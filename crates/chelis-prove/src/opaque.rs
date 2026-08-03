@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 use chelis_deep::ast::{Atom, Expr};
 use chelis_pred::PredAmenability;
+use chelis_types::{ScalarValue, scalar_from_f64, scalar_from_i64, types::Prim};
 
 use crate::solver::{ArithOp, BoolOp, CmpOp, SmtExpr, SmtSort};
 
@@ -1014,7 +1015,7 @@ pub enum GenMethod {
 /// materializes.
 #[derive(Debug, Clone)]
 pub struct GeneratedBinder {
-    pub env: BTreeMap<String, f64>,
+    pub env: BTreeMap<String, ScalarValue>,
     pub value_expr: Expr,
     pub method: GenMethod,
 }
@@ -1228,8 +1229,7 @@ pub fn generate_binder(
     if !producers.is_empty() {
         for _ in 0..ctor_budget {
             ctor_attempts += 1;
-            let Some(env) = propose_via_constructor_lossy(inv, module_source, producers, rng)
-            else {
+            let Some(env) = propose_via_constructor(inv, module_source, producers, rng) else {
                 continue;
             };
             // STILL validate (a buggy producer costs efficiency, never
@@ -1274,8 +1274,68 @@ pub fn generate_binder(
 /// the generator's `validate_env` both call this, so a non-finite
 /// representation leaf can never slip through one path while the other
 /// rejects it.
-pub fn any_non_finite(values: impl IntoIterator<Item = f64>) -> bool {
-    values.into_iter().any(|v| !v.is_finite())
+pub fn any_non_finite(values: impl IntoIterator<Item = ScalarValue>) -> bool {
+    values
+        .into_iter()
+        .any(|value| value.prim().is_float() && !value.as_f64_lossy().is_finite())
+}
+
+/// Preserve the execution wire dtype while crossing into the concrete prover.
+/// Exhaustive matching makes a future wire dtype fail to compile here instead
+/// of silently joining a lossy fallback.
+pub(crate) fn tensor_element_scalar(
+    elements: &chelis_compiler_api::schema::TensorElements,
+    index: usize,
+) -> Option<ScalarValue> {
+    use chelis_compiler_api::schema::TensorElements;
+    match elements {
+        TensorElements::F64(values) => {
+            scalar_from_f64("prove-wire", Prim::F64, *values.get(index)?).ok()
+        }
+        TensorElements::F32(values) => {
+            scalar_from_f64("prove-wire", Prim::F32, f64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::F16(values) => {
+            scalar_from_f64("prove-wire", Prim::F16, *values.get(index)?).ok()
+        }
+        TensorElements::Bf16(values) => {
+            scalar_from_f64("prove-wire", Prim::Bf16, *values.get(index)?).ok()
+        }
+        TensorElements::Int64(values) => {
+            scalar_from_i64("prove-wire", Prim::Int64, *values.get(index)?).ok()
+        }
+        TensorElements::Int32(values) => {
+            scalar_from_i64("prove-wire", Prim::Int32, i64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::Int16(values) => {
+            scalar_from_i64("prove-wire", Prim::Int16, i64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::Int8(values) => {
+            scalar_from_i64("prove-wire", Prim::Int8, i64::from(*values.get(index)?)).ok()
+        }
+        TensorElements::Bool(values) => {
+            scalar_from_i64("prove-wire", Prim::Bool, i64::from(*values.get(index)?)).ok()
+        }
+    }
+}
+
+fn scalar_json(value: ScalarValue) -> serde_json::Value {
+    if let Some(value) = value.as_bool_exact() {
+        serde_json::Value::from(value)
+    } else if let Some(value) = value.as_i64_exact() {
+        serde_json::Value::from(value)
+    } else {
+        serde_json::Value::from(value.as_f64_lossy())
+    }
+}
+
+/// User-facing counterexample shape for a typed flattened environment.
+pub fn generated_env_json(env: &BTreeMap<String, ScalarValue>) -> serde_json::Value {
+    serde_json::Value::Object(
+        env.iter()
+            .map(|(name, value)| (name.clone(), scalar_json(*value)))
+            .collect(),
+    )
 }
 
 /// Validate a flattened field env against the predicate. When the
@@ -1283,7 +1343,7 @@ pub fn any_non_finite(values: impl IntoIterator<Item = f64>) -> bool {
 /// the env keys are exactly the lowered var names so the two agree by
 /// construction.
 fn validate_env(
-    env: &BTreeMap<String, f64>,
+    env: &BTreeMap<String, ScalarValue>,
     _inv: &OpaqueInvariant,
     predicate: &Option<SmtExpr>,
     _consts: &ConstEnv,
@@ -1299,8 +1359,7 @@ fn validate_env(
             if any_non_finite(env.values().copied()) {
                 return false;
             }
-            let hash: std::collections::HashMap<String, f64> =
-                env.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let hash = env.iter().map(|(k, v)| (k.clone(), *v)).collect();
             // STRICT validation (CR-2 / CR-5 / CR-10): invariant-sample
             // acceptance uses exact `==`/`!=`, never the fuzz `1e-10`
             // tolerance. An epsilon-validated sample would weaken exactly
@@ -1319,7 +1378,7 @@ fn sample_fields_flat(
     fields: &[(String, FieldType)],
     prefix: &str,
     rng: &mut GenRng,
-) -> BTreeMap<String, f64> {
+) -> BTreeMap<String, ScalarValue> {
     let mut env = BTreeMap::new();
     for (name, fty) in fields {
         let path = format!("{prefix}.{name}");
@@ -1332,23 +1391,53 @@ fn sample_field_into(
     path: &str,
     fty: &FieldType,
     rng: &mut GenRng,
-    env: &mut BTreeMap<String, f64>,
+    env: &mut BTreeMap<String, ScalarValue>,
 ) {
     match fty {
         FieldType::Scalar(name) => {
-            let v = if let Some((lo, hi)) = int_sample_bounds(name) {
-                rng.next_i64(lo, hi) as f64
+            let value = if let Some((lo, hi)) = int_sample_bounds(name) {
+                scalar_from_i64(
+                    "prove-opaque-sample",
+                    Prim::parse_name(name).expect("integer width is a Prim"),
+                    rng.next_i64(lo, hi),
+                )
+                .expect("integer sample bounds are representable")
             } else if name == "bool" {
-                if rng.next_bool() { 1.0 } else { 0.0 }
+                scalar_from_i64(
+                    "prove-opaque-sample",
+                    Prim::Bool,
+                    i64::from(rng.next_bool()),
+                )
+                .expect("boolean samples are exactly zero or one")
             } else {
-                rng.next_f64(-10.0, 10.0)
+                scalar_from_f64(
+                    "prove-opaque-sample",
+                    Prim::parse_name(name).expect("opaque scalar dtype is classified"),
+                    rng.next_f64(-10.0, 10.0),
+                )
+                .expect("sample is valid at its declared float width")
             };
-            env.insert(path.to_string(), v);
+            env.insert(path.to_string(), value);
         }
-        FieldType::Tensor { dims, .. } => {
+        FieldType::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
+            let prim = Prim::parse_name(precision).expect("opaque tensor dtype is classified");
             for i in 0..count {
-                env.insert(format!("{path}.{i}"), rng.next_f64(-10.0, 10.0));
+                let value = if let Some((lo, hi)) = int_sample_bounds(precision) {
+                    scalar_from_i64("prove-opaque-sample", prim, rng.next_i64(lo, hi))
+                        .expect("integer tensor sample bounds are representable")
+                } else if precision == "bool" {
+                    scalar_from_i64(
+                        "prove-opaque-sample",
+                        Prim::Bool,
+                        i64::from(rng.next_bool()),
+                    )
+                    .expect("boolean tensor samples are exactly zero or one")
+                } else {
+                    scalar_from_f64("prove-opaque-sample", prim, rng.next_f64(-10.0, 10.0))
+                        .expect("tensor sample is valid at its declared float width")
+                };
+                env.insert(format!("{path}.{i}"), value);
             }
         }
         FieldType::Record(inner) => {
@@ -1361,7 +1450,7 @@ fn sample_field_into(
 
 /// Build the Deep record value `(record Ctor (kv {} field <lit-or-tensor>)
 /// ...)` from a flattened env.
-fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, f64>) -> Expr {
+fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, ScalarValue>) -> Expr {
     let mut children = vec![Expr::Atom(
         Atom::Name(inv.ctor_name.clone()),
         chelis_deep::Span::new(0, 0),
@@ -1374,23 +1463,41 @@ fn record_value_expr(inv: &OpaqueInvariant, env: &BTreeMap<String, f64>) -> Expr
     record_node(children)
 }
 
-fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) -> Expr {
+fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, ScalarValue>) -> Expr {
     match fty {
         FieldType::Scalar(name) => {
             if is_int_width(name) {
-                int_lit(*env.get(path).unwrap_or(&0.0) as i64, name)
+                int_lit(
+                    env.get(path)
+                        .and_then(ScalarValue::as_i64_exact)
+                        .expect("generated integer field is present and exact"),
+                    name,
+                )
             } else if name == "bool" {
-                bool_lit(*env.get(path).unwrap_or(&0.0) != 0.0)
+                bool_lit(
+                    env.get(path)
+                        .and_then(ScalarValue::as_bool_exact)
+                        .expect("generated bool field is present and exact"),
+                )
             } else {
-                float_lit(*env.get(path).unwrap_or(&0.0), name)
+                float_lit(
+                    env.get(path)
+                        .map(ScalarValue::as_f64_lossy)
+                        .expect("generated float field is present"),
+                    name,
+                )
             }
         }
         FieldType::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
-            let values: Vec<f64> = (0..count)
-                .map(|i| *env.get(&format!("{path}.{i}")).unwrap_or(&0.0))
+            let values: Vec<ScalarValue> = (0..count)
+                .map(|i| {
+                    env.get(&format!("{path}.{i}"))
+                        .copied()
+                        .unwrap_or_else(|| zero_scalar(precision))
+                })
                 .collect();
-            tensor_value_expr(dims, precision, &values)
+            tensor_value_expr_typed(dims, precision, &values)
         }
         FieldType::Record(inner) => {
             // A nested record value: `(record InnerCtor ...)`. The inner
@@ -1415,12 +1522,12 @@ fn field_value_expr(path: &str, fty: &FieldType, env: &BTreeMap<String, f64>) ->
 /// field values into the legacy f64 env. The conversion is deliberately
 /// named lossy until chelis#688 / #729 Phase 2 replaces that env. Returns
 /// `None` on producer failure (None result) or an unreadable output.
-fn propose_via_constructor_lossy(
+fn propose_via_constructor(
     inv: &OpaqueInvariant,
     module_source: &str,
     producers: &[GenProducer],
     rng: &mut GenRng,
-) -> Option<BTreeMap<String, f64>> {
+) -> Option<BTreeMap<String, ScalarValue>> {
     let idx = (rng.next_u64() as usize) % producers.len();
     let producer = &producers[idx];
 
@@ -1438,7 +1545,7 @@ fn propose_via_constructor_lossy(
     let mut env = BTreeMap::new();
     for (fname, fty) in &inv.fields {
         let field_path = format!("{}.{}", inv.binder, fname);
-        if !read_produced_field_lossy(
+        if !read_produced_field(
             module_source,
             producer,
             &arg_exprs,
@@ -1459,7 +1566,7 @@ fn propose_via_constructor_lossy(
 /// Returns `Some(true)` on success, `Some(false)` when the producer
 /// returned `None` (failure to unwrap), `None` on evaluation error.
 #[allow(clippy::too_many_arguments)]
-fn read_produced_field_lossy(
+fn read_produced_field(
     module_source: &str,
     producer: &GenProducer,
     arg_exprs: &[Expr],
@@ -1467,7 +1574,7 @@ fn read_produced_field_lossy(
     field: &str,
     fty: &FieldType,
     field_path: &str,
-    env: &mut BTreeMap<String, f64>,
+    env: &mut BTreeMap<String, ScalarValue>,
 ) -> Option<bool> {
     // The probe binds `r = producer(args)` (Option-unwrapped to a fresh
     // var via match when wrapped), accesses `r.<field>`, and we read the
@@ -1508,57 +1615,82 @@ fn read_produced_field_lossy(
     };
     use chelis_compiler_api::schema::ExecutionValue;
     match fty {
-        FieldType::Tensor { dims, .. } => {
+        FieldType::Tensor { dims, precision } => {
             // A tensor field access yields a Tensor value.
             let ExecutionValue::Tensor { value } = &root.value else {
                 return None;
             };
-            // A None result yields the NaN-filled sentinel: treat as failure.
-            if value.data.to_f64_lossy_vec().iter().any(|v| v.is_nan()) {
-                return Some(false);
-            }
             let count = dims.iter().product::<usize>().max(1);
             if value.data.len() != count {
                 return None;
             }
-            for (i, v) in value.data.to_f64_lossy_vec().into_iter().enumerate() {
-                env.insert(format!("{field_path}.{i}"), v);
+            let expected = Prim::parse_name(precision)?;
+            for i in 0..count {
+                let value = tensor_element_scalar(&value.data, i)?;
+                if value.prim() != expected {
+                    return None;
+                }
+                // A None result yields the NaN-filled sentinel: treat as failure.
+                if value.prim().is_float() && value.as_f64_lossy().is_nan() {
+                    return Some(false);
+                }
+                env.insert(format!("{field_path}.{i}"), value);
             }
         }
-        _ => {
-            // A scalar field access yields a scalar ExecutionValue (RT3-F3:
-            // a rank-0 access returns Float64 / Int64 / Bool, not a
-            // single-element Tensor). Extract the scalar; a NaN result is
-            // the None-sentinel and counts as a producer failure.
-            let v = match &root.value {
-                ExecutionValue::Float16 { value } | ExecutionValue::Bfloat16 { value } => *value,
-                ExecutionValue::Float32 { value } => *value as f64,
-                ExecutionValue::Float64 { value } => *value,
-                ExecutionValue::Int8 { value } => *value as f64,
-                ExecutionValue::Int16 { value } => *value as f64,
-                ExecutionValue::Int32 { value } => *value as f64,
-                ExecutionValue::Int64 { value } => *value as f64,
-                ExecutionValue::Bool { value } => {
-                    if *value {
-                        1.0
-                    } else {
-                        0.0
-                    }
+        FieldType::Scalar(prim_name) => {
+            // A scalar field access yields the exact-width scalar
+            // ExecutionValue variant. Preserve that carrier identity rather
+            // than widening through Float64 / Int64 or accepting a tagged
+            // dtype substitution. A NaN result is the None-sentinel and
+            // counts as a producer failure.
+            let prim = Prim::parse_name(prim_name)?;
+            let value = match &root.value {
+                ExecutionValue::Float16 { value } if prim == Prim::F16 => {
+                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Bfloat16 { value } if prim == Prim::Bf16 => {
+                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Float32 { value } if prim == Prim::F32 => {
+                    scalar_from_f64("prove-produced-field", prim, f64::from(*value)).ok()?
+                }
+                ExecutionValue::Float64 { value } if prim == Prim::F64 => {
+                    scalar_from_f64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Int8 { value } if prim == Prim::Int8 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
+                }
+                ExecutionValue::Int16 { value } if prim == Prim::Int16 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
+                }
+                ExecutionValue::Int32 { value } if prim == Prim::Int32 => {
+                    scalar_from_i64("prove-produced-field", prim, i64::from(*value)).ok()?
+                }
+                ExecutionValue::Int64 { value } if prim == Prim::Int64 => {
+                    scalar_from_i64("prove-produced-field", prim, *value).ok()?
+                }
+                ExecutionValue::Bool { value } if prim == Prim::Bool => {
+                    scalar_from_i64("prove-produced-field", Prim::Bool, i64::from(*value)).ok()?
                 }
                 // A rank-0/single-element tensor scalar, defensively.
                 ExecutionValue::Tensor { value }
                     if value.shape.iter().product::<usize>().max(1) == 1
                         && !value.data.is_empty() =>
                 {
-                    value.data.element_as_f64_lossy(0)
+                    let value = tensor_element_scalar(&value.data, 0)?;
+                    if value.prim() != prim {
+                        return None;
+                    }
+                    value
                 }
                 _ => return None,
             };
-            if v.is_nan() {
+            if value.prim().is_float() && value.as_f64_lossy().is_nan() {
                 return Some(false);
             }
-            env.insert(field_path.to_string(), v);
+            env.insert(field_path.to_string(), value);
         }
+        FieldType::Record(_) => return None,
     }
     Some(true)
 }
@@ -1576,8 +1708,26 @@ fn sample_raw_input_expr(kind: &GenParamKind, rng: &mut GenRng) -> Expr {
         }
         GenParamKind::Tensor { dims, precision } => {
             let count = dims.iter().product::<usize>().max(1);
-            let values: Vec<f64> = (0..count).map(|_| rng.next_f64(-10.0, 10.0)).collect();
-            tensor_value_expr(dims, precision, &values)
+            let prim = Prim::parse_name(precision).expect("producer tensor dtype is classified");
+            let values = (0..count)
+                .map(|_| {
+                    if let Some((lo, hi)) = int_sample_bounds(precision) {
+                        scalar_from_i64("prove-producer-sample", prim, rng.next_i64(lo, hi))
+                            .expect("integer tensor sample bounds are representable")
+                    } else if precision == "bool" {
+                        scalar_from_i64(
+                            "prove-producer-sample",
+                            Prim::Bool,
+                            i64::from(rng.next_bool()),
+                        )
+                        .expect("boolean tensor sample is exactly zero or one")
+                    } else {
+                        scalar_from_f64("prove-producer-sample", prim, rng.next_f64(-10.0, 10.0))
+                            .expect("float tensor sample is valid at its declared width")
+                    }
+                })
+                .collect::<Vec<_>>();
+            tensor_value_expr_typed(dims, precision, &values)
         }
     }
 }
@@ -1734,24 +1884,14 @@ fn typed_lit(prim: &str, value: Expr) -> Expr {
     )
 }
 fn float_lit(v: f64, prim: &str) -> Expr {
-    let lit = typed_lit("f32", Expr::Atom(Atom::Float(v), span0()));
-    if prim == "f64" {
-        node("cast", vec![lit, node("t-prim", vec![sym("f64")])])
-    } else {
-        lit
-    }
+    typed_lit(prim, Expr::Atom(Atom::Float(v), span0()))
 }
-/// A width-appropriate integer literal for a record field value: int32 is
-/// the literal default; any other integer width casts an int32 literal to
-/// the target width (review 5), so an int8/int16/int64 field value is
-/// well-typed rather than a bare int32 literal that mismatches the field.
+/// A width-appropriate integer literal for an internal Deep value. This is
+/// already below Surf's unsuffixed-literal defaulting boundary, so stamp the
+/// declared dtype directly; routing an int64 payload through an int32 literal
+/// would reject exact values outside the int32 range before the cast ran.
 fn int_lit(v: i64, prim: &str) -> Expr {
-    let lit = typed_lit("int32", Expr::Atom(Atom::Int(v), span0()));
-    if prim == "int32" {
-        lit
-    } else {
-        node("cast", vec![lit, node("t-prim", vec![sym(prim)])])
-    }
+    typed_lit(prim, Expr::Atom(Atom::Int(v), span0()))
 }
 fn bool_lit(v: bool) -> Expr {
     typed_lit("bool", Expr::Atom(Atom::Bool(v), span0()))
@@ -1761,16 +1901,35 @@ fn deep_cons_list(items: Vec<Expr>) -> Expr {
         app_node(vec![var_node("Cons"), item, tail])
     })
 }
-/// Public wrapper: build a fixed-shape tensor value Deep expr (a
-/// `to_tensor`/`pad_sequences` of typed float literals) for a sampled
-/// producer input. Used by the obligation engine's Tier C tensor-input
-/// sampling.
-pub fn tensor_value_expr_pub(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
-    tensor_value_expr(dims, precision, values)
-}
-
-fn tensor_value_expr(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
-    let scalar = |v: f64| float_lit(v, precision);
+pub(crate) fn tensor_value_expr_typed(
+    dims: &[usize],
+    precision: &str,
+    values: &[ScalarValue],
+) -> Expr {
+    let expected = Prim::parse_name(precision).expect("sampled tensor dtype is classified");
+    let scalar = |value: ScalarValue| {
+        assert_eq!(
+            value.prim(),
+            expected,
+            "sampled tensor element must carry its declared dtype"
+        );
+        if is_int_width(precision) {
+            int_lit(
+                value
+                    .as_i64_exact()
+                    .expect("integer tensor value has an exact integer payload"),
+                precision,
+            )
+        } else if precision == "bool" {
+            bool_lit(
+                value
+                    .as_bool_exact()
+                    .expect("bool tensor value has an exact boolean payload"),
+            )
+        } else {
+            float_lit(value.as_f64_lossy(), precision)
+        }
+    };
     if dims.len() <= 1 {
         app_node(vec![
             var_node("to_tensor"),
@@ -1782,12 +1941,44 @@ fn tensor_value_expr(dims: &[usize], precision: &str, values: &[f64]) -> Expr {
             .chunks(cols)
             .map(|row| deep_cons_list(row.iter().copied().map(scalar).collect()))
             .collect::<Vec<_>>();
-        app_node(vec![
-            var_node("pad_sequences"),
-            deep_cons_list(rows),
-            scalar(0.0),
-        ])
+        let zero = if is_int_width(precision) {
+            int_lit(0, precision)
+        } else if precision == "bool" {
+            bool_lit(false)
+        } else {
+            float_lit(0.0, precision)
+        };
+        app_node(vec![var_node("pad_sequences"), deep_cons_list(rows), zero])
     }
+}
+
+fn zero_scalar(precision: &str) -> ScalarValue {
+    let prim = Prim::parse_name(precision).expect("tensor dtype is classified");
+    if precision == "bool" || is_int_width(precision) {
+        scalar_from_i64("prove-opaque-default", prim, 0)
+            .expect("zero is representable at every integer/bool dtype")
+    } else {
+        scalar_from_f64("prove-opaque-default", prim, 0.0)
+            .expect("zero is representable at every float dtype")
+    }
+}
+
+pub(crate) fn scalar_values_json(values: &[ScalarValue]) -> serde_json::Value {
+    serde_json::Value::Array(
+        values
+            .iter()
+            .copied()
+            .map(|value| {
+                if let Some(value) = value.as_bool_exact() {
+                    serde_json::Value::from(value)
+                } else if let Some(value) = value.as_i64_exact() {
+                    serde_json::Value::from(value)
+                } else {
+                    serde_json::Value::from(value.as_f64_lossy())
+                }
+            })
+            .collect(),
+    )
 }
 fn node_def(name: &str, body: Expr) -> Expr {
     node("def", vec![sym(name), body])

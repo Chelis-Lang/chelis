@@ -5,7 +5,55 @@ use std::collections::{HashSet, VecDeque};
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
 
-use crate::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
+use crate::dag::{Dag, DimInfo, FusedInput, FusedStepOp, NodeId, RiscOp, TensorType};
+
+/// Return the first DAG node whose direct or fused computation applies
+/// `abs` to a signed-integer value.
+///
+/// Phase 2's evaluator supports that exact typed kernel, while compiled
+/// backends do not until Phase 3. Keeping the fused-step dtype walk here gives
+/// every backend one classification rather than three output-dtype heuristics;
+/// importantly, it still finds `abs(int) -> cmplt(...)` when the fused node's
+/// final output dtype is `bool`.
+pub fn first_integer_abs_node(dag: &Dag) -> Option<NodeId> {
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Abs)
+            && node
+                .inputs
+                .first()
+                .and_then(|input| dag.get(*input))
+                .is_some_and(|input| input.output_type.precision.is_integer())
+        {
+            return Some(node.id);
+        }
+
+        let RiscOp::FusedElem { ops } = &node.op else {
+            continue;
+        };
+        let mut step_precisions = Vec::<Option<Prim>>::with_capacity(ops.len());
+        for step in ops {
+            let input_precision = step.input_indices.first().and_then(|input| match input {
+                FusedInput::External(index) => node
+                    .inputs
+                    .get(*index)
+                    .and_then(|input| dag.get(*input))
+                    .map(|input| input.output_type.precision),
+                FusedInput::PreviousStep(index) => step_precisions.get(*index).copied().flatten(),
+            });
+            if step.op == FusedStepOp::Abs
+                && input_precision.is_some_and(|precision| precision.is_integer())
+            {
+                return Some(node.id);
+            }
+            step_precisions.push(if step.op == FusedStepOp::CmpLt {
+                Some(Prim::Bool)
+            } else {
+                input_precision
+            });
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionCopyCost {
@@ -187,10 +235,67 @@ mod tests {
     use chelis_types::types::Prim;
 
     use super::*;
-    use crate::dag::{Dag, DimInfo, RiscOp, TensorType};
+    use crate::dag::{Dag, DimInfo, FusedInput, FusedStep, FusedStepOp, RiscOp, TensorType};
 
     fn tensor(dims: Vec<DimInfo>, precision: Prim) -> TensorType {
         TensorType { dims, precision }
+    }
+
+    #[test]
+    fn integer_abs_analysis_sees_direct_and_bool_output_fused_forms() {
+        let int_ty = tensor(vec![DimInfo::Lit(1)], Prim::Int64);
+        let bool_ty = tensor(vec![DimInfo::Lit(1)], Prim::Bool);
+
+        let mut direct = Dag::new();
+        let x = direct.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            int_ty.clone(),
+            None,
+        );
+        let abs = direct.add_node(RiscOp::Abs, vec![x], int_ty.clone(), None);
+        assert_eq!(first_integer_abs_node(&direct), Some(abs));
+
+        let mut fused = Dag::new();
+        let x = fused.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            int_ty.clone(),
+            None,
+        );
+        let y = fused.add_node(RiscOp::Load { name: "y".into() }, vec![], int_ty, None);
+        let fused_abs_then_compare = fused.add_node(
+            RiscOp::FusedElem {
+                ops: vec![
+                    FusedStep {
+                        op: FusedStepOp::Abs,
+                        input_indices: vec![FusedInput::External(0)],
+                    },
+                    FusedStep {
+                        op: FusedStepOp::CmpLt,
+                        input_indices: vec![FusedInput::PreviousStep(0), FusedInput::External(1)],
+                    },
+                ],
+            },
+            vec![x, y],
+            bool_ty,
+            None,
+        );
+        assert_eq!(first_integer_abs_node(&fused), Some(fused_abs_then_compare));
+    }
+
+    #[test]
+    fn integer_abs_analysis_does_not_reject_float_abs() {
+        let float_ty = tensor(vec![DimInfo::Lit(1)], Prim::F32);
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            float_ty.clone(),
+            None,
+        );
+        dag.add_node(RiscOp::Abs, vec![x], float_ty, None);
+        assert_eq!(first_integer_abs_node(&dag), None);
     }
 
     #[test]

@@ -1,9 +1,14 @@
 # Grounded Dtype Semantics
 
-**Status:** Active phased plan. Phase 0 and the PR #956 §C6 covered-family
-tripwire have landed. The typed wire-schema and registered-PyO3 entry legs
-are implemented by this change; Phases 1-4 have not started. Tracking issue:
-[#729].
+**Status:** Active phased plan. Phase 0, the PR #956 §C6 covered-family
+tripwire, and Phase 1's typed wire-schema, registered-PyO3 entry legs, and
+sealed dtype-semantics layer have landed through PRs #1033 and #1049. Draft
+PR #1054 consolidates the complete Phase 2 kernel split, exact prover
+carriers, trap freeze, integer-unary evaluator rows, and the ordinary,
+windowed, argument-reduction, and overlapping window-adjoint consumers
+discovered by its red team. Its single Phase 2 oracle is
+`.venv/bin/python scripts/dtype_phase2_oracle.py`; Phases 3-4 have not
+landed. Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -181,18 +186,24 @@ pub enum NumericTrap {
     /// Value not a member of the dtype's set (fractional -> int,
     /// non-0/1 -> bool).
     Domain   { op: &'static str, prim: Prim },
-    /// Division/remainder by zero (existing behavior, absorbed here).
-    DivZero  { op: &'static str },
+    /// Division/remainder by zero.
+    DivZero  { op: &'static str, prim: Prim },
 }
 ```
 
-- **Message format (frozen at Phase 2 exit):**
-  `numeric trap: <kind> in <op> at <prim>` following the branding precedent
-  of `chelis_int_div_guard` / `integer division or remainder by zero`
-  (`chelis-runtime/include/chelis_runtime.h:165-171`). The EXACT strings are
-  recorded in the module as `pub const` and every lane emits them verbatim -
-  the C lane via generated guard snippets (Phase 3), eval via the module
-  directly. [#687]'s oracle compares them byte-for-byte.
+The `prim` on `DivZero` is required by controlling [04-NUM-9], which says
+EVERY trap names the dtype. The earlier one-field design sketch was a design
+bug; the numbered spec wins.
+
+- **Message format (frozen by controlling [04-NUM-9]):** the exact three
+  forms and the operation-name rule live in that atom. The operation slot is
+  the canonical lowered primitive whose numeric kernel raised the trap; a
+  composed operation forwards that trap unchanged, without an internal
+  evaluator prefix. The exact fragments are recorded in the module as
+  `pub const` and every lane emits them verbatim - the C lane via generated
+  guard snippets (Phase 3), eval via the module directly. [#687]'s later
+  oracle compares them byte-for-byte. This resolves [#861]'s Phase 2 decision
+  without introducing source-operation provenance that no lowered lane owns.
 - Traps are *values* (`Result::Err`) inside the lanes and become process
   aborts only at the lane boundary (eval: `error:` + nonzero exit;
   compiled C: stderr + nonzero exit). No lane may `panic!` for a user-input
@@ -506,7 +517,7 @@ behavior and is exactly what the atom forbids.
 | consumer | adopts | retires |
 |---|---|---|
 | eval scalar (`chelis-compiler-api/src/runtime/host_ops.rs`) | kernel split + `finalize_scalar` | [#680], [#718] eval-scalar cells |
-| eval tensor (same file + `chelis-ir/src/eval.rs`) | `finalize_tensor` bulk paths; `tensor_float_unop_f32` and raw `binary_map` deleted | [#717], [#684], [#724] eval half, [#726] eval half |
+| eval tensor (same file + `chelis-ir/src/eval.rs`) | `finalize_tensor` bulk paths; `tensor_float_unop_f32` and raw `binary_map` deleted; ordinary/window/argument reducers and the window adjoint plan ordered index groups and delegate all arithmetic/comparison/overlap accumulation to the sealed reduction kernels | [#717], [#684], [#724] eval half, [#726] eval half |
 | `convert_cast_data` / tensor `cast_value` (`chelis-ir/src/eval.rs`) and host `eval_cast` | `cast_raw` / `cast_scalar`; checked target finalization with identical scalar/tensor rules | [#717] cast rows, [#720] (via next row) |
 | `fold_static_cond` / const folds (`chelis-ir/src/lower.rs`) | `int_binop` + finalize in the Cast arm; decline-on-trap | [#711], [#720] |
 | prove (`graph_extract.rs`, `obligation_engine.rs`, `opaque.rs`) | Phase 1 adapter state: existing f64 env with explicit `*_lossy` reads forced by the typed wire change; Phase 2 end state: exact sealed-value env and deleted flatteners | [#688] |
@@ -1328,9 +1339,28 @@ pull them across the kernel-split boundary.
 
 ## Phase 2 - the kernel split and prove
 
-**You inherit:** the module (frozen §C1/§C3/§C4-Rust), eval as reference
-lane, and the not-yet-split `host_ops` helpers now visibly awkward (they
-finalize but still accept `Fn(f64,f64)`).
+**At phase entry you inherit:** the module (frozen §C1/§C3/§C4-Rust), eval
+as reference lane, and the not-yet-split `host_ops` helpers now visibly
+awkward (they finalize but still accept `Fn(f64,f64)`).
+
+**Implementation status:** draft PR #1054 delivers this phase as one
+consolidated change. It replaces the open host and IR arithmetic closures
+with sealed dtype-keyed kernels, preserves declared-width integer and float
+semantics through standalone and fused evaluation, and makes static-condition
+folding typed and decline on traps. Prove's concrete and generated
+environments carry exact `ScalarValue`s, including every post-#956 public
+wire scalar variant without dtype substitution. The exact trap grammar is
+public module data and the active Phase 2 corpus asserts byte-exact
+diagnostics. Integer `abs` lowers to the typed trapping kernel, integer
+`floor`/`ceil`/`round` lower to identity, and the C, HIP, and Metal emitters
+remain loud instead of routing integer `abs` through float-only templates.
+The reduction follow-up routes ordinary, windowed, and argument reductions,
+plus the overlapping window adjoint, through the same sealed boundary:
+consumers retain only shape and ordered index-group planning. Declared-width
+float witnesses, exact int64 comparison, all four integer-width
+intermediate-overflow rows, an overlap-add adjoint witness at every float
+arithmetic width, and structural no-bypass locks are part of the oracle.
+Implementing backend kernels remains Phase 3 / [#699].
 
 **You deliver:**
 
@@ -1356,12 +1386,16 @@ generate C guard code emitting those exact strings without asking.
 **Explicitly not yours:** C backend behavior (still unwrapped/untrapped at
 your exit); formatting anywhere.
 
-**Oracle:** `issue_680_int_exactness.rs` and `precision_matrix.rs`
-overflow rows green and un-ignored (eval side); `prove_int64_exactness.rs`
-green and un-ignored; `fold_static_cond_matrix.rs` eval expectations and
-the [#711] row green; the [#722] grad rows green in EVAL (grad's lowering now
-folds/computes exactly; the C half of [#722] waits for Phase 3 plus [#699]'s
-own fix, which is [#703]-track).
+**Oracle:** `.venv/bin/python scripts/dtype_phase2_oracle.py` is this phase's
+single authoritative command. Acceptance is exit 0 with the final line
+`DTYPE PHASE 2 ORACLE: PASS`. Its tested manifest inherits the complete Phase
+1 oracle; exercises all sealed numeric-kernel and frozen trap-string tests;
+runs the IR and host structural exclusivity locks; runs declared-width
+ordinary, windowed, and argument-reduction behavior including negative
+parity at every integer width and reverse-mode overlap accumulation at every
+float arithmetic width; runs the active eval matrices for [#680], precision,
+exact int64 values, and static-condition folding; and finishes with the exact
+prover-carrier boundary. It never runs ignored rows or Phase 3 backend suites.
 
 ## Phase 3 - backends adopt; the observation channel is generated
 

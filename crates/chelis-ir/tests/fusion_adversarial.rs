@@ -356,15 +356,25 @@ fn adv8_cast_not_fusible() {
 }
 
 // ============================================================================
-// ADV-9: CmpLt inside a fused chain produces float, not int
+// ADV-9: CmpLt inside a fused chain preserves sealed bool storage
 // ============================================================================
 #[test]
-fn adv9_cmplt_in_fused_chain_produces_float() {
+fn adv9_cmplt_in_fused_chain_produces_bool() {
     let mut dag = Dag::new();
     let x = load(&mut dag, "x", vec_f32(4));
     let y = load(&mut dag, "y", vec_f32(4));
-    let cmp = dag.add_node(RiscOp::CmpLt, vec![x, y], vec_f32(4), None);
-    let result = dag.add_node(RiscOp::Neg, vec![cmp], vec_f32(4), None);
+    let bool_ty = TensorType {
+        dims: vec![DimInfo::Lit(4)],
+        precision: Prim::Bool,
+    };
+    let cmp = dag.add_node(RiscOp::CmpLt, vec![x, y], bool_ty.clone(), None);
+    let false_value = dag.add_node(
+        RiscOp::synth_const(Prim::Bool, 0.0),
+        vec![],
+        bool_ty.clone(),
+        None,
+    );
+    let result = dag.add_node(RiscOp::MaxElem, vec![cmp, false_value], bool_ty, None);
     dag.add_root(result);
 
     let fused = fuse(&dag);
@@ -384,13 +394,14 @@ fn adv9_cmplt_in_fused_chain_produces_float() {
 
     let orig = eval_dag(&dag, &inputs);
     let fuse_out = eval_dag(&fused, &inputs);
-    assert_close(&orig, &fuse_out, 1e-6, "ADV-9: cmplt→neg");
+    assert_close(&orig, &fuse_out, 1e-6, "ADV-9: cmplt→bool-or");
 
-    // Check exact values: x<y = [1,0,1,1], neg = [-1,0,-1,-1]
+    // Check exact values: x<y = [true,false,true,true], and OR false
+    // preserves them without reopening a float representation.
     assert_eq!(
-        fuse_out[0].to_f64_lossy_vec(),
-        vec![-1.0, 0.0, -1.0, -1.0],
-        "CmpLt in fused chain should produce 1.0/0.0 floats, not bools"
+        fuse_out[0].storage().to_i64_exact_vec(),
+        Some(vec![1, 0, 1, 1]),
+        "CmpLt in a fused chain must preserve sealed bool storage"
     );
 }
 

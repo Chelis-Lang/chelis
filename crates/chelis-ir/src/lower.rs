@@ -545,7 +545,11 @@ pub fn install_chelis_panic_hook() {
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::{DeepTag, Span, decode_effect_kind};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{BUILTIN_NAMES, CheckedProgram, LinearityInfo, types::Prim};
+use chelis_types::{
+    BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
+    LinearityInfo, ScalarValue, cast_scalar, compare_scalars, float_binop, float_unop, int_binop,
+    int_unop, scalar_from_i64, types::Prim,
+};
 use chelis_vocab::EffectKind;
 
 use crate::dag::{Dag, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
@@ -7226,23 +7230,39 @@ impl LowerCtx {
             }
             "abs" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "abs input");
-                let node = self.lower_transcendental(RiscOp::Abs, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Abs, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "floor" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "floor input");
-                let node = self.lower_transcendental(RiscOp::Floor, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Floor, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "ceil" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "ceil input");
-                let node = self.lower_transcendental(RiscOp::Ceil, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Ceil, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "round" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "round input");
-                let node = self.lower_transcendental(RiscOp::Round, x, ty);
-                self.attach_reuse_hint(node, app_span, &[x])
+                let node = self.lower_exact_numeric_unary(RiscOp::Round, x, ty);
+                if node == x {
+                    node
+                } else {
+                    self.attach_reuse_hint(node, app_span, &[x])
+                }
             }
             "uniform_like" if args.len() == 3 => {
                 let template = self.lower_expr_node(&args[0], "uniform_like template");
@@ -9530,9 +9550,11 @@ impl LowerCtx {
     /// runtime), no `Shape` (a shape read participates in the #616
     /// conform/mask machinery and must stay on the runtime path), no
     /// `UniformLike`/`Dropout` (nondeterministic), no `shape_deps`, no
-    /// non-scalar node, and every op inside the whitelisted vocabulary whose
-    /// arms mirror `crate::eval` exactly (`Cast` shares
-    /// [`crate::eval::convert_cast_data`] so the two lanes cannot diverge).
+    /// non-scalar node, and every op inside the whitelisted vocabulary. Every
+    /// arithmetic arm enters the same closed, dtype-width kernel vocabulary as
+    /// `crate::eval`; constants and casts stay sealed [`ScalarValue`]s, so an
+    /// int64 condition never crosses an f64 memo slot and f16/bf16 casts are
+    /// finalized before their consumers run.
     ///
     /// Works at the DAG-node level, not the Deep-expression level, because by
     /// the time `lower_if` runs, inlined-function parameters are already
@@ -9543,7 +9565,45 @@ impl LowerCtx {
     /// builtins. Zero-divisor `FloorDiv`/`TruncDiv` refuses the fold rather
     /// than folding a runtime trap away.
     fn fold_static_cond(&self, cond: NodeId) -> Option<bool> {
-        let mut memo: HashMap<NodeId, f64> = HashMap::new();
+        fn numeric_binop(
+            lhs: ScalarValue,
+            rhs: ScalarValue,
+            int_op: Option<IntBinOp>,
+            float_op: Option<FloatBinOp>,
+        ) -> Option<ScalarValue> {
+            if lhs.prim().is_integer() {
+                int_binop(int_op?, lhs, rhs).ok()
+            } else if lhs.prim().is_float() {
+                float_binop(float_op?, lhs, rhs).ok()
+            } else {
+                None
+            }
+        }
+
+        fn numeric_unop(
+            value: ScalarValue,
+            int_op: Option<IntUnOp>,
+            float_op: Option<FloatUnOp>,
+        ) -> Option<ScalarValue> {
+            if value.prim().is_integer() {
+                int_unop(int_op?, value).ok()
+            } else if value.prim().is_float() {
+                float_unop(float_op?, value).ok()
+            } else {
+                None
+            }
+        }
+
+        fn bool_binop(
+            lhs: ScalarValue,
+            rhs: ScalarValue,
+            op: impl FnOnce(bool, bool) -> bool,
+        ) -> Option<ScalarValue> {
+            let value = op(lhs.as_bool_exact()?, rhs.as_bool_exact()?);
+            scalar_from_i64("fold_static_cond", Prim::Bool, i64::from(value)).ok()
+        }
+
+        let mut memo: HashMap<NodeId, ScalarValue> = HashMap::new();
         // Iterative post-order: (node, inputs_pushed).
         let mut stack: Vec<(NodeId, bool)> = vec![(cond, false)];
         while let Some((id, inputs_pushed)) = stack.pop() {
@@ -9572,61 +9632,51 @@ impl LowerCtx {
                 .and_then(|input| memo.get(input))
                 .copied();
             let value = match &node.op {
-                RiscOp::Const { value } => {
-                    // The fold memo is the f64 wide image (the
-                    // chelis#680 residue; exact integer folding arrives
-                    // with the Phase 2 kernel split). An integer
-                    // payload whose f64 image is not exact DECLINES the
-                    // fold instead of baking a collapsed value in
-                    // (chelis#856): the condition falls to runtime,
-                    // which reads the sealed payload exactly.
-                    if let Some(i) = value.as_i64_exact()
-                        && (i as f64) as i128 != i as i128
-                    {
-                        return None;
-                    }
-                    value.as_f64_lossy()
-                }
+                RiscOp::Const { value } => *value,
                 RiscOp::Cast { new_precision } => {
-                    let input_id = *node.inputs.first()?;
-                    let src = self.dag.get(input_id)?.output_type.precision;
                     // A trapping cast DECLINES TO FOLD (the section C2
                     // fold rule for casts): the condition falls to
                     // runtime, where the checked ladder traps with its
                     // full diagnostic. A fold must never bake a trap
                     // away nor bake one in.
-                    crate::eval::convert_cast_data(input0?, src, *new_precision).ok()?
+                    cast_scalar("cast", input0?, *new_precision).ok()?
                 }
-                RiscOp::Add => input0? + input1?,
-                RiscOp::Mul => input0? * input1?,
-                RiscOp::Neg => -input0?,
-                RiscOp::Div => input0? / input1?,
-                RiscOp::FloorDiv => {
-                    let divisor = input1?;
-                    if divisor == 0.0 {
-                        return None;
-                    }
-                    (input0? / divisor).floor()
+                RiscOp::Add => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Add), Some(FloatBinOp::Add))?
                 }
+                RiscOp::Mul if input0?.prim() == Prim::Bool => {
+                    bool_binop(input0?, input1?, |lhs, rhs| lhs && rhs)?
+                }
+                RiscOp::Mul => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Mul), Some(FloatBinOp::Mul))?
+                }
+                RiscOp::Neg => numeric_unop(input0?, Some(IntUnOp::Neg), Some(FloatUnOp::Neg))?,
+                RiscOp::Div => numeric_binop(input0?, input1?, None, Some(FloatBinOp::Div))?,
+                RiscOp::FloorDiv => numeric_binop(
+                    input0?,
+                    input1?,
+                    Some(IntBinOp::FloorDiv),
+                    Some(FloatBinOp::FloorDiv),
+                )?,
                 RiscOp::TruncDiv => {
-                    let divisor = input1?;
-                    if divisor == 0.0 {
-                        return None;
-                    }
-                    (input0? / divisor).trunc()
+                    numeric_binop(input0?, input1?, Some(IntBinOp::TruncDiv), None)?
                 }
-                RiscOp::CmpLt => {
-                    if input0? < input1? {
-                        1.0
-                    } else {
-                        0.0
-                    }
+                RiscOp::CmpLt => scalar_from_i64(
+                    "fold_static_cond",
+                    Prim::Bool,
+                    i64::from(compare_scalars(CompareOp::Lt, input0?, input1?).ok()?),
+                )
+                .ok()?,
+                RiscOp::MaxElem if input0?.prim() == Prim::Bool => {
+                    bool_binop(input0?, input1?, |lhs, rhs| lhs || rhs)?
                 }
-                RiscOp::MaxElem => input0?.max(input1?),
-                RiscOp::Abs => input0?.abs(),
-                RiscOp::Floor => input0?.floor(),
-                RiscOp::Ceil => input0?.ceil(),
-                RiscOp::Round => input0?.round_ties_even(),
+                RiscOp::MaxElem => {
+                    numeric_binop(input0?, input1?, Some(IntBinOp::Max), Some(FloatBinOp::Max))?
+                }
+                RiscOp::Abs => numeric_unop(input0?, Some(IntUnOp::Abs), Some(FloatUnOp::Abs))?,
+                RiscOp::Floor => numeric_unop(input0?, None, Some(FloatUnOp::Floor))?,
+                RiscOp::Ceil => numeric_unop(input0?, None, Some(FloatUnOp::Ceil))?,
+                RiscOp::Round => numeric_unop(input0?, None, Some(FloatUnOp::Round))?,
                 _ => return None,
             };
             // chelis#620 red-team fix: refuse the fold on any non-finite
@@ -9638,12 +9688,17 @@ impl LowerCtx {
             // the forward pass never takes. Falling to the runtime mask
             // path keeps the pre-existing (pre-#620) behavior for such
             // conditions instead of extending it to ADT/list pruning.
-            if !value.is_finite() {
+            if value.prim().is_float() && !value.as_f64_lossy().is_finite() {
                 return None;
             }
             memo.insert(id, value);
         }
-        memo.get(&cond).map(|v| *v != 0.0)
+        memo.get(&cond).map(|value| {
+            value
+                .as_bool_exact()
+                .or_else(|| value.as_i64_exact().map(|value| value != 0))
+                .unwrap_or_else(|| value.as_f64_lossy() != 0.0)
+        })
     }
 
     /// chelis#513 gap 3 (school im2col witness): const-fold a `reshape`
@@ -10379,8 +10434,8 @@ impl LowerCtx {
         out
     }
 
-    /// C4: Enforce float-only for the unary elementwise float family
-    /// (exp, log, sin, sqrt, cos, tan, atan, abs, floor, ceil, round).
+    /// C4: Enforce float-only for the unary transcendental family
+    /// (exp, log, sin, sqrt, cos, tan, atan).
     ///
     /// chelis#730 Phase 1 (census row 1, chelis#699/#722): a non-float
     /// input raises a FATAL lowering error instead of substituting a
@@ -10390,11 +10445,8 @@ impl LowerCtx {
     /// op as a host call over a tensor pointer - garbage C, not a loud
     /// failure (the chelis#776/#782 laundering finding). Under the
     /// chelis#729 interlock (section I1) these cells are CLEANLY
-    /// REJECTED here; computing the well-defined integer cases
-    /// (abs/floor/ceil/round) is chelis#729's work and replaces this
-    /// raise, never a silent default. The raise also fires under `grad`
-    /// lowering, which turns chelis#722's silent zero gradients into
-    /// the same loud error in both lanes.
+    /// REJECTED here. The well-defined integer unary family is handled by
+    /// `lower_exact_numeric_unary`; it never enters this float-only gate.
     fn lower_transcendental(&mut self, op: RiscOp, x: NodeId, ty: &TensorType) -> NodeId {
         // Elementwise: output dims come from the lowered operand, not the
         // annotation (whose dims can be stale symbolics inside a rank-poly
@@ -10452,6 +10504,60 @@ impl LowerCtx {
             }
             raise_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
         }
+    }
+
+    /// Lower the exact numeric unary family without crossing a float funnel.
+    ///
+    /// `abs` remains an executable node for both float and integer inputs so
+    /// the integer minimum-value trap survives to the typed kernel. Applying
+    /// `floor`, `ceil`, or `round` to an integer is exactly the identity, so
+    /// canonical lowering returns the operand and emits no float-only IR op.
+    /// This is the evaluator half of chelis#722; compiled integer `abs` stays
+    /// rejected at each backend boundary until Phase 3 / chelis#699.
+    fn lower_exact_numeric_unary(&mut self, op: RiscOp, x: NodeId, ty: &TensorType) -> NodeId {
+        let out_ty = Self::elementwise_out_ty(&self.dag, x, ty, None);
+        let input_prec = match self.dag.get(x) {
+            Some(node) => node.output_type.precision,
+            None => raise_lowering_error(
+                format!(
+                    "internal lowering desync: operand node {} of an exact numeric unary op is \
+                     missing from the DAG",
+                    x.0
+                ),
+                None,
+                self.current_span_id.clone(),
+            ),
+        };
+
+        if input_prec.is_float() {
+            return self
+                .dag
+                .add_node(op, vec![x], out_ty, self.current_span_id.clone());
+        }
+        if input_prec.is_integer() {
+            return match op {
+                RiscOp::Abs => {
+                    self.dag
+                        .add_node(RiscOp::Abs, vec![x], out_ty, self.current_span_id.clone())
+                }
+                RiscOp::Floor | RiscOp::Ceil | RiscOp::Round => x,
+                _ => unreachable!("exact numeric unary helper called with {op:?}"),
+            };
+        }
+
+        let unsupported = Unsupported::new(
+            UnsupportedKind::Op(format!("{op:?}")),
+            format!("`{}` tensors in IR lowering", input_prec.name()),
+            Stage::Lowering,
+            "this numeric unary family accepts active float and signed-integer dtypes only",
+        );
+        if unrepresentable_panic_suppressed() {
+            std::panic::panic_any(UnrepresentableDag);
+        }
+        if self.allow_host_list_ad_rewrites {
+            raise_fatal_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
+        }
+        raise_lowering_error(unsupported.to_string(), None, self.current_span_id.clone())
     }
 
     /// `(fn {} (params {} p1 p2 ...) body)`
@@ -10620,71 +10726,60 @@ impl LowerCtx {
                         ty,
                         self.current_span_id.clone(),
                     )),
-                    "exp" => LoweredValue::Node(self.dag.add_node(
+                    "exp" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Exp,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "log" => LoweredValue::Node(self.dag.add_node(
+                    "log" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Log,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "sin" => LoweredValue::Node(self.dag.add_node(
+                    "sin" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Sin,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "sqrt" => LoweredValue::Node(self.dag.add_node(
+                    "sqrt" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Sqrt,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "cos" => LoweredValue::Node(self.dag.add_node(
+                    "cos" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Cos,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "tan" => LoweredValue::Node(self.dag.add_node(
+                    "tan" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Tan,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "atan" => LoweredValue::Node(self.dag.add_node(
+                    "atan" => LoweredValue::Node(self.lower_transcendental(
                         RiscOp::Atan,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "abs" => LoweredValue::Node(self.dag.add_node(
+                    "abs" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Abs,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "floor" => LoweredValue::Node(self.dag.add_node(
+                    "floor" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Floor,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "ceil" => LoweredValue::Node(self.dag.add_node(
+                    "ceil" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Ceil,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
-                    "round" => LoweredValue::Node(self.dag.add_node(
+                    "round" => LoweredValue::Node(self.lower_exact_numeric_unary(
                         RiscOp::Round,
-                        vec![current_node],
-                        ty,
-                        self.current_span_id.clone(),
+                        current_node,
+                        &ty,
                     )),
                     "relu" => LoweredValue::Node(tier2::lower_relu(
                         &mut self.dag,
@@ -14925,6 +15020,97 @@ mod regression_tests {
                 .iter()
                 .any(|node| matches!(node.op, RiscOp::Mul)),
             "fractional checked cast must stay on the runtime mask path: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_uses_f16_storage_semantics() {
+        // 2049 rounds to 2048 at f16 storage width, so the comparison is
+        // false. Keeping the constants/casts sealed through the fold makes
+        // the else branch the only lowered payload.
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (cast {} (lit {} 2048.0) f16) (cast {} (lit {} 2049.0) f16)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
+            ),
+            "f16-finalized comparison must select the else branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
+            ),
+            "the untaken branch must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_uses_bf16_storage_semantics() {
+        // 257 rounds to 256 at bf16 storage width, the sibling boundary to
+        // the f16 test above.
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (cast {} (lit {} 256.0) bf16) (cast {} (lit {} 257.0) bf16)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
+            ),
+            "bf16-finalized comparison must select the else branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
+            ),
+            "the untaken branch must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_compares_int64_exactly_above_binary64_mantissa() {
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (lit {type: (t-prim {} int64)} 9007199254740992) \
+             (lit {type: (t-prim {} int64)} 9007199254740993)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 111.0)
+            ),
+            "exact int64 comparison must select the then branch: {dag:?}"
+        );
+        assert!(
+            !dag.nodes().iter().any(
+                |node| matches!(node.op, RiscOp::Const { value } if value.as_f64_lossy() == 222.0)
+            ),
+            "the untaken branch must not be lowered: {dag:?}"
+        );
+    }
+
+    #[test]
+    fn static_cond_fold_declines_on_integer_overflow() {
+        let dag = parse_and_lower_unchecked(
+            "(if {} (app {} (var {} lt) \
+             (app {} (var {} add) (cast {} (lit {} 127) int8) \
+                                    (cast {} (lit {} 1) int8)) \
+             (cast {} (lit {} 0) int8)) \
+             (lit {type: (t-prim {} f32)} 111.0) \
+             (lit {type: (t-prim {} f32)} 222.0))",
+        );
+        assert!(
+            dag.nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Mul)),
+            "a trapping typed kernel must decline the fold and retain runtime control flow: \
+             {dag:?}"
         );
     }
 

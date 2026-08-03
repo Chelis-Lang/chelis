@@ -1,8 +1,6 @@
-//! chelis#720 - `fold_static_cond`'s Cast arm folds f16/bf16 conditions with
-//! f32 semantics (via `convert_cast_data`, whose Bf16|F16 arm narrows only
-//! to f32, chelis#717) and DELETES the branch IEEE f16/bf16 semantics would
-//! take. The two lanes then return opposite answers, and the branch eval
-//! considers correct does not exist in the emitted C.
+//! chelis#720 regression matrix for `fold_static_cond`: cast operands must be
+//! finalized as sealed f16/bf16 scalars before comparison. Folding through an
+//! f32 memo deletes the branch IEEE f16/bf16 semantics require.
 //!
 //! Sibling of chelis#711 (the integer Const arm of the same fold, threshold
 //! 2^53); this one fires at 2049 (f16) / 257 (bf16). The fixes do not
@@ -14,9 +12,10 @@
 //! false-positive the #711 audit recorded).
 //!
 //! Bounding controls: conditions with an effectful branch (`fail`) route
-//! host-lane, do not fold, and the compiled int64 comparison there is EXACT
-//! (locked below); int8 conditions do not fold either but diverge at
-//! runtime through #714/#718's int64_t widening.
+//! host-lane, do not fold, and the compiled int64 comparison there is exact
+//! (locked below). The ignored int8 row belongs to the Phase 3 compiled-C
+//! trap work; this Phase 2 fold must at least decline when its typed kernel
+//! detects the overflow.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -110,15 +109,16 @@ const BITS_222: &str = "435e0000";
 /// compiled binary prints 111, and 222's bit pattern is ABSENT from the
 /// emitted C - the correct branch was deleted at compile time.
 #[test]
-#[ignore = "chelis#720: the fold computes the f16 condition with f32 semantics (2048 < 2049 \
-            = true), prints 111, and deletes the 222 branch; eval correctly prints 222. Run \
-            with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
+#[ignore = "chelis#720 fold semantics are now covered in chelis-ir; the end-to-end C row \
+            remains blocked because C host ABI selection rejects f16 before dead-condition \
+            elimination. Artifact routing and C host ABI support are outside this Phase 2 \
+            slice. Run with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn f16_cast_condition_folds_with_f16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(2048.0, f16), cast(2049.0, f16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
     assert_eq!(
         eval_first_line(program).expect("eval"),
-        "222",
+        "222.0",
         "eval is the correct lane here and must stay correct"
     );
     if !c_toolchain_available() {
@@ -131,20 +131,21 @@ fn f16_cast_condition_folds_with_f16_semantics() {
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
-        stdout.lines().next().unwrap_or("").trim() == "222",
+        stdout.lines().next().unwrap_or("").trim() == "222.0",
         "the compiled program must take the IEEE f16 branch; got: {stdout}"
     );
 }
 
 /// bf16 sibling at threshold 257 (8-bit mantissa).
 #[test]
-#[ignore = "chelis#720: same deletion at bf16 - fold computes 256 < 257 = true, prints 111, \
-            deletes the 222 branch; correct bf16 answer is 222 and eval agrees. Run with \
-            `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
+#[ignore = "chelis#720 fold semantics are now covered in chelis-ir; the end-to-end C row \
+            remains blocked because C host ABI selection rejects bf16 before dead-condition \
+            elimination. Artifact routing and C host ABI support are outside this Phase 2 \
+            slice. Run with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn bf16_cast_condition_folds_with_bf16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(256.0, bf16), cast(257.0, bf16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
-    assert_eq!(eval_first_line(program).expect("eval"), "222");
+    assert_eq!(eval_first_line(program).expect("eval"), "222.0");
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
     }
@@ -155,7 +156,7 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
         "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
-        stdout.lines().next().unwrap_or("").trim() == "222",
+        stdout.lines().next().unwrap_or("").trim() == "222.0",
         "the compiled program must take the IEEE bf16 branch; got: {stdout}"
     );
 }

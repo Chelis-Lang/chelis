@@ -711,13 +711,15 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/host_ops.rs",
-        48,
+        37,
         "declared derived-Debug residue carriers: Err(format!) \
          type-mismatch diagnostics over Value/Prim shapes, the tensor \
          SHAPE debug in render_tensor (elements route through \
          format_element), and cfg(test) assertions; chelis#729 Phase 1 \
          deleted the to_list mismatch site and consolidated the duplicate \
-         pad_sequences_to diagnostics",
+         pad_sequences_to diagnostics; Phase 2 deleted eleven more \
+         closure-dispatch mismatch/debug paths when host arithmetic moved \
+         to typed kernel errors",
     ),
     (
         Pat::RustDebugNumericFormat,

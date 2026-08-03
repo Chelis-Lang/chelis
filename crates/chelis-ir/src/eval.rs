@@ -8,15 +8,12 @@
 //! instead of re-finalizing. The raw f64 `binary_map`/`unary_map` paths
 //! this file used to run on are deleted, not deprecated.
 //!
-//! Known Phase 1 residue (chelis#680, closed by the Phase 2 kernel
-//! split): elementwise integer arithmetic still computes its wide value
-//! through the f64-shaped closures, so int64 results at magnitudes above
-//! 2^53 pass through [`wide_i64_saturating`] and can collapse or saturate
-//! exactly as they did before this refactor. Narrow widths (int8/16/32)
-//! are exact and trap-exact through that same adapter, and STORAGE is
-//! exact at every width; only the int64 wide-compute path waits for the
-//! typed kernels. Integer reductions (`sum`/`prod`/`max`/`min`) already
-//! accumulate in exact i64 here.
+//! chelis#729 Phase 2: elementwise arithmetic dispatches once per buffer
+//! into the closed typed kernels. Integer operands never cross binary64,
+//! f32/f64 compute at their declared widths, and f16/bf16 compute through
+//! binary32 with one storage finalization. Reductions pass only ordered
+//! index groups into the same closed typed-kernel boundary; this module
+//! does not own numeric accumulation or comparison.
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,7 +22,10 @@ use crate::dag::{
     RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::dtype_semantics::{
-    NumericTrap, RawScalar, RawTensor, TensorStorage, finalize_tensor, scalar_from_f64,
+    ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, RawScalar, RawTensor,
+    ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
+    finalize_tensor, float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
+    reduce_tensor_groups, reduce_window_grad_tensor_groups, scalar_from_f64,
 };
 use chelis_types::types::Prim;
 
@@ -251,16 +251,10 @@ fn ingress_to_declared(
     ))
 }
 
-/// The chelis#680 Phase 1 residue adapter: integer-family elementwise ops
-/// still compute their wide value through the unsplit f64 closures. An
-/// INTEGRAL wide value saturates through Rust `as` (exact for
-/// int8/16/32, saturating at the int64 boundary exactly as before this
-/// refactor; the Phase 2 kernel split computes integers in i64 and
-/// retires this). A NON-integral or non-finite wide value is NOT
-/// truncated: it stays on the float raw path so finalize Domain-traps,
-/// because a fractional result in an integer-typed position is the
-/// substituted-value laundering this plan forbids (the chelis#724
-/// integer-mean 187.5 is the live example).
+/// Legacy wide-buffer adapter for non-elementwise paths that still produce
+/// integral f64 images before finalization. Elementwise arithmetic and static
+/// condition folding never enter this adapter: their closed kernels preserve
+/// the exact integer storage width.
 fn wide_i64_saturating(x: f64) -> i64 {
     x as i64
 }
@@ -298,38 +292,6 @@ fn finalize_wide_int(
     let storage =
         finalize_tensor(op, prim, RawTensor::Int(wide)).map_err(|trap| trap.to_string())?;
     Ok(TensorValue::from_storage(shape, storage))
-}
-
-/// Element-wise `cast` conversion image for the DAG evaluator (#380) and
-/// lowering's static `if`-condition fold (chelis#620): the CHECKED
-/// default ladder (`chelis_types::cast_raw`; one authored rule per
-/// direction, both eval surfaces identical). Returns the trap so the
-/// fold can DECLINE TO FOLD on a trapping cast (the condition falls to
-/// runtime, where the trap fires with its full diagnostic) while the
-/// evaluator surfaces it loudly.
-///
-/// The SOURCE projection keeps the chelis#680 residue: an
-/// integer-family source is read through the f64 wide with the
-/// saturating adapter until the Phase 2 kernel split, exactly like the
-/// arithmetic paths. The tensor lane ([`cast_value`]) reads storage
-/// exactly and does not share that residue.
-pub fn convert_cast_data(x: f64, src: Prim, dst: Prim) -> Result<f64, NumericTrap> {
-    if src == dst {
-        return Ok(x);
-    }
-    let raw = match src {
-        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
-            RawScalar::Int(wide_i64_saturating(x))
-        }
-        Prim::Bool => RawScalar::Int(if x != 0.0 { 1 } else { 0 }),
-        Prim::F32 | Prim::F64 | Prim::F16 | Prim::Bf16 => RawScalar::Float(x),
-        Prim::F8e4m3 | Prim::String => panic!(
-            "cast: `{}` is not a numeric source dtype (spec/04-type-system.md \
-             section 1.1.1); the checker rejects it before evaluation",
-            src.name()
-        ),
-    };
-    chelis_types::cast_raw("cast", raw, dst).map(|value| value.as_f64_lossy())
 }
 
 /// Tensor `cast`: per-dtype, exact where the family is exact. Integer
@@ -423,62 +385,224 @@ fn uniform_like(
     finalize_wide("uniform_like", prim, shape.to_vec(), data)
 }
 
-/// Elementwise binary compute: read wide, apply the f64 closure, finalize
-/// once at the node's output dtype (the section C1 contract; replaces the
-/// deleted raw `binary_map`).
+/// Closed elementwise binary vocabulary for the IR evaluator. The enum is
+/// translated to the per-family public kernel only after the finalized
+/// operand storage has selected the family; no raw closure or string can
+/// become an arithmetic entry point.
+#[derive(Debug, Clone, Copy)]
+enum ElementwiseBinOp {
+    Add,
+    Mul,
+    Div,
+    FloorDiv,
+    TruncDiv,
+    Max,
+}
+
+impl ElementwiseBinOp {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Mul => "mul",
+            Self::Div => "div",
+            Self::FloorDiv => "floor_div",
+            Self::TruncDiv => "trunc_div",
+            Self::Max => "max_elem",
+        }
+    }
+
+    const fn int_op(self) -> Option<IntBinOp> {
+        match self {
+            Self::Add => Some(IntBinOp::Add),
+            Self::Mul => Some(IntBinOp::Mul),
+            Self::FloorDiv => Some(IntBinOp::FloorDiv),
+            Self::TruncDiv => Some(IntBinOp::TruncDiv),
+            Self::Max => Some(IntBinOp::Max),
+            Self::Div => None,
+        }
+    }
+
+    const fn float_op(self) -> Option<FloatBinOp> {
+        match self {
+            Self::Add => Some(FloatBinOp::Add),
+            Self::Mul => Some(FloatBinOp::Mul),
+            Self::Div => Some(FloatBinOp::Div),
+            Self::FloorDiv => Some(FloatBinOp::FloorDiv),
+            Self::Max => Some(FloatBinOp::Max),
+            Self::TruncDiv => None,
+        }
+    }
+}
+
 fn binary_elementwise(
-    op: &'static str,
-    prim: Prim,
+    op: ElementwiseBinOp,
     lhs: &TensorValue,
     rhs: &TensorValue,
-    f: impl Fn(f64, f64) -> f64,
 ) -> Result<TensorValue, String> {
     assert_eq!(lhs.shape, rhs.shape);
-    let wide = lhs
-        .to_f64_lossy_vec()
-        .into_iter()
-        .zip(rhs.to_f64_lossy_vec())
-        .map(|(a, b)| f(a, b))
-        .collect();
-    finalize_wide(op, prim, lhs.shape.clone(), wide)
+    let storage = if lhs.prim() == Prim::Bool && rhs.prim() == Prim::Bool {
+        let lhs_values = lhs
+            .storage()
+            .to_i64_exact_vec()
+            .expect("sealed bool storage has an exact integer view");
+        let rhs_values = rhs
+            .storage()
+            .to_i64_exact_vec()
+            .expect("sealed bool storage has an exact integer view");
+        let values = match op {
+            // Tier-2 lowers `and` and `or` to these two RISC operations.
+            // They remain logical operations over sealed bool storage; no
+            // numeric-family kernel or raw closure is involved.
+            ElementwiseBinOp::Mul => lhs_values
+                .into_iter()
+                .zip(rhs_values)
+                .map(|(lhs, rhs)| i64::from(lhs != 0 && rhs != 0))
+                .collect(),
+            ElementwiseBinOp::Max => lhs_values
+                .into_iter()
+                .zip(rhs_values)
+                .map(|(lhs, rhs)| i64::from(lhs != 0 || rhs != 0))
+                .collect(),
+            _ => {
+                return Err(format!(
+                    "{}: bool storage cannot enter a numeric IR kernel",
+                    op.name()
+                ));
+            }
+        };
+        return finalize_wide_int(op.name(), Prim::Bool, lhs.shape.clone(), values);
+    } else if lhs.prim().is_integer() {
+        let kernel = op.int_op().ok_or_else(|| {
+            format!(
+                "{}: integer operands cannot enter a float-only IR kernel",
+                op.name()
+            )
+        })?;
+        int_tensor_binop(kernel, lhs.storage(), rhs.storage())
+    } else if lhs.prim().is_float() {
+        let kernel = op.float_op().ok_or_else(|| {
+            format!(
+                "{}: float operands cannot enter an integer-only IR kernel",
+                op.name()
+            )
+        })?;
+        float_tensor_binop(kernel, lhs.storage(), rhs.storage())
+    } else {
+        return Err(format!(
+            "{}: dtype `{}` has no numeric IR kernel",
+            op.name(),
+            lhs.prim().name()
+        ));
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
 }
 
-/// Elementwise unary compute (replaces the deleted raw `unary_map`).
-fn unary_elementwise(
-    op: &'static str,
-    prim: Prim,
-    input: &TensorValue,
-    f: impl Fn(f64) -> f64,
-) -> Result<TensorValue, String> {
-    let wide = input.to_f64_lossy_vec().into_iter().map(f).collect();
-    finalize_wide(op, prim, input.shape.clone(), wide)
+/// Closed unary twin of [`ElementwiseBinOp`].
+#[derive(Debug, Clone, Copy)]
+enum ElementwiseUnOp {
+    Neg,
+    Recip,
+    Exp,
+    Log,
+    Sin,
+    Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
 }
 
-/// The exact diagnostic the integer zero-divisor trap emits, shared with the
-/// host evaluator (`chelis-compiler-api` `host_ops::INT_DIV_ZERO_MSG`), the C
-/// runtime guard (`chelis_int_div_guard`), and `spec/05-risc-primitives.md`
-/// §2.1, so the three lanes are byte-identical.
-const INT_DIV_ZERO_MSG: &str = "integer division or remainder by zero";
+impl ElementwiseUnOp {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Neg => "neg",
+            Self::Recip => "recip",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Sin => "sin",
+            Self::Sqrt => "sqrt",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Atan => "atan",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+        }
+    }
 
-/// Like [`binary_elementwise`] but the element closure may fail, surfacing the
-/// first error. Used by the integer `floor_div` / `trunc_div` zero-divisor trap
-/// (chelis#550) so this reference evaluator fails closed on an integer divide
-/// by zero instead of computing `floor(x/0) == ±inf` and propagating garbage.
-fn try_binary_elementwise(
-    op: &'static str,
-    prim: Prim,
+    const fn int_op(self) -> Option<IntUnOp> {
+        match self {
+            Self::Neg => Some(IntUnOp::Neg),
+            Self::Abs => Some(IntUnOp::Abs),
+            Self::Recip
+            | Self::Exp
+            | Self::Log
+            | Self::Sin
+            | Self::Sqrt
+            | Self::Cos
+            | Self::Tan
+            | Self::Atan
+            | Self::Floor
+            | Self::Ceil
+            | Self::Round => None,
+        }
+    }
+
+    const fn float_op(self) -> FloatUnOp {
+        match self {
+            Self::Neg => FloatUnOp::Neg,
+            Self::Recip => FloatUnOp::Recip,
+            Self::Exp => FloatUnOp::Exp,
+            Self::Log => FloatUnOp::Log,
+            Self::Sin => FloatUnOp::Sin,
+            Self::Sqrt => FloatUnOp::Sqrt,
+            Self::Cos => FloatUnOp::Cos,
+            Self::Tan => FloatUnOp::Tan,
+            Self::Atan => FloatUnOp::Atan,
+            Self::Abs => FloatUnOp::Abs,
+            Self::Floor => FloatUnOp::Floor,
+            Self::Ceil => FloatUnOp::Ceil,
+            Self::Round => FloatUnOp::Round,
+        }
+    }
+}
+
+fn unary_elementwise(op: ElementwiseUnOp, input: &TensorValue) -> Result<TensorValue, String> {
+    let storage = if input.prim().is_integer() {
+        let kernel = op.int_op().ok_or_else(|| {
+            format!(
+                "{}: integer operands cannot enter a float-only IR kernel",
+                op.name()
+            )
+        })?;
+        int_tensor_unop(kernel, input.storage())
+    } else if input.prim().is_float() {
+        float_tensor_unop(op.float_op(), input.storage())
+    } else {
+        return Err(format!(
+            "{}: dtype `{}` has no numeric IR kernel",
+            op.name(),
+            input.prim().name()
+        ));
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(input.shape.clone(), storage))
+}
+
+fn compare_elementwise(
+    op: CompareOp,
     lhs: &TensorValue,
     rhs: &TensorValue,
-    f: impl Fn(f64, f64) -> Result<f64, String>,
 ) -> Result<TensorValue, String> {
     assert_eq!(lhs.shape, rhs.shape);
-    let wide = lhs
-        .to_f64_lossy_vec()
-        .into_iter()
-        .zip(rhs.to_f64_lossy_vec())
-        .map(|(a, b)| f(a, b))
-        .collect::<Result<Vec<f64>, String>>()?;
-    finalize_wide(op, prim, lhs.shape.clone(), wide)
+    let storage =
+        compare_tensors(op, lhs.storage(), rhs.storage()).map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(lhs.shape.clone(), storage))
 }
 
 fn matmul(lhs: &TensorValue, rhs: &TensorValue, prim: Prim) -> Result<TensorValue, String> {
@@ -761,68 +885,38 @@ fn reduce_window(
         out_shape.push((in_dim - w) / s + 1);
     }
 
-    let window_volume: usize = window_shape.iter().product();
     let out_len = numel(&out_shape);
-    let mut out = vec![0.0_f64; out_len];
-    let data = input.to_f64_lossy_vec();
-
-    let init_acc = |r: ReduceWindowKind| -> f64 {
-        match r {
-            ReduceWindowKind::Max => f64::NEG_INFINITY,
-            ReduceWindowKind::Min => f64::INFINITY,
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => 0.0,
-        }
-    };
-    let combine = |r: ReduceWindowKind, acc: f64, x: f64| -> f64 {
-        match r {
-            ReduceWindowKind::Max => acc.max(x),
-            ReduceWindowKind::Min => acc.min(x),
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => acc + x,
-        }
-    };
-
-    for (out_flat, slot) in out.iter_mut().enumerate() {
+    let mut groups = Vec::with_capacity(out_len);
+    for out_flat in 0..out_len {
         let out_idx = linear_to_index(out_flat, &out_shape);
-
-        // Walk the window: iterate over all positions inside the
-        // window_shape multi-index. The source index per dimension is
-        // `out_idx[axis] * stride + window_pos` for windowed axes,
-        // matching the leading-axis passthrough rule above.
-        let mut acc = init_acc(reducer);
-        let mut window_pos = vec![0usize; n];
-        loop {
+        let mut group = Vec::with_capacity(window_shape.iter().product());
+        for_each_window_pos(window_shape, n, |window_pos| {
             let mut src_idx = vec![0usize; rank];
             src_idx[..leading].copy_from_slice(&out_idx[..leading]);
             for i in 0..n {
                 src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
             }
-            let src_flat = index_to_linear(&src_idx, &input.shape);
-            acc = combine(reducer, acc, data[src_flat]);
-
-            // Increment window_pos (mixed-radix carry).
-            if n == 0 {
-                break;
-            }
-            let mut carry = n;
-            for i in (0..n).rev() {
-                window_pos[i] += 1;
-                if window_pos[i] < window_shape[i] {
-                    carry = i;
-                    break;
-                }
-                window_pos[i] = 0;
-            }
-            if carry == n {
-                break;
-            }
-        }
-        if matches!(reducer, ReduceWindowKind::Mean) {
-            acc /= window_volume as f64;
-        }
-        *slot = acc;
+            group.push(index_to_linear(&src_idx, &input.shape));
+        });
+        groups.push(group);
     }
-
-    finalize_wide("reduce_window", prim, out_shape, out)
+    let op = match reducer {
+        ReduceWindowKind::Max => TensorReduceOp::ReduceWindowMax,
+        ReduceWindowKind::Min => TensorReduceOp::ReduceWindowMin,
+        ReduceWindowKind::Sum => TensorReduceOp::ReduceWindowSum,
+        ReduceWindowKind::Mean => TensorReduceOp::ReduceWindowMean,
+    };
+    let storage =
+        reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    if storage.prim() != prim {
+        return Err(format!(
+            "{} produced {} storage for {} IR output",
+            op.name(),
+            storage.prim().name(),
+            prim.name()
+        ));
+    }
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 /// Reverse-mode adjoint of [`reduce_window`] (see `RiscOp::ReduceWindowGrad`).
@@ -858,8 +952,6 @@ fn reduce_window_grad(
         "reduce_window_grad: input rank {rank} smaller than window arity {n}"
     );
     let leading = rank - n;
-    let window_volume: f64 = window_shape.iter().product::<usize>() as f64;
-
     // Output dim per windowed axis: floor((in - w) / s) + 1 (Valid padding),
     // matching the forward. The cotangent `g` is indexed by this shape.
     let mut out_shape = x.shape[..leading].to_vec();
@@ -881,63 +973,37 @@ fn reduce_window_grad(
         g.shape
     );
 
-    let x_data = x.to_f64_lossy_vec();
-    let g_data = g.to_f64_lossy_vec();
-    let mut din = vec![0.0_f64; x_data.len()];
-
-    // Walk each output position `o` (one upstream gradient value `g[o]`),
-    // then walk that window's source positions. `Max`/`Min` need the
-    // window extreme first; `Sum`/`Mean` scatter unconditionally.
-    for (out_flat, &g_val) in g_data.iter().enumerate() {
+    let mut groups = Vec::with_capacity(g.len());
+    for out_flat in 0..g.len() {
         let out_idx = linear_to_index(out_flat, &out_shape);
-
-        let src_flat_at = |window_pos: &[usize]| -> usize {
+        let mut group = Vec::with_capacity(window_shape.iter().product());
+        for_each_window_pos(window_shape, n, |window_pos| {
             let mut src_idx = vec![0usize; rank];
             src_idx[..leading].copy_from_slice(&out_idx[..leading]);
             for i in 0..n {
                 src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
             }
-            index_to_linear(&src_idx, &x.shape)
-        };
-
-        // First pass (Max/Min only): find the window extreme.
-        let extreme = match reducer {
-            ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                let mut acc = match reducer {
-                    ReduceWindowKind::Max => f64::NEG_INFINITY,
-                    _ => f64::INFINITY,
-                };
-                for_each_window_pos(window_shape, n, |window_pos| {
-                    let v = x_data[src_flat_at(window_pos)];
-                    acc = match reducer {
-                        ReduceWindowKind::Max => acc.max(v),
-                        _ => acc.min(v),
-                    };
-                });
-                Some(acc)
-            }
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => None,
-        };
-
-        // Second pass: scatter the contribution into `din`.
-        for_each_window_pos(window_shape, n, |window_pos| {
-            let src = src_flat_at(window_pos);
-            match reducer {
-                ReduceWindowKind::Sum => din[src] += g_val,
-                ReduceWindowKind::Mean => din[src] += g_val / window_volume,
-                ReduceWindowKind::Max | ReduceWindowKind::Min => {
-                    // Distribute to every position equal to the window
-                    // extreme (ties get the full gradient, mirroring the
-                    // `max_reduce` `eq`-mask adjoint).
-                    if x_data[src] == extreme.expect("extreme computed for Max/Min") {
-                        din[src] += g_val;
-                    }
-                }
-            }
+            group.push(index_to_linear(&src_idx, &x.shape));
         });
+        groups.push(group);
     }
-
-    finalize_wide("reduce_window_grad", prim, x.shape.clone(), din)
+    let op = match reducer {
+        ReduceWindowKind::Sum => ReduceWindowGradOp::Sum,
+        ReduceWindowKind::Mean => ReduceWindowGradOp::Mean,
+        ReduceWindowKind::Max => ReduceWindowGradOp::Max,
+        ReduceWindowKind::Min => ReduceWindowGradOp::Min,
+    };
+    let storage = reduce_window_grad_tensor_groups(op, x.storage(), g.storage(), &groups)
+        .map_err(|err| err.to_string())?;
+    if storage.prim() != prim {
+        return Err(format!(
+            "{} produced {} storage for {} IR output",
+            op.name(),
+            storage.prim().name(),
+            prim.name()
+        ));
+    }
+    Ok(TensorValue::from_storage(x.shape.clone(), storage))
 }
 
 /// Invoke `f` once per multi-index inside an `n`-dimensional window of
@@ -965,83 +1031,41 @@ fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usi
     }
 }
 
-/// Which axis-reduction is running; decides the exact integer fold.
-#[derive(Clone, Copy, Debug)]
-enum ReduceKind {
-    Sum,
-    Max,
-    Min,
-    Prod,
+/// Build the exact, ordered source-index group for every output element of
+/// an axis reduction. Shape planning remains local; arithmetic does not.
+fn axis_reduction_groups(input_shape: &[usize], axis: usize) -> (Vec<usize>, Vec<Vec<usize>>) {
+    assert!(axis < input_shape.len());
+    let mut out_shape = input_shape.to_vec();
+    let axis_len = out_shape.remove(axis);
+    let out_len = numel(&out_shape);
+    let mut groups = Vec::with_capacity(out_len);
+    for out_flat in 0..out_len {
+        let out_index = linear_to_index(out_flat, &out_shape);
+        let mut group = Vec::with_capacity(axis_len);
+        for axis_index in 0..axis_len {
+            let mut input_index = Vec::with_capacity(input_shape.len());
+            let mut output_axis = 0;
+            for input_axis in 0..input_shape.len() {
+                if input_axis == axis {
+                    input_index.push(axis_index);
+                } else {
+                    input_index.push(out_index[output_axis]);
+                    output_axis += 1;
+                }
+            }
+            group.push(index_to_linear(&input_index, input_shape));
+        }
+        groups.push(group);
+    }
+    (out_shape, groups)
 }
 
-/// Axis reduction. Float family folds wide in f64 and finalizes ONCE at
-/// the output dtype (one op, one rounding). Integer family folds in exact
-/// i64 with checked accumulation, so int64 sums stay exact above 2^53
-/// (chelis#684) and overflow traps instead of wrapping.
-fn reduce(
-    op: &'static str,
-    input: &TensorValue,
-    axis: usize,
-    kind: ReduceKind,
-    prim: Prim,
-) -> Result<TensorValue, String> {
-    assert!(axis < input.shape.len());
-    let mut out_shape = input.shape.clone();
-    out_shape.remove(axis);
-    let out_len = numel(&out_shape);
-    match input.storage().to_raw() {
-        RawTensor::Int(data) => {
-            let mut out: Vec<Option<i64>> = vec![None; out_len];
-            for (flat_idx, &value) in data.iter().enumerate() {
-                let mut idx = linear_to_index(flat_idx, &input.shape);
-                idx.remove(axis);
-                let out_idx = index_to_linear(&idx, &out_shape);
-                let acc = out[out_idx];
-                let next = match (kind, acc) {
-                    (ReduceKind::Sum, None) => Some(value),
-                    (ReduceKind::Sum, Some(a)) => Some(a.checked_add(value).ok_or_else(|| {
-                        chelis_types::dtype_semantics::NumericTrap::Overflow { op, prim }
-                            .to_string()
-                    })?),
-                    (ReduceKind::Prod, None) => Some(value),
-                    (ReduceKind::Prod, Some(a)) => Some(a.checked_mul(value).ok_or_else(|| {
-                        chelis_types::dtype_semantics::NumericTrap::Overflow { op, prim }
-                            .to_string()
-                    })?),
-                    (ReduceKind::Max, None) => Some(value),
-                    (ReduceKind::Max, Some(a)) => Some(a.max(value)),
-                    (ReduceKind::Min, None) => Some(value),
-                    (ReduceKind::Min, Some(a)) => Some(a.min(value)),
-                };
-                out[out_idx] = next;
-            }
-            // Empty-axis identity elements match the float lane's inits.
-            let identity = match kind {
-                ReduceKind::Sum => 0,
-                ReduceKind::Prod => 1,
-                ReduceKind::Max => i64::MIN,
-                ReduceKind::Min => i64::MAX,
-            };
-            let wide: Vec<i64> = out.into_iter().map(|v| v.unwrap_or(identity)).collect();
-            finalize_wide_int(op, prim, out_shape, wide)
-        }
-        RawTensor::Float(data) => {
-            let (init, f): (f64, fn(f64, f64) -> f64) = match kind {
-                ReduceKind::Sum => (0.0, |acc, x| acc + x),
-                ReduceKind::Prod => (1.0, |acc, x| acc * x),
-                ReduceKind::Max => (f64::NEG_INFINITY, f64::max),
-                ReduceKind::Min => (f64::INFINITY, f64::min),
-            };
-            let mut out = vec![init; out_len];
-            for (flat_idx, &value) in data.iter().enumerate() {
-                let mut idx = linear_to_index(flat_idx, &input.shape);
-                idx.remove(axis);
-                let out_idx = index_to_linear(&idx, &out_shape);
-                out[out_idx] = f(out[out_idx], value);
-            }
-            finalize_wide(op, prim, out_shape, out)
-        }
-    }
+/// Axis reduction through the closed Phase 2 typed kernel.
+fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let storage =
+        reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 /// Reduce along `axis`, tracking the index of the element that wins under
@@ -1051,31 +1075,11 @@ fn reduce(
 /// default argmax/argmin semantics. The output holds exact int64 indices
 /// (the `RiscOp::Argmax` spec invariant; per-dtype storage ended the
 /// f64-image detour of chelis#233).
-fn reduce_argcmp(
-    input: &TensorValue,
-    axis: usize,
-    init: f64,
-    better: impl Fn(f64, f64) -> bool,
-) -> Result<TensorValue, String> {
-    assert!(axis < input.shape.len());
-    let mut out_shape = input.shape.clone();
-    out_shape.remove(axis);
-    let out_len = numel(&out_shape);
-    let mut best_val = vec![init; out_len];
-    let mut best_idx = vec![-1i64; out_len];
-    let data = input.to_f64_lossy_vec();
-    for (flat_idx, &value) in data.iter().enumerate() {
-        let full = linear_to_index(flat_idx, &input.shape);
-        let axis_pos = full[axis] as i64;
-        let mut reduced = full.clone();
-        reduced.remove(axis);
-        let out_idx = index_to_linear(&reduced, &out_shape);
-        if best_idx[out_idx] < 0 || better(best_val[out_idx], value) {
-            best_val[out_idx] = value;
-            best_idx[out_idx] = axis_pos;
-        }
-    }
-    finalize_wide_int("argmax", Prim::Int64, out_shape, best_idx)
+fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let storage =
+        arg_reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
@@ -1902,7 +1906,7 @@ where
                         input.shape.len()
                     )
                 })?;
-                finalize_wide_int("shape", Prim::Int64, vec![], vec![extent as i64])?
+                finalize_wide_int("shape", out_prim, vec![], vec![extent as i64])?
             }
             RiscOp::Load { name } => match resolved_inputs.get(name.as_str()) {
                 Some(value) => ingress_to_declared(name.as_str(), out_prim, value)?,
@@ -1913,25 +1917,19 @@ where
                 values[&node.inputs[0]].clone()
             }
             RiscOp::Add => binary_elementwise(
-                "add",
-                out_prim,
+                ElementwiseBinOp::Add,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| a + b,
             )?,
             RiscOp::Mul => binary_elementwise(
-                "mul",
-                out_prim,
+                ElementwiseBinOp::Mul,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| a * b,
             )?,
             RiscOp::Div => binary_elementwise(
-                "div",
-                out_prim,
+                ElementwiseBinOp::Div,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| a / b,
             )?,
             // chelis#178: floor division rounds the quotient toward -inf.
             // For integer-valued operands `(a / b).floor()` yields the
@@ -1949,17 +1947,7 @@ where
             RiscOp::FloorDiv => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
-                if node.output_type.precision.is_integer() {
-                    try_binary_elementwise("floor_div", out_prim, lhs, rhs, |a, b| {
-                        if b == 0.0 {
-                            Err(INT_DIV_ZERO_MSG.to_string())
-                        } else {
-                            Ok((a / b).floor())
-                        }
-                    })?
-                } else {
-                    binary_elementwise("floor_div", out_prim, lhs, rhs, |a, b| (a / b).floor())?
-                }
+                binary_elementwise(ElementwiseBinOp::FloorDiv, lhs, rhs)?
             }
             // chelis#178: truncating (round-toward-zero) integer division.
             // `(a / b).trunc()` matches C/Rust integer `/` for the
@@ -1972,45 +1960,24 @@ where
             RiscOp::TruncDiv => {
                 let lhs = &values[&node.inputs[0]];
                 let rhs = &values[&node.inputs[1]];
-                try_binary_elementwise("trunc_div", out_prim, lhs, rhs, |a, b| {
-                    if b == 0.0 {
-                        Err(INT_DIV_ZERO_MSG.to_string())
-                    } else {
-                        Ok((a / b).trunc())
-                    }
-                })?
+                binary_elementwise(ElementwiseBinOp::TruncDiv, lhs, rhs)?
             }
-            RiscOp::Neg => unary_elementwise("neg", out_prim, &values[&node.inputs[0]], |x| -x)?,
-            RiscOp::Recip => {
-                unary_elementwise("recip", out_prim, &values[&node.inputs[0]], |x| 1.0 / x)?
-            }
-            RiscOp::Exp => unary_elementwise("exp", out_prim, &values[&node.inputs[0]], f64::exp)?,
-            RiscOp::Log => unary_elementwise("log", out_prim, &values[&node.inputs[0]], f64::ln)?,
-            RiscOp::Sin => unary_elementwise("sin", out_prim, &values[&node.inputs[0]], f64::sin)?,
-            RiscOp::Sqrt => {
-                unary_elementwise("sqrt", out_prim, &values[&node.inputs[0]], f64::sqrt)?
-            }
-            RiscOp::Cos => unary_elementwise("cos", out_prim, &values[&node.inputs[0]], f64::cos)?,
-            RiscOp::Tan => unary_elementwise("tan", out_prim, &values[&node.inputs[0]], f64::tan)?,
-            RiscOp::Atan => {
-                unary_elementwise("atan", out_prim, &values[&node.inputs[0]], f64::atan)?
-            }
-            RiscOp::Abs => unary_elementwise("abs", out_prim, &values[&node.inputs[0]], f64::abs)?,
-            RiscOp::Floor => {
-                unary_elementwise("floor", out_prim, &values[&node.inputs[0]], f64::floor)?
-            }
-            RiscOp::Ceil => {
-                unary_elementwise("ceil", out_prim, &values[&node.inputs[0]], f64::ceil)?
-            }
+            RiscOp::Neg => unary_elementwise(ElementwiseUnOp::Neg, &values[&node.inputs[0]])?,
+            RiscOp::Recip => unary_elementwise(ElementwiseUnOp::Recip, &values[&node.inputs[0]])?,
+            RiscOp::Exp => unary_elementwise(ElementwiseUnOp::Exp, &values[&node.inputs[0]])?,
+            RiscOp::Log => unary_elementwise(ElementwiseUnOp::Log, &values[&node.inputs[0]])?,
+            RiscOp::Sin => unary_elementwise(ElementwiseUnOp::Sin, &values[&node.inputs[0]])?,
+            RiscOp::Sqrt => unary_elementwise(ElementwiseUnOp::Sqrt, &values[&node.inputs[0]])?,
+            RiscOp::Cos => unary_elementwise(ElementwiseUnOp::Cos, &values[&node.inputs[0]])?,
+            RiscOp::Tan => unary_elementwise(ElementwiseUnOp::Tan, &values[&node.inputs[0]])?,
+            RiscOp::Atan => unary_elementwise(ElementwiseUnOp::Atan, &values[&node.inputs[0]])?,
+            RiscOp::Abs => unary_elementwise(ElementwiseUnOp::Abs, &values[&node.inputs[0]])?,
+            RiscOp::Floor => unary_elementwise(ElementwiseUnOp::Floor, &values[&node.inputs[0]])?,
+            RiscOp::Ceil => unary_elementwise(ElementwiseUnOp::Ceil, &values[&node.inputs[0]])?,
             // Round-half-to-even (banker's rounding), matching the C
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
-            RiscOp::Round => unary_elementwise(
-                "round",
-                out_prim,
-                &values[&node.inputs[0]],
-                f64::round_ties_even,
-            )?,
+            RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
             RiscOp::UniformLike { low, high, seed } => uniform_like(
                 &values[&node.inputs[0]].shape.clone(),
                 *low,
@@ -2022,49 +1989,32 @@ where
                 dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?
             }
             RiscOp::MaxElem => binary_elementwise(
-                "max_elem",
-                out_prim,
+                ElementwiseBinOp::Max,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                f64::max,
             )?,
-            RiscOp::CmpLt => binary_elementwise(
-                "cmplt",
-                out_prim,
+            RiscOp::CmpLt => compare_elementwise(
+                CompareOp::Lt,
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
-                |a, b| {
-                    if a < b { 1.0 } else { 0.0 }
+            )?,
+            RiscOp::Sum { axis, accumulator } => reduce(
+                &values[&node.inputs[0]],
+                *axis,
+                TensorReduceOp::Sum {
+                    accumulator: *accumulator,
+                    result: out_prim,
                 },
             )?,
-            RiscOp::Sum { axis, .. } => reduce(
-                "sum",
-                &values[&node.inputs[0]],
-                *axis,
-                ReduceKind::Sum,
-                out_prim,
-            )?,
-            RiscOp::MaxReduce { axis } => reduce(
-                "max_reduce",
-                &values[&node.inputs[0]],
-                *axis,
-                ReduceKind::Max,
-                out_prim,
-            )?,
-            RiscOp::MinReduce { axis } => reduce(
-                "min_reduce",
-                &values[&node.inputs[0]],
-                *axis,
-                ReduceKind::Min,
-                out_prim,
-            )?,
-            RiscOp::ProdReduce { axis } => reduce(
-                "prod_reduce",
-                &values[&node.inputs[0]],
-                *axis,
-                ReduceKind::Prod,
-                out_prim,
-            )?,
+            RiscOp::MaxReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MaxReduce)?
+            }
+            RiscOp::MinReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MinReduce)?
+            }
+            RiscOp::ProdReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::ProdReduce)?
+            }
             RiscOp::ReduceWindow {
                 reducer,
                 window_shape,
@@ -2088,14 +2038,11 @@ where
                 strides,
                 out_prim,
             )?,
-            RiscOp::Argmax { axis } => reduce_argcmp(
-                &values[&node.inputs[0]],
-                *axis,
-                f64::NEG_INFINITY,
-                |a, b| b > a,
-            )?,
+            RiscOp::Argmax { axis } => {
+                reduce_argcmp(&values[&node.inputs[0]], *axis, ArgReduceOp::Argmax)?
+            }
             RiscOp::Argmin { axis } => {
-                reduce_argcmp(&values[&node.inputs[0]], *axis, f64::INFINITY, |a, b| b < a)?
+                reduce_argcmp(&values[&node.inputs[0]], *axis, ArgReduceOp::Argmin)?
             }
             RiscOp::Reshape { new_shape } => {
                 let shape: Vec<usize> = new_shape
@@ -2187,49 +2134,10 @@ where
                 let externals: Vec<&TensorValue> =
                     node.inputs.iter().map(|id| &values[id]).collect();
 
-                // chelis#729 Phase 1: each fused step finalizes at the
-                // chain's element dtype (the section C1 finalize-per-op
-                // rule; fusion must not change rounding vs the unfused
-                // DAG). A bool-typed fused node (a chain ending in cmplt)
-                // takes its chain dtype from the first external input;
-                // the final node-level finalize below converts the 0/1
-                // tail to bool storage.
-                let chain_prim = if out_prim == Prim::Bool {
-                    match externals.first().map(|v| v.prim()) {
-                        Some(p) if p.is_float() || p.is_integer() => p,
-                        Some(other) => {
-                            return Err(format!(
-                                "fused chain at node {}: bool output with a non-numeric \
-                                 first external ({}); cannot determine the chain dtype",
-                                node.id.0,
-                                other.name()
-                            ));
-                        }
-                        None => {
-                            return Err(format!(
-                                "fused chain at node {}: bool output with no external \
-                                 inputs; cannot determine the chain dtype",
-                                node.id.0
-                            ));
-                        }
-                    }
-                } else {
-                    out_prim
-                };
-
-                // chelis#550: gate the integer `floor_div` zero-divisor trap on
-                // the fused node's output precision. A pure integer-division
-                // chain carries an integer output precision, so the trap fires
-                // for its `floor_div` steps; a float chain keeps IEEE semantics
-                // (`floor(+inf)`), never trapping. `trunc_div` is integer-only
-                // and traps unconditionally. Per-step operand precision is not
-                // recorded on `FusedStep`, so a `floor_div` buried in a chain
-                // whose tail changes the output precision (e.g. a trailing
-                // `cmplt` -> bool) is the one residual the output-precision
-                // gate cannot see; the authoritative integer trap there rests
-                // on `host_ops` (the user `chelis eval` lane) and the C backend
-                // guard, both of which trap per primitive.
-                let fused_is_integer = node.output_type.precision.is_integer();
+                // chelis#729 Phase 2: every step dispatches from its actual
+                // finalized operand storage. That preserves per-op rounding,
+                // exact integer width, and division traps even when a trailing
+                // comparison changes the fused node output dtype to bool.
 
                 // Walk the fused steps sequentially, building up intermediate results.
                 let mut intermediates: Vec<TensorValue> = Vec::with_capacity(ops.len());
@@ -2245,166 +2153,103 @@ where
                     let result = match step.op {
                         // Binary ops
                         FusedStepOp::Add => binary_elementwise(
-                            "add",
-                            chain_prim,
+                            ElementwiseBinOp::Add,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| a + b,
                         )?,
                         FusedStepOp::Mul => binary_elementwise(
-                            "mul",
-                            chain_prim,
+                            ElementwiseBinOp::Mul,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| a * b,
                         )?,
                         FusedStepOp::Div => binary_elementwise(
-                            "div",
-                            chain_prim,
+                            ElementwiseBinOp::Div,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| a / b,
                         )?,
-                        // chelis#178: floor / truncating integer division
-                        // fused steps. See the standalone `RiscOp` arms.
-                        // chelis#550: integer divisors trap on zero (gated on
-                        // the fused output precision; see `fused_is_integer`).
+                        // chelis#178/#550: floor/truncating division shares
+                        // the standalone typed-kernel path, including exact
+                        // per-dtype integer zero-divisor and overflow traps.
                         FusedStepOp::FloorDiv => {
                             let lhs = resolve(&step.input_indices[0]);
                             let rhs = resolve(&step.input_indices[1]);
-                            if fused_is_integer {
-                                try_binary_elementwise(
-                                    "floor_div",
-                                    chain_prim,
-                                    lhs,
-                                    rhs,
-                                    |a, b| {
-                                        if b == 0.0 {
-                                            Err(INT_DIV_ZERO_MSG.to_string())
-                                        } else {
-                                            Ok((a / b).floor())
-                                        }
-                                    },
-                                )?
-                            } else {
-                                binary_elementwise("floor_div", chain_prim, lhs, rhs, |a, b| {
-                                    (a / b).floor()
-                                })?
-                            }
+                            binary_elementwise(ElementwiseBinOp::FloorDiv, lhs, rhs)?
                         }
                         FusedStepOp::TruncDiv => {
                             let lhs = resolve(&step.input_indices[0]);
                             let rhs = resolve(&step.input_indices[1]);
-                            // `trunc_div` is integer-only; a zero divisor
-                            // always traps.
-                            try_binary_elementwise("trunc_div", chain_prim, lhs, rhs, |a, b| {
-                                if b == 0.0 {
-                                    Err(INT_DIV_ZERO_MSG.to_string())
-                                } else {
-                                    Ok((a / b).trunc())
-                                }
-                            })?
+                            binary_elementwise(ElementwiseBinOp::TruncDiv, lhs, rhs)?
                         }
                         FusedStepOp::MaxElem => binary_elementwise(
-                            "max_elem",
-                            chain_prim,
+                            ElementwiseBinOp::Max,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            f64::max,
                         )?,
-                        FusedStepOp::CmpLt => binary_elementwise(
-                            "cmplt",
-                            chain_prim,
+                        FusedStepOp::CmpLt => compare_elementwise(
+                            CompareOp::Lt,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
-                            |a, b| if a < b { 1.0 } else { 0.0 },
                         )?,
                         // Unary ops
                         FusedStepOp::Neg => unary_elementwise(
-                            "neg",
-                            chain_prim,
+                            ElementwiseUnOp::Neg,
                             resolve(&step.input_indices[0]),
-                            |x| -x,
                         )?,
                         FusedStepOp::Recip => unary_elementwise(
-                            "recip",
-                            chain_prim,
+                            ElementwiseUnOp::Recip,
                             resolve(&step.input_indices[0]),
-                            |x| 1.0 / x,
                         )?,
                         FusedStepOp::Exp => unary_elementwise(
-                            "exp",
-                            chain_prim,
+                            ElementwiseUnOp::Exp,
                             resolve(&step.input_indices[0]),
-                            f64::exp,
                         )?,
                         FusedStepOp::Log => unary_elementwise(
-                            "log",
-                            chain_prim,
+                            ElementwiseUnOp::Log,
                             resolve(&step.input_indices[0]),
-                            f64::ln,
                         )?,
                         FusedStepOp::Sin => unary_elementwise(
-                            "sin",
-                            chain_prim,
+                            ElementwiseUnOp::Sin,
                             resolve(&step.input_indices[0]),
-                            f64::sin,
                         )?,
                         FusedStepOp::Sqrt => unary_elementwise(
-                            "sqrt",
-                            chain_prim,
+                            ElementwiseUnOp::Sqrt,
                             resolve(&step.input_indices[0]),
-                            f64::sqrt,
                         )?,
                         FusedStepOp::Cos => unary_elementwise(
-                            "cos",
-                            chain_prim,
+                            ElementwiseUnOp::Cos,
                             resolve(&step.input_indices[0]),
-                            f64::cos,
                         )?,
                         FusedStepOp::Tan => unary_elementwise(
-                            "tan",
-                            chain_prim,
+                            ElementwiseUnOp::Tan,
                             resolve(&step.input_indices[0]),
-                            f64::tan,
                         )?,
                         FusedStepOp::Atan => unary_elementwise(
-                            "atan",
-                            chain_prim,
+                            ElementwiseUnOp::Atan,
                             resolve(&step.input_indices[0]),
-                            f64::atan,
                         )?,
                         FusedStepOp::Abs => unary_elementwise(
-                            "abs",
-                            chain_prim,
+                            ElementwiseUnOp::Abs,
                             resolve(&step.input_indices[0]),
-                            f64::abs,
                         )?,
                         FusedStepOp::Floor => unary_elementwise(
-                            "floor",
-                            chain_prim,
+                            ElementwiseUnOp::Floor,
                             resolve(&step.input_indices[0]),
-                            f64::floor,
                         )?,
                         FusedStepOp::Ceil => unary_elementwise(
-                            "ceil",
-                            chain_prim,
+                            ElementwiseUnOp::Ceil,
                             resolve(&step.input_indices[0]),
-                            f64::ceil,
                         )?,
                         FusedStepOp::Round => unary_elementwise(
-                            "round",
-                            chain_prim,
+                            ElementwiseUnOp::Round,
                             resolve(&step.input_indices[0]),
-                            f64::round_ties_even,
                         )?,
                     };
                     intermediates.push(result);
                 }
 
-                // The last step's output is the node's result, finalized at
-                // the NODE's dtype (identity when chain_prim == out_prim;
-                // the 0/1-to-bool conversion for cmplt tails).
+                // Every typed step already finalizes at its own dtype. The
+                // final conversion is therefore only a defensive checker-
+                // invariant guard; a comparison tail already carries bool.
                 let last = intermediates
                     .pop()
                     .expect("FusedElem must have at least one step");
@@ -2852,6 +2697,36 @@ mod tests {
     }
 
     #[test]
+    fn phase2_reduce_window_grad_accumulates_overlaps_at_declared_width() {
+        let f32_tensor = |shape, values| {
+            TensorValue::from_storage(
+                shape,
+                finalize_tensor("test", Prim::F32, RawTensor::Float(values)).unwrap(),
+            )
+        };
+        let x = f32_tensor(vec![5], vec![0.0; 5]);
+        let witness = f32_tensor(vec![3], vec![16_777_216.0, 1.0, -16_777_216.0]);
+        let actual =
+            reduce_window_grad(&x, &witness, ReduceWindowKind::Sum, &[3], &[1], Prim::F32).unwrap();
+        assert_eq!(
+            actual.to_f64_lossy_vec(),
+            vec![
+                16_777_216.0,
+                16_777_216.0,
+                0.0,
+                -16_777_215.0,
+                -16_777_216.0
+            ],
+            "the center receives all three cotangents and must round after each f32 add"
+        );
+
+        let control = f32_tensor(vec![3], vec![4.0, 1.0, -4.0]);
+        let actual =
+            reduce_window_grad(&x, &control, ReduceWindowKind::Sum, &[3], &[1], Prim::F32).unwrap();
+        assert_eq!(actual.to_f64_lossy_vec(), vec![4.0, 5.0, 1.0, -3.0, -4.0]);
+    }
+
+    #[test]
     fn reduce_window_grad_max_routes_to_argmax_and_accumulates_overlap() {
         // Strictly increasing input over a [4] window=2 stride=1: windows
         // [0,1]->max@1, [1,2]->max@2, [2,3]->max@3. With distinct upstream
@@ -2920,6 +2795,137 @@ mod tests {
         assert_eq!(
             vals[&c],
             TensorValue::from_vec(vec![3], vec![5.0, 7.0, 9.0])
+        );
+    }
+
+    /// [04-NUM-8]/dtype-semantics C5: the IR reference evaluator must call
+    /// the exact-width integer kernel, never project int64 operands through
+    /// binary64 before arithmetic.
+    #[test]
+    fn int64_elementwise_add_is_exact_above_binary64_mantissa() {
+        let dag = int_div_dag(RiscOp::Add, Prim::Int64);
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![2],
+                vec![(1_i64 << 53) + 1, (1_i64 << 53) + 2],
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "b".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![2], vec![1, -1]).unwrap(),
+        );
+        let values = eval_tensor(&dag, &inputs).expect("exact int64 add");
+        assert_eq!(
+            values[&dag.roots()[0]].storage().to_i64_exact_vec(),
+            Some(vec![(1_i64 << 53) + 2, (1_i64 << 53) + 1])
+        );
+    }
+
+    /// Negative twin for the exact integer kernel: overflow traps at the
+    /// declared width and names both the operation and dtype.
+    #[test]
+    fn int8_elementwise_add_overflow_uses_branded_trap() {
+        let dag = int_div_dag(RiscOp::Add, Prim::Int8);
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![127, 1]).unwrap(),
+        );
+        inputs.insert(
+            "b".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int8, vec![2], vec![1, 1]).unwrap(),
+        );
+        assert_eq!(
+            eval_tensor(&dag, &inputs).expect_err("int8 overflow must trap"),
+            "numeric trap: overflow in add at int8"
+        );
+    }
+
+    /// Comparison reads the finalized operand storage, not the result dtype
+    /// and not a lossy float projection.
+    #[test]
+    fn int64_comparison_is_exact_above_binary64_mantissa() {
+        let mut dag = Dag::new();
+        let ty = tensor_ty(&[2], Prim::Int64);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty, None);
+        let out = dag.add_node(RiscOp::CmpLt, vec![a, b], tensor_ty(&[2], Prim::Bool), None);
+        dag.add_root(out);
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![2],
+                vec![1_i64 << 53, (1_i64 << 53) + 2],
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "b".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![2],
+                vec![(1_i64 << 53) + 1, (1_i64 << 53) + 1],
+            )
+            .unwrap(),
+        );
+        let values = eval_tensor(&dag, &inputs).expect("exact int64 comparison");
+        assert_eq!(values[&out].storage().to_i64_exact_vec(), Some(vec![1, 0]));
+    }
+
+    /// Fused elementwise execution owes the same exact-width contract as
+    /// standalone nodes; fusion cannot reopen the f64 closure seam.
+    #[test]
+    fn fused_int64_arithmetic_is_exact_above_binary64_mantissa() {
+        let mut dag = Dag::new();
+        let ty = tensor_ty(&[1], Prim::Int64);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let one = dag.add_node(
+            RiscOp::Load { name: "one".into() },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let add = dag.add_node(RiscOp::Add, vec![a, one], ty.clone(), None);
+        let mul = dag.add_node(RiscOp::Mul, vec![add, one], ty, None);
+        dag.add_root(mul);
+        let fused = crate::fuse::fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::FusedElem { .. }))
+        );
+
+        let mut inputs = HashMap::new();
+        inputs.insert(
+            "a".into(),
+            TensorValue::finalize_from_wide_int(
+                "test",
+                Prim::Int64,
+                vec![1],
+                vec![(1_i64 << 53) + 1],
+            )
+            .unwrap(),
+        );
+        inputs.insert(
+            "one".into(),
+            TensorValue::finalize_from_wide_int("test", Prim::Int64, vec![1], vec![1]).unwrap(),
+        );
+        let values = eval_tensor(&fused, &inputs).expect("exact fused int64 arithmetic");
+        let root = fused.roots()[0];
+        assert_eq!(
+            values[&root].storage().to_i64_exact_vec(),
+            Some(vec![(1_i64 << 53) + 2])
         );
     }
 
@@ -3405,7 +3411,7 @@ mod tests {
 
     /// #380 negative / direction guard: int->float preserves the value
     /// exactly (no spurious truncation on the int->float direction), and
-    /// float->f32 narrows. Pins that `convert_cast_data` preserves the
+    /// float->f32 narrows. Pins that the sealed cast ladder preserves the
     /// int->float direction rather than applying the checked int-target rule.
     #[test]
     fn lowered_cast_int_to_float_preserves_value() {
@@ -3886,7 +3892,7 @@ mod tests {
         let err = eval_tensor(&dag, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("integer floor_div by zero must trap");
         assert_eq!(
-            err, INT_DIV_ZERO_MSG,
+            err, "numeric trap: division by zero in floor_div at int32",
             "trap diagnostic must match the shared message exactly"
         );
     }
@@ -3896,7 +3902,7 @@ mod tests {
         let dag = int_div_dag(RiscOp::TruncDiv, Prim::Int64);
         let err = eval_tensor(&dag, &divisor_inputs(vec![0.0, 2.0]))
             .expect_err("integer trunc_div by zero must trap");
-        assert_eq!(err, INT_DIV_ZERO_MSG);
+        assert_eq!(err, "numeric trap: division by zero in trunc_div at int64");
     }
 
     #[test]
@@ -3983,6 +3989,101 @@ mod tests {
         );
         let err = eval_tensor(&fused, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("fused integer floor_div by zero must trap");
-        assert_eq!(err, INT_DIV_ZERO_MSG);
+        assert_eq!(err, "numeric trap: division by zero in floor_div at int32");
+    }
+
+    fn exact_tensor(prim: Prim, values: RawTensor) -> TensorValue {
+        let len = match &values {
+            RawTensor::Int(values) => values.len(),
+            RawTensor::Float(values) => values.len(),
+        };
+        let storage = finalize_tensor("phase2-reduction-test", prim, values)
+            .expect("test values are in range");
+        TensorValue::from_storage(vec![len], storage)
+    }
+
+    #[test]
+    fn phase2_window_reduction_uses_declared_width_and_exact_storage() {
+        let f32_input = exact_tensor(
+            Prim::F32,
+            RawTensor::Float(vec![16_777_216.0, 1.0, -16_777_216.0]),
+        );
+        let f32_out = reduce_window(&f32_input, ReduceWindowKind::Sum, &[3], &[1], Prim::F32)
+            .expect("in-range f32 reduction");
+        assert_eq!(f32_out.to_f64_lossy_vec(), vec![0.0]);
+
+        let i64_input = exact_tensor(Prim::Int64, RawTensor::Int(vec![9_007_199_254_740_992, 1]));
+        let i64_out = reduce_window(&i64_input, ReduceWindowKind::Sum, &[2], &[1], Prim::Int64)
+            .expect("exact int64 reduction");
+        assert_eq!(
+            i64_out.storage().to_i64_exact_vec(),
+            Some(vec![9_007_199_254_740_993])
+        );
+    }
+
+    #[test]
+    fn phase2_window_reduction_traps_intermediate_overflow_at_operand_width() {
+        let input = exact_tensor(Prim::Int8, RawTensor::Int(vec![100, 100, -100]));
+        let err = reduce_window(&input, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
+            .expect_err("100i8 + 100i8 must trap before the later -100");
+        assert_eq!(err, "numeric trap: overflow in reduce_window_sum at int8");
+
+        let control = exact_tensor(Prim::Int8, RawTensor::Int(vec![40, 40, -40]));
+        let output = reduce_window(&control, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
+            .expect("in-range int8 control");
+        assert_eq!(output.storage().to_i64_exact_vec(), Some(vec![40]));
+    }
+
+    #[test]
+    fn phase2_axis_sum_traps_in_the_stride4_combine() {
+        let input = exact_tensor(
+            Prim::Int32,
+            RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
+        );
+        let err = reduce(
+            &input,
+            0,
+            TensorReduceOp::Sum {
+                accumulator: Prim::Int32,
+                result: Prim::Int32,
+            },
+        )
+        .expect_err("lane0 + lane1 overflows the int32 accumulator");
+        assert_eq!(err, "numeric trap: overflow in sum at int32");
+
+        let control = exact_tensor(
+            Prim::Int32,
+            RawTensor::Int(vec![i64::from(i32::MAX) - 1, 1, -1]),
+        );
+        let output = reduce(
+            &control,
+            0,
+            TensorReduceOp::Sum {
+                accumulator: Prim::Int32,
+                result: Prim::Int32,
+            },
+        )
+        .expect("below-overflow control");
+        assert_eq!(
+            output.storage().to_i64_exact_vec(),
+            Some(vec![i64::from(i32::MAX) - 1])
+        );
+    }
+
+    #[test]
+    fn phase2_arg_reductions_compare_int64_without_binary64() {
+        let max_input = exact_tensor(
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_992, 9_007_199_254_740_993]),
+        );
+        let max_out = reduce_argcmp(&max_input, 0, ArgReduceOp::Argmax).expect("argmax");
+        assert_eq!(max_out.storage().to_i64_exact_vec(), Some(vec![1]));
+
+        let min_input = exact_tensor(
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_993, 9_007_199_254_740_992]),
+        );
+        let min_out = reduce_argcmp(&min_input, 0, ArgReduceOp::Argmin).expect("argmin");
+        assert_eq!(min_out.storage().to_i64_exact_vec(), Some(vec![1]));
     }
 }

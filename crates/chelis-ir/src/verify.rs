@@ -566,7 +566,11 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             _ => {}
         }
 
-        // C4: transcendental ops require float precision.
+        // C4: transcendental ops require float precision. `abs` is the
+        // exact numeric exception: it has typed float and signed-integer
+        // kernels. Integer floor/ceil/round are canonicalized to identity
+        // during lowering, so seeing one of those integer nodes is still a
+        // structural error rather than permission to enter a float backend.
         match &node.op {
             RiscOp::Exp
             | RiscOp::Log
@@ -575,7 +579,6 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Cos
             | RiscOp::Tan
             | RiscOp::Atan
-            | RiscOp::Abs
             | RiscOp::Floor
             | RiscOp::Ceil
             | RiscOp::Round => {
@@ -586,6 +589,18 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     errors.push(format!(
                         "transcendental op {:?} at node {} requires float input, got {:?}",
                         node.op, node.id.0, input.output_type.precision
+                    ));
+                }
+            }
+            RiscOp::Abs => {
+                if arity == 1
+                    && let Some(input) = dag.get(node.inputs[0])
+                    && !input.output_type.precision.is_float()
+                    && !input.output_type.precision.is_integer()
+                {
+                    errors.push(format!(
+                        "numeric op Abs at node {} requires float or signed-integer input, got {:?}",
+                        node.id.0, input.output_type.precision
                     ));
                 }
             }
@@ -1963,6 +1978,62 @@ mod tests {
         );
         dag.add_node(RiscOp::Sqrt, vec![x], scalar_f32(), None);
         assert!(verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn c4_abs_on_signed_integer_is_valid_exact_ir() {
+        let mut dag = Dag::new();
+        let int_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::Int64,
+        };
+        let x = dag.add_node(
+            RiscOp::synth_const(int_ty.precision, -1.0),
+            vec![],
+            int_ty.clone(),
+            None,
+        );
+        dag.add_node(RiscOp::Abs, vec![x], int_ty, None);
+        assert!(verify(&dag).is_empty());
+    }
+
+    #[test]
+    fn c4_integer_rounding_node_is_rejected_as_noncanonical() {
+        let mut dag = Dag::new();
+        let int_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::Int64,
+        };
+        let x = dag.add_node(
+            RiscOp::synth_const(int_ty.precision, -1.0),
+            vec![],
+            int_ty.clone(),
+            None,
+        );
+        dag.add_node(RiscOp::Floor, vec![x], int_ty, None);
+        let errs = verify(&dag);
+        assert!(errs.iter().any(|error| error.contains("requires float")));
+    }
+
+    #[test]
+    fn c4_abs_on_bool_is_error() {
+        let mut dag = Dag::new();
+        let bool_ty = TensorType {
+            dims: vec![DimInfo::Lit(1)],
+            precision: Prim::Bool,
+        };
+        let x = dag.add_node(
+            RiscOp::synth_const(bool_ty.precision, 1.0),
+            vec![],
+            bool_ty.clone(),
+            None,
+        );
+        dag.add_node(RiscOp::Abs, vec![x], bool_ty, None);
+        let errs = verify(&dag);
+        assert!(
+            errs.iter()
+                .any(|error| error.contains("float or signed-integer"))
+        );
     }
 
     // --- C5: CmpLt output must be Bool ---

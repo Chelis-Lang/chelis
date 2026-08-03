@@ -539,17 +539,22 @@ fn issue_458_div_f32_over_i32_literal_rejected_before_eval_not_folded() {
 }
 
 /// Runtime backstop: even if a future type-checker hole let a mixed
-/// `(f32, int32)` scalar pair reach the host evaluator, `dispatch_scalar_binop`
+/// `(f32, int32)` scalar pair reach the host evaluator, the closed kernel
+/// dispatcher
 /// must reject it rather than re-precisioning to a 0.25 float fold (the old
 /// 0.9.0 `_ => Prim::F32` fallback). The mixed pair is neither int-int nor
 /// float-float, so it falls to the `_ => Err(..)` catch-all.
 #[test]
-fn issue_458_dispatch_scalar_binop_rejects_mixed_f32_i32_not_folds_to_quarter() {
+fn issue_458_closed_binop_dispatch_rejects_mixed_f32_i32_not_folds_to_quarter() {
     let lhs = RuntimeValue::scalar_like_float(chelis_types::types::Prim::F32, 1.0)
         .expect("f32 scalar 1.0");
     let rhs =
         RuntimeValue::scalar_like_int(chelis_types::types::Prim::Int32, 4).expect("int32 scalar 4");
-    let result = dispatch_scalar_binop(&lhs, &rhs, &|a, b| a / b);
+    let result = numeric_binop(
+        &[lhs, rhs],
+        Some(chelis_types::IntBinOp::TruncDiv),
+        Some(chelis_types::FloatBinOp::Div),
+    );
     assert!(
         result.is_err(),
         "chelis#458 / spec §5.1: a mixed (f32, int32) scalar div must be rejected by the \
@@ -1745,13 +1750,10 @@ fn prim_from_name_resolves_active_dtype_names() {
     }
 }
 
-/// E1 (WS-A0 RT-1 fixup): the float-binop dispatch's mixed
-/// narrow-float fallback used to silently re-precision to F32. The
-/// type checker must reject `(Bf16, F16)` and `(F16, Bf16)` per
-/// spec/04-type-system.md §5.1 (no implicit precision promotion);
-/// pin that the type checker still rejects so the unreachable!
-/// arm in `dispatch_scalar_binop` cannot be reached from any
-/// in-tree program.
+/// E1 (WS-A0 RT-1 fixup): the old float-binop fallback silently
+/// re-precisioned mixed narrow floats to F32. The type checker must reject
+/// `(Bf16, F16)` and `(F16, Bf16)` per spec/04-type-system.md §5.1, while
+/// the closed dtype kernel is the runtime backstop.
 #[test]
 fn type_checker_rejects_mixed_narrow_float_binop_per_spec_5_1() {
     let src = r#"
@@ -1763,8 +1765,7 @@ def main -> bf16 = add(cast(1.0, bf16), cast(1.0, f16))
     assert!(
         res.is_err(),
         "spec §5.1 forbids implicit precision promotion; \
-         `add(_:bf16, _:f16)` must be rejected by the type checker so the \
-         E1 unreachable! in `dispatch_scalar_binop` cannot be reached"
+         `add(_:bf16, _:f16)` must be rejected by the type checker"
     );
 }
 

@@ -346,3 +346,38 @@ fn w5_int_sample_bounds_are_width_clamped_single_source() {
         "a non-integer prim has no integer sample bounds"
     );
 }
+
+#[test]
+fn tier_c_tensor_argument_preserves_int64_payload_and_dtype() {
+    let exact = scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993)
+        .expect("value is representable as int64");
+    let arg = obligation_tensor_arg("xs", &[1], "int64", &[exact]);
+
+    assert_eq!(arg.json[0].as_i64(), Some(9_007_199_254_740_993));
+    let deep = chelis_deep::printer::print_canonical(&[arg.expr]);
+    assert!(deep.contains("(t-prim {} int64)"), "{deep}");
+    assert!(!deep.contains("(t-prim {} f32)"), "{deep}");
+}
+
+#[test]
+fn tier_c_integer_tensor_parameter_runs_at_its_declared_dtype() {
+    for width in ["int8", "int16", "int32", "int64"] {
+        let surf = format!(
+            "module M
+export (make)
+@opaque
+@invariant(c) c.n == (0 : {width})
+type Counter =
+  | Counter {{ n: {width} }}
+def make(xs: tensor[1, {width}]) -> Counter = Counter {{ n: (0 : {width}) }}
+"
+        );
+        let outcomes = run(&surf, "fuzz-only");
+        let outcome = only_outcome(&outcomes);
+        assert_eq!(
+            outcome.status,
+            ObligationStatus::Passed,
+            "integer tensor argument must be sampled at `{width}`: {outcome:?}"
+        );
+    }
+}
