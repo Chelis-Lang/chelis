@@ -458,8 +458,10 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
 /// Shared narrow-float membership: exact widened rendering or own-width
 /// shortest rendering. The zero slack below is retained as the executable
 /// Phase 0 ratchet that rejects the retired `%.16g` accommodation.
-/// Own-width recognition parses through f64 and narrows once, matching the
-/// [05-OBS-1] `strtod` contract without an intermediate f32 double rounding.
+/// This verifier alone reconstructs a value from already-rendered text: it
+/// follows spec/05 §8.1 (`strtod`/f64, then one narrowing to the declared
+/// half width). Runtime values never pass through this helper; storage and
+/// transport remain at the value's declared dtype width.
 fn narrow_float_violation(
     t: &str,
     prim: &str,
