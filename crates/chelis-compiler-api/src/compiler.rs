@@ -1511,7 +1511,7 @@ fn execution_artifact_from_compiled(
     // §3.6 and spec/design/loud_unsupported.md §C6.3.
     if let Some(host_program) = host_compiled.host.as_ref() {
         reject_host_only_builtins(host_program, target)?;
-        reject_eval_only_builtins(host_program)?;
+        reject_eval_only_builtins(host_program, target)?;
     }
 
     // Two C-build-path guards over `reduce_window_*`, applied before
@@ -3136,17 +3136,26 @@ fn reject_host_only_builtins_before_host_lowering(
 /// fail loudly instead of falling through to a generic codegen error
 /// (chelis#891 review finding 13). The list lives in `chelis_ir::host`
 /// and is shared with the CLI's build gate.
-fn reject_eval_only_builtins(program: &chelis_ir::host::ConcreteHostProgram) -> Result<()> {
+fn reject_eval_only_builtins(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: CompileTarget,
+) -> Result<()> {
     if let Some(name) = chelis_ir::host::find_eval_only_host_builtin(program) {
         // Branded through `Unsupported` (section C2,
         // spec/design/loud_unsupported.md): the CLI's twin gate brands
         // identically, keeping the two lanes byte-compatible for shells
-        // that match the `unsupported:` prefix.
+        // that match the `unsupported:` prefix. The stage tag names the
+        // ACTUAL rejecting lane (round-2 red-team finding: a hardcoded
+        // "c" misstated the lane on HIP builds).
+        let target_label = match target {
+            CompileTarget::C => "c",
+            CompileTarget::Hip => "hip",
+        };
         return Err(unsupported_stage_error(
             chelis_types::unsupported::Unsupported::new(
                 chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
                 "compiled targets (the host interpreter's eval/test lanes only)",
-                chelis_types::unsupported::Stage::Codegen("c"),
+                chelis_types::unsupported::Stage::Codegen(target_label),
                 "run the program with `chelis eval` or `chelis test`, or remove the \
                  call before building (spec/05-risc-primitives.md §3.6)",
             ),
