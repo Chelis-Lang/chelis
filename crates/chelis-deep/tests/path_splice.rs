@@ -287,23 +287,39 @@ fn deeppath_body_resolves_function_body() {
 }
 
 #[test]
-fn deeppath_resolve_mut_rewrites_in_place() {
+fn deeppath_resolve_mut_rejects_stamped_node_borrow() {
     let mut module = parse(GROWTH);
     let decl_index = resolve_function(&module, "economoist.growth.gordon_pv")
         .unwrap()
         .decl_index;
-    let def = def_node_mut(&mut module, decl_index);
+    let def = match &mut module[0] {
+        Expr::Node(module, _) => {
+            // The path API itself must refuse a mutable borrow before any
+            // successor child can be reached.
+            let mut children = module.children_slice().to_vec();
+            children.remove(1 + decl_index)
+        }
+        _ => panic!("expected stamped module"),
+    };
+    let mut def = def;
 
-    let body_slot = DeepPath::body().resolve_mut(def).expect("body slot");
-    *body_slot = parse("(lit {type: (t-prim {} f32)} 1.0)")
-        .into_iter()
-        .next()
-        .unwrap();
+    assert!(matches!(
+        DeepPath::body().resolve_mut(&mut def),
+        Err(chelis_deep::PathError::StampedNodeNeedsTransactionalRewrite { depth: 0 })
+    ));
+}
 
-    let body = function_body(def_node(&module, decl_index)).unwrap();
+#[test]
+fn splice_rejects_invalid_successor_body_transactionally() {
+    let module = parse(GROWTH);
+    let invalid = Expr::Atom(Atom::Tag(DeepTag::Lit), chelis_deep::Span::new(0, 0));
+    let error = splice_function_body(&module, "economoist.growth.gordon_pv", invalid)
+        .expect_err("a RuntimeExpr Tag atom must not cross the successor rewrite gate");
+    assert!(matches!(error, ResolveError::InvalidStampedRewrite { .. }));
     assert_eq!(
-        print_canonical(std::slice::from_ref(body)),
-        "(lit {type: (t-prim {} f32)} 1.0)\n"
+        parse(GROWTH),
+        module,
+        "the source program remains unchanged"
     );
 }
 
@@ -430,16 +446,6 @@ fn def_node(module: &[Expr], decl_index: usize) -> &Expr {
             let node = &node.children_slice()[1 + decl_index];
             assert_is_def(node);
             node
-        }
-        _ => panic!("expected module list or Node"),
-    }
-}
-
-fn def_node_mut(module: &mut [Expr], decl_index: usize) -> &mut Expr {
-    match &mut module[0] {
-        Expr::List(module_list, _) => &mut module_list.elements[MODULE_DECLS_START + decl_index],
-        Expr::Node(node, _) if node.tag() == DeepTag::Module => {
-            &mut node.children_slice_mut()[1 + decl_index]
         }
         _ => panic!("expected module list or Node"),
     }

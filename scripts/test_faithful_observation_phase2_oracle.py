@@ -7,19 +7,13 @@ import faithful_observation_phase2_oracle as oracle
 
 HARNESS_FIXTURE = """
 #[test]
-#[ignore = "chelis#684 ([#729] value layer): the rank-0 f64 realization \\
-            collapses int64 scalar roots above 2^53."]
-fn eval_int64_scalar_root_above_2p53_renders_exact() {
-}
-
-#[test]
-#[ignore = "chelis#864 (chelis#717 stale-tag family): eval's labeled root."]
-fn eval_f64_cast_tensor_root_renders_stored_width() {
-}
-
-#[test]
 #[ignore = "chelis#865 ([#729]/[#686] capacity family): the untagged f64 box."]
 fn c_boxed_f32_renders_at_own_width() {
+}
+
+#[test]
+#[ignore = "chelis#1110 (C emitter value layer): the suffixed literal's lexical f64."]
+fn c_suffixed_f32_literal_widens_from_its_stored_width() {
 }
 
 #[test]
@@ -29,23 +23,46 @@ fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
 const C_LANE_EXCLUDED: &[&str] = &["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"];
 """
 
+# Parser-only sample for `ignored_cells`. It is deliberately NOT checked
+# against the shipped ledger: its job is to keep both attribute spellings
+# covered. The multi-line leg used to come from the chelis#684 row, which
+# was un-ignored when chelis#729 repaired scalar-root storage (chelis#1078).
+IGNORE_PARSER_FIXTURE = """
+#[test]
+#[ignore = "chelis#111 (some family): a reason long enough to wrap across \\
+            two source lines."]
+fn multi_line_ignored_cell() {
+}
+
+#[test]
+#[ignore = "chelis#222 (another family): a single-line reason."]
+fn single_line_ignored_cell() {
+}
+
+#[test]
+fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
+}
+"""
+
 
 class IgnoreInventoryTests(unittest.TestCase):
     def test_multiline_and_single_line_ignores_are_both_attributed(self) -> None:
-        cells = oracle.ignored_cells(HARNESS_FIXTURE)
+        cells = oracle.ignored_cells(IGNORE_PARSER_FIXTURE)
         self.assertEqual(
             set(cells),
-            {
-                "eval_int64_scalar_root_above_2p53_renders_exact",
-                "eval_f64_cast_tensor_root_renders_stored_width",
-                "c_boxed_f32_renders_at_own_width",
-            },
+            {"multi_line_ignored_cell", "single_line_ignored_cell"},
         )
         self.assertIn(
-            "chelis#684",
-            cells["eval_int64_scalar_root_above_2p53_renders_exact"],
+            "chelis#111",
+            cells["multi_line_ignored_cell"],
             "the multi-line ignore reason must be captured whole",
         )
+        self.assertIn(
+            "two source lines",
+            cells["multi_line_ignored_cell"],
+            "the continuation line must be captured too",
+        )
+        self.assertIn("chelis#222", cells["single_line_ignored_cell"])
 
     def test_unignored_test_is_not_in_the_inventory(self) -> None:
         cells = oracle.ignored_cells(HARNESS_FIXTURE)
@@ -87,10 +104,10 @@ class LedgerTests(unittest.TestCase):
         )
 
     def test_an_ignore_that_drops_its_issue_citation_is_a_violation(self) -> None:
-        source = HARNESS_FIXTURE.replace("chelis#864", "some other reason")
+        source = HARNESS_FIXTURE.replace("chelis#865", "some other reason")
         violations = oracle.ledger_violations(source, oracle.KNOWN_RED_CELLS)
         self.assertTrue(
-            any("chelis#864" in violation for violation in violations), violations
+            any("chelis#865" in violation for violation in violations), violations
         )
 
     def test_every_ledger_row_names_a_repair_owner_outside_this_plan(self) -> None:
@@ -196,6 +213,22 @@ class UnignoredAndRetiredTests(unittest.TestCase):
         violations = oracle.unignored_violations(sources)
         self.assertTrue(
             any("c_int64_tensor_print_is_exact_above_2p53" in v for v in violations),
+            violations,
+        )
+
+    def test_a_conditionally_reignored_repaired_row_is_a_violation(self) -> None:
+        sources = self._shipped_sources()
+        sources[oracle.HARNESS_SOURCE] = sources[oracle.HARNESS_SOURCE].replace(
+            "#[test]\nfn eval_f64_cast_tensor_root_renders_stored_width() {",
+            "#[test]\n"
+            '#[cfg_attr(not(any()), ignore = "silently re-ignore chelis#864")]\n'
+            "fn eval_f64_cast_tensor_root_renders_stored_width() {",
+        )
+
+        violations = oracle.unignored_violations(sources)
+
+        self.assertTrue(
+            any("eval_f64_cast_tensor_root_renders_stored_width" in v for v in violations),
             violations,
         )
 

@@ -36,9 +36,8 @@
 //!
 //! | cell | issue |
 //! |---|---|
-//! | eval int64 SCALAR ROOT above 2^53 (rank-0 f64 realization collapses the value before the renderer) | chelis#684 ([#729] value layer; PR #792 red-team F1) |
-//! | eval LABELED ROOT of a cast-constructed f64 tensor (the stale F32 tag narrows the root render while print shows the stored bits) | chelis#864 (chelis#717 family, [#729] value layer; PR #863 red-team F1) |
 //! | compiled boxed renders of f32 elements (the untagged f64 box carries f64-image digits, not the own-width shortest form) | chelis#865 ([#729]/[#686] capacity family; PR #863 red-team F2) |
+//! | compiled renders of a SUFFIXED float literal (`0.1f32` widened to f64: the C emitter bakes the lexical f64 decimal, so eval and C disagree) | chelis#1110 (C emitter value layer; PR #1099 red-team rt-1099ext) |
 //!
 //! The six C-side cells went green at chelis#732 Phase 2 (un-ignored per
 //! §B2.3, each on its original assertion): #716 print + to_list, #723,
@@ -47,7 +46,7 @@
 //! cross-lane byte equality is locked below for agreeing bits
 //! (`cross_lane_stdout_is_byte_identical_where_bits_agree`).
 //!
-//! Those three cells are NOT skipped silently. The phase's authoritative
+//! Those two cells are NOT skipped silently. The phase's authoritative
 //! oracle (`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`)
 //! holds the same table as a ledger keyed by issue, requires this file's
 //! `#[ignore]` inventory to EQUAL it (an undeclared ignore is a silently
@@ -1346,22 +1345,16 @@ fn scalar_render_lines(stdout: &str) -> Vec<String> {
     lines
 }
 
-/// RED (chelis#684, [#729] value layer; surfaced by PR #792's red team,
-/// F1): an int64 SCALAR ROOT above 2^53 loses exactness at the labeled
-/// root while print and to_string of the same def render it exactly -
-/// the interpreter's rank-0 f64 realization collapses the value BEFORE
-/// the renderer sees it, so this is a stored-value defect upstream of the
-/// [05-OBS] rendering contract, not a formatter bug. The exception is
-/// annexed in spec/05 §8's [05-OBS-1]/[05-OBS-4] status text; the cell
-/// goes green (by un-ignoring, §B2.3) when [#729] repairs scalar-root
-/// storage. Rendering must NOT paper over it: the root faithfully shows
-/// the collapsed stored value.
+/// GREEN regression (chelis#684, [#729] value layer; surfaced by PR
+/// #792's red team, F1): an int64 SCALAR ROOT above 2^53 stays exact at
+/// the labeled root, agreeing with print and to_string of the same def.
+/// The interpreter's rank-0 f64 realization used to collapse the value
+/// BEFORE the renderer saw it, which made this a stored-value defect
+/// upstream of the [05-OBS] rendering contract rather than a formatter
+/// bug. chelis#729's per-dtype storage carries the exact i64 through the
+/// scalar-root path, so the original red assertion stays as the
+/// [05-OBS-1] regression lock (un-ignored per §B2.3, chelis#1078).
 #[test]
-#[ignore = "chelis#684 ([#729] value layer): the rank-0 f64 realization collapses int64 \
-            scalar roots above 2^53 before the renderer sees them; print/to_string are \
-            exact, the labeled root is not. Un-ignore when [#729] repairs scalar-root \
-            storage. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn eval_int64_scalar_root_above_2p53_renders_exact() {
     let program = "module M.Main\n\
          def run() -> int64 = cast(9007199254740993, int64)\n\
@@ -1375,8 +1368,8 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
         .find(|l| !l.is_empty() && !l.ends_with("()") && !l.starts_with("sroot = "))
         .unwrap_or_else(|| panic!("no print transcript in:\n{out}"));
     assert_eq!(transcript, "9007199254740993", "print exit must stay exact");
-    // Red half: the labeled root must carry the same exact value. Today it
-    // renders the f64-collapsed 9007199254740992 (chelis#684).
+    // The labeled root must carry the same exact value. Before chelis#684
+    // it rendered the f64-collapsed 9007199254740992.
     let root = out
         .lines()
         .find(|l| l.starts_with("sroot = "))
@@ -1388,43 +1381,58 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
     );
 }
 
-/// RED (chelis#864; chelis#717's stale-tag family, [#729] value layer;
-/// PR #863 red-team F1): eval's LABELED ROOT renders a cast-constructed
-/// f64 tensor through the stale F32 precision tag while the print
-/// transcript renders the stored f64 bits - [05-OBS-1]'s intra-lane exit
-/// agreement broken inside eval, and the root text no longer parses back
-/// to the stored bits at the declared f64 width. The compiled lane
-/// renders all exits identically (the correct behavior). The trigger is
-/// `cast(<tensor>, f64)` leaving the runtime tag at F32; the frozen F64
-/// table never constructs that shape (`via_cast=false`), which is how
-/// the cell hid from the corpus. Un-ignore when [#729] repairs the tag.
+/// GREEN regression (chelis#864; PR #863 red-team F1): eval's transcript
+/// and labeled-root exits agree for a cast-constructed f64 tensor. The
+/// post-Phase-3 diagnosis established that the root tag was already F64;
+/// the static `to_tensor` DAG shortcut had retained lexical f64 decimals
+/// in its F32 source node, so widening produced different stored values
+/// from the host path. Finalizing that shortcut's f32 ingress before the
+/// cast repairs the value, and this original red assertion stays as the
+/// [05-OBS-1] regression lock.
 #[test]
-#[ignore = "chelis#864 (chelis#717 stale-tag family, [#729] value layer): eval's labeled \
-            root renders a cast-constructed f64 tensor at the F32 tag width while print \
-            renders the stored f64 bits. Un-ignore when the tag repair lands. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn eval_f64_cast_tensor_root_renders_stored_width() {
-    let program = "module M.Main\n\
-         def mk() -> tensor[2, f64] = cast(to_tensor([0.1, 0.3]), f64)\n\
-         shown = print(mk())\n\
-         troot = mk()\n";
-    let out = eval_stdout(program).expect("eval");
-    let tlines = tensor_lines(&out);
-    assert_eq!(tlines.len(), 2, "transcript and root renders:\n{out}");
-    // Green half (control): the transcript renders the STORED bits (the
-    // f64 images of the f32-constructed elements) at the stored width.
-    assert_eq!(
-        tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
-        "the print transcript must keep rendering the stored bits"
-    );
-    // Red half: the labeled root must agree with the transcript
-    // ([05-OBS-1] intra-lane exit agreement). Today it renders `0.1, 0.3`
-    // through the stale F32 tag - text that parses to DIFFERENT f64 bits.
-    assert_eq!(
-        tlines[1],
-        format!("troot = {}", tlines[0]),
-        "the labeled root must render the same stored bits as print"
-    );
+    let cases = [
+        (
+            "f32 tensor widened as a tensor",
+            "cast(to_tensor([0.1, 0.3]), f64)",
+        ),
+        (
+            "f32-suffixed leaves widened as scalars",
+            "to_tensor([cast(0.1f32, f64), cast(0.3f32, f64)])",
+        ),
+        (
+            "explicit inner f32 casts widened as scalars",
+            "to_tensor([cast(cast(0.1, f32), f64), cast(cast(0.3, f32), f64)])",
+        ),
+    ];
+    for (case, expression) in cases {
+        let program = format!(
+            "module M.Main\ndef mk() -> tensor[2, f64] = {expression}\n\
+             shown = print(mk())\ntroot = mk()\n"
+        );
+        let out = eval_stdout(&program).expect("eval");
+        let tlines = tensor_lines(&out);
+        assert_eq!(
+            tlines.len(),
+            2,
+            "{case}: transcript and root renders:\n{out}"
+        );
+        // Green half (control): the transcript renders the STORED bits (the
+        // f64 images of the f32-constructed elements) at the stored width.
+        assert_eq!(
+            tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
+            "{case}: the print transcript must keep rendering the stored bits"
+        );
+        // The labeled root must agree with the transcript ([05-OBS-1]
+        // intra-lane exit agreement). Before chelis#864 the static DAG
+        // shortcut could widen unfinalized lexical decimals instead of the
+        // host path's stored f32 values.
+        assert_eq!(
+            tlines[1],
+            format!("troot = {}", tlines[0]),
+            "{case}: the labeled root must render the same stored bits as print"
+        );
+    }
 }
 
 /// RED (chelis#865; [#729]/[#686] capacity family; PR #863 red-team F2):
@@ -1456,6 +1464,65 @@ fn c_boxed_f32_renders_at_own_width() {
         list_payload_elems(&lline),
         ["0.1", "0.3"],
         "boxed f32 elements must render shortest at their own width ([05-OBS-2]): {lline}"
+    );
+}
+
+/// RED (chelis#1110; exposed by chelis#864's eval repair in this change
+/// set): the compiled lane DROPS a suffixed float literal's declared
+/// width. `0.1f32` carries its f32 width in its own type metadata with no
+/// Cast node following to apply it, and the C emitter bakes the lexical
+/// f64 decimal into the generated source (`__arg0_3 = 0.1;`) instead of
+/// the stored f32 value. Eval now finalizes that leaf at its declared
+/// width, so the lanes VISIBLY disagree: eval renders
+/// `[0.10000000149011612, 0.30000001192092896]`, C renders `[0.1, 0.3]`.
+///
+/// This is a stored-VALUE defect in the C emitter, upstream of the
+/// [05-OBS] rendering contract - both lanes' formatters are correct for
+/// the bits they hold, which is why the value-level green rows above
+/// pass. It is recorded here rather than absorbed: [05-OBS-3] makes a row
+/// eligible only when both lanes compute at [04-NUM-8]'s declared width,
+/// and a known width violation "must remain an issue-linked oracle
+/// exclusion and may not be laundered through the table". The cross-lane
+/// corpus passes today only because it never constructs this shape - the
+/// same blind spot that hid chelis#864 (`via_cast=false` there). Un-ignore
+/// when the C emitter finalizes suffixed literal leaves at their declared
+/// width.
+#[test]
+#[ignore = "chelis#1110 (C emitter value layer): the compiled lane bakes a suffixed float \
+            literal's lexical f64 decimal instead of its declared-width stored value, so \
+            eval and C visibly disagree after chelis#864's eval repair. Un-ignore when the \
+            C emitter finalizes suffixed literal leaves. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_suffixed_f32_literal_widens_from_its_stored_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[2, f64] = to_tensor([cast(0.1f32, f64), cast(0.3f32, f64)])\n\
+         shown = print(mk())\n";
+    let out = c_stdout(program, "obs_suffixed_f32").expect("C lane");
+    let tline = tensor_lines(&out)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no tensor render in:\n{out}"))
+        .to_string();
+    // Control: eval is the correct side of this disagreement. If this ever
+    // fails, the eval repair regressed and the cell is testing the wrong
+    // lane - a different defect from the one chelis#1110 declares.
+    let eval_out = eval_stdout(program).expect("eval");
+    let eval_tline = tensor_lines(&eval_out)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no eval tensor render in:\n{eval_out}"))
+        .to_string();
+    assert_eq!(
+        eval_tline, "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
+        "control: eval must keep finalizing the suffixed leaf at its declared width"
+    );
+    assert_eq!(
+        tline, eval_tline,
+        "the compiled lane must widen the suffixed literal's stored f32 value, agreeing \
+         with eval ([05-OBS-1] cross-lane exit agreement): {tline}"
     );
 }
 

@@ -1,5 +1,6 @@
-//! chelis#687 - the rejected-cells corpus (stub), delivered by chelis#730
-//! Phase 0 (spec/design/loud_unsupported.md section C2 / Phase 0 item 3).
+//! chelis#687 - the rejected-cells corpus, seeded by chelis#730 Phase 0
+//! (spec/design/loud_unsupported.md section C2 / Phase 0 item 3) and moved
+//! onto chelis#732's shared exact comparator in Phase 3.
 //!
 //! One table-driven file collecting the EXISTING loud-failure locks - the
 //! HIP narrow-float rejection, the Metal f64 rejection, the Metal rank-2
@@ -19,14 +20,16 @@
 //! - runtime int-div guard: `ws2b_numeric_identifier_divergence.rs`'s
 //!   `INT_DIV_ZERO_DIAGNOSTIC` rows (chelis#387 family)
 //!
-//! Full section C2 shape (per-lane byte-for-byte assertions across check /
-//! build / eval / compiled binary) arrives with the chelis#732 handshake at
-//! its Phase 3; this stub is deliberately substring-level, matching the
-//! originals it mirrors.
+//! Each current diagnostic record is compared byte-for-byte through the same
+//! comparator entrypoint as the value corpus. Emitted fallback source keeps
+//! exact marker locks because it is an artifact rather than one diagnostic
+//! record. The typed full-record diagnostic shape remains chelis#730 Phase 3
+//! work; exact text does not pretend to prove that pending structure.
 
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
+use chelis_types::agreement::compare_exact_observations;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -40,6 +43,15 @@ fn c_toolchain_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn assert_emission_fragment(observation: &str, expected: &str, context: &str) {
+    let candidate = observation
+        .find(expected)
+        .map(|start| &observation[start..start + expected.len()])
+        .unwrap_or("");
+    compare_exact_observations(context, expected, candidate)
+        .unwrap_or_else(|error| panic!("{context}: {error}; complete observation: {observation}"));
 }
 
 /// `chelis build` to `target`; (ok, stderr, concatenated emitted files).
@@ -116,25 +128,33 @@ fn c_run(program: &str, name: &str) -> (bool, String, String) {
 // The build-lane rejection rows (emission-only; no toolchain needed).
 // ===========================================================================
 
-/// (name, program, target, stderr substrings the rejection must carry).
-const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
+/// (name, program, target, exact stderr rejection).
+const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     (
         "hip_f16_compute",
         "def f(a: tensor[4, f16], b: tensor[4, f16]) -> tensor[4, f16] = add(a, b)\n",
         "hip",
-        &["unsupported:", "admits", "only on tensor load/store"],
+        "error: unsupported: `chelis build --target hip` admits `f16` only on tensor load/store \
+         nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
+         WS-A3). Node 2 carries op Add which has no bf16/f16 kernel template yet \
+         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1.\n",
     ),
     (
         "hip_bf16_compute",
         "def f(a: tensor[4, bf16], b: tensor[4, bf16]) -> tensor[4, bf16] = add(a, b)\n",
         "hip",
-        &["unsupported:", "admits", "only on tensor load/store"],
+        "error: unsupported: `chelis build --target hip` admits `bf16` only on tensor load/store \
+         nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
+         WS-A3). Node 2 carries op Add which has no bf16/f16 kernel template yet \
+         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1.\n",
     ),
     (
         "metal_f64",
         "def f(a: tensor[4, f64], b: tensor[4, f64]) -> tensor[4, f64] = add(a, b)\n",
         "metal",
-        &["unsupported:", "`chelis build --target metal` rejects f64"],
+        "error: unsupported: `chelis build --target metal` rejects f64 (node 0): Apple Silicon \
+         GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads. See \
+         spec/04-type-system.md §1.1.3.\n",
     ),
     // -- chelis#730 Phase 1 rows: the converted census sites, each pinned
     // to the branded section C2 rendering. --------------------------------
@@ -144,20 +164,29 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
          tensor_scan(0.0, fn (prev: f32, i: int64) -> add(prev, 1.0), cast(5, int64))\n\
          out = gen()\n",
         "c",
-        &["unsupported:", "tensor_scan", "(codegen:c)"],
+        "error: unsupported: builtin `tensor_scan` on `chelis build --target c` host emission \
+         (codegen:c); host-only builtin; run it under `chelis eval` or `chelis test`, or rewrite \
+         the caller to use tensor-lane primitives (spec/05-risc-primitives.md §3.6; \
+         chelis#705)\n",
     ),
     (
         "c_stub_scalar_floor",
         "def f(x: f32) -> f32 = floor(x)\nout = f(3.5)\n",
         "c",
-        &["unsupported:", "floor", "(codegen:c)"],
+        "error: unsupported: builtin `floor` on `chelis build` host emission (codegen:c); this \
+         builtin has no compiled-lane expression identity; the eval lane may support it \
+         (`chelis eval`). Silent-stub class: chelis#703; instances \
+         chelis#682/#704/#705/#715 ([05-UNS-1])\n",
     ),
     (
         "c_to_string_tensor",
         "def f(x: tensor[2, f32]) -> string = to_string(x)\n\
          out = f(to_tensor([1.5, 2.5]))\n",
         "c",
-        &["unsupported:", "to_string", "(codegen:c)"],
+        "error: unsupported: `to_string` of a `Tensor(TensorType { dims: [Lit(2)], precision: \
+         F32 })`-typed value on `chelis build` host emission (codegen:c); the compiled lane \
+         stringifies int64/f32/f64/bool/string scalars only today; tensor/list rendering is \
+         tracked by chelis#732 (was the `<value>` placeholder, chelis#734)\n",
     ),
     (
         "c_int64_max_reduce",
@@ -165,7 +194,9 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
          out = f(to_tensor([cast(1, int64), cast(4, int64), cast(2, int64), \
          cast(3, int64)]))\n",
         "c",
-        &["unsupported:", "max_reduce", "(codegen:c)"],
+        "error: unsupported: op `max_reduce` on `int64` tensors in the C DAG emitter (node 1) \
+         (codegen:c); the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
+         before the reduction. Non-f32 widening is follow-on work (chelis#692)\n",
     ),
     (
         "c_int_tensor_cos",
@@ -173,10 +204,10 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
          out = run(to_tensor([cast(1, int32), cast(2, int32), cast(3, int32), \
          cast(4, int32)]))\n",
         "c",
-        // The stage depends on routing (the DAG entry raises at lowering;
-        // the host-fallback path refuses at emission) - pin the brand and
-        // the op, not the stage.
-        &["unsupported:", "cos"],
+        "error: unsupported: builtin `cos` on tensor operands in `chelis build` host emission \
+         (no tensor emission arm for this op) (codegen:c); this op has no compiled tensor arm \
+         yet; the eval lane may support it (chelis#703 class; the DAG lane owns the supported \
+         tensor ops)\n",
     ),
     (
         "c_nonliteral_window",
@@ -184,25 +215,28 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
          reduce_window_max(x, [w], [s])\n\
          out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2, 1)\n",
         "c",
-        &["unsupported:", "window", "(lowering)"],
+        "error: Lowering error: unsupported: a non-literal window list for \
+         `reduce_window_max` on the compiled-backend lowering of `reduce_window_*` (lowering); \
+         window and stride lists must be integer literals for the compiled lane today; a \
+         runtime-parameterized window previously lowered to a silent no-op (chelis#725; \
+         chelis#730 census row 8) at source span `surf:86..89`\n",
     ),
     (
         "c_to_tensor_narrow_dtype",
         "def f() -> tensor[2, f16] = to_tensor([cast(2049.0, f16), cast(0.75, f16)])\n\
          out = print(f())\n",
         "c",
-        &[
-            "unsupported:",
-            "dtype `f16`",
-            "C host ABI selection",
-            "(codegen:c)",
-        ],
+        "error: unsupported: dtype `f16` on C host ABI selection (codegen:c); C-host scalar ABI \
+         support is tracked by chelis#714; no alternate dtype is permitted by [05-UNS-1]\n",
     ),
     (
         "hip_int64_neg",
         "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
         "hip",
-        &["unsupported:", "int64", "(codegen:hip)"],
+        "error: unsupported: dtype `int64` on a HIP kernel family with f32/f64 variants only \
+         (codegen:hip); this op has no typed HIP kernel for the operand dtype; the former silent \
+         F32 fallback emitted a corrupting kernel (chelis#689). Cast to f32/f64, or use the ops \
+         with typed templates (add/mul/div and the i8/i16 promoted sum)\n",
     ),
 ];
 
@@ -210,15 +244,11 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &[&str])] = &[
 /// diagnostic text.
 #[test]
 fn rejected_cells_fail_the_build_with_their_pinned_diagnostics() {
-    for (name, program, target, expects) in BUILD_REJECTION_ROWS {
+    for (name, program, target, expected) in BUILD_REJECTION_ROWS {
         let (ok, stderr, _) = build_target(program, name, target);
         assert!(!ok, "{name}: the build must be rejected");
-        for expect in *expects {
-            assert!(
-                stderr.contains(expect),
-                "{name}: the rejection must contain {expect:?}; got: {stderr}"
-            );
-        }
+        compare_exact_observations(&format!("{name} build rejection"), expected, &stderr)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
 }
 
@@ -237,10 +267,7 @@ fn metal_rank2_abort_stub_names_itself_in_the_emission() {
         "rank-2 metal must build (the stub is loud, not fatal): {stderr}"
     );
     for expect in ["fallback stub", "abort()"] {
-        assert!(
-            emitted.contains(expect),
-            "the rank-2 fallback must contain {expect:?} in the emission"
-        );
+        assert_emission_fragment(&emitted, expect, "metal rank-2 fallback emission fragment");
     }
 }
 
@@ -249,14 +276,14 @@ fn metal_rank2_abort_stub_names_itself_in_the_emission() {
 // aborts at run time with its pinned message and a nonzero exit).
 // ===========================================================================
 
-/// (name, program, stderr substring of the abort).
+/// (name, program, exact stderr of the abort).
 const RUNTIME_ABORT_ROWS: &[(&str, &str, &str)] = &[(
     // chelis#387 family: the portable integer div-by-zero guard, with a
     // runtime-computed divisor so nothing constant-folds it away.
     "int_div_by_zero",
     "def d(x: int64, y: int64, z: int64) -> int64 = trunc_div(x, sub(y, z))\n\
          out = d(cast(7, int64), cast(5, int64), cast(5, int64))\n",
-    "integer division or remainder by zero",
+    "integer division or remainder by zero\n",
 )];
 
 /// Every runtime rejected cell aborts (nonzero exit) with its pinned
@@ -273,10 +300,8 @@ fn runtime_rejected_cells_abort_with_their_pinned_diagnostics() {
             !ran_ok,
             "{name}: the compiled binary must abort, not exit 0; stdout: {stdout}"
         );
-        assert!(
-            stderr.contains(expect),
-            "{name}: the abort must carry {expect:?} on stderr; got: {stderr}"
-        );
+        compare_exact_observations(&format!("{name} runtime abort"), expect, &stderr)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
         // The nonzero exit + branded stderr above carry this test. (A
         // previous `!stdout.contains("out =")` guard was vacuous:
         // compiled binaries print bare values, never an `out =` prefix -

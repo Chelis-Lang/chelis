@@ -108,6 +108,12 @@ pub fn set_grow_segment_bytes_for_test(bytes: usize) {
     GROW_SEGMENT_OVERRIDE.with(|cell| cell.set(Some(bytes)));
 }
 
+/// Clear the test-only grown-segment override on the current thread.
+#[doc(hidden)]
+pub fn reset_grow_segment_bytes_for_test() {
+    GROW_SEGMENT_OVERRIDE.with(|cell| cell.set(None));
+}
+
 pub(super) fn grow_segment_bytes() -> usize {
     GROW_SEGMENT_OVERRIDE
         .with(Cell::get)

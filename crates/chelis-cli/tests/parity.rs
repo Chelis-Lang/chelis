@@ -19,10 +19,11 @@
 //! mismatch path (re-parse both lines as `Vec<f64>`, compare under 1e-6)
 //! was removed by chelis#729 Phase 0: it silently converted integer
 //! divergences into passing float comparisons - exactly the path a real
-//! bug takes (chelis#687). Ops with a legitimate cross-lane value
-//! tolerance get it from the per-op tolerance table
-//! (`spec/design/dtype_semantics.md` §C4.5, to be authored into spec/05
-//! [05-OBS-3]) once it exists, never from a blanket re-parse.
+//! bug takes (chelis#687). This mixed-operation example corpus has no one
+//! operation identity, so it uses the exact branch of the shared Phase 3
+//! comparator. Single-operation oracles may use the same comparator's
+//! [05-OBS-3] table branch when the operation and arithmetic-width
+//! preconditions are known.
 //!
 //! chelis#732 Phase 2 restored plain BYTE equality on every line: both
 //! lanes now render through the one frozen [05-OBS] grammar (eval via
@@ -51,6 +52,7 @@
 //! line/element diff).
 
 use assert_cmd::Command;
+use chelis_types::agreement::compare_exact_observations;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -243,7 +245,7 @@ fn run_binary(binary: &Path) -> Vec<u8> {
 }
 
 // -----------------------------------------------------------------------------
-// Byte-exact comparison
+// Shared Phase 3 comparison
 // -----------------------------------------------------------------------------
 
 /// Compare two stdout byte-streams under the parity invariant: same line
@@ -255,7 +257,9 @@ fn run_binary(binary: &Path) -> Vec<u8> {
 /// when a real divergence was present and re-read integer payloads as
 /// floats, so an int64 corruption above 2^53 could never fail this
 /// harness. A mismatch now REPORTS. chelis#732 Phase 2 is the release
-/// valve for legitimate float-formatting differences.
+/// valve for formatting differences by making both lanes canonical;
+/// Phase 3's explicit per-op table is the only release valve for a genuine
+/// value difference, and this mixed-operation corpus has no eligible row.
 ///
 /// Returns `Ok(())` if parity holds, or `Err(reason)` on first divergence.
 fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), String> {
@@ -276,11 +280,11 @@ fn assert_parity(eval_out: &[u8], c_out: &[u8], label: &str) -> Result<(), Strin
     }
 
     for (i, (e, c)) in eval_lines.iter().zip(c_lines.iter()).enumerate() {
-        if e != c {
+        if let Err(error) = compare_exact_observations(&format!("{label} line {i}"), e, c) {
             return Err(format!(
-                "[{label}] line {i} differs between lanes (byte-exact contract, \
-                 chelis#732 section C2.3; no render equivalence exists since \
-                 Phase 2):\n  eval: {e}\n  c:    {c}",
+                "[{label}] line {i} differs between lanes under the shared \
+                 chelis#732 Phase 3 comparator (this mixed-op corpus is \
+                 exact-only): {error}",
             ));
         }
     }

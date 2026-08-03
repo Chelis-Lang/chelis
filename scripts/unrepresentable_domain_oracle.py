@@ -16,9 +16,12 @@ this oracle tests the subset visible through the CLI:
    ensuring that rejecting bare names at RuntimeExpr slots does not
    accidentally break programs that legitimately use names at structural
    positions.
-3. The stamp pass integration tests exist and cover the headline criterion
-   (verified by running `cargo nextest run -p chelis-deep --test
-   stamp_to_typed`).
+3. The stamp pass and successor-carrier validation integration tests exist
+   and cover the headline criterion (verified by running `cargo nextest run
+   -p chelis-deep --test stamp_to_typed --test
+   phase3_successor_validation`). The successor suite adds the chelis#731
+   Phase 3 obligation that the gated `Node` carrier refuses to construct a
+   raw closed-vocabulary tag below itself, in metadata or in a child.
 
 Usage:
 
@@ -76,6 +79,8 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "chelis-deep",
     "--test",
     "stamp_to_typed",
+    "--test",
+    "phase3_successor_validation",
 )
 
 
