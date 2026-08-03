@@ -149,7 +149,27 @@ fn expr_needs_host(
                 inputs,
             )
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => false,
+        // Fail-closed (#1086): a headless list or an unrecognized form has no
+        // tag to classify, so it must not silently route Tensor. Force Host and
+        // record a reason, matching the KNOWN_TAGS "unknown tag → Host +
+        // diagnostic" contract (known_tags.rs) and the #731/#908
+        // exhaustive-disposition principle. These forms do not survive
+        // `chelis check` today (they score < 1 as UnknownForm), so this is
+        // defensive alignment with the stated contract rather than a live
+        // wrong-answer path — but a silent `false` here is exactly the
+        // fail-open default those contracts exist to eliminate.
+        Expr::BareList(_, _) => {
+            reasons.push(HostReason::UnrecognizedTag {
+                tag: "<bare-list>".to_string(),
+            });
+            true
+        }
+        Expr::UnknownForm(_) => {
+            reasons.push(HostReason::UnrecognizedTag {
+                tag: "<unknown-form>".to_string(),
+            });
+            true
+        }
         Expr::MetaExpr(meta, _) => expr_needs_host(
             &meta.expr,
             lane_by_def,
@@ -195,6 +215,18 @@ fn list_needs_host(
                 return true;
             }
         }
+    } else if !list.elements.is_empty() {
+        // Fail-closed (#1086): a non-empty list whose head is not a Deep tag
+        // (element 0 is a literal or nested form, so `get_tag` is None) cannot
+        // be classified against KNOWN_TAGS. Do not fall through to a silent
+        // Tensor routing — force Host with a reason, the same discipline as the
+        // BareList/UnknownForm arms in expr_needs_host. Like those, this form
+        // does not survive `chelis check` today, so it is defensive alignment
+        // with the fail-closed contract rather than a live wrong-answer path.
+        reasons.push(HostReason::UnrecognizedTag {
+            tag: "<untagged-list>".to_string(),
+        });
+        return true;
     }
 
     let tag_str = tag.unwrap_or("");
@@ -576,5 +608,151 @@ mod tests {
         assert_eq!(result.lane_by_def.get("b"), Some(&Lane::Host));
         // len is also HostOnly
         assert_eq!(result.lane_by_def.get("c"), Some(&Lane::Host));
+    }
+
+    // #1084: a genuine Tensor-lane positive under the C target. The pre-existing
+    // `pure_tensor_def_routes_tensor` above asserts `Host` (its body uses the
+    // HostOnly `to_tensor`), so before this test nothing showed any def reaching
+    // the Tensor lane on the C target — the outcome the C DAG path exists to
+    // serve. An f32 elementwise def is C-capable and non-HostOnly.
+    #[test]
+    fn f32_tensor_def_routes_tensor_for_c_target() {
+        let checked =
+            check_program_from_source("def f(a: tensor[4, f32]) -> tensor[4, f32] = mul(a, a)\n");
+        let result = infer_realizability(&checked, C_PRIMS);
+        assert_eq!(result.lane_by_def.get("f"), Some(&Lane::Tensor));
+    }
+
+    // #1084: first coverage of `compute_root_manifest`, which had none. A Host
+    // value root must appear in the manifest with its lane recorded.
+    #[test]
+    fn compute_root_manifest_lists_value_roots_with_lanes() {
+        let checked =
+            check_program_from_source("a: List[int32] = [cast(1, int32)]\nresult = concat(a, a)\n");
+        let realizability = infer_realizability(&checked, C_PRIMS);
+        let manifest = compute_root_manifest(&checked, &realizability);
+        let names: Vec<&str> = manifest.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"result"),
+            "manifest must list the `result` value root; got {names:?}"
+        );
+        let result_entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.name == "result")
+            .expect("result entry");
+        assert_eq!(
+            result_entry.lane,
+            Lane::Host,
+            "the concat-fed `result` root routes Host"
+        );
+    }
+
+    // #1086: a headless list must fail closed to Host with a recorded reason,
+    // not silently route Tensor.
+    #[test]
+    fn bare_list_routes_host_fail_closed() {
+        let expr = Expr::BareList(vec![], chelis_deep::Span::new(0, 0));
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+        let needs_host = expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        );
+        assert!(needs_host, "BareList must route Host (fail-closed)");
+        assert!(
+            reasons
+                .iter()
+                .any(|r| matches!(r, HostReason::UnrecognizedTag { .. })),
+            "BareList Host routing must record a reason, not be silent; got {reasons:?}"
+        );
+    }
+
+    // #1086: an unrecognized form must fail closed to Host with a reason.
+    #[test]
+    fn unknown_form_routes_host_fail_closed() {
+        use chelis_deep::ast::{MetaMap, UnknownFormData};
+        let expr = Expr::UnknownForm(Box::new(UnknownFormData {
+            head: "mystery".to_string(),
+            meta: MetaMap::default(),
+            children: vec![],
+            span: chelis_deep::Span::new(0, 0),
+        }));
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+        let needs_host = expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        );
+        assert!(needs_host, "UnknownForm must route Host (fail-closed)");
+        assert!(
+            !reasons.is_empty(),
+            "UnknownForm Host routing must record a reason, not be silent"
+        );
+    }
+
+    // #1086 completeness: the same fail-open existed one level down in
+    // `list_needs_host` — a list whose head is not a Deep tag (`get_tag` None)
+    // fell through to Tensor with no reason. It must fail closed too.
+    #[test]
+    fn untagged_list_routes_host_fail_closed() {
+        let list = List {
+            elements: vec![Expr::Atom(Atom::Int(0), chelis_deep::Span::new(0, 0))],
+        };
+        let expr = Expr::List(list, chelis_deep::Span::new(0, 0));
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+        let needs_host = expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        );
+        assert!(needs_host, "an untagged non-empty list must route Host");
+        assert!(
+            !reasons.is_empty(),
+            "untagged-list Host routing must record a reason, not be silent"
+        );
+    }
+
+    // #1084 / red-team Finding 1: the Host case alone cannot prove the manifest
+    // reads the real lane, because the lookup falls back to `Lane::Host`. A pure
+    // Tensor value root must be recorded as Tensor — this kills the mutation
+    // where the lane lookup is broken and every entry collapses to the default.
+    #[test]
+    fn compute_root_manifest_records_tensor_lane_not_just_host_default() {
+        let checked = check_program_from_source("x = cast(1, int32)\n");
+        let realizability = infer_realizability(&checked, C_PRIMS);
+        let manifest = compute_root_manifest(&checked, &realizability);
+        let x = manifest
+            .entries
+            .iter()
+            .find(|e| e.name == "x")
+            .expect("x entry");
+        assert_eq!(
+            x.lane,
+            Lane::Tensor,
+            "a pure Tensor value root must record Lane::Tensor, not the Host fallback"
+        );
+        assert_eq!(manifest.tensor_root_names(), vec!["x"]);
     }
 }
