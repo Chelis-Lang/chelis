@@ -526,12 +526,55 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
             }
         }
         // `BareList` is an untagged structural list — no vocabulary head.
+        //
+        // chelis#1085 / [04-TOT-1]: this arm used to infer each child and
+        // return the LAST child's type — `Type::Unit` for the empty list —
+        // and count the node as typed. So `(def {} f ())` type-checked
+        // clean through `check_typed_program`, which walks stamped Deep
+        // directly, while `check_ir_program` rejected the same program
+        // loudly because it normalizes `BareList` into a tagless
+        // `Expr::List` first and lands on the `None` arm below. Same
+        // program, two verdicts, and the permissive one scored a form with
+        // no honest type as checked (the chelis#873-shape fail-open).
+        //
+        // A headless list has no expression-position type in any position,
+        // so the disposition is the sibling arms' loud rejection. Per
+        // `chelis_deep::role::child_stamp_role`, the stamp pass produces a
+        // `BareList` at a RuntimeExpr or form-expecting slot only when the
+        // list is EMPTY (a non-empty list there decodes to `Node` or
+        // `UnknownForm`), and non-empty bare lists occupy only
+        // Syntax/Binder/Selector/Type slots, whose owning form consumes
+        // them structurally rather than through `infer_expr` — a `(params
+        // {} (x {type: ...}))` entry is read by `infer_fn`, never inferred
+        // as an expression. Reaching expression dispatch therefore means
+        // malformed input, or a structural helper sitting outside its
+        // owning form. Both are rejections.
+        //
+        // The one legitimate empty `()` in expression position — a match
+        // arm's absent guard — is screened by `infer_match` before it
+        // reaches here, so this arm does not reject it.
         deep::Expr::BareList(elems, _span) => {
-            let mut last_ty = Type::Unit;
-            for child in elems {
-                last_ty = infer_expr(child, env, vg, subst, adt_reg, errors, product);
-            }
-            last_ty
+            let shape = if elems.is_empty() {
+                "an empty list `()`".to_string()
+            } else {
+                format!("an untagged list with {} element(s)", elems.len())
+            };
+            report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::UnknownForm,
+                    format!(
+                        "{shape} in expression position has no checker disposition: a \
+                         headless list is not a canonical `(tag {{}} ...)` Deep expression \
+                         (spec/03-deep-syntax.md; chelis#1085 [04-TOT-1])"
+                    ),
+                    vec![
+                        "write the canonical Deep form for the value you mean, such as \
+                         `(lit {} 0)` or `(var {} name)`"
+                            .to_string(),
+                    ],
+                ),
+            )
         }
         // `UnknownForm` is a list whose head didn't decode into the vocabulary.
         deep::Expr::UnknownForm(data) => report(
