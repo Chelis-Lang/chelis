@@ -149,6 +149,28 @@ static inline int64_t chelis_int_div_guard(int64_t divisor) {
     }
     return divisor;
 }
+/* chelis#729 Phase 3: exact signed-integer absolute value. The generated
+ * caller supplies the declared width and the frozen C2 diagnostic produced
+ * from chelis_types::dtype_semantics::NumericTrap. Checking the minimum
+ * before negation avoids C signed-overflow undefined behavior. */
+static inline int64_t chelis_int_abs_guard(int64_t value, int bits,
+                                          const char *trap_message) {
+    int64_t minimum;
+    switch (bits) {
+        case 8: minimum = INT8_MIN; break;
+        case 16: minimum = INT16_MIN; break;
+        case 32: minimum = INT32_MIN; break;
+        case 64: minimum = INT64_MIN; break;
+        default:
+            fprintf(stderr, "chelis internal error: invalid integer abs width %d\n", bits);
+            abort();
+    }
+    if (value == minimum) {
+        fprintf(stderr, "%s\n", trap_message);
+        abort();
+    }
+    return value < 0 ? -value : value;
+}
 /* [04-NUM-13] / chelis#682: width-bounded two's-complement shifts.
  * Generated code must not use C's signed shift operators directly:
  * left-shifting a negative value or into the sign bit is undefined, a

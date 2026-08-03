@@ -150,6 +150,7 @@ use crate::host_abi::{
     HostAbiType, HostAbiType as HostType, project_program,
 };
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_types::NumericTrap;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use std::collections::{HashMap, HashSet};
@@ -2977,7 +2978,22 @@ impl<'a> HostEmitter<'a> {
                 CExpressionBuiltin::Pow => EmittedExpr::call("pow", [arg(0), arg(1)]),
                 CExpressionBuiltin::Abs => match arg_vars[0].1 {
                     HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                        EmittedExpr::call("llabs", [arg(0)])
+                        let prim = match arg_vars[0].1 {
+                            HostType::Int8 => Prim::Int8,
+                            HostType::Int16 => Prim::Int16,
+                            HostType::Int32 => Prim::Int32,
+                            HostType::Int64 => Prim::Int64,
+                            _ => unreachable!(),
+                        };
+                        let message = NumericTrap::Overflow { op: "abs", prim }.to_string();
+                        EmittedExpr::call(
+                            "chelis_int_abs_guard",
+                            [
+                                arg(0),
+                                EmittedExpr::integer(integer_abi_width(&arg_vars[0].1)?),
+                                EmittedExpr::string_literal(message),
+                            ],
+                        )
                     }
                     HostType::Float32 | HostType::Float64 => EmittedExpr::call("fabs", [arg(0)]),
                     ref other => {

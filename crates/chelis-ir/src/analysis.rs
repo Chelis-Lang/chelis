@@ -27,32 +27,55 @@ pub fn first_integer_abs_node(dag: &Dag) -> Option<NodeId> {
             return Some(node.id);
         }
 
-        let RiscOp::FusedElem { ops } = &node.op else {
-            continue;
-        };
-        let mut step_precisions = Vec::<Option<Prim>>::with_capacity(ops.len());
-        for step in ops {
-            let input_precision = step.input_indices.first().and_then(|input| match input {
-                FusedInput::External(index) => node
-                    .inputs
-                    .get(*index)
-                    .and_then(|input| dag.get(*input))
-                    .map(|input| input.output_type.precision),
-                FusedInput::PreviousStep(index) => step_precisions.get(*index).copied().flatten(),
-            });
-            if step.op == FusedStepOp::Abs
-                && input_precision.is_some_and(|precision| precision.is_integer())
-            {
-                return Some(node.id);
-            }
-            step_precisions.push(if step.op == FusedStepOp::CmpLt {
-                Some(Prim::Bool)
-            } else {
-                input_precision
-            });
+        if fused_node_applies_integer_abs(dag, node.id) {
+            return Some(node.id);
         }
     }
     None
+}
+
+/// Return the first fused node that applies `abs` to a signed-integer value.
+///
+/// Backends may adopt the exact direct kernel before their general fused
+/// integer kernel. This narrower query lets that boundary keep rejecting
+/// externally supplied fused IR without rejecting the newly supported direct
+/// node.
+pub fn first_fused_integer_abs_node(dag: &Dag) -> Option<NodeId> {
+    dag.nodes()
+        .iter()
+        .find(|node| fused_node_applies_integer_abs(dag, node.id))
+        .map(|node| node.id)
+}
+
+fn fused_node_applies_integer_abs(dag: &Dag, node_id: NodeId) -> bool {
+    let Some(node) = dag.get(node_id) else {
+        return false;
+    };
+    let RiscOp::FusedElem { ops } = &node.op else {
+        return false;
+    };
+    let mut step_precisions = Vec::<Option<Prim>>::with_capacity(ops.len());
+    for step in ops {
+        let input_precision = step.input_indices.first().and_then(|input| match input {
+            FusedInput::External(index) => node
+                .inputs
+                .get(*index)
+                .and_then(|input| dag.get(*input))
+                .map(|input| input.output_type.precision),
+            FusedInput::PreviousStep(index) => step_precisions.get(*index).copied().flatten(),
+        });
+        if step.op == FusedStepOp::Abs
+            && input_precision.is_some_and(|precision| precision.is_integer())
+        {
+            return true;
+        }
+        step_precisions.push(if step.op == FusedStepOp::CmpLt {
+            Some(Prim::Bool)
+        } else {
+            input_precision
+        });
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +305,11 @@ mod tests {
             None,
         );
         assert_eq!(first_integer_abs_node(&fused), Some(fused_abs_then_compare));
+        assert_eq!(
+            first_fused_integer_abs_node(&fused),
+            Some(fused_abs_then_compare)
+        );
+        assert_eq!(first_fused_integer_abs_node(&direct), None);
     }
 
     #[test]

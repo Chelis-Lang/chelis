@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::dag::{Dag, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp};
+use crate::dag::{Dag, DagNode, FusedInput, FusedStep, FusedStepOp, NodeId, RiscOp};
 
 /// Result of running the fusion pass.
 pub struct FuseResult {
@@ -66,9 +66,17 @@ fn build_consumer_counts(dag: &Dag) -> Vec<usize> {
 }
 
 /// Returns true if the op is an elementwise op that can participate in fusion.
-fn is_fusible_elementwise(op: &RiscOp) -> bool {
+fn is_fusible_elementwise(node: &DagNode) -> bool {
+    // chelis#729 Phase 3 / chelis#699: the C backend now has a typed,
+    // trapping direct integer-Abs kernel, while its general fused integer
+    // kernel is still deliberately unavailable. Keep integer Abs
+    // materialized so ordinary source programs cannot be optimized back
+    // onto the float-only fused path. Float Abs remains fusible.
+    if matches!(node.op, RiscOp::Abs) && node.output_type.precision.is_integer() {
+        return false;
+    }
     matches!(
-        op,
+        node.op,
         RiscOp::Add
             | RiscOp::Mul
             | RiscOp::Div
@@ -142,7 +150,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
         if in_chain[id] {
             continue;
         }
-        if !is_fusible_elementwise(&node.op) {
+        if !is_fusible_elementwise(node) {
             continue;
         }
 
@@ -163,7 +171,7 @@ fn find_chains(dag: &Dag, consumer_count: &[usize]) -> Vec<Chain> {
                 .iter()
                 .find(|n| n.inputs.contains(&current) && !in_chain[n.id.0]);
             match consumer {
-                Some(c) if is_fusible_elementwise(&c.op) => {
+                Some(c) if is_fusible_elementwise(c) => {
                     // Check all of this consumer's inputs: only fuse if the
                     // consumer's chain-internal inputs are all single-consumer.
                     // (Other inputs are external and fine.)
@@ -450,6 +458,13 @@ mod tests {
         TensorType::scalar_f32()
     }
 
+    fn vec_i64(n: usize) -> TensorType {
+        TensorType {
+            dims: vec![DimInfo::Lit(n)],
+            precision: chelis_types::types::Prim::Int64,
+        }
+    }
+
     #[test]
     fn consumer_counts_basic() {
         let mut dag = Dag::new();
@@ -528,6 +543,40 @@ mod tests {
         let chains = find_chains(&dag, &counts);
         assert_eq!(chains.len(), 1);
         assert_eq!(chains[0].nodes.len(), 2); // add, neg
+    }
+
+    #[test]
+    fn integer_abs_stays_materialized_until_typed_fused_kernels_exist() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_i64(4), None);
+        let one = dag.add_node(
+            RiscOp::synth_const(vec_i64(4).precision, 1.0),
+            vec![],
+            vec_i64(4),
+            None,
+        );
+        let abs = dag.add_node(RiscOp::Abs, vec![x], vec_i64(4), None);
+        let add = dag.add_node(RiscOp::Add, vec![abs, one], vec_i64(4), None);
+        dag.add_root(add);
+
+        let fused = fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .any(|node| matches!(node.op, RiscOp::Abs)),
+            "integer abs must reach the typed direct kernel instead of a float-only fused emitter"
+        );
+        assert!(
+            !fused.nodes().iter().any(|node| {
+                matches!(
+                    &node.op,
+                    RiscOp::FusedElem { ops }
+                        if ops.iter().any(|step| step.op == FusedStepOp::Abs)
+                )
+            }),
+            "integer abs cannot be fused until the fused kernel carries exact traps"
+        );
     }
 
     #[test]

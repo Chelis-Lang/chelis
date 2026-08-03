@@ -99,6 +99,7 @@ impl UnaryOperator {
 enum CExpression {
     Identifier(CIdentifier),
     Integer(i64),
+    StringLiteral(String),
     Call {
         function: CIdentifier,
         args: Vec<EmittedExpr>,
@@ -134,6 +135,17 @@ impl EmittedExpr {
 
     pub(crate) fn integer(value: i64) -> Self {
         Self(CExpression::Integer(value))
+    }
+
+    pub(crate) fn string_literal(value: impl Into<String>) -> Self {
+        let value = value.into();
+        assert!(
+            value
+                .bytes()
+                .all(|byte| byte == b' ' || byte.is_ascii_graphic()),
+            "emitted C string literal contains a control or non-ASCII byte"
+        );
+        Self(CExpression::StringLiteral(value))
     }
 
     pub(crate) fn call(function: &'static str, args: impl IntoIterator<Item = Self>) -> Self {
@@ -176,6 +188,10 @@ impl fmt::Display for EmittedExpr {
         match &self.0 {
             CExpression::Identifier(identifier) => f.write_str(&identifier.0),
             CExpression::Integer(value) => write!(f, "{value}"),
+            CExpression::StringLiteral(value) => {
+                let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+                write!(f, "\"{escaped}\"")
+            }
             CExpression::Call { function, args } => {
                 write!(f, "{}(", function.0)?;
                 for (index, arg) in args.iter().enumerate() {
@@ -216,6 +232,15 @@ mod tests {
             )],
         );
         assert_eq!(expr.as_c(), "floor((a / b))");
+    }
+
+    #[test]
+    fn string_literals_escape_without_opening_a_raw_expression_channel() {
+        let expr = EmittedExpr::call(
+            "guard",
+            [EmittedExpr::string_literal("numeric trap: \\\"abs\\\"")],
+        );
+        assert_eq!(expr.as_c(), r#"guard("numeric trap: \\\"abs\\\"")"#);
     }
 
     #[test]

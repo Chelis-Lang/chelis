@@ -4,6 +4,7 @@ use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, ReduceWindowKind,
     RiscOp, RtDim, SymbolicDimSource, TensorType, symbolic_bindings,
 };
+use chelis_types::NumericTrap;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 
@@ -79,7 +80,7 @@ impl CEmitter {
         func_name: &str,
         options: crate::CodegenOptions,
     ) -> Result<String, Unsupported> {
-        Self::reject_integer_abs(dag)?;
+        Self::reject_fused_integer_abs(dag)?;
         Self::validate_supported_precisions(dag);
         Self::validate_load_abi(dag);
         Self::validate_sparse_contracts(dag);
@@ -474,6 +475,9 @@ impl CEmitter {
             RiscOp::Cos => self.emit_unary_func(id, "cosf", &node.inputs, &node.output_type),
             RiscOp::Tan => self.emit_unary_func(id, "tanf", &node.inputs, &node.output_type),
             RiscOp::Atan => self.emit_unary_func(id, "atanf", &node.inputs, &node.output_type),
+            RiscOp::Abs if node.output_type.precision.is_integer() => {
+                self.emit_integer_abs(id, &node.inputs, &node.output_type)
+            }
             RiscOp::Abs => self.emit_unary_func(id, "fabsf", &node.inputs, &node.output_type),
             RiscOp::Floor => self.emit_unary_func(id, "floorf", &node.inputs, &node.output_type),
             RiscOp::Ceil => self.emit_unary_func(id, "ceilf", &node.inputs, &node.output_type),
@@ -796,16 +800,16 @@ impl CEmitter {
             .collect()
     }
 
-    /// Integer `abs` has an exact evaluator kernel but the C backend's
-    /// current unary template calls `fabsf`. Reject at the public emitter
-    /// edge until Phase 3 installs the typed, trapping C kernel (chelis#699).
-    fn reject_integer_abs(dag: &Dag) -> Result<(), Unsupported> {
-        if let Some(node) = chelis_ir::analysis::first_integer_abs_node(dag) {
+    /// The direct integer-Abs node has a typed, trapping C kernel. General
+    /// fused integer emission is a later Phase 3 slice, so externally supplied
+    /// fused IR remains loud instead of entering its float-only template.
+    fn reject_fused_integer_abs(dag: &Dag) -> Result<(), Unsupported> {
+        if let Some(node) = chelis_ir::analysis::first_fused_integer_abs_node(dag) {
             return Err(Unsupported::new(
                 UnsupportedKind::Op("Abs".to_string()),
-                format!("an integer tensor at C DAG node {}", node.0),
+                format!("a fused integer tensor at C DAG node {}", node.0),
                 Stage::Codegen("c"),
-                "integer abs code generation waits for the typed, trapping Phase 3 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane",
+                "direct integer abs is implemented with an exact trapping kernel; general fused integer emission remains Phase 3 work, so this externally supplied fused shape cannot enter the float-only template",
             ));
         }
         Ok(())
@@ -2319,6 +2323,78 @@ impl CEmitter {
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {op}(({et}*)t{a}->data)[idx];"
         ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn integer_width(prim: Prim) -> i64 {
+        match prim {
+            Prim::Int8 => 8,
+            Prim::Int16 => 16,
+            Prim::Int32 => 32,
+            Prim::Int64 => 64,
+            other => panic!(
+                "integer-width C helper called for non-integer dtype `{}`",
+                other.name()
+            ),
+        }
+    }
+
+    /// Build the exact integer-Abs call. The diagnostic literal is generated
+    /// from the frozen Rust `NumericTrap` grammar; the runtime helper only
+    /// checks the declared-width minimum before negating.
+    fn integer_abs_expr(prim: Prim, value: &str) -> String {
+        let message = NumericTrap::Overflow { op: "abs", prim }.to_string();
+        format!(
+            "({})chelis_int_abs_guard((int64_t)({value}), {}, {message:?})",
+            match prim {
+                Prim::Int8 => "int8_t",
+                Prim::Int16 => "int16_t",
+                Prim::Int32 => "int32_t",
+                Prim::Int64 => "int64_t",
+                other => panic!("integer abs called for `{}`", other.name()),
+            },
+            Self::integer_width(prim),
+        )
+    }
+
+    /// Typed, declared-width signed-integer absolute value. There is no libm
+    /// call and no C signed-overflow UB: `chelis_int_abs_guard` traps on MIN
+    /// before negation using the generated C2 message.
+    fn emit_integer_abs(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType) {
+        let a = inputs[0].0;
+        let et = Self::elem_type(ty);
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}->data;"));
+        self.line(&format!(
+            "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
+        ));
+        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        let contiguous = Self::integer_abs_expr(ty.precision, &format!("__in_a_{id}[i]"));
+        self.line(&format!("__out_{id}[i] = {contiguous};"));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line("int indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+        ));
+        self.line(&format!(
+            "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+        ));
+        let strided = Self::integer_abs_expr(ty.precision, &format!("__in_a_{id}[idx]"));
+        self.line(&format!("__out_{id}[i] = {strided};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -6017,16 +6093,18 @@ mod tests {
     }
 
     #[test]
-    fn integer_abs_is_rejected_before_the_float_unary_template() {
+    fn direct_integer_abs_uses_the_typed_guard_while_fused_stays_loud() {
         let ty = tensor_ty(&[1], Prim::Int64);
 
         let mut direct = Dag::new();
         let x = direct.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
         let out = direct.add_node(RiscOp::Abs, vec![x], ty.clone(), None);
         direct.set_roots(vec![out]);
-        let err = CEmitter::emit_dag(&direct, "integer_abs")
-            .expect_err("integer abs must not enter the C fabsf template");
-        assert!(err.to_string().contains("unsupported: op `Abs`"));
+        let c = CEmitter::emit_dag(&direct, "integer_abs")
+            .expect("direct integer abs has a typed C kernel");
+        assert!(c.contains("chelis_int_abs_guard"));
+        assert!(c.contains("numeric trap: overflow in abs at int64"));
+        assert!(!c.contains("fabsf(__in_a_"));
 
         let mut fused = Dag::new();
         let x = fused.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
