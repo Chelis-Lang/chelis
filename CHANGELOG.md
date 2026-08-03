@@ -196,6 +196,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `--json` output. Narrow by construction: a file that also has an
   ordinary value root still does not surface its arrow-form defs, and a
   file evaluated from inside a reef package root takes a different path.
+- **A module mixing a `grad` def with ordinary defs builds again**
+  (chelis#1095). The C lane failed outright with `lowered root count
+  mismatch: expected 2 named roots, got 1`, because a `grad` def declares
+  a named root but lowers to no tensor node. The declared inventory now
+  subtracts exactly the defs the lowerer positively reports as holding no
+  tensor node, rather than guessing from the type: a higher-order def is
+  not rootless in general — `def d(f, x) = f(x)` applies its fn parameter
+  and still lowers to a real root — so a static predicate would have
+  silently dropped working kernels. The chelis#232 drift guard stays live,
+  since only positively accounted-for names are subtracted.
 
 ## [0.18.1] — 2026-08-01
 
