@@ -215,6 +215,18 @@ fn list_needs_host(
                 return true;
             }
         }
+    } else if !list.elements.is_empty() {
+        // Fail-closed (#1086): a non-empty list whose head is not a Deep tag
+        // (element 0 is a literal or nested form, so `get_tag` is None) cannot
+        // be classified against KNOWN_TAGS. Do not fall through to a silent
+        // Tensor routing — force Host with a reason, the same discipline as the
+        // BareList/UnknownForm arms in expr_needs_host. Like those, this form
+        // does not survive `chelis check` today, so it is defensive alignment
+        // with the fail-closed contract rather than a live wrong-answer path.
+        reasons.push(HostReason::UnrecognizedTag {
+            tag: "<untagged-list>".to_string(),
+        });
+        return true;
     }
 
     let tag_str = tag.unwrap_or("");
@@ -691,5 +703,56 @@ mod tests {
             !reasons.is_empty(),
             "UnknownForm Host routing must record a reason, not be silent"
         );
+    }
+
+    // #1086 completeness: the same fail-open existed one level down in
+    // `list_needs_host` — a list whose head is not a Deep tag (`get_tag` None)
+    // fell through to Tensor with no reason. It must fail closed too.
+    #[test]
+    fn untagged_list_routes_host_fail_closed() {
+        let list = List {
+            elements: vec![Expr::Atom(Atom::Int(0), chelis_deep::Span::new(0, 0))],
+        };
+        let expr = Expr::List(list, chelis_deep::Span::new(0, 0));
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+        let needs_host = expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        );
+        assert!(needs_host, "an untagged non-empty list must route Host");
+        assert!(
+            !reasons.is_empty(),
+            "untagged-list Host routing must record a reason, not be silent"
+        );
+    }
+
+    // #1084 / red-team Finding 1: the Host case alone cannot prove the manifest
+    // reads the real lane, because the lookup falls back to `Lane::Host`. A pure
+    // Tensor value root must be recorded as Tensor — this kills the mutation
+    // where the lane lookup is broken and every entry collapses to the default.
+    #[test]
+    fn compute_root_manifest_records_tensor_lane_not_just_host_default() {
+        let checked = check_program_from_source("x = cast(1, int32)\n");
+        let realizability = infer_realizability(&checked, C_PRIMS);
+        let manifest = compute_root_manifest(&checked, &realizability);
+        let x = manifest
+            .entries
+            .iter()
+            .find(|e| e.name == "x")
+            .expect("x entry");
+        assert_eq!(
+            x.lane,
+            Lane::Tensor,
+            "a pure Tensor value root must record Lane::Tensor, not the Host fallback"
+        );
+        assert_eq!(manifest.tensor_root_names(), vec!["x"]);
     }
 }
