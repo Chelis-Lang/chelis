@@ -380,6 +380,13 @@ PERMITTED_RUST_FORMAT_NARROWING_PATHS: frozenset[str] = frozenset(
         "crates/chelis-backend-c/src/lib.rs",
         "crates/chelis-backend-hip/src/emit.rs",
         "crates/chelis-cli/src/main.rs",
+        # 2026-08-02 (chelis#890, [05-OP-1]): round_to's decimal-rounding
+        # MECHANISM - each dtype lane formats its operand at `places`
+        # precision then exactly re-parses at the operand's own width. An
+        # internal numeric algorithm whose precision spec IS the
+        # operation, not an observation exit; the result re-enters the
+        # value domain before any exit formats it.
+        "crates/chelis-compiler-api/src/runtime/json.rs",
         "crates/chelis-compiler-api/src/context.rs",
         "crates/chelis-cove/src/live.rs",
         "crates/chelis-deep/src/ast.rs",
@@ -411,6 +418,15 @@ PERMITTED_RUST_DEBUG_FORMAT_PATHS: frozenset[str] = frozenset(
         "crates/chelis-compiler-api/src/runtime/named_axis.rs",
         "crates/chelis-compiler-api/src/runtime/tests.rs",
         "crates/chelis-compiler-api/src/runtime/transforms.rs",
+        # 2026-08-02 (chelis#890/#903, chelis#997): the JSON/CSV I/O
+        # runtime modules join the declared derived-Debug residue-carrier
+        # class (Err(format!) parse/shape diagnostics over Json ADT
+        # fields and document shapes), plus the shared truncated_debug
+        # helper in runtime/mod.rs those modules route through. Same
+        # render_value sweep debt as eval.rs/host_ops.rs.
+        "crates/chelis-compiler-api/src/runtime/json.rs",
+        "crates/chelis-compiler-api/src/runtime/csv.rs",
+        "crates/chelis-compiler-api/src/runtime/mod.rs",
     }
 )
 
