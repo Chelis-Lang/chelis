@@ -1265,9 +1265,10 @@ dimension name only when it is **not bound in the value environment**: a bound
 `int32` variable is a runtime value and keeps the compile-time-constant
 rejection (issue #259) — `expand(x, ax, 4)` with `ax: int32` is still an
 error, never a trailing insert of an axis named `ax`. The `size` argument
-must be a **positive compile-time literal** (a bare int or `cast(N, int32)`):
+must be a **positive compile-time literal** (an `int64` literal `Ni64`, or a
+`cast(N, int64)` form):
 the inserted axis's extent is stamped onto the new named dim at lowering, and
-a symbolic-dim or runtime int32 size has no stampable extent (the eval lane
+a symbolic-dim or runtime `int64` size has no stampable extent (the eval lane
 cannot stage it and the C backend would reference an undeclared dim symbol),
 so those forms are rejected at check time. The positional concrete-rank
 `expand` forms (§4.7.2, insert-or-set) are unchanged and keep the three
@@ -1372,17 +1373,19 @@ movement primitive, typically when the input tensor has a symbolic batch
 dimension that is only known at run time. The relevant built-ins are:
 
 - `shape(x, axis)`: returns the size of `x`'s `axis`-th dimension as an
-  `int32` value. `axis` must be a concrete non-negative integer literal
-  (either a bare `int32` literal or a `cast(N, int32)` form; both reach
-  the axis-bounds check). The result is a runtime scalar, not a symbolic
-  dim reference.
+  `int64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` must be
+  a concrete non-negative integer literal (either a bare `int32` literal
+  or a `cast(N, int32)` form; both reach the axis-bounds check). The
+  result is a runtime scalar, not a symbolic dim reference.
 - `expand(x, axis, size)`: insert or set a dimension at position `axis`
   with width `size`. When `axis` is a dimension *name* instead of an
   integer, the call is the named-axis expand form (§4.5.3): it inserts a
   new named axis at the trailing end, or — with a fourth `anchor`
   argument — immediately before an existing named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
-  `shape_list`, a `List<Int64>`.
+  `shape_list`, a `List<int64>`.
+
+*(Not fully implemented; chelis#1112.)*
 
 This section pins which call shapes preserve symbolic dims in the type
 checker's output and which fall back to `(d-name {} *)` (see §4.5). The
@@ -1403,9 +1406,9 @@ extents.
 
 #### 4.7.1 `shape` axis form
 
-Both forms below produce an `int32` value and both pass the infer-time
-axis-bounds check (`cast(N, int32)` is unwrapped by the cast-aware
-extractor described in `crates/chelis-types/src/infer.rs`):
+Both forms below produce an `int64` value ([05-DIM-2]) and both pass the
+infer-time axis-bounds check (`cast(N, int32)` is unwrapped by the
+cast-aware extractor described in `crates/chelis-types/src/infer.rs`):
 
 ```text
 shape(x, 0)
@@ -1422,12 +1425,12 @@ type error (`DimensionMismatch`).
 
 `expand(x, axis, size)` accepts three forms for its `size` argument:
 
-1. an integer literal (or `cast(N, int32)` form): produces an output
-   dim of `(d-lit {} N)`.
+1. an `int64` integer literal (`Ni64`, or a `cast(N, int64)` form):
+   produces an output dim of `(d-lit {} N)`.
 2. a symbolic dim name in scope (a bare `var` reference such as a
    declared `[batch]` dim parameter): produces an output dim of
    `(d-name {} batch)`.
-3. any other `int32` expression, including a runtime `shape(...)`
+3. any other `int64` expression, including a runtime `shape(...)`
    call: the typer defers the output rank slot to whatever the
    declared signature's return-type or the surrounding call context
    imposes via standard unification.
@@ -1448,7 +1451,7 @@ its value provably
   and integer arithmetic.
 
 Everything else is sourceless: a bare runtime scalar parameter (e.g.
-`a_dim: int64`), a `cast`-wrapped one (`cast(a_dim, int32)`), a `let`
+`a_dim: int64`), a `cast`-wrapped one (`cast(a_dim, int64)`), a `let`
 bound to one (`d = a_dim`), arithmetic that *touches* one
 (`add(a_dim, 1)` — sourceless is absorbing), or **any other
 function-call value** (`ident(a_dim)`, a user `def` — an inline
@@ -1526,11 +1529,12 @@ The above is the **typer's** behavior. IR lowering separately
 recovers the concrete broadcast *extent* for codegen and autodiff:
 when the `size` argument reads `shape(operand, axis)` — whether the
 `shape(...)` call sits directly in the `size` slot or is bound to a
-`let` name and referenced as `cast(len, int32)` — lowering reads the
+`let` name and referenced as `cast(len, int64)` (an identity cast under
+[05-DIM-2]) — lowering reads the
 extent from `operand`'s already-resolved axis dim rather than
 defaulting to size 1. The `let`-indirection case is the canonical
 `tensor_full_like` / scalar-broadcast helper idiom (`len = shape(x,
-0)` then `expand(s, 0, cast(len, int32))`); without the recovery the
+0)` then `expand(s, 0, cast(len, int64))`); without the recovery the
 expand lowers to a size-1 axis, the size-1 broadcast that the typer
 accepts is rejected by the no-implicit-broadcasting IR, and
 `grad` fails to construct the backward DAG (Chelis-Lang/chelis#318,
@@ -1547,23 +1551,26 @@ to size 1 (§4.7.2 Form-3, Chelis-Lang/chelis#469).
 
 `reshape` recognizes one specific syntactic source for each element
 of its shape list and propagates the corresponding input axis into
-the result type. The recognized form for a shape-list element is:
+the result type. The recognized forms for a shape-list element are:
 
 ```text
+shape(<reshape-input-var>, <literal-axis>)
 cast(shape(<reshape-input-var>, <literal-axis>), int64)
 ```
 
-All four conditions are required:
+The second form's outer cast is an identity cast under [05-DIM-2],
+accepted so the pre-[05-DIM-2] spelling keeps its propagation. All
+conditions are required:
 
-1. The outer `cast`'s target type is `int64` (matching the
-   `List<Int64>` element type that `reshape` expects).
-2. The cast's inner expression is a `shape(...)` call.
-3. The `shape` call's first argument is a bare `var` whose bound name
+1. The element is a `shape(...)` call, optionally wrapped in a `cast`
+   whose target type is `int64` (matching the `List<int64>` element
+   type that `reshape` expects).
+2. The `shape` call's first argument is a bare `var` whose bound name
    is the same as the reshape's input tensor argument.
-4. The `shape` call's axis argument extracts to a concrete
+3. The `shape` call's axis argument extracts to a concrete
    non-negative integer (literal or `cast(N, int32)` form).
 
-When all four conditions hold, the typer propagates the input's dim
+When all conditions hold, the typer propagates the input's dim
 at the named axis into the corresponding output dim. The
 `flatten_batch` and `flatten_two` patterns from
 `examples/illustrative/runtime_shape_semantics.ch` are the canonical
@@ -1574,9 +1581,9 @@ sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
 def flatten_batch(x) -> tensor[n, 4, f32] = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
 ```
 
-A plain integer literal element (`cast(4, int64)`) still produces
-`(d-lit {} 4)`. Any element shape that is not literal and does not
-match the four conditions above falls back to `(d-name {} *)`.
+A plain integer literal element (`4i64`, or `cast(4, int64)`) still
+produces `(d-lit {} 4)`. Any element shape that is not literal and does
+not match the conditions above falls back to `(d-name {} *)`.
 
 #### 4.7.4 Patterns that fall back to wildcard
 
@@ -1604,25 +1611,36 @@ syntactic pattern from §4.7.3 or fall back."
 
 #### 4.7.5 Precision rule for `reshape`'s shape list
 
-`reshape`'s shape list must be homogeneous. The bare `shape(x, k)`
-returns `int32` and integer literals default to `int32`, but
-`reshape`'s shape list is conventionally `List<Int64>`, so every
-element must be cast to `int64` before it can appear in the list:
+`reshape`'s shape list is `List<int64>`: its elements are extent-domain
+quantities under `spec/05-risc-primitives.md` [05-DIM-1]. The list must be
+homogeneous, and its element precision must be `int64`. Those are two
+separate requirements and either can fail alone.
+
+No §5.6 position reaches a list literal, so a literal element states
+`int64` itself, with a suffix or an explicit `cast`; the §5.3 `int32`
+default never satisfies this slot. A non-literal element needs no
+annotation when its producer is already `int64`, which [05-DIM-2] makes
+true of `shape()`:
 
 ```text
-reshape(x, [shape(x, 0), 4])                          ;; TYPE ERROR: precision mismatch: expected int32, got int64
-reshape(x, [cast(shape(x, 0), int64), cast(4, int64)]) ;; OK
+reshape(x, [2i64, 2i64])                               ;; OK - explicit suffix
+reshape(x, [shape(x, 0), 4i64])                        ;; OK - shape() is int64; the literal states it
+reshape(x, [cast(shape(x, 0), int64), cast(4, int64)]) ;; OK - explicit cast
+reshape(x, [2, 2])                                     ;; TYPE ERROR: int32 literals in a List<int64> slot
+reshape(x, [2i64, 2i32])                               ;; TYPE ERROR: mixed element precision
 ```
 
-The diagnostic direction reflects the unification order in the
-type-checker: the first list element fixes the "expected"
-precision, and later entries that disagree trip the mismatch on the
-"got" side. The bare `shape(x, 0)` pins `int32` as the expected
-precision; the integer literal `4` (also `int32`) is fine, but the
-moment any `int64` enters the list the mismatch fires. In practice
-the fix is the same in both directions — cast every element to
-`int64` — so the unification-order artifact does not affect
-remediation guidance.
+The suffix requirement is deliberate, not a §5.6 gap; §5.6 records why
+list literals do not adopt. The two error lines want different
+diagnostics. The all-`int32` list is a slot mismatch, and its message
+should name the fix (write `2i64`) rather than only the mismatch. The
+mixed list is an intra-list disagreement that no defaulting rule can
+resolve, and its message should name the disagreeing element rather than
+render an `expected`/`got` pair, whose direction reflects unification
+order rather than which element the user got wrong.
+
+*(Not fully implemented; chelis#1112 owns the producer-side gap and
+chelis#916 the diagnostic form.)*
 
 #### 4.7.6 Out-of-scope: arbitrary runtime shape expressions
 
@@ -1817,6 +1835,29 @@ widens the f32 value), and a float literal under an integer `p` keeps the
 float source type because a decimal cannot bind at an integer type; the
 explicit cast then applies [04-NUM-14], accepting only a finite integral
 value in range and trapping `Domain` on a fractional value.
+
+The set is closed on purpose. Positions 1–3 adopt **tensor-literal
+bodies** only: a tensor's element type is a single property of the value,
+stated once in its type, and the body is bulk data — a per-element suffix
+on a thousand-element weights literal is noise that buries the one
+element that differs. Position 4 adopts a **bare scalar**, but its target
+dtype is spelled at the site and the position exists for
+**expressibility**, not convenience: without it `cast(3000000000, int64)`
+cannot be written at all, and `cast(1.1, f64)` would round through the
+`f32` default. What no position does is adopt a **list literal, or a
+scalar against a remote callee signature** — position 2 reaches through a
+signature, but only into a tensor body — and none should be added for
+ergonomics alone. A structural argument — a shape list, a bounds pair, a
+stride step — is program rather than payload, and under
+`spec/05-risc-primitives.md` [05-DIM-1] its dtype states which KIND of
+quantity it is: an extent is `int64` and an axis is `int32`, so a
+context-inferred `[2, 2]` would hide exactly the distinction the dtype
+exists to carry. Chelis programs are written and, more often, audited by
+agents; a suffix states the kind at the site, the write-side cost is one
+edit under a diagnostic that names the fix, and the read-side cost of
+context-dependent literals is paid on every audit. This is the trade
+`with seed(...)` already records (§7.1): its seed demands `int64` and the
+literal states it (`with seed(42i64)`), with no adoption carve-out.
 
 Outside this closed set, numeric literals in a tensor body fall back to the
 §5.3 literal defaults: integer literals to `int32`, float literals to `f32`.
@@ -2539,6 +2580,13 @@ in-tree witness of the need. Tracked by chelis#753.)*
 > selected by a backend, a build flag, or a global mode. No such opt-in is
 > authored yet; until one is, narrower-than-declared computation is
 > non-conforming in every lane.
+>
+> Arithmetic a backend SYNTHESIZES that is not an op on program values -
+> the loop counters and addressing expressions of generated code - carries
+> no declared dtype and is outside the table above. It MAY use a machine
+> width whose range provably contains every value it carries, and it SHALL
+> NOT be the carrier of a declared-dtype value crossing a boundary
+> ([04-NUM-11] governs those crossings).
 
 *(Not honored today: the IR evaluator computes every float op and every
 float reduction in f64 because its tensor store itself is f64-backed -
