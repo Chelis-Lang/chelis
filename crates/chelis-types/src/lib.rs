@@ -1,6 +1,7 @@
 //! Type checker for the Chelis language.
 
 pub mod adt;
+pub mod agreement;
 pub mod cancel;
 pub mod context;
 pub(crate) mod deep_type;

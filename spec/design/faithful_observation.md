@@ -1,40 +1,58 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
-**Status:** Phases 0-2 LANDED. Phase 0 (the round-trip harness and the
+**Status:** Phases 0-2 LANDED; Phase 3 is DELIVERED in this revision.
+Phase 0 (the round-trip harness and the
 exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 (the formatter, eval adoption, and the eval-side §B2.1 migration) landed
 2026-07-20: `format_element` lives at `chelis-types::observation`, every
 eval exit routes through it, §C1 and the number grammar are FROZEN (B1),
 and the contract is ratified as `spec/05-risc-primitives.md` §8 atoms
-[05-OBS-1..6] (the chelis#775 scalar-root decision is [05-OBS-4]). One
-annexed value-layer exception, surfaced by PR #792's red team: int64
-scalar roots above 2^53 render the f64-collapsed stored value at the
-labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
-exception and its ignored red cell are recorded at spec/05 §8).
+[05-OBS-1..6] (the chelis#775 scalar-root decision is [05-OBS-4]). Phase 1
+carried one annexed value-layer exception, surfaced by PR #792's red team:
+int64 scalar roots above 2^53 rendered the f64-collapsed stored value at
+the labeled root ([#684]'s rank-0 realization). [#729]'s per-dtype storage
+repaired it. The cell is un-ignored on its original assertion and its
+known-red row is gone ([#1078]); spec/05 §8 no longer records the
+exception, which the [#1043] timeless rewrite removed along with the other
+dated status prose.
 Phase 2 (the generated C side and the C-side §B2.1 migration) landed
 2026-07-24: `chelis_format_shortest` in the runtime, the print helper
 generated from an exhaustive `Prim` match, `to_list`'s F16/BF16 arms,
 and §C2.3 cross-lane byte equality locked for identical stored bits -
 [#716]/[#723]/[#726]-C/[#748]/[#749] fixed by un-ignoring their red
-cells (close the issues on the PR #863 merge). Four recorded
-boundaries, each issue-linked ([#864] and [#865] with ignored red
-cells in the harness): eval TENSOR float elements still render at the stored
+cells (close the issues on the PR #863 merge). The remaining recorded
+boundaries are issue-linked: eval TENSOR float elements still render at the stored
 f64 width (the deliberate §8.1 width note, [#729]'s metadata repair),
 so non-dyadic narrow-float tensor cells stay width-divergent across
-lanes until then; eval's LABELED ROOT of a cast-constructed f64 tensor
-narrows through the stale F32 tag ([#864], the [#717] family - an
-[05-OBS-1] violation inside eval, surfaced by PR #863's red team); the
-compiled lane's untagged f64 value box renders narrower float elements
+lanes until then; the compiled lane's untagged f64 value box renders narrower float elements
 (f32 as well as f16/bf16) at f64-image width through `to_list` and
 list/tuple boxing - faithful parse-back, not own-width shortest
 ([#865], the [#729]/[#686] capacity family). The former single-root
 label discrepancy [#862] is now authored by [05-OBS-6] and its prefix
 has landed; complete manifest-backed root availability and artifact
-acceptance remain under [#912]/[#1023], not this formatter class. Phase 3
-remains. Tracking issue: [#732].
+acceptance remain under [#912]/[#1023], not this formatter class. The
+cast-constructed f64 root cell [#864], surfaced by PR #863, is repaired
+and un-ignored after a post-Phase-3 re-diagnosis: the root tag was already
+F64, but the static `to_tensor` DAG shortcut widened lexical decimals
+without first materializing each typed leaf and cast chain at its declared
+width. The shipped repair carries NO precision-tagged leaf: static literal
+extraction keeps [#856]'s exact `RawScalar` and finalizes a FLOAT leaf at
+its own declared width in the `lit` arm, so an explicitly f32 scalar widened
+into an f64 tensor preserves the same stored value as the host path. The
+`{value: f64, Prim}` leaf carrier that an earlier draft proposed is NOT what
+landed, and deliberately so: an f64 value field would have reintroduced the
+above-2^53 integer loss that [#856]'s exact i64 lane exists to prevent.
+Integer leaves therefore stay on the exact lane and only float leaves are
+finalized. The compiled lane still drops a SUFFIXED literal's width
+([#1110], annexed below). Phase 3
+authors the [05-OBS-3] table, moves both value harnesses and the rejected-cell
+corpus onto `chelis_types::agreement`, and supplies one executable acceptance
+oracle. Its implementation is complete here; merge/CI acceptance is recorded
+on the carrying PR rather than claimed by this source revision. Tracking
+issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..6]; the
-per-op tolerance table lands into the same section at Phase 3, while
+per-op tolerance table is authored in the same section by Phase 3, while
 chelis#733 later migrates authority form and revisions through the pinned Buoy
 shell-side integration), `spec/04-type-system.md` (dtype value-set
 definitions, shared with `spec/design/dtype_semantics.md` §C1), and the audit
@@ -331,15 +349,22 @@ For every dtype and every storable value:
    [#716]'s cells, green after Phase 2, and permanent thereafter.
 2. **The per-op value-tolerance table** is a MACHINE artifact first
    (2026-07 review integration): its authoritative form is `const` Rust
-   beside the capability table (the same no-second-parser resolution as
-   that doc's open question 1), consumed directly by the [#687] oracle
+   at `chelis_types::agreement::OP_TOLERANCES`, beside the future
+   capability table (the same no-second-parser resolution as that doc's
+   open question 1), consumed directly by the [#687] oracle
    and by [#754]'s shell-facing gate; the `spec/05-risc-primitives.md`
    §8 rendering is generated from or tripwire-checked against it, so
    prose and data cannot drift. Content: for each transcendental, the
    documented cross-lane bound (default: 1 ulp at the computed width;
    `sqrt`: 0 - correctly rounded per IEEE; [#719] is FIXED (PR #760,
-   merged 2026-07-17), so the row may be authored when Phase 3 arrives;
-   add/sub/mul/div/comparisons: 0). The [#687] oracle
+   merged 2026-07-17), so the row is authored by Phase 3;
+   add/sub/mul/div/comparisons: 0 by absence). A row is eligible only
+   after both lanes establish [04-NUM-8] arithmetic-width conformance;
+   in particular, [#897]'s current eval float path may not use the table
+   to launder a mismatch. For f16/bf16, a rendered mismatch also requires
+   both pre-final f32 bit patterns and proof that they round to the two
+   observed stored values; the finalized strings alone cannot establish
+   an f32 ULP distance. The [#687] oracle
    consults ONLY this table when values differ; formatting differences
    are never tolerated (they are bugs here).
 3. **The oracle handshake**: with §C1-§C3 landed, [#687]'s exact-string
@@ -667,9 +692,12 @@ today - that divergence is [#729]'s subject matter and stays visible
 accepted at exit 0 with the final line `PHASE 2 ORACLE: PASS`. It is the
 executable form of what this phase used to state as prose, plus the leg
 that prose could not carry. Its obligations:
+`eval_f64_cast_tensor_root_renders_stored_width` ([#864]),
 `c_int64_tensor_print_is_exact_above_2p53` ([#723]) and
 `c_print_of_f16_tensor_prints_f16_values` / `c_to_list_of_f16_tensor_works`
-([#716]) present, un-ignored, and green; the
+([#716]) present, green, and carrying exactly one unconditional `#[test]`
+attribute. A `cfg`, `cfg_attr`, `ignore`, or unrecognized attribute shape
+around any repaired row is a structural failure before the suites run. The
 `c_dag_kernels_compute_correct_f16_bits_despite_print` byte-decode lock
 retired per its own instructions (replaced by the direct print row); the
 round-trip harness green on every exit in both lanes **except the
@@ -718,7 +746,7 @@ check).
 Scope, stated rather than assumed: the ignore-inventory equality covers
 the observation harness, this plan's own instrument. The sibling matrix
 files carry `#[ignore]`d cells owned by [#714]/[#717]/[#724]/[#729];
-for those the oracle asserts only that the three rows named above are
+for those the oracle asserts only that the three matrix rows named above are
 un-ignored and green.
 
 **Default CI does NOT run this oracle** (same standing as [#730]'s Phase
@@ -771,23 +799,47 @@ and the [#862] unit-root labeling discovery is filed, not absorbed.
 (4) PR #863's fresh-context red team (round 1) surfaced two further
 width-annex gaps, filed per §B2.5 and annexed at spec/05 §8 with
 ignored red cells: [#864] (eval's labeled-root render of
-`cast(<tensor>, f64)` results narrows through the stale F32 tag - an
-eval-lane [05-OBS-1] violation the harness's `via_cast=false` F64 table
+`cast(<tensor>, f64)` disagreed with the print transcript - an eval-lane
+[05-OBS-1] violation the harness's `via_cast=false` F64 table
 structurally never constructed) and [#865] (the compiled lane's
 untagged f64 value box renders f32 - not only f16/bf16 - elements at
 f64-image width through `to_list`/boxing; faithful but not own-width
 shortest). Both are [#729]-family value/capacity repairs; rendering is
-not the fix site for either.
+not the fix site for either. The chelis#864 follow-up re-diagnosed its
+current exact cause: the root tag was already F64, while static
+`to_tensor` lowering retained lexical f64 decimals in an F32 source node
+and widened the wrong stored value. Finalizing an enclosing F32 tensor was
+necessary but not sufficient: a scalar `f32 -> f64` cast inside an enclosing
+f64 `to_tensor` bypassed that check. Static literal extraction now finalizes
+each FLOAT leaf at its own declared width, read from the leaf's type metadata,
+while integer leaves stay on [#856]'s exact i64 lane - the leaf carries no
+precision tag, because routing every leaf through an f64 value field would
+have reintroduced the above-2^53 integer loss that lane prevents. An explicit
+cast chain needs no special handling: the authored ladder already finalizes at
+each float target. The cell is un-ignored, absent from the known-red
+ledger, and present in the separate must-run inventory whose exact
+unconditional attribute shape is checked.
+[#865] remains annexed, joined by [#1110]: the eval repair above made the
+compiled lane's own gap visible, since the C emitter bakes a suffixed
+literal's lexical f64 decimal instead of its declared-width stored value, so
+the two lanes now disagree on a shape the cross-lane corpus never
+constructed. Recorded as a known-red cell rather than absorbed - [05-OBS-3]
+forbids laundering a known width violation through the tolerance table.
 (5) The phase's oracle became a script rather than a prose conjunction,
 after PR #863's exact-head red team (F3) observed that the default
 harness run reported "30 passed, 3 skipped" while nothing asserted what
 the three skips were, that they still failed for their stated reasons,
-or that none had gone green. Three annexed cells is a defensible
-boundary; three cells nobody re-executes is not, and the difference is
+or that none had gone green. Three annexed cells was a defensible
+boundary; three cells nobody re-executed was not, and the difference is
 not visible from a green suite. The ledger makes the boundary
 executable, and its unexpectedly-green leg turns each cell into
-[#729]'s exit-criteria instrument: the day the tag repair or the box
-width lands, this oracle fails until the cell is un-ignored. The
+[#729]'s exit-criteria instrument: the day a value or box-width repair
+lands, this oracle fails until the cell is un-ignored. That transition
+has now occurred for [#864] and for [#684]: each cell's ignore and
+known-red row left together, and both repaired tests entered the must-run
+inventory ([#1078] retired the [#684] row, which the oracle's
+unexpectedly-green leg is what flagged as stale). The same leg now guards
+the newly annexed [#1110] in the other direction. The
 accompanying status texts here and at spec/05 §8 were narrowed in the
 same change set to say "conformant except the enumerated annexed cells"
 rather than leading with an unqualified conformance claim.
@@ -806,13 +858,16 @@ visible as exactly themselves.
    fix-precedes-the-row gate on `sqrt = 0` is SATISFIED: [#719] was
    fixed by PR #760 (merged 2026-07-17; contiguous f32 sqrt now takes
    the correctly-rounded scalar path, layout-independent, and the
-   scalar loop measured ~1.6x FASTER than vvsqrtf). The row may be
+   scalar loop measured ~1.6x FASTER than vvsqrtf). The row is now
    authored; the table is never authored with a known-false row.
 2. Jointly with [#687]: `parity.rs` and `eval_agreement.rs` replaced by /
    rebuilt on the byte-equal-or-table-bounded rule (§C4.3). (The silent
    float-parse fallback itself is deleted earlier, by [#729] Phase 0 -
    this phase replaces the comparison rule it left behind; see the
-   corpus-diet note in that deliverable.)
+   corpus-diet note in that deliverable.) Tolerance selection uses the
+   closed `AgreementOp` identity, derived by an exhaustive match on the
+   actual result-producing `RiscOp`; a caller cannot label an exact op as a
+   transcendental by passing a string.
 3. The rejected-cells corpus (from `loud_unsupported.md` Phase 0) and
    the value corpus unified under the same comparison rule so
    diagnostics and values are oracle-checked identically.
@@ -823,10 +878,34 @@ visible as exactly themselves.
 still disagree on VALUES - those are [#729]-tracked cells, now perfectly
 visible.
 
-**Oracle:** the [#687] oracle suite running in CI on the full corpus:
-byte-exact everywhere except table-listed ops within bounds; any
-remaining value divergence appears as a named, issue-linked ignore -
-never as tolerance.
+**Oracle:** one command -
+`.venv/bin/python scripts/faithful_observation_phase3_oracle.py`, accepted at
+exit 0 with the final line `PHASE 3 ORACLE: PASS`. It runs the shared policy
+and numbered-spec tripwire, the full current `parity.rs` plus rejected-cell
+corpus, and `eval_agreement.rs`; it also freezes each suite's test inventory,
+comparator adoption, forbidden legacy f64/epsilon paths, ignore ledger, and
+the exact reviewed definition of every required Rust test. The definition
+digests are a guard artifact: changing one requires independent evidence for
+the replacement behavior, and changing the digest merely to accept a test
+edit is not a repair. This makes an emptied parity row, an emptied rejected-cell
+driver, or an eval test that emits a forged producer-authored receipt fail
+before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
+evidence; they are not trusted as evidence of their own free-form detail.
+Two digest-locked behavioral canaries perturb the compiled observation before
+the shared comparator and present an adjacent f32 result while the evaluator
+is marked nonconforming; together with the exact operation-identity canary,
+they prove that compiled bytes reach the decision, the real IR op selects the
+tolerance, and chelis#897 blocks tolerance rather than relying on source-token
+presence.
+The sole allowed ignore is
+`parity_transformer_block_library_only`, whose exact reason is the
+environmental system-CBLAS prerequisite. There are no value-divergence
+ignores. The individual Rust suites run continuously under workspace
+nextest, while `scripts/test_faithful_observation_phase3_oracle.py` runs in
+CI's script-unit stage and mutation-checks the oracle's structural guards.
+Run the composite command before phase acceptance; byte-exact output is the
+default, table-listed operations may differ only within their authored bound,
+and every remaining value divergence is a failure rather than tolerance.
 
 ---
 
@@ -865,8 +944,10 @@ never as tolerance.
   and CAPACITY change, not a rendering one. Three separations remain
   open on that side and each already has its named cell: the runtime
   box's single `CHELIS_VALUE_FLOAT64` tag and `f64_` slot ([#865]),
-  eval's separable `Vec<f64>` plus `precision: Prim` fields ([#864],
-  [#717]), and the wire's `Vec<f64>` tensor data plus lone `Float64`
+  eval's separable `Vec<f64>` plus `precision: Prim` fields ([#717];
+  [#864]'s narrower static-literal ingress instance now carries a private
+  typed leaf through every f32/f64 cast before entering that storage), and the
+  wire's `Vec<f64>` tensor data plus lone `Float64`
   scalar variant ([#686]).
   **Phase 2's FORMATTING is forward-compatible with that payload by
   construction; its DECODING was not, and that distinction matters**
@@ -962,3 +1043,8 @@ guaranteed to be a real value bug wearing its own name.
 [#964]: https://github.com/Chelis-Lang/chelis/pull/964
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
+[#856]: https://github.com/Chelis-Lang/chelis/issues/856
+[#897]: https://github.com/Chelis-Lang/chelis/issues/897
+[#1043]: https://github.com/Chelis-Lang/chelis/pull/1043
+[#1078]: https://github.com/Chelis-Lang/chelis/issues/1078
+[#1110]: https://github.com/Chelis-Lang/chelis/issues/1110

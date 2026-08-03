@@ -87,8 +87,8 @@ finding folded in before merge; the red teams' discoveries are filed as
 [#794]/[#795]/[#796].
 
 **Wave 2 - the independently-landable value work.** [#732] Phase 1
-landed with Wave 1 (above); the remaining Wave 2 set is [#732] Phase 2
-(the generated C side: fixes [#716]/[#723] outright and gives the
+landed with Wave 1 (above); [#732] Phase 2 also LANDED (PR #863) and
+delivered the generated C side, fixing [#716]/[#723] outright and giving the
 refactor its byte-exact instrument; its one authoritative completion
 oracle is
 `.venv/bin/python scripts/faithful_observation_phase2_oracle.py`,
@@ -96,7 +96,21 @@ accepted at exit 0 with final line `PHASE 2 ORACLE: PASS` - it carries
 the known-red ledger that keeps every annexed [#729]-family cell
 re-executed rather than silently skipped, and fails when one goes
 green, so the upstream repair's landing forces the un-ignore in the
-same change set) in parallel with [#731] Phases 2-3 (the
+same change set. That protocol has now retired the [#864] cell: current
+execution showed its root metadata was already F64, while the static
+`to_tensor` lowering shortcut discarded the checked dtype of each literal
+leaf before widening it. The construction fix carries NO typed leaf: static
+extraction keeps [#856]'s exact `RawScalar` and finalizes only FLOAT leaves,
+at the width read from each leaf's own type metadata. Routing every leaf
+through an f64 value field - the shape an earlier draft proposed - would
+have reintroduced the above-2^53 integer loss that exact lane prevents.
+The original assertion covers enclosing-tensor and scalar-widening shapes,
+and the repaired row is locked into the oracle's unconditional must-run
+inventory after leaving the known-red ledger. The same protocol retired the
+[#684] row ([#1078]) and annexed [#1110], the compiled lane's still-open
+half of the same suffixed-literal shape. This is a
+narrow [#717]/[#729]-family value repair and does not claim the atomic
+per-dtype-storage Phase 1 migration. It ran in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag). [#730] Phase 2 is COMPLETE AND
 ACCEPTED (PR [#799], merged 2026-07-24): closed vocabularies, staged
 HostType/ABI separation, and structured emission, with the authoritative
@@ -141,7 +155,10 @@ tripwire compiling until the new dtype is classified.
 table per [`capability_table.md`](capability_table.md); [#733]
 Phase 3 (the first blocking provenance ratchet) ships with it only after
 the advisory Buoy pilot and change-impact phases are green; [#732] Phase 3
-(the tolerance table + the [#687] handshake) closes the oracle.
+(the tolerance table + the [#687] handshake) is delivered by the revision
+carrying this text and closes the internal oracle with
+`.venv/bin/python scripts/faithful_observation_phase3_oracle.py`; [#754]
+remains its external shell consumer.
 [#730] Phase 3 (gates become UX; amended 2026-07-30 to also deliver the
 typed diagnostic-kind and rejection-authority work) keeps Wave 4 as its
 recommended slot but is NOT gated on the capability table or the Buoy
@@ -237,8 +254,8 @@ flowchart TB
     direction TB
     n732p0["P0 · round-trip harness + exit census (LANDED)"]:::w0
     n732p1["P1 · format_element + eval adoption<br/>+ eval-side migration (LANDED)"]:::w2
-    n732p2["P2 · generated C helper + to_list arms<br/>+ C-side migration"]:::w2
-    n732p3["P3 · tolerance table + #687 handshake"]:::w4
+    n732p2["P2 · generated C helper + to_list arms<br/>+ C-side migration (LANDED)"]:::w2
+    n732p3["P3 · tolerance table + #687 handshake<br/>(DELIVERED in this revision)"]:::w4
     n732p0 --> n732p1 --> n732p2 --> n732p3
   end
 
@@ -745,3 +762,8 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
 [#894]: https://github.com/Chelis-Lang/chelis/pull/894
+[#717]: https://github.com/Chelis-Lang/chelis/issues/717
+[#856]: https://github.com/Chelis-Lang/chelis/issues/856
+[#864]: https://github.com/Chelis-Lang/chelis/issues/864
+[#1078]: https://github.com/Chelis-Lang/chelis/issues/1078
+[#1110]: https://github.com/Chelis-Lang/chelis/issues/1110
