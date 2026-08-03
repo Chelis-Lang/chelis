@@ -6,8 +6,8 @@
 //! The checker implements ONLY the value-set column of the §C1 table in
 //! `spec/design/dtype_semantics.md` over printed lane output. Its API is
 //! frozen at Phase 0 exit; these tests are the executable statement of
-//! its membership semantics, including the two documented text-level
-//! accommodations (print-truncation slack and own-width shortest forms).
+//! its membership semantics, including the documented own-width shortest
+//! form. Print-truncation slack is retired: membership is exact.
 //!
 //! New cells the checker exposes that the audit did not enumerate get
 //! their own `#[ignore]`d rows in the matrix files with a fresh issue
@@ -17,7 +17,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{assert_elements_in_domain, element_domain_violation, printed_value_tokens};
+use common::{
+    DOMAIN_PRINT_TRUNCATION_SLACK, assert_elements_in_domain, element_domain_violation,
+    printed_value_tokens,
+};
 
 fn is_member(prim: &str, token: &str) -> bool {
     element_domain_violation(prim, token).is_none()
@@ -169,14 +172,15 @@ fn f32_accepts_exact_widened_and_own_width_shortest_forms() {
 
 #[test]
 fn f32_rejects_the_retired_percent_g_truncation_form() {
+    assert_eq!(DOMAIN_PRINT_TRUNCATION_SLACK, 0.0);
     assert!(!is_member("f32", "0.300000011920929"));
 }
 
 #[test]
 fn f32_rejects_unrounded_f64_values() {
     // The chelis#717 shapes: raw f64 results in an f32 tensor. Each sits
-    // ~1e-8 relative from the nearest f32, five orders of magnitude
-    // outside the print-truncation slack.
+    // ~1e-8 relative from the nearest f32. With exact-zero slack, only the
+    // exact widened value or the dtype's own-width shortest form is accepted.
     assert!(!is_member("f32", "0.30000000447034836"));
     assert!(!is_member("f32", "0.3333333333333333"));
     assert!(!is_member("f32", "0.6666666666666666"));
