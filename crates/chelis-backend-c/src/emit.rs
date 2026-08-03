@@ -809,7 +809,12 @@ impl CEmitter {
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("a fused integer tensor at C DAG node {}", node.0),
                 Stage::Codegen("c"),
-                "direct integer abs is implemented with an exact trapping kernel; general fused integer emission remains Phase 3 work, so this externally supplied fused shape cannot enter the float-only template",
+                chelis_types::unimplemented_rejection!(
+                    691,
+                    "direct integer abs is implemented with an exact trapping kernel; \
+                     general fused integer emission remains Phase 3 work, so this \
+                     externally supplied fused shape cannot enter the float-only template"
+                ),
             ));
         }
         Ok(())
@@ -1694,7 +1699,33 @@ impl CEmitter {
             other => {
                 // chelis#729 rework: a constant the target cannot
                 // represent surfaces through the chelis#730 structured
-                // channel instead of panicking the compiler.
+                // channel instead of panicking the compiler. The two
+                // dtypes that reach here carry DIFFERENT authorities and
+                // must stay distinguishable per [05-UNS-5]: f8e4m3 is
+                // decided by spec, a string constant cell is unbuilt.
+                let authority = match other {
+                    Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                        "[04-DTYPE-1]",
+                        "no C constant representation exists for this dtype: f8e4m3 is \
+                         reserved but inactive and must not reach backend emission \
+                         (spec/04-type-system.md section 1.1.1)"
+                    ),
+                    Prim::String => chelis_types::unimplemented_rejection!(
+                        729,
+                        "no C constant representation exists for this dtype: the \
+                         exhaustive target capability table has no C string storage cell \
+                         (spec/04-type-system.md section 1.1)"
+                    ),
+                    Prim::F32
+                    | Prim::F64
+                    | Prim::F16
+                    | Prim::Bf16
+                    | Prim::Int8
+                    | Prim::Int16
+                    | Prim::Int32
+                    | Prim::Int64
+                    | Prim::Bool => unreachable!("emitted constant precision"),
+                };
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(other.name().to_string()),
                     format!(
@@ -1702,8 +1733,7 @@ impl CEmitter {
                         other.name()
                     ),
                     Stage::Codegen("c"),
-                    "no C constant representation exists for this dtype \
-                     (spec/04-type-system.md section 1.1)",
+                    authority,
                 ));
             }
         }

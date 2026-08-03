@@ -276,7 +276,11 @@ fn reject_integer_abs(dag: &Dag) -> Result<(), String> {
             UnsupportedKind::Op("Abs".to_string()),
             format!("an integer tensor at Metal DAG node {}", node.0),
             Stage::Codegen("metal"),
-            "integer abs code generation waits for the typed, trapping Phase 3 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane",
+            chelis_types::unimplemented_rejection!(
+                729,
+                "integer abs code generation waits for the typed, trapping Phase 3 \
+                 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
+            ),
         )
         .to_string());
     }

@@ -1145,8 +1145,22 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
                  entry-scoped tensor kernel and does not yet lower transform entries \
                  standalone",
                 chelis_types::unsupported::Stage::Codegen("c"),
-                "run the transform through `eval`, or select a non-transform def with \
-                 `entry_name=`",
+                // PROVISIONAL AUTHORITY - needs maintainer adjudication.
+                // No open issue owns "the entry-scoped compiled lane lowers a
+                // transform entry standalone": the capability owner this code
+                // names for multi-root grad-tuple emission (chelis#309) is
+                // CLOSED, and chelis#817/#818 (the defects that produced this
+                // decline) are closed too. chelis#613 is the nearest OPEN
+                // compiled-lane grad-rejection issue, cited here so the
+                // rejection carries a real open authority per [05-UNS-5]
+                // rather than none. Per spec/design/loud_unsupported.md
+                // section C2.1, membership does NOT prove relevance - if this
+                // capability deserves its own issue, file it and re-point.
+                chelis_types::unimplemented_rejection!(
+                    613,
+                    "run the transform through `eval`, or select a non-transform def \
+                     with `entry_name=`"
+                ),
             ))
         }
         other => stage_error(
@@ -1476,8 +1490,11 @@ pub fn reef_context_hip_unsupported_error() -> CompilerError {
          def's inputs/outputs into a single kernel instead of compiling \
          the requested entry",
         chelis_types::unsupported::Stage::Codegen("hip"),
-        "compile the entry with `target=\"c\"`, or run it through `eval`, \
-         until HIP reef-context support lands (chelis#829)",
+        chelis_types::unimplemented_rejection!(
+            829,
+            "compile the entry with `target=\"c\"`, or run it through `eval`, \
+             until HIP reef-context support lands"
+        ),
     ))
 }
 
@@ -3158,8 +3175,11 @@ fn reject_eval_only_builtins(
                 chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
                 "compiled targets (the host interpreter's eval/test lanes only)",
                 chelis_types::unsupported::Stage::Codegen(target_label),
-                "run the program with `chelis eval` or `chelis test`, or remove the \
-                 call before building (spec/05-risc-primitives.md §3.6)",
+                chelis_types::deliberate_rejection!(
+                    "[05-HOST-1]",
+                    "run the program with `chelis eval` or `chelis test`, or remove the \
+                     call before building (spec/05-risc-primitives.md sections 3.6/3.7)"
+                ),
             ),
         ));
     }

@@ -300,9 +300,15 @@ out = tensor_scan(
         message.contains("tensor_scan"),
         "rejection must name the builtin, got: {message}"
     );
+    // [05-UNS-5]: the host-only contract is now carried by the TYPED
+    // authority rather than the prose "host-only builtin" this replaced.
+    // [05-HOST-1] is the atom that decides it, so pin the citation and the
+    // explanation together - strictly stronger than the former either/or
+    // spelling check.
     assert!(
-        message.contains("host-only") || message.contains("Host-Runtime"),
-        "rejection must explain the host-only contract, got: {message}"
+        message.contains("deliberate [05-HOST-1]") && message.contains("host-runtime"),
+        "rejection must cite the deciding atom and explain the host-only contract, \
+         got: {message}"
     );
     // Belt-and-suspenders: confirm no C source containing the silent
     // stub was emitted via the err path. The previous regression
