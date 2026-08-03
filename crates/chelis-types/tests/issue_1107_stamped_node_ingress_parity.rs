@@ -421,3 +421,107 @@ fn reshape_with_host_lane_list_spelling_is_rejected_on_both_ingresses() {
         );
     }
 }
+
+// ── round 3: `match`-arm readers with a non-erroring default ───────────────
+//
+// The round-1/2 audits enumerated only the `let ... Expr::List .. else`
+// spelling. The destructure shape was never the correctness boundary -- a
+// stamped `Expr::Node` child hits a `match`-arm's `_ =>` default just as it hit
+// a `let-else`'s `else` -- so these are the same class, found later only
+// because the enumeration pattern was too narrow. All three are pre-existing.
+
+#[test]
+fn expand_with_sourceless_runtime_size_is_rejected_on_both_ingresses() {
+    // `classify_expand_size` had an `Expr::List`-only match with a
+    // `_ => SizeClass::Unknown` default, and `Unknown` is the ACCEPTING class
+    // in `check_expand_signature` while `Sourceless` is the rejecting one. So a
+    // stamped size argument fell to the fail-OPEN default and the typed ingress
+    // accepted a §4.7.2 sourceless size that the IR ingress rejected -- the
+    // silent-miscompile class chelis#469 exists to prevent.
+    assert_agree_and_reject(
+        "(defsig {} f (t-fn {} (t-tensor {} (d-name {} seq) (t-prim {} f32)) (t-prim {} int32) \
+           (t-tensor {} (d-name {} seq) (t-prim {} f32))))\n\
+         (def {} f (fn {} (params {} x k) \
+           (app {} (var {} expand) (var {} x) (lit {type: (t-prim {} int32)} 0) (var {} k))))",
+        "no tensor in scope carries it",
+        "expand sized by a runtime scalar with no tensor source",
+    );
+}
+
+#[test]
+fn expand_sized_by_a_shape_read_is_accepted_on_both_ingresses() {
+    // Over-rejection control for the fix above: a size read off an in-scope
+    // tensor is the canonical Form-3 source and must still check clean.
+    assert_agree_and_accept(
+        "(defsig {} f (t-fn {} (t-tensor {} (d-lit {} 4) (t-prim {} f32)) \
+           (t-tensor {} (d-lit {} 4) (t-prim {} f32))))\n\
+         (def {} f (fn {} (params {} x) (app {} (var {} expand) (var {} x) \
+           (lit {type: (t-prim {} int32)} 0) \
+           (app {} (var {} shape) (var {} x) (lit {type: (t-prim {} int32)} 0)))))",
+        "expand sized by a shape read of an in-scope tensor",
+    );
+}
+
+fn to_tensor_pair_program(declared_len: &str) -> String {
+    format!(
+        "(defsig {{}} h (t-tensor {{}} (d-lit {{}} {declared_len}) (t-prim {{}} f32)))\n\
+         (def {{}} h (app {{}} (var {{}} to_tensor) \
+           (app {{}} (var {{}} Cons) (app {{}} (var {{}} neg) (lit {{type: (t-prim {{}} f32)}} 1.0)) \
+           (app {{}} (var {{}} Cons) (app {{}} (var {{}} neg) (lit {{type: (t-prim {{}} f32)}} 2.0)) \
+           (var {{}} Nil)))))"
+    )
+}
+
+#[test]
+fn to_tensor_element_count_mismatch_is_rejected_on_both_ingresses() {
+    // `extract_numeric_leaf_for_shape` had the same shape of defect, so a
+    // stamped `lit`/`cast`/`neg` leaf defaulted to `None`, the static cons-chain
+    // walk gave up, and `to_tensor` produced a rank-1 WILDCARD that masked the
+    // real element count. A two-element literal declared `tensor[3, f32]` was
+    // accepted by the typed ingress and rejected by the IR one.
+    assert_agree_and_reject(
+        &to_tensor_pair_program("3"),
+        "body doesn't match declared signature",
+        "to_tensor with two elements declared as tensor[3]",
+    );
+}
+
+#[test]
+fn to_tensor_matching_element_count_is_accepted_on_both_ingresses() {
+    assert_agree_and_accept(
+        &to_tensor_pair_program("2"),
+        "to_tensor with two elements declared as tensor[2]",
+    );
+}
+
+#[test]
+fn uniform_like_literal_bounds_are_accepted_on_both_ingresses() {
+    // The third member, and the one that bites hardest: `is_static_numeric_bound`
+    // had an `Expr::List`-only match with a fail-CLOSED `_ => false` default, so
+    // on the stamped ingress EVERY bound read as non-resolvable and ordinary
+    // literal bounds were REJECTED by `check_typed_program` while
+    // `check_ir_program` accepted them. An over-rejection of a valid program.
+    // Covers all three accepted bound spellings: plain literal, `cast`-wrapped,
+    // and negated.
+    for (label, low) in [
+        ("plain literal", "(lit {type: (t-prim {} f32)} 0.0)"),
+        (
+            "cast-wrapped",
+            "(cast {} (lit {type: (t-prim {} f32)} 0.0) (t-prim {} f32))",
+        ),
+        (
+            "negated",
+            "(app {} (var {} neg) (lit {type: (t-prim {} f32)} 1.0))",
+        ),
+    ] {
+        assert_agree_and_accept(
+            &format!(
+                "(defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} f32)) \
+                   (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} f32))))\n\
+                 (def {{}} f (fn {{}} (params {{}} x) (app {{}} (var {{}} uniform_like) (var {{}} x) \
+                   {low} (lit {{type: (t-prim {{}} f32)}} 1.0))))"
+            ),
+            &format!("uniform_like with a {label} low bound"),
+        );
+    }
+}

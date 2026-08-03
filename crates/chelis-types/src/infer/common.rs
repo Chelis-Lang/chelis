@@ -160,61 +160,72 @@ pub(super) fn is_static_numeric_bound(expr: &deep::Expr) -> bool {
     // bound is then treated as non-resolvable and rejected loudly, never a
     // silent accept).
     stack_guard!("is_static_numeric_bound", expr, false);
-    match expr {
-        deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _) => true,
-        deep::Expr::List(list, _) => match get_tag(list) {
-            // A float-target cast of a resolvable value. An integer target
-            // truncates and is left unresolved, matching the lowering.
-            Some(DeepTag::Cast) => {
-                let inner_resolvable = list.elements.get(2).is_some_and(is_static_numeric_bound);
-                let target_is_float = list.elements.get(3).is_some_and(deep_prim_is_float);
-                target_is_float && inner_resolvable
-            }
-            // neg(<inner>): unary minus desugars to `(app {} (var {} neg) <inner>)`.
-            Some(DeepTag::App) if children(list).first().is_some_and(expr_is_neg_var) => {
-                children(list).get(1).is_some_and(is_static_numeric_bound)
-            }
-            // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
-            // The lowering's `extract_f64_value` catch-all reads element 2 of
-            // ANY list, which blesses a form whose value is NOT at element 2 --
-            // e.g. `(par {} 2.0 3.0)`, whose value is its LAST child (3.0) per
-            // spec/03-deep-syntax.md §2.3, while element 2 is the FIRST child
-            // (2.0). Accepting that would let the checker bless a bound the
-            // lowering folds from the wrong position (the chelis#703 silent-
-            // substitution shape; chelis#731 red team). The checker's arm is
-            // therefore NARROWER than the lowering's on purpose: a `par`-wrapped
-            // (or otherwise non-literal, non-cast, non-neg) bound is rejected
-            // here, so it never reaches the fold. The lowering-side over-broad
-            // catch-all is filed separately.
-            Some(DeepTag::Lit) => matches!(
-                list.elements.get(2),
-                Some(deep::Expr::Atom(
-                    deep::Atom::Float(_) | deep::Atom::Int(_),
-                    _
-                ))
-            ),
-            _ => false,
-        },
+    if matches!(
+        expr,
+        deep::Expr::Atom(deep::Atom::Float(_) | deep::Atom::Int(_), _)
+    ) {
+        return true;
+    }
+    // chelis#1107 round 3: this was an `Expr::List`-only match with a
+    // fail-CLOSED `_ => false` default, so on the stamped ingress EVERY bound
+    // read as non-resolvable and `uniform_like(x, 0.0, 1.0)` -- ordinary
+    // literal bounds -- was REJECTED by `check_typed_program` while
+    // `check_ir_program` accepted it. An over-rejection of a valid program,
+    // in the same reader class as the shape-path findings.
+    let Some((tag, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    match tag {
+        // A float-target cast of a resolvable value. An integer target
+        // truncates and is left unresolved, matching the lowering.
+        DeepTag::Cast => {
+            let inner_resolvable = kids.first().is_some_and(is_static_numeric_bound);
+            let target_is_float = kids.get(1).is_some_and(deep_prim_is_float);
+            target_is_float && inner_resolvable
+        }
+        // neg(<inner>): unary minus desugars to `(app {} (var {} neg) <inner>)`.
+        DeepTag::App if kids.first().is_some_and(expr_is_neg_var) => {
+            kids.get(1).is_some_and(is_static_numeric_bound)
+        }
+        // Only a `lit`-tagged list carries a numeric atom AS ITS VALUE.
+        // The lowering's `extract_f64_value` catch-all reads element 2 of
+        // ANY list, which blesses a form whose value is NOT at element 2 --
+        // e.g. `(par {} 2.0 3.0)`, whose value is its LAST child (3.0) per
+        // spec/03-deep-syntax.md §2.3, while element 2 is the FIRST child
+        // (2.0). Accepting that would let the checker bless a bound the
+        // lowering folds from the wrong position (the chelis#703 silent-
+        // substitution shape; chelis#731 red team). The checker's arm is
+        // therefore NARROWER than the lowering's on purpose: a `par`-wrapped
+        // (or otherwise non-literal, non-cast, non-neg) bound is rejected
+        // here, so it never reaches the fold. The lowering-side over-broad
+        // catch-all is filed separately.
+        DeepTag::Lit => matches!(
+            kids.first(),
+            Some(deep::Expr::Atom(
+                deep::Atom::Float(_) | deep::Atom::Int(_),
+                _
+            ))
+        ),
         _ => false,
     }
 }
 
 /// True when `target` is a `(t-prim {} <name>)` naming a float precision.
 pub(super) fn deep_prim_is_float(target: &deep::Expr) -> bool {
-    matches!(target, deep::Expr::List(list, _)
-        if get_tag(list) == Some(DeepTag::TPrim)
-            && children(list)
-                .first()
-                .and_then(symbol_name)
-                .and_then(Prim::parse_name)
-                .is_some_and(|prim| prim.is_float()))
+    // chelis#1107 round 3: carrier-preserving read.
+    matches!(stamped_parts(target), Some((DeepTag::TPrim, _, kids))
+        if kids
+            .first()
+            .and_then(symbol_name)
+            .and_then(Prim::parse_name)
+            .is_some_and(|prim| prim.is_float()))
 }
 
 /// True when `expr` is `(var {} neg)`, the callee of a desugared unary minus.
 pub(super) fn expr_is_neg_var(expr: &deep::Expr) -> bool {
-    matches!(expr, deep::Expr::List(list, _)
-        if get_tag(list) == Some(DeepTag::Var)
-            && children(list).first().and_then(symbol_name) == Some("neg"))
+    // chelis#1107 round 3: carrier-preserving read.
+    matches!(stamped_parts(expr), Some((DeepTag::Var, _, kids))
+        if kids.first().and_then(symbol_name) == Some("neg"))
 }
 
 /// Get metadata map from element[1] of a list.
