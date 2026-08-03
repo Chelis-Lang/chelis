@@ -308,7 +308,11 @@ Native JSON over the prelude `Json` ADT
 JList List[Json] | JDict Dict[string, Json]`). **Eval/test-only**:
 `chelis build` and the public `compile()` API reject every name below
 whole-program (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`), like
-`process_run`. All failures (malformed JSON, missing path, type mismatch,
+`process_run`. The compiled-lane counterpart is `Std.Io.{Json,Csv}` (§11):
+ordinary package defs that `chelis build` accepts, over std's own distinct
+`Json` ADT — reef package name-rewriting keeps its same-named
+`parse_json`/`to_json` from colliding with these builtins in either lane.
+All failures (malformed JSON, missing path, type mismatch,
 non-finite number) are loud eval errors — no silent defaults. Numeric
 semantics are normative in `spec/05-risc-primitives.md` §3.7
 ([05-OP-1]..[05-OP-5]).
@@ -352,7 +356,8 @@ is the fixed-shape Json value
 every §3.8 accessor works on it (`json_list(c, "rows")`, `json_str(c,
 "rows.0.px")`, `to_json(c)` for debugging) and there is deliberately no
 `Csv` prelude type. **Eval/test-only** like §3.8
-(`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`). All failures are loud eval
+(`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`); build-lane CSV reading and
+writing live in `Std.Io.Csv` (§11). All failures are loud eval
 errors — no silent NaN/defaults. Numeric cell semantics are normative in
 `spec/05-risc-primitives.md` §3.7 ([05-OP-2], [05-OP-3]).
 
@@ -581,7 +586,7 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 | `Std.Sort` | `sort_1d`, `sort_2d` |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
 | `Std.Index` | `list_index`, `take_list`, `drop_list` |
-| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`to_json`/`write_json` (+ exported `Json` constructors, `try_write_*` twins). Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
+| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors, `try_*` twins). Ordinary package defs, so they run under **`chelis build`** — which rejects the §3.8/§3.9 builtins — making this the compiled lane's structured-I/O path; std's `Json` ADT (`JsonInt`/`JsonFloat`/…) is a distinct type from the prelude `Json` (`JInt`/`JNum`/…), and package name-rewriting keeps the shared callable names apart. Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
 | `Std.Text` | `join(parts, sep)` |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | dates, fixed-point, tokenization, `run`/`run_chelis`, contract predicates |

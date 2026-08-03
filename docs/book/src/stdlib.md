@@ -184,9 +184,7 @@ exported, so documents can be built directly):
   `json_array`, `json_object`, plus `json_is_null`.
 - `to_json(value)` renders a `Json` value compactly (object keys in dictionary
   insertion order, f64 via `to_string`'s shortest-round-trip form — a claim
-  scoped to **f64 specifically**: narrower floats route through a compiled-lane
-  `to_string` funnel that PR #863 fixes and that fix is not on `main` at this
-  writing, so only the f64 path is version-independent — escapes for
+  made for **f64 specifically**, the dtype `JsonFloat` carries — escapes for
   `\" \\ \n \t \r`). Non-finite numbers have no JSON representation: `to_json`
   fails on them and `try_to_json` returns `None`. `write_json(path, value)`
   writes the rendered text and names the path on failure; `try_write_json` is
@@ -196,7 +194,14 @@ exported, so documents can be built directly):
   rejects `\uXXXX` input. Both halves of that asymmetry need a character-level
   primitive and are tracked as chelis#953.
 
-These IO modules carry the `IO` effect and run on the evaluator and host paths.
+These IO modules carry the `IO` effect and run in **both lanes**: under
+`chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.
+They are distinct from the eval-only prelude JSON/CSV builtins
+(`parse_json`/`to_json`/`parse_csv`/`to_csv` over the prelude `Json` ADT,
+chelis#890/chelis#903), which `chelis build` rejects whole-program — so for a
+compiled program this module surface is the structured-I/O path. The shared
+names are different callables on different types; reef package name-rewriting
+keeps them apart in both lanes.
 
 ### Tokenization
 

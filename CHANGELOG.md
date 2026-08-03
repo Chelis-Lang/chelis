@@ -215,7 +215,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   per-character recursive, so multi-kilobyte fields do not hit the eval
   lane's recursion ceiling. `try_load_json` on a missing path now returns
   `None` (previously it trapped inside `read_file`), matching
-  `try_read_csv`'s missing-file contract.
+  `try_read_csv`'s missing-file contract. These serializers are the
+  **compiled-lane counterpart** of the eval-only prelude JSON/CSV builtins
+  (chelis#890/chelis#903): ordinary package defs that `chelis build`
+  accepts, on std's own `Json` ADT, unaffected by the builtins'
+  `EVAL_ONLY_HOST_BUILTINS` rejection — reef package name-rewriting keeps
+  the shared `to_json`/`to_csv`/`parse_json` names apart in both lanes.
 
 - **`chelis-vocab` defines a closed vocabulary for the physical representations of runtime elements.**
   `RuntimeDType::repr()` maps each dtype to one `Repr` value.
