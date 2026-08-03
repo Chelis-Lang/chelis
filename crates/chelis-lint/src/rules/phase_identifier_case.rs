@@ -1,8 +1,7 @@
-//! Rule `phase-identifier-case` — Phase identifiers are
-//! `phase` + digit/letter in lowercase form when embedded in filenames
-//! (§9.1). The historic `phaseA_*.rs` style (camelCase chunk inside an
-//! otherwise snake_case filename) is the violation; the corrected form is
-//! `phase_a_*.rs`.
+//! Rule `phase-identifier-case`. The historic `phaseA_*.rs` style embeds a
+//! camelCase chunk in an otherwise snake-case filename. New artifacts use
+//! semantic names; legacy artifacts that must retain the identifier use
+//! `phase_a_*.rs` (`CONTRIBUTING.md` § Declarative Naming).
 
 use crate::{Context, Rule, Surface, Violation};
 use regex::Regex;
@@ -14,7 +13,7 @@ fn phase_re() -> &'static Regex {
     PHASE_RE.get_or_init(|| {
         // Match the bare token `phaseA`, `phaseB`, … — `phase` followed
         // immediately by an uppercase letter, with a token boundary on
-        // either side. Allows the new `phase_a` form to pass.
+        // either side. Allows the legacy-compatible `phase_a` form to pass.
         Regex::new(r"(^|[^a-zA-Z])phase[A-Z]").unwrap()
     })
 }
@@ -27,7 +26,7 @@ impl Rule for PhaseIdentifierCase {
     }
 
     fn spec_ref(&self) -> &str {
-        "§9.1"
+        "CONTRIBUTING.md § Declarative Naming"
     }
 
     fn applies_to(&self) -> &[Surface] {
@@ -39,7 +38,7 @@ impl Rule for PhaseIdentifierCase {
     }
 
     fn summary(&self) -> &str {
-        "phase identifiers in filenames use `phase_a` (snake), not `phaseA` (camelCase chunk)"
+        "use semantic filenames; legacy phase identifiers use `phase_a`, not `phaseA`"
     }
 
     fn check(&self, ctx: &Context<'_>) -> Vec<Violation> {
@@ -54,7 +53,7 @@ impl Rule for PhaseIdentifierCase {
                 line: None,
                 col: None,
                 message: format!(
-                    "filename `{name}` uses `phaseA` form; rename to `phase_a` per §9.1"
+                    "filename `{name}` uses legacy `phaseA` form; choose a semantic name, or use `phase_a` only when compatibility requires retaining the identifier, per CONTRIBUTING.md § Declarative Naming"
                 ),
             }]
         } else {
@@ -84,6 +83,7 @@ mod tests {
         let v = run("phaseA_item6_from_github.rs");
         assert_eq!(v.len(), 1);
         assert!(v[0].message.contains("phase_a"));
+        assert_eq!(v[0].spec_ref, "CONTRIBUTING.md § Declarative Naming");
     }
 
     #[test]
@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn accepts_phase3j_form() {
-        // Historical phase3j (digit+lowercase-letter) is the established
-        // convention per §9.1 — must not fire.
+        // Historical phase3j identifiers remain accepted for compatibility;
+        // this lint does not authorize new phase-based names.
         let v = run("phase3j_pre_release.md");
         assert!(v.is_empty());
     }

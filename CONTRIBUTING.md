@@ -52,6 +52,33 @@ hand-maintained copies.
 - Update the owning doc when a public language or compiler behavior changes.
 - Do not revert unrelated work already present in the repo.
 
+## Declarative Naming
+
+Use declarative or informational names for branches, commits, plans, tests, files, and
+other artifacts. Name the capability, behavior, invariant, or deliverable they contain;
+a reader should understand the subject without first finding a roadmap that explains
+an opaque sequence label.
+
+Do not use `phase`, `tier`, `stage`, `milestone`, `step`, `item`, or a bare
+letter/number as the primary identity. A sequencing label may appear as secondary
+tracking context when it is genuinely useful, but it never substitutes for a semantic
+name.
+
+Branch names use a conventional-commit type prefix (`feat`, `fix`, `test`, `docs`,
+`style`, `chore`, or `refactor`) followed by a descriptive kebab-case slug:
+
+```text
+feat/json-serialization
+fix/runtime-shape-validation
+docs/timeless-spec-contracts
+```
+
+Avoid names such as `feat/phase-a-item6`, `fix/tier-2`, or `docs/phase3j`: they record
+position but not purpose. When a historical artifact must retain a phase identifier
+for cross-reference compatibility, use the surrounding surface's normal case
+(`phase_a` in a snake-case filename). This is a legacy compatibility rule, not
+authorization for new phase-based names.
+
 ## Repo Gate (before every push)
 
 `scripts/gate.py` is the single source of truth for the per-PR
