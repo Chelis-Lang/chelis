@@ -35,7 +35,7 @@
 //! consume_declared_roots(parts.forward_node_index);
 //! ```
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use chelis_deep::{DeepTag, Expr as DeepExpr};
@@ -320,6 +320,29 @@ impl AllRootNames {
 pub struct TensorRootNames(Vec<IrName>);
 
 impl TensorRootNames {
+    /// Drop the names the lowerer recorded as contributing no root
+    /// (chelis#1095).
+    ///
+    /// The declared set is built before lowering, from each def's declared
+    /// type. One shape does not survive lowering: a `grad` whose adjoint is
+    /// absent lowers to an empty value, so its def owns no root. Only the
+    /// lowerer can know that, so it reports the names and this subtracts
+    /// them. Every other kind of drift still reaches
+    /// [`NamedRoots::aligned`] — this removes names that were positively
+    /// accounted for, not names that merely failed to appear.
+    fn without(&self, rootless: &BTreeSet<String>) -> Self {
+        if rootless.is_empty() {
+            return self.clone();
+        }
+        Self(
+            self.0
+                .iter()
+                .filter(|name| !rootless.contains(name.as_str()))
+                .cloned()
+                .collect(),
+        )
+    }
+
     pub fn as_slice(&self) -> &[IrName] {
         &self.0
     }
@@ -804,7 +827,7 @@ pub fn lower_checked(
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
     pipeline_bail_if_cancelled("lower")?;
-    let lower_result = chelis_ir::lower::try_lower_program(checked.program());
+    let lower_result = chelis_ir::lower::try_lower_program_to_library(checked.program());
     pipeline_bail_if_cancelled("lower")?;
     finish_isolated_lowering(checked, mode, lower_result)
 }
@@ -812,27 +835,43 @@ pub fn lower_checked(
 fn finish_isolated_lowering(
     checked: CheckedCompilation,
     mode: LoweringMode,
-    lower_result: Result<Dag, LowerDiagnostic>,
+    lower_result: Result<LoweredLibrary, LowerDiagnostic>,
 ) -> Result<LoweredCompilation, PipelineRejection> {
     pipeline_bail_if_cancelled("lower")?;
-    let (dag, root_binding_mode) = match lower_result {
-        Ok(dag) if mode == LoweringMode::AllowHostBackend && dag.roots().is_empty() => {
-            (dag, RootBindingMode::SelectedHostBackend)
+    let (dag, rootless_defs, root_binding_mode) = match lower_result {
+        Ok(library) if mode == LoweringMode::AllowHostBackend && library.dag.roots().is_empty() => {
+            (
+                library.dag,
+                library.rootless_defs,
+                RootBindingMode::SelectedHostBackend,
+            )
         }
-        Ok(dag) => (dag, RootBindingMode::Exact),
+        Ok(library) => (library.dag, library.rootless_defs, RootBindingMode::Exact),
         Err(diagnostic)
             if mode == LoweringMode::AllowHostOnly
                 && !diagnostic.fatal
                 && checked.root_metadata.tensor_names.is_empty() =>
         {
-            (Dag::new(), RootBindingMode::AcceptedNonfatalRejection)
+            (
+                Dag::new(),
+                BTreeSet::new(),
+                RootBindingMode::AcceptedNonfatalRejection,
+            )
         }
-        Err(diagnostic) if mode == LoweringMode::AllowHostBackend && !diagnostic.fatal => {
-            (Dag::new(), RootBindingMode::AcceptedNonfatalRejection)
-        }
+        Err(diagnostic) if mode == LoweringMode::AllowHostBackend && !diagnostic.fatal => (
+            Dag::new(),
+            BTreeSet::new(),
+            RootBindingMode::AcceptedNonfatalRejection,
+        ),
         Err(diagnostic) => return Err(PipelineRejection::Lower(diagnostic)),
     };
-    finish_lowering(checked, dag, RootCountContext::Program, root_binding_mode)
+    finish_lowering(
+        checked,
+        dag,
+        &rootless_defs,
+        RootCountContext::Program,
+        root_binding_mode,
+    )
 }
 
 /// Lower a checked compilation against a reusable library DAG.
@@ -852,14 +891,14 @@ pub fn lower_checked_with_context(
 
     let lower_result = chelis_ir::lower::try_lower_program_with_context(library, &checked.program);
     pipeline_bail_if_cancelled("lower")?;
-    let (mut dag, accepted_nonfatal_rejection) = match lower_result {
-        Ok(dag) => (dag, false),
+    let (mut dag, rootless_defs, accepted_nonfatal_rejection) = match lower_result {
+        Ok(composed) => (composed.dag, composed.rootless_defs, false),
         Err(diagnostic)
             if mode == LoweringMode::AllowHostOnly
                 && !diagnostic.fatal
                 && tensor_names.is_empty() =>
         {
-            (library.dag.clone(), true)
+            (library.dag.clone(), BTreeSet::new(), true)
         }
         Err(diagnostic) => return Err(PipelineRejection::Lower(diagnostic)),
     };
@@ -875,7 +914,13 @@ pub fn lower_checked_with_context(
     } else {
         RootBindingMode::Exact
     };
-    finish_lowering(checked, dag, RootCountContext::NewCode, root_binding_mode)
+    finish_lowering(
+        checked,
+        dag,
+        &rootless_defs,
+        RootCountContext::NewCode,
+        root_binding_mode,
+    )
 }
 
 fn pipeline_bail_if_cancelled(stage: &'static str) -> Result<(), PipelineRejection> {
@@ -901,12 +946,13 @@ fn lift_semantic_rejection(rejection: SemanticRejection) -> PipelineRejection {
 fn finish_lowering(
     checked: CheckedCompilation,
     dag: Dag,
+    rootless_defs: &BTreeSet<String>,
     root_context: RootCountContext,
     root_binding_mode: RootBindingMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
     let named_roots = match root_binding_mode {
         RootBindingMode::Exact => NamedRoots::aligned(
-            &checked.root_metadata.tensor_names,
+            &checked.root_metadata.tensor_names.without(rootless_defs),
             dag.roots(),
             root_context,
         )?,
@@ -1075,13 +1121,29 @@ mod artifact_type_tests {
             .expect("test source must pass semantic checks")
     }
 
+    /// A lowering result carrying `dag` and nothing else. chelis#1095 made
+    /// `finish_isolated_lowering` consume the carrier rather than a bare
+    /// `Dag`, so it can read the reported rootless defs.
+    fn lowered(dag: Dag) -> LoweredLibrary {
+        LoweredLibrary {
+            dag,
+            symbol_table: HashMap::new(),
+            program_defs: HashMap::new(),
+            program_types: HashMap::new(),
+            linearity: Default::default(),
+            lowered_names: HashMap::new(),
+            rootless_defs: BTreeSet::new(),
+        }
+    }
+
     #[test]
     fn strict_successful_empty_dag_rejects_nonempty_tensor_root_names() {
         let checked =
             checked_compilation("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
 
-        let error = finish_isolated_lowering(checked, LoweringMode::Strict, Ok(Dag::new()))
-            .expect_err("strict successful lowering must use exact root alignment");
+        let error =
+            finish_isolated_lowering(checked, LoweringMode::Strict, Ok(lowered(Dag::new())))
+                .expect_err("strict successful lowering must use exact root alignment");
 
         assert!(matches!(
             error,
@@ -1097,8 +1159,9 @@ mod artifact_type_tests {
     fn successful_empty_dag_aligns_empty_tensor_root_names() {
         let checked = checked_compilation("label = \"host only\"\n");
 
-        let lowered = finish_isolated_lowering(checked, LoweringMode::Strict, Ok(Dag::new()))
-            .expect("empty names and empty roots must align");
+        let lowered =
+            finish_isolated_lowering(checked, LoweringMode::Strict, Ok(lowered(Dag::new())))
+                .expect("empty names and empty roots must align");
 
         assert!(lowered.dag().roots().is_empty());
         assert!(lowered.named_roots().is_empty());
@@ -1109,9 +1172,12 @@ mod artifact_type_tests {
         let checked =
             checked_compilation("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n");
 
-        let lowered =
-            finish_isolated_lowering(checked, LoweringMode::AllowHostBackend, Ok(Dag::new()))
-                .expect("the selected host backend owns the output");
+        let lowered = finish_isolated_lowering(
+            checked,
+            LoweringMode::AllowHostBackend,
+            Ok(lowered(Dag::new())),
+        )
+        .expect("the selected host backend owns the output");
 
         assert!(lowered.dag().roots().is_empty());
         assert!(lowered.named_roots().is_empty());
@@ -1174,6 +1240,67 @@ mod artifact_type_tests {
             chelis_deep::parse_and_stamp_file(source).expect("typed Deep must parse and stamp");
 
         assert!(root_names_from_checked_exprs(&typed_exprs, &HashMap::new(), None).is_empty());
+    }
+
+    // chelis#1095: the lowerer reports which defs held no tensor node, and
+    // those names come out of the declared set before alignment.
+    #[test]
+    fn declared_root_names_drop_the_names_the_lowerer_reports_as_rootless() {
+        let names = TensorRootNames(vec![
+            IrName::new("sumsq"),
+            IrName::new("grad_sumsq"),
+            IrName::new("ho_ignores"),
+        ]);
+        let rootless = BTreeSet::from(["grad_sumsq".to_string()]);
+
+        let kept = names.without(&rootless);
+        let kept: Vec<&str> = kept.iter().map(IrName::as_str).collect();
+        assert_eq!(kept, ["sumsq", "ho_ignores"]);
+    }
+
+    // Negative parity, and the rt-1103 regression in unit form: a def is
+    // dropped ONLY when the lowerer reported it. An empty report must leave
+    // every declared name in place — the over-classification that deleted
+    // `ho_a`'s kernel showed up exactly here, as names disappearing that no
+    // lowering outcome justified.
+    #[test]
+    fn declared_root_names_are_untouched_when_nothing_is_reported_rootless() {
+        let names = TensorRootNames(vec![IrName::new("ho_a"), IrName::new("sumsq")]);
+
+        let kept = names.without(&BTreeSet::new());
+        let kept: Vec<&str> = kept.iter().map(IrName::as_str).collect();
+        assert_eq!(kept, ["ho_a", "sumsq"]);
+    }
+
+    // A rootless def is subtracted from the DECLARED roots only. The full
+    // inventory is a different product and keeps every declaration.
+    #[test]
+    fn a_rootless_grad_def_leaves_the_full_name_inventory_alone() {
+        let checked = checked_compilation(
+            "def sumsq(theta: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(theta, theta), 0))\n\
+             def grad_sumsq(model: tensor[3, f32] -> f32, theta: tensor[3, f32]) -> tensor[3, f32] = {\n\
+             \x20 target = fn (theta_local: tensor[3, f32]) -> model(theta_local)\n\
+             \x20 grad(target, wrt=theta_local)(theta)\n\
+             }\n",
+        );
+
+        let all_names: Vec<&str> = checked
+            .root_metadata()
+            .all_names()
+            .iter()
+            .map(IrName::as_str)
+            .collect();
+        assert_eq!(all_names, ["sumsq", "grad_sumsq"]);
+
+        // Both are still DECLARED roots pre-lowering — the subtraction is a
+        // lowering outcome, not a signature judgement.
+        let declared: Vec<&str> = checked
+            .root_metadata()
+            .tensor_names()
+            .iter()
+            .map(IrName::as_str)
+            .collect();
+        assert_eq!(declared, ["sumsq", "grad_sumsq"]);
     }
 
     #[test]
