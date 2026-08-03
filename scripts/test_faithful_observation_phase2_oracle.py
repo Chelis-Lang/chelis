@@ -12,6 +12,11 @@ fn c_boxed_f32_renders_at_own_width() {
 }
 
 #[test]
+#[ignore = "chelis#1110 (C emitter value layer): the suffixed literal's lexical f64."]
+fn c_suffixed_f32_literal_widens_from_its_stored_width() {
+}
+
+#[test]
 fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
 }
 

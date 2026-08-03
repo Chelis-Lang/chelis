@@ -163,6 +163,14 @@ KNOWN_RED_CELLS: tuple[RedCell, ...] = (
         fragment="boxed f32 elements must render shortest at their own width",
         owner="chelis#729/#686 capacity family (the untagged f64 value box)",
     ),
+    RedCell(
+        name="c_suffixed_f32_literal_widens_from_its_stored_width",
+        issue="chelis#1110",
+        fragment="the compiled lane must widen the suffixed literal's stored f32 value",
+        owner="chelis#729 Phase 3 C-lane value layer (chelis#1110: the emitter "
+        "bakes a suffixed literal's lexical f64 decimal; dtype_semantics.md "
+        "keeps the compiled lane documented-divergent until Phase 3)",
+    ),
 )
 
 # Phase 2 oracle bullet 1: red-to-green only by un-ignoring (§B2.3).

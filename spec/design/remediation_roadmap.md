@@ -99,11 +99,16 @@ green, so the upstream repair's landing forces the un-ignore in the
 same change set. That protocol has now retired the [#864] cell: current
 execution showed its root metadata was already F64, while the static
 `to_tensor` lowering shortcut discarded the checked dtype of each literal
-leaf and cast chain before widening it. The construction fix now carries a
-private typed leaf through f32/f64 cast evaluation; the original assertion
-covers enclosing-tensor and scalar-widening shapes, and the repaired row is
-locked into the oracle's unconditional must-run inventory after leaving the
-known-red ledger. This is a
+leaf before widening it. The construction fix carries NO typed leaf: static
+extraction keeps [#856]'s exact `RawScalar` and finalizes only FLOAT leaves,
+at the width read from each leaf's own type metadata. Routing every leaf
+through an f64 value field - the shape an earlier draft proposed - would
+have reintroduced the above-2^53 integer loss that exact lane prevents.
+The original assertion covers enclosing-tensor and scalar-widening shapes,
+and the repaired row is locked into the oracle's unconditional must-run
+inventory after leaving the known-red ledger. The same protocol retired the
+[#684] row ([#1078]) and annexed [#1110], the compiled lane's still-open
+half of the same suffixed-literal shape. This is a
 narrow [#717]/[#729]-family value repair and does not claim the atomic
 per-dtype-storage Phase 1 migration. It ran in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag). [#730] Phase 2 is COMPLETE AND
@@ -757,3 +762,8 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
 [#894]: https://github.com/Chelis-Lang/chelis/pull/894
+[#717]: https://github.com/Chelis-Lang/chelis/issues/717
+[#856]: https://github.com/Chelis-Lang/chelis/issues/856
+[#864]: https://github.com/Chelis-Lang/chelis/issues/864
+[#1078]: https://github.com/Chelis-Lang/chelis/issues/1078
+[#1110]: https://github.com/Chelis-Lang/chelis/issues/1110

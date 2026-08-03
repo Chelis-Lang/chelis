@@ -37,6 +37,7 @@
 //! | cell | issue |
 //! |---|---|
 //! | compiled boxed renders of f32 elements (the untagged f64 box carries f64-image digits, not the own-width shortest form) | chelis#865 ([#729]/[#686] capacity family; PR #863 red-team F2) |
+//! | compiled renders of a SUFFIXED float literal (`0.1f32` widened to f64: the C emitter bakes the lexical f64 decimal, so eval and C disagree) | chelis#1110 (C emitter value layer; PR #1099 red-team rt-1099ext) |
 //!
 //! The six C-side cells went green at chelis#732 Phase 2 (un-ignored per
 //! §B2.3, each on its original assertion): #716 print + to_list, #723,
@@ -45,7 +46,7 @@
 //! cross-lane byte equality is locked below for agreeing bits
 //! (`cross_lane_stdout_is_byte_identical_where_bits_agree`).
 //!
-//! That remaining cell is NOT skipped silently. The phase's authoritative
+//! Those two cells are NOT skipped silently. The phase's authoritative
 //! oracle (`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`)
 //! holds the same table as a ledger keyed by issue, requires this file's
 //! `#[ignore]` inventory to EQUAL it (an undeclared ignore is a silently
@@ -1463,6 +1464,65 @@ fn c_boxed_f32_renders_at_own_width() {
         list_payload_elems(&lline),
         ["0.1", "0.3"],
         "boxed f32 elements must render shortest at their own width ([05-OBS-2]): {lline}"
+    );
+}
+
+/// RED (chelis#1110; exposed by chelis#864's eval repair in this change
+/// set): the compiled lane DROPS a suffixed float literal's declared
+/// width. `0.1f32` carries its f32 width in its own type metadata with no
+/// Cast node following to apply it, and the C emitter bakes the lexical
+/// f64 decimal into the generated source (`__arg0_3 = 0.1;`) instead of
+/// the stored f32 value. Eval now finalizes that leaf at its declared
+/// width, so the lanes VISIBLY disagree: eval renders
+/// `[0.10000000149011612, 0.30000001192092896]`, C renders `[0.1, 0.3]`.
+///
+/// This is a stored-VALUE defect in the C emitter, upstream of the
+/// [05-OBS] rendering contract - both lanes' formatters are correct for
+/// the bits they hold, which is why the value-level green rows above
+/// pass. It is recorded here rather than absorbed: [05-OBS-3] makes a row
+/// eligible only when both lanes compute at [04-NUM-8]'s declared width,
+/// and a known width violation "must remain an issue-linked oracle
+/// exclusion and may not be laundered through the table". The cross-lane
+/// corpus passes today only because it never constructs this shape - the
+/// same blind spot that hid chelis#864 (`via_cast=false` there). Un-ignore
+/// when the C emitter finalizes suffixed literal leaves at their declared
+/// width.
+#[test]
+#[ignore = "chelis#1110 (C emitter value layer): the compiled lane bakes a suffixed float \
+            literal's lexical f64 decimal instead of its declared-width stored value, so \
+            eval and C visibly disagree after chelis#864's eval repair. Un-ignore when the \
+            C emitter finalizes suffixed literal leaves. Run with \
+            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
+fn c_suffixed_f32_literal_widens_from_its_stored_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let program = "module M.Main\n\
+         def mk() -> tensor[2, f64] = to_tensor([cast(0.1f32, f64), cast(0.3f32, f64)])\n\
+         shown = print(mk())\n";
+    let out = c_stdout(program, "obs_suffixed_f32").expect("C lane");
+    let tline = tensor_lines(&out)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no tensor render in:\n{out}"))
+        .to_string();
+    // Control: eval is the correct side of this disagreement. If this ever
+    // fails, the eval repair regressed and the cell is testing the wrong
+    // lane - a different defect from the one chelis#1110 declares.
+    let eval_out = eval_stdout(program).expect("eval");
+    let eval_tline = tensor_lines(&eval_out)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no eval tensor render in:\n{eval_out}"))
+        .to_string();
+    assert_eq!(
+        eval_tline, "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
+        "control: eval must keep finalizing the suffixed leaf at its declared width"
+    );
+    assert_eq!(
+        tline, eval_tline,
+        "the compiled lane must widen the suffixed literal's stored f32 value, agreeing \
+         with eval ([05-OBS-1] cross-lane exit agreement): {tline}"
     );
 }
 

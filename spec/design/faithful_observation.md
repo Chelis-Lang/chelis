@@ -7,11 +7,14 @@ exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 2026-07-20: `format_element` lives at `chelis-types::observation`, every
 eval exit routes through it, §C1 and the number grammar are FROZEN (B1),
 and the contract is ratified as `spec/05-risc-primitives.md` §8 atoms
-[05-OBS-1..6] (the chelis#775 scalar-root decision is [05-OBS-4]). One
-annexed value-layer exception, surfaced by PR #792's red team: int64
-scalar roots above 2^53 render the f64-collapsed stored value at the
-labeled root ([#684]'s rank-0 realization, repaired by [#729]; the
-exception and its ignored red cell are recorded at spec/05 §8).
+[05-OBS-1..6] (the chelis#775 scalar-root decision is [05-OBS-4]). Phase 1
+carried one annexed value-layer exception, surfaced by PR #792's red team:
+int64 scalar roots above 2^53 rendered the f64-collapsed stored value at
+the labeled root ([#684]'s rank-0 realization). [#729]'s per-dtype storage
+repaired it. The cell is un-ignored on its original assertion and its
+known-red row is gone ([#1078]); spec/05 §8 no longer records the
+exception, which the [#1043] timeless rewrite removed along with the other
+dated status prose.
 Phase 2 (the generated C side and the C-side §B2.1 migration) landed
 2026-07-24: `chelis_format_shortest` in the runtime, the print helper
 generated from an exhaustive `Prim` match, `to_list`'s F16/BF16 arms,
@@ -32,9 +35,16 @@ cast-constructed f64 root cell [#864], surfaced by PR #863, is repaired
 and un-ignored after a post-Phase-3 re-diagnosis: the root tag was already
 F64, but the static `to_tensor` DAG shortcut widened lexical decimals
 without first materializing each typed leaf and cast chain at its declared
-width. The repair carries a private `{value, Prim}` leaf through extraction,
-so both an enclosing f32 tensor and an explicitly f32 scalar widened into an
-f64 tensor preserve the same stored value as the host path. Phase 3
+width. The shipped repair carries NO precision-tagged leaf: static literal
+extraction keeps [#856]'s exact `RawScalar` and finalizes a FLOAT leaf at
+its own declared width in the `lit` arm, so an explicitly f32 scalar widened
+into an f64 tensor preserves the same stored value as the host path. The
+`{value: f64, Prim}` leaf carrier that an earlier draft proposed is NOT what
+landed, and deliberately so: an f64 value field would have reintroduced the
+above-2^53 integer loss that [#856]'s exact i64 lane exists to prevent.
+Integer leaves therefore stay on the exact lane and only float leaves are
+finalized. The compiled lane still drops a SUFFIXED literal's width
+([#1110], annexed below). Phase 3
 authors the [05-OBS-3] table, moves both value harnesses and the rejected-cell
 corpus onto `chelis_types::agreement`, and supplies one executable acceptance
 oracle. Its implementation is complete here; merge/CI acceptance is recorded
@@ -800,12 +810,21 @@ current exact cause: the root tag was already F64, while static
 `to_tensor` lowering retained lexical f64 decimals in an F32 source node
 and widened the wrong stored value. Finalizing an enclosing F32 tensor was
 necessary but not sufficient: a scalar `f32 -> f64` cast inside an enclosing
-f64 `to_tensor` bypassed that check. Static literal extraction now evaluates
-every f32/f64 leaf/cast chain at its typed width and carries the leaf precision
-into tensor materialization. The cell is un-ignored, absent from the known-red
+f64 `to_tensor` bypassed that check. Static literal extraction now finalizes
+each FLOAT leaf at its own declared width, read from the leaf's type metadata,
+while integer leaves stay on [#856]'s exact i64 lane - the leaf carries no
+precision tag, because routing every leaf through an f64 value field would
+have reintroduced the above-2^53 integer loss that lane prevents. An explicit
+cast chain needs no special handling: the authored ladder already finalizes at
+each float target. The cell is un-ignored, absent from the known-red
 ledger, and present in the separate must-run inventory whose exact
-unconditional attribute shape is checked;
-[#865] remains annexed.
+unconditional attribute shape is checked.
+[#865] remains annexed, joined by [#1110]: the eval repair above made the
+compiled lane's own gap visible, since the C emitter bakes a suffixed
+literal's lexical f64 decimal instead of its declared-width stored value, so
+the two lanes now disagree on a shape the cross-lane corpus never
+constructed. Recorded as a known-red cell rather than absorbed - [05-OBS-3]
+forbids laundering a known width violation through the tolerance table.
 (5) The phase's oracle became a script rather than a prose conjunction,
 after PR #863's exact-head red team (F3) observed that the default
 harness run reported "30 passed, 3 skipped" while nothing asserted what
@@ -816,8 +835,11 @@ not visible from a green suite. The ledger makes the boundary
 executable, and its unexpectedly-green leg turns each cell into
 [#729]'s exit-criteria instrument: the day a value or box-width repair
 lands, this oracle fails until the cell is un-ignored. That transition
-has now occurred for [#864]; its ignore and known-red row left together,
-while the repaired test entered the must-run inventory. The
+has now occurred for [#864] and for [#684]: each cell's ignore and
+known-red row left together, and both repaired tests entered the must-run
+inventory ([#1078] retired the [#684] row, which the oracle's
+unexpectedly-green leg is what flagged as stale). The same leg now guards
+the newly annexed [#1110] in the other direction. The
 accompanying status texts here and at spec/05 §8 were narrowed in the
 same change set to say "conformant except the enumerated annexed cells"
 rather than leading with an unqualified conformance claim.
@@ -1021,3 +1043,8 @@ guaranteed to be a real value bug wearing its own name.
 [#964]: https://github.com/Chelis-Lang/chelis/pull/964
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
+[#856]: https://github.com/Chelis-Lang/chelis/issues/856
+[#897]: https://github.com/Chelis-Lang/chelis/issues/897
+[#1043]: https://github.com/Chelis-Lang/chelis/pull/1043
+[#1078]: https://github.com/Chelis-Lang/chelis/issues/1078
+[#1110]: https://github.com/Chelis-Lang/chelis/issues/1110
