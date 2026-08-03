@@ -4,8 +4,10 @@
 tripwire, and Phase 1's typed wire-schema, registered-PyO3 entry legs, and
 sealed dtype-semantics layer have landed through PRs #1033 and #1049. Draft
 PR #1054 consolidates the complete Phase 2 kernel split, exact prover
-carriers, trap freeze, and integer-unary evaluator rows. When it lands, the
-Phase 2 oracle is complete; Phases 3-4 have not landed. Tracking issue: [#729].
+carriers, trap freeze, integer-unary evaluator rows, and the ordinary,
+windowed, and argument-reduction consumers discovered by its red team. Its
+single Phase 2 oracle is `.venv/bin/python scripts/dtype_phase2_oracle.py`;
+Phases 3-4 have not landed. Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
 section, today silent), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
@@ -514,7 +516,7 @@ behavior and is exactly what the atom forbids.
 | consumer | adopts | retires |
 |---|---|---|
 | eval scalar (`chelis-compiler-api/src/runtime/host_ops.rs`) | kernel split + `finalize_scalar` | [#680], [#718] eval-scalar cells |
-| eval tensor (same file + `chelis-ir/src/eval.rs`) | `finalize_tensor` bulk paths; `tensor_float_unop_f32` and raw `binary_map` deleted | [#717], [#684], [#724] eval half, [#726] eval half |
+| eval tensor (same file + `chelis-ir/src/eval.rs`) | `finalize_tensor` bulk paths; `tensor_float_unop_f32` and raw `binary_map` deleted; ordinary/window/argument reducers plan ordered index groups and delegate all arithmetic/comparison to the sealed reduction kernels | [#717], [#684], [#724] eval half, [#726] eval half |
 | `convert_cast_data` / tensor `cast_value` (`chelis-ir/src/eval.rs`) and host `eval_cast` | `cast_raw` / `cast_scalar`; checked target finalization with identical scalar/tensor rules | [#717] cast rows, [#720] (via next row) |
 | `fold_static_cond` / const folds (`chelis-ir/src/lower.rs`) | `int_binop` + finalize in the Cast arm; decline-on-trap | [#711], [#720] |
 | prove (`graph_extract.rs`, `obligation_engine.rs`, `opaque.rs`) | Phase 1 adapter state: existing f64 env with explicit `*_lossy` reads forced by the typed wire change; Phase 2 end state: exact sealed-value env and deleted flatteners | [#688] |
@@ -1351,7 +1353,12 @@ public module data and the active Phase 2 corpus asserts byte-exact
 diagnostics. Integer `abs` lowers to the typed trapping kernel, integer
 `floor`/`ceil`/`round` lower to identity, and the C, HIP, and Metal emitters
 remain loud instead of routing integer `abs` through float-only templates.
-Implementing those backend kernels remains Phase 3 / [#699].
+The reduction follow-up routes ordinary, windowed, and argument reductions
+through the same sealed boundary: consumers retain only shape and ordered
+index-group planning. Declared-width float witnesses, exact int64 comparison,
+all four integer-width intermediate-overflow rows, and structural no-bypass
+locks are part of the oracle. Implementing backend kernels remains Phase 3 /
+[#699].
 
 **You deliver:**
 
@@ -1377,12 +1384,16 @@ generate C guard code emitting those exact strings without asking.
 **Explicitly not yours:** C backend behavior (still unwrapped/untrapped at
 your exit); formatting anywhere.
 
-**Oracle:** `issue_680_int_exactness.rs` and `precision_matrix.rs`
-overflow rows green and un-ignored (eval side); `prove_int64_exactness.rs`
-green and un-ignored; `fold_static_cond_matrix.rs` eval expectations and
-the [#711] row green; the [#722] grad rows green in EVAL (grad's lowering now
-folds/computes exactly; the C half of [#722] waits for Phase 3 plus [#699]'s
-own fix, which is [#703]-track).
+**Oracle:** `.venv/bin/python scripts/dtype_phase2_oracle.py` is this phase's
+single authoritative command. Acceptance is exit 0 with the final line
+`DTYPE PHASE 2 ORACLE: PASS`. Its tested manifest inherits the complete Phase
+1 oracle; exercises all sealed numeric-kernel and frozen trap-string tests;
+runs the IR and host structural exclusivity locks; runs declared-width
+ordinary, windowed, and argument-reduction behavior including negative
+parity at every integer width; runs the active eval matrices for [#680],
+precision, exact int64 values, and static-condition folding; and finishes
+with the exact prover-carrier boundary. It never runs ignored rows or Phase 3
+backend suites.
 
 ## Phase 3 - backends adopt; the observation channel is generated
 

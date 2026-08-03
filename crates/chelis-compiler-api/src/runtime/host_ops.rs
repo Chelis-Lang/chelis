@@ -5,11 +5,12 @@ use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, TensorType};
 use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
-    BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue,
-    compare_scalar_tensor, compare_scalars, compare_tensor_scalar, compare_tensors, float_binop,
-    float_scalar_tensor_binop, float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop,
-    float_unop, int_binop, int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop,
-    int_tensor_unop, int_unop, scalar_from_i64, types::Prim,
+    ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue,
+    TensorReduceOp, arg_reduce_tensor_groups, compare_scalar_tensor, compare_scalars,
+    compare_tensor_scalar, compare_tensors, float_binop, float_scalar_tensor_binop,
+    float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
+    int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
+    reduce_tensor_groups, scalar_from_i64, types::Prim,
 };
 
 use super::transforms::*;
@@ -1384,103 +1385,10 @@ pub(super) fn tensor_reduce_host(
         return Err("reduction over empty axis is undefined".to_string());
     }
     let out_numel = tensor_numel(&out_shape);
-
-    // chelis#729 Phase 1: integer-family inputs fold in EXACT i64
-    // (int64 sums stay exact above 2^53, chelis#684; Sum/Prod overflow
-    // traps via checked accumulation instead of wrapping). Argmax/Argmin
-    // keep the f64 comparison walk below (their output is an index).
-    if tensor.precision.is_integer()
-        && matches!(
-            op,
-            ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod
-        )
-    {
-        let data = tensor
-            .value
-            .storage()
-            .to_i64_exact_vec()
-            .expect("integer tensor storage reads exactly");
-        let mut out: Vec<Option<i64>> = vec![None; out_numel];
-        for (out_linear, slot_cell) in out.iter_mut().enumerate() {
-            let out_indices = linear_to_indices(out_linear, &out_shape);
-            for k in 0..axis_len {
-                let mut in_indices = Vec::with_capacity(rank);
-                let mut oi = 0;
-                for dim in 0..rank {
-                    if dim == axis {
-                        in_indices.push(k);
-                    } else {
-                        in_indices.push(out_indices[oi]);
-                        oi += 1;
-                    }
-                }
-                let value = data[indices_to_linear(&in_indices, &tensor.value.shape)];
-                let next = match (op, *slot_cell) {
-                    (ReduceOp::Sum, None) => value,
-                    (ReduceOp::Sum, Some(acc)) => acc.checked_add(value).ok_or_else(|| {
-                        chelis_types::NumericTrap::Overflow {
-                            op: "sum",
-                            prim: tensor.precision,
-                        }
-                        .to_string()
-                    })?,
-                    (ReduceOp::Prod, None) => value,
-                    (ReduceOp::Prod, Some(acc)) => acc.checked_mul(value).ok_or_else(|| {
-                        chelis_types::NumericTrap::Overflow {
-                            op: "prod_reduce",
-                            prim: tensor.precision,
-                        }
-                        .to_string()
-                    })?,
-                    (ReduceOp::Min, None) => value,
-                    (ReduceOp::Min, Some(acc)) => acc.min(value),
-                    (ReduceOp::Max, None) => value,
-                    (ReduceOp::Max, Some(acc)) => acc.max(value),
-                    (ReduceOp::Argmax | ReduceOp::Argmin, _) => {
-                        unreachable!("integer fold guard excludes arg reductions")
-                    }
-                };
-                *slot_cell = Some(next);
-            }
-        }
-        let wide: Vec<i64> = out
-            .into_iter()
-            .map(|slot| slot.expect("axis_len >= 1 fills every output slot"))
-            .collect();
-        return RuntimeTensorValue::from_wide_int("reduce", tensor.precision, out_shape, wide);
-    }
-
-    let mut out = vec![0.0_f64; out_numel];
-    let wide_in = tensor.value.to_f64_lossy_vec();
-    let sum_in_f32 = matches!(op, ReduceOp::Sum) && tensor.precision == Prim::F32;
-    #[allow(clippy::needless_range_loop)]
+    let mut groups = Vec::with_capacity(out_numel);
     for out_linear in 0..out_numel {
         let out_indices = linear_to_indices(out_linear, &out_shape);
-        // Stride-4 ILP cascade lanes for Sum (issue #163, parity with
-        // torch's CPU `row_sum` at n <= 16). Other reductions keep a
-        // single accumulator since they're either associative
-        // (Min/Prod) or position-tracking (Argmax/Argmin).
-        let mut sum_lanes = [0.0_f64; 4];
-        let mut sum_lanes_f32 = [0.0_f32; 4];
-        let mut best_value = match op {
-            ReduceOp::Sum => 0.0,
-            ReduceOp::Min => f64::INFINITY,
-            ReduceOp::Max => f64::NEG_INFINITY,
-            ReduceOp::Prod => 1.0,
-            ReduceOp::Argmax => f64::NEG_INFINITY,
-            ReduceOp::Argmin => f64::INFINITY,
-        };
-        let mut best_index: usize = 0;
-        // #172: Min/Max must PROPAGATE NaN to match torch (`torch.max`/
-        // `torch.min` of any slice containing NaN return NaN, at every
-        // position). A naive `value > best` / `value < best` silently
-        // DROPS NaN (all NaN comparisons are false), which made the C
-        // backend's SIMD `chelis_max_f32` position-dependent and diverged
-        // from torch on both lanes. Track whether any NaN was seen and
-        // force the Min/Max result to NaN if so. (Prod already propagates
-        // via `*=`; Sum has its own IEEE accumulation; Argmax/Argmin index
-        // semantics are unchanged.)
-        let mut saw_nan = false;
+        let mut group = Vec::with_capacity(axis_len);
         for k in 0..axis_len {
             let mut in_indices = Vec::with_capacity(rank);
             let mut oi = 0;
@@ -1492,79 +1400,44 @@ pub(super) fn tensor_reduce_host(
                     oi += 1;
                 }
             }
-            let in_linear = indices_to_linear(&in_indices, &tensor.value.shape);
-            let value = wide_in[in_linear];
-            if value.is_nan() {
-                saw_nan = true;
-            }
-            match op {
-                ReduceOp::Sum => {
-                    if sum_in_f32 {
-                        sum_lanes_f32[k & 3] += value as f32;
-                    } else {
-                        sum_lanes[k & 3] += value;
-                    }
-                }
-                ReduceOp::Min => {
-                    if value < best_value {
-                        best_value = value;
-                    }
-                }
-                ReduceOp::Max => {
-                    if value > best_value {
-                        best_value = value;
-                    }
-                }
-                ReduceOp::Prod => {
-                    best_value *= value;
-                }
-                ReduceOp::Argmax => {
-                    if value > best_value {
-                        best_value = value;
-                        best_index = k;
-                    }
-                }
-                ReduceOp::Argmin => {
-                    if value < best_value {
-                        best_value = value;
-                        best_index = k;
-                    }
-                }
-            }
+            group.push(indices_to_linear(&in_indices, &tensor.value.shape));
         }
-        out[out_linear] = match op {
-            ReduceOp::Sum => {
-                if sum_in_f32 {
-                    ((sum_lanes_f32[0] + sum_lanes_f32[1]) + (sum_lanes_f32[2] + sum_lanes_f32[3]))
-                        as f64
-                } else {
-                    (sum_lanes[0] + sum_lanes[1]) + (sum_lanes[2] + sum_lanes[3])
-                }
-            }
-            // #172: Min/Max propagate NaN (torch parity). Prod already
-            // propagates through `best_value *= NaN`.
-            ReduceOp::Min | ReduceOp::Max if saw_nan => f64::NAN,
-            ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod => best_value,
-            // Argmax/Argmin: write the integer index into the f64 storage
-            // slot. The surrounding `precision` tag is `Prim::Int64`
-            // (set below per chelis#233), so downstream consumers read
-            // these slots back as int64 scalars.
-            ReduceOp::Argmax | ReduceOp::Argmin => best_index as f64,
-        };
+        groups.push(group);
     }
-    // chelis#233: argmax_reduce / argmin_reduce return integer indices,
-    // not reduced operand values, so the storage precision must be
-    // `Prim::Int64` regardless of the input precision. This matches the
-    // type-system label widened in #230 and prevents downstream
-    // primitives that branch on `RuntimeTensorValue::precision` (`eq`,
-    // `to_list`, `tensor_to_scalar`) from misclassifying the result as
-    // the input's float dtype. The other reductions return values at
-    // the input dtype and preserve `tensor.precision`.
-    let out_precision = match op {
-        ReduceOp::Argmax | ReduceOp::Argmin => Prim::Int64,
-        ReduceOp::Sum | ReduceOp::Min | ReduceOp::Max | ReduceOp::Prod => tensor.precision,
+
+    let storage = match op {
+        ReduceOp::Argmax => {
+            arg_reduce_tensor_groups(ArgReduceOp::Argmax, tensor.value.storage(), &groups)
+        }
+        ReduceOp::Argmin => {
+            arg_reduce_tensor_groups(ArgReduceOp::Argmin, tensor.value.storage(), &groups)
+        }
+        ReduceOp::Sum => {
+            let accumulator = tensor.precision.default_reduce_sum_accumulator()?;
+            let result = tensor.precision.default_reduce_sum_result_precision()?;
+            reduce_tensor_groups(
+                TensorReduceOp::Sum {
+                    accumulator,
+                    result,
+                },
+                tensor.value.storage(),
+                &groups,
+            )
+        }
+        ReduceOp::Min => {
+            reduce_tensor_groups(TensorReduceOp::MinReduce, tensor.value.storage(), &groups)
+        }
+        ReduceOp::Max => {
+            reduce_tensor_groups(TensorReduceOp::MaxReduce, tensor.value.storage(), &groups)
+        }
+        ReduceOp::Prod => {
+            reduce_tensor_groups(TensorReduceOp::ProdReduce, tensor.value.storage(), &groups)
+        }
     };
-    RuntimeTensorValue::from_wide("reduce", out_precision, out_shape, out)
+    let storage = storage.map_err(|err| err.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape, storage,
+    )))
 }
 
 /// Permute axes of a tensor, given an `axes` permutation. `axes[i]` is the
@@ -1764,18 +1637,10 @@ pub(super) fn tensor_reduce_window_host(
     }
 
     let out_numel = tensor_numel(&out_shape);
-    let mut out = vec![0.0_f64; out_numel];
-    let wide_in = tensor.value.to_f64_lossy_vec();
-    let window_volume: usize = window_shape.iter().product();
-    let init_acc = match reducer {
-        ReduceWindowOp::Max => f64::NEG_INFINITY,
-        ReduceWindowOp::Min => f64::INFINITY,
-        ReduceWindowOp::Sum | ReduceWindowOp::Mean => 0.0,
-    };
-
-    for (out_flat, slot) in out.iter_mut().enumerate() {
+    let mut groups = Vec::with_capacity(out_numel);
+    for out_flat in 0..out_numel {
         let out_indices = linear_to_indices(out_flat, &out_shape);
-        let mut acc = init_acc;
+        let mut group = Vec::with_capacity(window_shape.iter().product());
         let mut window_pos = vec![0usize; n];
         loop {
             let mut src_indices = vec![0usize; in_shape.len()];
@@ -1784,29 +1649,7 @@ pub(super) fn tensor_reduce_window_host(
                 src_indices[leading + i] = out_indices[leading + i] * strides[i] + window_pos[i];
             }
             let src_linear = indices_to_linear(&src_indices, in_shape);
-            let value = wide_in[src_linear];
-            // #172 sibling (intentionally NOT NaN-propagating here, mirrors the
-            // C-emit note in `chelis-backend-c/src/emit.rs` ~3963): windowed
-            // Max/Min use Rust `f64::max`/`f64::min`, which DROP NaN (return
-            // the non-NaN operand) — the same NaN-dropping semantics as the C
-            // backend's `fmaxf`/`fminf`, so eval and the backend stay
-            // CONSISTENT here. The #172 NaN-propagation fix scoped itself to
-            // `max_reduce` / `min_reduce`; flipping reduce_window forward
-            // without also defining the NaN gradient-routing in the windowed
-            // backward would create a fwd/bwd inconsistency. Tracked as a
-            // follow-up; reduce_window has its own parity gate (spec §2.3).
-            acc = match reducer {
-                ReduceWindowOp::Max => acc.max(value),
-                ReduceWindowOp::Min => acc.min(value),
-                ReduceWindowOp::Sum | ReduceWindowOp::Mean => acc + value,
-            };
-            // Unreachable: `n == 0` already returned `Err` above (a windowed
-            // reduction needs >= 1 windowed axis). Kept to mirror
-            // `chelis_ir::eval::reduce_window`, whose internal walk has no
-            // such early return and so relies on this guard.
-            if n == 0 {
-                break;
-            }
+            group.push(src_linear);
             let mut carry = n;
             for i in (0..n).rev() {
                 window_pos[i] += 1;
@@ -1820,13 +1663,20 @@ pub(super) fn tensor_reduce_window_host(
                 break;
             }
         }
-        if matches!(reducer, ReduceWindowOp::Mean) {
-            acc /= window_volume as f64;
-        }
-        *slot = acc;
+        groups.push(group);
     }
-
-    RuntimeTensorValue::from_wide("reduce_window", tensor.precision, out_shape, out)
+    let op = match reducer {
+        ReduceWindowOp::Max => TensorReduceOp::ReduceWindowMax,
+        ReduceWindowOp::Min => TensorReduceOp::ReduceWindowMin,
+        ReduceWindowOp::Sum => TensorReduceOp::ReduceWindowSum,
+        ReduceWindowOp::Mean => TensorReduceOp::ReduceWindowMean,
+    };
+    debug_assert_eq!(op.name(), op_name);
+    let storage =
+        reduce_tensor_groups(op, tensor.value.storage(), &groups).map_err(|err| err.to_string())?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape, storage,
+    )))
 }
 
 /// Pad each axis by `padding[i] = (lo_i, hi_i)`, filling the inserted
@@ -3252,8 +3102,17 @@ mod numeric_trap_forwarding_tests {
 
     #[test]
     fn composed_evaluation_forwards_the_raising_primitive_trap_without_plumbing() {
-        let input = RuntimeTensorValue::from_wide_int("test", Prim::Int8, vec![2], vec![127, 1])
-            .expect("input is representable at int8");
+        // int8 sum has an int32 default accumulator and therefore cannot
+        // overflow on this two-element input. Use an int32 accumulator-edge
+        // row so the test continues to exercise trap forwarding without
+        // contradicting the §5.7.1 accumulator contract.
+        let input = RuntimeTensorValue::from_wide_int(
+            "test",
+            Prim::Int32,
+            vec![2],
+            vec![i64::from(i32::MAX), 1],
+        )
+        .expect("input is representable at int32");
         let err = eval_composed_unary(&input, |dag, x, ty| {
             let output_ty = TensorType {
                 dims: Vec::new(),
@@ -3266,9 +3125,9 @@ mod numeric_trap_forwarding_tests {
                 None,
             )
         })
-        .expect_err("the composed int8 sum must overflow");
+        .expect_err("the composed int32 sum must overflow");
 
-        assert_eq!(err, "numeric trap: overflow in sum at int8");
+        assert_eq!(err, "numeric trap: overflow in sum at int32");
         assert!(!err.contains("IR eval failed"));
         assert!(!err.contains("composed unary"));
     }

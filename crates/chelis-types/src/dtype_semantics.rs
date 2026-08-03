@@ -373,6 +373,66 @@ impl CompareOp {
     }
 }
 
+/// Closed reduction operation set for the Phase 2 dtype-keyed tensor
+/// kernel. The variants carry the canonical primitive identity, so a trap
+/// cannot be mislabeled by a consumer-provided string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorReduceOp {
+    /// Global `sum`; its explicit accumulator is part of the IR contract.
+    /// `result` is either that accumulator dtype or the source dtype after
+    /// the host surface's specified final narrowing for f16/bf16.
+    Sum {
+        accumulator: Prim,
+        result: Prim,
+    },
+    ProdReduce,
+    MaxReduce,
+    MinReduce,
+    ReduceWindowSum,
+    ReduceWindowMean,
+    ReduceWindowMax,
+    ReduceWindowMin,
+}
+
+impl TensorReduceOp {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Sum { .. } => "sum",
+            Self::ProdReduce => "prod_reduce",
+            Self::MaxReduce => "max_reduce",
+            Self::MinReduce => "min_reduce",
+            Self::ReduceWindowSum => "reduce_window_sum",
+            Self::ReduceWindowMean => "reduce_window_mean",
+            Self::ReduceWindowMax => "reduce_window_max",
+            Self::ReduceWindowMin => "reduce_window_min",
+        }
+    }
+}
+
+/// Closed exact-comparison reduction set. The result is an int64 index;
+/// operands remain at their stored dtype throughout comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgReduceOp {
+    Argmax,
+    Argmin,
+}
+
+impl ArgReduceOp {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Argmax => "argmax",
+            Self::Argmin => "argmin",
+        }
+    }
+
+    const fn compare(self) -> CompareOp {
+        match self {
+            Self::Argmax => CompareOp::Gt,
+            Self::Argmin => CompareOp::Lt,
+        }
+    }
+}
+
 /// Arithmetic family required by a closed kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NumericFamily {
@@ -400,6 +460,12 @@ pub enum NumericKernelError {
         op: &'static str,
         lhs: usize,
         rhs: usize,
+    },
+    InvalidReductionSignature {
+        op: &'static str,
+        input: Prim,
+        accumulator: Prim,
+        result: Prim,
     },
 }
 
@@ -431,6 +497,18 @@ impl std::fmt::Display for NumericKernelError {
             Self::LengthMismatch { op, lhs, rhs } => write!(
                 f,
                 "numeric kernel {op} expects matching buffer lengths, got {lhs} and {rhs}"
+            ),
+            Self::InvalidReductionSignature {
+                op,
+                input,
+                accumulator,
+                result,
+            } => write!(
+                f,
+                "numeric reduction {op} has invalid dtype signature: input {}, accumulator {}, result {}",
+                input.name(),
+                accumulator.name(),
+                result.name()
             ),
         }
     }
@@ -1447,6 +1525,467 @@ pub fn float_tensor_unop(
         _ => unreachable!("family check makes the float buffer exhaustive"),
     };
     Ok(TensorStorage { buf })
+}
+
+fn reduction_arithmetic_prim(prim: Prim) -> Option<Prim> {
+    match prim {
+        Prim::F16 | Prim::Bf16 => Some(Prim::F32),
+        Prim::F32 | Prim::F64 | Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => Some(prim),
+        Prim::Bool | Prim::String | Prim::F8e4m3 => None,
+    }
+}
+
+fn valid_sum_accumulator(input: Prim, accumulator: Prim) -> bool {
+    matches!(
+        (input, accumulator),
+        (Prim::F16 | Prim::Bf16, Prim::F32 | Prim::F64)
+            | (Prim::F32, Prim::F32 | Prim::F64)
+            | (Prim::F64, Prim::F64)
+            | (Prim::Int8 | Prim::Int16, Prim::Int32 | Prim::Int64)
+            | (Prim::Int32, Prim::Int32 | Prim::Int64)
+            | (Prim::Int64, Prim::Int64)
+    )
+}
+
+fn reduction_signature(
+    op: TensorReduceOp,
+    input: Prim,
+) -> Result<(Prim, Prim), NumericKernelError> {
+    let (accumulator, result) = match op {
+        TensorReduceOp::Sum {
+            accumulator,
+            result,
+        } => (accumulator, result),
+        TensorReduceOp::ProdReduce
+        | TensorReduceOp::MaxReduce
+        | TensorReduceOp::MinReduce
+        | TensorReduceOp::ReduceWindowSum
+        | TensorReduceOp::ReduceWindowMax
+        | TensorReduceOp::ReduceWindowMin => {
+            let accumulator = reduction_arithmetic_prim(input).ok_or(
+                NumericKernelError::InvalidReductionSignature {
+                    op: op.name(),
+                    input,
+                    accumulator: input,
+                    result: input,
+                },
+            )?;
+            (accumulator, input)
+        }
+        TensorReduceOp::ReduceWindowMean => {
+            let accumulator = reduction_arithmetic_prim(input).ok_or(
+                NumericKernelError::InvalidReductionSignature {
+                    op: op.name(),
+                    input,
+                    accumulator: input,
+                    result: input,
+                },
+            )?;
+            if !input.is_float() {
+                return Err(NumericKernelError::InvalidReductionSignature {
+                    op: op.name(),
+                    input,
+                    accumulator,
+                    result: input,
+                });
+            }
+            (accumulator, input)
+        }
+    };
+
+    let same_family = (input.is_integer() && accumulator.is_integer() && result.is_integer())
+        || (input.is_float() && accumulator.is_float() && result.is_float());
+    let valid = match op {
+        TensorReduceOp::Sum { .. } => {
+            valid_sum_accumulator(input, accumulator)
+                && same_family
+                && if input.is_integer() {
+                    result == accumulator
+                } else {
+                    result == input || result == accumulator
+                }
+        }
+        _ => {
+            same_family && reduction_arithmetic_prim(input) == Some(accumulator) && result == input
+        }
+    };
+    if !valid {
+        return Err(NumericKernelError::InvalidReductionSignature {
+            op: op.name(),
+            input,
+            accumulator,
+            result,
+        });
+    }
+    Ok((accumulator, result))
+}
+
+fn scalar_at_reduction_width(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    index: usize,
+    accumulator: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
+    let value = input.scalar_at(index);
+    if value.prim() == accumulator {
+        return Ok(value);
+    }
+    if value.prim().is_integer() && accumulator.is_integer() {
+        return scalar_from_i64(
+            op.name(),
+            accumulator,
+            value
+                .as_i64_exact()
+                .expect("integer-family reduction input reads exactly"),
+        )
+        .map_err(Into::into);
+    }
+    if value.prim().is_float() && accumulator.is_float() {
+        return scalar_from_f64(op.name(), accumulator, value.as_f64_lossy()).map_err(Into::into);
+    }
+    Err(NumericKernelError::WrongFamily {
+        op: op.name(),
+        expected: if accumulator.is_integer() {
+            NumericFamily::Int
+        } else {
+            NumericFamily::Float
+        },
+        actual: value.prim(),
+    })
+}
+
+fn reduction_seed(
+    op: TensorReduceOp,
+    prim: Prim,
+    integer: i64,
+    float: f64,
+) -> Result<ScalarValue, NumericKernelError> {
+    if prim.is_integer() {
+        scalar_from_i64(op.name(), prim, integer).map_err(Into::into)
+    } else {
+        scalar_from_f64(op.name(), prim, float).map_err(Into::into)
+    }
+}
+
+macro_rules! checked_reduce_int {
+    ($op:expr, $prim:expr, $lhs:expr, $rhs:expr, $method:ident, $variant:ident) => {{
+        let value = $lhs.$method($rhs).ok_or(NumericTrap::Overflow {
+            op: $op.name(),
+            prim: $prim,
+        })?;
+        Ok(ScalarValue {
+            bits: Bits::$variant(value),
+        })
+    }};
+}
+
+fn reduction_add(
+    op: TensorReduceOp,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    require_same_dtype(op.name(), lhs, rhs)?;
+    match (lhs.bits, rhs.bits) {
+        (Bits::I8(lhs), Bits::I8(rhs)) => {
+            checked_reduce_int!(op, Prim::Int8, lhs, rhs, checked_add, I8)
+        }
+        (Bits::I16(lhs), Bits::I16(rhs)) => {
+            checked_reduce_int!(op, Prim::Int16, lhs, rhs, checked_add, I16)
+        }
+        (Bits::I32(lhs), Bits::I32(rhs)) => {
+            checked_reduce_int!(op, Prim::Int32, lhs, rhs, checked_add, I32)
+        }
+        (Bits::I64(lhs), Bits::I64(rhs)) => {
+            checked_reduce_int!(op, Prim::Int64, lhs, rhs, checked_add, I64)
+        }
+        (Bits::F32(lhs), Bits::F32(rhs)) => Ok(ScalarValue {
+            bits: Bits::F32(lhs + rhs),
+        }),
+        (Bits::F64(lhs), Bits::F64(rhs)) => Ok(ScalarValue {
+            bits: Bits::F64(lhs + rhs),
+        }),
+        _ => unreachable!("validated reduction accumulators are exact-width int or f32/f64"),
+    }
+}
+
+fn reduction_mul(
+    op: TensorReduceOp,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    require_same_dtype(op.name(), lhs, rhs)?;
+    match (lhs.bits, rhs.bits) {
+        (Bits::I8(lhs), Bits::I8(rhs)) => {
+            checked_reduce_int!(op, Prim::Int8, lhs, rhs, checked_mul, I8)
+        }
+        (Bits::I16(lhs), Bits::I16(rhs)) => {
+            checked_reduce_int!(op, Prim::Int16, lhs, rhs, checked_mul, I16)
+        }
+        (Bits::I32(lhs), Bits::I32(rhs)) => {
+            checked_reduce_int!(op, Prim::Int32, lhs, rhs, checked_mul, I32)
+        }
+        (Bits::I64(lhs), Bits::I64(rhs)) => {
+            checked_reduce_int!(op, Prim::Int64, lhs, rhs, checked_mul, I64)
+        }
+        (Bits::F32(lhs), Bits::F32(rhs)) => Ok(ScalarValue {
+            bits: Bits::F32(lhs * rhs),
+        }),
+        (Bits::F64(lhs), Bits::F64(rhs)) => Ok(ScalarValue {
+            bits: Bits::F64(lhs * rhs),
+        }),
+        _ => unreachable!("validated reduction accumulators are exact-width int or f32/f64"),
+    }
+}
+
+fn reduction_div_float(
+    op: TensorReduceOp,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+) -> Result<ScalarValue, NumericKernelError> {
+    require_same_dtype(op.name(), lhs, rhs)?;
+    let prim = lhs.prim();
+    match (lhs.bits, rhs.bits) {
+        (Bits::F32(lhs), Bits::F32(rhs)) => Ok(ScalarValue {
+            bits: Bits::F32(lhs / rhs),
+        }),
+        (Bits::F64(lhs), Bits::F64(rhs)) => Ok(ScalarValue {
+            bits: Bits::F64(lhs / rhs),
+        }),
+        _ => Err(NumericKernelError::InvalidReductionSignature {
+            op: op.name(),
+            input: prim,
+            accumulator: prim,
+            result: prim,
+        }),
+    }
+}
+
+fn reduction_extreme(
+    op: TensorReduceOp,
+    lhs: ScalarValue,
+    rhs: ScalarValue,
+    take_max: bool,
+    ignore_nan: bool,
+) -> Result<ScalarValue, NumericKernelError> {
+    require_same_dtype(op.name(), lhs, rhs)?;
+    if ignore_nan {
+        if scalar_is_nan(lhs) {
+            return Ok(rhs);
+        }
+        if scalar_is_nan(rhs) {
+            return Ok(lhs);
+        }
+    }
+    let compare = if take_max {
+        CompareOp::Gt
+    } else {
+        CompareOp::Lt
+    };
+    if compare_scalars(compare, rhs, lhs)? {
+        Ok(rhs)
+    } else {
+        Ok(lhs)
+    }
+}
+
+fn scalar_is_nan(value: ScalarValue) -> bool {
+    value.prim().is_float() && value.as_f64_lossy().is_nan()
+}
+
+fn reduce_sum_group(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    group: &[usize],
+    accumulator: Prim,
+    stride4: bool,
+) -> Result<ScalarValue, NumericKernelError> {
+    let zero = reduction_seed(op, accumulator, 0, 0.0)?;
+    if !stride4 {
+        let mut acc = zero;
+        for &index in group {
+            acc = reduction_add(
+                op,
+                acc,
+                scalar_at_reduction_width(op, input, index, accumulator)?,
+            )?;
+        }
+        return Ok(acc);
+    }
+
+    let mut lanes = [zero; 4];
+    for (position, &index) in group.iter().enumerate() {
+        lanes[position & 3] = reduction_add(
+            op,
+            lanes[position & 3],
+            scalar_at_reduction_width(op, input, index, accumulator)?,
+        )?;
+    }
+    let left = reduction_add(op, lanes[0], lanes[1])?;
+    let right = reduction_add(op, lanes[2], lanes[3])?;
+    reduction_add(op, left, right)
+}
+
+fn reduce_group(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    group: &[usize],
+    accumulator: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
+    match op {
+        TensorReduceOp::Sum { .. } => reduce_sum_group(op, input, group, accumulator, true),
+        TensorReduceOp::ReduceWindowSum => reduce_sum_group(op, input, group, accumulator, false),
+        TensorReduceOp::ReduceWindowMean => {
+            let sum = reduce_sum_group(op, input, group, accumulator, false)?;
+            let divisor = reduction_seed(op, accumulator, group.len() as i64, group.len() as f64)?;
+            reduction_div_float(op, sum, divisor)
+        }
+        TensorReduceOp::ProdReduce => {
+            let mut acc = reduction_seed(op, accumulator, 1, 1.0)?;
+            for &index in group {
+                acc = reduction_mul(
+                    op,
+                    acc,
+                    scalar_at_reduction_width(op, input, index, accumulator)?,
+                )?;
+            }
+            Ok(acc)
+        }
+        TensorReduceOp::MaxReduce
+        | TensorReduceOp::MinReduce
+        | TensorReduceOp::ReduceWindowMax
+        | TensorReduceOp::ReduceWindowMin => {
+            let take_max = matches!(
+                op,
+                TensorReduceOp::MaxReduce | TensorReduceOp::ReduceWindowMax
+            );
+            let integer_identity = if accumulator.is_integer() {
+                let (lo, hi) = accumulator
+                    .integer_range()
+                    .expect("integer reduction accumulators have fixed bounds");
+                if take_max { lo } else { hi }
+            } else if take_max {
+                i64::MIN
+            } else {
+                i64::MAX
+            };
+            let float_identity = if take_max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            let mut acc = reduction_seed(op, accumulator, integer_identity, float_identity)?;
+            let propagate_nan = matches!(op, TensorReduceOp::MaxReduce | TensorReduceOp::MinReduce);
+            let ignore_nan = matches!(
+                op,
+                TensorReduceOp::ReduceWindowMax | TensorReduceOp::ReduceWindowMin
+            );
+            for &index in group {
+                let value = scalar_at_reduction_width(op, input, index, accumulator)?;
+                if propagate_nan && scalar_is_nan(value) {
+                    return Ok(value);
+                }
+                acc = reduction_extreme(op, acc, value, take_max, ignore_nan)?;
+            }
+            Ok(acc)
+        }
+    }
+}
+
+fn reduction_result_scalar(
+    op: TensorReduceOp,
+    value: ScalarValue,
+    result: Prim,
+) -> Result<ScalarValue, NumericKernelError> {
+    if value.prim() == result {
+        return Ok(value);
+    }
+    if value.prim().is_integer() && result.is_integer() {
+        scalar_from_i64(
+            op.name(),
+            result,
+            value
+                .as_i64_exact()
+                .expect("integer accumulator result reads exactly"),
+        )
+        .map_err(Into::into)
+    } else if value.prim().is_float() && result.is_float() {
+        scalar_from_f64(op.name(), result, value.as_f64_lossy()).map_err(Into::into)
+    } else {
+        Err(NumericKernelError::InvalidReductionSignature {
+            op: op.name(),
+            input: value.prim(),
+            accumulator: value.prim(),
+            result,
+        })
+    }
+}
+
+/// Reduce explicitly ordered groups of input indices through one closed,
+/// dtype-keyed kernel. Callers own shape/index planning; arithmetic order,
+/// accumulator width, trap identity, and final storage are enforced here.
+pub fn reduce_tensor_groups(
+    op: TensorReduceOp,
+    input: &TensorStorage,
+    groups: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    let (accumulator, result) = reduction_signature(op, input.prim())?;
+    let values = groups
+        .iter()
+        .map(|group| {
+            reduce_group(op, input, group, accumulator)
+                .and_then(|value| reduction_result_scalar(op, value, result))
+        })
+        .collect::<Result<Vec<_>, NumericKernelError>>()?;
+    let raw = if result.is_integer() {
+        RawTensor::Int(
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_i64_exact()
+                        .expect("integer reduction results read exactly")
+                })
+                .collect(),
+        )
+    } else {
+        RawTensor::Float(values.iter().map(ScalarValue::as_f64_lossy).collect())
+    };
+    finalize_tensor(op.name(), result, raw).map_err(Into::into)
+}
+
+/// Reduce explicitly ordered groups to exact int64 winner indices. Values
+/// are compared at their stored dtype and never cross binary64 for integer
+/// inputs; first-seen wins ties.
+pub fn arg_reduce_tensor_groups(
+    op: ArgReduceOp,
+    input: &TensorStorage,
+    groups: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    if !input.prim().is_integer() && !input.prim().is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: op.name(),
+            expected: NumericFamily::Float,
+            actual: input.prim(),
+        });
+    }
+    let mut indices = Vec::with_capacity(groups.len());
+    for group in groups {
+        if group.is_empty() {
+            indices.push(-1);
+            continue;
+        }
+        let mut best_value = input.scalar_at(group[0]);
+        let mut best_index = 0i64;
+        for (axis_index, &input_index) in group.iter().enumerate().skip(1) {
+            let candidate = input.scalar_at(input_index);
+            if compare_scalars(op.compare(), candidate, best_value)? {
+                best_value = candidate;
+                best_index = axis_index as i64;
+            }
+        }
+        indices.push(best_index);
+    }
+    finalize_tensor(op.name(), Prim::Int64, RawTensor::Int(indices)).map_err(Into::into)
 }
 
 fn splat_storage(value: ScalarValue, len: usize) -> TensorStorage {
@@ -2667,6 +3206,163 @@ mod tests {
                 .unwrap()
                 .to_i64_exact_vec(),
             Some(vec![0])
+        );
+    }
+
+    fn one_group(len: usize) -> Vec<Vec<usize>> {
+        vec![(0..len).collect()]
+    }
+
+    #[test]
+    fn window_reductions_compute_at_each_declared_arithmetic_width() {
+        let cases = [
+            (Prim::F16, vec![2048.0, 1.0, -2048.0], 1.0),
+            (Prim::Bf16, vec![256.0, 1.0, -256.0], 1.0),
+            (Prim::F32, vec![16_777_216.0, 1.0, -16_777_216.0], 0.0),
+            (Prim::F64, vec![16_777_216.0, 1.0, -16_777_216.0], 1.0),
+        ];
+        for (prim, values, expected) in cases {
+            let input = finalize_tensor("test", prim, RawTensor::Float(values)).unwrap();
+            let output =
+                reduce_tensor_groups(TensorReduceOp::ReduceWindowSum, &input, &one_group(3))
+                    .unwrap();
+            assert_eq!(
+                output.to_f64_lossy_vec(),
+                vec![expected],
+                "{} must use its declared arithmetic width",
+                prim.name()
+            );
+        }
+    }
+
+    #[test]
+    fn window_integer_reductions_trap_intermediate_overflow_at_every_width() {
+        for (prim, max) in [
+            (Prim::Int8, i64::from(i8::MAX)),
+            (Prim::Int16, i64::from(i16::MAX)),
+            (Prim::Int32, i64::from(i32::MAX)),
+            (Prim::Int64, i64::MAX),
+        ] {
+            let input = finalize_tensor("test", prim, RawTensor::Int(vec![max, 1, -1])).unwrap();
+            assert_eq!(
+                reduce_tensor_groups(TensorReduceOp::ReduceWindowSum, &input, &one_group(3),),
+                Err(NumericKernelError::Trap(NumericTrap::Overflow {
+                    op: "reduce_window_sum",
+                    prim,
+                })),
+                "{} max + 1 must trap before the later -1",
+                prim.name()
+            );
+
+            let control =
+                finalize_tensor("test", prim, RawTensor::Int(vec![max - 1, 1, -1])).unwrap();
+            assert_eq!(
+                reduce_tensor_groups(TensorReduceOp::ReduceWindowSum, &control, &one_group(3),)
+                    .unwrap()
+                    .to_i64_exact_vec(),
+                Some(vec![max - 1])
+            );
+        }
+    }
+
+    #[test]
+    fn global_sum_uses_explicit_accumulator_and_stride4_order() {
+        let int8 = finalize_tensor(
+            "test",
+            Prim::Int8,
+            RawTensor::Int(vec![i64::from(i8::MAX), 1, -1]),
+        )
+        .unwrap();
+        let widened = reduce_tensor_groups(
+            TensorReduceOp::Sum {
+                accumulator: Prim::Int32,
+                result: Prim::Int32,
+            },
+            &int8,
+            &one_group(3),
+        )
+        .unwrap();
+        assert_eq!(widened.prim(), Prim::Int32);
+        assert_eq!(widened.to_i64_exact_vec(), Some(vec![i64::from(i8::MAX)]));
+
+        let int32 = finalize_tensor(
+            "test",
+            Prim::Int32,
+            RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
+        )
+        .unwrap();
+        assert_eq!(
+            reduce_tensor_groups(
+                TensorReduceOp::Sum {
+                    accumulator: Prim::Int32,
+                    result: Prim::Int32,
+                },
+                &int32,
+                &one_group(3),
+            ),
+            Err(NumericKernelError::Trap(NumericTrap::Overflow {
+                op: "sum",
+                prim: Prim::Int32,
+            }))
+        );
+    }
+
+    #[test]
+    fn reduction_kernel_rejects_implicit_or_narrow_accumulator_signatures() {
+        let input = finalize_tensor("test", Prim::Int32, RawTensor::Int(vec![1, 2])).unwrap();
+        assert_eq!(
+            reduce_tensor_groups(
+                TensorReduceOp::Sum {
+                    accumulator: Prim::Int16,
+                    result: Prim::Int16,
+                },
+                &input,
+                &one_group(2),
+            ),
+            Err(NumericKernelError::InvalidReductionSignature {
+                op: "sum",
+                input: Prim::Int32,
+                accumulator: Prim::Int16,
+                result: Prim::Int16,
+            })
+        );
+    }
+
+    #[test]
+    fn arg_reductions_compare_int64_exactly_and_keep_first_ties() {
+        let input = finalize_tensor(
+            "test",
+            Prim::Int64,
+            RawTensor::Int(vec![
+                9_007_199_254_740_992,
+                9_007_199_254_740_993,
+                9_007_199_254_740_993,
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            arg_reduce_tensor_groups(ArgReduceOp::Argmax, &input, &one_group(3))
+                .unwrap()
+                .to_i64_exact_vec(),
+            Some(vec![1])
+        );
+    }
+
+    #[test]
+    fn value_and_window_extrema_keep_their_distinct_nan_rules() {
+        let input =
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![f64::NAN, 1.0])).unwrap();
+        assert!(
+            reduce_tensor_groups(TensorReduceOp::MaxReduce, &input, &one_group(2))
+                .unwrap()
+                .element_f64_lossy(0)
+                .is_nan()
+        );
+        assert_eq!(
+            reduce_tensor_groups(TensorReduceOp::ReduceWindowMax, &input, &one_group(2))
+                .unwrap()
+                .to_f64_lossy_vec(),
+            vec![1.0]
         );
     }
 

@@ -11,8 +11,9 @@
 //! chelis#729 Phase 2: elementwise arithmetic dispatches once per buffer
 //! into the closed typed kernels. Integer operands never cross binary64,
 //! f32/f64 compute at their declared widths, and f16/bf16 compute through
-//! binary32 with one storage finalization. Integer reductions
-//! (`sum`/`prod`/`max`/`min`) continue to accumulate in exact i64 here.
+//! binary32 with one storage finalization. Reductions pass only ordered
+//! index groups into the same closed typed-kernel boundary; this module
+//! does not own numeric accumulation or comparison.
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,9 +22,10 @@ use crate::dag::{
     RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::dtype_semantics::{
-    CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, RawScalar, RawTensor, TensorStorage,
-    compare_tensors, finalize_tensor, float_tensor_binop, float_tensor_unop, int_tensor_binop,
-    int_tensor_unop, scalar_from_f64,
+    ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, RawScalar, RawTensor,
+    TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors, finalize_tensor,
+    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop, reduce_tensor_groups,
+    scalar_from_f64,
 };
 use chelis_types::types::Prim;
 
@@ -883,68 +885,38 @@ fn reduce_window(
         out_shape.push((in_dim - w) / s + 1);
     }
 
-    let window_volume: usize = window_shape.iter().product();
     let out_len = numel(&out_shape);
-    let mut out = vec![0.0_f64; out_len];
-    let data = input.to_f64_lossy_vec();
-
-    let init_acc = |r: ReduceWindowKind| -> f64 {
-        match r {
-            ReduceWindowKind::Max => f64::NEG_INFINITY,
-            ReduceWindowKind::Min => f64::INFINITY,
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => 0.0,
-        }
-    };
-    let combine = |r: ReduceWindowKind, acc: f64, x: f64| -> f64 {
-        match r {
-            ReduceWindowKind::Max => acc.max(x),
-            ReduceWindowKind::Min => acc.min(x),
-            ReduceWindowKind::Sum | ReduceWindowKind::Mean => acc + x,
-        }
-    };
-
-    for (out_flat, slot) in out.iter_mut().enumerate() {
+    let mut groups = Vec::with_capacity(out_len);
+    for out_flat in 0..out_len {
         let out_idx = linear_to_index(out_flat, &out_shape);
-
-        // Walk the window: iterate over all positions inside the
-        // window_shape multi-index. The source index per dimension is
-        // `out_idx[axis] * stride + window_pos` for windowed axes,
-        // matching the leading-axis passthrough rule above.
-        let mut acc = init_acc(reducer);
-        let mut window_pos = vec![0usize; n];
-        loop {
+        let mut group = Vec::with_capacity(window_shape.iter().product());
+        for_each_window_pos(window_shape, n, |window_pos| {
             let mut src_idx = vec![0usize; rank];
             src_idx[..leading].copy_from_slice(&out_idx[..leading]);
             for i in 0..n {
                 src_idx[leading + i] = out_idx[leading + i] * strides[i] + window_pos[i];
             }
-            let src_flat = index_to_linear(&src_idx, &input.shape);
-            acc = combine(reducer, acc, data[src_flat]);
-
-            // Increment window_pos (mixed-radix carry).
-            if n == 0 {
-                break;
-            }
-            let mut carry = n;
-            for i in (0..n).rev() {
-                window_pos[i] += 1;
-                if window_pos[i] < window_shape[i] {
-                    carry = i;
-                    break;
-                }
-                window_pos[i] = 0;
-            }
-            if carry == n {
-                break;
-            }
-        }
-        if matches!(reducer, ReduceWindowKind::Mean) {
-            acc /= window_volume as f64;
-        }
-        *slot = acc;
+            group.push(index_to_linear(&src_idx, &input.shape));
+        });
+        groups.push(group);
     }
-
-    finalize_wide("reduce_window", prim, out_shape, out)
+    let op = match reducer {
+        ReduceWindowKind::Max => TensorReduceOp::ReduceWindowMax,
+        ReduceWindowKind::Min => TensorReduceOp::ReduceWindowMin,
+        ReduceWindowKind::Sum => TensorReduceOp::ReduceWindowSum,
+        ReduceWindowKind::Mean => TensorReduceOp::ReduceWindowMean,
+    };
+    let storage =
+        reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    if storage.prim() != prim {
+        return Err(format!(
+            "{} produced {} storage for {} IR output",
+            op.name(),
+            storage.prim().name(),
+            prim.name()
+        ));
+    }
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 /// Reverse-mode adjoint of [`reduce_window`] (see `RiscOp::ReduceWindowGrad`).
@@ -1087,83 +1059,41 @@ fn for_each_window_pos(window_shape: &[usize], n: usize, mut f: impl FnMut(&[usi
     }
 }
 
-/// Which axis-reduction is running; decides the exact integer fold.
-#[derive(Clone, Copy, Debug)]
-enum ReduceKind {
-    Sum,
-    Max,
-    Min,
-    Prod,
+/// Build the exact, ordered source-index group for every output element of
+/// an axis reduction. Shape planning remains local; arithmetic does not.
+fn axis_reduction_groups(input_shape: &[usize], axis: usize) -> (Vec<usize>, Vec<Vec<usize>>) {
+    assert!(axis < input_shape.len());
+    let mut out_shape = input_shape.to_vec();
+    let axis_len = out_shape.remove(axis);
+    let out_len = numel(&out_shape);
+    let mut groups = Vec::with_capacity(out_len);
+    for out_flat in 0..out_len {
+        let out_index = linear_to_index(out_flat, &out_shape);
+        let mut group = Vec::with_capacity(axis_len);
+        for axis_index in 0..axis_len {
+            let mut input_index = Vec::with_capacity(input_shape.len());
+            let mut output_axis = 0;
+            for input_axis in 0..input_shape.len() {
+                if input_axis == axis {
+                    input_index.push(axis_index);
+                } else {
+                    input_index.push(out_index[output_axis]);
+                    output_axis += 1;
+                }
+            }
+            group.push(index_to_linear(&input_index, input_shape));
+        }
+        groups.push(group);
+    }
+    (out_shape, groups)
 }
 
-/// Axis reduction. Float family folds wide in f64 and finalizes ONCE at
-/// the output dtype (one op, one rounding). Integer family folds in exact
-/// i64 with checked accumulation, so int64 sums stay exact above 2^53
-/// (chelis#684) and overflow traps instead of wrapping.
-fn reduce(
-    op: &'static str,
-    input: &TensorValue,
-    axis: usize,
-    kind: ReduceKind,
-    prim: Prim,
-) -> Result<TensorValue, String> {
-    assert!(axis < input.shape.len());
-    let mut out_shape = input.shape.clone();
-    out_shape.remove(axis);
-    let out_len = numel(&out_shape);
-    match input.storage().to_raw() {
-        RawTensor::Int(data) => {
-            let mut out: Vec<Option<i64>> = vec![None; out_len];
-            for (flat_idx, &value) in data.iter().enumerate() {
-                let mut idx = linear_to_index(flat_idx, &input.shape);
-                idx.remove(axis);
-                let out_idx = index_to_linear(&idx, &out_shape);
-                let acc = out[out_idx];
-                let next = match (kind, acc) {
-                    (ReduceKind::Sum, None) => Some(value),
-                    (ReduceKind::Sum, Some(a)) => Some(a.checked_add(value).ok_or_else(|| {
-                        chelis_types::dtype_semantics::NumericTrap::Overflow { op, prim }
-                            .to_string()
-                    })?),
-                    (ReduceKind::Prod, None) => Some(value),
-                    (ReduceKind::Prod, Some(a)) => Some(a.checked_mul(value).ok_or_else(|| {
-                        chelis_types::dtype_semantics::NumericTrap::Overflow { op, prim }
-                            .to_string()
-                    })?),
-                    (ReduceKind::Max, None) => Some(value),
-                    (ReduceKind::Max, Some(a)) => Some(a.max(value)),
-                    (ReduceKind::Min, None) => Some(value),
-                    (ReduceKind::Min, Some(a)) => Some(a.min(value)),
-                };
-                out[out_idx] = next;
-            }
-            // Empty-axis identity elements match the float lane's inits.
-            let identity = match kind {
-                ReduceKind::Sum => 0,
-                ReduceKind::Prod => 1,
-                ReduceKind::Max => i64::MIN,
-                ReduceKind::Min => i64::MAX,
-            };
-            let wide: Vec<i64> = out.into_iter().map(|v| v.unwrap_or(identity)).collect();
-            finalize_wide_int(op, prim, out_shape, wide)
-        }
-        RawTensor::Float(data) => {
-            let (init, f): (f64, fn(f64, f64) -> f64) = match kind {
-                ReduceKind::Sum => (0.0, |acc, x| acc + x),
-                ReduceKind::Prod => (1.0, |acc, x| acc * x),
-                ReduceKind::Max => (f64::NEG_INFINITY, f64::max),
-                ReduceKind::Min => (f64::INFINITY, f64::min),
-            };
-            let mut out = vec![init; out_len];
-            for (flat_idx, &value) in data.iter().enumerate() {
-                let mut idx = linear_to_index(flat_idx, &input.shape);
-                idx.remove(axis);
-                let out_idx = index_to_linear(&idx, &out_shape);
-                out[out_idx] = f(out[out_idx], value);
-            }
-            finalize_wide(op, prim, out_shape, out)
-        }
-    }
+/// Axis reduction through the closed Phase 2 typed kernel.
+fn reduce(input: &TensorValue, axis: usize, op: TensorReduceOp) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let storage =
+        reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 /// Reduce along `axis`, tracking the index of the element that wins under
@@ -1173,31 +1103,11 @@ fn reduce(
 /// default argmax/argmin semantics. The output holds exact int64 indices
 /// (the `RiscOp::Argmax` spec invariant; per-dtype storage ended the
 /// f64-image detour of chelis#233).
-fn reduce_argcmp(
-    input: &TensorValue,
-    axis: usize,
-    init: f64,
-    better: impl Fn(f64, f64) -> bool,
-) -> Result<TensorValue, String> {
-    assert!(axis < input.shape.len());
-    let mut out_shape = input.shape.clone();
-    out_shape.remove(axis);
-    let out_len = numel(&out_shape);
-    let mut best_val = vec![init; out_len];
-    let mut best_idx = vec![-1i64; out_len];
-    let data = input.to_f64_lossy_vec();
-    for (flat_idx, &value) in data.iter().enumerate() {
-        let full = linear_to_index(flat_idx, &input.shape);
-        let axis_pos = full[axis] as i64;
-        let mut reduced = full.clone();
-        reduced.remove(axis);
-        let out_idx = index_to_linear(&reduced, &out_shape);
-        if best_idx[out_idx] < 0 || better(best_val[out_idx], value) {
-            best_val[out_idx] = value;
-            best_idx[out_idx] = axis_pos;
-        }
-    }
-    finalize_wide_int("argmax", Prim::Int64, out_shape, best_idx)
+fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<TensorValue, String> {
+    let (out_shape, groups) = axis_reduction_groups(&input.shape, axis);
+    let storage =
+        arg_reduce_tensor_groups(op, input.storage(), &groups).map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
@@ -2116,34 +2026,23 @@ where
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
-            RiscOp::Sum { axis, .. } => reduce(
-                "sum",
+            RiscOp::Sum { axis, accumulator } => reduce(
                 &values[&node.inputs[0]],
                 *axis,
-                ReduceKind::Sum,
-                out_prim,
+                TensorReduceOp::Sum {
+                    accumulator: *accumulator,
+                    result: out_prim,
+                },
             )?,
-            RiscOp::MaxReduce { axis } => reduce(
-                "max_reduce",
-                &values[&node.inputs[0]],
-                *axis,
-                ReduceKind::Max,
-                out_prim,
-            )?,
-            RiscOp::MinReduce { axis } => reduce(
-                "min_reduce",
-                &values[&node.inputs[0]],
-                *axis,
-                ReduceKind::Min,
-                out_prim,
-            )?,
-            RiscOp::ProdReduce { axis } => reduce(
-                "prod_reduce",
-                &values[&node.inputs[0]],
-                *axis,
-                ReduceKind::Prod,
-                out_prim,
-            )?,
+            RiscOp::MaxReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MaxReduce)?
+            }
+            RiscOp::MinReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MinReduce)?
+            }
+            RiscOp::ProdReduce { axis } => {
+                reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::ProdReduce)?
+            }
             RiscOp::ReduceWindow {
                 reducer,
                 window_shape,
@@ -2167,14 +2066,11 @@ where
                 strides,
                 out_prim,
             )?,
-            RiscOp::Argmax { axis } => reduce_argcmp(
-                &values[&node.inputs[0]],
-                *axis,
-                f64::NEG_INFINITY,
-                |a, b| b > a,
-            )?,
+            RiscOp::Argmax { axis } => {
+                reduce_argcmp(&values[&node.inputs[0]], *axis, ArgReduceOp::Argmax)?
+            }
             RiscOp::Argmin { axis } => {
-                reduce_argcmp(&values[&node.inputs[0]], *axis, f64::INFINITY, |a, b| b < a)?
+                reduce_argcmp(&values[&node.inputs[0]], *axis, ArgReduceOp::Argmin)?
             }
             RiscOp::Reshape { new_shape } => {
                 let shape: Vec<usize> = new_shape
@@ -4092,5 +3988,100 @@ mod tests {
         let err = eval_tensor(&fused, &divisor_inputs(vec![2.0, 0.0]))
             .expect_err("fused integer floor_div by zero must trap");
         assert_eq!(err, "numeric trap: division by zero in floor_div at int32");
+    }
+
+    fn exact_tensor(prim: Prim, values: RawTensor) -> TensorValue {
+        let len = match &values {
+            RawTensor::Int(values) => values.len(),
+            RawTensor::Float(values) => values.len(),
+        };
+        let storage = finalize_tensor("phase2-reduction-test", prim, values)
+            .expect("test values are in range");
+        TensorValue::from_storage(vec![len], storage)
+    }
+
+    #[test]
+    fn phase2_window_reduction_uses_declared_width_and_exact_storage() {
+        let f32_input = exact_tensor(
+            Prim::F32,
+            RawTensor::Float(vec![16_777_216.0, 1.0, -16_777_216.0]),
+        );
+        let f32_out = reduce_window(&f32_input, ReduceWindowKind::Sum, &[3], &[1], Prim::F32)
+            .expect("in-range f32 reduction");
+        assert_eq!(f32_out.to_f64_lossy_vec(), vec![0.0]);
+
+        let i64_input = exact_tensor(Prim::Int64, RawTensor::Int(vec![9_007_199_254_740_992, 1]));
+        let i64_out = reduce_window(&i64_input, ReduceWindowKind::Sum, &[2], &[1], Prim::Int64)
+            .expect("exact int64 reduction");
+        assert_eq!(
+            i64_out.storage().to_i64_exact_vec(),
+            Some(vec![9_007_199_254_740_993])
+        );
+    }
+
+    #[test]
+    fn phase2_window_reduction_traps_intermediate_overflow_at_operand_width() {
+        let input = exact_tensor(Prim::Int8, RawTensor::Int(vec![100, 100, -100]));
+        let err = reduce_window(&input, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
+            .expect_err("100i8 + 100i8 must trap before the later -100");
+        assert_eq!(err, "numeric trap: overflow in reduce_window_sum at int8");
+
+        let control = exact_tensor(Prim::Int8, RawTensor::Int(vec![40, 40, -40]));
+        let output = reduce_window(&control, ReduceWindowKind::Sum, &[3], &[1], Prim::Int8)
+            .expect("in-range int8 control");
+        assert_eq!(output.storage().to_i64_exact_vec(), Some(vec![40]));
+    }
+
+    #[test]
+    fn phase2_axis_sum_traps_in_the_stride4_combine() {
+        let input = exact_tensor(
+            Prim::Int32,
+            RawTensor::Int(vec![i64::from(i32::MAX), 1, -1]),
+        );
+        let err = reduce(
+            &input,
+            0,
+            TensorReduceOp::Sum {
+                accumulator: Prim::Int32,
+                result: Prim::Int32,
+            },
+        )
+        .expect_err("lane0 + lane1 overflows the int32 accumulator");
+        assert_eq!(err, "numeric trap: overflow in sum at int32");
+
+        let control = exact_tensor(
+            Prim::Int32,
+            RawTensor::Int(vec![i64::from(i32::MAX) - 1, 1, -1]),
+        );
+        let output = reduce(
+            &control,
+            0,
+            TensorReduceOp::Sum {
+                accumulator: Prim::Int32,
+                result: Prim::Int32,
+            },
+        )
+        .expect("below-overflow control");
+        assert_eq!(
+            output.storage().to_i64_exact_vec(),
+            Some(vec![i64::from(i32::MAX) - 1])
+        );
+    }
+
+    #[test]
+    fn phase2_arg_reductions_compare_int64_without_binary64() {
+        let max_input = exact_tensor(
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_992, 9_007_199_254_740_993]),
+        );
+        let max_out = reduce_argcmp(&max_input, 0, ArgReduceOp::Argmax).expect("argmax");
+        assert_eq!(max_out.storage().to_i64_exact_vec(), Some(vec![1]));
+
+        let min_input = exact_tensor(
+            Prim::Int64,
+            RawTensor::Int(vec![9_007_199_254_740_993, 9_007_199_254_740_992]),
+        );
+        let min_out = reduce_argcmp(&min_input, 0, ArgReduceOp::Argmin).expect("argmin");
+        assert_eq!(min_out.storage().to_i64_exact_vec(), Some(vec![1]));
     }
 }
