@@ -135,54 +135,37 @@ fn generic_adt_int8_specialization_reaches_exact_host_abi() {
 }
 
 #[test]
-fn generic_adt_bf16_specialization_reaches_structured_abi_rejection() {
-    let error = compile(c_request(&generic_record_source("bf16", "7.0")))
-        .expect_err("ReviewBox[bf16] must reach the C-host target decision");
-    assert_eq!(error.stage, "compile");
-    assert_eq!(
-        error.errors.len(),
-        1,
-        "unexpected error envelope: {error:?}"
-    );
-    let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
-    for expected in [
-        "unsupported:",
-        "dtype `bf16`",
-        "C host ABI selection",
-        "(codegen:c)",
-    ] {
-        assert!(
-            diagnostic.message.contains(expected),
-            "generic ADT rejection must contain {expected:?}: {diagnostic:?}"
-        );
-    }
+fn generic_adt_bf16_specialization_reaches_exact_host_abi() {
+    let result = compile(c_request(&generic_record_source("bf16", "7.0")))
+        .expect("ReviewBox[bf16] must specialize to the exact Phase 3 host ABI");
+    let generated_c = result
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("C compilation must emit a translation unit");
     assert!(
-        !diagnostic.message.contains("unresolved host type variable"),
-        "generic substitution must finish before ABI selection: {diagnostic:?}"
+        generated_c.contents.contains("uint16_t"),
+        "the specialized field must retain its exact bf16 carrier:\n{}",
+        generated_c.contents
     );
 }
 
 #[test]
-fn bf16_callback_reaches_structured_abi_rejection_without_placeholder() {
+fn bf16_callback_uses_exact_typed_carrier_without_placeholder() {
     let source = "def apply(f: bf16 -> bf16, x: bf16) -> bf16 = f(x)\n\
                   out = print(apply(fn (x: bf16) -> x, cast(6.0, bf16)))\n";
-    let error =
-        compile(c_request(source)).expect_err("a bf16 callback has no grounded C-host ABI yet");
-    assert_eq!(error.stage, "compile");
-    assert_eq!(
-        error.errors.len(),
-        1,
-        "unexpected error envelope: {error:?}"
-    );
-    let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
+    let result = compile(c_request(source)).expect("bf16 callbacks have an exact Phase 3 host ABI");
+    let generated_c = result
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("C compilation must emit a translation unit");
     assert!(
-        diagnostic.message.contains("unsupported:")
-            && diagnostic.message.contains("dtype `bf16`")
-            && diagnostic.message.contains("C host ABI selection")
-            && diagnostic.message.contains("(codegen:c)"),
-        "callback rejection must come from ABI selection: {diagnostic:?}"
+        generated_c
+            .contents
+            .contains("uint16_t apply(uint16_t (*f)(uint16_t), uint16_t x)"),
+        "bf16 callback parameters and results must use the exact tagged-width carrier:\n{}",
+        generated_c.contents
     );
 }
 
@@ -326,16 +309,17 @@ fn nested_generic_adt_access_substitutes_int8_through_every_field() {
 }
 
 #[test]
-fn nested_generic_adt_access_preserves_bf16_until_abi_rejection() {
-    let error = compile(c_request(&generic_access_source("bf16", "7.0")))
-        .expect_err("nested generic bf16 must reach target selection");
-    assert_eq!(error.stage, "compile", "{error:?}");
-    let diagnostic = error.errors.first().expect("one diagnostic");
-    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
+fn nested_generic_adt_access_preserves_exact_bf16_host_abi() {
+    let result = compile(c_request(&generic_access_source("bf16", "7.0")))
+        .expect("nested generic bf16 must retain its exact Phase 3 host ABI");
+    let generated_c = result
+        .files
+        .iter()
+        .find(|file| file.path.ends_with(".c"))
+        .expect("C compilation must emit a translation unit");
     assert!(
-        diagnostic.message.contains("dtype `bf16`")
-            && diagnostic.message.contains("C host ABI selection")
-            && !diagnostic.message.contains("unresolved host type variable"),
-        "nested generic substitution must finish before target selection: {diagnostic:?}"
+        generated_c.contents.contains("uint16_t"),
+        "nested generic substitution must retain the exact bf16 carrier:\n{}",
+        generated_c.contents
     );
 }

@@ -8,9 +8,8 @@ controlled vocabulary mutation that adds one fully-decodable variant to BOTH
 closed vocabularies (``EffectKind`` and ``RuntimeDType``) in a single
 workspace check, requiring non-exhaustive compile errors at each vocabulary's
 independent consumers, plus a controlled ``HostAbiType`` mutation (the
-backend's crate-private typed ABI vocabulary, section C6.3; gained the
-``ReducedFloatBoxed`` boxed-only list-element state at chelis#732 Phase 2)
-that must go red at the ABI owner's and the emitter's exhaustive matches. The endpoint scan rejects the former Unit and
+backend's crate-private typed ABI vocabulary, section C6.3) that must go red
+at the ABI owner's and the emitter's exhaustive matches. The endpoint scan rejects the former Unit and
 raw-generic-field escape hatches in addition to the legacy host-type and
 expression-emission endpoints. The mutation touches only the vocabulary
 owner, refuses to run over a dirty owner file, and restores the original bytes
@@ -242,19 +241,19 @@ def mutate_host_abi_type(source: str) -> str:
     """Add one ABI variant so every exhaustive HostAbiType consumer goes red.
 
     HostAbiType is the crate-private section C6.3 typed-state boundary in the
-    C backend (chelis#730 Phase 2), extended by chelis#732 Phase 2 with the
-    boxed-only ``ReducedFloatBoxed`` list-element state. A new variant with no
-    arms anywhere must be a compile-error work-list at the owner's
-    ``c_type_name`` matches and the emitter's boxing/unboxing/print consumers,
-    never a silent fall-through.
+    C backend (chelis#730 Phase 2). A new variant with no arms anywhere must
+    be a compile-error work-list at the owner's ``c_type_name`` matches and
+    the emitter's boxing/unboxing/print consumers, never a silent fall-through.
+
+    Anchor on the enum declaration rather than a particular adjacent variant:
+    later dtype phases are expected to refine this closed vocabulary, and the
+    mutation oracle must remain live across those sanctioned changes.
     """
 
     replacements = (
         (
-            "    ReducedFloatBoxed(Prim),\n    Adt(String, Vec<HostAbiType>),",
-            "    ReducedFloatBoxed(Prim),\n"
-            "    Phase2OracleAbi,\n"
-            "    Adt(String, Vec<HostAbiType>),",
+            "pub(crate) enum HostAbiType {\n",
+            "pub(crate) enum HostAbiType {\n    Phase2OracleAbi,\n",
         ),
     )
     return apply_anchored_replacements(source, replacements, "HostAbiType")
