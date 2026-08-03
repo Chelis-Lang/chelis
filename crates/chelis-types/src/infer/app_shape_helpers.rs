@@ -84,25 +84,25 @@ pub(super) fn collect_cons_chain_for_shape(expr: &deep::Expr) -> Option<Vec<&dee
     let mut out = Vec::new();
     let mut cursor = expr;
     loop {
-        let deep::Expr::List(list, _) = cursor else {
-            return None;
-        };
-        match get_tag(list)? {
+        // chelis#1107: carrier-preserving read. A `List`-only destructure gave
+        // up on every stamped node, so no cons chain was ever recognized on
+        // `check_typed_program`.
+        let (tag, _, kids) = stamped_parts(cursor)?;
+        match tag {
             DeepTag::Var => {
-                let name = children(list).first().and_then(symbol_name)?;
+                let name = kids.first().and_then(symbol_name)?;
                 if name == "Nil" {
                     return Some(out);
                 }
                 return None;
             }
             DeepTag::App => {
-                let app_children = children(list);
-                let func = app_children.first()?;
+                let func = kids.first()?;
                 if !is_builtin_var(func, "Cons") {
                     return None;
                 }
-                let head = app_children.get(1)?;
-                let tail = app_children.get(2)?;
+                let head = kids.get(1)?;
+                let tail = kids.get(2)?;
                 out.push(head);
                 cursor = tail;
             }
@@ -151,13 +151,13 @@ pub(super) fn extract_numeric_leaf_for_shape(expr: &deep::Expr) -> Option<()> {
 }
 
 pub(super) fn symbolic_dim_ref_name(expr: &deep::Expr) -> Option<&str> {
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    if get_tag(list) != Some(DeepTag::Var) {
+    // chelis#1107: carrier-preserving read; a stamped named axis (`sum(x, seq)`)
+    // was unrecognizable on the typed ingress.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    if tag != DeepTag::Var {
         return None;
     }
-    children(list).first().and_then(symbol_name)
+    kids.first().and_then(symbol_name)
 }
 
 /// chelis#397/#469: the materializability class of a runtime `expand` size
@@ -342,19 +342,18 @@ pub(super) fn classify_arith_app(list: &deep::List, env: &Env) -> SizeClass {
 /// presence is what proves a tensor source); a runtime axis is fine.
 pub(super) fn shape_read_operand(expr: &deep::Expr) -> Option<&deep::Expr> {
     stack_guard!("shape_read_operand", expr, None);
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
+    // chelis#1107: carrier-preserving read; a `List`-only destructure never
+    // recognized a stamped `shape(...)` read.
+    let (tag, _, kids) = stamped_parts(expr)?;
     // Strip outer `cast(..., ty)` wrappers (tag form and app form).
-    if get_tag(list) == Some(DeepTag::Cast) {
-        return children(list).first().and_then(shape_read_operand);
+    if tag == DeepTag::Cast {
+        return kids.first().and_then(shape_read_operand);
     }
-    let kids = children(list);
     let callee = kids.first()?;
-    if get_tag(list) == Some(DeepTag::App) && is_builtin_var(callee, "cast") {
+    if tag == DeepTag::App && is_builtin_var(callee, "cast") {
         return kids.get(1).and_then(shape_read_operand);
     }
-    if get_tag(list) == Some(DeepTag::App) && is_builtin_var(callee, "shape") {
+    if tag == DeepTag::App && is_builtin_var(callee, "shape") {
         // `(app {} (var shape) <operand> <axis>)`.
         return kids.get(1);
     }

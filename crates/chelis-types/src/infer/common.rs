@@ -777,13 +777,17 @@ pub(super) fn build_opacity_meta(
     // (the reef rewrite emits them with internal names), so each
     // exported name self-attributes through its stem.
     for (module, item) in items {
-        let deep::Expr::List(list, _) = item else {
+        // chelis#1107: carrier-preserving read. A `List`-only destructure
+        // skipped every stamped declaration, leaving both maps empty on the
+        // stamped ingress -- the opacity diagnostic then reported "exported
+        // producers: none" for a module that exports one.
+        let Some((tag, _, kids)) = stamped_parts(item) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Export) {
+        if tag != DeepTag::Export {
             continue;
         }
-        for child in children(list) {
+        for child in kids {
             let Some(name) = symbol_name(child) else {
                 continue;
             };
@@ -806,13 +810,13 @@ pub(super) fn build_opacity_meta(
     // legitimately exported producers in pipelines that strip Export
     // decls (fail-open for unattributable names by design).
     for (module, item) in items {
-        let deep::Expr::List(list, _) = item else {
+        // chelis#1107: carrier-preserving read, as in pass 1 above.
+        let Some((tag, _, kids)) = stamped_parts(item) else {
             continue;
         };
-        if !matches!(get_tag(list), Some(DeepTag::Def) | Some(DeepTag::Defsig)) {
+        if !matches!(tag, DeepTag::Def | DeepTag::Defsig) {
             continue;
         }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -825,7 +829,7 @@ pub(super) fn build_opacity_meta(
             continue;
         };
         meta.bindings.insert(name.to_string(), target);
-        if get_tag(list) == Some(DeepTag::Defsig)
+        if tag == DeepTag::Defsig
             && let Some(scheme) = env.lookup(name)
         {
             declared_sigs.insert(name.to_string(), scheme.body.clone());
@@ -898,13 +902,17 @@ pub(super) fn build_opacity_meta(
 pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: `stamped_parts` reads both carriers. A `List`-only
+        // destructure skipped every stamped declaration, so this check fired
+        // on `check_ir_program` (which normalizes Node to List) and never on
+        // `check_typed_program`.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Def) {
+        if tag != DeepTag::Def {
             continue;
         }
-        let Some(name) = children(list).first().and_then(symbol_name) else {
+        let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         if !seen.insert(name) {
@@ -929,13 +937,14 @@ pub(super) fn report_duplicate_defs(items: &[&deep::Expr], errors: &mut Diagnost
 pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let mut seen: HashSet<&str> = HashSet::new();
     for expr in items {
-        let deep::Expr::List(list, _) = expr else {
+        // chelis#1107: carrier-preserving read, as in `report_duplicate_defs`.
+        let Some((tag, _, kids)) = stamped_parts(expr) else {
             continue;
         };
-        if get_tag(list) != Some(DeepTag::Defsig) {
+        if tag != DeepTag::Defsig {
             continue;
         }
-        let Some(name) = children(list).first().and_then(symbol_name) else {
+        let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         if !seen.insert(name) {
@@ -978,14 +987,13 @@ pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Diagn
 /// same name; report once per name, as the `def` (what the user wrote).
 pub(super) fn report_builtin_shadowing(items: &[&deep::Expr], errors: &mut DiagnosticSink<'_>) {
     let decl_name = |expr: &deep::Expr, tag: DeepTag| -> Option<String> {
-        let deep::Expr::List(list, _) = expr else {
-            return None;
-        };
-        if get_tag(list) != Some(tag) {
+        // chelis#1107: carrier-preserving read. Without it the §8.6 shadowing
+        // gate never fired on the stamped ingress.
+        let (found_tag, _, kids) = stamped_parts(expr)?;
+        if found_tag != tag {
             return None;
         }
-        children(list)
-            .first()
+        kids.first()
             .and_then(symbol_name)
             .filter(|name| builtins::BUILTIN_NAMES.contains(name))
             .map(str::to_string)

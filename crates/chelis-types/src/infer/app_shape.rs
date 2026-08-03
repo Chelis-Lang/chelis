@@ -1675,18 +1675,18 @@ pub(super) fn extract_int_for_dim(expr: &deep::Expr) -> Option<i64> {
     if let Some(value) = extract_int_literal(expr) {
         return Some(value);
     }
-    let deep::Expr::List(list, _) = expr else {
-        return None;
-    };
-    match get_tag(list)? {
-        DeepTag::Cast => extract_int_for_dim(children(list).first()?),
+    // chelis#1107: carrier-preserving read. A `List`-only destructure meant a
+    // stamped `cast`-wrapped dimension read as "not statically known" on
+    // `check_typed_program` while `check_ir_program` extracted it.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    match tag {
+        DeepTag::Cast => extract_int_for_dim(kids.first()?),
         DeepTag::App => {
-            let app_children = children(list);
-            let func = app_children.first()?;
+            let func = kids.first()?;
             if !is_builtin_var(func, "cast") {
                 return None;
             }
-            extract_int_for_dim(app_children.get(1)?)
+            extract_int_for_dim(kids.get(1)?)
         }
         _ => None,
     }

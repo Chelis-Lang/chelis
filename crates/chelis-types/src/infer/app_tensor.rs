@@ -1264,31 +1264,35 @@ pub(super) fn peel_to_tensor_argument(ty: &Type) -> ToTensorPeel<'_> {
 /// with `extract_int_for_dim` is bounded: each call strictly reduces
 /// the expression depth (peels one wrapper layer).
 pub(super) fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
-    match expr {
-        deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::Lit) => {
-            children(list).first().and_then(|child| match child {
-                deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
-                _ => None,
-            })
-        }
-        deep::Expr::List(list, _) if get_tag(list) == Some(DeepTag::App) => {
-            let app_children = children(list);
-            match (app_children.first(), app_children.get(1)) {
-                (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
-                    extract_int_for_dim(arg).map(|value| -value)
-                }
-                _ => None,
+    if let deep::Expr::Atom(deep::Atom::Int(n), _) = expr {
+        return Some(*n);
+    }
+    // chelis#1107: carrier-preserving read. The `List`-only arms below never
+    // matched a stamped `lit`/`app`, so every literal axis and dimension read
+    // as "not a compile-time constant" on `check_typed_program` -- an
+    // OVER-rejection: `mean(x, 0)` was rejected there and accepted by
+    // `check_ir_program`.
+    let (tag, _, kids) = stamped_parts(expr)?;
+    match tag {
+        DeepTag::Lit => kids.first().and_then(|child| match child {
+            deep::Expr::Atom(deep::Atom::Int(n), _) => Some(*n),
+            _ => None,
+        }),
+        DeepTag::App => match (kids.first(), kids.get(1)) {
+            (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
+                extract_int_for_dim(arg).map(|value| -value)
             }
-        }
+            _ => None,
+        },
         _ => None,
     }
 }
 
 pub(super) fn is_builtin_var(expr: &deep::Expr, expected: &str) -> bool {
-    let deep::Expr::List(list, _) = expr else {
-        return false;
-    };
-    get_tag(list) == Some(DeepTag::Var)
-        && children(list).first().and_then(symbol_name) == Some(expected)
+    // chelis#1107: carrier-preserving read. A `List`-only destructure made this
+    // return `false` for EVERY stamped `(var {} name)`, so each of its callers
+    // -- the `cast`/`neg`/`shape`/`Cons` recognizers in the static shape
+    // readers -- silently failed to recognize its form on the typed ingress.
+    matches!(stamped_parts(expr), Some((DeepTag::Var, _, kids))
+        if kids.first().and_then(symbol_name) == Some(expected))
 }
