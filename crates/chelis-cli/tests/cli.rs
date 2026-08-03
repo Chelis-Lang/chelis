@@ -8702,6 +8702,215 @@ fn build_c_pipe_into_user_defined_unary_tensor_fn_matches_nested_call() {
     );
 }
 
+// issue #1095 counter-oracle (rt-1103): a higher-order def whose body does
+// NOT use its function parameter still owns a real root, and must keep it.
+//
+// This is the case a signature-shaped rule gets wrong. `ho_a` declares
+// `f: tensor[3, f32] -> f32` and never applies it, so lowering never
+// reaches the function-parameter placeholder and the body lowers to a
+// perfectly good `mul` root. Excluding it on the strength of its type
+// deletes real computation: the module is a pure-DAG kernel, so the root
+// set IS the kernel's inputs/outputs, and dropping it emits a 0-in/0-out
+// stub that aborts at runtime with "expected 0 inputs, got 1" instead of
+// computing anything.
+//
+// The build exits 0 either way, so this drives the emitted kernel and
+// pins the value: x * x over [1, 2, 3] must be [1, 4, 9].
+#[test]
+#[cfg(unix)]
+fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("only_ho.ch");
+    write_file(
+        &source,
+        "module OnlyHo
+         def ho_a(f: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] =          mul(copy(x), x)
+",
+    );
+
+    let out_dir = dir.path().join("only-ho-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // A pure-DAG module emits no `main`, so drive the kernel directly.
+    write_file(
+        &out_dir.join("driver.c"),
+        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
+    );
+
+    let status = gcc_link_sources(&out_dir, &["driver.c", "only_ho.c"], "only_ho_driver");
+    assert!(status.success(), "gcc link failed for the only_ho driver");
+    let run = StdCommand::new("./only_ho_driver")
+        .current_dir(&out_dir)
+        .output()
+        .expect("driver should run");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    assert!(
+        run.status.success(),
+        "only_ho kernel aborted (a dropped root emits a 0-in/0-out stub); \
+         status {} stderr: {stderr}",
+        run.status,
+    );
+    assert_eq!(
+        stdout.trim_end().lines().collect::<Vec<_>>(),
+        ["1.0", "4.0", "9.0"],
+        "an unused fn-typed parameter must not cost the def its kernel; got {stdout:?}",
+    );
+}
+
+// issue #1095, mixed module (rt-1103): the three def shapes must coexist —
+// a first-order def, a higher-order def that keeps its root, and a
+// higher-order `grad` def that owns none. Getting the subtraction right for
+// one shape in isolation is not enough; the declared names are aligned
+// against `dag.roots()` POSITIONALLY, so dropping the wrong one still
+// balances the count and silently mislabels every later root.
+#[test]
+#[cfg(unix)]
+fn build_c_mixed_module_keeps_working_roots_and_drops_only_the_rootless_grad() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("mixed.ch");
+    write_file(
+        &source,
+        "module Mixed
+         def sumsq(theta: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(theta, theta), 0))
+         def ho_ignores(f: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] =          mul(copy(x), x)
+         def grad_sumsq(model: tensor[3, f32] -> f32, theta: tensor[3, f32]) -> tensor[3, f32] = {
+         \x20 target = fn (theta_local: tensor[3, f32]) -> model(theta_local)
+         \x20 grad(target, wrt=theta_local)(theta)
+         }
+         theta = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])
+         squared = ho_ignores(sumsq, theta)
+         dsumsq = grad_sumsq(sumsq, theta)
+",
+    );
+
+    let out_dir = dir.path().join("mixed-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let status = gcc_link_generated(&out_dir, "mixed.c", "mixed");
+    assert!(status.success(), "gcc link failed for mixed.c");
+    let run = StdCommand::new("./mixed")
+        .current_dir(&out_dir)
+        .output()
+        .expect("compiled binary should run");
+    assert!(run.status.success(), "mixed binary failed: {}", run.status);
+    let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
+    assert_eq!(
+        stdout.trim_end(),
+        "theta = tensor(shape=[3], data=[1.0, 2.0, 3.0])\n\
+         squared = tensor(shape=[3], data=[1.0, 4.0, 9.0])\n\
+         dsumsq = tensor(shape=[3], data=[2.0, 4.0, 6.0])",
+        "the unused-fn-param def must keep computing x * x while the grad \
+         def is fixed; got: {stdout:?}",
+    );
+}
+
+// issue #1095 regression oracle: the grad_quadratic program must lower
+// with both of its named roots intact.
+//
+// This is the same source the #406 leak oracle below builds, but with no
+// valgrind dependency. That matters: #406 self-skips when valgrind is
+// absent, and CI has no valgrind, so when #1013 routed `build --target c`
+// through the pipeline's exact root alignment the resulting
+// `lowered root count mismatch: expected 2 named roots, got 1` ran in no
+// continuous job. The declared roots here are the two `def`s (`sumsq` and
+// `grad_sumsq`), not the `theta` / `dsumsq` host bindings the program
+// prints. `grad_sumsq`'s `grad` has no adjoint to build (its callee is a
+// function parameter, supplied only at the call site), so it lowers to an
+// empty value and owns no root; the lowerer reports that and the declared
+// root names subtract it. See `LoweredValue::contributes_no_root`.
+//
+// Asserting the build succeeds is not enough on its own — a root can be
+// dropped and still produce compilable C — so this also runs the linked
+// binary and pins the gradient value. d/dtheta sum(theta * theta) is
+// 2 * theta, so [1, 2, 3] must yield [2, 4, 6]; a dropped or zeroed
+// gradient root shows up here as [0, 0, 0] or a missing line.
+#[test]
+#[cfg(unix)]
+fn build_c_grad_program_keeps_both_named_roots() {
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("grad_quadratic.ch");
+    write_file(
+        &source,
+        "module GradQuadratic\n\
+         def sumsq(theta: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(theta, theta), 0))\n\
+         def grad_sumsq(model: tensor[3, f32] -> f32, theta: tensor[3, f32]) -> tensor[3, f32] = {\n\
+         \x20 target = fn (theta_local: tensor[3, f32]) -> model(theta_local)\n\
+         \x20 grad(target, wrt=theta_local)(theta)\n\
+         }\n\
+         theta = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)])\n\
+         dsumsq = grad_sumsq(sumsq, theta)\n",
+    );
+
+    let out_dir = dir.path().join("grad-build");
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert();
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !stderr.contains("root count mismatch"),
+        "grad_quadratic must lower with every named root intact; got: {stderr}",
+    );
+    assert.success();
+
+    let status = gcc_link_generated(&out_dir, "grad_quadratic.c", "grad_quadratic");
+    assert!(status.success(), "gcc link failed for grad_quadratic.c");
+    let run = StdCommand::new("./grad_quadratic")
+        .current_dir(&out_dir)
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run.status.success(),
+        "compiled binary failed with status {}",
+        run.status,
+    );
+    let stdout = String::from_utf8(run.stdout).expect("utf-8 stdout");
+    assert_eq!(
+        stdout.trim_end(),
+        "theta = tensor(shape=[3], data=[1.0, 2.0, 3.0])\n\
+         dsumsq = tensor(shape=[3], data=[2.0, 4.0, 6.0])",
+        "grad_quadratic must print both roots with the exact gradient \
+         2 * theta; got: {stdout:?}",
+    );
+}
+
 // issue #406 acceptance oracle: a `chelis build --target c` program
 // must not leak the list / tensor temporaries its `main` allocates.
 //

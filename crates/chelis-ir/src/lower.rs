@@ -4,7 +4,7 @@
 
 use std::any::Any;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 
@@ -604,6 +604,12 @@ pub struct LoweredLibrary {
     /// as it would in monolithic mode (where the same library def lives
     /// in `top_level_defs` and is consulted directly).
     pub lowered_names: HashMap<String, bool>,
+    /// chelis#1095: def names whose lowered value held no tensor node, so
+    /// they contributed no DAG root. Consumers subtract these from the
+    /// declared root names before aligning against [`Self::dag`]'s roots.
+    /// `serde(default)` so a cached pre-#1095 carrier still deserializes.
+    #[serde(default)]
+    pub rootless_defs: BTreeSet<String>,
 }
 
 /// Lower a checked program to the [`LoweredLibrary`] carrier. The bare
@@ -794,6 +800,7 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
         program_types,
         linearity: program.linearity().clone(),
         lowered_names,
+        rootless_defs: ctx.rootless_defs,
     }
 }
 
@@ -972,13 +979,23 @@ fn strip_drop_nodes(dag: &Dag) -> (Dag, HashMap<NodeId, NodeId>) {
 /// byte-for-byte (modulo any irrelevant extra defs that DCE pruned).
 pub fn lower_program_with_context(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
     try_lower_program_with_context(library, new_program)
+        .map(|composed| composed.dag)
         .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
+}
+
+/// A composed lowering: the combined DAG plus the chelis#1095 record of
+/// which new-code defs contributed no root. Mirrors the two fields the
+/// whole-program path reads off [`LoweredLibrary`].
+#[derive(Debug, Clone)]
+pub struct ComposedLowering {
+    pub dag: Dag,
+    pub rootless_defs: BTreeSet<String>,
 }
 
 pub fn try_lower_program_with_context(
     library: &LoweredLibrary,
     new_program: &CheckedProgram,
-) -> Result<Dag, LowerDiagnostic> {
+) -> Result<ComposedLowering, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_program_with_context: exprs", new_program.exprs());
     assert_decode_once_at_boundary(
         "lower_program_with_context: annotated_exprs",
@@ -995,7 +1012,10 @@ pub fn try_lower_program_with_context(
     catch_lowering(|| lower_program_with_context_inner(library, new_program))
 }
 
-fn lower_program_with_context_inner(library: &LoweredLibrary, new_program: &CheckedProgram) -> Dag {
+fn lower_program_with_context_inner(
+    library: &LoweredLibrary,
+    new_program: &CheckedProgram,
+) -> ComposedLowering {
     let new_type_env = new_program.type_env();
     let lowered_names =
         top_level_lowering_map_with_context(library, new_program.exprs(), new_type_env);
@@ -1054,7 +1074,10 @@ fn lower_program_with_context_inner(library: &LoweredLibrary, new_program: &Chec
     // library/new-code boundary gets the same Copy nodes as monolithic
     // lowering, and every surviving linear value receives a terminal Drop.
     let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&ctx.dag);
-    insert_drop_nodes_for_unconsumed_values(copy_dag)
+    ComposedLowering {
+        dag: insert_drop_nodes_for_unconsumed_values(copy_dag),
+        rootless_defs: ctx.rootless_defs,
+    }
 }
 
 fn flatten_binding_into(prefix: &str, value: &LoweredValue, out: &mut HashMap<String, NodeId>) {
@@ -4034,6 +4057,24 @@ enum LoweredValue {
 }
 
 impl LoweredValue {
+    /// Whether `add_named_roots` would contribute zero roots for this
+    /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
+    ///
+    /// The empty aggregate is reachable: the single-target arm of the
+    /// `grad` result packing drops an absent adjoint instead of
+    /// materializing a zero, so a `grad` over a body that resolves to
+    /// [`CallableExpr::Parameter`] leaves `packed` empty. This is
+    /// deliberately not "added no NEW root": `Dag::add_root` also
+    /// deduplicates, so two defs sharing one node would answer yes to
+    /// that question while genuinely owning a root.
+    fn contributes_no_root(&self) -> bool {
+        match self {
+            Self::Node(_) => false,
+            Self::Tuple(items) => items.iter().all(Self::contributes_no_root),
+            Self::Adt { fields, .. } => fields.iter().all(Self::contributes_no_root),
+        }
+    }
+
     fn expect_node(&self, context: &str) -> NodeId {
         match self {
             Self::Node(id) => *id,
@@ -4277,6 +4318,11 @@ struct LowerCtx {
     /// alongside `bindings` and `local_callables`. See
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: HashSet<String>,
+    /// chelis#1095: top-level def names whose lowered value held no tensor
+    /// node, so they contributed no DAG root. `chelis-compiler-api`
+    /// subtracts these from the declared root names before aligning them
+    /// against `dag.roots()`.
+    rootless_defs: BTreeSet<String>,
     dim_substitutions: HashMap<String, DimInfo>,
     /// WS-A8: precision-tvar substitutions, keyed by the precision-var
     /// name (e.g. `p`) as it appears in `(t-var {} p)` precision slots
@@ -4360,6 +4406,7 @@ impl LowerCtx {
             inlining_depths: HashMap::new(),
             inlining_active: 0,
             fn_typed_params: HashSet::new(),
+            rootless_defs: BTreeSet::new(),
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
             rank_substitutions: HashMap::new(),
@@ -4880,6 +4927,19 @@ impl LowerCtx {
             let saved_span_id = self.current_span_id.clone();
             if let Some(s) = expr.span_id() {
                 self.current_span_id = Some(s.to_owned());
+            }
+            // chelis#1095: record the defs whose lowered value holds no
+            // tensor node at all, so `add_named_roots` below contributes
+            // nothing. The declared-root accounting in chelis-compiler-api
+            // subtracts exactly these names; recording the OUTCOME rather
+            // than predicting it from the signature is what keeps the two
+            // sides in agreement. A predicate over the declared type
+            // cannot do this job — `def d(f: T -> U, x: T) = f(x)` applies
+            // its function parameter and still lowers to a root (the
+            // `CallableExpr::Parameter` fallback returns the last argument),
+            // while `grad` over the same placeholder lowers to nothing.
+            if value.contributes_no_root() {
+                self.rootless_defs.insert(name.to_string());
             }
             self.add_named_roots(name, &value);
             self.current_span_id = saved_span_id;
