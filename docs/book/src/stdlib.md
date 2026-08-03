@@ -163,15 +163,45 @@ with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
 
 - `read_csv(path)` returns a list of header-keyed dictionaries, `try_read_csv(path)` returns
   the optional form.
+- `to_csv(rows)` renders that same shape back to CSV text (header from the first
+  row's key order, minimal quoting with doubled embedded quotes, LF line endings,
+  trailing newline; zero rows render as the empty string; a record that would
+  render as a blank line — a single empty value or header — renders as a quoted
+  empty field `""` so `read_csv`'s blank-line filter cannot drop it). Fields or
+  headers containing CR or LF are **rejected** — the line-based reader cannot
+  round-trip them (chelis#954 tracks the whole-file reader that lifts this), so
+  the writer refuses rather than emit output its own reader mangles. `try_to_csv` returns `None` instead of failing (mismatched row key
+  sets, CR/LF content); `write_csv(path, rows)` writes the rendered text and
+  names the path and first offending row on failure; `try_write_csv` is its
+  `Option` twin.
 
 `Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
-`JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`):
+`JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors are
+exported, so documents can be built directly):
 
 - `load_json(path)`, `parse_json(text)` and their `try_` variants.
 - `json_get`, and the typed accessors `json_string`, `json_int`, `json_float`, `json_bool`,
   `json_array`, `json_object`, plus `json_is_null`.
+- `to_json(value)` renders a `Json` value compactly (object keys in dictionary
+  insertion order, f64 via `to_string`'s shortest-round-trip form — a claim
+  made for **f64 specifically**, the dtype `JsonFloat` carries — escapes for
+  `\" \\ \n \t \r`). Non-finite numbers have no JSON representation: `to_json`
+  fails on them and `try_to_json` returns `None`. `write_json(path, value)`
+  writes the rendered text and names the path on failure; `try_write_json` is
+  its `Option` twin. Control characters outside the escaped set pass through
+  unescaped — RFC 8259-invalid output for such input — because chelis has no
+  `char_code` primitive to emit `\u00XX`; the parser's `decode_escape` likewise
+  rejects `\uXXXX` input. Both halves of that asymmetry need a character-level
+  primitive and are tracked as chelis#953.
 
-These IO modules carry the `IO` effect and run on the evaluator and host paths.
+These IO modules carry the `IO` effect and run in **both lanes**: under
+`chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.
+They are distinct from the eval-only prelude JSON/CSV builtins
+(`parse_json`/`to_json`/`parse_csv`/`to_csv` over the prelude `Json` ADT,
+chelis#890/chelis#903), which `chelis build` rejects whole-program — so for a
+compiled program this module surface is the structured-I/O path. The shared
+names are different callables on different types; reef package name-rewriting
+keeps them apart in both lanes.
 
 ### Tokenization
 
