@@ -143,7 +143,7 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
             ElementRef::F16(v) => format_half(
                 f64::from(v),
                 u64::from(v.to_bits()),
-                &|x| u64::from(half::f16::from_f64(x).to_bits()),
+                &|x| u64::from(crate::dtype_semantics::f16_from_f64_rne(x).to_bits()),
                 "f16",
             ),
             other => mismatch(prim, &other),
@@ -152,7 +152,7 @@ pub fn format_element(prim: Prim, value: ElementRef) -> String {
             ElementRef::Bf16(v) => format_half(
                 f64::from(v),
                 u64::from(v.to_bits()),
-                &|x| u64::from(half::bf16::from_f64(x).to_bits()),
+                &|x| u64::from(crate::dtype_semantics::bf16_from_f64_rne(x).to_bits()),
                 "bf16",
             ),
             other => mismatch(prim, &other),
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn f16_formats_shortest_round_trip_at_f16_width() {
-        let f16 = half::f16::from_f64;
+        let f16 = crate::dtype_semantics::f16_from_f64_rne;
         // Exact-representable rows from the harness's frozen f16 table.
         assert_eq!(
             format_element(Prim::F16, ElementRef::F16(f16(0.75))),
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn bf16_formats_shortest_round_trip_at_bf16_width() {
-        let bf16 = half::bf16::from_f64;
+        let bf16 = crate::dtype_semantics::bf16_from_f64_rne;
         assert_eq!(
             format_element(Prim::Bf16, ElementRef::Bf16(bf16(0.75))),
             "0.75"
@@ -642,7 +642,7 @@ mod tests {
                 panic!("f16 bits {bits:#06x} rendered unparseable `{text}`: {e}")
             });
             assert_eq!(
-                half::f16::from_f64(parsed).to_bits(),
+                crate::dtype_semantics::f16_from_f64_rne(parsed).to_bits(),
                 bits,
                 "f16 bits {bits:#06x} (`{}`) rendered `{text}` which does not \
                  round-trip at f16 width",
@@ -652,7 +652,7 @@ mod tests {
                 no_shorter_rendering(
                     f64::from(v),
                     u64::from(bits),
-                    &|x| u64::from(half::f16::from_f64(x).to_bits()),
+                    &|x| u64::from(crate::dtype_semantics::f16_from_f64_rne(x).to_bits()),
                     significant_digits(&text),
                 );
                 assert_form_matches_rendered_magnitude(&text, bits);
@@ -673,7 +673,7 @@ mod tests {
                 panic!("bf16 bits {bits:#06x} rendered unparseable `{text}`: {e}")
             });
             assert_eq!(
-                half::bf16::from_f64(parsed).to_bits(),
+                crate::dtype_semantics::bf16_from_f64_rne(parsed).to_bits(),
                 bits,
                 "bf16 bits {bits:#06x} (`{}`) rendered `{text}` which does not \
                  round-trip at bf16 width",
@@ -683,7 +683,7 @@ mod tests {
                 no_shorter_rendering(
                     f64::from(v),
                     u64::from(bits),
-                    &|x| u64::from(half::bf16::from_f64(x).to_bits()),
+                    &|x| u64::from(crate::dtype_semantics::bf16_from_f64_rne(x).to_bits()),
                     significant_digits(&text),
                 );
                 assert_form_matches_rendered_magnitude(&text, bits);
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn half_grammar_thresholds_match_the_normative_constants() {
         // bf16 spans both boundaries; sample values on each side.
-        let bf = |x: f64| half::bf16::from_f64(x);
+        let bf = crate::dtype_semantics::bf16_from_f64_rne;
         // Below 1e-4: e-notation.
         let tiny = bf(5e-5);
         let tiny_text = format_element(Prim::Bf16, ElementRef::Bf16(tiny));

@@ -533,12 +533,12 @@ fn parse_canonical_float(
     let (value, element) = match prim {
         Prim::F16 => {
             let parsed = text.parse::<f64>().map_err(|_| parse_error())?;
-            let value = half::f16::from_f64(parsed);
+            let value = crate::dtype_semantics::f16_from_f64_rne(parsed);
             (FloatValue::F16(value), ElementRef::F16(value))
         }
         Prim::Bf16 => {
             let parsed = text.parse::<f64>().map_err(|_| parse_error())?;
-            let value = half::bf16::from_f64(parsed);
+            let value = crate::dtype_semantics::bf16_from_f64_rne(parsed);
             (FloatValue::Bf16(value), ElementRef::Bf16(value))
         }
         Prim::F32 => {

@@ -418,10 +418,10 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
         "f16" => narrow_float_violation(
             t,
             "f16",
-            |d| half::f16::from_f64(d).to_f64(),
+            |d| chelis_types::f16_from_f64_rne(d).to_f64(),
             |t| {
                 t.parse::<f64>().is_ok_and(|v| {
-                    let w = half::f16::from_f64(v);
+                    let w = chelis_types::f16_from_f64_rne(v);
                     chelis_types::observation::format_element(
                         chelis_types::types::Prim::F16,
                         chelis_types::observation::ElementRef::F16(w),
@@ -432,10 +432,10 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
         "bf16" => narrow_float_violation(
             t,
             "bf16",
-            |d| half::bf16::from_f64(d).to_f64(),
+            |d| chelis_types::bf16_from_f64_rne(d).to_f64(),
             |t| {
                 t.parse::<f64>().is_ok_and(|v| {
-                    let w = half::bf16::from_f64(v);
+                    let w = chelis_types::bf16_from_f64_rne(v);
                     chelis_types::observation::format_element(
                         chelis_types::types::Prim::Bf16,
                         chelis_types::observation::ElementRef::Bf16(w),

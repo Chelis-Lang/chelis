@@ -1158,6 +1158,86 @@ impl TensorStorage {
     }
 }
 
+fn round_shift_even_u64(value: u64, shift: u32) -> u64 {
+    match shift {
+        0 => value,
+        1..=63 => {
+            let quotient = value >> shift;
+            let remainder = value & ((1_u64 << shift) - 1);
+            let halfway = 1_u64 << (shift - 1);
+            quotient + u64::from(remainder > halfway || (remainder == halfway && quotient & 1 == 1))
+        }
+        64 => u64::from(value > (1_u64 << 63)),
+        _ => 0,
+    }
+}
+
+/// Round one binary64 value directly into a binary16-shaped IEEE encoding.
+///
+/// The source significand remains intact until the one target-width
+/// round-to-nearest-ties-to-even step. In particular, this must not delegate
+/// through f32 or a converter which truncates the low binary64 significand
+/// bits before rounding ([04-NUM-14]).
+fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: i32) -> u16 {
+    let source = value.to_bits();
+    let sign = ((source >> 48) & 0x8000) as u16;
+    let source_exponent = ((source >> 52) & 0x7ff) as u32;
+    let source_mantissa = source & 0x000f_ffff_ffff_ffff;
+    let target_exponent_max = (1_u32 << exponent_bits) - 1;
+    let target_exponent_bits = (target_exponent_max << mantissa_bits) as u16;
+
+    if source_exponent == 0x7ff {
+        if source_mantissa == 0 {
+            return sign | target_exponent_bits;
+        }
+        // Preserve the NaN class with one canonical quiet payload. The text
+        // contract carries no NaN payload, and this avoids target-dependent
+        // signaling-NaN behavior at the conversion boundary.
+        return sign | target_exponent_bits | (1_u16 << (mantissa_bits - 1));
+    }
+    if source_exponent == 0 {
+        // Every finite binary64 subnormal is below half of the least f16 or
+        // bf16 subnormal. This also preserves the sign of zero.
+        return sign;
+    }
+
+    let mut exponent = source_exponent as i32 - 1023;
+    let significand = (1_u64 << 52) | source_mantissa;
+    let minimum_exponent = 1 - bias;
+    let maximum_exponent = target_exponent_max as i32 - 1 - bias;
+    if exponent > maximum_exponent {
+        return sign | target_exponent_bits;
+    }
+
+    if exponent >= minimum_exponent {
+        let mut rounded = round_shift_even_u64(significand, 52 - mantissa_bits);
+        if rounded == (1_u64 << (mantissa_bits + 1)) {
+            rounded >>= 1;
+            exponent += 1;
+            if exponent > maximum_exponent {
+                return sign | target_exponent_bits;
+            }
+        }
+        let target_exponent = ((exponent + bias) as u16) << mantissa_bits;
+        let target_mantissa = (rounded & ((1_u64 << mantissa_bits) - 1)) as u16;
+        return sign | target_exponent | target_mantissa;
+    }
+
+    let shift = (52 - mantissa_bits) + (minimum_exponent - exponent) as u32;
+    let rounded = round_shift_even_u64(significand, shift);
+    sign | rounded as u16
+}
+
+/// Canonical one-step binary64-to-f16 conversion ([04-NUM-14]).
+pub fn f16_from_f64_rne(value: f64) -> half::f16 {
+    half::f16::from_bits(f64_to_ieee16_bits(value, 5, 10, 15))
+}
+
+/// Canonical one-step binary64-to-bf16 conversion ([04-NUM-14]).
+pub fn bf16_from_f64_rne(value: f64) -> half::bf16 {
+    half::bf16::from_bits(f64_to_ieee16_bits(value, 8, 7, 127))
+}
+
 /// Round an exact i64 directly to bfloat16, once, with target-width
 /// round-to-nearest-ties-to-even. Converting through f64 first is not
 /// equivalent above 2^53: it can erase which side of a bf16 midpoint the
@@ -2985,6 +3065,18 @@ mod tests {
     }
 
     #[test]
+    fn direct_f64_to_f16_rounds_once_without_an_intermediate_f32() {
+        const JUST_BELOW_MIDPOINT: f64 = 52847.99970178839;
+
+        assert_eq!(f16_from_f64_rne(JUST_BELOW_MIDPOINT).to_bits(), 0x7a73);
+        assert_eq!(
+            f16_from_f64_rne(f64::from(JUST_BELOW_MIDPOINT as f32)).to_bits(),
+            0x7a74,
+            "an explicit f32 source first lands on the midpoint, then ties upward"
+        );
+    }
+
+    #[test]
     fn f16_finalize_overflows_to_infinity_at_the_ieee_boundary() {
         // The locked cell: mul(65504f16, 2f16) = inf.
         assert_eq!(
@@ -3031,6 +3123,66 @@ mod tests {
         assert_eq!(
             fin(Prim::Bf16, wide).unwrap().as_f64_lossy(),
             0.010009765625
+        );
+    }
+
+    #[test]
+    fn direct_f64_to_bf16_keeps_all_source_bits_until_the_rne_step() {
+        const JUST_ABOVE_MIDPOINT: f64 = 1.0039062500000002;
+
+        assert_eq!(bf16_from_f64_rne(JUST_ABOVE_MIDPOINT).to_bits(), 0x3f81);
+        assert_eq!(
+            bf16_from_f64_rne(f64::from(JUST_ABOVE_MIDPOINT as f32)).to_bits(),
+            0x3f80,
+            "an explicit f32 source first lands on the midpoint, then ties downward"
+        );
+    }
+
+    #[test]
+    fn direct_reduced_float_rounding_obeys_every_finite_midpoint() {
+        fn check(last_finite: u16, image: impl Fn(u16) -> f64, round: impl Fn(f64) -> u16) {
+            for lower_bits in 0..last_finite {
+                let upper_bits = lower_bits + 1;
+                let midpoint = (image(lower_bits) + image(upper_bits)) / 2.0;
+                let below = f64::from_bits(midpoint.to_bits() - 1);
+                let above = f64::from_bits(midpoint.to_bits() + 1);
+                let tie_bits = if lower_bits & 1 == 0 {
+                    lower_bits
+                } else {
+                    upper_bits
+                };
+
+                assert_eq!(round(below), lower_bits, "below midpoint {lower_bits:#06x}");
+                assert_eq!(round(midpoint), tie_bits, "at midpoint {lower_bits:#06x}");
+                assert_eq!(round(above), upper_bits, "above midpoint {lower_bits:#06x}");
+
+                assert_eq!(
+                    round(-below),
+                    0x8000 | lower_bits,
+                    "negative below-magnitude midpoint {lower_bits:#06x}"
+                );
+                assert_eq!(
+                    round(-midpoint),
+                    0x8000 | tie_bits,
+                    "negative midpoint {lower_bits:#06x}"
+                );
+                assert_eq!(
+                    round(-above),
+                    0x8000 | upper_bits,
+                    "negative above-magnitude midpoint {lower_bits:#06x}"
+                );
+            }
+        }
+
+        check(
+            0x7bff,
+            |bits| f64::from(half::f16::from_bits(bits)),
+            |value| f16_from_f64_rne(value).to_bits(),
+        );
+        check(
+            0x7f7f,
+            |bits| f64::from(half::bf16::from_bits(bits)),
+            |value| bf16_from_f64_rne(value).to_bits(),
         );
     }
 
