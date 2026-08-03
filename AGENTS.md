@@ -362,28 +362,38 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - **Rust** where the task naturally fits a compiled workspace member.
 - **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
   Python instead. Shell is fragile and untestable.
-- **One exception — the published bootstrap installer.** Shell is permitted *only* for
-  the chelisup bootstrap one-liner (`chelisup.sh`, the `curl -fsSL … | sh` installer). It
-  runs on a bare machine *before* any chelis, cargo, or even Python exists, so Python is
-  not an option — it is not guaranteed present either, which is the whole bootstrap
-  problem. It MUST be minimal POSIX `sh`, `shellcheck`-clean, and covered by a test
-  (`sh -n` parse plus `shellcheck` when available). This is a single-purpose carve-out for
-  the one artifact that cannot be anything else; every other script remains Python.
+- **Shell exceptions.** Shell is permitted only for these artifacts:
+  - The published `chelisup.sh` bootstrap runs before Chelis, Cargo, or Python exists.
+  - The generated Nix `chelisup` launcher runs with only its package closure.
+  - The cargo-husky `commit-msg` hook locates a repository-managed Python interpreter.
+  Each artifact MUST use minimal POSIX `sh`. Each artifact MUST pass `sh -n` and
+  `shellcheck` when available. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
-- **Use the uv-managed Python** at `.venv/bin/python`, not the system Python.
-  Create it once with `uv venv --python 3.11` from the repo root. `py/pyproject.toml`
-  pins `requires-python = ">=3.11"`. See [`README.md`](README.md) for the full setup.
+- **Use a managed Python**, not the system Python. Inside Devenv, use the activated
+  environment at `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python`.
+  Create the manual environment once with `uv venv --python 3.11` from the repo root.
+  `py/pyproject.toml` pins `requires-python = ">=3.11"`. See [`README.md`](README.md)
+  for the full setup.
 
 ## Build Toolchain
 
-`chelis-python` links against `libpython` and `.cargo/config.toml` sets
-`PYO3_PYTHON` to `.venv/bin/python` so the link step finds the project-pinned
-interpreter. This is a hard prerequisite on every platform: `cargo build` for
-any crate that transitively pulls pyo3 will fail without a `.venv/`. On macOS
-specifically, Apple's bundled `python3` is 3.9 and reports a stale
-`sysconfig.LIBDIR` pointing at a non-existent Xcode framework path; using the
-uv-managed interpreter sidesteps that. Run `uv venv --python 3.11` once before
-building.
+`chelis-python` links against `libpython`. Outside Devenv, `.cargo/config.toml`
+sets `PYO3_PYTHON` to `.venv/bin/python`. Devenv overrides that variable with
+`.devenv/state/venv/bin/python` and activates the same environment.
+
+A managed Python is a hard prerequisite on every platform. Outside Devenv,
+`cargo build` for a crate that pulls pyo3 will fail without `.venv/`. On macOS,
+Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. A managed
+interpreter avoids that path. Run `uv venv --python 3.11` before a manual build.
+
+## Local Git Hook
+
+Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
+runs `scripts/check_commit_message.py`.
+
+Cargo-husky remains the fallback for the manual setup. `cargo test` installs its
+POSIX wrapper, which runs the same Python checker. All formatting and lint hooks
+remain disabled. CI remains the remote enforcement boundary.
 
 ## Build And Gate Commands
 
@@ -486,7 +496,9 @@ default workspace run.
   the builds and feature/profile differences invalidate each other's caches.
 - Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
   `python3 scripts/reap_orphans.py` and reap them with
-  `python3 scripts/reap_orphans.py --kill`. Review the dry-run listing first:
+  `python3 scripts/reap_orphans.py --kill`. Inside Devenv, use
+  `chelis-reap-orphans` and `chelis-reap-orphans --kill`. Review the dry-run
+  listing first:
   ppid==1 cannot distinguish an abandoned build from a deliberately detached
   one (`nohup cargo build` you are still tailing). Run it from the checkout
   whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
@@ -501,8 +513,9 @@ default workspace run.
 - macOS workstation only: first-exec assessment can degrade under mass
   fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
-  slow) before trusting the gate's workspace nextest stage locally; when
-  degraded, fall back to CI (macOS Smoke) for that stage per
+  slow). Inside Devenv, use `chelis-exec-preflight`. Run the probe before the
+  local workspace nextest stage. If the probe reports degradation, use the
+  macOS Smoke CI stage per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
 
 ## Local HIP Environment
@@ -513,6 +526,7 @@ runnable. The authoritative runbook is [`docs/local_hip_environment.md`](docs/lo
 **For any HIP manual gate (especially hipBLAS-linked tests), run via**
 `scripts/hip_test.py` — e.g.
 `scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness -- --ignored --test-threads=1`.
+Inside Devenv, use the equivalent `chelis-hip-test` command.
 The wrapper sets `HSA_OVERRIDE_GFX_VERSION=11.5.1`, the full `LD_LIBRARY_PATH`, and
 the full `HIPCC_COMPILE_FLAGS_APPEND` (including `-L` to the gfx1151 wheel lib that
 hipBLAS link resolution needs). Plain `cargo test --ignored` inherits only the
@@ -645,6 +659,18 @@ and [`docs/book/src/reef.md`](docs/book/src/reef.md).
   `install` / `default` / `list-installed` / `which` / `show` / `uninstall` /
   `self uninstall`. The store is `$CHELIS_HOME` (default `~/.chelis`):
   `toolchains/<ver>`, `bin/{chelis,chelisup}`, `reef/`, `src/`.
+- **Nix `chelisup` closure:** the Nix package uses `bin/chelisup` as a wrapper
+  around `libexec/chelisup`. Before `install`, the wrapper creates the staging
+  root `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes
+  `$CHELIS_HOME/nix-gcroots/chelisup`. A failed install preserves the prior root.
+  If the install copied a new binary, the wrapper promotes
+  `$CHELIS_HOME/nix-gcroots/chelisup.partial`. A new attempt recovers a stale
+  staging root before it changes that root. After success, the Nix wrapper
+  restores itself at `$CHELIS_HOME/bin/chelisup`. The generic Rust installer
+  contains no Nix root path or cleanup logic. The installed Nix wrapper removes
+  all three roots after the real `self uninstall` command succeeds. The
+  `chelisupLauncherLint` flake check gates the generated launcher with `bash -n`
+  plus `shellcheck`.
 - **Shim resolution order** (first match wins): `+<ver>` arg → `CHELIS_TOOLCHAIN`
   → nearest `chelis-toolchain` file → nearest `reef.toml` `compiler =` pin →
   recorded default. A resolved-but-not-installed version is a loud error naming

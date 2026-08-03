@@ -6,6 +6,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Locked Nix packages expose the Chelis compiler, C runtime, and `chelisup`.**
+  The root flake supports `x86_64-linux` and `aarch64-darwin` with native checks.
+  Pinned `crate2nix` crate derivations share dependency outputs across the product packages.
+  Nix generates the graph through import from derivation, so Cargo changes require no checked-in graph refresh.
+  It also provides `chelis` and `chelisup` applications for `nix run`.
+  The Nix `chelisup` launcher roots its closure before it installs release shims.
+  The launcher remains installed and owns Nix root cleanup. The generic installer remains independent of Nix.
+  Nix remains an additive source-build channel. `chelisup` still routes release toolchains.
+- **A tracked Devenv shell supplies the contributor toolchain on Linux and macOS.**
+  The shell input pins Devenv modules to `v2.2`. The shell also pins Rust, Python 3.11, test tools, and the platform C toolchain.
+  Linux uses GCC, OpenBLAS, and Valgrind from Nixpkgs. macOS maps `gcc` and
+  `g++` to the Nixpkgs clang wrapper from `pkgs.stdenv.cc`.
+  `devenv test` runs separate toolchain, Python, C, and C++ tasks.
+  Native Nix CI uses the reviewed portable Devenv action and public cache.
+  The Linux job runs per pull request with bounded parallelism, reclaimed runner disk, and a cached cvc5 toolchain closure.
+  The macOS job is a documented manual dispatch gate with the identical check set.
+
 ### Fixed
 
 - **Compiled list combinators grow accumulators in place (part of chelis#943).**

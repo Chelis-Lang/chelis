@@ -23,6 +23,8 @@ execs it with a short timeout:
 
 ```sh
 .venv/bin/python scripts/preflight_exec_probe.py
+# Inside an active Devenv shell:
+chelis-exec-preflight
 ```
 
 Expected when healthy:

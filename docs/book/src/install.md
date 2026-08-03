@@ -138,6 +138,40 @@ binary-artifact status. It is read-only and never installs. See
 
 The rest of this page builds the Chelis compiler itself from a checkout.
 
+### Nix source packages
+
+The root flake supports `x86_64-linux` and `aarch64-darwin`. It provides these packages:
+
+- `chelis`
+- `chelis-runtime`
+- `chelisup`
+
+Run these commands from the repository root:
+
+```sh
+nix build .#chelis
+nix build .#chelis-runtime
+nix build .#chelisup
+nix run .#chelis -- --version
+nix run .#chelisup -- --help
+.venv/bin/python scripts/test_nix_flake_contract.py
+nix flake check --print-build-logs
+```
+
+Nix is a source-build channel. It does not replace the release store or the version router.
+
+Before an install, the Nix wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup`.
+
+The stable root preserves the copied installer dependencies. A failed install preserves the prior stable root.
+
+If a failed install copied a new binary, `$CHELIS_HOME/nix-gcroots/chelisup.partial` protects that binary.
+
+After each successful install, the Nix wrapper restores itself at `$CHELIS_HOME/bin/chelisup`. The generic installer contains no Nix root logic.
+
+Through the installed Nix wrapper, `chelisup self uninstall` removes all three roots after executable cleanup.
+
+The `chelisup` release workflow owns release pins and side-by-side toolchains.
+
 ## Rust Toolchain
 
 Chelis is built with stable Rust:

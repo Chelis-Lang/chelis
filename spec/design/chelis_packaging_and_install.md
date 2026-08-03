@@ -246,6 +246,43 @@ The toolchain may additionally be *described* as a `[artifacts]` entry for
 reproducibility, but its installer of record is chelisup, not `reef install`.
 This keeps two installers from fighting over the toolchain.
 
+### 5.7 Nix source package
+
+The Nix `chelisup` package has a launcher at `bin/chelisup` and the real binary
+at `libexec/chelisup`. Before an install, the launcher creates the staging root
+`$CHELIS_HOME/nix-gcroots/chelisup.next`.
+
+After a successful install, the launcher promotes
+`$CHELIS_HOME/nix-gcroots/chelisup` and removes the staging root. A failed
+install always preserves the prior stable root.
+
+If the failed install copied a new binary, the launcher promotes
+`$CHELIS_HOME/nix-gcroots/chelisup.partial`. This partial root protects that
+binary. The launcher then removes the staging root.
+
+If an interrupted install left a staging root, the next attempt compares its
+package with both installed copies. It promotes the partial root only for a
+matching copy. Then it removes the stale staging root.
+
+The real installer copies itself into both executable paths. After each
+successful copy, the Nix launcher replaces `$CHELIS_HOME/bin/chelisup` with
+itself. `$CHELIS_HOME/bin/chelis` remains the real shim.
+
+The stable GC root points to the complete Nix package output. It preserves the
+shim dependencies and every store reference in the installed launcher.
+
+The real installer contains no Nix root path or cleanup logic. The installed
+Nix launcher intercepts `self uninstall`. It delegates executable cleanup to
+the real installer and then removes the stable, staging, and partial roots.
+
+A direct real-binary copy has no Nix root management. Nix does not scan files
+outside the store, so garbage collection can remove its store dependencies.
+
+The launcher is generated shell: it runs where only the package closure exists,
+so Python is not available to it. The `chelisupLauncherLint` flake check gates
+the built launcher with `bash -n` plus `shellcheck`, mirroring the static gate
+on the bootstrap installer.
+
 ## 6. Layer 1 — binary distribution (chelis#468)
 
 Specified in full as Item 11 of [`reef_distribution.md`](reef_distribution.md).

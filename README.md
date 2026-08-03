@@ -53,6 +53,261 @@ Packages](docs/book/src/reef.md)**.
 
 The rest of this README builds the Chelis compiler from a checkout.
 
+### Devenv development shell
+
+Devenv is optional for local work. Native Nix CI requires Devenv. The shell
+supplies pinned Rust, Python, C, and contributor tools.
+
+The tracked environment supports `x86_64-linux` and Apple silicon macOS
+(`aarch64-darwin`). Other systems must use the manual setup below.
+
+These installation commands come from the
+[Devenv getting-started guide](https://devenv.sh/getting-started/).
+
+#### Install Nix on macOS
+
+The macOS environment requires Apple silicon.
+
+1. Install Nix with the official Nix installer:
+
+   ```sh
+   curl -sSfL https://artifacts.nixos.org/nix-installer | sh -s -- install
+   ```
+
+2. When the installation is complete, open a new terminal.
+
+#### Install Nix on Linux
+
+The Linux environment requires an x86_64 system.
+
+1. Install Nix in multi-user mode:
+
+   ```sh
+   sh <(curl -L https://nixos.org/nix/install) --daemon
+   ```
+
+2. When the installation is complete, open a new login shell.
+
+#### Install Devenv
+
+After Nix is available, run these steps.
+
+1. Install the Devenv release that this repository pins:
+
+   ```sh
+   nix --extra-experimental-features 'nix-command flakes' profile install github:cachix/devenv/v2.2
+   ```
+
+2. Make sure that Devenv reports version `2.2.0`:
+
+   ```sh
+   devenv --version
+   ```
+
+If Devenv reports a Bash evaluation error on macOS, install a current Bash
+version:
+
+```sh
+nix-env --install --attr bashInteractive -f https://github.com/NixOS/nixpkgs/tarball/nixpkgs-unstable
+```
+
+Do not run `devenv init` because this repository already contains the required
+Devenv files.
+
+#### Use the shell
+
+1. From the repository root, run the environment smoke test:
+
+   ```sh
+   devenv test
+   ```
+
+2. Enter the interactive shell:
+
+   ```sh
+   devenv shell
+   ```
+
+3. Inside the shell, build the workspace:
+
+   ```sh
+   cargo build --workspace
+   ```
+
+4. Run the Chelis command from the workspace:
+
+   ```sh
+   cargo run -p chelis-cli --bin chelis -- --help
+   ```
+
+5. Before a code push, run the local gate:
+
+   ```sh
+   chelis-gate --local
+   ```
+
+Use `devenv shell --` to run one command without an interactive shell:
+
+```sh
+# Run the authoritative C-backend acceptance oracle.
+devenv shell -- cargo nextest run -p chelis-backend-c
+
+# List the repository gate commands.
+devenv shell -- chelis-gate --list
+
+# List orphaned Chelis build processes.
+devenv shell -- chelis-reap-orphans
+```
+
+#### Shell behavior
+
+The repository pins the Devenv modules to release `v2.2`. The version of the
+local Devenv CLI must match this module version.
+
+`devenv.nix` imports five local configuration modules. `devenv.yaml` defines
+the inputs and CLI options.
+
+`devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
+revisions. Therefore, `devenv update` cannot change them.
+`scripts/check_nix_lock_parity.py` keeps these revisions aligned with
+`flake.lock`.
+
+On macOS, the `gcc` and `g++` shims invoke the Nixpkgs clang wrapper from
+`pkgs.stdenv.cc`. They do not invoke host Apple clang.
+
+On Linux, the shell supplies GCC, OpenBLAS, and Valgrind from Nixpkgs.
+
+Devenv creates and activates Python 3.11 at `.devenv/state/venv`. It sets
+`PYO3_PYTHON` to that interpreter.
+
+Devenv does not modify the repository-root `.venv`. The manual setup path below
+owns that environment outside Devenv.
+
+`devenv test` initializes the managed files and Python. It then runs separate
+smoke tasks for the toolchain, Python, C, and C++.
+
+The shell also supplies these platform commands:
+
+- `chelis-exec-preflight` on macOS
+- `chelis-z3-test` on Linux
+- `chelis-hip-test` on Linux
+
+Each command forwards its arguments to the applicable Python file under
+`scripts/`.
+
+Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
+runs `scripts/check_commit_message.py`.
+
+The manual setup retains cargo-husky as a fallback. `cargo test` installs a
+POSIX wrapper that invokes the same checker with `.venv/bin/python`.
+
+Both hooks reject AI tool authorship markers before Git creates a commit. All
+listed format and lint hooks remain disabled.
+
+#### Native Nix CI
+
+Both jobs for native Nix packages use the reviewed portable Devenv action from
+`Chelis-Lang/ci`. The jobs run their tasks through the portable shell.
+
+The action uses exact Nix and Devenv inputs. Its public Devenv cache is
+read-only. The cache does not contain the custom cvc5 derivation.
+
+Each job stores the prebuilt cvc5 toolchain closure in the GitHub Actions cache.
+The derivation name identifies the cache entry.
+
+The Linux job runs for each code pull request and each push to `main`. The
+shared detector skips documentation-only pull requests and reports success.
+The job first removes unused preinstalled toolchains. It limits Nix to two
+concurrent builds.
+
+The macOS job is a manual gate. Default CI does not run this job.
+
+Run this command to dispatch the macOS job:
+
+```sh
+gh workflow run "Nix Packages" --ref <branch>
+```
+
+When the `Nix Packages (aarch64-darwin)` job completes with all checks green,
+the gate passes.
+
+Devenv is not a product requirement.
+
+If you do not use Devenv locally, use the manual setup below.
+
+### Nix source packages
+
+The root flake provides locked source packages for these native systems:
+
+- `x86_64-linux`
+- `aarch64-darwin`
+
+Build a package from the repository root:
+
+```sh
+nix build .                 # default package, identical to .#chelis
+nix build .#default         # explicit default alias
+nix build .#chelis          # compiler, runtime library, and five public headers
+nix build .#chelis-runtime  # runtime static library and five public headers
+nix build .#chelisup        # installer command and its internal Nix payload
+```
+
+Run an application from the repository root:
+
+```sh
+nix run . -- --version              # default application, identical to .#chelis
+nix run .#default -- --version       # explicit default application alias
+nix run .#chelis -- --version        # packaged compiler
+nix run .#chelisup -- --help         # packaged installer
+nix run .#chelisup -- install 0.17.1 # install one release toolchain
+```
+
+Before an install, the Nix `chelisup` wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup`.
+
+The stable root keeps the copied installer dependencies available after Nix garbage collection. A failed install preserves the prior stable root.
+
+If a failed install copied a new binary, `$CHELIS_HOME/nix-gcroots/chelisup.partial` protects that binary.
+
+After each successful install, the Nix wrapper restores itself at `$CHELIS_HOME/bin/chelisup`. The generic installer contains no Nix root logic.
+
+Through the installed Nix wrapper, `chelisup self uninstall` removes all three roots after executable cleanup.
+
+Run the complete check set for the native system:
+
+```sh
+.venv/bin/python scripts/test_nix_flake_contract.py
+nix flake check --print-build-logs
+```
+
+Nix is an additive source-build channel. It does not create the version store that release toolchains use.
+
+`chelisup` remains the release installer and version router. Use `chelisup` when a project needs release pins or side-by-side toolchains.
+
+The flake does not export internal crates, the Python extension, `chelis-std`, or documentation as separate packages.
+
+The Rust packages use an automatic graph from crate2nix 0.15.0. The graph gives each Rust crate a separate Nix derivation.
+
+Nix generates the graph from the Cargo workspace through import from derivation. Nix fetchers prepare dependencies before Cargo runs in offline mode.
+
+The repository does not track `Cargo.nix`.
+
+A Cargo input change gives the generator a new derivation identity. No graph refresh command is necessary.
+
+The first evaluation builds the pinned generator before Nix schedules crate builds. Later evaluations can reuse the generated graph from the Nix store.
+
+Each native CI job evaluates its matching graph. A foreign-system package evaluation requires a compatible remote builder.
+
+To bump the shared Nix pins, pick a `cachix/devenv-nixpkgs` revision and read its locked inner `NixOS/nixpkgs` revision. Set that inner revision in `flake.nix` and the outer revision in `devenv.yaml`. Keep the `rust-overlay` revision identical in both files.
+
+Then refresh both lock files and verify the result:
+
+```sh
+nix flake lock
+devenv update
+.venv/bin/python scripts/check_nix_lock_parity.py
+.venv/bin/python scripts/test_devenv_version.py
+```
+
 **Rust toolchain.** Install [rustup](https://rustup.rs) (the Rust toolchain
 installer) if you do not already have it:
 
@@ -109,12 +364,13 @@ uv venv --python 3.11
 ```
 
 The project pins Python 3.11 (`py/pyproject.toml` requires `>=3.11`).
-Always use the uv-managed interpreter at `.venv/bin/python` — `.cargo/config.toml`
-sets `PYO3_PYTHON` to it so `cargo build -p chelis-python` links against the
-right `libpython` on every developer's machine. Using the system Python is
-**not supported**; on macOS, Apple's bundled `python3` reports a stale
-`sysconfig.LIBDIR` that breaks the PyO3 link step, and on Linux the
-system Python may not match the chelis-tools version constraint.
+Outside Devenv, always use the uv-managed interpreter at `.venv/bin/python`.
+`.cargo/config.toml` sets `PYO3_PYTHON` to that manual environment.
+
+Inside Devenv, use the activated environment at `.devenv/state/venv`.
+Devenv overrides `PYO3_PYTHON` with its managed interpreter.
+
+Using the system Python is **not supported**. Apple's bundled Python reports a stale library path, and Linux Python can violate the version contract.
 
 Install Python dependencies into the uv venv as needed:
 
@@ -128,10 +384,11 @@ but no pip installs.
 
 ## Build
 
-**The uv venv is a hard prerequisite for `cargo build` on every platform**:
-`chelis-python` links against `libpython`, and the PyO3 link step fails
-with an obscure linker error if `.venv/` does not exist. Run
-`uv venv --python 3.11` (see Prerequisites) before your first build.
+Outside Devenv, the root uv environment is a hard prerequisite for `cargo build` on every platform.
+
+Inside Devenv, the activated `.devenv/state/venv` environment satisfies the same PyO3 requirement.
+
+`chelis-python` links against `libpython`. Run `uv venv --python 3.11` before a manual build if `.venv/` does not exist.
 
 ```sh
 cargo build --workspace
@@ -156,8 +413,9 @@ is the single source of truth for the per-PR gate; CI runs the same
 commands:
 
 ```sh
-.venv/bin/python scripts/gate.py --list   # print the canonical command list
-.venv/bin/python scripts/gate.py --local  # developer pre-push subset
+.venv/bin/python scripts/gate.py --list   # manual environment
+.venv/bin/python scripts/gate.py --local  # manual environment
+chelis-gate --local                       # active Devenv shell
 ```
 
 `--local` runs workspace clippy, `cargo fmt --check`,

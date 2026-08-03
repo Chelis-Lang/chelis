@@ -10,6 +10,10 @@ target/
 # Node dependency trees are generated artifacts. OpenSpec tooling is supplied
 # by CI and must not install packages into the repository checkout.
 node_modules/
+# Devenv generates local state from the tracked input files.
+/.devenv/
+/.devenv.flake.nix
+/.pre-commit-config.yaml
 # WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
 # Sollya + fplll from source. A build artifact, never committed (the committed
 # proof bundle under crates/chelis-prove/data is the source of truth).
@@ -25,6 +29,7 @@ data/
 !crates/
 !crates/**/*.c
 !crates/**/*.h
+!nix/**/*.c
 # WI-13 committed, certified erf envelope + its Sollya/Gappa proof bundle: all
 # source-of-truth data (the envelope is embedded via include_str!; the .gappa
 # proof + .sollya generator are the committed machine-checkable proof term), so

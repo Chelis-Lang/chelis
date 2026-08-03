@@ -1,0 +1,22 @@
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "type": "github"
+      }
+    },
+    "rust-overlay": {
+      "locked": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "2222222222222222222222222222222222222222",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
