@@ -8,6 +8,29 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`chelis-std` CSV/JSON serializers (chelis#928).** `Std.Io.Csv` gains
+  `to_csv` / `try_to_csv` / `write_csv` / `try_write_csv` (header from the
+  first row's key order, minimal quoting with doubled embedded quotes, LF
+  endings; blank-rendering records are emitted as a quoted empty field so
+  the reader cannot drop them; fields or headers containing CR/LF are
+  rejected because the line-based reader cannot round-trip them).
+  `Std.Io.Json` gains `to_json` / `try_to_json` / `write_json` /
+  `try_write_json` (insertion-order keys, shortest-round-trip f64 via
+  `to_string`, non-finite numbers fail loudly / return `None`) and now
+  exports the seven `Json` constructors so documents can be built directly.
+  New `Std.Text` module with `join(parts, sep)`. The bundled chelis-std
+  0.4.0 dist bytes changed accordingly (same version; committed reef.lock
+  hashes regenerated). Serialization helpers are iterative (map/fold), not
+  per-character recursive, so multi-kilobyte fields do not hit the eval
+  lane's recursion ceiling. `try_load_json` on a missing path now returns
+  `None` (previously it trapped inside `read_file`), matching
+  `try_read_csv`'s missing-file contract. These serializers are the
+  **compiled-lane counterpart** of the eval-only prelude JSON/CSV builtins
+  (chelis#890/chelis#903): ordinary package defs that `chelis build`
+  accepts, on std's own `Json` ADT, unaffected by the builtins'
+  `EVAL_ONLY_HOST_BUILTINS` rejection — reef package name-rewriting keeps
+  the shared `to_json`/`to_csv`/`parse_json` names apart in both lanes.
+
 - **Host-lane JSON I/O builtins (chelis#890).** A prelude `Json` ADT
   (`JNull | JBool bool | JInt int64 | JNum f64 | JStr string | JList
   List[Json] | JDict Dict[string, Json]`) with `parse_json`/`to_json`,
@@ -198,29 +221,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.17.5] — 2026-07-31
 
 ### Added
-
-- **`chelis-std` CSV/JSON serializers (chelis#928).** `Std.Io.Csv` gains
-  `to_csv` / `try_to_csv` / `write_csv` / `try_write_csv` (header from the
-  first row's key order, minimal quoting with doubled embedded quotes, LF
-  endings; blank-rendering records are emitted as a quoted empty field so
-  the reader cannot drop them; fields or headers containing CR/LF are
-  rejected because the line-based reader cannot round-trip them).
-  `Std.Io.Json` gains `to_json` / `try_to_json` / `write_json` /
-  `try_write_json` (insertion-order keys, shortest-round-trip f64 via
-  `to_string`, non-finite numbers fail loudly / return `None`) and now
-  exports the seven `Json` constructors so documents can be built directly.
-  New `Std.Text` module with `join(parts, sep)`. The bundled chelis-std
-  0.4.0 dist bytes changed accordingly (same version; committed reef.lock
-  hashes regenerated). Serialization helpers are iterative (map/fold), not
-  per-character recursive, so multi-kilobyte fields do not hit the eval
-  lane's recursion ceiling. `try_load_json` on a missing path now returns
-  `None` (previously it trapped inside `read_file`), matching
-  `try_read_csv`'s missing-file contract. These serializers are the
-  **compiled-lane counterpart** of the eval-only prelude JSON/CSV builtins
-  (chelis#890/chelis#903): ordinary package defs that `chelis build`
-  accepts, on std's own `Json` ADT, unaffected by the builtins'
-  `EVAL_ONLY_HOST_BUILTINS` rejection — reef package name-rewriting keeps
-  the shared `to_json`/`to_csv`/`parse_json` names apart in both lanes.
 
 - **`chelis-vocab` defines a closed vocabulary for the physical representations of runtime elements.**
   `RuntimeDType::repr()` maps each dtype to one `Repr` value.
