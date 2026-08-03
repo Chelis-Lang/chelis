@@ -17,6 +17,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use chelis_types::observation::{ElementRef, format_element};
+use chelis_types::types::Prim;
 use common::{
     DOMAIN_PRINT_TRUNCATION_SLACK, assert_elements_in_domain, element_domain_violation,
     printed_value_tokens,
@@ -237,6 +239,25 @@ fn bf16_membership_at_8_bit_mantissa() {
     // A nearby decimal that merely rounds to the same bf16 is not the
     // canonical own-width shortest rendering.
     assert!(!is_member("bf16", "0.3339"));
+}
+
+#[test]
+fn every_half_width_canonical_rendering_is_a_domain_member() {
+    for bits in 0..=u16::MAX {
+        let f16_value = half::f16::from_bits(bits);
+        let f16_token = format_element(Prim::F16, ElementRef::F16(f16_value));
+        assert!(
+            is_member("f16", &f16_token),
+            "f16 bits {bits:#06x} rendered as {f16_token:?}"
+        );
+
+        let bf16_value = half::bf16::from_bits(bits);
+        let bf16_token = format_element(Prim::Bf16, ElementRef::Bf16(bf16_value));
+        assert!(
+            is_member("bf16", &bf16_token),
+            "bf16 bits {bits:#06x} rendered as {bf16_token:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

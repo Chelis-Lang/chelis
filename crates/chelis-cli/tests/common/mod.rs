@@ -420,8 +420,8 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
             "f16",
             |d| half::f16::from_f64(d).to_f64(),
             |t| {
-                t.parse::<f32>().is_ok_and(|v| {
-                    let w = half::f16::from_f32(v);
+                t.parse::<f64>().is_ok_and(|v| {
+                    let w = half::f16::from_f64(v);
                     chelis_types::observation::format_element(
                         chelis_types::types::Prim::F16,
                         chelis_types::observation::ElementRef::F16(w),
@@ -434,8 +434,8 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
             "bf16",
             |d| half::bf16::from_f64(d).to_f64(),
             |t| {
-                t.parse::<f32>().is_ok_and(|v| {
-                    let w = half::bf16::from_f32(v);
+                t.parse::<f64>().is_ok_and(|v| {
+                    let w = half::bf16::from_f64(v);
                     chelis_types::observation::format_element(
                         chelis_types::types::Prim::Bf16,
                         chelis_types::observation::ElementRef::Bf16(w),
@@ -458,6 +458,8 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
 /// Shared narrow-float membership: exact widened rendering or own-width
 /// shortest rendering. The zero slack below is retained as the executable
 /// Phase 0 ratchet that rejects the retired `%.16g` accommodation.
+/// Own-width recognition parses through f64 and narrows once, matching the
+/// [05-OBS-1] `strtod` contract without an intermediate f32 double rounding.
 fn narrow_float_violation(
     t: &str,
     prim: &str,
