@@ -59,7 +59,7 @@ pub use dtype_semantics::{
     finalize_scalar, finalize_tensor, float_binop, float_scalar_tensor_binop, float_tensor_binop,
     float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
     int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
-    reduce_window_grad_tensor_groups, scalar_from_f64, scalar_from_i64,
+    reduce_window_grad_tensor_groups, scalar_from_f64, scalar_from_i64, tensor_from_scalars,
 };
 pub use fitness::{
     FitnessReport, StructuralStats, TypeAnalysisOutcome, analyze_ir_program,
