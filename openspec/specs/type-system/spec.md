@@ -225,8 +225,9 @@ name-trackable operations, rejecting positional shape-rewriters.
 
 ### Requirement: Runtime shape semantics
 
-`shape(x, axis)` SHALL require a concrete non-negative integer axis and return an `int32`
-runtime scalar; a negative or out-of-range axis SHALL be a `DimensionMismatch`. An `expand`
+`shape(x, axis)` SHALL require a concrete non-negative integer axis and return an `int64`
+runtime scalar (`spec/05-risc-primitives.md` [05-DIM-2]; not fully implemented,
+chelis#1112); a negative or out-of-range axis SHALL be a `DimensionMismatch`. An `expand`
 runtime `size` SHALL be accepted only when it folds to a compile-time constant or derives from
 an in-scope tensor's shape; a sourceless runtime size SHALL be rejected identically at check,
 build, and eval.

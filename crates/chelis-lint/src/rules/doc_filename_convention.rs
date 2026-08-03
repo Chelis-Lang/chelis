@@ -70,7 +70,7 @@ fn classify_doc(path: &Path) -> Slot {
         let after = &s[idx + "/spec/".len()..];
         if !after.contains('/') {
             // Distinguish §8.1 (numbered language specs in chelis/spec/)
-            // from §8.2 (snake_case design/phase notes) by the filename
+            // from §8.2 (snake_case design and implementation notes) by the filename
             // itself: a leading `NN-` prefix indicates intent to be a
             // numbered spec. Other names follow §8.2. This shape-based
             // dispatch works for both absolute and relative paths.
@@ -287,7 +287,7 @@ impl DocFilenameConvention {
             ),
             Slot::SpecDesign => (
                 snake_re().is_match(name),
-                "snake_case (e.g., `phase1a_kernel_codegen.md`)",
+                "snake_case (e.g., `dtype_semantics.md`)",
                 "§8.2",
             ),
             Slot::Docs => {
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn accepts_snake_in_spec_design() {
-        assert!(run("/repo/spec/design/phase1a_kernel_codegen.md").is_empty());
+        assert!(run("/repo/spec/design/dtype_semantics.md").is_empty());
         assert!(run("/repo/spec/design/chelis_canonical_reference.md").is_empty());
     }
 
@@ -515,16 +515,15 @@ mod tests {
 
     #[test]
     fn accepts_shell_spec_snake_case() {
-        // shoals/spec/phase3l.md is snake — pass under §8.2.
-        assert!(run("/home/jeff/Documents/scratch/shoals/spec/phase3l.md").is_empty());
-        assert!(run("/home/jeff/Documents/scratch/nautilus/spec/phase3j.md").is_empty());
-        assert!(run("/home/jeff/Documents/scratch/coral/spec/phase3k.md").is_empty());
+        assert!(run("/repo/shells/shoals/spec/runtime_abi.md").is_empty());
+        assert!(run("/repo/shells/nautilus/spec/model_contract.md").is_empty());
+        assert!(run("/repo/shells/coral/spec/deployment_contract.md").is_empty());
     }
 
     #[test]
     fn flags_shell_spec_kebab() {
         // Shell spec dirs follow §8.2 (snake_case); kebab is a violation.
-        let v = run("/home/jeff/Documents/scratch/shoals/spec/phase-3l.md");
+        let v = run("/repo/shells/shoals/spec/runtime-abi.md");
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].spec_ref, "§8.2");
     }

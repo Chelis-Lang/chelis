@@ -95,6 +95,32 @@ the roadmap says. It is not the ordering for language semantics, and the canonic
 reference says so itself: "Language semantics still belong in the numbered spec
 documents."
 
+### Normative Specs Are Timeless Contracts
+
+Normative specifications describe the decided Chelis architecture and language
+semantics, irrespective of how completely any compiler version implements them. This
+rule applies to an untransferred numbered chapter, a controlling
+`openspec/specs/<capability>/spec.md`, and every normative `spec.md` delta under an
+active OpenSpec change.
+
+- Do not put project or implementation status in normative specs. Prohibited material
+  includes status/version-draft banners, phase or milestone labels, completion claims,
+  delivery histories, release or PR inventories, acceptance-oracle results, temporary
+  workarounds, and descriptions of what the implementation currently happens to do.
+- State the fully decided rule without weakening it to match a bug, an incomplete
+  backend, or a temporary restriction. In particular, never narrow an operation to one
+  dtype merely because that is the only dtype a lane implements today. The
+  implementation must move toward the spec; the spec must not move toward bad behavior.
+- When an implementation gap would materially mislead a reader, one short
+  non-normative parenthetical may say that the requirement is not fully implemented and
+  link its owning issue. It must not describe the current workaround, phase, release,
+  partial inventory, or completion percentage, and it must not qualify the normative
+  requirement.
+- Put sequencing and status in `spec/design/`, `docs/`, GitHub trackers, or OpenSpec
+  proposals/designs/tasks. A chapter-to-capability transfer records implementation
+  divergence in the owning OpenSpec change, never by copying that status into the
+  receiving capability spec.
+
 ### Numbered Specs Decide; Design Docs Implement
 
 - **`spec/00-12*.md` is the authority on WHAT the language does and HOW it must
