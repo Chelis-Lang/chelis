@@ -102,6 +102,69 @@ pub struct CompilerError {
     pub errors: Vec<Diagnostic>,
 }
 
+/// `Diagnostic::kind` for an evaluation abandoned via a cancellation token
+/// (chelis#914), as opposed to one that failed on its own merits.
+///
+/// `Diagnostic::kind` is an open string, so this is purely additive: existing
+/// consumers that do not know the value simply see an unfamiliar kind, and the
+/// serialized shape is unchanged.
+pub const EVAL_CANCELLED_KIND: &str = "cancelled";
+
+impl CompilerError {
+    /// Whether this error is a cancellation rather than a genuine failure.
+    ///
+    /// Prefer this over inspecting messages: it reads the structured
+    /// `Diagnostic::kind` set at the eval-stage boundary, so it cannot be
+    /// confused by a program whose own error text discusses cancellation.
+    pub fn is_cancellation(&self) -> bool {
+        self.errors
+            .iter()
+            .any(|diagnostic| diagnostic.kind == EVAL_CANCELLED_KIND)
+    }
+}
+
+/// The error a front-end phase returns when the compile was abandoned
+/// (chelis#930).
+///
+/// `stage` is the phase that was running or about to run, which is what the
+/// operator wants to know ("it was still type-checking"). Classification is
+/// structural — [`EVAL_CANCELLED_KIND`] — exactly as for the eval lanes; the
+/// message carries the sentinel only for the CLI's `--timeout` boundary, which
+/// sees flattened text rather than the typed error.
+pub(crate) fn cancelled_stage_error(stage: &str) -> CompilerError {
+    stage_error(stage, chelis_types::EVAL_CANCELLED_MSG, EVAL_CANCELLED_KIND)
+}
+
+/// Front-end phase boundary (chelis#930): abandon the compile if cancellation
+/// has been requested.
+///
+/// Phase boundaries alone bound interrupt latency to one phase; the passes
+/// that dominate a large front end also poll per top-level declaration
+/// (`chelis-types`), which is what makes the bound useful rather than nominal.
+pub(crate) fn bail_if_cancelled(stage: &str) -> Result<()> {
+    if chelis_types::cancellation_requested() {
+        return Err(cancelled_stage_error(stage));
+    }
+    Ok(())
+}
+
+/// Replace a phase's error with the cancellation error when the compile was
+/// abandoned mid-phase (chelis#930).
+///
+/// A pass that stopped early reports whatever its truncated view implied —
+/// unbound tail declarations, missing signatures. Those are artefacts of the
+/// abandonment, not findings about the program, and reporting them would be
+/// actively misleading (the user asked to stop; the program may be fine).
+/// Cancellation is one-way, so this decision is deterministic: once the token
+/// is tripped it stays tripped for the rest of the compile.
+pub(crate) fn cancelled_or(stage: &str, error: CompilerError) -> CompilerError {
+    if chelis_types::cancellation_requested() {
+        cancelled_stage_error(stage)
+    } else {
+        error
+    }
+}
+
 type Result<T> = std::result::Result<T, CompilerError>;
 
 pub fn parse(request: ParseRequest) -> Result<ParseResult> {
@@ -711,13 +774,15 @@ fn wire_deep_error_path(path: crate::fragment::DeepErrorPath) -> crate::schema::
 }
 
 pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
+    bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
         source_kind: request.source_kind,
         source: &request.source,
         entry: None,
         goal: crate::pipeline::PipelineGoal::TypeAnalysis,
     })
-    .map_err(pipeline_rejection_to_compiler_error)?;
+    .map_err(pipeline_rejection_to_compiler_error)
+    .map_err(|error| cancelled_or("check", error))?;
     let crate::pipeline::PipelineOutcome::TypeAnalysis(analysis) = outcome else {
         unreachable!("the type-analysis goal returns only a type-analysis outcome")
     };
@@ -725,6 +790,14 @@ pub fn check(request: crate::schema::CheckRequest) -> Result<CheckResult> {
         chelis_types::TypeAnalysisOutcome::Rejected { fitness }
         | chelis_types::TypeAnalysisOutcome::Accepted { fitness, .. } => fitness,
     };
+    // chelis#930 review: a cancelled walk must not become a CheckResult.
+    // Every pass check_ir_fitness runs can now stop early on a tripped
+    // token, so without this bail a cancelled check returns
+    // Ok(score: 1.0, errors: []) computed over the truncated walk --
+    // "perfect success" whose empty error list is a coverage artifact.
+    // An embedder can reach this on the public API today by installing a
+    // CancelToken (exported since chelis#914) and calling compiler::check.
+    bail_if_cancelled("check")?;
     Ok(CheckResult {
         score: report.score,
         components: FitnessComponents {
@@ -1903,6 +1976,11 @@ fn compile_new_source_in_context(
     // resolved the package's library decls; the new source is whatever
     // the user typed into a `chelis eval --file` / `chelis test` worker /
     // `chelis check` call.
+    // chelis#930: same phase-boundary polling as `compile_source_scoped`. This
+    // is the primary route for reef packages (`chelis eval --file` inside a
+    // package, `chelis test` workers), so it is the path that matters most for
+    // the library-heavy workloads in chelis#828.
+    bail_if_cancelled("parse")?;
     let raw_new_decls = parse_surf(new_source)?;
     // Strip module wrappers and route through the reef name resolver so
     // bare references like `add` get rewritten to their internal-name
@@ -1914,9 +1992,11 @@ fn compile_new_source_in_context(
     let rewritten =
         chelis_reef::rewrite_entry_decls_with_reef_graph(&context.reef_state, &flat_decls)
             .map_err(|err| stage_error("reef", err, "reef_error"))?;
+    bail_if_cancelled("desugar")?;
     let prepared = crate::pipeline::prepare_surf_decls(&rewritten, None).map_err(|error| {
         pipeline_rejection_to_compiler_error(crate::pipeline::PipelineRejection::Preparation(error))
     })?;
+    bail_if_cancelled("check")?;
 
     // Type-check the new code once against the library context, then run the
     // shared effect and linearity transitions.
@@ -1928,18 +2008,24 @@ fn compile_new_source_in_context(
     .map_err(|report| CompilerError {
         stage: "check".to_string(),
         errors: report.errors.iter().map(check_error_diagnostic).collect(),
-    })?;
+    })
+    .map_err(|error| cancelled_or("check", error))?;
+    bail_if_cancelled("effects")?;
     let checked = crate::pipeline::complete_checks(
         analysis,
         crate::pipeline::SemanticContext::Library(&context.library_checked),
     )
-    .map_err(|rejection| pipeline_rejection_to_compiler_error(rejection.into()))?;
+    .map_err(|rejection| pipeline_rejection_to_compiler_error(rejection.into()))
+    .map_err(|error| cancelled_or("effects", error))?;
+    bail_if_cancelled("linearity")?;
+    bail_if_cancelled("lower")?;
     let lowered = crate::pipeline::lower_checked_with_context(
         checked,
         &context.library_dag,
         crate::pipeline::LoweringMode::AllowHostOnly,
     )
-    .map_err(pipeline_rejection_to_compiler_error)?;
+    .map_err(pipeline_rejection_to_compiler_error)
+    .map_err(|error| cancelled_or("lower", error))?;
     let lowered_parts = lowered.into_parts();
     let (_, _, new_checked, root_metadata) = lowered_parts.checked.into_parts();
     let all_root_names = root_metadata.all_names().clone();
@@ -2248,8 +2334,7 @@ fn eval_compiled(
                 // dtype tags still exist; the wire `value` below cannot
                 // carry them (chelis#732 P1, [05-OBS-1]).
                 display: Some(crate::runtime::render_value(&value)),
-                value: runtime_value_to_schema(&value)
-                    .map_err(|message| stage_error("eval", message, "eval_error"))?,
+                value: runtime_value_to_schema(&value).map_err(eval_stage_error)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2378,6 +2463,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
     use crate::pipeline::{PipelineRejection, PreparationError};
 
     match rejection {
+        PipelineRejection::Cancelled { stage } => cancelled_stage_error(stage),
         PipelineRejection::Preparation(PreparationError::SurfParse { source, error }) => {
             stage_error_with_span(
                 "parse",
@@ -2507,17 +2593,19 @@ fn compile_source_scoped(
     source: &str,
     entry: Option<&str>,
 ) -> Result<CompiledSource> {
+    bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
         source_kind,
         source,
         entry,
         goal: crate::pipeline::PipelineGoal::Lower(crate::pipeline::LoweringMode::AllowHostOnly),
     })
-    .map_err(pipeline_rejection_to_compiler_error)?;
+    .map_err(pipeline_rejection_to_compiler_error)
+    .map_err(|error| cancelled_or("check", error))?;
     let crate::pipeline::PipelineOutcome::Lowered(lowered) = outcome else {
         unreachable!("the lower goal returns only a lowered outcome")
     };
-
+    bail_if_cancelled("lower")?;
     // Issue #912: compute realizability and manifest alongside existing
     // routing. This is observe-only. The manifest will replace the old
     // root classification at Task 8.
@@ -3500,9 +3588,18 @@ pub(crate) fn stage_error(stage: &str, message: impl Into<String>, kind: &str) -
     stage_error_with_span(stage, message, kind, None)
 }
 
+/// Lift an eval-lane failure message into a `CompilerError` at the one
+/// boundary where lane-internal text becomes a structured diagnostic.
+/// Cancellation gets its dedicated kind; genuine evaluation failures retain
+/// the recovery suggestions attached by their owning diagnostic rules.
 fn eval_stage_error(message: String) -> CompilerError {
+    let kind = if chelis_types::is_cancellation(&message) {
+        EVAL_CANCELLED_KIND
+    } else {
+        "eval_error"
+    };
     let cast_domain = message.contains("numeric trap: domain in cast at");
-    let mut error = stage_error("eval", message, "eval_error");
+    let mut error = stage_error("eval", message, kind);
     if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
         diagnostic.suggestions.push(
             "fractional float-to-int conversion must state its rounding explicitly: \

@@ -6,6 +6,7 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use serde::{Deserialize, Serialize};
 
 use crate::CheckedProgram;
+use crate::cancel::CancelToken;
 use crate::errors::{CheckError, CheckErrorKind};
 use crate::infer::SignatureInferenceMetadata;
 use crate::pipe_stage::resolve_pipe_stage_callee;
@@ -339,7 +340,19 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
 
     pre_declare_top_level_defs(program.annotated_exprs(), program.type_env(), &mut scope);
 
+    // chelis#930: cooperative cancellation at top-level-declaration
+    // granularity — the same grain as the type checker's own schedule, and
+    // linearity is the third-largest front-end phase on a declaration-heavy
+    // program. Abandoning the walk proves nothing about the tail, so this is a
+    // hard failure rather than a partial `Ok` (covered-or-rejected).
+    let cancel = crate::cancel::current_cancel_token();
     for expr in program.annotated_exprs() {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            checker
+                .errors
+                .push(crate::cancel::cancellation_check_error());
+            break;
+        }
         checker.check_top_level(expr, &mut scope);
     }
 
@@ -479,7 +492,15 @@ pub fn check_linearity_with_context(
 
     // Walk ONLY new-code bodies. Library bodies are never re-walked,
     // so library tensor parameters never enter the new-code scope.
+    // chelis#930: cancellable at the same grain as [`check_linearity`].
+    let cancel = crate::cancel::current_cancel_token();
     for expr in new_program.annotated_exprs() {
+        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            checker
+                .errors
+                .push(crate::cancel::cancellation_check_error());
+            break;
+        }
         checker.check_top_level(expr, &mut scope);
     }
 

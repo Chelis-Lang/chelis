@@ -231,6 +231,15 @@ enum Command {
         /// backend constraints — required for #763 cross-lane comparison.
         #[arg(long)]
         target: Option<String>,
+        /// Abandon the evaluation after this many seconds and exit
+        /// non-zero with `error: evaluation timed out after <N>s`.
+        ///
+        /// For unattended and scripted use: without it, a mis-sized or
+        /// accidentally quadratic program is indistinguishable from one
+        /// that is still making progress (chelis#914). Interactive Ctrl-C
+        /// already works and needs no flag.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
     /// Run front-end checks and report fitness-oriented diagnostics
     ///
@@ -832,6 +841,7 @@ fn main() {
             json,
             allow_style_violations,
             target,
+            timeout,
         }) => {
             // Parse target for realizability inference (issue #912).
             let parsed_target = parse_eval_target(target.as_deref());
@@ -842,6 +852,7 @@ fn main() {
                 allow_style_violations,
                 parsed_target,
                 target.is_some(), // whether user explicitly passed --target
+                timeout,
             )
         }
         Some(Command::Check {
@@ -1124,7 +1135,92 @@ fn parse_eval_target(target: Option<&str>) -> chelis_types::types::Target {
     }
 }
 
+/// chelis#914: `--timeout` wrapper around [`cmd_eval_inner`].
+///
+/// The token is installed on THIS thread because the eval runs inline in the
+/// CLI; a watchdog thread trips it after `secs`. The guard is held across the
+/// whole inner call so every dispatch arm is covered, and the cancellation
+/// sentinel is translated here into the user-facing timeout message — the
+/// inner path stays unaware that a timeout exists.
 fn cmd_eval(
+    file: Option<&std::path::Path>,
+    expr: Option<&str>,
+    json: bool,
+    allow_style_violations: bool,
+    target: chelis_types::types::Target,
+    explicit_target: bool,
+    timeout: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _cancel_guard = timeout.map(install_eval_timeout);
+    let outcome = cmd_eval_inner(
+        file,
+        expr,
+        json,
+        allow_style_violations,
+        target,
+        explicit_target,
+    );
+    match (outcome, timeout) {
+        (Err(err), Some(secs)) if chelis_compiler_api::is_cancellation(&err.to_string()) => {
+            Err(format!("evaluation timed out after {secs}s (--timeout)").into())
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+/// Arm the `--timeout` watchdog and install its token for the current thread.
+///
+/// Two-stage on purpose. The token is the clean path: the compiler and the
+/// eval lanes notice it at their next check point and unwind normally, so
+/// destructors run and the error surfaces through the ordinary error channel.
+/// A grace period after the deadline, the watchdog gives up on cooperation and
+/// exits the process.
+///
+/// **Why the backstop stays after chelis#930.** When only evaluation was
+/// cancellable (chelis#914), the backstop was not a backstop at all: a
+/// compile-bound program could never observe the token, so the hard exit was
+/// the *normal* path for that entire class and the effective deadline was
+/// silently `<N> + grace`. chelis#930 made parse / desugar / check / lower poll
+/// the token too, so cooperative unwinding is now the ordinary outcome for
+/// compile-bound programs as well — measured on the chelis#930 repro, a
+/// front-end-bound `--timeout 2` now reports at ~2.05 s instead of at the
+/// 7 s hard exit.
+///
+/// It is not, however, removable, because "everything is cancellable" is
+/// stronger than what the front end actually proves. Cancellation is polled at
+/// phase boundaries and at top-level-declaration boundaries, so the residual
+/// uninterruptible unit is one declaration — unbounded in principle — and
+/// several steps on the `eval --file` path poll nothing at all: the style gate,
+/// reef graph preparation and linking, and lowering's whole-program walk. A
+/// genuinely wedged pass (an accidental non-terminating loop in the compiler)
+/// would never reach a poll by construction. `--timeout` exists to give
+/// unattended runs an unconditional loud failure, and a guarantee qualified by
+/// "unless the wedge is somewhere we did not instrument" is not that. Silently
+/// not timing out remains the worse failure, so the backstop stays as defence
+/// in depth rather than as the mechanism.
+fn install_eval_timeout(secs: u64) -> chelis_compiler_api::CancelTokenGuard {
+    let token = chelis_compiler_api::CancelToken::new();
+    let watchdog = token.clone();
+    // Detached by design: this thread only sleeps and sets a flag, holds no
+    // resources, and must outlive nothing. The process exits when `cmd_eval`
+    // returns, whichever stage got there first.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        watchdog.cancel();
+        std::thread::sleep(TIMEOUT_HARD_EXIT_GRACE);
+        // Still alive: the cooperative path did not reach a node visit.
+        eprintln!("error: evaluation timed out after {secs}s (--timeout)");
+        std::process::exit(1);
+    });
+    chelis_compiler_api::install_cancel_token(token)
+}
+
+/// How long the `--timeout` watchdog waits for cooperative cancellation to
+/// unwind before hard-exiting. Generous relative to the per-node check so a
+/// single long-running tensor op is not cut short spuriously.
+const TIMEOUT_HARD_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn cmd_eval_inner(
     file: Option<&std::path::Path>,
     expr: Option<&str>,
     json: bool,
@@ -1326,15 +1422,8 @@ fn run_eval_in_context(
                 return Err(EvalInContextError::Compile(msg));
             }
         };
-    let result = chelis_compiler_api::eval_in_context(&context, source).map_err(|err| {
-        EvalInContextError::Compile(
-            err.errors
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("; "),
-        )
-    })?;
+    let result = chelis_compiler_api::eval_in_context(&context, source)
+        .map_err(|err| EvalInContextError::Compile(join_eval_error(err)))?;
     if json {
         // JSON mode: stdout carries the raw `EvalResult` serde JSON
         // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
@@ -9177,13 +9266,25 @@ fn try_eval_result(
     } else {
         chelis_compiler_api::compiler::eval(request)
     }
-    .map_err(|err| {
-        err.errors
-            .iter()
-            .map(format_eval_diagnostic)
-            .collect::<Vec<_>>()
-            .join("; ")
-    })
+    .map_err(join_eval_error)
+}
+
+/// Flatten a `CompilerError` into the single string this CLI's error channel
+/// carries.
+///
+/// Cancellation (chelis#914) is decided on the STRUCTURED
+/// `CompilerError::is_cancellation`, never by inspecting message text, and is
+/// then transported as the bare sentinel. `cmd_eval` recognizes it at the
+/// `Box<dyn Error>` boundary, where the typed error is no longer available.
+fn join_eval_error(err: chelis_compiler_api::compiler::CompilerError) -> String {
+    if err.is_cancellation() {
+        return chelis_compiler_api::EVAL_CANCELLED_MSG.to_string();
+    }
+    err.errors
+        .iter()
+        .map(format_eval_diagnostic)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]

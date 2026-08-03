@@ -128,6 +128,24 @@ fn parse_rejection_stops_before_type_analysis() {
 }
 
 #[test]
+fn pre_cancelled_pipeline_rejects_structurally_before_parsing() {
+    let token = chelis_types::CancelToken::new();
+    token.cancel();
+    let _guard = chelis_types::install_cancel_token(token);
+
+    let rejection = run_source(request(
+        "def answer -> int32 = 42\n",
+        PipelineGoal::FullCheck,
+    ))
+    .expect_err("a pre-cancelled pipeline must not start parsing");
+
+    assert!(matches!(
+        rejection,
+        PipelineRejection::Cancelled { stage: "parse" }
+    ));
+}
+
+#[test]
 fn type_rejection_has_no_checked_or_lowered_product() {
     let rejection = run_source(request(
         "def broken -> int32 = missing\n",

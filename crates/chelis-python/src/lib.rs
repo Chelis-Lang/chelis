@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 use chelis_compiler_api::compiler::{
     self, CompiledExecutionArtifact, CompilerError, EntryLaneDecline, ExecutionTensorSpec,
@@ -16,6 +19,7 @@ use chelis_compiler_api::schema::{
     CheckRequest, CompileRequest, CompileTarget, DecompileRequest, DesugarRequest, EvalRequest,
     EvalResult, SourceKind, TensorValue, ValidateMode, ValidateRequest,
 };
+use chelis_compiler_api::{CancelToken, install_cancel_token};
 use chelis_compiler_api::{
     CompiledContext, compile_for_execution_in_context, eval_in_context_with_bindings,
     find_package_root_for_input, load_or_compile_with_local_registry_fallback,
@@ -643,12 +647,118 @@ fn load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel> {
     load_artifact(py, Path::new(path), None)
 }
 
+/// How often the calling thread wakes to give Python a chance to notice a
+/// pending signal. 50 ms keeps the worst-case SIGINT-to-`KeyboardInterrupt`
+/// latency well inside the 250 ms budget in chelis#914 while costing one
+/// GIL reacquisition per interval on an otherwise idle thread.
+const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Run a compiler-API job and return its JSON encoding, staying responsive
+/// to Python signals for the whole run (chelis#914).
+///
+/// Previously this was `py.allow_threads(f)`, which parks the Python **main**
+/// thread inside Rust for the entire job. Python's SIGINT handler only sets a
+/// flag; `KeyboardInterrupt` is raised when control next reaches the
+/// interpreter's eval loop — which, on that shape, is after the job already
+/// finished. A multi-minute eval was therefore uninterruptible.
+///
+/// Now the job runs on a worker thread with a cancellation token installed,
+/// and this thread alternates between waiting on the result channel (GIL
+/// released, so other Python threads still run) and calling
+/// `py.check_signals()` (GIL held, so a pending `KeyboardInterrupt` is
+/// actually raised).
+///
+/// **The worker is always joined, never detached.** A detached worker would
+/// keep burning CPU inside an abandoned evaluation while the caller believes
+/// it stopped — strictly worse than the bug being fixed. During evaluation,
+/// both lanes poll at every node visit; during front-end work, the compiler
+/// polls at phase and top-level-declaration boundaries. The join is bounded by
+/// the current cooperative unit rather than by all remaining work.
 fn run_json<T, F>(py: Python<'_>, f: F) -> PyResult<String>
 where
-    T: serde::Serialize + Send,
-    F: FnOnce() -> Result<T, CompilerError> + Send,
+    T: serde::Serialize + Send + 'static,
+    F: FnOnce() -> Result<T, CompilerError> + Send + 'static,
 {
-    let result = py.allow_threads(f).map_err(compiler_error)?;
+    let token = CancelToken::new();
+    let worker_token = token.clone();
+    let (tx, rx) = mpsc::channel();
+
+    let worker = thread::Builder::new()
+        .name("chelis-eval".to_string())
+        // The evaluator's AST walker recurses per program node and has no
+        // stack guard; Rust's 2 MiB thread default would drop the recursion
+        // ceiling ~4x below the Python main thread's 8 MiB, and a stack
+        // overflow is abort(), not panic() -- it kills the whole CPython
+        // process. Match `chelis test`'s worker size (cli/src/main.rs).
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            // The token must be installed on the thread that runs the eval:
+            // the guard is thread-local, and the guard drop on scope exit
+            // keeps the token from outliving this job.
+            let _cancel_guard = install_cancel_token(worker_token);
+            // A send failure means the receiver is gone, which cannot happen
+            // while `run_json` is still on the stack holding `rx`.
+            let _ = tx.send(f());
+        })
+        .map_err(|err| ChelisError::new_err(format!("failed to spawn eval thread: {err}")))?;
+
+    // `allow_threads` requires everything the closure touches to be `Sync`,
+    // and `mpsc::Receiver` is `Send` but not `Sync`. The mutex is uncontended
+    // (only this thread ever locks it) and taken once per 50 ms poll.
+    let rx = Mutex::new(rx);
+
+    let outcome = loop {
+        // Release the GIL across the wait so other Python threads are not
+        // blocked by this call, then reacquire to check for signals.
+        let polled = py.allow_threads(|| {
+            rx.lock()
+                .expect("eval result channel mutex is never held across a panic")
+                .recv_timeout(SIGNAL_POLL_INTERVAL)
+        });
+        match polled {
+            Ok(result) => break Ok(result),
+            Err(RecvTimeoutError::Disconnected) => break Err(None),
+            Err(RecvTimeoutError::Timeout) => {
+                if let Err(signal_err) = py.check_signals() {
+                    // Ask the worker to stop, then fall through to the join
+                    // below. Re-raise the original Python exception (normally
+                    // KeyboardInterrupt) rather than synthesizing one, so
+                    // `signal.signal(...)` handlers that raise something else
+                    // are honoured.
+                    token.cancel();
+                    break Err(Some(signal_err));
+                }
+            }
+        }
+    };
+
+    // Unconditional join: cancelled, failed, or finished, this worker is
+    // accounted for before the call returns.
+    //
+    // The GIL is released across the join. After a cancellation the worker
+    // still has to unwind, and unwinding can be slow when the evaluation is
+    // holding a large intermediate value (freeing it is itself work). Holding
+    // the GIL through that would block every other Python thread for the
+    // duration, for no benefit — nothing here touches Python state.
+    let joined = py.allow_threads(move || worker.join());
+
+    let outcome = match outcome {
+        Ok(result) => result,
+        Err(Some(signal_err)) => return Err(signal_err),
+        Err(None) => {
+            // The channel closed without a value: the worker panicked. Surface
+            // the panic payload instead of a bare "disconnected".
+            let detail = joined
+                .err()
+                .and_then(|payload| panic_message(&payload))
+                .unwrap_or_else(|| "worker thread ended without a result".to_string());
+            return Err(ChelisError::new_err(format!(
+                "evaluation panicked: {detail}"
+            )));
+        }
+    };
+
+    let result = outcome.map_err(compiler_error)?;
     serde_json::to_string(&result)
         .map_err(|err| ChelisError::new_err(format!("serialization failed: {err}")))
 }
@@ -690,6 +800,15 @@ fn open_compiled_library(path: &Path) -> Result<Library, libloading::Error> {
     {
         unsafe { Library::new(path) }
     }
+}
+
+/// Best-effort rendering of a panic payload, which is `&str` for
+/// `panic!("literal")` and `String` for a formatted panic.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> Option<String> {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        return Some((*text).to_string());
+    }
+    payload.downcast_ref::<String>().cloned()
 }
 
 fn load_artifact(
@@ -3833,5 +3952,50 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             "an explicit project_root must force in-context resolution (and hit the \
              corrupted library), not silently take the bare path"
         );
+    }
+}
+
+#[cfg(test)]
+mod worker_stack_tests {
+    use super::*;
+    use pyo3::Python;
+    use pyo3::types::PyModule;
+
+    /// The eval worker thread must carry the 32 MiB stack `chelis test`
+    /// uses, not Rust's 2 MiB default. Review measured the default
+    /// dropping the recursion ceiling ~4x below the Python main thread's
+    /// 8 MiB (depth 200 evaluated on `main`, SIGBUS-aborted the whole
+    /// CPython process through the 2 MiB worker), so this pins a depth
+    /// that must keep succeeding: a regression back to the default stack
+    /// aborts this test's process rather than failing an assertion,
+    /// which is exactly the loudness we want (chelis#914 review).
+    #[test]
+    fn eval_worker_survives_depth_that_overflowed_the_default_stack() {
+        let program = "def down(n: int64) -> int64 = \
+                       if lte(n, 0i64) then 0i64 else add(1i64, down(sub(n, 1i64)))\n\
+                       depth = down(200i64)\n";
+        Python::with_gil(|py| {
+            let module = PyModule::new(py, "_native").expect("module");
+            register_module(&module).expect("register");
+            let result = module
+                .getattr("eval_json")
+                .expect("eval_json")
+                .call1((program, "{}"))
+                .expect("eval must survive depth 200 on the widened worker stack")
+                .extract::<String>()
+                .expect("json");
+            let payload: serde_json::Value = serde_json::from_str(&result).expect("payload");
+            let depth = payload["roots"]
+                .as_array()
+                .expect("roots")
+                .iter()
+                .find(|root| root["name"] == "depth")
+                .expect("depth root");
+            // Int roots surface as {"type": "int", "value": N}; the exact
+            // number proves the recursion ran to completion rather than
+            // being clipped by a partial-result path.
+            assert_eq!(depth["value"]["type"].as_str(), Some("int64"));
+            assert_eq!(depth["value"]["value"].as_i64(), Some(200));
+        });
     }
 }

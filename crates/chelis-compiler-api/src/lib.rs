@@ -18,10 +18,18 @@ mod source_arch;
 /// bindings' `compile_and_load` auto-discovery) can resolve the enclosing
 /// reef project without depending on `chelis-reef` directly. See issue #816.
 pub use chelis_reef::{find_package_root_for_dir, find_package_root_for_input};
+/// Cooperative cancellation for long-running evaluation (chelis#914).
+/// Install a token on the thread that will run the eval, hand a clone to
+/// whoever may want to stop it, and the eval unwinds with
+/// [`EVAL_CANCELLED_MSG`] within one node visit of the request.
+pub use chelis_types::{
+    CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, current_cancel_token, install_cancel_token,
+    is_cancellation,
+};
 pub use chelis_types::{LinkedProgramGuard, install_linked_program_guard};
 pub use compiler::{
-    PreparedEvalInContext, check_in_context, compile_for_execution_in_context, eval_in_context,
-    eval_in_context_with_bindings, eval_many_in_context, prepare_eval_in_context,
+    EVAL_CANCELLED_KIND, PreparedEvalInContext, check_in_context, compile_for_execution_in_context,
+    eval_in_context, eval_in_context_with_bindings, eval_many_in_context, prepare_eval_in_context,
     surf_source_has_import,
 };
 pub use compiler::{add_function, replace_function_body};

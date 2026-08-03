@@ -16,6 +16,7 @@ use chelis_vocab::EffectKind;
 
 use crate::adt::{AdtRegistry, CallShape};
 use crate::builtins;
+use crate::cancel::CancelToken;
 use crate::context::{TypeEnv, TypeEnvInner};
 use crate::deep_type::{
     BinderMode, DeepTypeResolver, ResolvedCastTarget, TypeDiagnosticLocation, TypeResolutionEnv,

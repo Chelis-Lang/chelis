@@ -152,6 +152,44 @@ When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
 
+### Bounding a slow evaluation
+
+Interactively, Ctrl-C stops a running `chelis eval` immediately. For
+unattended and scripted runs — CI, agent harnesses, batch jobs — use
+`--timeout`:
+
+```sh
+chelis eval --timeout 30 --file slow.ch
+```
+
+On trip the command prints
+
+```text
+error: evaluation timed out after 30s (--timeout)
+```
+
+to stderr and exits non-zero, so a mis-sized or accidentally quadratic
+program fails loudly instead of being indistinguishable from one that is
+still making progress. Without the flag there is no timeout; evaluation
+runs to completion.
+
+The timeout is cooperative: the evaluator checks for it at every node
+visit, and the front end checks it at every phase boundary and at every
+top-level declaration inside the passes that dominate a large compile
+(chelis#930), so both a compile-bound and an evaluation-bound program
+unwind cleanly rather than being killed mid-write.
+
+A backstop still terminates the process a few seconds after the deadline
+if nothing has unwound. It is defence in depth, not the mechanism: the
+polling above is not exhaustive — the style gate, Reef graph resolution,
+and lowering's whole-program walk do not poll, and a compiler pass that
+genuinely wedges would never reach a check point. `--timeout` promises an
+unconditional loud failure, so the process-level stop remains.
+
+The same cancellation mechanism is what makes `KeyboardInterrupt` work
+promptly in the Python bindings (chelis#914, chelis#930); see
+`bindings/python/README.md`.
+
 ## Native Test Loop
 
 `chelis test` runs `def test_*()` functions in `tests/**/*.ch` files:
