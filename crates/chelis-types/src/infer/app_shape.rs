@@ -1270,7 +1270,7 @@ pub(super) enum PairListShape {
     /// number of elements, missing `Nil` close, etc.). The caller MUST
     /// emit an infer-time error naming the offending axis.
     Malformed { axis: usize, reason: String },
-    /// The top-level chain is well-typed as `List[List[Int32]]` but
+    /// The top-level chain is well-typed as `List[List[Int64]]` but
     /// isn't a literal Cons/Nil chain (e.g. it's a variable resolved by
     /// the type system). Caller falls back to wildcard output shape.
     Unknown,

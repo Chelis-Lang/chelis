@@ -284,8 +284,9 @@ fn positional_reduce_on_sole_spread_rejected() {
 /// `reshape` (the other op that shares `&tv -> tv` with `relu`) is rejected.
 #[test]
 fn reshape_in_rank_poly_body_rejected() {
-    let json =
-        check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2i64, 3i64])\n");
+    let json = check_json(
+        "def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = reshape(x, [2i64, 3i64])\n",
+    );
     assert_body_discipline_rejected(&json, "reshape", "reshape in ..r body");
 }
 

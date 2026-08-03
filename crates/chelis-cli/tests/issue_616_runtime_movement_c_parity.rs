@@ -10,7 +10,7 @@
 //! the same bound scalars the eval lane resolves, so one compiled binary
 //! handles every input length and the two lanes must agree exactly.
 //!
-//! The verb: `shrink(x, [[1i64, n-1i64]])` keeps `[2, ..., n-1]` for input
+//! The verb: `shrink(x, [[1i64, n - 1]])` keeps `[2, ..., n-1]` for input
 //! `[1, 2, ..., n]` (with `n = shape(x, 0)` read at run time); `stride(_, 2i64)`
 //! then keeps every other element: `[2, 4, 6, ...]`.
 

@@ -1895,7 +1895,7 @@ pub(super) fn tensor_stride_host(
 /// Convert a `RuntimeValue::List` of inner `List`s into a flat
 /// `Vec<(usize, usize)>` of `[start, end]` bounds pairs. Each inner list
 /// must have exactly two non-negative int entries (matching the
-/// type-checker's `List[List[Int32]]` contract). Any other shape -- wrong
+/// type-checker's `List[List[Int64]]` contract). Any other shape -- wrong
 /// inner-list length, non-int entries, negative endpoints -- surfaces as
 /// a loud host-runtime error.
 pub(super) fn extract_bounds_pair_list(
