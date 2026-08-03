@@ -750,13 +750,25 @@ WI-1 depth-oracle harness tears down its owned deep fixture on a fresh
 production-sized grown segment, so a green test proves the typed
 stack-budget diagnostic rather than accepting an abort.
 
+**Authoring scope (2026-08-03).** The read-only authoring surfaces
+(outline, references, call graph) no longer deep-copy their input into
+`Expr::List`. They read either carrier in place through a borrowed node
+view, and their scope model is repaired: a `let` binds pair by pair, so a
+later right-hand side sees an earlier binder while an earlier one still
+sees the top level, and an arm's pattern binders (including the recursive
+`pat-as`/`pat-tuple` shapes) cover that arm's guard and body. A binder that
+shadows a top-level name removes its references, its call-graph edges, and
+its renames. `crates/chelis-compiler-api/tests/authoring_scope.rs` locks
+each direction, with a positive control that an unshadowed reference is
+still found and a tripwire that the read-only paths call no normalization
+helper.
+
 The *ingress* half is NOT discharged. The generic compiler API Deep path
-still uses `parse_str_strict`, not `parse_and_stamp_file`; the read-only
-authoring surfaces (outline, references, call graph) still normalize to
-`List` and still have the arm/`let` binder-scope gaps; and the legacy
-`List` variant and consumer bridge remain active. Phase 3 MUST NOT be
-called successor-accepted until those remaining §C4.2 ingress and deletion
-clauses are executable and green.
+still uses `parse_str_strict`, not `parse_and_stamp_file` ([#1088] owns
+that migration); mutating authoring normalization remains active; and the
+legacy `List` variant and consumer bridge remain active. Phase 3 MUST NOT
+be called successor-accepted until those remaining §C4.2 ingress and
+deletion clauses are executable and green.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
@@ -846,3 +858,4 @@ continuous-oracle guarantees.
 [#874]: https://github.com/Chelis-Lang/chelis/issues/874
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
+[#1088]: https://github.com/Chelis-Lang/chelis/issues/1088
