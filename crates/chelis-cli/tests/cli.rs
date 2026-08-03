@@ -1306,6 +1306,54 @@ fn build_c_runs_iter_foundation_and_matches_eval_output() {
         .assert()
         .success();
 
+    let generated =
+        fs::read_to_string(out_dir.join("iter_foundation.c")).expect("read generated iter C");
+    let runtime_header =
+        fs::read_to_string(out_dir.join("chelis_runtime.h")).expect("read copied runtime header");
+
+    for symbol in [
+        "chelis_list_with_capacity",
+        "chelis_list_push",
+        "chelis_list_extend",
+    ] {
+        assert!(
+            !runtime_header.contains(symbol),
+            "emitter-internal accumulator `{symbol}` must not enter the published C header"
+        );
+    }
+
+    for declaration in [
+        "chelis_list *chelis_list_with_capacity(int64_t capacity);",
+        "void chelis_list_push(chelis_list *list, chelis_value value);",
+        "void chelis_list_extend(chelis_list *list, const chelis_list *src);",
+    ] {
+        assert!(
+            generated.contains(declaration),
+            "generated C must privately declare `{declaration}`"
+        );
+    }
+
+    for (symbol, expected_calls) in [
+        ("chelis_list_with_capacity(", 6),
+        ("chelis_list_push(", 5),
+        ("chelis_list_extend(", 1),
+    ] {
+        let occurrences = generated.matches(symbol).count();
+        assert_eq!(
+            occurrences - 1,
+            expected_calls,
+            "iter_foundation must exercise every in-place combinator path for `{symbol}`"
+        );
+    }
+    assert!(
+        !generated.contains(" = chelis_list_append("),
+        "compiled combinator loops must not rebuild accumulators with list_append"
+    );
+    assert!(
+        !generated.contains(" = chelis_list_concat("),
+        "compiled flat_map must not rebuild its accumulator with list_concat"
+    );
+
     let eval_stdout = Command::cargo_bin("chelis")
         .expect("binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -8802,6 +8850,146 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
     assert!(
         vg_stderr.contains("suppressed: 0 bytes in 0 blocks"),
         "the #406 leak oracle must run with NO suppressions; \
+         valgrind reported:\n{vg_stderr}"
+    );
+}
+
+// issue #943: the emitted `map`/`filter` accumulation loops used to
+// rebuild the result list per element (`target = chelis_list_append(
+// target, …)`) without releasing the predecessor — Θ(n²) allocation,
+// with every intermediate generation unreachable at exit ("definitely
+// lost"). The fix accumulates in place (`chelis_list_with_capacity` +
+// `chelis_list_push`), so a combinator pipeline must now run leak-free.
+// Elements are floats deliberately: heap-payload elements (strings)
+// still leak linearly through the `chelis_list_index` retain imbalance,
+// which is tracked separately on #943 and not fixed by this oracle's
+// subject.
+//
+// Same toolchain gating and no-suppression contract as the #406 oracle
+// above. Registered in `docs/manual_gates.md`; manual gate:
+//   cargo test -p chelis-cli --test cli \
+//     build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind \
+//     -- --ignored --nocapture
+//
+// `#[ignore]` rather than the #406 sibling's bare self-skip: valgrind is
+// installed in no CI job (`grep -rniE valgrind .github/workflows/` is
+// empty) and is unavailable on macOS arm64, so on every machine that
+// currently runs the suite the tool-availability `return` below made
+// nextest report **PASS in ~0.008s** for a leak oracle that never ran.
+// A green result for an unexecuted check is worse than an honest skip,
+// especially for the standing guard on this change set's central claim.
+// `docs/manual_gates.md` states the contract this now satisfies: "If a
+// test is `#[ignore]`'d, it must appear here with its full command and
+// prerequisite."
+//
+// The tool-availability check is kept as a second line of defence so the
+// documented `--ignored` command still explains itself on a box without
+// valgrind rather than failing obscurely. The #406 sibling
+// (`cli.rs`, `build_c_leak_program_has_zero_definitely_lost_under_valgrind`)
+// and the other five #406-era oracles still self-skip and report a false
+// PASS; converting them is out of scope here and tracked separately.
+#[test]
+#[ignore = "requires valgrind + gcc; registered in docs/manual_gates.md (chelis#943)"]
+#[cfg(unix)]
+fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
+    fn tool_available(tool: &str) -> bool {
+        StdCommand::new(tool)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    if !tool_available("valgrind") {
+        eprintln!("SKIP: valgrind not installed; cannot run the #943 leak oracle");
+        return;
+    }
+    if !tool_available("gcc") {
+        eprintln!("SKIP: gcc not installed; cannot link the #943 leak oracle");
+        return;
+    }
+
+    let dir = tempdir().expect("tempdir");
+    let source = dir.path().join("combinators.ch");
+    write_file(
+        &source,
+        "module Combinators\n\
+         vals = map(fn (x) -> mul(x, 2.0f64), [1.0f64, 2.0f64, 3.0f64, 4.0f64])\n\
+         kept = filter(fn (x) -> gt(x, 3.0f64), vals)\n\
+         total = fold(fn (a, x) -> add(a, x), 0.0f64, kept)\n",
+    );
+
+    let out_dir = dir.path().join("combinators-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let bin = out_dir.join("combinators");
+    let link = StdCommand::new("gcc")
+        .current_dir(&out_dir)
+        .args([
+            "-O2",
+            "-mavx2",
+            "-fopenmp",
+            "combinators.c",
+            "-L.",
+            "-lchelis_runtime",
+            "-lm",
+            "-lpthread",
+            "-ldl",
+            "-o",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("gcc should run");
+    assert!(
+        link.status.success(),
+        "gcc link failed:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+
+    let valgrind = StdCommand::new("valgrind")
+        .current_dir(&out_dir)
+        .args([
+            "--leak-check=full",
+            "--errors-for-leak-kinds=definite",
+            bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("valgrind should run");
+
+    let vg_stdout = String::from_utf8_lossy(&valgrind.stdout);
+    let vg_stderr = String::from_utf8_lossy(&valgrind.stderr);
+    println!("valgrind stdout:\n{vg_stdout}");
+    println!("valgrind stderr:\n{vg_stderr}");
+
+    assert!(
+        vg_stdout.contains("total = 18.0"),
+        "combinator pipeline produced wrong output under valgrind:\n{vg_stdout}"
+    );
+    let no_definitely_lost = vg_stderr.contains("definitely lost: 0 bytes in 0 blocks")
+        || vg_stderr.contains("All heap blocks were freed -- no leaks are possible");
+    assert!(
+        no_definitely_lost,
+        "chelis-built map/filter program must have zero definitely-lost \
+         bytes under valgrind (issue #943); valgrind reported:\n{vg_stderr}"
+    );
+    let no_suppressed_errors = vg_stderr.contains("suppressed: 0 bytes in 0 blocks")
+        || vg_stderr.contains("(suppressed: 0 from 0)");
+    assert!(
+        no_suppressed_errors,
+        "the #943 leak oracle must run with NO suppressions; \
          valgrind reported:\n{vg_stderr}"
     );
 }
