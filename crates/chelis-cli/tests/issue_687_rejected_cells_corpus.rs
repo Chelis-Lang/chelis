@@ -15,10 +15,13 @@
 //! - Metal: `metal_dtype_emission_and_bool_add.rs::
 //!   metal_rejects_f64_with_a_specific_diagnostic` and
 //!   `::metal_rank2_fallback_is_a_named_abort_stub`
-//! - C-host reduced-float selection: typed build rejection before the
-//!   former widened scalar path can reach runtime
 //! - runtime int-div guard: `ws2b_numeric_identifier_divergence.rs`'s
 //!   `INT_DIV_ZERO_DIAGNOSTIC` rows (chelis#387 family)
+//!
+//! Chelis#729 Phase 3 retired the scalar `floor` and narrow-float C-host
+//! ingress rows from this rejection corpus. Their original assertions now run
+//! as positive cross-lane regressions in `scalar_stub_matrix.rs` and
+//! `narrow_dtype_matrix.rs`.
 //!
 //! Each current diagnostic record is compared byte-for-byte through the same
 //! comparator entrypoint as the value corpus. Emitted fallback source keeps
@@ -189,7 +192,7 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "c",
         "error: unsupported: `to_string` of a `Tensor(TensorType { dims: [Lit(2)], precision: \
          F32 })`-typed value on `chelis build` host emission (codegen:c); unimplemented \
-         chelis#1059: the compiled lane stringifies int64/f32/f64/bool/string scalars only \
+         chelis#1059: the compiled lane stringifies admitted numeric/bool/string scalars only \
          today; chelis#1059 owns compiled tensor/list rendering (the former `<value>` \
          placeholder is chelis#734)\n",
     ),
@@ -226,15 +229,6 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          chelis#1058: window and stride lists must be integer literals for the compiled lane \
          today; a runtime-parameterized window previously lowered to a silent no-op; \
          chelis#1058 owns compiled runtime-list support at source span `surf:86..89`\n",
-    ),
-    (
-        "c_to_tensor_narrow_dtype",
-        "def f() -> tensor[2, f16] = to_tensor([cast(2049.0, f16), cast(0.75, f16)])\n\
-         out = print(f())\n",
-        "c",
-        "error: unsupported: dtype `f16` on C host ABI selection (codegen:c); unimplemented \
-         chelis#714: the C-host scalar ABI has no exact representation for this dtype; no \
-         alternate dtype is permitted\n",
     ),
     (
         "hip_int64_neg",
@@ -291,7 +285,7 @@ const RUNTIME_ABORT_ROWS: &[(&str, &str, &str)] = &[(
     "int_div_by_zero",
     "def d(x: int64, y: int64, z: int64) -> int64 = trunc_div(x, sub(y, z))\n\
          out = d(cast(7, int64), cast(5, int64), cast(5, int64))\n",
-    "integer division or remainder by zero\n",
+    "numeric trap: division by zero in trunc_div at int64\n",
 )];
 
 /// Every runtime rejected cell aborts (nonzero exit) with its pinned

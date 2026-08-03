@@ -1,5 +1,5 @@
-//! chelis#717 - the host evaluator's tensor lane narrows results to the
-//! element dtype per-op inconsistently, and is wrong in three directions:
+//! chelis#717 - the host evaluator's tensor lane formerly narrowed results to
+//! the element dtype per-op inconsistently in three directions:
 //!
 //! 1. **f64 tensors are destroyed to f32** by every unary float op:
 //!    `tensor_float_unop_f32` (`crates/chelis-compiler-api/src/runtime/
@@ -14,19 +14,17 @@
 //! 3. **f16/bf16 tensors are never rounded at all** (covered in
 //!    narrow_dtype_matrix.rs; this file carries the f32/f64 rows).
 //!
-//! The compiled C lane is correct in every cell of this file, so each
-//! broken row is also a cross-lane divergence in the direction
+//! The compiled C lane supplied the correct controls for every cell, so each
+//! historical row captured a cross-lane divergence in the direction
 //! eval-wrong / C-right - the same direction as chelis#691, opposite to
-//! chelis#680.
+//! chelis#680. All rows are now ordinary regression tests.
 //!
 //! Why nothing caught it: `eval_agreement.rs` compares lanes through f64
 //! with a tolerance (chelis#687), and every f32/f64 row here is a relative
 //! error of 1e-8 .. 1e-16 - exactly what a tolerance oracle ignores.
 //!
-//! Tests asserting correct behavior that fail today are `#[ignore]`d with
-//! the issue number, the observed wrong value, and the run command. The
-//! C-lane cells are locked as passing controls so a fix cannot regress the
-//! correct lane.
+//! The C-lane cells remain passing controls so a future change cannot regress
+//! the correct lane while preserving evaluator parity.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -301,9 +299,8 @@ fn eval_f32_tensor_tan_and_sqrt_do_narrow_to_f32() {
 // chelis#717 - f64 tensors destroyed to f32 by unary ops (eval)
 // ===========================================================================
 
-/// Observed today: eval prints 14.101419448852539 - the f32-precision tan -
-/// for an f64 tensor. Eight significant digits of a declared-f64 value are
-/// silently gone.
+/// Before the typed kernel split, eval printed 14.101419448852539 - the
+/// f32-precision tan - for an f64 tensor. This locks the repaired f64 path.
 #[test]
 fn eval_f64_tensor_tan_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("tan", "1.5", "3.0")).expect("eval should run");
@@ -323,7 +320,7 @@ fn eval_f64_tensor_tan_keeps_f64_precision() {
     );
 }
 
-/// Observed today: 1.4142135381698608 = f32(sqrt(2)).
+/// The pre-repair value was 1.4142135381698608 = f32(sqrt(2)).
 #[test]
 fn eval_f64_tensor_sqrt_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("sqrt", "2.0", "3.0")).expect("eval should run");
@@ -333,7 +330,7 @@ fn eval_f64_tensor_sqrt_keeps_f64_precision() {
     );
 }
 
-/// Observed today: 7.389056205749512 = f32(exp(2)).
+/// The pre-repair value was 7.389056205749512 = f32(exp(2)).
 #[test]
 fn eval_f64_tensor_exp_keeps_f64_precision() {
     let line = eval_first_line(&f64_unop_program("exp", "2.0", "3.0")).expect("eval should run");
@@ -354,10 +351,8 @@ fn eval_f64_tensor_exp_keeps_f64_precision() {
 // chelis#717 - f32 tensors: add/div/recip skip the f32 rounding (eval)
 // ===========================================================================
 
-/// Observed today: eval prints 0.30000000447034836, a value that does not
-/// exist in f32 (it is the f64 sum of the two f32 inputs, never rounded).
-/// Computing in f64 and rounding once IS correctly rounded for f32 - eval
-/// just skips the rounding step for add.
+/// Before the repair, eval printed 0.30000000447034836, a value that does not
+/// exist in f32 (the unfinalized f64 sum of two f32 inputs).
 #[test]
 fn eval_f32_tensor_add_rounds_to_f32() {
     let line = eval_first_line(
@@ -376,7 +371,7 @@ fn eval_f32_tensor_add_rounds_to_f32() {
     );
 }
 
-/// Observed today: 0.3333333333333333 (raw f64 quotient).
+/// The pre-repair value was 0.3333333333333333 (a raw f64 quotient).
 #[test]
 fn eval_f32_tensor_div_rounds_to_f32() {
     let line = eval_first_line(
@@ -393,8 +388,8 @@ fn eval_f32_tensor_div_rounds_to_f32() {
     );
 }
 
-/// Observed today: 0.6666666666666666 (raw f64). Note the irony: recip is on
-/// the very op list #695 names as living on the lossy f64 helpers.
+/// The pre-repair value was 0.6666666666666666 (raw f64). This locks the
+/// required f32 finalization after `recip`.
 #[test]
 fn eval_f32_tensor_recip_rounds_to_f32() {
     let line = eval_first_line(

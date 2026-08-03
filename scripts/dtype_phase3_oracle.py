@@ -65,6 +65,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "--test",
                 "issue_761_subnormal_ingress",
                 "--test",
+                "issue_734_tostring_placeholder",
+                "--test",
                 "observation_roundtrip_harness",
             ),
         ),

@@ -392,10 +392,9 @@ fn integer_reduce_sum_overflow_traps_before_ubsan() {
 // chelis#692 - int64 reduce ops panic the compiler
 // ===========================================================================
 
-/// Observed today: `chelis build` PANICS (emit.rs:4238) instead of either
+/// Before chelis#730 Phase 1, `chelis build` panicked instead of either
 /// compiling correctly or rejecting with a diagnostic. This row asserts the
-/// non-panic contract: any outcome except a Rust backtrace.
-/// Un-ignored by chelis#730 Phase 1 (census row 11): the reduce-family
+/// non-panic contract: any outcome except a Rust backtrace. The reduce-family
 /// panics are now section C2 diagnostics through the emitter channel;
 /// the build fails cleanly and this test accepts the rejection arm.
 #[test]
@@ -431,10 +430,9 @@ const I64_SUM_2P53: &str = "module M.Main\n\
      def f(x: tensor[1, 2, int64]) -> tensor[1, int64] = sum(x, 1)\n\
      out = print(to_list(f(to_tensor([[cast(9007199254740992, int64), cast(1, int64)]]))))\n";
 
-/// **The C lane's int64 tensor sum is EXACT at 2^53 + 1** - provable only
-/// through `to_list`, because the tensor print helper launders int64 through
-/// double (#723). This lock keeps the correct computation correct while
-/// #723/#684 land.
+/// **The C lane's int64 tensor sum is EXACT at 2^53 + 1.** This `to_list`
+/// route originally proved that the computation was correct while the tensor
+/// printer still laundered the stored value through double (#723).
 #[test]
 fn c_int64_tensor_sum_is_exact_via_to_list() {
     if !c_toolchain_available() {
@@ -448,8 +446,8 @@ fn c_int64_tensor_sum_is_exact_via_to_list() {
     );
 }
 
-/// Observed today: eval prints [9007199254740992] - the Vec<f64> storage
-/// (#684) collapses the element before the sum ever runs.
+/// Before typed eval storage, this printed `[9007199254740992]` because the
+/// element collapsed through `Vec<f64>` before the sum ran (#684).
 #[test]
 fn eval_int64_tensor_sum_is_exact_at_2p53() {
     assert_eq!(

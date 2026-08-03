@@ -829,6 +829,29 @@ fn print_helper_elem_case(prim: Prim) -> Option<Vec<String>> {
 /// `default:` arm aborts with the raw dtype id so an unknown runtime
 /// dtype stays loud (loud_unsupported.md section C1).
 fn append_tensor_print_helper(out: &mut Vec<String>) {
+    // chelis#729 Phase 3 / chelis#734: reduced-float scalar `to_string`
+    // uses the same own-width formatter as tensor/scalar print.  Keep these
+    // helpers private to the generated translation unit: the public runtime
+    // ABI remains on tagged numeric carriers rather than gaining uint16
+    // payload callables.
+    out.push("static chelis_string chelis_host_string_from_f16(uint16_t value) {".to_string());
+    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
+    out.push(
+        "    chelis_format_shortest((double)chelis_f16_to_f32(value), CHELIS_F16, fmt_buf, sizeof fmt_buf);"
+            .to_string(),
+    );
+    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
+    out.push("static chelis_string chelis_host_string_from_bf16(uint16_t value) {".to_string());
+    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
+    out.push(
+        "    chelis_format_shortest((double)chelis_bf16_to_f32(value), CHELIS_BF16, fmt_buf, sizeof fmt_buf);"
+            .to_string(),
+    );
+    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
     out.push(
         "static void chelis_print_tensor_elem_stdout(const chelis_tensor* t, int64_t i) {"
             .to_string(),
@@ -3061,6 +3084,10 @@ impl<'a> HostEmitter<'a> {
                     // from `print` of the same stored value - PR #863
                     // round-1 F1).
                     HostType::Float32 => EmittedExpr::call("chelis_string_from_f32", [arg(0)]),
+                    HostType::Float16 => EmittedExpr::call("chelis_host_string_from_f16", [arg(0)]),
+                    HostType::BFloat16 => {
+                        EmittedExpr::call("chelis_host_string_from_bf16", [arg(0)])
+                    }
                     HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
                     HostType::String => arg(0),
                     // chelis#730 Phase 1 (census row 3, chelis#734): to_string
@@ -3077,7 +3104,7 @@ impl<'a> HostEmitter<'a> {
                             Stage::Codegen("c"),
                             chelis_types::unimplemented_rejection!(
                                 1059,
-                                "the compiled lane stringifies int64/f32/f64/bool/string scalars \
+                                "the compiled lane stringifies admitted numeric/bool/string scalars \
                                  only today; chelis#1059 owns compiled tensor/list rendering \
                                  (the former `<value>` placeholder is chelis#734)"
                             ),

@@ -257,32 +257,29 @@ fn rt_p1b_inline_forward_exact_output_no_fabricated_roots() {
 // Orchestrator probe 2 - reachability precision
 // ===========================================================================
 
-/// A wrapper invoked ONLY through a pipe stage must count as reachable:
-/// hard build failure (or a correct binary) - never garbage, never a
-/// mis-scoped abort stub on the live path.
+/// A wrapper invoked ONLY through a pipe stage must count as reachable.
+/// Phase 3 supports scalar `floor`, so this former reject-or-correct probe is
+/// now an exact positive control: the wrapper must lower and execute.
 #[test]
 fn rt_p2_pipe_stage_wrapper_is_live() {
     let program = "module M.Main\n\
          def bad(x: f32) -> f32 = floor(x)\n\
          out = print(3.5 |> bad)\n";
     let (ok, stderr, emitted) = build_target(program, ".ch", "rt_pipe_live", "c");
-    if ok {
-        assert!(
-            !emitted.contains("abort();") || !emitted.contains("unsupported:"),
-            "a wrapper reachable through a pipe must not be stubbed; emitted:\n{emitted}"
+    assert!(ok, "Phase 3 scalar floor must build; stderr: {stderr}");
+    assert!(
+        emitted.contains("floorf("),
+        "the f32 wrapper must lower through the own-width floor intrinsic; emitted:\n{emitted}"
+    );
+    if c_toolchain_available() {
+        let (ran_ok, stdout, stderr) =
+            c_run(program, "rt_pipe_live_run").expect("built program should link");
+        assert!(ran_ok, "built program must run; stderr: {stderr}");
+        assert_eq!(
+            stdout.lines().next(),
+            Some("3.0"),
+            "floor(3.5) must print the exact observed value; stdout: {stdout}"
         );
-        if c_toolchain_available() {
-            let (ran_ok, stdout, _) =
-                c_run(program, "rt_pipe_live_run").expect("built program should link");
-            assert!(
-                ran_ok && stdout.trim().starts_with('3'),
-                "floor(3.5) must print 3, never a stub value; stdout: {stdout}"
-            );
-        }
-    } else {
-        let line = branded_line(&stderr)
-            .unwrap_or_else(|| panic!("pipe-live rejection must be branded; got: {stderr}"));
-        assert_frozen_shape(line, "pipe-live");
     }
 }
 

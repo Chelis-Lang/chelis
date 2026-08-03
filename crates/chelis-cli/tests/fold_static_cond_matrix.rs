@@ -111,7 +111,8 @@ fn emitted_contains_222(emitted: &str) -> bool {
 // ===========================================================================
 
 /// True f16 rounds cast(2049.0, f16) to 2048, so lt(2048, 2048) is false and
-/// the answer is 222. Observed today: eval prints 222 (correct); the
+/// the answer is 222. Before the compiled Phase 3 fix, eval printed 222
+/// (correct) while the
 /// compiled binary prints 111, and 222's bit pattern is ABSENT from the
 /// emitted C - the correct branch was deleted at compile time.
 #[test]

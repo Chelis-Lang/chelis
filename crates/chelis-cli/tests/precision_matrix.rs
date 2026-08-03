@@ -16,8 +16,8 @@
 //!   * at `f64`   -> `2^53` is **CORRECT**. `2^53 + 1` is not representable in
 //!     an f64 mantissa (53 bits), so IEEE-754 ties-to-even rounds it down. Any
 //!     "fix" that makes this return `2^53 + 1` has broken f64.
-//!   * at `int64` -> `2^53` is a **BUG**. The value is exactly representable in
-//!     an i64; it is only wrong because the evaluator laundered it through f64.
+//!   * at `int64` -> `2^53 + 1` is **REQUIRED**. The value is exactly
+//!     representable in an i64; the historical bug laundered it through f64.
 //!
 //! Same literal inputs, opposite verdicts. That collision is precisely why the
 //! bug survived: an f64-typed, tolerance-based oracle
@@ -29,12 +29,14 @@
 //! * `Locked` - verified correct today; this row is a regression lock.
 //! * `ByDesign` - lossy, and CORRECT to be lossy (float mantissa limits). Locks
 //!   the boundary so a fix does not over-correct.
+//!
 //! Historical broken rows retain their issue references in prose, but become
 //! ordinary `Locked` regression tests as soon as their implementation lands.
 //!
-//! Every `Broken` row below was confirmed by running the code, not by reading
-//! it. Two claims that came from source inspection alone turned out to be false
-//! during this investigation, so nothing here is asserted without execution.
+//! Every historical broken row was confirmed by running the code, not by
+//! reading it. Two claims that came from source inspection alone turned out to
+//! be false during this investigation, so nothing here is asserted without
+//! execution.
 //!
 //! ## Precision boundaries used
 //!
@@ -927,9 +929,9 @@ fn unannotated_top_level_binding_keeps_int64_exact() {
     .expect("eval");
     assert_eq!(
         got, "9007199254740993",
-        "an int64 top-level binding must stay an exact int64 scalar. It is \
-         currently promoted to a rank-0 tensor backed by Vec<f64> and prints as \
-         `tensor(shape=[], data=[...])`. chelis#684"
+        "an int64 top-level binding must stay an exact int64 scalar; before \
+         typed binding storage it was promoted to a rank-0 Vec<f64> tensor. \
+         chelis#684"
     );
 }
 
@@ -1034,7 +1036,7 @@ fn borrow_of_int64_scalar_is_rejected_loudly() {
 }
 
 // ===========================================================================
-// C BACKEND emits float32 math for int64 tensors (#691).
+// C BACKEND formerly emitted float32 math for int64 tensors (#691).
 //
 // Verified by compiling and running: the C backend types the pointers
 // correctly as `int64_t*` but calls `fmaxf`, a float32 function:
@@ -1059,8 +1061,8 @@ fn borrow_of_int64_scalar_is_rejected_loudly() {
 // that rejects int64 tensors. Both lanes emit through the same `CEmitter`.
 // ===========================================================================
 
-/// Verified: eval returns `[16777217, 1, 2, 3]`; compiled C returns
-/// `[16777216.0, 1.0, 2.0, 3.0]`.
+/// Before Phase 3, eval returned `[16777217, 1, 2, 3]` while compiled C
+/// returned `[16777216.0, 1.0, 2.0, 3.0]`.
 ///
 /// `16777217` is `2^24 + 1`: not representable in **float32**, trivially
 /// representable in int64. The threshold is 2^24, not 2^53, so this is far
@@ -1175,12 +1177,8 @@ fn int64_literal_above_mantissa_boundary_is_exact_in_the_compiled_lane() {
     );
 }
 
-/// The int64 scalar `abs` host-lane path in the compiled backend is EXACT,
-/// even though the eval lane is wrong on the same input (chelis#680) and the
-/// DAG-lane `fabsf` arm is wrong for tensors (chelis#691).
-///
-/// Locked to keep the three cases distinct: same operation, three lanes, three
-/// different verdicts. A fix must not collapse them by accident.
+/// The int64 scalar `abs` host-lane path remains exact after the eval and DAG
+/// tensor lanes adopted the same checked integer semantics.
 #[test]
 fn int64_scalar_abs_is_exact_in_the_compiled_host_lane() {
     if !c_toolchain_available() {
@@ -1468,7 +1466,7 @@ fn int64_tensor_abs_agrees_across_lanes() {
     assert_int_tensor_unop_parity("abs", "[100, 200, 300, 400]", "abs_i64");
 }
 
-/// `floor` remains a separate Phase 3 integer-kernel row.
+/// `floor` remains a separate Phase 4 capability-table row.
 #[test]
 #[ignore = "chelis#699: floor on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
@@ -1477,7 +1475,7 @@ fn int64_tensor_floor_agrees_across_lanes() {
     assert_int_tensor_unop_parity("floor", "[-100, 200, -300, 400]", "floor_i64");
 }
 
-/// `ceil` remains a separate Phase 3 integer-kernel row.
+/// `ceil` remains a separate Phase 4 capability-table row.
 #[test]
 #[ignore = "chelis#699: ceil on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
@@ -1486,7 +1484,7 @@ fn int64_tensor_ceil_agrees_across_lanes() {
     assert_int_tensor_unop_parity("ceil", "[-100, 200, -300, 400]", "ceil_i64");
 }
 
-/// `round` remains a separate Phase 3 integer-kernel row.
+/// `round` remains a separate Phase 4 capability-table row.
 #[test]
 #[ignore = "chelis#699: round on an int64 tensor still has no compiled integer kernel. \
             Run with `cargo test -p chelis-cli --test precision_matrix -- \
@@ -1673,14 +1671,12 @@ fn static_int_condition_does_not_delete_the_correct_branch() {
 }
 
 // ===========================================================================
-// pad_sequences narrows int64 to int32 in the compiled lane (#713).
+// pad_sequences formerly narrowed int64 to int32 in the compiled lane (#713).
 // ===========================================================================
 
-/// Verified: eval returns `3000000000.0`; compiled C returns `2147483647.0`
-/// (= i32::MAX). `chelis_pad_sequences` (crates/chelis-runtime/src/lib.rs:
-/// 2318-2330) allocates a `CHELIS_I32` output whenever the pad value is int64,
-/// and writes elements `i64 -> f64 -> i32`. The declared return type here is
-/// `tensor[2, 2, int64]`.
+/// Before Phase 3, eval preserved `3000000000` while compiled C saturated it
+/// to `2147483647` (= i32::MAX). The typed runtime path must now allocate and
+/// write the declared int64 representation end to end.
 #[test]
 fn pad_sequences_preserves_int64_ids_above_i32_max() {
     let eval_expr = "pad_sequences([[cast(3000000000, int64), cast(1, int64)], \

@@ -1,13 +1,12 @@
-//! chelis#715 - eight more scalar builtins hit `host_emit.rs:2300`'s
-//! `/* unsupported builtin */ 0` substitution, at EVERY dtype including
-//! plain f32/f64: `tan`, `atan`, `floor`, `ceil`, `round`, `recip`,
-//! `max_elem`, `min_elem`.
+//! chelis#715 - eight scalar builtins formerly hit the C host emitter's
+//! `/* unsupported builtin */ 0` substitution, including plain f32/f64:
+//! `tan`, `atan`, `floor`, `ceil`, `round`, `recip`, `max_elem`, `min_elem`.
 //!
 //! Unlike chelis#704 (scalar activations, where eval also rejects), eval
-//! computes all of these correctly - so nothing warns the user before the
-//! compiled binary replaces `floor(1.5)` or `max_elem(lr, floor_val)` with
-//! `0`. Same substitution site as #682/#704/#705; this file extends the
-//! confirmed blast radius to ordinary scalar math.
+//! computed all of these correctly, so nothing warned the user before the
+//! compiled binary replaced `floor(1.5)` or `max_elem(lr, floor_val)` with
+//! `0`. Same historical substitution site as #682/#704/#705; these ordinary
+//! regressions preserve the confirmed blast radius.
 //!
 //! Also carried here: the chelis#719 regression locks. The C backend's
 //! contiguous f32 tensor `sqrt` path used Accelerate's `vvsqrtf`, which is not
@@ -16,10 +15,9 @@
 //! scalar `sqrtf` loop; these tests lock correct rounding and layout
 //! independence in the compiled lane.
 //!
-//! The passing controls bound the stub list exactly: the working scalar ops
-//! stay locked in both lanes, the tensor forms of the broken ops stay
-//! locked (the stub is scalar-only, like #704's split), and the int-dtype
-//! rejections that are correct stay rejected.
+//! The passing controls bound the historical stub list exactly: the already
+//! working scalar ops stay locked in both lanes, the corresponding tensor
+//! forms stay locked, and correct int-dtype rejections stay rejected.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -106,11 +104,11 @@ fn scalar_program(op_expr: &str, ret_ty: &str) -> String {
 
 const STUB_MARKER: &str = "unsupported builtin";
 
-/// One broken row: eval computes `eval_expected`, the C lane must agree on
-/// the VALUE and must not contain the stub marker. Fails today with C
-/// printing `0`. The Phase 3 observation dependency requires the compiled
-/// lane to use the same own-width rendering as eval, so the two expected
-/// strings are byte-identical for every repaired row.
+/// One formerly broken row: eval computes `eval_expected`, the C lane must
+/// agree on the VALUE and must not contain the stub marker. Before Phase 3,
+/// C printed `0`. The observation contract requires the compiled lane to use
+/// the same own-width rendering as eval, so the two expected strings are
+/// byte-identical for every repaired row.
 fn assert_scalar_parity(
     op_expr: &str,
     ret_ty: &str,
@@ -144,7 +142,7 @@ fn assert_scalar_parity(
 }
 
 // ===========================================================================
-// chelis#715 - the broken rows (all observed printing 0 from the binary)
+// chelis#715 - repaired rows (all printed 0 before the Phase 3 fix)
 // ===========================================================================
 
 #[test]
@@ -244,7 +242,7 @@ fn i64_scalar_floor_is_identity_in_all_lanes() {
 /// The f64 rows of the stub family, distilled from the probe battery
 /// (`docs/investigations/probes/bat_scalar_ops.py`) - chelis#715's title
 /// says EVERY dtype, so the f64 half is asserted too, not just f32.
-/// Observed today: C prints 0 for all seven rows; eval is correct.
+/// Before Phase 3, C printed 0 for all seven rows while eval was correct.
 #[test]
 fn f64_scalar_stub_family_agrees_across_lanes() {
     for (expr, eval_expected, c_expected, name) in [
@@ -281,7 +279,7 @@ fn f64_scalar_stub_family_agrees_across_lanes() {
 }
 
 /// The f64 working-op controls, mirroring the f32 set: bounds the f64 half
-/// of #715 to exactly the seven broken ops above.
+/// of #715 to exactly the seven formerly broken ops above.
 #[test]
 fn working_f64_scalar_ops_agree_across_lanes() {
     if !c_toolchain_available() {
@@ -466,7 +464,7 @@ fn c_f32_tensor_sqrt_ordinary_values_agree_across_lanes() {
 // ===========================================================================
 
 /// The scalar ops that DO work, at f32, with values whose printed form is
-/// identical in both lanes. Bounds #715 to exactly the eight broken ops.
+/// identical in both lanes. Bounds #715 to the eight formerly broken ops.
 #[test]
 fn working_f32_scalar_ops_agree_across_lanes() {
     if !c_toolchain_available() {
@@ -540,8 +538,8 @@ fn working_i64_scalar_ops_agree_across_lanes() {
     }
 }
 
-/// The TENSOR forms of the broken ops are correct in both lanes - the stub
-/// is scalar-only, exactly like #704's tensor/scalar split. (floor and
+/// The TENSOR forms of the formerly broken ops are correct in both lanes -
+/// the stub was scalar-only, exactly like #704's tensor/scalar split. (floor and
 /// max_elem chosen for exact printed values; tan/recip carry rounding
 /// differences that belong to chelis#717/#719, not here.)
 #[test]

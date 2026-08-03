@@ -236,26 +236,21 @@ fn hip_int64_neg_is_rejected_with_the_branded_diagnostic() {
 }
 
 // ===========================================================================
-// Census row 4 (chelis#714 symptom) - LIVE evidence lock.
+// Census row 4 (chelis#714 symptom) - Phase 3 positive transition lock.
 // ===========================================================================
 
-/// **Rejection lock (replaced the Phase 0 evidence lock at Phase 1):**
-/// the compiled f16 scalar `floor` program is REJECTED at build with the
-/// branded diagnostic - the row 4 `<value>` print arms and the row 2
-/// builtin stub are both errors now, so the chelis#714 Unknown chain
-/// terminates loudly instead of printing a placeholder.
+/// The compiled f16 scalar `floor` program now computes through the exact
+/// Phase 3 ABI. This replaces Phase 1's rejection lock while retaining the
+/// original no-placeholder assertion as an exact value check.
 #[test]
-fn c_f16_floor_is_rejected_not_value_placeholder() {
-    let err = c_run_outcome(
+fn c_f16_floor_computes_not_value_placeholder() {
+    let (_, stdout, stderr) = c_run_outcome(
         "def run() -> f16 = floor(cast(1.5, f16))\nout = run()\n",
         ".ch",
         "f16_floor_value",
     )
-    .expect_err("census row 4: the f16 floor program must fail the build loudly");
-    assert!(
-        err.contains("unsupported:"),
-        "the rejection must carry the branded section C2 diagnostic; got: {err}"
-    );
+    .expect("census row 4: f16 floor must build and run through the exact ABI");
+    assert_eq!(stdout.trim(), "out = 1.0", "stderr: {stderr}");
 }
 
 // ===========================================================================

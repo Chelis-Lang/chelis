@@ -629,7 +629,9 @@ deliberate ADT zero adjoint, the empty-`drop` sequencing zero, and the
 `fail`-in-if mask placeholder - each annotated at the site). Row status
 notes below are left as the P0 record; the per-row conversion evidence
 is the un-ignored acceptance tests named in PR [#791] plus
-`loud_unsupported_phase1.rs`. Appended rows:
+`loud_unsupported_phase1.rs`. Chelis#729 Phase 3 subsequently turns the
+supported scalar-math and narrow-scalar rows 2/4/6/7 into exact positive
+controls while leaving genuinely unsupported siblings branded. Appended rows:
 
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|

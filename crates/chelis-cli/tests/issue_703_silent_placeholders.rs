@@ -250,8 +250,15 @@ fn assert_scalar_op_not_stubbed(op: &str, name: &str) {
                  zero. The scalar helper may already exist in host_emit.rs and \
                  simply not be wired into the dispatch. chelis#704"
             );
-            assert!(
-                !stdout.contains("out = 0"),
+            let rendered = stdout
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("out = "))
+                .unwrap_or_else(|| panic!("scalar `{op}` printed no `out =` record: {stdout}"));
+            let value = rendered.parse::<f64>().unwrap_or_else(|error| {
+                panic!("scalar `{op}` printed a non-numeric result `{rendered}`: {error}")
+            });
+            assert_ne!(
+                value, 0.0,
                 "scalar `{op}(3.5)` returned 0. chelis#704. Got: {stdout}"
             );
         }
@@ -260,10 +267,9 @@ fn assert_scalar_op_not_stubbed(op: &str, name: &str) {
 
 macro_rules! scalar_stub_test {
     ($fn_name:ident, $op:literal) => {
-        // Un-ignored by chelis#730 Phase 1: the stub arm is now a loud
-        // build rejection (the Err(_) arm below), which this test accepts;
-        // computing these scalar ops in the compiled lane is chelis#704's
-        // support work.
+        // Un-ignored by chelis#730 Phase 1 when the stub arm became a loud
+        // build rejection. Implemented rows now take the success arm, which
+        // parses the result rather than confusing a leading `0.` with zero.
         #[test]
         fn $fn_name() {
             assert_scalar_op_not_stubbed($op, stringify!($fn_name));

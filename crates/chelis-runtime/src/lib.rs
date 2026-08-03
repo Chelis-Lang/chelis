@@ -2387,8 +2387,8 @@ pub unsafe extern "C" fn chelis_tensor_from_value_list(
 /// Allocate a tensor from a nested chelis_list with an explicit destination
 /// dtype. The C backend calls this when the surface-level type annotation
 /// disambiguates the storage width: `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
-/// must be backed by 8-byte f64 slots even though every list element arrives
-/// tagged `CHELIS_VALUE_FLOAT64` (the same tag the legacy path uses for f32).
+/// must be backed by 8-byte f64 slots. Narrow float boxes now arrive through
+/// exact tagged rank-0 tensors; `CHELIS_VALUE_FLOAT64` denotes only f64.
 ///
 /// RT-4 F1 fix: previously the runtime had no dtype hint and silently
 /// allocated at f32 width (4 bytes/elem) for every float-tagged list,
@@ -2456,11 +2456,9 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
                 chelis_value_from_f32(raw)
             }
             // chelis#732 Phase 2 (section C3.4, chelis#716's abort half):
-            // read the 2-byte storage and widen exactly. The list box is
-            // f64-valued, so the element leaves as the exact image of the
-            // stored half value (widening is lossless); the box renders at
-            // f64 width until the value box learns narrow-float widths
-            // (chelis#729's capacity side).
+            // read the 2-byte storage exactly. Phase 3 boxes the original
+            // bits through a tagged rank-0 tensor, preserving the narrow
+            // dtype for own-width formatting and later unboxing.
             RuntimeDType::Bf16 => {
                 let bits = *((*tensor).data as *const u16).add(i * stride);
                 chelis_value_from_bf16_bits(bits)

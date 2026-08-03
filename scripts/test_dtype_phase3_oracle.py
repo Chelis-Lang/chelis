@@ -48,6 +48,7 @@ class CommandManifestTests(unittest.TestCase):
                 "fold_static_cond_matrix",
                 "issue_759_checked_cast_default",
                 "issue_761_subnormal_ingress",
+                "issue_734_tostring_placeholder",
                 "observation_roundtrip_harness",
             },
         )

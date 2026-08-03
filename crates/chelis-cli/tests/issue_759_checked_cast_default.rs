@@ -19,10 +19,9 @@
 //! * any -> float: IEEE RNE finalize at the target width; overflow is
 //!   the correctly signed infinity, never a trap ([04-NUM-2]).
 //!
-//! The named lossy/wrapping cast forms remain chelis#759's future
-//! surface. The compiled C lane adopts the checked ladder at chelis#729
-//! Phase 3; its divergence is recorded here as ignored red rows, per
-//! the eval-reference-lane pattern (never silently adjusted).
+//! The named lossy/wrapping cast forms remain chelis#759's future surface.
+//! The compiled C lane adopted the checked ladder in chelis#729 Phase 3;
+//! the former red rows below are unconditional cross-lane regressions.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -323,9 +322,9 @@ fn static_if_with_trapping_cast_condition_traps_at_runtime_not_folds() {
 }
 
 // ===========================================================================
-// Compiled C lane: documented-divergent until chelis#729 Phase 3. These
-// assert the FUTURE checked behavior and stay red/ignored per the
-// eval-reference-lane pattern (dtype_semantics.md section B2.2).
+// Compiled C lane: chelis#729 Phase 3 checked-cast regressions. These retain
+// the original assertions that were red before the compiled lane adopted the
+// same checked ladder as eval (dtype_semantics.md section C3).
 // ===========================================================================
 
 fn c_toolchain_available() -> bool {

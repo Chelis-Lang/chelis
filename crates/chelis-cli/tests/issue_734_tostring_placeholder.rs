@@ -11,19 +11,15 @@
 //! (previously "unknown - probe"): LIVE. The fix arrives via that plan's
 //! Phase 1 (the arm becomes Err through the emitter failure channel).
 //!
-//! Controls: to_string of int64/f64/bool scalars is correct in both lanes.
-//! The former f16 "control" passed only because the C host silently widened
-//! the value through the Unknown/f64 path; Phase 2 replaces that accidental
-//! green with an explicit ABI rejection until chelis#729 supplies real
-//! reduced-float storage and rounding. The exact f16/bf16 `to_string` cells
-//! are locked below as typed ABI rejections with no emitted C artifact.
+//! Controls: to_string of scalar values is correct in both lanes. The former
+//! f16 "control" passed only because the C host silently widened through the
+//! Unknown/f64 path; Phase 2 replaced that accidental green with an explicit
+//! ABI rejection. Chelis#729 Phase 3 supplies exact reduced-float storage and
+//! returns f16/bf16 to the positive, own-width observation corpus below.
 
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
-use chelis_compiler_api::compiler::compile;
-use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
-use chelis_vocab::DiagnosticKind;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -91,7 +87,9 @@ fn c_first_line(program: &str, name: &str) -> String {
         .to_string()
 }
 
-/// Observed today: the compiled binary prints the literal `<value>`.
+/// Historical bug: the compiled binary printed the literal `<value>`.
+/// Phase 1 now rejects this unsupported container conversion loudly; the
+/// ignored positive row remains the support contract.
 #[test]
 #[ignore = "chelis#1059: to_string(tensor) is now REJECTED loudly at build per the \
             chelis#730 plan (was chelis#734's silent '<value>' placeholder); real tensor \
@@ -114,7 +112,8 @@ fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
     );
 }
 
-/// Observed today: `<value>` for lists as well.
+/// Historical bug: lists also produced `<value>`. The current compiled lane
+/// rejects this unsupported container conversion loudly.
 #[test]
 #[ignore = "chelis#1059: to_string(List) is now REJECTED loudly at build per the \
             chelis#730 plan (was chelis#734's silent '<value>' placeholder); real list rendering \
@@ -165,72 +164,22 @@ fn to_string_scalar_arms_agree_across_lanes() {
 }
 
 /// Reduced-float scalar `to_string` used to appear green only because the C
-/// host widened the value through its old unknown/f64 representation. Until
-/// chelis#729 supplies exact storage and rounding, both known logical dtypes
-/// must reach the structured C-host ABI rejection; they must not widen and no
-/// translation unit may be emitted.
+/// host widened the value through its old unknown/f64 representation. Phase 3
+/// gives both dtypes exact host storage, so this exit must now preserve their
+/// own-width shortest strings and agree with eval.
 #[test]
-fn to_string_reduced_float_scalars_reject_before_artifact_emission() {
-    for dtype in ["f16", "bf16"] {
+fn to_string_reduced_float_scalars_agree_across_lanes() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for (dtype, value, expected) in [("f16", "0.3333", "0.3333"), ("bf16", "0.334", "0.334")] {
         let program = format!(
-            "module M.Main\ndef render() -> string = to_string(cast(1.5, {dtype}))\n\
+            "module M.Main\ndef render() -> string = to_string(cast({value}, {dtype}))\n\
              out = print(render())\n"
         );
-        let error = compile(CompileRequest {
-            source_kind: SourceKind::Surf,
-            source: program.clone(),
-            target: CompileTarget::C,
-            entry_name: None,
-        })
-        .expect_err("reduced-float to_string must not produce a widened C artifact");
-        assert_eq!(error.stage, "compile", "{dtype}: {error:?}");
-        assert_eq!(error.errors.len(), 1, "{dtype}: {error:?}");
-        let diagnostic = &error.errors[0];
-        assert_eq!(
-            diagnostic.kind(),
-            DiagnosticKind::UnsupportedFeature,
-            "{dtype}"
-        );
-        for expected in [
-            "unsupported:",
-            &format!("dtype `{dtype}`"),
-            "C host ABI selection",
-            "(codegen:c)",
-        ] {
-            assert!(
-                diagnostic.message.contains(expected),
-                "{dtype}: missing {expected:?} in {diagnostic:?}"
-            );
-        }
-
-        let dir = tempdir().expect("tempdir");
-        let source_path = dir.path().join(format!("to_string_{dtype}.ch"));
-        let out_dir = dir.path().join("out");
-        write_file(&source_path, &program);
-        let output = Command::cargo_bin("chelis")
-            .expect("binary")
-            .env("CHELIS_STYLE_GATE_DISABLE", "1")
-            .args([
-                "build",
-                source_path.to_str().unwrap(),
-                "--target",
-                "c",
-                "--output",
-                out_dir.to_str().unwrap(),
-            ])
-            .output()
-            .expect("chelis build should run");
-        assert!(!output.status.success(), "{dtype}: build must reject");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("unsupported:")
-                && stderr.contains(&format!("dtype `{dtype}`"))
-                && stderr.contains("C host ABI selection"),
-            "{dtype}: {stderr}"
-        );
-        assert!(
-            !out_dir.join(format!("to_string_{dtype}.c")).exists(),
-            "{dtype}: rejection must occur before a C translation unit is written"
-        );
+        let eval = eval_first_line(&program).expect("eval lane");
+        let compiled = c_first_line(&program, &format!("to_string_{dtype}"));
+        assert_eq!(eval, expected, "{dtype}: eval own-width rendering drift");
+        assert_eq!(compiled, eval, "{dtype}: to_string lane divergence");
     }
 }
