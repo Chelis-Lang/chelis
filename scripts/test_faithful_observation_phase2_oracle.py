@@ -7,12 +7,6 @@ import faithful_observation_phase2_oracle as oracle
 
 HARNESS_FIXTURE = """
 #[test]
-#[ignore = "chelis#684 ([#729] value layer): the rank-0 f64 realization \\
-            collapses int64 scalar roots above 2^53."]
-fn eval_int64_scalar_root_above_2p53_renders_exact() {
-}
-
-#[test]
 #[ignore = "chelis#865 ([#729]/[#686] capacity family): the untagged f64 box."]
 fn c_boxed_f32_renders_at_own_width() {
 }
@@ -24,22 +18,46 @@ fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
 const C_LANE_EXCLUDED: &[&str] = &["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"];
 """
 
+# Parser-only sample for `ignored_cells`. It is deliberately NOT checked
+# against the shipped ledger: its job is to keep both attribute spellings
+# covered. The multi-line leg used to come from the chelis#684 row, which
+# was un-ignored when chelis#729 repaired scalar-root storage (chelis#1078).
+IGNORE_PARSER_FIXTURE = """
+#[test]
+#[ignore = "chelis#111 (some family): a reason long enough to wrap across \\
+            two source lines."]
+fn multi_line_ignored_cell() {
+}
+
+#[test]
+#[ignore = "chelis#222 (another family): a single-line reason."]
+fn single_line_ignored_cell() {
+}
+
+#[test]
+fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
+}
+"""
+
 
 class IgnoreInventoryTests(unittest.TestCase):
     def test_multiline_and_single_line_ignores_are_both_attributed(self) -> None:
-        cells = oracle.ignored_cells(HARNESS_FIXTURE)
+        cells = oracle.ignored_cells(IGNORE_PARSER_FIXTURE)
         self.assertEqual(
             set(cells),
-            {
-                "eval_int64_scalar_root_above_2p53_renders_exact",
-                "c_boxed_f32_renders_at_own_width",
-            },
+            {"multi_line_ignored_cell", "single_line_ignored_cell"},
         )
         self.assertIn(
-            "chelis#684",
-            cells["eval_int64_scalar_root_above_2p53_renders_exact"],
+            "chelis#111",
+            cells["multi_line_ignored_cell"],
             "the multi-line ignore reason must be captured whole",
         )
+        self.assertIn(
+            "two source lines",
+            cells["multi_line_ignored_cell"],
+            "the continuation line must be captured too",
+        )
+        self.assertIn("chelis#222", cells["single_line_ignored_cell"])
 
     def test_unignored_test_is_not_in_the_inventory(self) -> None:
         cells = oracle.ignored_cells(HARNESS_FIXTURE)
