@@ -983,24 +983,47 @@ mod tests {
         // Negative controls for every stamped carrier: the permanent oracle
         // must inspect metadata and structural children rather than treating
         // the carrier tag itself as proof that the whole subtree was stamped.
+        //
+        // For the gated `Node` carrier the guarantee is stronger than "the
+        // oracle finds it": the constructor consults this same traversal, so
+        // a Node hiding a raw vocabulary tag in its metadata cannot be built
+        // at all (chelis#731 Phase 3 successor acceptance).
         let raw_in_meta = Expr::List(
             List {
                 elements: vec![sym("var"), empty_map(), sym("hidden")],
             },
             ZERO,
         );
-        let stamped = Expr::node(
+        let rejected = crate::node::Node::try_new(
             DeepTag::Tuple,
             MetaMap {
-                entries: vec![("probe".to_string(), raw_in_meta)],
+                entries: vec![("probe".to_string(), raw_in_meta.clone())],
             },
             Vec::new(),
-            ZERO,
         );
+        assert!(
+            matches!(
+                rejected,
+                Err(crate::node::NodeError::RawVocabularyTag { ref raw_tag, .. })
+                    if raw_tag == "var"
+            ),
+            "Node metadata remains part of the decode-once oracle: {rejected:?}"
+        );
+
+        // The ungated carriers have no constructor to reject them, so the
+        // oracle itself must still walk their metadata.
+        let unknown_with_raw_meta = Expr::UnknownForm(Box::new(crate::ast::UnknownFormData {
+            head: "future-form".to_string(),
+            meta: MetaMap {
+                entries: vec![("probe".to_string(), raw_in_meta)],
+            },
+            children: Vec::new(),
+            span: ZERO,
+        }));
         assert_eq!(
-            find_raw_vocabulary_tag(&[stamped]).as_deref(),
+            find_raw_vocabulary_tag(&[unknown_with_raw_meta]).as_deref(),
             Some("var"),
-            "Node metadata remains part of the decode-once oracle"
+            "UnknownForm metadata remains part of the decode-once oracle"
         );
     }
 

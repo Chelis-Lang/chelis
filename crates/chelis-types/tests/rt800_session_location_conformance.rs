@@ -4,7 +4,6 @@
 
 mod support;
 
-use chelis_deep::DeepTag;
 use chelis_deep::parser::parse_str as parse_deep_lenient;
 use chelis_macros::{ExpansionOptions, expand_program};
 use chelis_surf::desugar::desugar_program;
@@ -52,10 +51,9 @@ fn einsum_with_only_equation_and_one_operand_reports_one_arity_root() {
 
 #[test]
 fn cast_operand_and_target_failures_remain_two_independent_roots() {
-    let mut exprs =
-        parse_deep_lenient("(def {} bad (cast {} (var {} missing_value) (t-prim {} f32)))")
-            .expect("Deep fixture must parse");
-    support::append_name_to_last_node(&mut exprs, DeepTag::TPrim, "extra");
+    let exprs = support::parse_unchecked_legacy(
+        "(def {} bad (cast {} (var {} missing_value) (t-prim {} f32 extra)))",
+    );
     let errors = check_ir_program(&exprs)
         .expect_err("adversarial Deep fixture must be rejected")
         .errors;

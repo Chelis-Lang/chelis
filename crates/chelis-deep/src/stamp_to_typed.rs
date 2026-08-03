@@ -602,6 +602,30 @@ mod tests {
     }
 
     #[test]
+    fn declaration_type_parameter_lists_are_structural_binders() {
+        // (deftype {} Option (a) (variant {} None))
+        let input = vec![RawExpr::List(
+            vec![
+                raw_sym("deftype"),
+                empty_map(),
+                raw_sym("Option"),
+                RawExpr::List(vec![raw_sym("a")], sp()),
+                RawExpr::List(vec![raw_sym("variant"), empty_map(), raw_sym("None")], sp()),
+            ],
+            sp(),
+        )];
+
+        let exprs = stamp_to_typed(input).expect("type parameter list must stamp structurally");
+        let Expr::Node(deftype, _) = &exprs[0] else {
+            panic!("expected stamped deftype Node");
+        };
+        assert!(
+            matches!(deftype.children_slice().get(1), Some(Expr::BareList(params, _)) if
+            matches!(params.as_slice(), [Expr::Atom(Atom::Name(name), _)] if name == "a"))
+        );
+    }
+
+    #[test]
     fn top_level_non_declaration_is_error() {
         // (app {} (lit {} 1)) — app is not a declaration
         let input = vec![RawExpr::List(

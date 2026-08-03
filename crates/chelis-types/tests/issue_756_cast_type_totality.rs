@@ -22,9 +22,9 @@
 
 mod support;
 
+use chelis_deep::Expr;
 use chelis_deep::parser::parse_str_strict as parse_deep;
 use chelis_deep::printer::print_canonical;
-use chelis_deep::{DeepTag, Expr};
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
 use chelis_types::errors::CheckErrorKind;
@@ -156,9 +156,7 @@ fn canonical_t_prim_with_an_extra_child_is_rejected_once() {
         chelis_deep::parser::parse_str(&deep_cast_program("(t-prim {} f32 extra)")).is_err(),
         "wrong-arity canonical types must be rejected at stamped ingress"
     );
-    let mut deep = chelis_deep::parser::parse_str(&deep_cast_program("(t-prim {} f32)"))
-        .expect("valid control must stamp");
-    support::append_name_to_last_node(&mut deep, DeepTag::TPrim, "extra");
+    let deep = support::parse_unchecked_legacy(&deep_cast_program("(t-prim {} f32 extra)"));
     let report = check_ir_fitness(&deep);
     assert!(
         report.score < 1.0,
