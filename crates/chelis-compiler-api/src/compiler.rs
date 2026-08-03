@@ -1511,6 +1511,7 @@ fn execution_artifact_from_compiled(
     // §3.6 and spec/design/loud_unsupported.md §C6.3.
     if let Some(host_program) = host_compiled.host.as_ref() {
         reject_host_only_builtins(host_program, target)?;
+        reject_eval_only_builtins(host_program, target)?;
     }
 
     // Two C-build-path guards over `reduce_window_*`, applied before
@@ -3124,6 +3125,41 @@ fn reject_host_only_builtins_before_host_lowering(
 ) -> Result<()> {
     if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
         return Err(host_only_builtin_error(&name, target));
+    }
+    Ok(())
+}
+
+/// Eval/test-only builtins (`process_run`, the chelis#890 JSON family, the
+/// chelis#903 CSV family) are rejected for every compiled target with the
+/// same message the CLI build gate prints, so the public
+/// `compile()`/`compile_for_execution()` APIs (the chelis-python path)
+/// fail loudly instead of falling through to a generic codegen error
+/// (chelis#891 review finding 13). The list lives in `chelis_ir::host`
+/// and is shared with the CLI's build gate.
+fn reject_eval_only_builtins(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: CompileTarget,
+) -> Result<()> {
+    if let Some(name) = chelis_ir::host::find_eval_only_host_builtin(program) {
+        // Branded through `Unsupported` (section C2,
+        // spec/design/loud_unsupported.md): the CLI's twin gate brands
+        // identically, keeping the two lanes byte-compatible for shells
+        // that match the `unsupported:` prefix. The stage tag names the
+        // ACTUAL rejecting lane (round-2 red-team finding: a hardcoded
+        // "c" misstated the lane on HIP builds).
+        let target_label = match target {
+            CompileTarget::C => "c",
+            CompileTarget::Hip => "hip",
+        };
+        return Err(unsupported_stage_error(
+            chelis_types::unsupported::Unsupported::new(
+                chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
+                "compiled targets (the host interpreter's eval/test lanes only)",
+                chelis_types::unsupported::Stage::Codegen(target_label),
+                "run the program with `chelis eval` or `chelis test`, or remove the \
+                 call before building (spec/05-risc-primitives.md §3.6)",
+            ),
+        ));
     }
     Ok(())
 }
@@ -5397,13 +5433,13 @@ def id(let: int64) -> int64 = let
     #[test]
     fn compile_emits_generic_adt_runtime_calls_for_recursive_host_program() {
         let source = r#"
-type Json =
+type Jsonish =
   | JsonNull
   | JsonInt(int64)
   | JsonString(string)
-  | JsonArray(List[Json])
+  | JsonArray(List[Jsonish])
 
-def describe(value: Json) -> string =
+def describe(value: Jsonish) -> string =
   match value with {
     | JsonNull => "null"
     | JsonInt(n) => to_string(n)
@@ -5717,11 +5753,11 @@ year = mk_date.year
             r#"
 module Std.Test
 
-type Json =
+type Jsonish =
   | JsonNull
   | JsonString(string)
-  | JsonArray(List[Json])
-  | JsonObject(Dict[string, Json])
+  | JsonArray(List[Jsonish])
+  | JsonObject(Dict[string, Jsonish])
 
 type Tokenizer =
   | BpeTokenizer(Dict[string, int64], Dict[string, int64], Dict[int64, string], int64)
@@ -5729,7 +5765,7 @@ type Tokenizer =
 def parse_line(line: string) -> Option[List[string]] =
   Some([])
 
-def json_string(value: Option[Json]) -> Option[string] =
+def json_string(value: Option[Jsonish]) -> Option[string] =
   match value with {
     | Some(inner) =>
         match inner with {

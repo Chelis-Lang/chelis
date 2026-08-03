@@ -40,7 +40,7 @@ mod source_arch;
 
 pub use builtins::{
     BUILTIN_NAMES, BUILTINS, BuiltinDecl, Realizability, ShapeClass, builtin_decl, builtin_env,
-    realizability, shape_class,
+    prelude_adt_defs, realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,

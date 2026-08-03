@@ -556,6 +556,18 @@ const BASELINE: &[Entry] = &[
     // uses a precision spec today, and a new one is a third formatter. --
     (
         Pat::RustFormatNarrowing,
+        "crates/chelis-compiler-api/src/runtime/json.rs",
+        2,
+        "round_to's decimal-rounding MECHANISM (chelis#890, [05-OP-1]): \
+         each dtype lane formats its operand at `places` precision then \
+         exactly re-parses at the operand's own width -- an internal \
+         numeric algorithm whose precision spec IS the operation, not an \
+         observation exit; the observable result re-enters the value \
+         domain before any exit formats it. One site per authored lane \
+         (f64, f32)",
+    ),
+    (
+        Pat::RustFormatNarrowing,
         "crates/chelis-backend-c/src/lib.rs",
         6,
         "cfg(test): the fill negative-lock needle ({value:.8}f must NOT \
@@ -724,9 +736,38 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        24,
+        31,
         "declared derived-Debug residue carriers: Err(format!) \
-         diagnostics over Value/callable/handle shapes",
+         diagnostics over Value/callable/handle shapes; +7 from the \
+         chelis#890/#903 JSON/CSV builtin dispatch arms (chelis#997 debt)",
+    ),
+    (
+        Pat::RustDebugNumericFormat,
+        "crates/chelis-compiler-api/src/runtime/json.rs",
+        18,
+        "chelis#890 JSON I/O runtime: Err(format!) parse/shape diagnostics \
+         over Json ADT fields and truncated payload renders -- the same \
+         residue-carrier class as eval.rs/host_ops.rs (chelis#997 debt; \
+         the sweep fix routes them through render_value); +1 cfg(test) \
+         assertion message in the invalid-escape regression test",
+    ),
+    (
+        Pat::RustDebugNumericFormat,
+        "crates/chelis-compiler-api/src/runtime/csv.rs",
+        10,
+        "chelis#903 CSV I/O runtime: Err(format!) parse/shape diagnostics \
+         over document shapes, incl. the integer-accessor malformed-cell \
+         renders -- the json.rs residue-carrier class (chelis#997 debt; \
+         same render_value sweep)",
+    ),
+    (
+        Pat::RustDebugNumericFormat,
+        "crates/chelis-compiler-api/src/runtime/mod.rs",
+        1,
+        "the shared truncated_debug helper for the chelis#890/#903 \
+         JSON/CSV shape diagnostics: ONE Debug spelling those modules \
+         route through (chelis#997 debt; the sweep replaces this single \
+         site)",
     ),
     (
         Pat::RustDebugNumericFormat,
@@ -745,10 +786,12 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/tests.rs",
-        21,
+        43,
         "cfg-gated runtime unit-test assertions, not product exits; \
          chelis#729 Phase 1 replaced one raw-scalar assertion with two \
-         sealed ScalarValue assertion sites (net +1)",
+         sealed ScalarValue assertion sites (net +1); +22 from the \
+         chelis#890/#903 JSON/CSV pipeline-test `got {other:?}` \
+         assertion messages",
     ),
     (
         Pat::RustDebugNumericFormat,

@@ -45,6 +45,17 @@
         ]
       },
       {
+        "leg": "prelude-adt-numeric",
+        "artifact": "chelis_types::builtins::register_prelude_adts Rust-registered prelude value ADTs",
+        "enumerator": "prelude_adt_rows -> chelis_types::prelude_adt_defs",
+        "command": "cargo nextest run -p chelis-cli --test capacity_census_tripwire",
+        "expected_success": "capacity_census_matches_public_surface passes",
+        "mutations": [
+          "planted_prelude_adt_with_f64_variant_is_detected",
+          "registered_prelude_json_adt_is_enumerated_with_both_flags"
+        ]
+      },
+      {
         "leg": "wire-schema-numeric-fields",
         "artifact": "crates/chelis-compiler-api/src/schema.rs public serialized type graph",
         "enumerator": "rustdoc JSON public schema type graph -> wire-schema numeric fields",
@@ -1070,6 +1081,15 @@
       "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
       "flags": [],
       "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+    },
+    {
+      "kind": "prelude-adt-numeric",
+      "id": "prelude::Json: JNull | JBool(bool) | JInt(int64) | JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "maintainer-override(source-faithful JSON ingestion ADT for the #890/#903 eval-lane I/O surface: JNum f64 is the exact carrier of the source format's float production, landed integer-capable from the start with JInt int64 beside it per roadmap invariant 7 and the io/json JsonInt/JsonFloat precedent; [05-OP-2] decides the split; liveness-bound to the open capacity class, chelis#729)"
     },
     {
       "kind": "std-adt-numeric",
