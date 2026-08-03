@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.2] — 2026-08-03
+
 ### Added
 
 - **`chelis-std` CSV/JSON serializers (chelis#928).** `Std.Io.Csv` gains
@@ -129,11 +131,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   the removal; migrate any downstream `Node` mutation to the `try_replace_*` API.
 
 - **`shape(x, axis)` returns `int32` under eval, not `int64`** (#729
-  Phase 2). `int32` is the normative carrier for the shape query
-  (`spec/05-risc-primitives.md` §2.2); the old `int64` payload stayed
-  invisible only while mixed-width arithmetic silently promoted. Code
-  that fed a `shape` result into an `int64`-typed position now needs an
-  explicit `cast`.
+  Phase 2), conforming to the `int32` return that `spec/04` §4.7.1 stated
+  at the time; the old `int64` payload stayed invisible only while
+  mixed-width arithmetic silently promoted. **Known divergence, do not
+  migrate onto this:** chelis#1000 landed in this same release and
+  reverses that rule — `[05-DIM-2]` now says `shape` SHALL return `int64`
+  as an extent-domain quantity — so the evaluator is non-conforming here
+  and is expected to move back to `int64` (chelis#1120, chelis#1112).
+  Code that feeds a `shape` result into an `int64` position needs a
+  `cast` on 0.18.2 specifically, and will not once that lands.
 - **Entry-scoped compiled artifacts emit the fixed C symbol
   `chelis_main`** (chelis#817, chelis#818), carried in the manifest as
   `host_entry_name`, so a def named `main`, `free`, or `malloc` links
