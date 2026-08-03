@@ -1499,6 +1499,17 @@ pub(super) fn reshape_output_dim(
 /// shape arg is not a recognized list form (in which case the caller
 /// falls back to all-wildcards with rank inferred from `list_literal_len`).
 pub(super) fn collect_shape_list_elements(expr: &deep::Expr) -> Option<Vec<&deep::Expr>> {
+    // chelis#1107 (measured, deliberately NOT extended to `UnknownForm`):
+    // `(list ...)` is outside the 62-tag vocabulary, so in expression position
+    // BOTH ingresses reject the program before this shape ever matters --
+    // `infer_expr`'s `UnknownForm` arm fires on each. The stamp pass carries
+    // it as `Expr::UnknownForm` and `normalize_nodes_to_lists` preserves that,
+    // so both lanes miss this `List`-only arm identically and both fall back
+    // to the same wildcard shape. The arm is symmetric across carriers and
+    // cannot produce an ingress divergence; it stays live only for
+    // programmatically built `Expr::List` trees, where both lanes see a
+    // `List`. Teaching it `UnknownForm` would make the checker derive a shape
+    // for a form it has already ruled invalid, which is not an improvement.
     if let deep::Expr::List(list, _) = expr
         && list.unknown_tag_symbol() == Some("list")
     {

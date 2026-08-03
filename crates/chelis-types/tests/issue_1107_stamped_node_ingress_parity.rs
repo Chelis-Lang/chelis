@@ -385,3 +385,39 @@ fn reshape_shape_mismatch_is_rejected_on_both_ingresses() {
         "reshape whose real rank-2 result contradicts a declared rank-1 signature",
     );
 }
+
+/// `[2, 3]` in the host-lane `(list ...)` spelling, which is outside the
+/// 62-tag vocabulary.
+const SHAPE_LIST_TAGGED_2_3: &str =
+    "(list {} (lit {type: (t-prim {} int64)} 2) (lit {type: (t-prim {} int64)} 3))";
+
+#[test]
+fn reshape_with_host_lane_list_spelling_is_rejected_on_both_ingresses() {
+    // The `(list ...)` shape-list spelling is NOT an ingress divergence, and
+    // this test exists to keep it that way.
+    //
+    // `list` is not in the closed vocabulary, so in expression position both
+    // ingresses reject the program outright on `infer_expr`'s `UnknownForm`
+    // arm -- the verdict is identical, and neither lane derives a shape from
+    // it. Full diagnostic-set equality is deliberately NOT asserted here: the
+    // IR ingress additionally runs `chelis_deep::validate::validate`, a
+    // structural pass the typed lane does not run, which reports the same
+    // unknown tag a second time. That duplicate applies to every unknown tag,
+    // not to shape lists, and is a diagnostic-count asymmetry rather than a
+    // soundness one.
+    let source = format!(
+        "(defsig {{}} f (t-fn {{}} (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} f32)) \
+           (t-tensor {{}} (d-lit {{}} 2) (d-lit {{}} 3) (t-prim {{}} f32))))\n\
+         (def {{}} f (fn {{}} (params {{}} x) \
+           (app {{}} (var {{}} reshape) (var {{}} x) {SHAPE_LIST_TAGGED_2_3})))"
+    );
+    let exprs = stamped(&source);
+    let needle = "unknown Deep tag `list` has no checker disposition";
+    for (label, diagnostics) in [("typed", typed_errors(&exprs)), ("ir", ir_errors(&exprs))] {
+        assert!(
+            diagnostics.iter().any(|m| m.contains(needle)),
+            "the {label} ingress must reject the host-lane `(list ...)` spelling \
+             in expression position (chelis#1107); got {diagnostics:?}"
+        );
+    }
+}
