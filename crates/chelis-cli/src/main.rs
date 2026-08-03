@@ -9261,8 +9261,16 @@ fn run_tide_repl() -> Result<(), Box<dyn std::error::Error>> {
 /// Error joining matches [`try_eval`] exactly, so JSON and text mode
 /// surface identical error text on failure.
 fn format_eval_diagnostic(diag: &chelis_compiler_api::schema::Diagnostic) -> String {
-    let mut rendered = diag.message.clone();
-    for hint in &diag.suggestions {
+    render_eval_diagnostic(&diag.message, &diag.suggestions)
+}
+
+/// The rendering itself, over the two fields it reads. Separated from the
+/// `Diagnostic` adapter above because chelis#959 seals diagnostic production
+/// inside compiler-api: no crate outside it can build a `Diagnostic`, so the
+/// rendering contract is exercised through this function instead.
+fn render_eval_diagnostic(message: &str, suggestions: &[String]) -> String {
+    let mut rendered = message.to_string();
+    for hint in suggestions {
         rendered.push_str("; hint: ");
         rendered.push_str(hint);
     }
@@ -9307,30 +9315,19 @@ fn join_eval_error(err: chelis_compiler_api::compiler::CompilerError) -> String 
 
 #[cfg(test)]
 mod eval_diagnostic_rendering_tests {
-    use super::format_eval_diagnostic;
-    use chelis_compiler_api::schema::Diagnostic;
+    use super::render_eval_diagnostic;
 
-    fn diagnostic(message: &str, suggestions: &[&str]) -> Diagnostic {
-        Diagnostic {
-            kind: "eval_error".to_string(),
-            message: message.to_string(),
-            severity: 1.0,
-            expected: None,
-            got: None,
-            suggestions: suggestions.iter().map(|hint| (*hint).to_string()).collect(),
-            span: None,
-            deep_path: None,
-        }
+    fn hints(suggestions: &[&str]) -> Vec<String> {
+        suggestions.iter().map(|hint| (*hint).to_string()).collect()
     }
 
     #[test]
     fn structured_suggestions_render_without_matching_diagnostic_text() {
-        let diagnostic = diagnostic(
-            "renamed trap wording that contains no cast substring",
-            &["first recovery action", "second recovery action"],
-        );
         assert_eq!(
-            format_eval_diagnostic(&diagnostic),
+            render_eval_diagnostic(
+                "renamed trap wording that contains no cast substring",
+                &hints(&["first recovery action", "second recovery action"]),
+            ),
             "renamed trap wording that contains no cast substring; hint: first recovery action; \
              hint: second recovery action"
         );
@@ -9338,8 +9335,10 @@ mod eval_diagnostic_rendering_tests {
 
     #[test]
     fn diagnostic_without_suggestions_keeps_its_exact_message() {
-        let diagnostic = diagnostic("plain failure", &[]);
-        assert_eq!(format_eval_diagnostic(&diagnostic), "plain failure");
+        assert_eq!(
+            render_eval_diagnostic("plain failure", &hints(&[])),
+            "plain failure"
+        );
     }
 }
 

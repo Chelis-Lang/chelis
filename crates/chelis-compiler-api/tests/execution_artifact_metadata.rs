@@ -577,9 +577,11 @@ fn vmap_entry_is_a_loud_unsupported_error_on_the_callable_surface() {
     .expect_err("a vmap entry must be a loud error on compile_for_execution, not a panic");
     let diagnostic = &err.errors[0];
     assert_eq!(
-        diagnostic.kind, "unsupported_feature",
+        diagnostic.kind(),
+        chelis_vocab::DiagnosticKind::UnsupportedFeature,
         "a transform entry is a not-yet-implemented capability, got kind {}: {}",
-        diagnostic.kind, diagnostic.message
+        diagnostic.kind().as_str(),
+        diagnostic.message
     );
     assert!(
         diagnostic.message.contains("batch_process") && diagnostic.message.contains("eval"),

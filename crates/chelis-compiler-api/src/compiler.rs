@@ -685,9 +685,11 @@ fn add_function_insert_error_to_compiler_error(
         ),
         InsertFunctionError::NoModule
         | InsertFunctionError::MultipleModules { .. }
-        | InsertFunctionError::InvalidStampedRewrite { .. } => {
-            stage_error("add-function", error.to_string(), GeneralKind::DeepDeclError)
-        }
+        | InsertFunctionError::InvalidStampedRewrite { .. } => stage_error(
+            "add-function",
+            error.to_string(),
+            GeneralKind::DeepDeclError,
+        ),
     }
 }
 
@@ -2228,7 +2230,11 @@ fn eval_compiled(
         .into_iter()
         .map(|(name, value)| {
             let tensor = crate::decode::wire_tensor_to_ir(&value).map_err(|message| {
-                stage_error("eval", format!("binding `{name}`: {message}"), GeneralKind::EvalError)
+                stage_error(
+                    "eval",
+                    format!("binding `{name}`: {message}"),
+                    GeneralKind::EvalError,
+                )
             })?;
             Ok((name, tensor))
         })
@@ -2519,15 +2525,8 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             stage: "effects".to_string(),
             errors: errors
                 .iter()
-                .map(|error| Diagnostic {
-                    kind: "effect_error".to_string(),
-                    message: error.message.clone(),
-                    severity: 0.8,
-                    expected: None,
-                    got: None,
-                    suggestions: Vec::new(),
-                    span: None,
-                    deep_path: None,
+                .map(|error| {
+                    Diagnostic::general(GeneralKind::EffectError, error.message.clone(), 0.8)
                 })
                 .collect(),
         },
@@ -3730,7 +3729,6 @@ fn eval_stage_error(message: String) -> CompilerError {
     }
     error
 }
-
 
 /// Lift a [`WireDagSchemaError`] from validating a `WireDag` at a
 /// process boundary into a typed `schema`-stage [`CompilerError`] (WI-2).

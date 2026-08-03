@@ -602,9 +602,11 @@ fn compile_in_context_hip_rejects_as_branded_unsupported_feature() {
     assert_eq!(err.stage, "compile");
     let diag = &err.errors[0];
     assert_eq!(
-        diag.kind, "unsupported_feature",
+        diag.kind(),
+        chelis_vocab::DiagnosticKind::UnsupportedFeature,
         "HIP reef-context rejection must be kind-visible to the #730 sweep, got {}: {}",
-        diag.kind, diag.message
+        diag.kind().as_str(),
+        diag.message
     );
     assert!(
         diag.message.starts_with("unsupported:"),

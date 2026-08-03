@@ -59,7 +59,6 @@ use std::path::{Path, PathBuf};
 
 use crate::cache_envelope;
 use crate::compiler::CompilerError;
-use crate::schema::{Diagnostic, GeneralKind};
 
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.

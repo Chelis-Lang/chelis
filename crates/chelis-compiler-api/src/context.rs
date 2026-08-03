@@ -44,7 +44,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::compiler::{CompilerError, bail_if_cancelled, cancelled_or, check_error_diagnostic};
-use crate::schema::{Diagnostic, GeneralKind, Span, stage_error};
+use crate::schema::{Diagnostic, GeneralKind};
 
 /// 32-byte content hash of every source file that contributed to a
 /// `CompiledContext`. Phase I disk cache keys on this for invalidation.
@@ -695,12 +695,9 @@ pub fn load_or_compile_with_local_registry_fallback(
 /// diagnostic kind, must propagate as a genuine failure rather than trigger
 /// the uncached-recompile fallback (#822 review round 3, finding 4).
 fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
-    err.errors
-        .iter()
-        .any(|d| {
-            d.kind() == chelis_vocab::DiagnosticKind::HashError
-                && d.message.contains("LocalRegistry")
-        })
+    err.errors.iter().any(|d| {
+        d.kind() == chelis_vocab::DiagnosticKind::HashError && d.message.contains("LocalRegistry")
+    })
 }
 
 /// Magic header bytes for the Phase I disk-cache file format.
@@ -1201,7 +1198,7 @@ fn hash_error(msg: &str) -> CompilerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::stage_error;
+    use crate::schema::stage_error;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;

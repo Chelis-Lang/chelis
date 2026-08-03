@@ -170,18 +170,17 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          out = gen()\n",
         "c",
         "error: unsupported: builtin `tensor_scan` on `chelis build --target c` host emission \
-         (codegen:c); host-only builtin; run it under `chelis eval` or `chelis test`, or rewrite \
-         the caller to use tensor-lane primitives (spec/05-risc-primitives.md §3.6; \
-         chelis#705)\n",
+         (codegen:c); deliberate [05-HOST-1]: host-runtime builders are intentionally excluded \
+         from compiled targets; run under `chelis eval` or `chelis test`, or rewrite the caller \
+         to use tensor-lane primitives\n",
     ),
     (
         "c_stub_scalar_floor",
         "def f(x: f32) -> f32 = floor(x)\nout = f(3.5)\n",
         "c",
-        "error: unsupported: builtin `floor` on `chelis build` host emission (codegen:c); this \
-         builtin has no compiled-lane expression identity; the eval lane may support it \
-         (`chelis eval`). Silent-stub class: chelis#703; instances \
-         chelis#682/#704/#705/#715 ([05-UNS-1])\n",
+        "error: unsupported: builtin `floor` on `chelis build` host emission (codegen:c); \
+         deliberate [04-TOT-2]: the checked builtin vocabulary and C expression vocabulary \
+         disagree; no fallback expression is permitted\n",
     ),
     (
         "c_to_string_tensor",
@@ -189,9 +188,10 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          out = f(to_tensor([1.5, 2.5]))\n",
         "c",
         "error: unsupported: `to_string` of a `Tensor(TensorType { dims: [Lit(2)], precision: \
-         F32 })`-typed value on `chelis build` host emission (codegen:c); the compiled lane \
-         stringifies int64/f32/f64/bool/string scalars only today; tensor/list rendering is \
-         tracked by chelis#732 (was the `<value>` placeholder, chelis#734)\n",
+         F32 })`-typed value on `chelis build` host emission (codegen:c); unimplemented \
+         chelis#1059: the compiled lane stringifies int64/f32/f64/bool/string scalars only \
+         today; chelis#1059 owns compiled tensor/list rendering (the former `<value>` \
+         placeholder is chelis#734)\n",
     ),
     (
         "c_int64_max_reduce",
@@ -200,8 +200,9 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          cast(3, int64)]))\n",
         "c",
         "error: unsupported: op `max_reduce` on `int64` tensors in the C DAG emitter (node 1) \
-         (codegen:c); the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-         before the reduction. Non-f32 widening is follow-on work (chelis#692)\n",
+         (codegen:c); unimplemented chelis#729: the C reduce kernels are f32-hardcoded today \
+         (WS-A1/F1); cast to f32 before the reduction. The target capability table owns non-f32 \
+         widening\n",
     ),
     (
         "c_int_tensor_cos",
@@ -210,9 +211,9 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          cast(4, int32)]))\n",
         "c",
         "error: unsupported: builtin `cos` on tensor operands in `chelis build` host emission \
-         (no tensor emission arm for this op) (codegen:c); this op has no compiled tensor arm \
-         yet; the eval lane may support it (chelis#703 class; the DAG lane owns the supported \
-         tensor ops)\n",
+         (no tensor emission arm for this op) (codegen:c); deliberate [04-TOT-2]: a checked \
+         tensor operation must route through the typed DAG lane; the C host scalar lane has no \
+         fallback tensor expression\n",
     ),
     (
         "c_nonliteral_window",
@@ -220,28 +221,30 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          reduce_window_max(x, [w], [s])\n\
          out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2, 1)\n",
         "c",
-        "error: Lowering error: unsupported: a non-literal window list for \
-         `reduce_window_max` on the compiled-backend lowering of `reduce_window_*` (lowering); \
-         window and stride lists must be integer literals for the compiled lane today; a \
-         runtime-parameterized window previously lowered to a silent no-op (chelis#725; \
-         chelis#730 census row 8) at source span `surf:86..89`\n",
+        "error: Lowering error: unsupported: a non-literal window list for `reduce_window_max` \
+         on the compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \
+         chelis#1058: window and stride lists must be integer literals for the compiled lane \
+         today; a runtime-parameterized window previously lowered to a silent no-op; \
+         chelis#1058 owns compiled runtime-list support at source span `surf:86..89`\n",
     ),
     (
         "c_to_tensor_narrow_dtype",
         "def f() -> tensor[2, f16] = to_tensor([cast(2049.0, f16), cast(0.75, f16)])\n\
          out = print(f())\n",
         "c",
-        "error: unsupported: dtype `f16` on C host ABI selection (codegen:c); C-host scalar ABI \
-         support is tracked by chelis#714; no alternate dtype is permitted by [05-UNS-1]\n",
+        "error: unsupported: dtype `f16` on C host ABI selection (codegen:c); unimplemented \
+         chelis#714: the C-host scalar ABI has no exact representation for this dtype; no \
+         alternate dtype is permitted\n",
     ),
     (
         "hip_int64_neg",
         "def f(x: tensor[4, int64]) -> tensor[4, int64] = neg(x)\n",
         "hip",
         "error: unsupported: dtype `int64` on a HIP kernel family with f32/f64 variants only \
-         (codegen:hip); this op has no typed HIP kernel for the operand dtype; the former silent \
-         F32 fallback emitted a corrupting kernel (chelis#689). Cast to f32/f64, or use the ops \
-         with typed templates (add/mul/div and the i8/i16 promoted sum)\n",
+         (codegen:hip); unimplemented chelis#689: this op has no typed HIP kernel for the \
+         operand dtype; the former silent F32 fallback emitted a corrupting kernel \
+         (chelis#689). Cast to f32/f64, or use the ops with typed templates (add/mul/div and \
+         the i8/i16 promoted sum)\n",
     ),
 ];
 
