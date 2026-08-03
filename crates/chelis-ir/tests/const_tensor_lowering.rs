@@ -22,6 +22,124 @@ fn surf_to_dag(source: &str) -> Result<Dag, String> {
     try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
 }
 
+/// Deep-source pipeline for witnesses Surf cannot express (hand-written
+/// `.dp` shapes; see the chelis#1123 red-team report on PR #1123).
+fn deep_to_dag(source: &str) -> Result<Dag, String> {
+    let deep =
+        chelis_deep::parser::parse_and_stamp(source).map_err(|e| format!("deep parse: {e:?}"))?;
+    let checked = check_typed_program(&deep)
+        .map_err(|errs| format!("typecheck failed: {:?}", errs.errors))?;
+    let checked = chelis_effects::check_program(&checked)
+        .map_err(|errs| format!("effects failed: {errs:?}"))?;
+    let checked =
+        check_linearity(&checked).map_err(|errs| format!("linearity failed: {errs:?}"))?;
+    try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
+}
+
+/// chelis#1123 red-team ask 2: the end-to-end guard for single rounding -
+/// the module-level pins in chelis-types cannot observe this crate's
+/// lowering path (mutation-verified blind). The witness stages an INTEGER
+/// atom under f32 lit metadata, a shape Surf cannot produce and the
+/// validator currently accepts (chelis#1131). EXPIRY: when chelis#1131
+/// closes that shape at the validator, this input becomes invalid -
+/// convert this test to a rejection lock in the same change set rather
+/// than deleting it.
+#[test]
+fn int_leaf_in_f32_tensor_literal_single_rounds() {
+    let source = r#"
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
+
+(def {} main (fn {} (params {})
+  (app {} (var {} to_tensor)
+    (app {} (var {} Cons)
+      (lit {type: (t-prim {} f32)} 18014399583223809)
+      (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 3) (var {} Nil))))))
+"#;
+    let dag = deep_to_dag(source).expect("pipeline succeeds");
+    let bits = dag
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.op {
+            RiscOp::ConstTensor { data } => match data.element_ref(0) {
+                chelis_types::ElementRef::F32(v) => Some(v.to_bits()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("non-uniform literal takes the ConstTensor path with an f32 payload");
+    assert_eq!(
+        bits, 0x5A80_0001,
+        "the integer leaf must round ONCE into f32; 0x5A800000 is the \
+         double-rounded (i as f64 as f32) image"
+    );
+}
+
+/// bf16 sibling of the single-rounding witness (same chelis#1131 EXPIRY
+/// note). Guards relatively: the DAG payload must equal the sealed
+/// module's single-rounded image, whose absolute value the chelis-types
+/// pins lock; under the double-rounding mutation the two diverge.
+#[test]
+fn int_leaf_in_bf16_tensor_literal_single_rounds() {
+    let source = r#"
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} bf16))))
+
+(def {} main (fn {} (params {})
+  (app {} (var {} to_tensor)
+    (app {} (var {} Cons)
+      (lit {type: (t-prim {} bf16)} 18084767253659649)
+      (app {} (var {} Cons) (lit {type: (t-prim {} bf16)} 3) (var {} Nil))))))
+"#;
+    let dag = deep_to_dag(source).expect("pipeline succeeds");
+    let stored = dag
+        .nodes()
+        .iter()
+        .find_map(|n| match &n.op {
+            RiscOp::ConstTensor { data } => Some(data.scalar_at(0)),
+            _ => None,
+        })
+        .expect("non-uniform literal takes the ConstTensor path");
+    let expected = chelis_types::finalize_scalar(
+        "test",
+        chelis_types::types::Prim::Bf16,
+        chelis_types::RawScalar::Int(18_084_767_253_659_649),
+    )
+    .expect("in-range integer finalize");
+    assert_eq!(
+        stored, expected,
+        "the bf16 payload must be the single-rounded integer image"
+    );
+}
+
+/// chelis#1123 red-team ask 5 (and chelis#1132): the tensor-level finalize
+/// diagnostic is reachable WITHOUT the chelis#1131 gap - every atom kind
+/// here agrees with its declared prim; the overflow is manufactured by a
+/// `neg` application the checker does not constant-fold. Locks the exact
+/// diagnostic text so the loud replacement for the deleted hand-rolled
+/// integer-lane guards stays live. Surf rejects the equivalent source at
+/// the literal-range check, so the witness is Deep-only; Deep is a
+/// supported input surface.
+#[test]
+fn overflowing_negated_literal_raises_the_finalize_diagnostic() {
+    let source = r#"
+(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} int8))))
+
+(def {} main (fn {} (params {})
+  (app {} (var {} to_tensor)
+    (app {} (var {} Cons)
+      (app {} (var {} neg) (lit {type: (t-prim {} int8)} -128))
+      (app {} (var {} Cons) (lit {type: (t-prim {} int8)} 1) (var {} Nil))))))
+"#;
+    let err = deep_to_dag(source).expect_err("the literal must not lower");
+    assert!(
+        err.contains("tensor literal does not finalize at its ascribed dtype `int8`"),
+        "expected the [04-NUM-1] finalize diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("overflow in const at int8"),
+        "expected the overflow trap brand, got: {err}"
+    );
+}
+
 /// chelis#1123 red-team finding 3: a literal mixing an explicit cast with a
 /// bare integer literal stages Typed + Raw, whose uniformity keys differ by
 /// construction, so lowering takes the ConstTensor path even though the

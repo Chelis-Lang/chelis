@@ -2866,7 +2866,10 @@ mod tests {
         // 0x5A800000. Finalize takes the single-rounding path ([04-NUM-1]:
         // one rounding, at the declared width).
         let single = fin_i(Prim::F32, 18_014_399_583_223_809).unwrap();
-        let bits = (single.as_f64_lossy() as f32).to_bits();
+        let bits = match single.element_ref() {
+            ElementRef::F32(v) => v.to_bits(),
+            other => panic!("expected f32 storage, got {other:?}"),
+        };
         assert_eq!(bits, 0x5A80_0001, "finalize must single-round i64->f32");
         let double = ((18_014_399_583_223_809i64 as f64) as f32).to_bits();
         assert_eq!(
