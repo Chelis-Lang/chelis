@@ -165,6 +165,7 @@ def parse_contributor_docs(text: str) -> None:
         "chelis-z3-test",
         "chelis-hip-test",
         "no-ai-authorship",
+        "cargo-husky",
         "scripts/check_commit_message.py",
         ".devenv/state/venv",
         "PYO3_PYTHON",
@@ -257,6 +258,12 @@ class DevenvCompositionTests(unittest.TestCase):
     def test_missing_command_docs_fail_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
         mutated = text.replace("chelis-gate", "missing-gate")
+        with self.assertRaisesRegex(ValueError, "contributor guide is incomplete"):
+            parse_contributor_docs(mutated)
+
+    def test_missing_cargo_husky_docs_fail_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        mutated = text.replace("cargo-husky", "missing-hook-installer")
         with self.assertRaisesRegex(ValueError, "contributor guide is incomplete"):
             parse_contributor_docs(mutated)
 

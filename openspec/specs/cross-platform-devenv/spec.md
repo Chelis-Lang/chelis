@@ -124,7 +124,11 @@ The custom hook MUST invoke `scripts/check_commit_message.py` with the configure
 
 The custom hook MUST accept ordinary commit messages. It MUST report the matched marker when it rejects a message.
 
-Devenv MUST be the only local hook installer. The repository MUST NOT retain the cargo-husky hook or dependency.
+Devenv MUST install the custom hook for contributors who use the Devenv shell.
+
+The repository MUST retain the cargo-husky user hook and development dependency for contributors who use the manual setup.
+
+The cargo-husky hook MUST use minimal POSIX `sh`. It MUST invoke `scripts/check_commit_message.py` with a repository-managed Python interpreter.
 
 The repository MUST ignore `.pre-commit-config.yaml`. Devenv generates this local file when a contributor enters the shell.
 
@@ -132,6 +136,11 @@ The repository MUST ignore `.pre-commit-config.yaml`. Devenv generates this loca
 - **WHEN** a contributor runs `devenv shell`
 - **THEN** no listed catalog hook is active
 - **AND** Devenv installs the custom `commit-msg` hook
+
+#### Scenario: A contributor runs tests through the manual setup
+- **WHEN** a contributor runs `cargo test` outside Devenv
+- **THEN** cargo-husky installs the `commit-msg` hook
+- **AND** the hook invokes the shared checker with a repository-managed Python interpreter
 
 #### Scenario: A listed catalog entry becomes active without a policy change
 - **WHEN** any listed catalog entry sets `enable = true`

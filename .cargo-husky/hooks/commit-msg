@@ -1,0 +1,18 @@
+#!/bin/sh
+# cargo-husky fallback for contributors who use the manual setup.
+
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+
+if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
+    python_path="$repo_root/.devenv/state/venv/bin/python"
+elif [ -x "$repo_root/.venv/bin/python" ]; then
+    python_path="$repo_root/.venv/bin/python"
+else
+    printf '%s\n' 'ERROR: no managed Python interpreter exists for the commit hook.' >&2
+    printf '%s\n' 'Run devenv test or uv venv --python 3.11.' >&2
+    exit 2
+fi
+
+exec "$python_path" "$repo_root/scripts/check_commit_message.py" "$@"

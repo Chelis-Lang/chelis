@@ -198,7 +198,10 @@ Each command forwards its arguments to the applicable Python file under
 Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
 runs `scripts/check_commit_message.py`.
 
-The hook rejects AI tool authorship markers before Git creates a commit. All
+The manual setup retains cargo-husky as a fallback. `cargo test` installs a
+POSIX wrapper that invokes the same checker with `.venv/bin/python`.
+
+Both hooks reject AI tool authorship markers before Git creates a commit. All
 listed format and lint hooks remain disabled.
 
 #### Native Nix CI

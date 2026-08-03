@@ -362,16 +362,12 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - **Rust** where the task naturally fits a compiled workspace member.
 - **Never shell.** Do not write `.sh` scripts. If a CI step needs a one-liner, invoke
   Python instead. Shell is fragile and untestable.
-- **One exception — the published bootstrap installer.** Shell is permitted *only* for
-  the chelisup bootstrap one-liner (`chelisup.sh`, the `curl -fsSL … | sh` installer). It
-  runs on a bare machine *before* any chelis, cargo, or even Python exists, so Python is
-  not an option — it is not guaranteed present either, which is the whole bootstrap
-  problem. It MUST be minimal POSIX `sh`, `shellcheck`-clean, and covered by a test
-  (`sh -n` parse plus `shellcheck` when available). The generated Nix `chelisup`
-  launcher (`nix/packages.nix`) is the same kind of artifact: it runs with only the
-  package closure present, so it is shell by necessity, and the `chelisupLauncherLint`
-  flake check gates it with `bash -n` plus `shellcheck`. These carve-outs cover the
-  artifacts that cannot be anything else; every other script remains Python.
+- **Shell exceptions.** Shell is permitted only for these artifacts:
+  - The published `chelisup.sh` bootstrap runs before Chelis, Cargo, or Python exists.
+  - The generated Nix `chelisup` launcher runs with only its package closure.
+  - The cargo-husky `commit-msg` hook locates a repository-managed Python interpreter.
+  Each artifact MUST use minimal POSIX `sh`. Each artifact MUST pass `sh -n` and
+  `shellcheck` when available. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
 - **Use a managed Python**, not the system Python. Inside Devenv, use the activated
   environment at `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python`.
@@ -393,9 +389,11 @@ interpreter avoids that path. Run `uv venv --python 3.11` before a manual build.
 ## Local Git Hook
 
 Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
-runs `scripts/check_commit_message.py`. All formatting and lint hooks remain
-disabled. Do not restore the cargo-husky installer. Devenv owns local hook
-installation, and CI remains the remote enforcement boundary.
+runs `scripts/check_commit_message.py`.
+
+Cargo-husky remains the fallback for the manual setup. `cargo test` installs its
+POSIX wrapper, which runs the same Python checker. All formatting and lint hooks
+remain disabled. CI remains the remote enforcement boundary.
 
 ## Build And Gate Commands
 
