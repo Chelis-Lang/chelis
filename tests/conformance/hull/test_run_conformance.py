@@ -473,6 +473,32 @@ class SimulateUnsoundTests(unittest.TestCase):
         self.assertNotEqual("reject_0001", sentinel["id"])
 
 
+class RecordSelectionTests(unittest.TestCase):
+    def test_exact_record_ids_select_only_requested_sentinel(self):
+        records = [
+            {"id": "check_00000", "lane": "check"},
+            {"id": "reject_0000", "lane": "reject"},
+            {"id": "eval_00000", "lane": "eval"},
+        ]
+        selected = rc.select_slice(
+            records,
+            check_n=None,
+            eval_n=None,
+            record_ids=["reject_0000"],
+        )
+        self.assertEqual([record["id"] for record in selected], ["reject_0000"])
+
+    def test_unknown_exact_record_id_is_a_loud_error(self):
+        records = [{"id": "reject_0000", "lane": "reject"}]
+        with self.assertRaisesRegex(ValueError, "missing_0000"):
+            rc.select_slice(
+                records,
+                check_n=None,
+                eval_n=None,
+                record_ids=["missing_0000"],
+            )
+
+
 # ============================================================================
 # VERSION PINNING (stale-corpus guard).
 # ============================================================================

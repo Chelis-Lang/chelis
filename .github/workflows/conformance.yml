@@ -10,14 +10,13 @@ name: Hull Conformance
 #
 # This is a CI job like backend-sanitizers, NOT part of the per-PR developer
 # `gate.py` quartet (scripts/test_gate.py knows conformance.yml is out of scope
-# by design -- see the CONFORMANCE_YML reference there). It runs per-PR and on
-# push-to-main; the FULL >=10k fresh campaign runs nightly in
-# conformance-nightly.yml.
+# by design -- see the CONFORMANCE_YML reference there). It runs per PR, with
+# manual exact-main dispatch available; the FULL >=10k fresh campaign runs
+# nightly in conformance-nightly.yml.
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: conformance-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -35,7 +34,8 @@ jobs:
   # reach ci.yml's changes job; this replicates it here so the required
   # `Hull Conformance Gate (Linux)` context skips on a docs-only PR
   # (skipped required job reports success) while running on every code PR
-  # and push. Kept as a separate file (no required-context move) to avoid
+  # and a manual exact-main dispatch. Kept as a separate file (no
+  # required-context move) to avoid
   # the branch-protection deadlock footgun in chelis#420; the build-once /
   # shared-artifact fold is escalated separately.
   changes:
@@ -149,7 +149,9 @@ jobs:
         run: |
           if .venv/bin/python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \
-            --simulate-unsound reject_0000; then
+            --record-id reject_0000 \
+            --simulate-unsound reject_0000 \
+            --eval-agree-floor 0; then
             echo "TEETH BROKEN: --simulate-unsound exited 0; the gate did not catch the injected CompilerUnsound" >&2
             exit 1
           else

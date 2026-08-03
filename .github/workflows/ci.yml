@@ -1,9 +1,12 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+  # Strict branch protection already requires an up-to-date PR head to pass
+  # every required context before merge. Keep an explicit exact-main rerun
+  # escape hatch without automatically spending the full matrix a second time
+  # on the resulting main-branch commit.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -19,16 +22,16 @@ jobs:
   # Detect docs-only pull requests so the heavy jobs (Integration, macOS
   # Smoke, SMT Feature Build, Backend Sanitizers, Hull Conformance Gate)
   # can skip them via a job-level `if` (chelis#419). This MUST be a job
-  # output consumed by each heavy job's `if`, never a workflow-level
+  # output consumed by each build/test job's `if`, never a workflow-level
   # `paths-ignore`: a required check filtered out by `paths-ignore` never
   # reports its status context, so branch protection waits on it forever
   # and the PR can never merge; a required check whose JOB is skipped by
   # an `if` reports its context as success, satisfying branch protection.
   #
   # This job itself is intentionally NOT a required status check, is
-  # cheap (no toolchain, no build), and runs on every event. On push (no
-  # pull_request context) it emits docs_only=false so push-to-main always
-  # runs the full suite, per the WS-7 spend-trim scope.
+  # cheap (no toolchain, no build), and runs on every event. On manual
+  # dispatch (no pull_request context) it emits docs_only=false so the
+  # requested exact-main run executes the full suite.
   changes:
     name: Detect docs-only changes
     runs-on: ubuntu-latest
@@ -53,8 +56,8 @@ jobs:
           COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
-            # push-to-main (or any non-PR event) always runs the full
-            # suite; do not skip heavy jobs off a PR diff.
+            # A manual exact-main run always executes the full suite; do
+            # not skip build/test jobs without a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
@@ -71,6 +74,11 @@ jobs:
   lint-and-unit:
     name: Lint and Unit Tests (Linux)
     runs-on: ubuntu-latest
+    # Pure documentation changes cannot affect Cargo compilation, Rust
+    # formatting, doctests, or the Chelis source lint corpus. The Docs job
+    # remains live and validates mdBook plus embedded package examples.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
@@ -180,7 +188,7 @@ jobs:
     # fast instead of silently absorbing a stray from-source cvc5 build.
     timeout-minutes: 25
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success. Runs on every code PR and push.
+    # success. Runs on every code PR and manual exact-main dispatch.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # cvc5 builds from source into target/ on top of the workspace build —
@@ -192,27 +200,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
-
-      # Free ~25-30 GB before the cargo + cvc5 build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
-
-      - name: Install C dependencies
-        # apt-get under retry (scripts/ci_apt_get.py) so a transient
-        # mirror reset does not flake the cvc5 smoke job. This fast lane
-        # does not install Z3, Gappa, or Arb-only tools; those live in
-        # the non-required full prove workflow.
-        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
 
       # cvc5 (cvc5-sys) builds from source via CMake+make (~22m cold). To keep
       # that off the per-PR path we LINK a prebuilt cvc5, tried in two layers
@@ -241,6 +228,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
+
+      # A warm durable asset makes this a small Rust link/test job. Pay the
+      # 25-30 GB system purge only when the durable probe misses and a cold
+      # from-source cvc5 build remains possible.
+      - name: Free disk space (Ubuntu)
+        if: steps.cvc5fetch.outputs.warm != 'true'
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        # apt-get under retry (scripts/ci_apt_get.py) so a transient
+        # mirror reset does not flake the cvc5 smoke job. This fast lane
+        # does not install Z3, Gappa, or Arb-only tools; those live in
+        # the non-required full prove workflow.
+        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
 
       - name: Restore prebuilt cvc5 (Actions cache fallback)
         id: cvc5restore
@@ -311,6 +321,10 @@ jobs:
   smt-build-glibc231:
     name: SMT Feature Build (Linux, glibc 2.31)
     runs-on: ubuntu-latest
+    # Like the primary SMT smoke, this release-compatibility build has no
+    # input on a pure documentation PR.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     container: debian:11
     defaults:
       run:
@@ -441,6 +455,10 @@ jobs:
   smt-build-darwin-arm64:
     name: SMT Feature Build (darwin-arm64)
     runs-on: macos-latest
+    # Like the primary SMT smoke, this release-compatibility build has no
+    # input on a pure documentation PR.
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -543,8 +561,8 @@ jobs:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     # Skip on docs-only PRs (chelis#419). A skipped required job reports
-    # success, so branch protection stays satisfied; on push docs_only is
-    # always false. `needs: [changes]` is what makes the output readable.
+    # success, so branch protection stays satisfied. A manual dispatch emits
+    # docs_only=false. `needs: [changes]` makes the output readable.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
@@ -554,7 +572,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Free ~25-30 GB before the cargo build; see
+      # Free ~25-30 GB before the full workspace build; see
       # .github/actions/free-disk-space (scripts/ci_free_disk.py).
       - name: Free disk space (Ubuntu)
         uses: ./.github/actions/free-disk-space
@@ -619,7 +637,8 @@ jobs:
     timeout-minutes: 20
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. macOS Smoke is the authoritative workspace oracle, so it
-    # runs on every code PR and every push; only a pure-prose PR skips it.
+    # runs on every code PR and manual exact-main dispatch; only a pure-prose
+    # PR skips it.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
@@ -683,7 +702,7 @@ jobs:
     name: Backend Sanitizers
     runs-on: ubuntu-latest
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success. Runs on every code PR and push.
+    # success. Runs on every code PR and manual exact-main dispatch.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     env:
@@ -697,11 +716,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
-
-      # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
 
       # apt-get under retry (scripts/ci_apt_get.py); see the lint-and-unit
       # job for the transient-mirror-reset rationale.
@@ -798,11 +812,6 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
-
-      # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py).
-      - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

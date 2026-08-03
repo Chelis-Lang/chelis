@@ -40,6 +40,7 @@ def _load_module():
 gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+CONFORMANCE_YML = REPO_ROOT / ".github" / "workflows" / "conformance.yml"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = (
@@ -158,6 +159,62 @@ def _assert_darwin_manual_dispatch(workflow: str) -> None:
     linux = blocks.get("nix-linux-x86-64", "")
     if "github.event_name" in linux:
         raise AssertionError("the Linux Nix job must keep pull request coverage")
+
+
+def _assert_pr_or_dispatch_only(workflow: str) -> None:
+    """Required PR gates must not rerun wholesale after merge.
+
+    Strict branch protection requires the PR head to be current with main and
+    green before merge. Keep a manual exact-main escape hatch, but do not spend
+    a second full matrix on the resulting main-branch commit.
+    """
+    trigger_section = workflow.split("jobs:", 1)[0]
+    trigger_keys = set(
+        re.findall(r"(?m)^  ([a-z_]+):\s*$", trigger_section)
+    )
+    if "pull_request" not in trigger_keys:
+        raise AssertionError("required CI must run on pull_request")
+    if "workflow_dispatch" not in trigger_keys:
+        raise AssertionError("required CI must keep a manual dispatch escape hatch")
+    if "push" in trigger_keys:
+        raise AssertionError("required PR CI must not rerun on push-to-main")
+
+
+def _assert_bounded_hull_teeth(workflow: str) -> None:
+    block = _workflow_job_blocks(workflow).get("conformance", "")
+    required = (
+        "--simulate-unsound reject_0000",
+        "--record-id reject_0000",
+        "--eval-agree-floor 0",
+    )
+    for marker in required:
+        if marker not in block:
+            raise AssertionError(f"Hull teeth step must include {marker!r}")
+
+
+def _assert_ci_disk_reclaim_scope(workflow: str) -> None:
+    blocks = _workflow_job_blocks(workflow)
+    marker = "uses: ./.github/actions/free-disk-space"
+    for job in ("lint-and-unit", "integration", "smt-build"):
+        if marker not in blocks.get(job, ""):
+            raise AssertionError(f"disk-heavy job {job!r} must reclaim runner disk")
+    for job in ("backend-sanitizers", "docs"):
+        if marker in blocks.get(job, ""):
+            raise AssertionError(
+                f"small-target job {job!r} must not spend time on full disk reclaim"
+            )
+
+
+def _assert_smt_reclaim_only_on_durable_miss(workflow: str) -> None:
+    block = _workflow_job_blocks(workflow).get("smt-build", "")
+    fetch = block.find("id: cvc5fetch")
+    reclaim = block.find("- name: Free disk space (Ubuntu)")
+    if fetch < 0 or reclaim < 0 or fetch > reclaim:
+        raise AssertionError("SMT durable cvc5 fetch must precede disk reclaim")
+    reclaim_end = block.find("\n      - name:", reclaim + 1)
+    reclaim_step = block[reclaim : None if reclaim_end < 0 else reclaim_end]
+    if "if: steps.cvc5fetch.outputs.warm != 'true'" not in reclaim_step:
+        raise AssertionError("SMT disk reclaim must run only on a durable cvc5 miss")
 
 
 def _assert_runner_resource_bounds(workflow: str) -> None:
@@ -935,24 +992,19 @@ class DocsOnlySkipTests(unittest.TestCase):
 
     # Jobs that must skip on a docs-only PR.
     HEAVY_GATED_JOBS = {
+        "lint-and-unit",
         "integration",
         "macos-smoke",
         "backend-sanitizers",
         "smt-build",
+        "smt-build-glibc231",
+        "smt-build-darwin-arm64",
     }
     # Jobs that must ALWAYS run (never gated on docs_only).
-    # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
-    # (ship-smt) without a docs_only `if`, so today they run unconditionally
-    # and are classified here. Follow-up: give them the same docs-skip `if` +
-    # `needs: [changes]` as smt-build and move them to HEAVY_GATED_JOBS so the
-    # heavy from-source cvc5 builds also skip on docs-only PRs (chelis#419).
     ALWAYS_RUN_JOBS = {
-        "lint-and-unit",
         "no-ai-authorship",
         "docs",
         "changes",
-        "smt-build-glibc231",
-        "smt-build-darwin-arm64",
     }
 
     def test_changes_job_exists_and_is_ungated(self):
@@ -1039,6 +1091,89 @@ class DocsOnlySkipTests(unittest.TestCase):
             f"ci.yml job(s) {unclassified} are not classified docs-only-"
             f"skip vs always-run; decide explicitly (chelis#419)",
         )
+
+
+class RequiredWorkflowTriggerTests(unittest.TestCase):
+    """Run the expensive required matrix once per reviewed change.
+
+    The live main branch has strict required-status checks, so the merge result
+    has already been validated as an up-to-date PR tree. A manual dispatch
+    remains available when an exact-main rerun is useful.
+    """
+
+    def test_ci_and_hull_are_pull_request_or_manual_only(self):
+        for path in (CI_YML, CONFORMANCE_YML):
+            with self.subTest(workflow=path.name):
+                _assert_pr_or_dispatch_only(path.read_text())
+
+    def test_reintroduced_push_trigger_fails_the_lock(self):
+        workflow = """name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+"""
+        with self.assertRaisesRegex(AssertionError, "push-to-main"):
+            _assert_pr_or_dispatch_only(workflow)
+
+    def test_missing_pull_request_trigger_fails_the_lock(self):
+        workflow = """name: CI
+on:
+  workflow_dispatch:
+jobs:
+"""
+        with self.assertRaisesRegex(AssertionError, "pull_request"):
+            _assert_pr_or_dispatch_only(workflow)
+
+
+class HullTeethRuntimeTests(unittest.TestCase):
+    def test_injected_unsound_step_runs_only_its_sentinel(self):
+        _assert_bounded_hull_teeth(CONFORMANCE_YML.read_text())
+
+    def test_missing_exact_record_bound_fails_the_lock(self):
+        workflow = CONFORMANCE_YML.read_text().replace(
+            "--record-id reject_0000", "--record-id removed_0000", 1
+        )
+        with self.assertRaisesRegex(AssertionError, "record-id"):
+            _assert_bounded_hull_teeth(workflow)
+
+
+class DiskReclaimScopeTests(unittest.TestCase):
+    def test_only_disk_heavy_ci_jobs_pay_full_reclaim_cost(self):
+        _assert_ci_disk_reclaim_scope(CI_YML.read_text())
+
+    def test_reclaim_on_small_docs_target_fails_the_lock(self):
+        workflow = CI_YML.read_text().replace(
+            "  docs:\n",
+            "  docs:\n    uses: ./.github/actions/free-disk-space\n",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "small-target job 'docs'"):
+            _assert_ci_disk_reclaim_scope(workflow)
+
+    def test_missing_reclaim_on_full_integration_target_fails_the_lock(self):
+        workflow = CI_YML.read_text().replace(
+            "uses: ./.github/actions/free-disk-space",
+            "uses: ./.github/actions/removed-free-disk-space",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "disk-heavy job"):
+            _assert_ci_disk_reclaim_scope(workflow)
+
+
+class SmtWarmPathTests(unittest.TestCase):
+    def test_durable_hit_skips_full_runner_reclaim(self):
+        _assert_smt_reclaim_only_on_durable_miss(CI_YML.read_text())
+
+    def test_unconditional_smt_reclaim_fails_the_lock(self):
+        workflow = CI_YML.read_text().replace(
+            "if: steps.cvc5fetch.outputs.warm != 'true'",
+            "if: always()",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "only on a durable cvc5 miss"):
+            _assert_smt_reclaim_only_on_durable_miss(workflow)
 
 
 class NoAiAuthorshipTests(unittest.TestCase):

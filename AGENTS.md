@@ -495,9 +495,15 @@ macOS.
 Documentation-only changes (Markdown/prose with no code, fixture, or
 example edits) are exempt from `--local`: skip the local gate, push,
 and require green CI instead. The gate's clippy/build/test stages
-cannot be affected by prose, and CI still runs the lint stage plus the
-Docs job (mdBook build and the `skill_suite` example validator), which
-cover everything a docs-only diff can break.
+cannot be affected by prose, so CI reports those required jobs as skipped
+and still runs the Docs job (mdBook build and the `skill_suite` example
+validator), which covers everything a docs-only diff can break.
+
+The expensive required CI and Hull workflows run on pull requests, not again
+on the resulting push to `main`. This relies on `main` branch protection's
+strict up-to-date required checks; both workflows retain `workflow_dispatch`
+for an explicit exact-main rerun. If that protection is relaxed, restore the
+push trigger before relying on a PR result for the merged tree.
 
 Default-gate discipline:
 

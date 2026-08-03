@@ -20,7 +20,7 @@ run itself.
 Usage (the uv-managed interpreter, per the no-shell scripting policy):
     .venv/bin/python tests/conformance/hull/run_conformance.py \
         --chelis-bin /abs/path/to/chelis [--check-n N --eval-n M] [--strict] \
-        [--allow-version-skew]
+        [--allow-version-skew] [--record-id ID]
 """
 
 from __future__ import annotations
@@ -634,10 +634,26 @@ def live_chelis_version(chelis_bin: str) -> str:
     return proc.stdout.strip()
 
 
-def select_slice(records: list[dict], check_n: int | None, eval_n: int | None) -> list[dict]:
+def select_slice(
+    records: list[dict],
+    check_n: int | None,
+    eval_n: int | None,
+    record_ids: list[str] | None = None,
+) -> list[dict]:
     """Select a deterministic fixed slice by lane: the first check_n check/reject
     records and the first eval_n eval records (the corpus is ordered, so the same
-    pinned slice is drawn each run -- a PR's pass/fail is reproducible)."""
+    pinned slice is drawn each run -- a PR's pass/fail is reproducible). Exact
+    record ids are for bounded harness self-tests; every requested id must exist."""
+    if record_ids:
+        if check_n is not None or eval_n is not None:
+            raise ValueError("--record-id cannot be combined with lane caps")
+        requested = set(record_ids)
+        selected = [record for record in records if record["id"] in requested]
+        found = {record["id"] for record in selected}
+        missing = sorted(requested - found)
+        if missing:
+            raise ValueError(f"unknown --record-id value(s): {', '.join(missing)}")
+        return selected
     check_recs = [r for r in records if r["lane"] in ("check", "reject")]
     eval_recs = [r for r in records if r["lane"] == "eval"]
     if check_n is not None:
@@ -652,6 +668,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--chelis-bin", required=True, help="ABSOLUTE path to the chelis binary")
     parser.add_argument("--check-n", type=int, default=None, help="cap check/reject programs")
     parser.add_argument("--eval-n", type=int, default=None, help="cap eval programs")
+    parser.add_argument(
+        "--record-id",
+        action="append",
+        default=[],
+        help="run exactly this record id (repeatable; for bounded harness self-tests)",
+    )
     parser.add_argument("--timeout", type=float, default=30.0, help="per-program subprocess timeout (s)")
     parser.add_argument("--max-workers", type=int, default=None)
     parser.add_argument("--strict", action="store_true", help="promote CompilerTooConservative to a failure")
@@ -675,7 +697,13 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"\n{exc}\n")
         return 1
 
-    records = select_slice(load_verdicts(), args.check_n, args.eval_n)
+    try:
+        records = select_slice(
+            load_verdicts(), args.check_n, args.eval_n, args.record_id
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
     result = run_corpus(
         args.chelis_bin, records, args.timeout, args.max_workers,
         simulate_unsound=args.simulate_unsound,
