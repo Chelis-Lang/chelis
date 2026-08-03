@@ -8994,6 +8994,93 @@ fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
     );
 }
 
+// chelis#928: the Std.Io serializers must stay compiled-lane compatible.
+// The chelis-std self-test corpus runs under `chelis test` (the eval lane
+// only), so a std source change that type-checks and evals but cannot
+// LOWER — the [05-UNS-1]/chelis#730 class; e.g. Option-in-List composites,
+// which the C host lane cannot resolve — ships green unless something
+// builds a program importing the new surface. This test is that something:
+// it stages a reef project that writes a CSV and a JSON document through
+// Std.Io, `chelis build`s it, links with the system toolchain, runs the
+// binary, and asserts both emitted documents byte-exactly (including a
+// 17-significant-digit f64 that must survive shortest-round-trip).
+#[test]
+#[cfg(unix)]
+fn build_c_program_using_std_io_serializers_emits_exact_documents() {
+    let dir = tempdir().expect("tempdir");
+    let proj = dir.path().join("proj");
+    fs::create_dir_all(proj.join("src")).expect("mkdir proj/src");
+    fs::write(
+        proj.join("reef.toml"),
+        format!(
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\ncompiler = \"={}\"\n\
+             module_prefix = \"T\"\n\n[dependencies]\nchelis-std = {{ version = \"0.4.0\" }}\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .expect("write reef.toml");
+
+    let csv_path = dir.path().join("out.csv");
+    let json_path = dir.path().join("out.json");
+    fs::write(
+        proj.join("src/main.ch"),
+        format!(
+            "module T.Main\n\
+             import Std.Io.Csv (write_csv, read_csv)\n\
+             import Std.Io.Json (Json, JsonFloat, JsonString, JsonInt, JsonObject, write_json)\n\
+             rows = [dict_of([(\"k\", \"a,b\"), (\"price\", \"7773.015187\")]), dict_of([(\"k\", \"he said \\\"hi\\\"\"), (\"price\", \"0.15110743269565682\")])]\n\
+             done_csv = write_csv(\"{csv}\", rows)\n\
+             doc = JsonObject(dict_of([(\"cap_price\", JsonFloat(0.15110743269565682f64)), (\"name\", JsonString(\"a\\\"b\\\\c\")), (\"n\", JsonInt(cast(3, int64)))]))\n\
+             done_json = write_json(\"{json}\", doc)\n\
+             back = read_csv(\"{csv}\")\n\
+             n = len(back)\n",
+            csv = csv_path.display(),
+            json = json_path.display()
+        ),
+    )
+    .expect("write main.ch");
+
+    let out_dir = dir.path().join("ser-build");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", dir.path().join("reef-home"))
+        .env("CHELIS_RUNTIME_DIR", runtime_library_dir())
+        .current_dir(&proj)
+        .args([
+            "build",
+            "src/main.ch",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let status = gcc_link_generated(&out_dir, "main.c", "main");
+    assert!(status.success(), "linking the serializer program failed");
+
+    let run = StdCommand::new(out_dir.join("main"))
+        .output()
+        .expect("serializer program should run");
+    assert!(run.status.success(), "serializer program exited nonzero");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("n = 2"),
+        "compiled read-back of the written CSV must see 2 rows:\n{stdout}"
+    );
+
+    let json_text = fs::read_to_string(&json_path).expect("out.json written");
+    assert_eq!(
+        json_text, "{\"cap_price\":0.15110743269565682,\"name\":\"a\\\"b\\\\c\",\"n\":3}",
+        "compiled write_json output must be byte-exact"
+    );
+    let csv_text = fs::read_to_string(&csv_path).expect("out.csv written");
+    assert_eq!(
+        csv_text, "k,price\n\"a,b\",7773.015187\n\"he said \"\"hi\"\"\",0.15110743269565682\n",
+        "compiled write_csv output must be byte-exact"
+    );
+}
+
 // issue #406 (complete): the sibling leaks #412 did not reach. #412 freed
 // the heap temporaries the program-root `main` allocates, but two more
 // "definitely lost" classes of the same shape survived, each via a
