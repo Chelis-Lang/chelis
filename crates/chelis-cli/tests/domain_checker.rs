@@ -198,6 +198,8 @@ fn f16_membership_at_11_bit_mantissa() {
         "65504",
         "-1.5",
         "1.4140625",
+        // Own-width shortest form of the stored f16 value nearest 1/3.
+        "0.3333",
         // Exact widened f16 products from the locked eval-scalar rows.
         "0.0099945068359375",
         "0.333251953125",
@@ -212,6 +214,9 @@ fn f16_membership_at_11_bit_mantissa() {
     assert!(!is_member("f16", "131008"));
     // The chelis#716 misprint (an f16 buffer read as f32).
     assert!(!is_member("f16", "0.0004898309707641602"));
+    // A nearby decimal that merely rounds to the same f16 is not the
+    // canonical own-width shortest rendering.
+    assert!(!is_member("f16", "0.3334"));
 }
 
 #[test]

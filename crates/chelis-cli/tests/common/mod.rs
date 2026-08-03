@@ -421,8 +421,11 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
             |d| half::f16::from_f64(d).to_f64(),
             |t| {
                 t.parse::<f32>().is_ok_and(|v| {
-                    let w = half::f16::from_f32(v).to_f32();
-                    format!("{w:?}") == t
+                    let w = half::f16::from_f32(v);
+                    chelis_types::observation::format_element(
+                        chelis_types::types::Prim::F16,
+                        chelis_types::observation::ElementRef::F16(w),
+                    ) == t
                 })
             },
         ),
@@ -432,8 +435,11 @@ pub fn element_domain_violation(prim: &str, token: &str) -> Option<String> {
             |d| half::bf16::from_f64(d).to_f64(),
             |t| {
                 t.parse::<f32>().is_ok_and(|v| {
-                    let w = half::bf16::from_f32(v).to_f32();
-                    format!("{w:?}") == t
+                    let w = half::bf16::from_f32(v);
+                    chelis_types::observation::format_element(
+                        chelis_types::types::Prim::Bf16,
+                        chelis_types::observation::ElementRef::Bf16(w),
+                    ) == t
                 })
             },
         ),
