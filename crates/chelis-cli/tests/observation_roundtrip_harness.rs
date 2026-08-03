@@ -36,7 +36,6 @@
 //!
 //! | cell | issue |
 //! |---|---|
-//! | eval int64 SCALAR ROOT above 2^53 (rank-0 f64 realization collapses the value before the renderer) | chelis#684 ([#729] value layer; PR #792 red-team F1) |
 //! | compiled boxed renders of f32 elements (the untagged f64 box carries f64-image digits, not the own-width shortest form) | chelis#865 ([#729]/[#686] capacity family; PR #863 red-team F2) |
 //!
 //! The six C-side cells went green at chelis#732 Phase 2 (un-ignored per
@@ -46,7 +45,7 @@
 //! cross-lane byte equality is locked below for agreeing bits
 //! (`cross_lane_stdout_is_byte_identical_where_bits_agree`).
 //!
-//! Those two cells are NOT skipped silently. The phase's authoritative
+//! That remaining cell is NOT skipped silently. The phase's authoritative
 //! oracle (`.venv/bin/python scripts/faithful_observation_phase2_oracle.py`)
 //! holds the same table as a ledger keyed by issue, requires this file's
 //! `#[ignore]` inventory to EQUAL it (an undeclared ignore is a silently
@@ -1345,22 +1344,16 @@ fn scalar_render_lines(stdout: &str) -> Vec<String> {
     lines
 }
 
-/// RED (chelis#684, [#729] value layer; surfaced by PR #792's red team,
-/// F1): an int64 SCALAR ROOT above 2^53 loses exactness at the labeled
-/// root while print and to_string of the same def render it exactly -
-/// the interpreter's rank-0 f64 realization collapses the value BEFORE
-/// the renderer sees it, so this is a stored-value defect upstream of the
-/// [05-OBS] rendering contract, not a formatter bug. The exception is
-/// annexed in spec/05 §8's [05-OBS-1]/[05-OBS-4] status text; the cell
-/// goes green (by un-ignoring, §B2.3) when [#729] repairs scalar-root
-/// storage. Rendering must NOT paper over it: the root faithfully shows
-/// the collapsed stored value.
+/// GREEN regression (chelis#684, [#729] value layer; surfaced by PR
+/// #792's red team, F1): an int64 SCALAR ROOT above 2^53 stays exact at
+/// the labeled root, agreeing with print and to_string of the same def.
+/// The interpreter's rank-0 f64 realization used to collapse the value
+/// BEFORE the renderer saw it, which made this a stored-value defect
+/// upstream of the [05-OBS] rendering contract rather than a formatter
+/// bug. chelis#729's per-dtype storage carries the exact i64 through the
+/// scalar-root path, so the original red assertion stays as the
+/// [05-OBS-1] regression lock (un-ignored per §B2.3, chelis#1078).
 #[test]
-#[ignore = "chelis#684 ([#729] value layer): the rank-0 f64 realization collapses int64 \
-            scalar roots above 2^53 before the renderer sees them; print/to_string are \
-            exact, the labeled root is not. Un-ignore when [#729] repairs scalar-root \
-            storage. Run with \
-            `cargo test -p chelis-cli --test observation_roundtrip_harness -- --ignored`."]
 fn eval_int64_scalar_root_above_2p53_renders_exact() {
     let program = "module M.Main\n\
          def run() -> int64 = cast(9007199254740993, int64)\n\
@@ -1374,8 +1367,8 @@ fn eval_int64_scalar_root_above_2p53_renders_exact() {
         .find(|l| !l.is_empty() && !l.ends_with("()") && !l.starts_with("sroot = "))
         .unwrap_or_else(|| panic!("no print transcript in:\n{out}"));
     assert_eq!(transcript, "9007199254740993", "print exit must stay exact");
-    // Red half: the labeled root must carry the same exact value. Today it
-    // renders the f64-collapsed 9007199254740992 (chelis#684).
+    // The labeled root must carry the same exact value. Before chelis#684
+    // it rendered the f64-collapsed 9007199254740992.
     let root = out
         .lines()
         .find(|l| l.starts_with("sroot = "))

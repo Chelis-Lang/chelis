@@ -5080,7 +5080,10 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
             troot = mk()\n";
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
-        let root_id = compiled.named_roots["troot"];
+        let root_id = *compiled
+            .named_roots
+            .get(&crate::pipeline::IrName::new("troot"))
+            .expect("troot named root");
         let root = compiled.dag.get(root_id).expect("troot DAG node");
         assert_eq!(
             root.output_type.precision,
@@ -5118,10 +5121,11 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
             def mk() -> tensor[2, f32] = cast(to_tensor([0.1, 0.3]), f32)\n\
             troot = mk()\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
-        let root = compiled
-            .dag
-            .get(compiled.named_roots["troot"])
-            .expect("troot DAG node");
+        let root_id = *compiled
+            .named_roots
+            .get(&crate::pipeline::IrName::new("troot"))
+            .expect("troot named root");
+        let root = compiled.dag.get(root_id).expect("troot DAG node");
         assert_eq!(
             root.output_type.precision,
             chelis_types::types::Prim::F32,

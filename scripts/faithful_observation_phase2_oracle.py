@@ -158,12 +158,6 @@ class RedCell:
 # being weakened here.
 KNOWN_RED_CELLS: tuple[RedCell, ...] = (
     RedCell(
-        name="eval_int64_scalar_root_above_2p53_renders_exact",
-        issue="chelis#684",
-        fragment="the labeled root must carry the exact stored int64",
-        owner="chelis#729 value layer (rank-0 realization collapses the value)",
-    ),
-    RedCell(
         name="c_boxed_f32_renders_at_own_width",
         issue="chelis#865",
         fragment="boxed f32 elements must render shortest at their own width",
@@ -174,6 +168,11 @@ KNOWN_RED_CELLS: tuple[RedCell, ...] = (
 # Phase 2 oracle bullet 1: red-to-green only by un-ignoring (§B2.3).
 UNIGNORED_ROWS: tuple[tuple[Path, str, str], ...] = (
     (HARNESS_SOURCE, "eval_f64_cast_tensor_root_renders_stored_width", "chelis#864"),
+    (
+        HARNESS_SOURCE,
+        "eval_int64_scalar_root_above_2p53_renders_exact",
+        "chelis#684",
+    ),
     (REDUCTION_MATRIX_SOURCE, "c_int64_tensor_print_is_exact_above_2p53", "chelis#723"),
     (NARROW_MATRIX_SOURCE, "c_print_of_f16_tensor_prints_f16_values", "chelis#716"),
     (NARROW_MATRIX_SOURCE, "c_to_list_of_f16_tensor_works", "chelis#716"),
