@@ -8517,8 +8517,11 @@ fn reject_eval_only_builtins_host(
             chelis_types::unsupported::UnsupportedKind::Builtin(builtin.to_string()),
             "compiled targets (the host interpreter's eval/test lanes only)",
             chelis_types::unsupported::Stage::Codegen(target),
-            "run the program with `chelis eval` or `chelis test`, or remove the \
-             call before building (spec/05-risc-primitives.md §3.6)",
+            chelis_types::deliberate_rejection!(
+                "[05-HOST-1]",
+                "run the program with `chelis eval` or `chelis test`, or remove the \
+                 call before building (spec/05-risc-primitives.md sections 3.6/3.7)"
+            ),
         )
         .to_string()
         .into());

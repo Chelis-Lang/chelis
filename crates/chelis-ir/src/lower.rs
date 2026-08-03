@@ -10585,7 +10585,12 @@ impl LowerCtx {
             UnsupportedKind::Op(format!("{op:?}")),
             format!("`{}` tensors in IR lowering", input_prec.name()),
             Stage::Lowering,
-            "this numeric unary family accepts active float and signed-integer dtypes only",
+            chelis_types::unimplemented_rejection!(
+                729,
+                "this numeric unary family accepts active float and signed-integer \
+                 dtypes only in the executable IR today; other dtypes are tracked by \
+                 chelis#729"
+            ),
         );
         if unrepresentable_panic_suppressed() {
             std::panic::panic_any(UnrepresentableDag);

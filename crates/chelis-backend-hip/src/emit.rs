@@ -174,7 +174,11 @@ impl HipEmitter {
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("an integer tensor at HIP DAG node {}", node.0),
                 Stage::Codegen("hip"),
-                "integer abs code generation waits for the typed, trapping Phase 3 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane",
+                chelis_types::unimplemented_rejection!(
+                    689,
+                    "integer abs code generation waits for the typed, trapping Phase 3 \
+                     kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
+                ),
             ));
         }
         Ok(())
