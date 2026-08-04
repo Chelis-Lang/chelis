@@ -326,90 +326,37 @@ REGISTRIES of what actually exists:
   public implementation edge each, taking the raw literal and performing
   validation inside `chelis-types`; downstream crates cannot construct a
   `SpecAtomRef`/`IssueRef` and then compose it with a second generic authority
-  constructor. The authority carriers and their private fields live in a
-  sealed child module, so a sibling descendant of `unsupported` cannot use
-  Rust's ancestor-module visibility to add a constructor or trait
-  implementation. `SpecAtomRef` and `IssueRef` remain private even to sibling
-  modules; the public authority accessors return only the raw read-only atom or
-  issue value. The owner exposes only the exact `RejectionAuthority` API types
-  and the two validating macro helpers.
-  `scripts/check_rejection_authority_boundary.py`
-  locks the complete public-function inventory of the owning module (free
-  functions as well as methods), locks those module and re-export edges,
-  rejects any extra module/re-export/include edge, rejects direct production
-  calls to the hidden builders, and mutation-tests those bypasses. Construction
-  itself refuses [05-UNS-1..6], so a macro alias or a direct validating-builder
-  call cannot turn the response contract into a semantic authority.
+  constructor. `scripts/check_rejection_authority_boundary.py` locks the
+  complete public-function inventory of the owning module (free functions as
+  well as methods), rejects extra module/re-export/include edges, rejects
+  direct production calls to the hidden builders, and mutation-tests those
+  bypasses. Construction itself refuses [05-UNS-1..6], so a macro alias or a
+  direct validating-builder call cannot turn the response contract into a
+  semantic authority.
 - `SpecAtomRef` validates in two gates: the `[NN-AAA-N]` grammar,
   then MEMBERSHIP in the derived atom registry - a generated artifact
   parsed from the numbered specs' blockquote atoms and locked by a
   byte-agreement test (the §C4.3 generated-header pattern), so the
   registry cannot drift from `spec/` silently. Citing an atom that no
   numbered spec declares is a construction error.
-- `IssueRef` wraps `NonZeroU32` AND validates membership in a generated
-  issue manifest recording, per number: every executable production
-  construction site, its exact file and line, and the last-verified facts that
-  the number is an ISSUE (not a PR) and is OPEN. The manifest and Rust registry
-  are derived together from literal `unimplemented_rejection!` construction
-  sites in workspace production sources and build scripts; byte-agreement tests
-  reject hand edits and additions/removals that do not follow source. Workspace
-  members and explicit lib, bin, example, and custom build roots come from the
-  root and package Cargo manifests, so a non-`crates/` member or custom target
-  path is part of the same inventory. Every exact non-test Cargo target is
-  counted regardless of its filename suffix; its parent tree is additionally
-  walked for ordinary `*.rs` module files. Every path dependency must resolve
-  to a workspace member. Root-manifest `patch`/`replace` and Cargo-config
-  `patch`/`paths`/`replace`/`source` overrides are forbidden because they can
-  substitute compiled local packages that `metadata --no-deps` does not expose
-  as paths. The metadata query runs from an isolated working directory and
-  Cargo home after clearing dependency-override environment keys, so a
-  developer-global override cannot change the inventoried graph. The scanner
-  masks nested Rust comments and string forms while preserving offsets, so
-  historical text cannot manufacture a site and comments or whitespace around
-  macro tokens cannot hide one. Macro aliases and re-exports fail generation,
-  as do production `include!`, built-in Rust `path` attributes, build-script
-  helper-module declarations, and Rust source symlinks: every accepted
-  construction remains in an ordinary Rust file under a manifest-derived
-  lexical source root and retains the canonical macro name the inventory can
-  locate.
-  Unrelated tool metadata containing a nested `path` key is not a module edge
-  and remains accepted. Every `src/**/*.rs` file is conservatively counted,
-  including `src/tests/` and co-located `#[cfg(test)]` modules, because directory
-  names do not establish Rust reachability and this lexical inventory does not
-  evaluate configurations. The macro owner is scanned on the same terms; only
-  its balanced canonical `macro_rules!` definition span is masked. The
-  privileged owner boundary forbids authority type/import aliases, including
-  grouped and nested `use` trees, and forbids every `type` declaration in the
-  owner, including generic-default aliases and associated types, so balanced
-  token substitutions cannot attach a standard public trait implementation to
-  a hidden identity. Outside the owner, balanced macro token trees are walked;
-  a macro definition or invocation that carries a protected authority identity
-  is rejected instead of being trusted to expand without a hidden impl.
-- `Rejection Authority Liveness` runs on every pull request and re-runs when
-  its body is edited, not only when authority files or the head SHA change. It
-  live-validates the standing source-derived manifest, queries GitHub's
-  paginated `closingIssuesReferences` relation (including manual links visible
-  at that run), and additionally inspects the PR body and every retrievable
-  commit message for closing keywords. The event supplies a canonical positive
-  commit count and exact head object ID; the REST commit inventory must equal
-  that count and end at that head. The endpoint's 250-commit ceiling therefore
-  fails closed rather than silently truncating a larger PR, and a stale or
-  racing response cannot certify another head. A closing reference to an
-  issue with live constructors fails and reports every offending `path:line`;
-  the constructors and generated artifacts must move to their still-open
-  capability owner before the delivered instance can close. The PR title is
-  scanned because it becomes the squash commit subject. Issue comments and
-  repository prose are historical context rather than closing-capable merge
-  inputs and are not scanned. Tracker, GraphQL pagination, or PR-commit
-  retrieval failure stays a blocking failure. GitHub emits no pull-request
-  workflow activity when a manual sidebar link is added, so the required check
-  cannot claim a new run for that metadata change. A separate
-  `issues.closed` workflow derives authorities from the current default branch
-  and reopens the issue with exact sites when such a late link or direct close
-  strands an authority; inventory ambiguity also reopens fail-closed. Thus
-  membership answers the compile-time question, the per-PR job rejects every
-  closing input observable at each run, and the compensating guard restores the
-  OPEN-state invariant after otherwise unobservable closure metadata.
+- `IssueRef` wraps `NonZeroU32` AND validates membership in a
+  checked-in issue manifest recording, per number: it is an ISSUE
+  (not a PR), and it is OPEN. **A checked-in manifest is
+  self-authorizing unless its edits are gated** - the same PR that
+  cites a bogus number can add the manifest row that blesses it (the
+  2026-07-30 addendum's countermodel: after a same-PR edit, a closed
+  issue, a PR number, and a 404 all "validate"). So manifest
+  ADDITIONS receive blocking LIVE validation: every construction,
+  registry, validator, imported liveness-helper, detector, and workflow input
+  is in the `Rejection Authority Liveness` change set, and that job verifies
+  every added or modified row against the live tracker (exists, is an
+  issue, is open) before the PR can merge. Phase 4's §C7.5 scheduled job
+  will re-verify the STANDING manifest for drift, so a cited issue closing
+  later makes the stale citation red - the shell contract's "probe flips
+  green, remove the citation" rule, pointed inward. Until that Phase 4 job
+  lands, standing-state drift remains a named pending control rather than an
+  implied continuous guarantee. Membership answers the compile-time question;
+  the change-gated job answers the truth question when authority inputs change.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also
@@ -421,10 +368,10 @@ REGISTRIES of what actually exists:
   become derivation inputs rather than the standalone source.
 
 **Calibrated claim:** construction proves only citation IDENTITY and
-last-verified tracker STATE - an existing atom, or a source-derived manifest
-member live-verified as an open ISSUE by the most recent pull-request check.
-Between checks the issue manifest means "open at last verification", never
-"open this instant".
+last-verified tracker STATE - an existing atom, or a manifest member
+that was live-verified as an open ISSUE when its row was added and at
+the last scheduled re-verification since. Between schedules the issue
+manifest means "open at last verification", never "open this instant".
 Neither registry proves RELEVANCE: whether an atom semantically
 decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
@@ -437,9 +384,8 @@ admission route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
 the out-of-module struct literal each fail to compile, construct, or
-validate; a source construction citing a closed issue, a PR number,
-or a nonexistent number fails live validation. A closing PR body or commit
-that would strand an existing construction fails before merge. An
+validate; a same-PR manifest addition of a closed issue, a PR number,
+or a nonexistent number fails the change-gated live validation. An
 open but unrelated issue (chelis#879) is the supported structural
 control: it passes construction/live validation and MUST fail review
 when attached to an unrelated rejection. The [#687] corpus update

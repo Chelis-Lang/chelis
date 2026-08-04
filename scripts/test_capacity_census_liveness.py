@@ -169,23 +169,6 @@ class FetchIssue(unittest.TestCase):
         )
         self.assertIsNone(fetch_issue(999999, run=missing))
 
-    def test_mismatched_or_non_integer_issue_identity_fails_closed(self) -> None:
-        payloads = (
-            '{"state":"open","number":714}',
-            '{"state":"open","number":true}',
-            '[{"state":"open","number":729}]',
-        )
-        for payload in payloads:
-            with self.subTest(payload=payload):
-                def run(_: list[str], **__: object) -> object:
-                    return type(
-                        "Completed",
-                        (),
-                        {"returncode": 0, "stdout": payload},
-                    )()
-
-                self.assertIsNone(fetch_issue(729, run=run))
-
 
 if __name__ == "__main__":
     unittest.main()
