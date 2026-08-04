@@ -502,6 +502,41 @@ pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
     (0..rank).contains(&axis).then_some(axis as usize)
 }
 
+/// Reject an axis argument whose resolved type is not `int32`.
+///
+/// An axis names a rank position and is int32 in every enforced surface
+/// (`sum`, `permute`, `shape`). chelis#1113 owns the numbered-atom
+/// classification; until it lands this keeps the acceptance closed so
+/// no axis-taking builtin silently admits an int64 axis while `sum`
+/// rejects one. `Var` and `Error` pass through: an axis that is still
+/// unresolved carries no dtype to judge, and one that already failed
+/// must not produce a second diagnostic for the same cause.
+///
+/// The `Err` value is the witness-carrying `Type::Error` from `report`
+/// (chelis#731 §C3), so a caller returning `Type` propagates it with a
+/// plain `return` rather than minting a fresh one.
+pub(super) fn reject_non_int32_axis(
+    op: &str,
+    axis_ty: &Type,
+    list: &deep::List,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(), Type> {
+    match axis_ty {
+        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => Ok(()),
+        other => Err(report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!("{op} expects int32 axis, got {other}"),
+                ),
+                vec![],
+            ),
+        )),
+    }
+}
+
 /// Resolve one member of a two-axis builtin (`trace`, `diagonal`)
 /// against the operand `tensor_ty`. Like [`resolve_builtin_axis`], a
 /// negative literal indexes from the end; a still-out-of-range axis
@@ -509,14 +544,23 @@ pub(super) fn normalize_static_axis(rank: usize, axis: i64) -> Option<usize> {
 /// is absent (not a literal) the historical positional `default` is
 /// used so the prior `unwrap_or(0)` / `unwrap_or(1)` behavior is
 /// preserved for the no-arg case.
+///
+/// `axis_ty` is the member's resolved (subst-applied) type and is
+/// screened by [`reject_non_int32_axis`] before extraction. Without
+/// that screen the fallback above is a fail-open: a non-integer axis
+/// extracts to `None` and silently becomes `default`, so
+/// `diagonal(m, 9.0, 0)` reported "axes 0 and 0" for an axis the
+/// caller never wrote, and a string axis checked clean.
 pub(super) fn resolve_axis_pair_member(
     op: &str,
     axis_expr: Option<&deep::Expr>,
+    axis_ty: &Type,
     tensor_ty: &Type,
     default: usize,
     list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
+    reject_non_int32_axis(op, axis_ty, list, errors)?;
     // Issue #216: use the cast-aware extractor so `cast(N, int32)`-wrapped
     // axis literals trip the infer-time bounds check instead of slipping
     // through to host-runtime defense-in-depth.
@@ -563,13 +607,20 @@ pub(super) fn resolve_axis_pair_member(
 /// reports a diagnostic and returns the witness-carrying `Type::Error` as the
 /// `Err` value (chelis#731 §C3), so the caller propagates it with a plain
 /// `return` rather than minting a fresh `Type::Error`.
+///
+/// `axis_ty` is the axis argument's resolved (subst-applied) type,
+/// screened by [`reject_non_int32_axis`] before extraction so no caller
+/// silently admits an int64 axis the way `cumsum`/`concat` once did
+/// while `sum` rejected one.
 pub(super) fn resolve_builtin_axis(
     op: &str,
     axis_expr: Option<&deep::Expr>,
+    axis_ty: &Type,
     tensor_ty: &Type,
     list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
+    reject_non_int32_axis(op, axis_ty, list, errors)?;
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {
