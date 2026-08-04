@@ -1864,8 +1864,12 @@ fn build_c_nested_float_builtins_do_not_emit_int_temps() {
         "expected float-valued builtin temps to avoid int declarations:\n{source}"
     );
     assert!(
-        source.contains("double __arg"),
-        "expected generated host C to use double temps:\n{source}"
+        source.contains("float __arg"),
+        "expected generated host C to keep f32 temps at their declared width:\n{source}"
+    );
+    assert!(
+        !source.contains("double __arg"),
+        "expected generated host C not to widen f32 temps to double:\n{source}"
     );
 
     let status = gcc_compile_generated(&out_dir, "nested_float_builtins.c");
