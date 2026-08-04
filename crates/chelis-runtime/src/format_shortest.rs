@@ -68,14 +68,14 @@ pub(crate) fn format_shortest(image: f64, width: RuntimeDType) -> String {
         RuntimeDType::F32 => format!("{:?}", image as f32),
         RuntimeDType::F16 => format_half(
             image,
-            u64::from(half::f16::from_f64(image).to_bits()),
-            &|x| u64::from(half::f16::from_f64(x).to_bits()),
+            u64::from(crate::ieee_narrow::f64_to_f16_bits_rne(image)),
+            &|x| u64::from(crate::ieee_narrow::f64_to_f16_bits_rne(x)),
             "f16",
         ),
         RuntimeDType::Bf16 => format_half(
             image,
-            u64::from(half::bf16::from_f64(image).to_bits()),
-            &|x| u64::from(half::bf16::from_f64(x).to_bits()),
+            u64::from(crate::ieee_narrow::f64_to_bf16_bits_rne(image)),
+            &|x| u64::from(crate::ieee_narrow::f64_to_bf16_bits_rne(x)),
             "bf16",
         ),
         other => runtime_fail!(

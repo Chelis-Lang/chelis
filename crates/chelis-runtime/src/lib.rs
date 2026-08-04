@@ -14,6 +14,7 @@ use std::fs::File;
 use std::ptr;
 
 pub mod dtype_header;
+mod ieee_narrow;
 
 #[cfg(test)]
 mod runtime_dtype_contract_tests;
