@@ -84,6 +84,73 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         errors = MODULE.validate_source(mutated)
         self.assertTrue(any("private authority token" in error for error in errors), errors)
 
+    def test_same_module_associated_const_cannot_construct_with_self(self):
+        mutated = self.source.replace(
+            "impl IssueRef {",
+            "impl IssueRef {\n"
+            "    pub const REDTEAM_ROGUE: Self = Self(NonZeroU32::MIN);",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("associated const" in error for error in errors), errors)
+
+    def test_private_scalar_tuple_field_cannot_be_made_public(self):
+        mutated = self.source.replace(
+            "pub struct IssueRef(NonZeroU32);",
+            "pub struct IssueRef(pub NonZeroU32);",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("private authority layout" in error for error in errors), errors)
+
+    def test_balanced_alias_and_public_trait_cannot_bypass_token_counts(self):
+        mutated = self.source.replace(
+            "enum RejectionCitation {\n    Atom(SpecAtomRef),\n    Issue(IssueRef),",
+            "enum RejectionCitation {\n    Atom(SpecAtomRef),\n    Issue(RedteamIssueAlias),",
+            1,
+        ).replace(
+            "        issue: IssueRef,",
+            "        issue: RedteamIssueAlias,",
+            1,
+        )
+        mutated += (
+            "\ntype RedteamIssueAlias = IssueRef;\n"
+            "pub trait RedteamForge {\n"
+            "    fn redteam_forge(number: NonZeroU32) -> Self;\n"
+            "}\n"
+            "impl RedteamForge for IssueRef {\n"
+            "    fn redteam_forge(number: NonZeroU32) -> Self { Self(number) }\n"
+            "}\n"
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("public item inventory" in error for error in errors), errors)
+
+    def test_macro_cannot_generate_an_uninventoried_associated_const(self):
+        mutated = self.source.replace(
+            "impl IssueRef {",
+            "impl IssueRef {\n    redteam_expose!();",
+            1,
+        )
+        mutated = (
+            "macro_rules! redteam_expose {\n"
+            "    () => { pub const REDTEAM_ROGUE: Self = Self(NonZeroU32::MIN); };\n"
+            "}\n"
+            + mutated
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("macro inventory" in error for error in errors), errors)
+
+    def test_protected_wrapper_cannot_gain_an_unreviewed_derive(self):
+        mutated = self.source.replace(
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n"
+            "pub struct IssueRef(NonZeroU32);",
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, RedteamForge)]\n"
+            "pub struct IssueRef(NonZeroU32);",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("private authority layout" in error for error in errors), errors)
+
     def test_direct_public_builder_call_is_rejected_in_production(self):
         errors = MODULE.validate_usage_source(
             "crates/example/src/lib.rs",

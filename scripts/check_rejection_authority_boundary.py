@@ -41,6 +41,31 @@ ANY_FN = re.compile(
     r"fn\s+([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
+ASSOCIATED_CONST = re.compile(
+    r"\b(?:pub(?:\([^)]*\))?\s+)?const\s+(?!fn\b)([A-Za-z_][A-Za-z0-9_]*)"
+)
+PUBLIC_ITEM = re.compile(
+    r"^\s*pub(?:\([^)]*\))?\s+"
+    r"(struct|enum|trait|type|static|union)\s+([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+PUBLIC_CONST = re.compile(
+    r"^\s*pub(?:\([^)]*\))?\s+const\s+(?!fn\b)([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
+SENSITIVE_IMPL = re.compile(
+    r"\bimpl\b[^\{;]*\b(SpecAtomRef|IssueRef|RejectionAuthority)\b\s*\{"
+)
+MACRO_RULES_DEFINITION = re.compile(
+    r"\bmacro_rules\s*!\s*(?:r#)?([A-Za-z_][A-Za-z0-9_]*)"
+)
+MACRO_INVOCATION = re.compile(
+    r"\b(?:r#)?([A-Za-z_][A-Za-z0-9_]*)\s*!\s*[\(\[\{]"
+)
+ATTRIBUTE_NAME = re.compile(
+    r"#\s*\[\s*(?:r#)?([A-Za-z_][A-Za-z0-9_]*)"
+)
+DERIVE_ATTRIBUTE = re.compile(r"#\s*\[\s*derive\s*\(([^\]]*)\)\s*\]")
 
 EXPECTED_PUBLIC_FUNCTIONS = Counter(
     {
@@ -90,6 +115,78 @@ EXPECTED_PRIVATE_AUTHORITY_TOKENS = Counter(
         "__build_unimplemented_rejection": 2,
     }
 )
+EXPECTED_PUBLIC_ITEMS = Counter(
+    {
+        ("struct", "SpecAtomRef"): 1,
+        ("struct", "IssueRef"): 1,
+        ("enum", "RejectionAuthorityKind"): 1,
+        ("struct", "RejectionAuthority"): 1,
+        ("enum", "AuthorityConstructionError"): 1,
+        ("enum", "UnsupportedKind"): 1,
+        ("enum", "Stage"): 1,
+        ("struct", "SpanRef"): 1,
+        ("struct", "Unsupported"): 1,
+    }
+)
+EXPECTED_SENSITIVE_IMPLS = Counter(
+    {"SpecAtomRef": 1, "IssueRef": 1, "RejectionAuthority": 1}
+)
+EXPECTED_MACRO_DEFINITIONS = Counter(
+    {"deliberate_rejection": 1, "unimplemented_rejection": 1}
+)
+EXPECTED_MACRO_INVOCATIONS = Counter(
+    {
+        "write": 12,
+        "deliberate_rejection": 3,
+        "format": 2,
+        "panic": 2,
+        "assert": 2,
+        "assert_eq": 1,
+    }
+)
+EXPECTED_ATTRIBUTES = Counter(
+    {
+        "derive": 10,
+        "doc": 2,
+        "macro_export": 2,
+        "test": 2,
+        "must_use": 1,
+        "cfg": 1,
+    }
+)
+EXPECTED_DERIVES = Counter(
+    {
+        ("Debug", "Clone", "Copy", "PartialEq", "Eq", "Hash"): 5,
+        ("Debug", "Clone", "Copy", "PartialEq", "Eq"): 2,
+        ("Debug", "Clone", "PartialEq", "Eq"): 2,
+        ("Debug", "Clone", "PartialEq", "Eq", "Default"): 1,
+    }
+)
+PRIVATE_COPY_EQ_HASH_DERIVE = (
+    r"#\s*\[\s*derive\s*\(\s*Debug\s*,\s*Clone\s*,\s*Copy\s*,\s*"
+    r"PartialEq\s*,\s*Eq\s*,\s*Hash\s*\)\s*\]\s*"
+)
+PRIVATE_AUTHORITY_LAYOUTS = {
+    "SpecAtomRef tuple field": re.compile(
+        PRIVATE_COPY_EQ_HASH_DERIVE
+        + r"pub\s+struct\s+SpecAtomRef\s*\(\s*&'static\s+str\s*\)\s*;"
+    ),
+    "IssueRef tuple field": re.compile(
+        PRIVATE_COPY_EQ_HASH_DERIVE
+        + r"pub\s+struct\s+IssueRef\s*\(\s*NonZeroU32\s*\)\s*;"
+    ),
+    "RejectionCitation enum": re.compile(
+        PRIVATE_COPY_EQ_HASH_DERIVE + r"enum\s+RejectionCitation\s*\{\s*"
+        r"Atom\s*\(\s*SpecAtomRef\s*\)\s*,\s*"
+        r"Issue\s*\(\s*IssueRef\s*\)\s*,?\s*\}"
+    ),
+    "RejectionAuthority fields": re.compile(
+        PRIVATE_COPY_EQ_HASH_DERIVE
+        + r"pub\s+struct\s+RejectionAuthority\s*\{\s*"
+        r"citation\s*:\s*RejectionCitation\s*,\s*"
+        r"hint\s*:\s*&'static\s+str\s*,?\s*\}"
+    ),
+}
 DIRECT_BUILDER = re.compile(
     r"\b(__build_deliberate_rejection|__build_unimplemented_rejection)\b"
 )
@@ -161,6 +258,12 @@ def validate_source(source: str) -> list[str]:
                 f"found {dict(sorted(functions.items()))}, expected "
                 f"{dict(sorted(expected_functions.items()))}"
             )
+        associated_consts = ASSOCIATED_CONST.findall(body)
+        if associated_consts:
+            errors.append(
+                f"{type_name} exposes an unapproved associated const "
+                "construction edge: " + ", ".join(sorted(associated_consts))
+            )
 
     private_tokens = Counter(PRIVATE_AUTHORITY_TOKEN.findall(code))
     if private_tokens != EXPECTED_PRIVATE_AUTHORITY_TOKENS:
@@ -169,6 +272,53 @@ def validate_source(source: str) -> list[str]:
             f"found {dict(sorted(private_tokens.items()))}, expected "
             f"{dict(sorted(EXPECTED_PRIVATE_AUTHORITY_TOKENS.items()))}"
         )
+
+    public_items = Counter(PUBLIC_ITEM.findall(code))
+    public_items.update(("const", name) for name in PUBLIC_CONST.findall(code))
+    if public_items != EXPECTED_PUBLIC_ITEMS:
+        errors.append(
+            "unsupported.rs public item inventory changed: "
+            f"found {dict(sorted(public_items.items()))}, expected "
+            f"{dict(sorted(EXPECTED_PUBLIC_ITEMS.items()))}"
+        )
+
+    sensitive_impls = Counter(SENSITIVE_IMPL.findall(code))
+    if sensitive_impls != EXPECTED_SENSITIVE_IMPLS:
+        errors.append(
+            "unsupported.rs protected impl inventory changed: "
+            f"found {dict(sorted(sensitive_impls.items()))}, expected "
+            f"{dict(sorted(EXPECTED_SENSITIVE_IMPLS.items()))}"
+        )
+
+    macro_definitions = Counter(MACRO_RULES_DEFINITION.findall(code))
+    macro_invocations = Counter(MACRO_INVOCATION.findall(code))
+    if (
+        macro_definitions != EXPECTED_MACRO_DEFINITIONS
+        or macro_invocations != EXPECTED_MACRO_INVOCATIONS
+    ):
+        errors.append(
+            "unsupported.rs macro inventory changed: "
+            f"definitions={dict(sorted(macro_definitions.items()))}, "
+            f"invocations={dict(sorted(macro_invocations.items()))}"
+        )
+
+    attributes = Counter(ATTRIBUTE_NAME.findall(code))
+    derives = Counter(
+        tuple(part.strip() for part in match.group(1).split(","))
+        for match in DERIVE_ATTRIBUTE.finditer(code)
+    )
+    if attributes != EXPECTED_ATTRIBUTES or derives != EXPECTED_DERIVES:
+        errors.append(
+            "unsupported.rs attribute/derive inventory changed: "
+            f"attributes={dict(sorted(attributes.items()))}, "
+            f"derives={dict(sorted(derives.items()))}"
+        )
+
+    for label, pattern in PRIVATE_AUTHORITY_LAYOUTS.items():
+        if len(pattern.findall(code)) != 1:
+            errors.append(
+                f"unsupported.rs private authority layout changed: {label}"
+            )
 
     required_private_edges = (
         "const fn new(atom: &'static str)",
