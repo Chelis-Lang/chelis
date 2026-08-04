@@ -505,6 +505,80 @@ pub struct DependencyReferenceEdge {
 }
 
 impl PreparedProgram {
+    /// Partition `non_stdlib_decls` into the build-lane library cache's
+    /// **stable dependency prefix** and its **volatile entry suffix**
+    /// (chelis#1168).
+    ///
+    /// The build-lane type-check stacks three cache layers: the cached
+    /// chelis-std sub-context (`stdlib_decls`), a cached dependency
+    /// sub-context (the first slice returned here), and the freshly
+    /// re-analyzed entry (the second slice). This method decides the
+    /// boundary between the latter two.
+    ///
+    /// The returned pair `(dependency, entry)` is a `split_at` of
+    /// `non_stdlib_decls`: `dependency` is everything up to the entry
+    /// module's first declaration, `entry` is the entry module onward.
+    /// Their concatenation therefore equals `non_stdlib_decls` **exactly,
+    /// in order** — the invariant the layered checker relies on to stay
+    /// byte-identical to the monolithic path (composing
+    /// `stdlib ++ dependency ++ entry` reconstructs
+    /// `stdlib ++ non_stdlib == decls`).
+    ///
+    /// Why a prefix/suffix split and not "all dependency packages": the
+    /// reef linker orders `non_stdlib_decls` by package name
+    /// (`BTreeMap` walk), so the root package's modules are *interleaved*
+    /// with dependency packages rather than forming a contiguous block. A
+    /// dependency package that sorts after the root lands in the entry
+    /// suffix and is re-analyzed each build; only the decls that sort
+    /// before the entry module are cached. This keeps the split a pure
+    /// prefix/suffix of `non_stdlib_decls` (no reordering, so no risk of
+    /// perturbing the composed program's declaration order), at the cost
+    /// of not caching post-root dependencies.
+    ///
+    /// The entry module's declarations are a contiguous run inside
+    /// `non_stdlib_decls` (they come from one linked module), and
+    /// `entry_decls` is a byte-identical re-link of that same module, so
+    /// the run is located by an exact contiguous match. If it is not found
+    /// (no entry decls, or a caller that did not derive `entry_decls` from
+    /// `non_stdlib_decls`), the split degenerates to an empty dependency
+    /// prefix and the whole of `non_stdlib_decls` as the entry suffix —
+    /// i.e. the pre-chelis#1168 two-layer behavior, still byte-identical.
+    pub fn dependency_entry_partition(&self) -> (&[Decl], &[Decl]) {
+        match self.entry_module_offset_in_non_stdlib() {
+            Some(split) => {
+                let (dependency, entry) = self.non_stdlib_decls.split_at(split);
+                // Falsifiable: the entry suffix must begin with the entry
+                // module's decls (split_at already guarantees the trivial
+                // `dependency ++ entry == non_stdlib_decls`).
+                debug_assert!(
+                    entry.len() >= self.entry_decls.len()
+                        && entry[..self.entry_decls.len()] == self.entry_decls[..],
+                    "the entry suffix must begin with the entry module"
+                );
+                (dependency, entry)
+            }
+            // Degenerate fallback: the entry decls were not located as a
+            // contiguous run of `non_stdlib_decls` (empty entry, or a caller
+            // that did not derive `entry_decls` from it). No cacheable
+            // dependency prefix; the whole slice is the entry layer, which
+            // reproduces the pre-chelis#1168 two-layer behavior exactly.
+            None => (&[], &self.non_stdlib_decls),
+        }
+    }
+
+    /// The offset of the entry module's first declaration within
+    /// `non_stdlib_decls`, or `None` when `entry_decls` is empty or does
+    /// not occur as a contiguous sub-slice.
+    fn entry_module_offset_in_non_stdlib(&self) -> Option<usize> {
+        let entry = &self.entry_decls;
+        let haystack = &self.non_stdlib_decls;
+        if entry.is_empty() || entry.len() > haystack.len() {
+            return None;
+        }
+        (0..=(haystack.len() - entry.len()))
+            .find(|&start| &haystack[start..start + entry.len()] == entry.as_slice())
+    }
+
     /// Return the fail-closed declaration slice for checking a selected entry
     /// module after a prove verdict (chelis#924).
     ///
@@ -8804,6 +8878,101 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent");
         }
         fs::write(path, contents).expect("write file");
+    }
+
+    /// Two-package fixture (root + one path dependency) used to exercise
+    /// `PreparedProgram::dependency_entry_partition` under both link
+    /// orderings: a dependency sorting before the root, and one sorting
+    /// after it.
+    fn two_pkg_fixture(
+        root_name: &str,
+        root_prefix: &str,
+        dep_name: &str,
+        dep_prefix: &str,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("app");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"{ver}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./thedep\" }}\n",
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            &format!(
+                "module {root_prefix}.Main\nimport {dep_prefix}.Math (dep_add)\n\ndef main_value -> int32 = dep_add(1, 2)\n"
+            ),
+        );
+        write(
+            &root.join("thedep/reef.toml"),
+            &format!(
+                "[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"{ver}\"\nmodule_prefix = \"{dep_prefix}\"\n",
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("thedep/src/math.ch"),
+            &format!(
+                "module {dep_prefix}.Math\nexport (dep_add)\n\ndef dep_add(x: int32, y: int32) -> int32 = cast(0, int32)\n"
+            ),
+        );
+        write(
+            &root.join("reef.lock"),
+            &format!(
+                "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"{ver}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./thedep\"\n",
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        (dir, root)
+    }
+
+    /// `dependency_entry_partition` must return a pure prefix/suffix of
+    /// `non_stdlib_decls` whose concatenation reconstructs it exactly,
+    /// under both alphabetical link orderings, and the entry suffix must
+    /// begin with the entry module.
+    #[test]
+    fn dependency_entry_partition_reconstructs_non_stdlib() {
+        // Case A: dependency package sorts BEFORE the root ("coral" <
+        // "school"), so the entry is a suffix and the dependency prefix is
+        // non-empty (the cache engages).
+        // Case B: dependency package sorts AFTER the root ("aaaapp" <
+        // "zzzlib"), so the entry is the prefix and the dependency prefix
+        // is empty (the split degenerates to two-layer behavior).
+        for (root_name, root_prefix, dep_name, dep_prefix, expect_nonempty_dep_prefix) in [
+            ("school", "School", "coral", "Coral", true),
+            ("aaaapp", "Aaaapp", "zzzlib", "Zzzlib", false),
+        ] {
+            let (_dir, root) = two_pkg_fixture(root_name, root_prefix, dep_name, dep_prefix);
+            let entry = root.join("src/main.ch");
+            let prepared = prepare_program_for_file(&entry)
+                .expect("prepare ok")
+                .expect("inside reef package");
+
+            let (dependency, entry_suffix) = prepared.dependency_entry_partition();
+
+            // Concatenation reconstructs non_stdlib_decls exactly, in order.
+            let mut reconstructed = dependency.to_vec();
+            reconstructed.extend(entry_suffix.iter().cloned());
+            assert_eq!(
+                reconstructed, prepared.non_stdlib_decls,
+                "dependency ++ entry must equal non_stdlib_decls for {root_name}"
+            );
+
+            // The entry suffix begins with the entry module's decls.
+            assert!(
+                entry_suffix.len() >= prepared.entry_decls.len()
+                    && entry_suffix[..prepared.entry_decls.len()] == prepared.entry_decls[..],
+                "entry suffix must start with entry_decls for {root_name}"
+            );
+
+            assert_eq!(
+                !dependency.is_empty(),
+                expect_nonempty_dep_prefix,
+                "dependency-prefix emptiness under link ordering mismatch for {root_name}"
+            );
+        }
     }
 
     /// Lock the runtime version invariant: the `BUNDLED_CHELIS_STD_VERSION`

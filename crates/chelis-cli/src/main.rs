@@ -3003,9 +3003,16 @@ fn cmd_build(
                 if !chelis_compiler_api::cache_disabled()
                     && pruned_deep_exprs.len() == full_deep_exprs.len() =>
             {
+                // chelis#1168: split the non-chelis-std decls into the
+                // stable dependency prefix (Layer 2, cached) and the
+                // volatile entry suffix (re-analyzed). The concatenation
+                // equals `non_stdlib_decls`, so the composed whole program
+                // is byte-identical to the pre-split two-layer path.
+                let (dependency_decls, entry_layer_decls) = prepared.dependency_entry_partition();
                 chelis_compiler_api::check_layered_for_build(
                     &prepared.stdlib_decls,
-                    &prepared.non_stdlib_decls,
+                    dependency_decls,
+                    entry_layer_decls,
                 )
                 .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
             }
