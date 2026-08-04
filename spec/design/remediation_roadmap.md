@@ -339,7 +339,14 @@ once is cheap; a break they make and later unmake is the expensive kind. Like
 the sequencing above, this ordering is advice, not law; a cut may move if a
 cell becomes urgent.
 
-Current baseline (2026-08-01): **v0.18.1 is shipped**. The v0.17 and v0.18 rows
+Current baseline (2026-08-04): **v0.18.3 is shipped**. Two further patch cuts
+landed on the v0.18 line after v0.18.1: **v0.18.2** (2026-08-03) added the
+`chelis-std` CSV/JSON serializers (chelis#928) and the eval-lane JSON I/O
+builtins (chelis#890), and **v0.18.3** (2026-08-04) added `cast_trunc`, the
+named truncating float-to-integer cast (chelis#759). Neither moved an
+exact-output or wire expectation, so neither is a migration cut in the sense
+the table below uses; v0.18.3's one source-visible delta is that `cast_trunc`
+became a reserved word. The v0.17 and v0.18 rows
 below are therefore historical records, while v0.19 and v0.20 remain planned
 cuts. v0.18.1 already shipped [05-OBS-6]'s `name = ` prefix in both lanes. It
 did not deliver the manifested root set/order, unavailable-root behavior, or
@@ -557,7 +564,7 @@ a judgement may not.
 | [#683] | `i64::MIN` not writable as a literal | standalone front-end fix; natural moment is [#729] Phase 2 (the exact int lane makes the round-trip testable), but nothing blocks doing it sooner |
 | [#689] | HIP int64 ops emit F32 kernels | two-part: the SILENT half dies at [#730] Phase 1 (`elem_kind` raises); the SUPPORT half is owned by capability-table B-cells `Unimplemented { issue: #689 }` until int64 kernel templates land (see [`capability_table.md`](capability_table.md) seed decisions) |
 | [#690] | HIP has no integer div-by-zero guard | rides the same HIP B-cell work as [#689]; the guard is part of `Implemented` for HIP int division cells |
-| [#691] | C DAG lane emits fmaxf/fabsf for int64 | repaired in [#729] Phase 3: integer min/max/abs dispatch through exact checked integer paths; the original rows remain ordinary regressions |
+| [#691] | C DAG lane emits fmaxf/fabsf for int64 | repaired in [#729] Phase 3: integer min/max/abs dispatch through exact checked integer paths; the original rows remain ordinary regressions. The ISSUE nonetheless stays OPEN under the [#730] rejection-authority liveness pin - `spec/design/loud_unsupported_issue_manifest.json` requires it open while emitter sites cite it (`chelis-backend-c/src/emit.rs:830` and `:3285` today), and `scripts/validate_rejection_issue_manifest.py` in the `rejection-authority-liveness` CI job fails closed on a closed authority - so the repair does not close it; closing it reddens CI, which is what the issue-closing reference in PR #1151's own body demonstrated when that PR merged |
 | [#693] | Metal int64 `abs` zero emission | root cause is [#699] (confirmed by emission); Metal B-cell `Unimplemented { issue: #693 }` until the MSL integer path is wired post-[#699]-fix |
 | [#713] | `pad_sequences` allocates int32 output for int64 input | repaired in [#729] Phase 3 at the typed runtime allocation/copy boundary; the int64 row is in the authoritative Phase 3 oracle |
 | [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3 (now live); dies at [#730] Phase 1, unwritable after Phase 2; rendering via [#732]'s formatter |
