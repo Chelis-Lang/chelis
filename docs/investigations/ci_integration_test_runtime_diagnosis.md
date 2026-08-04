@@ -157,10 +157,10 @@ expensive part.
 > target directory each. `capacity_census_typed.py` owns a single
 > `SHARED_RUSTDOC_TARGET_DIR`, so the second leg to run reuses the first's
 > compiled dependency graph rather than building a second one. Measured across
-> the base and branch CI runs of that change, the census total fell from 207.9s
-> to 88.0s on macOS Smoke and from 101.2s to 75.9s on the Linux dtype oracle,
-> with the binding pair carrying the win (58.5s + 57.0s to 13.0s + 13.4s on
-> macOS).
+> the base and branch CI runs of that change, summing every census test in each
+> job, the census total fell from 213.4s to 92.1s on macOS Smoke (-57%) and from
+> 157.2s to 93.0s on the Linux dtype oracle (-41%). The binding pair carries the
+> win on both: -89.0s on macOS and -79.1s on Linux.
 >
 > Two things that table's reader should not have to discover elsewhere. The wire
 > leg by itself remains above nextest's 60s SLOW threshold: sharing makes the
