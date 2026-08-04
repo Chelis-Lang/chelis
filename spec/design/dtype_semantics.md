@@ -305,6 +305,21 @@ is the in-tree `crates/chelis-cli/tests/issue_729_payload_census.rs`, whose
 scope is `RiscOp`/`WireRiscOp` carrier fields rather than every numeric form
 in the repository.
 
+**The Pad fill is scheduled, not permanently exempt ([#878]).** That carrier
+migrates to the sealed `ScalarValue` form - finalized at the padded tensor's
+dtype, with the `WireDag` bump that implies - BEFORE Phase 4 closes, and it
+rides the v0.19 cut with the rest of the storage family so a shipped field
+changes shape once rather than twice (the same anti-churn invariant that binds
+the prelude JSON integer decision above). The guard for it already exists and
+the migration SHRINKS that guard rather than growing an exemption: §C6's typed
+wire leg carries `WireRiscOp::Pad.fill: f64` as a FLAGGED `float-carrier` row,
+and a FLAGGED capacity row has no issue-citation path at all - redesign onto
+the tagged carrier is its first sanctioned outcome, so sealing the fill retires
+the row (through that leg's manifest and enumerator, per B1) instead of earning
+it a maintainer override. Until then the IR-side row stays cited in the
+no-sixth-layer census above, which turns red the moment the field grows a
+sibling.
+
 **Normative home for the GUARANTEE this delivers:**
 `spec/04-type-system.md` [04-NUM-11] - a value survives storage,
 transport, and every boundary crossing at its declared dtype without
@@ -1613,6 +1628,17 @@ before this phase; its seed-decision list is this phase's work-list.
    capability sets become generated projections of Tables A/B. The root
    manifest may consume those projections and the checked root set, but it
    cannot remain an independently authored builtin/backend authority.
+
+**Why deliverable 4 is generated rather than curated (measured, chelis#937).**
+`uniform_like` on an f64 tensor in the compiled C lane returned near-zero
+garbage - a mean around 0.000365 where 0.5 was owed - while the f32 path was
+correct, and no test was red, because the hand-curated acceptance matrix simply
+had no `uniform_like` x f64 cell. A suite generated over every Table-A cell
+cannot omit a cell, which is precisely the failure mode this deliverable exists
+to make impossible; a curated matrix can only ever be as complete as whoever
+last extended it. The interim guard is the cross-lane parity-oracle row that
+lands with the chelis#937 decision, whose capability seed row belongs to
+`capability_table.md`.
 
 **Frozen at your exit:** the table schema and the rule that lanes derive
 from it. After this phase, "add a builtin" without deciding every lane is
