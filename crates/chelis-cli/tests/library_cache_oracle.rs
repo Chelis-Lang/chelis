@@ -37,6 +37,25 @@
 //! 6. `dependency_build_writes_library_cache_artifact` — a build with a
 //!    dependency writes a `chelis-lib-*.tc` file (the Layer-2 cache
 //!    engaged).
+//! 7. `pruning_fires_monolithic_vs_layered_build_c_identical` — with an unused
+//!    dependency def (so build-time pruning fires), the layered path — which
+//!    now RUNS under pruning (chelis#1168 engage-under-pruning) and subsumes
+//!    the cross-module full-program check — emits C byte-identical to the
+//!    monolithic path.
+//! 8. `pruning_fires_macro_hygiene_monolithic_vs_layered_c_identical` — the
+//!    same with an unused macro-minting dependency def: expansion advances the
+//!    shared hygiene counter over the full program before pruning drops the
+//!    def, so the entry's binders survive the split identically.
+//! 9. `eval_only_wrapper_build_accept_reject_parity` — a well-typed package
+//!    with an unreachable eval-only def AND an unreachable wrapper of it builds
+//!    identically (accept) in both cache regimes: the transitive eval-only drop
+//!    leaves no dangling reference for the monolithic check to spuriously
+//!    reject. Negative parity — the C-bytes oracles assert success on both arms
+//!    and are blind to an accept/reject flip.
+//! 10. `unreachable_dep_type_error_rejected_in_both_cache_regimes` — the
+//!     rejection direction: a violation in an unreachable dependency def is
+//!     rejected byte-identically in both cache regimes (layered `Ok(None)` →
+//!     monolithic fallback).
 
 use assert_cmd::Command;
 use std::fs;
@@ -287,5 +306,199 @@ fn dependency_build_writes_library_cache_artifact() {
         !library_cache_artifacts(&cache_home).is_empty(),
         "building a package with a dependency must write a chelis-lib-*.tc \
          Layer-2 artifact"
+    );
+}
+
+// ── Pruning-FIRES oracles (chelis#1168 engage-under-pruning) ─────────
+//
+// Every oracle above uses fixtures whose defs are all reachable, so
+// `pruned_deep_exprs.len() == full_deep_exprs.len()` and build-time pruning
+// never fires. That is exactly the case the #1168 cache was ORIGINALLY gated
+// to (`layered_full_checked` was `None` whenever pruning fired). These
+// fixtures add an UNUSED dependency def so pruning drops it — the path where
+// `cmd_build` runs the cross-module full-program check. With the gate removed,
+// the layered check runs under pruning and subsumes that check; the emitted C
+// must still match the monolithic path byte-for-byte.
+
+/// Like `plain_bodies`, but the dependency carries an extra `az_unused` def
+/// that the entry never calls. The entry matches `plain_bodies`' entry, so
+/// after pruning drops `az_unused` the program equals the `plain_bodies`
+/// program.
+fn plain_bodies_with_unused_dep() -> (&'static str, &'static str) {
+    (
+        "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef az_unused(x: int32, y: int32) -> int32 = add(add(x, y), y)\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+    )
+}
+
+/// Like `macro_bodies`, but the dependency also carries an UNUSED
+/// macro-minting def (`dep_unused`). Its `dmk` expansion still advances the
+/// shared hygiene counter over the full program (expansion precedes pruning),
+/// then pruning drops it — so the entry's `v_macro_0` binding must survive the
+/// dependency/entry split identically under pruning.
+fn macro_bodies_with_unused_dep() -> (&'static str, &'static str) {
+    (
+        "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\ndef dep_unused(x: int32) -> int32 = dmk(add(x, x))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\ndef main_value -> int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+    )
+}
+
+#[test]
+fn pruning_fires_monolithic_vs_layered_build_c_identical() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let (dep, entry_body) = plain_bodies_with_unused_dep();
+    let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
+
+    let monolithic = build_c(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let layered = build_c(&entry, &cache_home, &[]);
+    assert_eq!(
+        monolithic, layered,
+        "under build-time pruning, the layered path's emitted C must match the \
+         monolithic path (chelis#1168 engage-under-pruning)"
+    );
+
+    // Confirm pruning ACTUALLY fired: `az_unused` is unreachable from the
+    // entry, so its symbol must be absent from the compiled C. The emitted C
+    // carries the un-mangled def name (`az_add` appears), so `az_unused` would
+    // too if pruning had not dropped it — i.e. this fixture genuinely exercises
+    // `pruned_deep_exprs.len() != full_deep_exprs.len()`.
+    let layered_c = String::from_utf8_lossy(&layered.0);
+    assert!(
+        layered_c.contains("az_add"),
+        "sanity: the reachable dependency def must appear in the emitted C"
+    );
+    assert!(
+        !layered_c.contains("az_unused"),
+        "pruning must drop the unused dependency def `az_unused`: this fixture \
+         must exercise the pruning-fires path"
+    );
+}
+
+#[test]
+fn pruning_fires_macro_hygiene_monolithic_vs_layered_c_identical() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let (dep, entry_body) = macro_bodies_with_unused_dep();
+    let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
+
+    let monolithic = build_c(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let layered = build_c(&entry, &cache_home, &[]);
+    assert!(
+        !library_cache_artifacts(&cache_home).is_empty(),
+        "the macro fixture must engage the dependency cache"
+    );
+    assert_eq!(
+        monolithic, layered,
+        "macro hygiene diverged under pruning: the layered path renamed the \
+         entry's binders (miscompile)"
+    );
+}
+
+// ── Accept/reject parity under the eval-only transitive drop (chelis#1168) ──
+//
+// `cmd_build` drops UNREACHABLE defs that (transitively) reference an eval-only
+// host builtin BEFORE the monolithic full-program check, but the layered cache
+// path checks the intact pre-drop decls. If the drop were non-transitive, an
+// unreachable wrapper of a dropped def would keep a DANGLING reference: the
+// monolithic path manufactures an unbound-variable error the layered path never
+// sees, so build accept/reject would flip on cache state. The existing C-bytes
+// oracles all assert success on both arms, so they are structurally blind to
+// this — hence a dedicated negative parity oracle (chelis#1168 fable-verify).
+
+/// Build `entry` and capture `(success, stderr)` WITHOUT asserting the outcome,
+/// so the monolithic and cache-warm paths can be compared for accept/reject
+/// parity.
+fn build_capture(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> (bool, String) {
+    let out = tempdir().expect("out dir");
+    let mut cmd = Command::cargo_bin("chelis").expect("chelis binary");
+    cmd.env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", cache_home);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    let output = cmd.output().expect("run chelis build");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The dependency has an unreachable eval-only CHAIN: `dep_runner` uses the
+/// eval-only `round_to` builtin, `dep_wrapper` calls `dep_runner`, and
+/// `dep_outer` calls `dep_wrapper`. The entry uses only `az_add`. The transitive
+/// drop must remove ALL THREE so no dangling reference reaches the monolithic
+/// check. The chain is depth-3 on purpose: a single-pass "direct users + their
+/// direct dependents" drop would leave `dep_outer` dangling, so this fixture
+/// pins the FIXPOINT, not just one hop.
+fn eval_only_wrapper_bodies() -> (&'static str, &'static str) {
+    (
+        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, int32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+    )
+}
+
+#[test]
+fn eval_only_wrapper_build_accept_reject_parity() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let (dep, entry_body) = eval_only_wrapper_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
+
+    let (mono_ok, mono_err) =
+        build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let _ = build_capture(&entry, &cache_home, &[]); // cold: warm the cache
+    let (warm_ok, warm_err) = build_capture(&entry, &cache_home, &[]);
+
+    assert_eq!(
+        mono_ok, warm_ok,
+        "build accept/reject must not flip on cache state\n \
+         monolithic: ok={mono_ok} stderr={mono_err:?}\n \
+         cache-warm: ok={warm_ok} stderr={warm_err:?}"
+    );
+    assert_eq!(
+        mono_err, warm_err,
+        "build stderr must be byte-identical across cache regimes"
+    );
+    // The package is well-typed (`chelis check` accepts it): the transitive drop
+    // removes the unreachable eval-only chain, so it builds in BOTH regimes.
+    assert!(
+        mono_ok,
+        "well-typed package must build in both cache regimes; stderr={mono_err:?}"
+    );
+}
+
+/// An unreachable dependency def with a plain type error. It is NOT eval-only,
+/// so it survives the eval-only drop and reaches the monolithic full-program
+/// check; the layered check also sees it and returns `Ok(None)`, so the
+/// monolithic fallback produces the diagnostic. Both regimes must REJECT.
+fn unreachable_type_error_bodies() -> (&'static str, &'static str) {
+    (
+        "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_broken(x: int32) -> int32 = add(x, cast(1, f64))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+    )
+}
+
+#[test]
+fn unreachable_dep_type_error_rejected_in_both_cache_regimes() {
+    // The rejection direction of accept/reject parity: a violation in an
+    // unreachable dependency def must surface in BOTH cache regimes (the layered
+    // check returns `Ok(None)` on the error and the monolithic fallback emits
+    // the diagnostic), byte-identical (chelis#1168).
+    let (scratch, cache_home) = fresh_cache_home();
+    let (dep, entry_body) = unreachable_type_error_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
+
+    let (mono_ok, mono_err) =
+        build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let _ = build_capture(&entry, &cache_home, &[]);
+    let (warm_ok, warm_err) = build_capture(&entry, &cache_home, &[]);
+
+    assert!(
+        !mono_ok && !warm_ok,
+        "an unreachable dependency type error must be rejected in BOTH cache \
+         regimes: monolithic ok={mono_ok}, cache-warm ok={warm_ok}"
+    );
+    assert_eq!(
+        mono_err, warm_err,
+        "the rejection stderr must be byte-identical across cache regimes"
     );
 }

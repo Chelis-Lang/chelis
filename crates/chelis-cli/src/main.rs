@@ -2987,22 +2987,24 @@ fn cmd_build(
     let pruned_deep_exprs =
         prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
 
-    // Layered build fast path: when the input resolves inside a reef
-    // package, the chelis-std typecheck cache is enabled, AND build-time
-    // pruning did not drop any decls (so the full program is the
-    // lowering target), reuse the cached chelis-std sub-context for the
-    // type-check stage instead of re-inferring chelis-std. When pruning
-    // fires the layered whole-program checked state would not match
-    // the pruned lower target, so the monolithic path is used.
-    // `check_layered_for_build` returns `Ok(None)` on any non-chelis-std
-    // type/effect/linearity error, falling back to monolithic so the
-    // error-path output stays byte-identical.
+    // Layered build check: when the input resolves inside a reef package and
+    // the typecheck cache is enabled, reuse the cached chelis-std + dependency
+    // sub-contexts (chelis#1168) instead of re-inferring the whole library.
+    // This runs whether or not build-time pruning fires:
+    //   - no pruning: the layered whole-program `CheckedCompilation` IS the
+    //     lowering target (selected directly below);
+    //   - pruning fires (any chelis-std/shell package): the layered check
+    //     still covers the FULL program, so it subsumes the cross-module
+    //     `checked_program_with_effects(&full_deep_exprs)` re-inference below —
+    //     the ~full-library type-inference cost this cache exists to remove.
+    //     (The pruned program is still re-checked for the lowering target.)
+    // `check_layered_for_build` returns `Ok(None)` on ANY dependency/entry
+    // type/effect/linearity error (including the opaque-encapsulation
+    // violation), so the monolithic full-program check below still runs on the
+    // fallback path and the error output stays byte-identical.
     let layered_full_checked: Option<chelis_compiler_api::pipeline::CheckedCompilation> =
         match &prepared {
-            Some(prepared)
-                if !chelis_compiler_api::cache_disabled()
-                    && pruned_deep_exprs.len() == full_deep_exprs.len() =>
-            {
+            Some(prepared) if !chelis_compiler_api::cache_disabled() => {
                 // chelis#1168: split the non-chelis-std decls into the
                 // stable dependency prefix (Layer 2, cached) and the
                 // volatile entry suffix (re-analyzed). The concatenation
@@ -3047,10 +3049,16 @@ fn cmd_build(
     // then report the bare reference as a plain unbound variable and mask
     // the `OpaqueTypeViolation`. Mirror `chelis check`: when pruning fired
     // for a reef-prepared package, run the cross-module check against the
-    // full program first so the encapsulation diagnostic surfaces, then
-    // fall through to the existing pruned-lowering path (which preserves
-    // the reef pricer/layered-cache lowering target unchanged).
-    if prepared.is_some() && pruned_deep_exprs.len() != full_deep_exprs.len() {
+    // full program so the encapsulation diagnostic surfaces. When the layered
+    // check above already covered the full program (`Some`), it performed this
+    // exact whole-program check from the cached contexts, so skip the
+    // redundant monolithic re-inference (chelis#1168) — the whole point of the
+    // cache; only run it on the layered fallback path (`None`), where the
+    // full-program error report must stay byte-identical.
+    if prepared.is_some()
+        && pruned_deep_exprs.len() != full_deep_exprs.len()
+        && layered_full_checked.is_none()
+    {
         checked_program_with_effects(&full_deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     }
     let deep_exprs = if preserve_host_library_surface {
@@ -9377,13 +9385,27 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
 // finding 13).
 const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTINS;
 
-/// Drop top-level decls for any function whose body references an eval-only
-/// host builtin ([`EVAL_ONLY_HOST_BUILTINS`]) and is not reachable from the
-/// entry program. Such functions can never be lowered into a compiled
-/// artifact, so an unused transitive dependency module (e.g. chelis-std's
-/// `Std.Process`) must not drag them into the build's lowering target. Both
-/// the `def` body and its sibling `defsig` are removed by name. A reachable
-/// eval-only use is preserved so the build gate still rejects it. chelis#334.
+/// Drop top-level decls for any function that can never be lowered into a
+/// compiled artifact and is not reachable from the entry program: one whose
+/// body references an eval-only host builtin ([`EVAL_ONLY_HOST_BUILTINS`]), OR
+/// one that (transitively) references such a dropped def. An unused transitive
+/// dependency module (e.g. chelis-std's `Std.Process`) must not drag them into
+/// the build's lowering target. Both the `def` body and its sibling `defsig`
+/// are removed by name. A reachable eval-only use is preserved so the build
+/// gate still rejects it. chelis#334.
+///
+/// The drop is a TRANSITIVE closure (chelis#1168): dropping only the DIRECT
+/// eval-only users would leave an unreachable wrapper with a dangling reference
+/// to a dropped def, which the monolithic full-program check in `cmd_build`
+/// then rejects as an unbound variable — a spurious error `chelis check` never
+/// raises, and one the layered cache path (which sees the intact pre-drop
+/// decls) does not, so build accept/reject would flip on cache state.
+///
+/// Divergence note (chelis#334, widened to the transitive case): because these
+/// unreachable defs are removed before the build's type check, `chelis build`
+/// alone does NOT surface a real error (e.g. a type error or non-termination)
+/// that lives inside an unreachable, eval-only-tainted def — such a def can
+/// never reach a compiled artifact. `chelis check` remains the gate for those.
 fn drop_unreachable_eval_only_defs(
     exprs: Vec<DeepExpr>,
     entry_exprs: &[DeepExpr],
@@ -9395,21 +9417,52 @@ fn drop_unreachable_eval_only_defs(
         .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
         .collect::<HashSet<_>>();
 
-    // Names of unreachable functions whose body uses an eval-only builtin.
-    // Collected first so both the `def` and its `defsig` are dropped.
-    let drop_names = exprs
+    // Reference graph over the UNREACHABLE named defs only: (name, referenced
+    // var names). Reachable defs are never dropped (a reachable eval-only use is
+    // preserved for the build gate), and reachability is transitive, so a
+    // dropped (unreachable) def can only ever be referenced by another
+    // unreachable def — the closure below stays within this set.
+    let unreachable_defs: Vec<(String, Vec<String>)> = exprs
         .iter()
         .filter_map(|expr| {
             let name = deep_named_decl_name(expr)?;
             if reachable.contains(name) {
                 return None;
             }
-            deep_referenced_vars(expr)
-                .iter()
-                .any(|var| EVAL_ONLY_HOST_BUILTINS.contains(var))
-                .then(|| name.to_string())
+            let refs = deep_referenced_vars(expr)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            Some((name.to_string(), refs))
         })
-        .collect::<HashSet<_>>();
+        .collect();
+
+    // Seed: unreachable defs whose body directly uses an eval-only builtin.
+    let mut drop_names: HashSet<String> = unreachable_defs
+        .iter()
+        .filter(|(_, refs)| {
+            refs.iter()
+                .any(|var| EVAL_ONLY_HOST_BUILTINS.contains(&var.as_str()))
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    // Transitive closure: also drop any unreachable def that references a
+    // dropped name, to a fixpoint (see the doc comment). Monotone over a finite
+    // set, so it terminates.
+    loop {
+        let newly: Vec<String> = unreachable_defs
+            .iter()
+            .filter(|(name, refs)| {
+                !drop_names.contains(name) && refs.iter().any(|var| drop_names.contains(var))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if newly.is_empty() {
+            break;
+        }
+        drop_names.extend(newly);
+    }
 
     exprs
         .into_iter()
