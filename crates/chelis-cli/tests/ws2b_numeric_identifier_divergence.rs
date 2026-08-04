@@ -9,7 +9,7 @@
 //! * #387 — integer `div`/`mod` by zero must TRAP, not return a finite
 //!   wrong value. The evaluator halts with one clean diagnostic shared
 //!   between `div` and `mod`; the C backend emits an EXPLICIT, PORTABLE
-//!   `chelis_int_div_guard` (`abort()` with the same diagnostic) rather than
+//!   `chelis_int_checked_divisor` (`abort()` with the same diagnostic) rather than
 //!   relying on a hardware fault — x86 raises SIGFPE on integer #DE but ARM64
 //!   does not fault, so a SIGFPE-dependent trap silently returned a wrong
 //!   value on macOS arm64. Float `div` keeps IEEE-754 (`1.0 / 0.0 == inf`).
@@ -285,10 +285,8 @@ fn tensor_value<'a>(stdout: &'a str, name: &str) -> &'a str {
 // #387 — integer division / remainder by zero must TRAP
 // -----------------------------------------------------------------------------
 
-/// Pre-Phase-3 C-lane diagnostic. The typed eval kernels already use the
-/// [04-NUM-9] branded shape with the actual operation and dtype; C adopts it
-/// in chelis#729 Phase 3.
-const INT_DIV_ZERO_DIAGNOSTIC: &str = "integer division or remainder by zero";
+/// [04-NUM-9] branded diagnostics shared by eval and the C backend after
+/// chelis#729 Phase 3. The actual operation and dtype are part of the contract.
 const EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in trunc_div at int64";
 const EVAL_MOD_ZERO_DIAGNOSTIC: &str = "numeric trap: division by zero in mod at int64";
 
@@ -449,7 +447,7 @@ fn issue_387_integer_mod_by_zero_traps_with_same_diagnostic() {
 }
 
 /// NEGATIVE parity: the C backend must trap integer division by zero with
-/// an EXPLICIT, PORTABLE guard (`chelis_int_div_guard` -> `abort()` with the
+/// an EXPLICIT, PORTABLE guard (`chelis_int_checked_divisor` -> `abort()` with the
 /// clean diagnostic), not by relying on a hardware fault. The divisor is
 /// computed at RUNTIME (`sub(y, z)`), so the compiler cannot constant-fold it
 /// to a literal `0` and elide the division. This is the regression that
@@ -469,7 +467,7 @@ out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_
     // Emit-shape: the integer divisor must be wrapped in the portable guard.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_int_div_guard("),
+        c_source.contains("chelis_int_checked_divisor("),
         "integer trunc_div must emit the portable zero-divisor guard (#387); \
          emitted C=\n{c_source}",
     );
@@ -492,7 +490,7 @@ out = d(cast(to_tensor([7, 8]), int64), cast(to_tensor([3, 5]), int64), cast(to_
     // than the old SIGFPE silent exit).
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        stderr.contains(INT_DIV_ZERO_DIAGNOSTIC),
+        stderr.contains(EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC),
         "C backend trap must emit the canonical diagnostic on stderr (#387); \
          stderr={stderr:?}",
     );
@@ -517,7 +515,7 @@ out = d(cast(7, int64), cast(5, int64))\n";
     let kernel_c = build.path().join("scalardivtrap.c");
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_int_div_guard("),
+        c_source.contains("chelis_int_checked_divisor("),
         "scalar integer trunc_div must emit the portable guard (#387); emitted C=\n{c_source}",
     );
 
@@ -534,7 +532,7 @@ out = d(cast(7, int64), cast(5, int64))\n";
         String::from_utf8_lossy(&run.stdout),
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains(INT_DIV_ZERO_DIAGNOSTIC),
+        String::from_utf8_lossy(&run.stderr).contains(EVAL_TRUNC_DIV_ZERO_DIAGNOSTIC),
         "scalar trap must emit the canonical diagnostic; stderr={:?}",
         String::from_utf8_lossy(&run.stderr),
     );
@@ -563,7 +561,7 @@ out = d(cast(7, int64), cast(5, int64))\n";
         String::from_utf8_lossy(&run.stdout),
     );
     assert!(
-        String::from_utf8_lossy(&run.stderr).contains(INT_DIV_ZERO_DIAGNOSTIC),
+        String::from_utf8_lossy(&run.stderr).contains(EVAL_MOD_ZERO_DIAGNOSTIC),
         "scalar mod trap must emit the canonical diagnostic; stderr={:?}",
         String::from_utf8_lossy(&run.stderr),
     );
@@ -581,7 +579,7 @@ out = d(1.0, 5.0)\n";
     let kernel_c = build.path().join("scalarfdiv.c");
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        !c_source.contains("chelis_int_div_guard("),
+        !c_source.contains("chelis_int_checked_divisor("),
         "float div must NOT emit the integer trap guard (#387); emitted C=\n{c_source}",
     );
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);

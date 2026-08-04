@@ -1177,7 +1177,8 @@ fn round_shift_even_u64(value: u64, shift: u32) -> u64 {
 /// The source significand remains intact until the one target-width
 /// round-to-nearest-ties-to-even step. In particular, this must not delegate
 /// through f32 or a converter which truncates the low binary64 significand
-/// bits before rounding ([04-NUM-14]).
+/// bits before rounding: doing so loses which side of an f16/bf16 midpoint the
+/// original f64 occupied ([04-NUM-14]).
 fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: i32) -> u16 {
     let source = value.to_bits();
     let sign = ((source >> 48) & 0x8000) as u16;
@@ -1190,14 +1191,13 @@ fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: 
         if source_mantissa == 0 {
             return sign | target_exponent_bits;
         }
-        // Preserve the NaN class with one canonical quiet payload. The text
-        // contract carries no NaN payload, and this avoids target-dependent
-        // signaling-NaN behavior at the conversion boundary.
+        // Every NaN remains a NaN. A canonical quiet payload also avoids
+        // architecture-dependent signaling-NaN behavior at this boundary.
         return sign | target_exponent_bits | (1_u16 << (mantissa_bits - 1));
     }
     if source_exponent == 0 {
         // Every finite binary64 subnormal is below half of the least f16 or
-        // bf16 subnormal. This also preserves the sign of zero.
+        // bf16 subnormal. This includes signed zero and preserves its sign.
         return sign;
     }
 
@@ -1228,6 +1228,37 @@ fn f64_to_ieee16_bits(value: f64, exponent_bits: u32, mantissa_bits: u32, bias: 
     sign | rounded as u16
 }
 
+fn i64_to_ieee16_bits(value: i64, exponent_bits: u32, mantissa_bits: u32, bias: i32) -> u16 {
+    let sign = if value.is_negative() { 0x8000 } else { 0 };
+    let magnitude = value.unsigned_abs();
+    if magnitude == 0 {
+        return sign;
+    }
+
+    let mut exponent = 63 - magnitude.leading_zeros();
+    let target_exponent_max = (1_u32 << exponent_bits) - 1;
+    let maximum_exponent = target_exponent_max as i32 - 1 - bias;
+    if exponent as i32 > maximum_exponent {
+        return sign | ((target_exponent_max << mantissa_bits) as u16);
+    }
+
+    let mut rounded = if exponent > mantissa_bits {
+        round_shift_even_u64(magnitude, exponent - mantissa_bits)
+    } else {
+        magnitude << (mantissa_bits - exponent)
+    };
+    if rounded == (1_u64 << (mantissa_bits + 1)) {
+        rounded >>= 1;
+        exponent += 1;
+        if exponent as i32 > maximum_exponent {
+            return sign | ((target_exponent_max << mantissa_bits) as u16);
+        }
+    }
+    let target_exponent = ((exponent as i32 + bias) as u16) << mantissa_bits;
+    let target_mantissa = (rounded & ((1_u64 << mantissa_bits) - 1)) as u16;
+    sign | target_exponent | target_mantissa
+}
+
 /// Canonical one-step binary64-to-f16 conversion ([04-NUM-14]).
 pub fn f16_from_f64_rne(value: f64) -> half::f16 {
     half::f16::from_bits(f64_to_ieee16_bits(value, 5, 10, 15))
@@ -1238,37 +1269,17 @@ pub fn bf16_from_f64_rne(value: f64) -> half::bf16 {
     half::bf16::from_bits(f64_to_ieee16_bits(value, 8, 7, 127))
 }
 
+fn f16_from_i64_rne(value: i64) -> half::f16 {
+    half::f16::from_bits(i64_to_ieee16_bits(value, 5, 10, 15))
+}
+
 /// Round an exact i64 directly to bfloat16, once, with target-width
 /// round-to-nearest-ties-to-even. Converting through f64 first is not
 /// equivalent above 2^53: it can erase which side of a bf16 midpoint the
 /// exact integer occupies and then manufacture a tie (chelis#729 Phase 1,
 /// [04-NUM-14]).
 fn bf16_from_i64_rne(value: i64) -> half::bf16 {
-    if value == 0 {
-        return half::bf16::from_f64(0.0);
-    }
-
-    let negative = value.is_negative();
-    let magnitude = value.unsigned_abs();
-    let top_bit = 63 - magnitude.leading_zeros();
-    let rounded_magnitude = if top_bit <= 7 {
-        magnitude
-    } else {
-        let shift = top_bit - 7;
-        let mut significand = magnitude >> shift;
-        let remainder_mask = (1_u64 << shift) - 1;
-        let remainder = magnitude & remainder_mask;
-        let halfway = 1_u64 << (shift - 1);
-        if remainder > halfway || (remainder == halfway && significand & 1 == 1) {
-            significand += 1;
-        }
-        significand << shift
-    };
-
-    // `rounded_magnitude` has at most eight significant bits, so this u64
-    // to f64 conversion is exact even when the rounded result is 2^63.
-    let exact_image = rounded_magnitude as f64;
-    half::bf16::from_f64(if negative { -exact_image } else { exact_image })
+    half::bf16::from_bits(i64_to_ieee16_bits(value, 8, 7, 127))
 }
 
 fn require_same_storage_shape(
@@ -2301,7 +2312,7 @@ pub fn finalize_scalar(
         }),
         Prim::F16 => Bits::F16(match raw {
             RawScalar::Float(x) => f16_from_f64_rne(x),
-            RawScalar::Int(i) => half::f16::from_f64(i as f64),
+            RawScalar::Int(i) => f16_from_i64_rne(i),
         }),
         Prim::Bf16 => Bits::Bf16(match raw {
             RawScalar::Float(x) => bf16_from_f64_rne(x),
@@ -2500,7 +2511,7 @@ impl<'de> serde::Deserialize<'de> for ScalarValue {
             ScalarWire::F64(v) => ScalarValue { bits: Bits::F64(v) },
             ScalarWire::F32(v) => ScalarValue { bits: Bits::F32(v) },
             ScalarWire::F16(image) => {
-                let half = half::f16::from_f64(image);
+                let half = f16_from_f64_rne(image);
                 if f64::from(half) != image && !image.is_nan() {
                     return Err(D::Error::custom(format!(
                         "f16 wire image {image} is not an exact f16 value; \
@@ -2513,7 +2524,7 @@ impl<'de> serde::Deserialize<'de> for ScalarValue {
                 }
             }
             ScalarWire::Bf16(image) => {
-                let half = half::bf16::from_f64(image);
+                let half = bf16_from_f64_rne(image);
                 if f64::from(half) != image && !image.is_nan() {
                     return Err(D::Error::custom(format!(
                         "bf16 wire image {image} is not an exact bf16 value; \
@@ -2581,7 +2592,7 @@ impl<'de> serde::Deserialize<'de> for TensorStorage {
             StorageWire::F16(images) => {
                 let mut out = Vec::with_capacity(images.len());
                 for image in images {
-                    let half = half::f16::from_f64(image);
+                    let half = f16_from_f64_rne(image);
                     if f64::from(half) != image && !image.is_nan() {
                         return Err(D::Error::custom(format!(
                             "f16 wire image {image} is not an exact f16 value; \
@@ -2596,7 +2607,7 @@ impl<'de> serde::Deserialize<'de> for TensorStorage {
             StorageWire::Bf16(images) => {
                 let mut out = Vec::with_capacity(images.len());
                 for image in images {
-                    let half = half::bf16::from_f64(image);
+                    let half = bf16_from_f64_rne(image);
                     if f64::from(half) != image && !image.is_nan() {
                         return Err(D::Error::custom(format!(
                             "bf16 wire image {image} is not an exact bf16 value; \
@@ -2637,10 +2648,7 @@ pub fn finalize_tensor(
         }),
         Prim::F16 => Buf::F16(match raw {
             RawTensor::Float(v) => v.into_iter().map(f16_from_f64_rne).collect(),
-            RawTensor::Int(v) => v
-                .into_iter()
-                .map(|i| half::f16::from_f64(i as f64))
-                .collect(),
+            RawTensor::Int(v) => v.into_iter().map(f16_from_i64_rne).collect(),
         }),
         Prim::Bf16 => Buf::Bf16(match raw {
             RawTensor::Float(v) => v.into_iter().map(bf16_from_f64_rne).collect(),
@@ -3057,7 +3065,7 @@ mod tests {
         // 2051 ties between 2050 and 2052; even mantissa wins (2052).
         assert_eq!(fin(Prim::F16, 2051.0).unwrap().as_f64_lossy(), 2052.0);
         // The f16(0.1)^2 product cell from the scalar lock.
-        let wide = f64::from(half::f16::from_f64(0.1)) * f64::from(half::f16::from_f64(0.1));
+        let wide = f64::from(f16_from_f64_rne(0.1)) * f64::from(f16_from_f64_rne(0.1));
         assert_eq!(
             fin(Prim::F16, wide).unwrap().as_f64_lossy(),
             0.0099945068359375
@@ -3072,6 +3080,24 @@ mod tests {
         assert_eq!(
             f16_from_f64_rne(f64::from(JUST_BELOW_MIDPOINT as f32)).to_bits(),
             0x7a74,
+            "an explicit f32 source first lands on the midpoint, then ties upward"
+        );
+    }
+
+    #[test]
+    fn f64_to_f16_rounds_once_without_an_intermediate_f32() {
+        const JUST_BELOW_MIDPOINT: f64 = 52847.99970178839;
+
+        assert_eq!(
+            fin(Prim::F16, JUST_BELOW_MIDPOINT).unwrap().as_f64_lossy(),
+            52832.0,
+            "the original f64 lies below the f16 midpoint"
+        );
+        assert_eq!(
+            fin(Prim::F16, f64::from(JUST_BELOW_MIDPOINT as f32))
+                .unwrap()
+                .as_f64_lossy(),
+            52864.0,
             "an explicit f32 source first lands on the midpoint, then ties upward"
         );
     }
@@ -3119,7 +3145,7 @@ mod tests {
         // even rounds down to 256 (the narrow_dtype_matrix cell).
         assert_eq!(fin(Prim::Bf16, 257.0).unwrap().as_f64_lossy(), 256.0);
         assert_eq!(fin(Prim::Bf16, 0.75).unwrap().as_f64_lossy(), 0.75);
-        let wide = f64::from(half::bf16::from_f64(0.1)) * f64::from(half::bf16::from_f64(0.1));
+        let wide = f64::from(bf16_from_f64_rne(0.1)) * f64::from(bf16_from_f64_rne(0.1));
         assert_eq!(
             fin(Prim::Bf16, wide).unwrap().as_f64_lossy(),
             0.010009765625
@@ -3134,6 +3160,24 @@ mod tests {
         assert_eq!(
             bf16_from_f64_rne(f64::from(JUST_ABOVE_MIDPOINT as f32)).to_bits(),
             0x3f80,
+            "an explicit f32 source first lands on the midpoint, then ties downward"
+        );
+    }
+
+    #[test]
+    fn f64_to_bf16_rounds_once_without_discarding_source_bits() {
+        const JUST_ABOVE_MIDPOINT: f64 = 1.0039062500000002;
+
+        assert_eq!(
+            fin(Prim::Bf16, JUST_ABOVE_MIDPOINT).unwrap().as_f64_lossy(),
+            1.0078125,
+            "the low f64 mantissa bits put the source above the bf16 midpoint"
+        );
+        assert_eq!(
+            fin(Prim::Bf16, f64::from(JUST_ABOVE_MIDPOINT as f32))
+                .unwrap()
+                .as_f64_lossy(),
+            1.0,
             "an explicit f32 source first lands on the midpoint, then ties downward"
         );
     }

@@ -1,22 +1,20 @@
-//! chelis#718 - integer width semantics are INVERTED between lanes and
-//! surfaces. What happens when an int8/int16/int32 result exceeds its width
-//! depends on both which lane runs it and whether the value is a scalar or
-//! a tensor:
+//! chelis#718 regression matrix. Before #729 Phase 3, integer width semantics
+//! were inverted between lanes and surfaces:
 //!
 //! | surface  | `chelis eval`        | compiled C            |
 //! |----------|----------------------|-----------------------|
 //! | scalar   | wraps at width (-56) | escapes width (200)   |
 //! | tensor   | escapes width (200.0)| wraps at width (-56)  |
 //!
-//! Each lane is width-correct exactly where the other is width-less, so no
-//! overflowing narrow-int program agrees across lanes. This also corrects a
-//! claim in chelis#695 ("the C backend currently wraps natively"): true only
-//! for tensors; the scalar C lane computes at int64 width and returns values
+//! Each lane was width-correct exactly where the other was width-less, so no
+//! overflowing narrow-int program agreed across lanes. This also corrects a
+//! historical claim in chelis#695 ("the C backend currently wraps natively"):
+//! it was true only for tensors; the scalar C lane computed at int64 width and returned values
 //! that do not exist in the declared type (`neg(-128i8) = 128`).
 //!
 //! The decided contract (chelis#680/#695): overflow TRAPS with a branded
-//! diagnostic, at every width, in both lanes. The `#[ignore]`d tests assert
-//! that contract per cell so the fix cannot land on one surface only.
+//! diagnostic, at every width, in both lanes. The tests assert that contract
+//! per cell so the fix cannot land on one surface only.
 //! precision_matrix.rs already carries the eval-scalar trap rows; this file
 //! adds the other three cells plus in-range controls.
 
@@ -115,13 +113,10 @@ const TENSOR_I8_OVERFLOW: &str = "module M.Main\n\
 // precision_matrix.rs). Each asserts the decided trap contract.
 // ===========================================================================
 
-/// Observed today: the compiled binary prints `200` - a value that does not
+/// Before Phase 3 the compiled binary printed `200` - a value that does not
 /// exist in int8. No wrap, no trap; the width is simply absent (the scalar
 /// travels as `int64_t`, chelis#714's mechanism).
 #[test]
-#[ignore = "chelis#718: compiled C scalar int8 add(100, 100) prints 200 (no width); eval \
-            wraps to -56; the contract says both must trap. Run with \
-            `cargo test -p chelis-cli --test int_width_lane_matrix -- --ignored`."]
 fn c_scalar_int8_add_overflow_traps() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -129,8 +124,8 @@ fn c_scalar_int8_add_overflow_traps() {
     let (line, stderr, ok) = c_lane(SCALAR_I8_OVERFLOW, "c_i8_scalar_ovf").expect("C lane");
     if ok {
         // chelis#729 Phase 0: if the lane produced a value instead of
-        // trapping, that value must at least be a member of int8 (today
-        // it prints 200, which is the mechanical detection of #718).
+        // trapping, that value must at least be a member of int8 (the
+        // historical value 200 is the mechanical detection of #718).
         common::assert_elements_in_domain("int8", &line, "c_i8_scalar_ovf");
     }
     assert!(
@@ -140,13 +135,10 @@ fn c_scalar_int8_add_overflow_traps() {
     );
 }
 
-/// Observed today: `128` from the compiled binary - not an int8 value.
+/// Before Phase 3 this produced `128` from the compiled binary - not an int8 value.
 /// (eval wraps to -128, which the contract also forbids, but at least stays
 /// in range; see precision_matrix.rs for the eval rows.)
 #[test]
-#[ignore = "chelis#718: compiled C neg(cast(-128, int8)) prints 128, not an int8 value; \
-            the contract says overflow must trap. Run with \
-            `cargo test -p chelis-cli --test int_width_lane_matrix -- --ignored`."]
 fn c_scalar_int8_neg_min_traps() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -165,7 +157,7 @@ fn c_scalar_int8_neg_min_traps() {
     );
 }
 
-/// Observed today: eval prints `data=[200.0, 3.0]` - no width applied
+/// Before the typed-storage repair eval printed `data=[200.0, 3.0]` - no width applied
 /// (f64 storage, chelis#684), and float-formatted integers to boot.
 #[test]
 fn eval_tensor_int8_add_overflow_traps() {
@@ -179,12 +171,9 @@ fn eval_tensor_int8_add_overflow_traps() {
     }
 }
 
-/// Observed today: the compiled binary prints `data=[-56, 3]` - a silent
+/// Before Phase 3 the compiled binary printed `data=[-56, 3]` - a silent
 /// two's-complement wrap in genuine int8_t buffers.
 #[test]
-#[ignore = "chelis#718: compiled C int8 TENSOR add(100, 100) silently wraps to -56; the \
-            contract says overflow must trap, and eval disagrees (200.0) besides. Run with \
-            `cargo test -p chelis-cli --test int_width_lane_matrix -- --ignored`."]
 fn c_tensor_int8_add_overflow_traps() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -198,16 +187,12 @@ fn c_tensor_int8_add_overflow_traps() {
 
 /// The remaining scalar overflow cells from the probe battery
 /// (`docs/investigations/probes/bat_narrow.py`), one row per width and op
-/// shape. Observed today in compiled C: int8 mul prints 256, int16 add
-/// prints 60000, int32 add prints 4000000000 - values that do not exist
+/// shape. Before Phase 3, compiled C printed int8 mul as 256, int16 add as
+/// 60000, and int32 add as 4000000000 - values that do not exist
 /// in the declared types (the int64_t widening, chelis#714's mechanism).
 /// eval wraps to 0 / -5536 / -294967296 respectively. The contract says
 /// every cell traps.
 #[test]
-#[ignore = "chelis#718: compiled C narrow-int scalar overflow escapes the width at every \
-            width (int8 mul 256, int16 add 60000, int32 add 4000000000); eval wraps; the \
-            contract says both trap. Run with \
-            `cargo test -p chelis-cli --test int_width_lane_matrix -- --ignored`."]
 fn c_scalar_overflow_traps_at_every_width() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");

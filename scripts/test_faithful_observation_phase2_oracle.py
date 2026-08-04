@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 
 import unittest
+from unittest import mock
 
 import faithful_observation_phase2_oracle as oracle
 
 
 HARNESS_FIXTURE = """
 #[test]
-#[ignore = "chelis#865 ([#729]/[#686] capacity family): the untagged f64 box."]
 fn c_boxed_f32_renders_at_own_width() {
 }
 
 #[test]
-#[ignore = "chelis#1110 (C emitter value layer): the suffixed literal's lexical f64."]
 fn c_suffixed_f32_literal_widens_from_its_stored_width() {
 }
 
@@ -20,8 +19,34 @@ fn c_suffixed_f32_literal_widens_from_its_stored_width() {
 fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
 }
 
-const C_LANE_EXCLUDED: &[&str] = &["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"];
 """
+
+PROBE_LEDGER = (
+    (
+        "TEST_EXCLUDED",
+        "chelis#test",
+        (("test_exclusion_probe", ("hidden",)),),
+        (("hidden", "f64", "cast(1.0, f64)", "1.0"),),
+    ),
+)
+
+PROBE_FIXTURE = """
+const TEST_EXCLUDED: &[&str] = &["hidden"];
+
+#[test]
+fn test_exclusion_probe() {
+    for _label in TEST_EXCLUDED {}
+    let _shrink_protocol = "DECLARED_EXCLUSIONS";
+    println!("exclusion probe TEST_EXCLUDED visited: hidden");
+}
+"""
+
+FIXTURE_CELL = oracle.RedCell(
+    name="c_boxed_f32_renders_at_own_width",
+    issue="chelis#865",
+    fragment="boxed f32 elements must render shortest at their own width",
+    owner="chelis#729/#686 capacity family",
+)
 
 # Parser-only sample for `ignored_cells`. It is deliberately NOT checked
 # against the shipped ledger: its job is to keep both attribute spellings
@@ -94,36 +119,40 @@ class LedgerTests(unittest.TestCase):
         )
 
     def test_a_stale_ledger_row_is_a_violation(self) -> None:
-        source = HARNESS_FIXTURE.replace(
-            '#[ignore = "chelis#865 ([#729]/[#686] capacity family): the untagged f64 box."]\n',
-            "",
-        )
-        violations = oracle.ledger_violations(source, oracle.KNOWN_RED_CELLS)
+        violations = oracle.ledger_violations(HARNESS_FIXTURE, (FIXTURE_CELL,))
         self.assertTrue(
             any("c_boxed_f32_renders_at_own_width" in v for v in violations), violations
         )
 
     def test_an_ignore_that_drops_its_issue_citation_is_a_violation(self) -> None:
-        source = HARNESS_FIXTURE.replace("chelis#865", "some other reason")
-        violations = oracle.ledger_violations(source, oracle.KNOWN_RED_CELLS)
+        source = HARNESS_FIXTURE.replace(
+            "#[test]\nfn c_boxed_f32_renders_at_own_width()",
+            '#[test]\n#[ignore = "some other reason"]\nfn c_boxed_f32_renders_at_own_width()',
+        )
+        violations = oracle.ledger_violations(source, (FIXTURE_CELL,))
         self.assertTrue(
             any("chelis#865" in violation for violation in violations), violations
         )
 
-    def test_every_ledger_row_names_a_repair_owner_outside_this_plan(self) -> None:
-        for cell in oracle.KNOWN_RED_CELLS:
-            self.assertTrue(cell.owner, cell.name)
-            self.assertIn(
-                "chelis#729",
-                cell.owner,
-                "every known-red cell is a chelis#729-family value/capacity "
-                "repair; rendering is not the fix site",
-            )
+    def test_repaired_boxed_f32_cell_left_the_red_ledger(self) -> None:
+        self.assertEqual(oracle.KNOWN_RED_CELLS, ())
+        self.assertIn(
+            (oracle.HARNESS_SOURCE, "c_boxed_f32_renders_at_own_width", "chelis#865"),
+            oracle.UNIGNORED_ROWS,
+        )
+        self.assertIn(
+            (
+                oracle.HARNESS_SOURCE,
+                "c_suffixed_f32_literal_widens_from_its_stored_width",
+                "chelis#1110",
+            ),
+            oracle.UNIGNORED_ROWS,
+        )
 
 
 class RedRunClassificationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.cell = oracle.KNOWN_RED_CELLS[0]
+        self.cell = FIXTURE_CELL
 
     def test_red_on_the_declared_assertion_meets_the_obligation(self) -> None:
         output = f"running 1 test\n{self.cell.fragment}\ntest result: FAILED"
@@ -159,21 +188,15 @@ class ExclusionTests(unittest.TestCase):
         self.assertEqual(oracle.exclusion_violations(HARNESS_FIXTURE), [])
 
     def test_a_widened_exclusion_list_is_a_violation(self) -> None:
-        source = HARNESS_FIXTURE.replace(
-            '&["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max"]',
-            '&["f64-neg-zero", "f64-max", "f64-audit-e19", "f32-max", "f32-tenth"]',
-        )
+        source = HARNESS_FIXTURE + '\nconst C_LANE_EXCLUDED: &[&str] = &["f32-tenth"];\n'
         violations = oracle.exclusion_violations(source)
         self.assertTrue(
             any("C_LANE_EXCLUDED" in violation for violation in violations), violations
         )
 
-    def test_a_missing_exclusion_const_is_a_violation(self) -> None:
-        source = HARNESS_FIXTURE.replace("const C_LANE_EXCLUDED", "const RENAMED_AWAY")
-        violations = oracle.exclusion_violations(source)
-        self.assertTrue(
-            any("cannot run" in violation for violation in violations), violations
-        )
+    def test_no_exclusion_const_is_required_when_the_ledger_is_empty(self) -> None:
+        self.assertEqual(oracle.DECLARED_EXCLUSIONS, ())
+        self.assertEqual(oracle.exclusion_violations(HARNESS_FIXTURE), [])
 
     def test_an_undeclared_exclusion_const_is_a_violation(self) -> None:
         source = HARNESS_FIXTURE + '\nconst NEW_ROWS_EXCLUDED: &[&str] = &["hidden"];\n'
@@ -587,117 +610,98 @@ class DocCitationParityTests(unittest.TestCase):
 
 
 class ExclusionProbeTests(unittest.TestCase):
-    def _harness(self) -> str:
-        return (oracle.REPO_ROOT / oracle.HARNESS_SOURCE).read_text(encoding="utf-8")
+    def test_the_shipped_empty_ledger_needs_no_probes(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.HARNESS_SOURCE).read_text(encoding="utf-8")
+        self.assertEqual(oracle.DECLARED_EXCLUSIONS, ())
+        self.assertEqual(oracle.exclusion_probe_violations(source), [])
 
-    def test_the_shipped_probes_satisfy_all_legs(self) -> None:
-        self.assertEqual(oracle.exclusion_probe_violations(self._harness()), [])
-
-    def test_every_exclusion_declares_at_least_one_probe(self) -> None:
-        for const_name, _owner, probes, _labels in oracle.DECLARED_EXCLUSIONS:
-            self.assertTrue(probes, f"{const_name} has no re-execution probe")
+    def test_a_declared_probe_satisfies_all_legs(self) -> None:
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            self.assertEqual(oracle.exclusion_probe_violations(PROBE_FIXTURE), [])
 
     def test_a_deleted_probe_is_a_violation(self) -> None:
-        source = self._harness().replace(
-            "fn c_lane_excluded_labels_still_fail_at_ingress(",
-            "fn renamed_probe(",
-        )
-        violations = oracle.exclusion_probe_violations(source)
+        source = PROBE_FIXTURE.replace("fn test_exclusion_probe(", "fn renamed_probe(")
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            violations = oracle.exclusion_probe_violations(source)
         self.assertTrue(
-            any("not defined" in v and "C_LANE_EXCLUDED" in v for v in violations),
+            any("not defined" in v and "TEST_EXCLUDED" in v for v in violations),
             violations,
         )
 
     def test_an_ignored_probe_is_a_disabled_leg_violation(self) -> None:
-        source = self._harness().replace(
-            "#[test]\nfn c_lane_excluded_neg_zero_still_drops_the_sign() {",
-            '#[test]\n#[ignore = "silenced"]\n'
-            "fn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+        source = PROBE_FIXTURE.replace(
+            "#[test]\nfn test_exclusion_probe() {",
+            '#[test]\n#[ignore = "silenced"]\nfn test_exclusion_probe() {',
             1,
         )
-        violations = oracle.exclusion_probe_violations(source)
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            violations = oracle.exclusion_probe_violations(source)
         self.assertTrue(
             any("disabled re-execution leg" in v for v in violations), violations
         )
 
     def test_a_probe_dropping_the_const_reference_is_a_violation(self) -> None:
-        body = oracle.test_fn_body(
-            self._harness(),
-            "c_lane_excluded_labels_still_fail_at_ingress",
-        )
+        body = oracle.test_fn_body(PROBE_FIXTURE, "test_exclusion_probe")
         assert body is not None
-        source = self._harness().replace(
-            body, body.replace("C_LANE_EXCLUDED", "LOCAL_LABELS")
-        )
-        violations = oracle.exclusion_probe_violations(source)
+        source = PROBE_FIXTURE.replace(body, body.replace("TEST_EXCLUDED", "LOCAL_LABELS"))
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            violations = oracle.exclusion_probe_violations(source)
         self.assertTrue(
             any("no longer references the list constant" in v for v in violations),
             violations,
         )
 
     def test_a_probe_dropping_the_shrink_protocol_is_a_violation(self) -> None:
-        body = oracle.test_fn_body(
-            self._harness(), "c_lane_excluded_labels_still_fail_at_ingress"
-        )
+        body = oracle.test_fn_body(PROBE_FIXTURE, "test_exclusion_probe")
         assert body is not None
-        source = self._harness().replace(
-            body, body.replace("DECLARED_EXCLUSIONS", "SOME_LEDGER")
-        )
-        violations = oracle.exclusion_probe_violations(source)
+        source = PROBE_FIXTURE.replace(body, body.replace("DECLARED_EXCLUSIONS", "SOME_LEDGER"))
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            violations = oracle.exclusion_probe_violations(source)
         self.assertTrue(
             any("shrink-protocol" in v for v in violations), violations
         )
 
 
 class ProbeAttributeTests(unittest.TestCase):
-    def _harness(self) -> str:
-        return (oracle.REPO_ROOT / oracle.HARNESS_SOURCE).read_text(encoding="utf-8")
-
-    def test_the_shipped_probes_are_unconditional_tests(self) -> None:
-        self.assertEqual(oracle.probe_attribute_violations(self._harness()), [])
-        for _const, _owner, probes, _rows in oracle.DECLARED_EXCLUSIONS:
-            for probe, _expected in probes:
-                self.assertEqual(
-                    oracle.probe_attributes(self._harness(), probe), ["#[test]"]
-                )
+    def test_a_declared_probe_is_an_unconditional_test(self) -> None:
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            self.assertEqual(oracle.probe_attribute_violations(PROBE_FIXTURE), [])
+        self.assertEqual(
+            oracle.probe_attributes(PROBE_FIXTURE, "test_exclusion_probe"), ["#[test]"]
+        )
 
     def test_a_cfg_attr_ignore_is_a_violation(self) -> None:
-        source = self._harness().replace(
-            "#[test]\nfn c_lane_excluded_neg_zero_still_drops_the_sign() {",
-            "#[test]\n#[cfg_attr(all(), ignore)]\n"
-            "fn c_lane_excluded_neg_zero_still_drops_the_sign() {",
+        source = PROBE_FIXTURE.replace(
+            "#[test]\nfn test_exclusion_probe() {",
+            "#[test]\n#[cfg_attr(all(), ignore)]\nfn test_exclusion_probe() {",
             1,
         )
-        violations = oracle.probe_attribute_violations(source)
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            violations = oracle.probe_attribute_violations(source)
         self.assertTrue(
             any("cfg_attr" in v or "exactly the" in v for v in violations), violations
         )
 
     def test_a_missing_test_attribute_is_a_violation(self) -> None:
-        source = self._harness().replace(
-            "#[test]\nfn c_lane_excluded_labels_still_fail_at_ingress() {",
-            "fn c_lane_excluded_labels_still_fail_at_ingress() {",
-            1,
-        )
-        violations = oracle.probe_attribute_violations(source)
+        source = PROBE_FIXTURE.replace("#[test]\nfn test_exclusion_probe() {", "fn test_exclusion_probe() {")
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            violations = oracle.probe_attribute_violations(source)
         self.assertTrue(
-            any(
-                "c_lane_excluded_labels_still_fail_at_ingress" in v
-                for v in violations
-            ),
+            any("test_exclusion_probe" in v for v in violations),
             violations,
         )
 
     def test_a_multi_line_attribute_fails_closed(self) -> None:
-        source = self._harness().replace(
-            "#[test]\nfn c_lane_excluded_labels_still_fail_at_ingress() {",
+        source = PROBE_FIXTURE.replace(
+            "#[test]\nfn test_exclusion_probe() {",
             "#[test]\n#[cfg_attr(\n    all(),\n    ignore\n)]\n"
-            "fn c_lane_excluded_labels_still_fail_at_ingress() {",
+            "fn test_exclusion_probe() {",
             1,
         )
-        violations = oracle.probe_attribute_violations(source)
+        with mock.patch.object(oracle, "DECLARED_EXCLUSIONS", PROBE_LEDGER):
+            violations = oracle.probe_attribute_violations(source)
         self.assertTrue(
-            any("c_lane_excluded_labels_still_fail_at_ingress" in v for v in violations),
+            any("test_exclusion_probe" in v for v in violations),
             "an attribute shape the parser cannot vouch for must be a "
             f"violation, never a pass; got {violations}",
         )
@@ -940,24 +944,25 @@ class KnownRedCellRunTests(unittest.TestCase):
     def test_all_cells_red_on_their_fragments_passes(self) -> None:
         def runner(_command, **_kwargs):
             name = _command[-1]
-            cell = next(c for c in oracle.KNOWN_RED_CELLS if c.name == name)
+            cell = FIXTURE_CELL
+            self.assertEqual(cell.name, name)
             return self._Completed(101, f"running 1 test\n{cell.fragment}\nFAILED")
 
-        oracle.run_known_red_cells({}, runner=runner)
+        oracle.run_known_red_cells({}, runner=runner, cells=(FIXTURE_CELL,))
 
     def test_a_gone_green_cell_raises_the_shrink_protocol(self) -> None:
         def runner(_command, **_kwargs):
             return self._Completed(0, "running 1 test\nok")
 
         with self.assertRaisesRegex(oracle.OracleFailure, "Un-ignore"):
-            oracle.run_known_red_cells({}, runner=runner)
+            oracle.run_known_red_cells({}, runner=runner, cells=(FIXTURE_CELL,))
 
     def test_a_wrong_reason_cell_raises_with_the_fragment(self) -> None:
         def runner(_command, **_kwargs):
             return self._Completed(101, "running 1 test\nsome unrelated panic")
 
         with self.assertRaisesRegex(oracle.OracleFailure, "NOT on its declared"):
-            oracle.run_known_red_cells({}, runner=runner)
+            oracle.run_known_red_cells({}, runner=runner, cells=(FIXTURE_CELL,))
 
 
 class RuleManifestTests(unittest.TestCase):

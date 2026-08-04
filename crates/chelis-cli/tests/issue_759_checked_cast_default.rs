@@ -19,10 +19,9 @@
 //! * any -> float: IEEE RNE finalize at the target width; overflow is
 //!   the correctly signed infinity, never a trap ([04-NUM-2]).
 //!
-//! The named lossy/wrapping cast forms remain chelis#759's future
-//! surface. The compiled C lane adopts the checked ladder at chelis#729
-//! Phase 3; its divergence is recorded here as ignored red rows, per
-//! the eval-reference-lane pattern (never silently adjusted).
+//! The named lossy/wrapping cast forms remain chelis#759's future surface.
+//! The compiled C lane adopted the checked ladder in chelis#729 Phase 3;
+//! the former red rows below are unconditional cross-lane regressions.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -323,9 +322,9 @@ fn static_if_with_trapping_cast_condition_traps_at_runtime_not_folds() {
 }
 
 // ===========================================================================
-// Compiled C lane: documented-divergent until chelis#729 Phase 3. These
-// assert the FUTURE checked behavior and stay red/ignored per the
-// eval-reference-lane pattern (dtype_semantics.md section B2.2).
+// Compiled C lane: chelis#729 Phase 3 checked-cast regressions. These retain
+// the original assertions that were red before the compiled lane adopted the
+// same checked ladder as eval (dtype_semantics.md section C3).
 // ===========================================================================
 
 fn c_toolchain_available() -> bool {
@@ -374,11 +373,6 @@ fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), Strin
 }
 
 #[test]
-#[ignore = "chelis#729 Phase 3: the compiled C lane does not implement the checked cast \
-            ladder yet. Measured 2026-07-24: cast(300.0, int8) compiles to a raw C cast \
-            and prints data=[44.0] (wrap, plus the chelis#723 print lie). This row \
-            asserts the future branded trap; the eval lane is the reference. Run with \
-            `cargo test -p chelis-cli --test issue_759_checked_cast_default -- --ignored`."]
 fn c_tensor_float_to_int_out_of_range_traps_overflow() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -394,9 +388,6 @@ fn c_tensor_float_to_int_out_of_range_traps_overflow() {
 }
 
 #[test]
-#[ignore = "chelis#729 Phase 3: compiled fractional float->int still uses a raw C cast; \
-            the checked default must Domain-trap instead. Eval is the reference lane. Run \
-            with `cargo test -p chelis-cli --test issue_759_checked_cast_default -- --ignored`."]
 fn c_tensor_fractional_float_to_int_traps_domain() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");
@@ -413,10 +404,6 @@ fn c_tensor_fractional_float_to_int_traps_domain() {
 }
 
 #[test]
-#[ignore = "chelis#729 Phase 3: compiled int->narrower-int out-of-range still wraps \
-            (measured 2026-07-24: int32 300 -> int8 prints data=[44.0]); the checked \
-            ladder traps. Eval is the reference lane. Run with `cargo test -p \
-            chelis-cli --test issue_759_checked_cast_default -- --ignored`."]
 fn c_tensor_int_narrowing_out_of_range_traps_overflow() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");

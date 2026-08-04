@@ -1684,16 +1684,17 @@ impl CEmitter {
                 self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
             }
             // WS-1: bf16 / f16 Const fill. The literal's exact 16-bit
-            // pattern is computed at codegen time via the `half` crate
+            // pattern is computed at codegen time via the dtype-semantic
+            // one-rounding conversion
             // so the runtime never needs an f64 -> reduced converter
             // call per element; it just stamps the precomputed
             // pattern via `chelis_fill_bf16` / `chelis_fill_f16`.
             Prim::Bf16 => {
-                let bits = half::bf16::from_f64(wide).to_bits();
+                let bits = chelis_types::bf16_from_f64_rne(wide).to_bits();
                 self.line(&format!("chelis_fill_bf16(t{id}, 0x{bits:04X}u);"));
             }
             Prim::F16 => {
-                let bits = half::f16::from_f64(wide).to_bits();
+                let bits = chelis_types::f16_from_f64_rne(wide).to_bits();
                 self.line(&format!("chelis_fill_f16(t{id}, 0x{bits:04X}u);"));
             }
             other => {
@@ -1893,13 +1894,41 @@ impl CEmitter {
         // `chelis_int_div_guard`, which aborts with the same clean diagnostic
         // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
         // is never guarded; `+`/`*`/`fmaxf` never divide.
-        let guard_int_div = op == "/" && ty.precision.is_integer();
-        // Build the divisor sub-expression for each lane, guarded when needed.
-        let guarded = |divisor: String| -> String {
-            if guard_int_div {
-                format!("({et})chelis_int_div_guard((int64_t)({divisor}))")
-            } else {
-                divisor
+        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "*" | "/");
+        let elem_expr = |lhs: String, rhs: String| -> String {
+            if !checked_int {
+                return format!("{lhs} {op} {rhs}");
+            }
+            let bits = Self::integer_width(ty.precision);
+            let op_name = match op {
+                "+" => "add",
+                "*" => "mul",
+                "/" => "trunc_div",
+                _ => unreachable!(),
+            };
+            let overflow = NumericTrap::Overflow {
+                op: op_name,
+                prim: ty.precision,
+            }
+            .to_string();
+            match op {
+                "+" => format!(
+                    "({et})chelis_int_checked_add((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
+                ),
+                "*" => format!(
+                    "({et})chelis_int_checked_mul((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
+                ),
+                "/" => {
+                    let zero = NumericTrap::DivZero {
+                        op: op_name,
+                        prim: ty.precision,
+                    }
+                    .to_string();
+                    format!(
+                        "({lhs} / ({et})chelis_int_checked_divisor((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {zero:?}, {overflow:?}))"
+                    )
+                }
+                _ => unreachable!(),
             }
         };
         self.emit_slot_wrapper(id, ty);
@@ -1918,7 +1947,7 @@ impl CEmitter {
         // An integer-div guard introduces a function call with side effects,
         // which is not safely vectorizable; only the non-guarded ops keep the
         // `simd` clause.
-        if guard_int_div {
+        if checked_int {
             self.line("#pragma omp parallel for");
         } else {
             self.line("#pragma omp parallel for simd");
@@ -1926,8 +1955,8 @@ impl CEmitter {
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "__out_{id}[i] = __in_a_{id}[i] {op} {};",
-            guarded(format!("__in_b_{id}[i]"))
+            "__out_{id}[i] = {};",
+            elem_expr(format!("__in_a_{id}[i]"), format!("__in_b_{id}[i]"))
         ));
         self.indent -= 1;
         self.line("}");
@@ -1948,8 +1977,11 @@ impl CEmitter {
             "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
         ));
         self.line(&format!(
-            "(({et}*)t{id}->data)[i] = (({et}*)t{a}->data)[idx_a] {op} {};",
-            guarded(format!("(({et}*)t{b}->data)[idx_b]"))
+            "(({et}*)t{id}->data)[i] = {};",
+            elem_expr(
+                format!("(({et}*)t{a}->data)[idx_a]"),
+                format!("(({et}*)t{b}->data)[idx_b]")
+            )
         ));
         self.indent -= 1;
         self.line("}");
@@ -2185,6 +2217,14 @@ impl CEmitter {
         } else {
             func
         };
+        let elem_expr = |lhs: String, rhs: String| -> String {
+            if ty.precision.is_integer() {
+                let comparison = if func.contains("max") { ">" } else { "<" };
+                format!("(({lhs}) {comparison} ({rhs}) ? ({lhs}) : ({rhs}))")
+            } else {
+                format!("{f}({lhs}, {rhs})")
+            }
+        };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
@@ -2202,7 +2242,8 @@ impl CEmitter {
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "__out_{id}[i] = {f}(__in_a_{id}[i], __in_b_{id}[i]);"
+            "__out_{id}[i] = {};",
+            elem_expr(format!("__in_a_{id}[i]"), format!("__in_b_{id}[i]"))
         ));
         self.indent -= 1;
         self.line("}");
@@ -2223,7 +2264,11 @@ impl CEmitter {
             "int idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
         ));
         self.line(&format!(
-            "(({et}*)t{id}->data)[i] = {f}((({et}*)t{a}->data)[idx_a], (({et}*)t{b}->data)[idx_b]);"
+            "(({et}*)t{id}->data)[i] = {};",
+            elem_expr(
+                format!("(({et}*)t{a}->data)[idx_a]"),
+                format!("(({et}*)t{b}->data)[idx_b]")
+            )
         ));
         self.indent -= 1;
         self.line("}");
@@ -2324,6 +2369,21 @@ impl CEmitter {
         }
         let a = inputs[0].0;
         let et = Self::elem_type(ty);
+        let elem_expr = |value: String| -> String {
+            if op == "-" && ty.precision.is_integer() {
+                let message = NumericTrap::Overflow {
+                    op: "neg",
+                    prim: ty.precision,
+                }
+                .to_string();
+                format!(
+                    "({et})chelis_int_checked_neg((int64_t)({value}), {}, {message:?})",
+                    Self::integer_width(ty.precision)
+                )
+            } else {
+                format!("{op}{value}")
+            }
+        };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
         self.indent += 1;
@@ -2331,10 +2391,17 @@ impl CEmitter {
         self.line(&format!(
             "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
         ));
-        self.line("#pragma omp parallel for simd");
+        if ty.precision.is_integer() && op == "-" {
+            self.line("#pragma omp parallel for");
+        } else {
+            self.line("#pragma omp parallel for simd");
+        }
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line(&format!("__out_{id}[i] = {op}__in_a_{id}[i];"));
+        self.line(&format!(
+            "__out_{id}[i] = {};",
+            elem_expr(format!("__in_a_{id}[i]"))
+        ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -2351,7 +2418,8 @@ impl CEmitter {
             "int idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
         ));
         self.line(&format!(
-            "(({et}*)t{id}->data)[i] = {op}(({et}*)t{a}->data)[idx];"
+            "(({et}*)t{id}->data)[i] = {};",
+            elem_expr(format!("(({et}*)t{a}->data)[idx]"))
         ));
         self.indent -= 1;
         self.line("}");
@@ -4274,17 +4342,54 @@ impl CEmitter {
         self.line(&format!(
             "{acc_et} __v = ({acc_et})((const {operand_et}*)t{a}->data)[src_idx];"
         ));
-        self.line("switch (__reduce_i & 3) {");
-        self.line("  case 0: acc0 += __v; break;");
-        self.line("  case 1: acc1 += __v; break;");
-        self.line("  case 2: acc2 += __v; break;");
-        self.line("  default: acc3 += __v; break;");
-        self.line("}");
+        if ty.precision.is_integer() {
+            let bits = Self::integer_width(ty.precision);
+            let trap = NumericTrap::Overflow {
+                op: "sum",
+                prim: ty.precision,
+            }
+            .to_string();
+            self.line("switch (__reduce_i & 3) {");
+            for lane in 0..3 {
+                self.line(&format!(
+                    "  case {lane}: acc{lane} = ({acc_et})chelis_int_checked_add((int64_t)acc{lane}, (int64_t)__v, {bits}, {trap:?}); break;"
+                ));
+            }
+            self.line(&format!(
+                "  default: acc3 = ({acc_et})chelis_int_checked_add((int64_t)acc3, (int64_t)__v, {bits}, {trap:?}); break;"
+            ));
+            self.line("}");
+        } else {
+            self.line("switch (__reduce_i & 3) {");
+            self.line("  case 0: acc0 += __v; break;");
+            self.line("  case 1: acc1 += __v; break;");
+            self.line("  case 2: acc2 += __v; break;");
+            self.line("  default: acc3 += __v; break;");
+            self.line("}");
+        }
         self.indent -= 1;
         self.line("}");
-        self.line(&format!(
-            "(({acc_et}*)t{id}->data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
-        ));
+        if ty.precision.is_integer() {
+            let bits = Self::integer_width(ty.precision);
+            let trap = NumericTrap::Overflow {
+                op: "sum",
+                prim: ty.precision,
+            }
+            .to_string();
+            self.line(&format!(
+                "{acc_et} __sum01 = ({acc_et})chelis_int_checked_add((int64_t)acc0, (int64_t)acc1, {bits}, {trap:?});"
+            ));
+            self.line(&format!(
+                "{acc_et} __sum23 = ({acc_et})chelis_int_checked_add((int64_t)acc2, (int64_t)acc3, {bits}, {trap:?});"
+            ));
+            self.line(&format!(
+                "(({acc_et}*)t{id}->data)[outer] = ({acc_et})chelis_int_checked_add((int64_t)__sum01, (int64_t)__sum23, {bits}, {trap:?});"
+            ));
+        } else {
+            self.line(&format!(
+                "(({acc_et}*)t{id}->data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
+            ));
+        }
         self.indent -= 1;
         self.line("}");
         if can_simd_fast_path {
@@ -4379,18 +4484,9 @@ impl CEmitter {
             "for (int outer = 0; outer < t{id}->size; outer++) {{"
         ));
         self.indent += 1;
-        // Stride-4 ILP cascade (issue #163). Integer addition is
-        // associative so output bytes are unchanged for non-overflowing
-        // sums; kept symmetric with the float path for consistency.
-        // CAVEAT: for int sums whose true sum exceeds the accumulator
-        // type's range, the lane-wise pattern wraps modulo 2^N
-        // independently per lane and then re-wraps at the lane combine,
-        // which can differ from a strict left-fold's wrap result on the
-        // same inputs. The runtime host evaluator stores integer tensor
-        // elements in f64 and does not overflow (up to 2^53), so a
-        // backend/evaluator disagreement is possible at and beyond that
-        // boundary. Not observed in practice; chelis programs rarely
-        // sum 2^31+ int32 values into an int32 accumulator.
+        // Stride-4 ILP cascade (issue #163). [04-NUM-12] defines integer
+        // trap occurrence relative to this exact lane order, so every lane
+        // update and each final combine uses the checked accumulator width.
         self.line(&format!(
             "{acc_c_ty} acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;"
         ));
@@ -4428,16 +4524,32 @@ impl CEmitter {
         self.line(&format!(
             "{acc_c_ty} __v = ({acc_c_ty})(({src_c_ty}*)t{a}->data)[src_idx];"
         ));
+        let bits = Self::integer_width(ty.precision);
+        let trap = NumericTrap::Overflow {
+            op: "sum",
+            prim: ty.precision,
+        }
+        .to_string();
         self.line("switch (__reduce_i & 3) {");
-        self.line("  case 0: acc0 += __v; break;");
-        self.line("  case 1: acc1 += __v; break;");
-        self.line("  case 2: acc2 += __v; break;");
-        self.line("  default: acc3 += __v; break;");
+        for lane in 0..3 {
+            self.line(&format!(
+                "  case {lane}: acc{lane} = ({acc_c_ty})chelis_int_checked_add((int64_t)acc{lane}, (int64_t)__v, {bits}, {trap:?}); break;"
+            ));
+        }
+        self.line(&format!(
+            "  default: acc3 = ({acc_c_ty})chelis_int_checked_add((int64_t)acc3, (int64_t)__v, {bits}, {trap:?}); break;"
+        ));
         self.line("}");
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "(({acc_c_ty}*)t{id}->data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
+            "{acc_c_ty} __sum01 = ({acc_c_ty})chelis_int_checked_add((int64_t)acc0, (int64_t)acc1, {bits}, {trap:?});"
+        ));
+        self.line(&format!(
+            "{acc_c_ty} __sum23 = ({acc_c_ty})chelis_int_checked_add((int64_t)acc2, (int64_t)acc3, {bits}, {trap:?});"
+        ));
+        self.line(&format!(
+            "(({acc_c_ty}*)t{id}->data)[outer] = ({acc_c_ty})chelis_int_checked_add((int64_t)__sum01, (int64_t)__sum23, {bits}, {trap:?});"
         ));
         self.indent -= 1;
         self.line("}");
@@ -6086,7 +6198,37 @@ impl CEmitter {
         let dst_elem = format!("(({dst_et}*)t{id}->data)[i]");
         let src_reduced = Self::is_reduced_float_prec(src_prec);
         let dst_reduced = Self::is_reduced_float_prec(dst_prec);
-        let assignment = if src_reduced && dst_reduced {
+        let assignment = if src_prec.is_integer() && dst_prec.is_integer() {
+            let overflow = NumericTrap::Overflow {
+                op: "cast",
+                prim: dst_prec,
+            }
+            .to_string();
+            format!(
+                "{dst_elem} = ({dst_et})chelis_checked_int_cast((int64_t)({src_elem}), {}, {overflow:?});",
+                Self::integer_width(dst_prec)
+            )
+        } else if src_prec.is_float() && dst_prec.is_integer() {
+            let source_value = if src_reduced {
+                format!("{}({src_elem})", Self::reduced_to_f32_fn(src_prec))
+            } else {
+                src_elem.clone()
+            };
+            let domain = NumericTrap::Domain {
+                op: "cast",
+                prim: dst_prec,
+            }
+            .to_string();
+            let overflow = NumericTrap::Overflow {
+                op: "cast",
+                prim: dst_prec,
+            }
+            .to_string();
+            format!(
+                "{dst_elem} = ({dst_et})chelis_checked_float_to_int((double)({source_value}), {}, {domain:?}, {overflow:?});",
+                Self::integer_width(dst_prec)
+            )
+        } else if src_reduced && dst_reduced {
             // bf16 <-> f16: chain `src -> f32 -> dst` so each leg uses
             // the spec-correct rounding helpers; the intermediate `f32`
             // is exact for both bf16 and f16 (both fit in the f32

@@ -156,22 +156,7 @@ class RedCell:
 # is a VALUE or CAPACITY defect upstream of the rendering contract; each
 # leaves this table by being repaired upstream and un-ignored, never by
 # being weakened here.
-KNOWN_RED_CELLS: tuple[RedCell, ...] = (
-    RedCell(
-        name="c_boxed_f32_renders_at_own_width",
-        issue="chelis#865",
-        fragment="boxed f32 elements must render shortest at their own width",
-        owner="chelis#729/#686 capacity family (the untagged f64 value box)",
-    ),
-    RedCell(
-        name="c_suffixed_f32_literal_widens_from_its_stored_width",
-        issue="chelis#1110",
-        fragment="the compiled lane must widen the suffixed literal's stored f32 value",
-        owner="chelis#729 Phase 3 C-lane value layer (chelis#1110: the emitter "
-        "bakes a suffixed literal's lexical f64 decimal; dtype_semantics.md "
-        "keeps the compiled lane documented-divergent until Phase 3)",
-    ),
-)
+KNOWN_RED_CELLS: tuple[RedCell, ...] = ()
 
 # Phase 2 oracle bullet 1: red-to-green only by un-ignoring (§B2.3).
 UNIGNORED_ROWS: tuple[tuple[Path, str, str], ...] = (
@@ -184,6 +169,12 @@ UNIGNORED_ROWS: tuple[tuple[Path, str, str], ...] = (
     (REDUCTION_MATRIX_SOURCE, "c_int64_tensor_print_is_exact_above_2p53", "chelis#723"),
     (NARROW_MATRIX_SOURCE, "c_print_of_f16_tensor_prints_f16_values", "chelis#716"),
     (NARROW_MATRIX_SOURCE, "c_to_list_of_f16_tensor_works", "chelis#716"),
+    (HARNESS_SOURCE, "c_boxed_f32_renders_at_own_width", "chelis#865"),
+    (
+        HARNESS_SOURCE,
+        "c_suffixed_f32_literal_widens_from_its_stored_width",
+        "chelis#1110",
+    ),
 )
 
 # Phase 2 oracle bullet 3: retired per their own in-file instructions,
@@ -193,10 +184,12 @@ RETIRED_LOCKS: tuple[str, ...] = (
     "c_f16_tensor_print_aborts_with_dtype_id_instead_of_misreading",
 )
 
-# Declared corpus exclusions (obligation 6, §B2.9 three-legged). Both are
-# documented at their definitions with the owning issue. Leg 1 is the
-# equality check against the row labels (either direction). Legs 2-3 come
-# from TWO mechanisms with different trust models (PR #962 round-2 M1):
+# Declared corpus exclusions (obligation 6, §B2.9 three-legged). Phase 3
+# retired the final chelis#751 rows after exact-bit C literal emission made
+# the entire frozen table constructible. This stays typed and empty so any
+# future exclusion must still opt into both mechanisms below in one change.
+# Leg 1 is the equality check against row labels. Legs 2-3 come from TWO
+# mechanisms with different trust models (PR #962 round-2 M1):
 #
 # - the `probes`: NON-ignored harness tests, each with its declared
 #   ordered receipt sequence. Receipts are probe-authored text - they
@@ -221,38 +214,7 @@ DECLARED_EXCLUSIONS: tuple[
         tuple[tuple[str, str, str, str], ...],
     ],
     ...,
-] = (
-    (
-        "C_LANE_EXCLUDED",
-        "chelis#751 (C constant-emission ingress; rows are unconstructible, not red)",
-        (
-            (
-                "c_lane_excluded_labels_still_fail_at_ingress",
-                ("f64-max", "f64-audit-e19", "f32-max"),
-            ),
-            (
-                "c_lane_excluded_neg_zero_still_drops_the_sign",
-                ("f64-neg-zero",),
-            ),
-        ),
-        (
-            ("f64-neg-zero", "f64", "cast(-0.0, f64)", "-0.0"),
-            (
-                "f64-max",
-                "f64",
-                "cast(1.7976931348623157e308, f64)",
-                "1.7976931348623157e308",
-            ),
-            (
-                "f64-audit-e19",
-                "f64",
-                "cast(9.999999980506448e19, f64)",
-                "9.999999980506448e19",
-            ),
-            ("f32-max", "f32", "3.4028234663852886e38", "3.4028234663852886e38"),
-        ),
-    ),
-)
+] = ()
 
 
 def exclusion_labels(rows: Sequence[tuple[str, str, str, str]]) -> tuple[str, ...]:
@@ -1611,8 +1573,9 @@ def run_structural_scan(sources: dict[Path, str]) -> None:
     print(
         "+ structural scan: un-ignored oracle rows present, interim locks "
         f"retired, {len(KNOWN_RED_CELLS)} known-red cells declared and cited, "
-        f"corpus exclusions unchanged with {probe_count} non-ignored "
-        "re-execution probes bound, the §C2.3 cross-lane corpus floor "
+        f"{len(DECLARED_EXCLUSIONS)} corpus exclusions declared with "
+        f"{probe_count} non-ignored re-execution probes bound, the §C2.3 "
+        "cross-lane corpus floor "
         f"({len(CROSS_LANE_CORPUS_FLOOR)} programs) intact, all "
         f"{len(OBSERVATION_DECODE_TABLE)} observation decode arms on their "
         f"declared pointer views, no zero-emitter public exit, all "
@@ -1643,6 +1606,9 @@ def run_exclusion_probes(env: dict[str, str]) -> None:
 
 
 def run_exclusion_probes_into(violations: list[str], env: dict[str, str]) -> None:
+    if not DECLARED_EXCLUSIONS:
+        consume_findings(violations, classify_probe_outputs, "no-declared-exclusions", ())
+        return
     for const_name, _owner, probes, rows in DECLARED_EXCLUSIONS:
         probe_runs: list[tuple[str, Sequence[str], int, str]] = []
         for probe, expected in probes:
@@ -2002,7 +1968,7 @@ def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) 
         tmp_path = Path(tmp)
 
         entries: list[CExclusionGroundTruth] = []
-        for label, dt, elem, value_text in exclusions["C_LANE_EXCLUDED"]:
+        for label, dt, elem, value_text in exclusions.get("C_LANE_EXCLUDED", ()):
             name = f"gt_{label.replace('-', '_')}"
             program = (
                 "module M.Main\n"
@@ -2038,14 +2004,16 @@ def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) 
         consume_findings(violations, c_exclusion_ground_truth_violations, entries)
 
 
-def run_known_red_cells(env: dict[str, str], runner=subprocess.run) -> None:
+def run_known_red_cells(
+    env: dict[str, str], runner=subprocess.run, cells: tuple[RedCell, ...] = KNOWN_RED_CELLS
+) -> None:
     """Re-run each known-red cell; `runner` is injectable so the unit
     suite can exercise this leg's classification and failure paths
     without cargo (round-4 F3: the gone-green branch shipped a
     `NameError` because nothing executed it)."""
 
     with verdict_sink("known-red ledger failed") as violations:
-        for cell in KNOWN_RED_CELLS:
+        for cell in cells:
             command = (
                 "cargo",
                 "test",

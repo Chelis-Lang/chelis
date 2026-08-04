@@ -31,6 +31,12 @@ fn supported_concrete_types_map_to_exact_c_host_abis() {
         .expect("f32 has a C-host representation");
     assert_eq!(f32_abi.c_type_name(), Some("float"));
 
+    for precision in [Prim::F16, Prim::Bf16] {
+        let abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(precision))
+            .expect("reduced floats have exact uint16 C-host storage in Phase 3");
+        assert_eq!(abi.c_type_name(), Some("uint16_t"));
+    }
+
     let i32_abi = HostAbiType::try_from_concrete(&ConcreteHostType::Scalar(Prim::Int32))
         .expect("int32 has a C-host representation");
     assert_eq!(i32_abi.c_type_name(), Some("int32_t"));
@@ -43,68 +49,32 @@ fn supported_concrete_types_map_to_exact_c_host_abis() {
     assert_eq!(tensor_abi.c_type_name(), Some("chelis_tensor*"));
 }
 
+/// Once Phase 3 supplies exact scalar storage, every container recursively
+/// preserves the same reduced-float ABI; no boxed-only exception remains.
 #[test]
-fn unsupported_scalar_abis_return_the_shared_typed_diagnostic() {
-    for precision in [Prim::F16, Prim::Bf16] {
-        let logical = ConcreteHostType::Scalar(precision);
-        let err = HostAbiType::try_from_concrete(&logical)
-            .expect_err("this scalar C-host representation is unimplemented");
-        assert_eq!(
-            err.what,
-            UnsupportedKind::Dtype(precision.name().to_string())
-        );
-        assert_eq!(err.stage, Stage::Codegen("c"));
-        assert!(err.to_string().starts_with("unsupported: "));
-    }
-}
-
-/// A pointer container must not ERASE an unsupported element ABI. Two
-/// conformant outcomes exist since chelis#732 Phase 2:
-///
-/// * the LIST element position carries the NAMED boxed-only state
-///   `ReducedFloatBoxed` (the `to_list` exit: elements live behind
-///   `chelis_value` boxes as exact f64 images, the list is an ordinary
-///   `chelis_list *`, and the element has no standalone C spelling - so a
-///   scalar materialization still rejects, which
-///   `reduced_float_boxed_element_has_no_scalar_c_spelling` locks);
-/// * every other container position keeps the wholesale chelis#714
-///   rejection.
-#[test]
-fn nested_values_cannot_hide_an_unsupported_scalar_abi() {
+fn nested_values_preserve_reduced_float_abi() {
     let list = ConcreteHostType::List(Box::new(ConcreteHostType::Scalar(Prim::F16)));
-    let abi = HostAbiType::try_from_concrete(&list)
-        .expect("to_list of an f16 tensor is printable (chelis#732 Phase 2)");
+    let abi = HostAbiType::try_from_concrete(&list).expect("f16 list has an exact ABI");
     assert_eq!(
         abi,
-        HostAbiType::List(Box::new(HostAbiType::ReducedFloatBoxed(Prim::F16))),
-        "the element state must stay NAMED, never erased to f32/f64/void*"
+        HostAbiType::List(Box::new(HostAbiType::Float16)),
+        "the element state must stay exact, never erased to f32/f64/void*"
     );
 
     let tuple = ConcreteHostType::Tuple(vec![ConcreteHostType::Scalar(Prim::Bf16)]);
-    let err = HostAbiType::try_from_concrete(&tuple)
-        .expect_err("non-list containers keep the wholesale rejection");
-    assert_eq!(err.what, UnsupportedKind::Dtype("bf16".into()));
+    assert_eq!(
+        HostAbiType::try_from_concrete(&tuple).expect("bf16 tuple has an exact ABI"),
+        HostAbiType::Tuple(vec![HostAbiType::BFloat16])
+    );
 
     let dict = ConcreteHostType::Dict(
         Box::new(ConcreteHostType::Scalar(Prim::Int64)),
         Box::new(ConcreteHostType::Scalar(Prim::F16)),
     );
-    let err = HostAbiType::try_from_concrete(&dict)
-        .expect_err("non-list containers keep the wholesale rejection");
-    assert_eq!(err.what, UnsupportedKind::Dtype("f16".into()));
-}
-
-/// The chelis#732 Phase 2 half of the anti-erasure control: the boxed-only
-/// element state has no standalone C spelling, so no declaration, boxing,
-/// or unboxing path can materialize an f16/bf16 C scalar out of a list.
-#[test]
-fn reduced_float_boxed_element_has_no_scalar_c_spelling() {
-    for precision in [Prim::F16, Prim::Bf16] {
-        assert_eq!(
-            HostAbiType::ReducedFloatBoxed(precision).c_type_name(),
-            None
-        );
-    }
+    assert_eq!(
+        HostAbiType::try_from_concrete(&dict).expect("f16 dict value has an exact ABI"),
+        HostAbiType::Dict(Box::new(HostAbiType::Int64), Box::new(HostAbiType::Float16))
+    );
 }
 
 #[test]

@@ -91,7 +91,10 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
 
     def test_host_abi_mutation_refuses_a_drifted_owner_shape(self) -> None:
         source = (oracle.REPO_ROOT / oracle.HOST_ABI_SOURCE).read_text(encoding="utf-8")
-        drifted = source.replace("ReducedFloatBoxed(Prim),", "ReducedFloatBoxed(Prim), /* moved */")
+        drifted = source.replace(
+            "pub(crate) enum HostAbiType {",
+            "pub(crate) enum RenamedHostAbiType {",
+        )
         with self.assertRaisesRegex(oracle.OracleFailure, "HostAbiType owner shape drifted"):
             oracle.mutate_host_abi_type(drifted)
 

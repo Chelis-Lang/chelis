@@ -13,11 +13,9 @@ sleef = []
 chelis-ir = { path = "../chelis-ir" }
 chelis-types = { path = "../chelis-types" }
 chelis-vocab.workspace = true
-# WS-1 (dtype + Metal cleanup cycle): bit-pattern computation for the
-# bf16/f16 Const emit path. Codegen evaluates `half::bf16::from_f64(value)`
-# and `half::f16::from_f64(value)` at compile time so the emitted C
-# code calls `chelis_fill_bf16(t, 0xXXXXu)` with the exact two-byte
-# pattern (no per-element runtime conversion at Const fill time).
+# WS-1/chelis#729 reduced-float reference values in the C-backend regression
+# corpus. Production Const emission uses chelis-types' canonical one-rounding
+# conversion and stamps the resulting exact two-byte pattern.
 half = { workspace = true }
 
 [build-dependencies]

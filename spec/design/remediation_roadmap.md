@@ -109,8 +109,9 @@ have reintroduced the above-2^53 integer loss that exact lane prevents.
 The original assertion covers enclosing-tensor and scalar-widening shapes,
 and the repaired row is locked into the oracle's unconditional must-run
 inventory after leaving the known-red ledger. The same protocol retired the
-[#684] row ([#1078]) and annexed [#1110], the compiled lane's still-open
-half of the same suffixed-literal shape. This is a
+[#684] row ([#1078]) and annexed [#1110], whose compiled-lane half now leaves
+the ledger through [#729] Phase 3: host lowering finalizes a suffixed literal
+at its checker-stamped width before an enclosing widening cast. This is a
 narrow [#717]/[#729]-family value repair and does not claim the atomic
 per-dtype-storage Phase 1 migration. It ran in parallel with [#731] Phases 2-3 (the
 witness token + DeepTag). [#730] Phase 2 is COMPLETE AND
@@ -136,10 +137,11 @@ at) is hard-gated on byte-identical rendering.
 **Wave 3 - the semantics refactor.** [#729] Phases 1-3 in order (the
 module + storage decision; the kernel split + prove; backend adoption),
 validated by everything Waves 0-2 built. Phases 1 and 2 landed through PRs
-#1049 and #1054; PR #1065 is the bounded Phase 3 integer-`abs` seed and the
-remainder of Phase 3 stays open. The required Linux Integration job runs the
-nested `.venv/bin/python scripts/dtype_phase2_oracle.py`, making the Phase
-0-2 acceptance chain continuous. Entry gate: the [#729] §C6
+#1049 and #1054; PR #1065 is the bounded Phase 3 integer-`abs` seed, and this
+revision delivers the remaining Phase 3 C value work. The required Linux
+Integration job runs the nested
+`.venv/bin/python scripts/dtype_phase3_oracle.py`, making the Phase 0-3
+acceptance chain continuous. Entry gate: the [#729] §C6
 covered-family capacity census/tripwire (PR #956) lands BEFORE Phase 1
 entry. This change completes the two typed hard edges: the wire-schema and
 PyO3 binding commands in [#729] §C6 are implemented with reviewed baselines
@@ -555,14 +557,14 @@ a judgement may not.
 | [#683] | `i64::MIN` not writable as a literal | standalone front-end fix; natural moment is [#729] Phase 2 (the exact int lane makes the round-trip testable), but nothing blocks doing it sooner |
 | [#689] | HIP int64 ops emit F32 kernels | two-part: the SILENT half dies at [#730] Phase 1 (`elem_kind` raises); the SUPPORT half is owned by capability-table B-cells `Unimplemented { issue: #689 }` until int64 kernel templates land (see [`capability_table.md`](capability_table.md) seed decisions) |
 | [#690] | HIP has no integer div-by-zero guard | rides the same HIP B-cell work as [#689]; the guard is part of `Implemented` for HIP int division cells |
-| [#691] | C DAG lane emits fmaxf/fabsf for int64 | owned by capability-table seed decision: B-cells `Unimplemented { issue: #691 }` - the substitution becomes a rejection at [#730] Phase 1 / table landing, correct kernels later |
+| [#691] | C DAG lane emits fmaxf/fabsf for int64 | repaired in [#729] Phase 3: integer min/max/abs dispatch through exact checked integer paths; the original rows remain ordinary regressions |
 | [#693] | Metal int64 `abs` zero emission | root cause is [#699] (confirmed by emission); Metal B-cell `Unimplemented { issue: #693 }` until the MSL integer path is wired post-[#699]-fix |
-| [#713] | `pad_sequences` allocates int32 output for int64 input | standalone lowering fix; natural moment is [#729] Phase 3 (C host dtype parity), tracked here until claimed there |
+| [#713] | `pad_sequences` allocates int32 output for int64 input | repaired in [#729] Phase 3 at the typed runtime allocation/copy boundary; the int64 row is in the authoritative Phase 3 oracle |
 | [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3 (now live); dies at [#730] Phase 1, unwritable after Phase 2; rendering via [#732]'s formatter |
-| [#751] | generated C emits uncompilable / sign-losing float constants (f64::MAX as integer literal; -0.0 as `-0`) | ingress, [#729] family; natural moment [#729] Phase 3 (constant emission); [#732]'s harness C_LANE_EXCLUDED cells return when it lands |
+| [#751] | generated C emits uncompilable / sign-losing float constants (f64::MAX as integer literal; -0.0 as `-0`) | repaired in [#729] Phase 3 by exact-bit C literal emission; all four former `C_LANE_EXCLUDED` rows returned to the always-run corpus and the exclusion ledger is empty |
 | [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3. Scope boundary (2026-07): a verdict proves lane agreement for its RECORDED (target triple, C toolchain + flags incl. -ffp-contract, libm identity) only - never cross-platform determinism by itself; the platform axis compares verdicts across CI matrix entries under the same tolerance table. Platform priority (Jeff, 2026-07-20): server-side Linux x86-64 is the primary verdict platform before any wider matrix. The -ffp-contract entry in the provenance flag set now has a measured in-house exemplar: the pre-[#770]-fix `uniform_like` affine was contraction-dependent (PR #779 removed the sensitivity at the source) |
-| [#763] | `chelis lane-check` - the exact-only, Nix-hermetic first slice of [#754] (owner: brittonr) | child of the [#754] row: same one-comparator rule and proof-scope boundary; for its exact-safe corpus, byte-identity holds TODAY (the parity corpus diet, verified 2026-07-17), so [#732] Phase 2 is the corpus-EXPANSION unlock rather than a ship blocker; the initial corpus curates around [#751] (uncompilable float constants) and [#761] (subnormal ingress flush) |
-| [#761] | C lane flushes f32 subnormal literals to zero at ingress (the to_tensor route; found by [#719]'s fix session) | ingress, [#729] family ([04-NUM-2] requires subnormal-preserving narrowing); distinct from [#748] (rendering), whose print collapse masks this value-loss class in print-based checks; natural moment [#729] Phase 3 (C host dtype parity) or standalone earlier; blocks the subnormal locks in [#719]'s and [#732]'s suites until fixed |
+| [#763] | `chelis lane-check` - the exact-only, Nix-hermetic first slice of [#754] (owner: brittonr) | child of the [#754] row: same one-comparator rule and proof-scope boundary; for its exact-safe corpus, byte-identity holds TODAY. [#732] Phase 2 unlocked corpus expansion, and [#729] Phase 3 returned the former [#751]/[#761] curated gaps as ordinary regression rows |
+| [#761] | C lane flushes f32 subnormal literals to zero at ingress (the to_tensor route; found by [#719]'s fix session) | repaired in [#729] Phase 3 by exact f32 bit emission at the C ingress; the direct and cast-mediated rows are unconditional oracle fixtures |
 | [#775] | scalar top-level roots render as a rank-0 tensor in eval but a bare scalar in compiled C | SUPERSEDED 2026-07-29: the disposition below said "deliberately fixed in NEITHER lane now ... until Phase 1 decides". Phase 1 DECIDED it on 2026-07-20 and shipped it as [05-OBS-4], and eval is conformant on execution (0.17.1: `root = run()` renders `root = 0.1`, not the rank-0 wrapper). The divergence as filed no longer reproduces. What survives is the MIRROR image - the C lane's `print` exit still emits `tensor(shape=[], data=[9.0])` where [05-OBS-4] says the rank-0 wrapper is not an exit form - which is [#732] Phase 2's scope. Re-verify and close, or re-scope to the C instance. This row is one of four faces of an unauthored root contract, tracked at [#912] |
 | [#780] | matmul shape checking lost through an unannotated lambda parameter - a Surf-reachable false green (found in [#773]'s red team; pre-existing on both sides of the [#773] fix) | [#731] family: a silent unresolved-var acceptance, the deferral-shaped cousin of silent `Type::Error`; sequenced behind [#731] Phase 1-2 rather than fixed standalone so lambda-param binding/re-check semantics are decided once inside the track |
 | [#783] | annotation writeback degrades an unresolved Var to a rank-0 default and clobbers a concrete annotation (a silent [#703]-class substitution; the enabler of the transient [#773]-fix conv2d ICE, hotfixed same day) | sits between [#731] (the silent-degradation discipline) and [#730] (the substitution shape): the durable invariant is covered-or-rejected on the type-metadata channel - never replace a concrete annotation with a degraded one silently. Not urgent: the known trigger is guarded (all eleven shape-computed overrides), regression-locked by `issue_778_conv2d_annotation_clobber.rs` |

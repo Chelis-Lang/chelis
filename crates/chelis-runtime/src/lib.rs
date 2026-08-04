@@ -1370,6 +1370,25 @@ pub unsafe extern "C" fn chelis_value_from_f64(value: f64) -> chelis_value {
     }
 }
 
+#[inline]
+unsafe fn chelis_value_from_f32(value: f32) -> chelis_value {
+    chelis_value_from_tensor(chelis_scalar_tensor_from_f32(value))
+}
+
+#[inline]
+unsafe fn chelis_value_from_f16_bits(value: u16) -> chelis_value {
+    let tensor = chelis_alloc(0, ptr::null(), CHELIS_F16);
+    *((*tensor).data as *mut u16) = value;
+    chelis_value_from_tensor(tensor)
+}
+
+#[inline]
+unsafe fn chelis_value_from_bf16_bits(value: u16) -> chelis_value {
+    let tensor = chelis_alloc(0, ptr::null(), CHELIS_BF16);
+    *((*tensor).data as *mut u16) = value;
+    chelis_value_from_tensor(tensor)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chelis_value_from_bool(value: bool) -> chelis_value {
     chelis_value {
@@ -1460,13 +1479,18 @@ pub unsafe extern "C" fn chelis_value_as_int64(value: chelis_value) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_value_as_f64(value: chelis_value) -> f64 {
-    if value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
-        return value.as_.i64_ as f64;
+    match value.tag {
+        chelis_value_tag::CHELIS_VALUE_INT64 => value.as_.i64_ as f64,
+        chelis_value_tag::CHELIS_VALUE_FLOAT64 => value.as_.f64_,
+        chelis_value_tag::CHELIS_VALUE_TENSOR => {
+            let tensor = value.as_.tensor;
+            if tensor.is_null() || (*tensor).ndim != 0 {
+                runtime_fail!("expected floating-point scalar value");
+            }
+            read_scalar_as_f64(tensor, tensor_dtype(tensor, "boxed scalar value"))
+        }
+        _ => runtime_fail!("expected floating-point value"),
     }
-    if value.tag != chelis_value_tag::CHELIS_VALUE_FLOAT64 {
-        runtime_fail!("expected float64 value");
-    }
-    value.as_.f64_
 }
 
 #[no_mangle]
@@ -2103,6 +2127,14 @@ unsafe fn chelis_nested_list_shape(list: *const chelis_list) -> (Vec<c_int>, Run
                 leaf_dtype = RuntimeDType::F32;
                 break;
             }
+            chelis_value_tag::CHELIS_VALUE_TENSOR => {
+                let tensor = first.as_.tensor;
+                if tensor.is_null() || (*tensor).ndim != 0 {
+                    runtime_fail!("to_tensor expects rank-0 tensor leaves");
+                }
+                leaf_dtype = tensor_dtype(tensor, "to_tensor boxed scalar leaf");
+                break;
+            }
             chelis_value_tag::CHELIS_VALUE_BOOL => {
                 leaf_dtype = RuntimeDType::Bool;
                 break;
@@ -2165,6 +2197,7 @@ unsafe fn chelis_flatten_nested_list_typed(
                     let value: f32 = match item.tag {
                         chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as f32,
                         chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as f32,
+                        chelis_value_tag::CHELIS_VALUE_TENSOR => chelis_value_as_f64(*item) as f32,
                         chelis_value_tag::CHELIS_VALUE_BOOL => {
                             if item.as_.boolean {
                                 1.0
@@ -2182,6 +2215,7 @@ unsafe fn chelis_flatten_nested_list_typed(
                     let value: f64 = match item.tag {
                         chelis_value_tag::CHELIS_VALUE_INT64 => item.as_.i64_ as f64,
                         chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_,
+                        chelis_value_tag::CHELIS_VALUE_TENSOR => chelis_value_as_f64(*item),
                         chelis_value_tag::CHELIS_VALUE_BOOL => {
                             if item.as_.boolean {
                                 1.0
@@ -2263,14 +2297,52 @@ unsafe fn chelis_flatten_nested_list_typed(
                     };
                     *(out_bytes as *mut f32).add(i) = value;
                 }
-                // chelis#730 Phase 1 message migration: the section C2
-                // calibration exemplar, rendered in the frozen branded shape.
-                RuntimeDType::Bf16 | RuntimeDType::F16 => runtime_fail!(
-                    "unsupported: destination dtype `{}` on to_tensor host-lane literal \
-                     storage (runtime); bf16/f16/f8e4m3 are not implemented on the host \
-                     runtime",
-                    dst_dtype.name()
-                ),
+                RuntimeDType::F16 => {
+                    let bits = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => {
+                            ieee_narrow::f64_to_f16_bits_rne(item.as_.f64_)
+                        }
+                        chelis_value_tag::CHELIS_VALUE_TENSOR => {
+                            let tensor = item.as_.tensor;
+                            let dtype = tensor_dtype(tensor, "to_tensor f16 leaf");
+                            if (*tensor).ndim != 0 {
+                                runtime_fail!("to_tensor expects rank-0 tensor leaves");
+                            }
+                            if dtype == RuntimeDType::F16 {
+                                *((*tensor).data as *const u16)
+                            } else {
+                                ieee_narrow::f64_to_f16_bits_rne(read_scalar_as_f64(tensor, dtype))
+                            }
+                        }
+                        _ => {
+                            runtime_fail!("to_tensor leaf element type cannot lower to f16 storage")
+                        }
+                    };
+                    *(out_bytes as *mut u16).add(i) = bits;
+                }
+                RuntimeDType::Bf16 => {
+                    let bits = match item.tag {
+                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => {
+                            ieee_narrow::f64_to_bf16_bits_rne(item.as_.f64_)
+                        }
+                        chelis_value_tag::CHELIS_VALUE_TENSOR => {
+                            let tensor = item.as_.tensor;
+                            let dtype = tensor_dtype(tensor, "to_tensor bf16 leaf");
+                            if (*tensor).ndim != 0 {
+                                runtime_fail!("to_tensor expects rank-0 tensor leaves");
+                            }
+                            if dtype == RuntimeDType::Bf16 {
+                                *((*tensor).data as *const u16)
+                            } else {
+                                ieee_narrow::f64_to_bf16_bits_rne(read_scalar_as_f64(tensor, dtype))
+                            }
+                        }
+                        _ => runtime_fail!(
+                            "to_tensor leaf element type cannot lower to bf16 storage"
+                        ),
+                    };
+                    *(out_bytes as *mut u16).add(i) = bits;
+                }
             }
             *flat_idx += 1;
         }
@@ -2315,8 +2387,8 @@ pub unsafe extern "C" fn chelis_tensor_from_value_list(
 /// Allocate a tensor from a nested chelis_list with an explicit destination
 /// dtype. The C backend calls this when the surface-level type annotation
 /// disambiguates the storage width: `let xs: tensor[3, f64] = [1.0, 2.0, 3.0]`
-/// must be backed by 8-byte f64 slots even though every list element arrives
-/// tagged `CHELIS_VALUE_FLOAT64` (the same tag the legacy path uses for f32).
+/// must be backed by 8-byte f64 slots. Narrow float boxes now arrive through
+/// exact tagged rank-0 tensors; `CHELIS_VALUE_FLOAT64` denotes only f64.
 ///
 /// RT-4 F1 fix: previously the runtime had no dtype hint and silently
 /// allocated at f32 width (4 bytes/elem) for every float-tagged list,
@@ -2381,21 +2453,19 @@ pub unsafe extern "C" fn chelis_list_from_tensor(tensor: *const chelis_tensor) -
             }
             RuntimeDType::F32 => {
                 let raw = *((*tensor).data as *const f32).add(i * stride);
-                chelis_value_from_f64(raw as f64)
+                chelis_value_from_f32(raw)
             }
             // chelis#732 Phase 2 (section C3.4, chelis#716's abort half):
-            // read the 2-byte storage and widen exactly. The list box is
-            // f64-valued, so the element leaves as the exact image of the
-            // stored half value (widening is lossless); the box renders at
-            // f64 width until the value box learns narrow-float widths
-            // (chelis#729's capacity side).
+            // read the 2-byte storage exactly. Phase 3 boxes the original
+            // bits through a tagged rank-0 tensor, preserving the narrow
+            // dtype for own-width formatting and later unboxing.
             RuntimeDType::Bf16 => {
                 let bits = *((*tensor).data as *const u16).add(i * stride);
-                chelis_value_from_f64(f64::from(half::bf16::from_bits(bits)))
+                chelis_value_from_bf16_bits(bits)
             }
             RuntimeDType::F16 => {
                 let bits = *((*tensor).data as *const u16).add(i * stride);
-                chelis_value_from_f64(f64::from(half::f16::from_bits(bits)))
+                chelis_value_from_f16_bits(bits)
             }
         };
         items.push(value);
@@ -2420,16 +2490,11 @@ pub unsafe extern "C" fn chelis_pad_sequences(
     }
     let shape = [batch as c_int, width as c_int];
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
-        RuntimeDType::I32
+        RuntimeDType::I64
     } else {
         RuntimeDType::F32
     };
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id());
-    let pad = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
-        pad_value.as_.i64_ as f64
-    } else {
-        pad_value.as_.f64_
-    };
     // RT-4 F1 sibling: pad_sequences writes per-element through the
     // dtype-correct pointer below; the legacy `let buf = data_as_f32(..)`
     // shortcut is no longer used because i32 and f32 dispatch differently.
@@ -2438,25 +2503,31 @@ pub unsafe extern "C" fn chelis_pad_sequences(
             let seq = item.as_.list;
             for col in 0..width {
                 let flat = row * width + col;
-                let value = if col < (*seq).items.len() {
-                    match (*seq).items[col].tag {
-                        chelis_value_tag::CHELIS_VALUE_INT64 => (*seq).items[col].as_.i64_ as f64,
-                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => (*seq).items[col].as_.f64_,
-                        _ => runtime_fail!("pad_sequences expects numeric nested lists"),
-                    }
+                if dtype == RuntimeDType::I64 {
+                    let value = if col < (*seq).items.len() {
+                        let item = (*seq).items[col];
+                        if item.tag != chelis_value_tag::CHELIS_VALUE_INT64 {
+                            runtime_fail!("pad_sequences expects homogeneous numeric lists");
+                        }
+                        item.as_.i64_
+                    } else {
+                        pad_value.as_.i64_
+                    };
+                    *((*out).data as *mut i64).add(flat) = value;
                 } else {
-                    pad
-                };
-                // RT-4 F1 sibling: write through the dtype-correct
-                // pointer so a CHELIS_I32 tensor stores int32 bytes,
-                // not float bytes. Previously this wrote `value as f32`
-                // unconditionally, leaving the int32-tagged tensor
-                // holding float bit patterns that downstream readers
-                // interpreted as junk integers.
-                if dtype == RuntimeDType::I32 {
-                    *((*out).data as *mut i32).add(flat) = value as i32;
-                } else {
-                    *((*out).data as *mut f32).add(flat) = value as f32;
+                    let value = if col < (*seq).items.len() {
+                        let item = (*seq).items[col];
+                        match item.tag {
+                            chelis_value_tag::CHELIS_VALUE_TENSOR => {
+                                chelis_value_as_f64(item) as f32
+                            }
+                            chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as f32,
+                            _ => runtime_fail!("pad_sequences expects homogeneous numeric lists"),
+                        }
+                    } else {
+                        chelis_value_as_f64(pad_value) as f32
+                    };
+                    *((*out).data as *mut f32).add(flat) = value;
                 }
             }
         }
@@ -2477,16 +2548,11 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     let width = width as usize;
     let shape = [batch as c_int, width as c_int];
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
-        RuntimeDType::I32
+        RuntimeDType::I64
     } else {
         RuntimeDType::F32
     };
     let out = chelis_alloc(2, shape.as_ptr(), dtype.id());
-    let pad = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
-        pad_value.as_.i64_ as f64
-    } else {
-        pad_value.as_.f64_
-    };
     // RT-4 F1 sibling: writes occur per-element through the
     // dtype-correct pointer below; legacy `data_as_f32` shortcut is
     // no longer used because i32 and f32 dispatch differently.
@@ -2498,19 +2564,33 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
             let seq = item.as_.list;
             for col in 0..width {
                 let flat = row * width + col;
-                let value = if col < (*seq).items.len() {
-                    match (*seq).items[col].tag {
-                        chelis_value_tag::CHELIS_VALUE_INT64 => (*seq).items[col].as_.i64_ as f64,
-                        chelis_value_tag::CHELIS_VALUE_FLOAT64 => (*seq).items[col].as_.f64_,
-                        _ => runtime_fail!("pad_sequences_to expects numeric nested lists"),
-                    }
+                if dtype == RuntimeDType::I64 {
+                    let value = if col < (*seq).items.len() {
+                        let item = (*seq).items[col];
+                        if item.tag != chelis_value_tag::CHELIS_VALUE_INT64 {
+                            runtime_fail!("pad_sequences_to expects homogeneous numeric lists");
+                        }
+                        item.as_.i64_
+                    } else {
+                        pad_value.as_.i64_
+                    };
+                    *((*out).data as *mut i64).add(flat) = value;
                 } else {
-                    pad
-                };
-                if dtype == RuntimeDType::I32 {
-                    *((*out).data as *mut i32).add(flat) = value as i32;
-                } else {
-                    *((*out).data as *mut f32).add(flat) = value as f32;
+                    let value = if col < (*seq).items.len() {
+                        let item = (*seq).items[col];
+                        match item.tag {
+                            chelis_value_tag::CHELIS_VALUE_TENSOR => {
+                                chelis_value_as_f64(item) as f32
+                            }
+                            chelis_value_tag::CHELIS_VALUE_FLOAT64 => item.as_.f64_ as f32,
+                            _ => {
+                                runtime_fail!("pad_sequences_to expects homogeneous numeric lists")
+                            }
+                        }
+                    } else {
+                        chelis_value_as_f64(pad_value) as f32
+                    };
+                    *((*out).data as *mut f32).add(flat) = value;
                 }
             }
         }

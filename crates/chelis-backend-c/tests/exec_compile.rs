@@ -2384,15 +2384,11 @@ int main() {{
     assert!(output.contains("PASS"), "i8 add wrong output:\n{output}");
 }
 
-/// i8 + i8 wraparound at i8 width: `100 + 50 = 150` does NOT fit in i8.
-/// The C-emit lowers to `(int8_t)acc + (int8_t)acc`, which under the
-/// usual C arithmetic conversions promotes to `int`, adds, then the
-/// store-back to `int8_t` truncates. That is two's-complement
-/// wraparound by the spec/04-type-system.md §5.4 contract. Pin the
-/// expected wrapping so a future emit refactor (e.g. silently
-/// promoting to i32 at the source-load site) breaks this test loudly.
+/// i8 + i8 overflow traps at the declared width before C can execute a
+/// narrowing conversion. This locks the Phase 3 checked-arithmetic contract
+/// at the backend's direct compile-run surface.
 #[test]
-fn exec_i8_add_overflow_wraps_two_complement() {
+fn exec_i8_add_overflow_traps() {
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(2), None);
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(2), None);
@@ -2407,43 +2403,35 @@ fn exec_i8_add_overflow_wraps_two_complement() {
 extern void test_i8_add_wrap(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
 
 int main() {{
-    // 100 + 50 = 150, wraps to -106 in i8 two's-complement.
-    // 127 + 1   = 128, wraps to -128 in i8 two's-complement.
+    // Both elements overflow int8 and must trap before store-back.
     int8_t a_data[2] = {{ 100, 127 }};
     int8_t b_data[2] = {{ 50, 1 }};
-    int8_t expected[2] = {{ (int8_t)-106, (int8_t)-128 }};
     chelis_tensor at = make_view_1d_i8(a_data, 2);
     chelis_tensor bt = make_view_1d_i8(b_data, 2);
     chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i8_add_wrap(in_ptrs, 2, outs, 1);
-    int ok = 1;
-    for (int i = 0; i < 2; i++) {{
-        int8_t got = ((int8_t*)outs[0]->data)[i];
-        if (got != expected[i]) {{
-            printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
-            ok = 0;
-        }}
-    }}
-    printf("%s\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
+    return 0;
 }}
 "#
     );
 
-    let Some(output) = compile_and_run_kernel("ws_a4_i8_add_wrap", src, &harness) else {
-        panic!("i8 add overflow kernel failed to compile/run");
-    };
+    let run = compile_and_capture_run("ws_a4_i8_add_wrap", src, &harness);
+    let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(
-        output.contains("PASS"),
-        "i8 add overflow did not wrap as expected:\n{output}"
+        !run.status.success(),
+        "i8 add overflow must terminate unsuccessfully"
+    );
+    assert!(
+        stderr.contains("numeric trap: overflow in add at int8"),
+        "i8 add overflow must use the canonical diagnostic; stderr={stderr:?}"
     );
 }
 
-/// i8 mul correctness: 12 * 10 = 120 fits in i8; 16 * 8 = 128 wraps to
-/// -128. Pin the wrapping behavior the same way as the add test.
+/// The second i8 multiplication overflows after an in-range first element;
+/// the kernel must trap rather than partially legitimizing the wrapped row.
 #[test]
-fn exec_i8_mul_correct_output_with_wrap() {
+fn exec_i8_mul_overflow_traps() {
     let mut dag = Dag::new();
     let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i8(2), None);
     let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i8(2), None);
@@ -2460,31 +2448,27 @@ extern void test_i8_mul(chelis_tensor** inputs, int n_in, chelis_tensor** output
 int main() {{
     int8_t a_data[2] = {{ 12, 16 }};
     int8_t b_data[2] = {{ 10, 8 }};
-    // 12*10 = 120 fits; 16*8 = 128 wraps to -128.
-    int8_t expected[2] = {{ 120, (int8_t)-128 }};
+    // 12*10 = 120 fits; 16*8 = 128 overflows int8 and must trap.
     chelis_tensor at = make_view_1d_i8(a_data, 2);
     chelis_tensor bt = make_view_1d_i8(b_data, 2);
     chelis_tensor* in_ptrs[2] = {{ &at, &bt }};
     chelis_tensor* outs[1] = {{ NULL }};
     test_i8_mul(in_ptrs, 2, outs, 1);
-    int ok = 1;
-    for (int i = 0; i < 2; i++) {{
-        int8_t got = ((int8_t*)outs[0]->data)[i];
-        if (got != expected[i]) {{
-            printf("MISMATCH at %d: got %d expected %d\n", i, (int)got, (int)expected[i]);
-            ok = 0;
-        }}
-    }}
-    printf("%s\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
+    return 0;
 }}
 "#
     );
 
-    let Some(output) = compile_and_run_kernel("ws_a4_i8_mul", src, &harness) else {
-        panic!("i8 mul kernel failed to compile/run");
-    };
-    assert!(output.contains("PASS"), "i8 mul wrong output:\n{output}");
+    let run = compile_and_capture_run("ws_a4_i8_mul", src, &harness);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        !run.status.success(),
+        "i8 mul overflow must terminate unsuccessfully"
+    );
+    assert!(
+        stderr.contains("numeric trap: overflow in mul at int8"),
+        "i8 mul overflow must use the canonical diagnostic; stderr={stderr:?}"
+    );
 }
 
 /// i16 add: pick values that exercise the int16_t path through the

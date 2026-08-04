@@ -6,14 +6,14 @@ print-truncation slack is now zero after [#732] Phase 2. The PR #956 §C6
 covered-family tripwire and Phase 1's typed wire-schema, registered-PyO3 entry
 legs, and sealed dtype-semantics layer landed through PRs #1033 and #1049.
 Phase 2's complete kernel split, exact prover carriers, trap freeze, and
-reduction/adjoint consumers landed through PR #1054. The continuously wired
-`.venv/bin/python scripts/dtype_phase2_oracle.py` inherits the complete Phase
-1 and Phase 0 contracts. PR #1065 began Phase 3 with exact,
-minimum-trapping signed-integer `abs` in the C tensor and scalar-host lanes.
-General fused integer kernels and the remaining C rows mean Phase 3 is not
-complete, and Phase 4 has not started. Tracking issue: [#729].
-**Owning specs:** `spec/04-type-system.md` (gains an authored overflow/rounding
-section, today silent), `spec/05-risc-primitives.md` (op result semantics),
+reduction/adjoint consumers landed through PR #1054. PR #1065 began Phase 3
+with exact, minimum-trapping signed-integer `abs`; this revision delivers the
+remaining C scalar/tensor value work and continuously wires
+`.venv/bin/python scripts/dtype_phase3_oracle.py`, which inherits Phases 0-2
+and the faithful-observation Phase 3 contract. Phase 4 has not started.
+Tracking issue: [#729].
+**Owning specs:** `spec/04-type-system.md` (the authored overflow/rounding and
+per-dtype value contract), `spec/05-risc-primitives.md` (op result semantics),
 and the audit record in `docs/investigations/numeric_audit_next_sweeps.md` /
 `docs/investigations/numeric_audit_structural_prevention.md`.
 **Class fixed:** [#727] (no dtype's semantics are enforced at any single
@@ -402,11 +402,11 @@ spelling `overflow in arithmetic at int8` is gone with the rewire, and
 lossy/truncating forms ([#759]) remain the future explicit escape
 hatch, the same species as [#753]'s `wrap_*`: never the default,
 greppable, with capability-table rows and cross-lane oracle coverage
-like any other cell. The compiled C lane stays documented-divergent
-until Phase 3 (issue-linked ignored rows in
-`crates/chelis-cli/tests/issue_759_checked_cast_default.rs`); spelling
-and atoms for the named forms land with Phase 2's kernel work; cells
-ratified at Phase 4.
+like any other cell. Phase 3 brings the compiled C lane onto the checked
+default ladder and returns the former issue-linked ignored rows in
+`crates/chelis-cli/tests/issue_759_checked_cast_default.rs` to the ordinary
+regression corpus. Spelling and atoms for the future named forms remain
+[#759] capability work; their cells are ratified at Phase 4.
 
 The 2026-08-02 dependency sweep found no executable example or fixture relying
 on fractional default-cast truncation. Six test-only sites exercised or
@@ -1432,16 +1432,24 @@ RENDERER whose printed strings are the expected values for yours (the
 rendering contract, not the value contract - values are owed to
 [04-NUM-8] by both lanes independently).
 
-**Implementation status:** draft PR #1065 delivers the first bounded C-kernel
-row on top of #1054. Direct signed-integer `abs` uses its declared width for
-int8/int16/int32/int64 in both the tensor emitter and scalar host emitter,
-traps on each width's minimum before C negation, and emits §C2's byte-exact
-diagnostic generated from `NumericTrap`. Integer `abs` stays materialized
-until the general fused-integer emitter carries the same semantics;
-externally supplied fused integer-`abs` IR remains loud. This also makes
-[#722]'s compiled integer-`abs` gradient row green. It does not deliver the
-other integer kernels, generated observation helper, or Phase 3 oracle, and
-it does not widen the HIP/Metal scope.
+**Implementation status:** PR #1065 landed the first bounded C-kernel row on
+top of #1054. This revision completes the phase's C value layer. Exact narrow
+scalar ABI types survive as `uint16_t` f16/bf16 payloads; scalar and tensor
+arithmetic finalize at the declared float width; integer scalar, tensor,
+cast, and reduction paths use checked helpers with §C2's byte-exact traps.
+Integer tensor operations stay materialized at the checked DAG boundary, so
+the float-only fused emitter cannot bypass their guards. The existing tagged
+rank-0 tensor carrier boxes non-f64 floats without adding a public numeric ABI
+channel. Exact-bit literal emission retires [#751]'s four C-ingress corpus
+exclusions, host lowering finalizes suffixed literal leaves before widening
+([#1110]), and exact f32 subnormal ingress closes [#761]. [#713], [#714],
+[#715]'s authored float rows, [#718], [#699], [#691], and [#865] leave their
+Phase 3 red/ignored state on their original assertions. The same exact narrow
+scalar storage returns f16/bf16 `to_string` to the own-width observation
+corpus ([#734]) through private generated helpers, without adding a public
+numeric ABI channel. The integer
+floor/ceil/round capability decisions remain explicitly in Phase 4, and this
+revision does not widen the HIP/Metal scope.
 
 **You deliver:**
 
@@ -1456,8 +1464,8 @@ it does not widen the HIP/Metal scope.
    ([#714]); it does not reopen or duplicate the host-type boundary.
 2. Scalar C arithmetic at width with generated trap guards emitting §C2's
    frozen strings (the `chelis_int_div_guard` pattern, generalized), and
-   f16/bf16 scalar C storage/rounding matching §C1 (likely via uint16
-   payload + the same conversion helpers the WS-1 kernels already use).
+   f16/bf16 scalar C storage/rounding matching §C1 via exact `uint16_t`
+   payloads and the same conversion helpers the WS-1 kernels use.
 3. **The generated print helper**: the emitted C tensor/scalar printers
    are produced from `format_element`'s per-dtype logic (a Rust function
    emitting the C switch, exhaustive over `Prim`, `default:` aborts with
@@ -1476,12 +1484,20 @@ conformance matrix asserts against.
 [#724]/[#726] arrive in Phase 4; until then those cells stay ignored with
 their issue numbers); HIP/Metal kernel work (none needed).
 
-**Oracle:** the C rows of `narrow_dtype_matrix.rs` and
-`int_width_lane_matrix.rs`, `scalar_stub_matrix.rs`'s dtype rows, the
-[#723] row in `reduction_and_bitwise_matrix.rs`, and
-`fold_static_cond_matrix.rs`'s C rows - green and un-ignored; plus the
-cross-lane byte-diff pass over the whole corpus (print/to_list/wire vs
-stored bits, both lanes, every dtype).
+**Oracle:** `.venv/bin/python scripts/dtype_phase3_oracle.py` is this phase's
+single authoritative command. Acceptance is exit 0 with the final line
+`DTYPE PHASE 3 ORACLE: PASS`. Its tested manifest inherits the complete dtype
+Phase 2 oracle and the faithful-observation Phase 3 oracle; runs the C rows of
+`narrow_dtype_matrix.rs`, `int_width_lane_matrix.rs`,
+`scalar_stub_matrix.rs`, `precision_matrix.rs`,
+`reduction_and_bitwise_matrix.rs`, `fold_static_cond_matrix.rs`, the checked
+cast/subnormal/reduced-float `to_string` fixtures, and the complete observation
+harness; runs the C
+emitter structural locks; and finishes with the numeric-surface capacity
+censuses. It never opts into Phase 4's ignored capability cells or HIP/Metal.
+The required Linux Integration job invokes this nested oracle after the
+normal integration gate, so Phases 0-3 remain continuous without duplicating
+their commands in `scripts/gate.py`.
 
 ## Phase 4 - the capability table becomes the permanent guard
 

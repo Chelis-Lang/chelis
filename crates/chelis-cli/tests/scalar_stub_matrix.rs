@@ -1,13 +1,12 @@
-//! chelis#715 - eight more scalar builtins hit `host_emit.rs:2300`'s
-//! `/* unsupported builtin */ 0` substitution, at EVERY dtype including
-//! plain f32/f64: `tan`, `atan`, `floor`, `ceil`, `round`, `recip`,
-//! `max_elem`, `min_elem`.
+//! chelis#715 - eight scalar builtins formerly hit the C host emitter's
+//! `/* unsupported builtin */ 0` substitution, including plain f32/f64:
+//! `tan`, `atan`, `floor`, `ceil`, `round`, `recip`, `max_elem`, `min_elem`.
 //!
 //! Unlike chelis#704 (scalar activations, where eval also rejects), eval
-//! computes all of these correctly - so nothing warns the user before the
-//! compiled binary replaces `floor(1.5)` or `max_elem(lr, floor_val)` with
-//! `0`. Same substitution site as #682/#704/#705; this file extends the
-//! confirmed blast radius to ordinary scalar math.
+//! computed all of these correctly, so nothing warned the user before the
+//! compiled binary replaced `floor(1.5)` or `max_elem(lr, floor_val)` with
+//! `0`. Same historical substitution site as #682/#704/#705; these ordinary
+//! regressions preserve the confirmed blast radius.
 //!
 //! Also carried here: the chelis#719 regression locks. The C backend's
 //! contiguous f32 tensor `sqrt` path used Accelerate's `vvsqrtf`, which is not
@@ -16,14 +15,15 @@
 //! scalar `sqrtf` loop; these tests lock correct rounding and layout
 //! independence in the compiled lane.
 //!
-//! The passing controls bound the stub list exactly: the working scalar ops
-//! stay locked in both lanes, the tensor forms of the broken ops stay
-//! locked (the stub is scalar-only, like #704's split), and the int-dtype
-//! rejections that are correct stay rejected.
+//! The passing controls bound the historical stub list exactly: the already
+//! working scalar ops stay locked in both lanes, the corresponding tensor
+//! forms stay locked, and correct int-dtype rejections stay rejected.
 
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
+use chelis_types::agreement::{AgreementOp, ArithmeticWidthStatus, compare_rendered_elements};
+use chelis_types::types::Prim;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -106,12 +106,11 @@ fn scalar_program(op_expr: &str, ret_ty: &str) -> String {
 
 const STUB_MARKER: &str = "unsupported builtin";
 
-/// One broken row: eval computes `eval_expected`, the C lane must agree on
-/// the VALUE and must not contain the stub marker. Fails today with C
-/// printing `0`. Per-lane expected strings since chelis#732 Phase 1: eval
-/// renders in the pinned grammar (own-width digits, integral floats keep
-/// one fractional digit) while the compiled lane keeps its pre-contract
-/// printf forms until the Phase 2 generated printer restores byte parity.
+/// One formerly broken row: eval computes `eval_expected`, the C lane must
+/// agree on the VALUE and must not contain the stub marker. Before Phase 3,
+/// C printed `0`. The observation contract requires the compiled lane to use
+/// the same own-width rendering as eval, so the two expected strings are
+/// byte-identical for every repaired row.
 fn assert_scalar_parity(
     op_expr: &str,
     ret_ty: &str,
@@ -144,75 +143,80 @@ fn assert_scalar_parity(
     );
 }
 
+/// [05-OBS-3] parity for an f64 transcendental whose libm result may differ
+/// by one ULP across supported platforms.  The shared closed-op comparator is
+/// the only authority for the tolerance; the emitted-source assertion keeps
+/// a mutually wrong f32 implementation from passing by byte agreement.
+fn assert_f64_transcendental_parity(op_expr: &str, op: AgreementOp, name: &str) {
+    let program = scalar_program(op_expr, "f64");
+    let eval_got = eval_first_line(&program).unwrap_or_else(|e| panic!("{name}: eval failed: {e}"));
+    common::assert_elements_in_domain("f64", &eval_got, name);
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    let (emitted, c_got) = c_lane(&program, name).expect("C lane should build and run");
+    common::assert_elements_in_domain("f64", &c_got, name);
+    assert!(
+        !emitted.contains(&format!("{}f(", op.name())),
+        "{name}: an f64 operation must not route through the f32 libm entry"
+    );
+    compare_rendered_elements(
+        op,
+        Prim::F64,
+        ArithmeticWidthStatus::StoredAtArithmeticWidth,
+        &eval_got,
+        &c_got,
+    )
+    .unwrap_or_else(|error| panic!("{name}: {error}"));
+}
+
 // ===========================================================================
-// chelis#715 - the broken rows (all observed printing 0 from the binary)
+// chelis#715 - repaired rows (all printed 0 before the Phase 3 fix)
 // ===========================================================================
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar tan compiles to the 0 stub (C prints 0; eval 1.5574077367782593). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_tan_agrees_across_lanes() {
     assert_scalar_parity(
         "tan(cast(1.0, f32))",
         "f32",
         "1.5574077",
-        "1.5574077367782593",
+        "1.5574077",
         "f32_tan",
     );
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar atan compiles to the 0 stub (C prints 0; eval 0.7853981852531433). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_atan_agrees_across_lanes() {
     assert_scalar_parity(
         "atan(cast(1.0, f32))",
         "f32",
         "0.7853982",
-        "0.7853981852531433",
+        "0.7853982",
         "f32_atan",
     );
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar floor compiles to the 0 stub at plain f32 (C prints 0; eval 1). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_floor_agrees_across_lanes() {
-    assert_scalar_parity("floor(cast(1.5, f32))", "f32", "1.0", "1", "f32_floor");
+    assert_scalar_parity("floor(cast(1.5, f32))", "f32", "1.0", "1.0", "f32_floor");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar ceil compiles to the 0 stub (C prints 0; eval 2). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_ceil_agrees_across_lanes() {
-    assert_scalar_parity("ceil(cast(1.5, f32))", "f32", "2.0", "2", "f32_ceil");
+    assert_scalar_parity("ceil(cast(1.5, f32))", "f32", "2.0", "2.0", "f32_ceil");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar round compiles to the 0 stub (C prints 0; eval 2). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_round_agrees_across_lanes() {
-    assert_scalar_parity("round(cast(1.5, f32))", "f32", "2.0", "2", "f32_round");
+    assert_scalar_parity("round(cast(1.5, f32))", "f32", "2.0", "2.0", "f32_round");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar recip compiles to the 0 stub (C prints 0; eval 0.25). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_recip_agrees_across_lanes() {
     assert_scalar_parity("recip(cast(4.0, f32))", "f32", "0.25", "0.25", "f32_recip");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar max_elem compiles to the 0 stub at every dtype (C prints 0; \
-            eval 1.5). Ordinary clamp code silently returns 0 when compiled. Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "max_elem(cast(1.5, f32), cast(0.25, f32))",
@@ -224,9 +228,6 @@ fn f32_scalar_max_elem_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar min_elem compiles to the 0 stub (C prints 0; eval 0.25). \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f32_scalar_min_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "min_elem(cast(1.5, f32), cast(0.25, f32))",
@@ -238,17 +239,11 @@ fn f32_scalar_min_elem_agrees_across_lanes() {
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: the stub fires at f64 too - scalar floor(1.5f64) compiles to 0. \
-            Run with `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f64_scalar_floor_agrees_across_lanes() {
-    assert_scalar_parity("floor(cast(1.5, f64))", "f64", "1.0", "1", "f64_floor");
+    assert_scalar_parity("floor(cast(1.5, f64))", "f64", "1.0", "1.0", "f64_floor");
 }
 
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: scalar max_elem at int64 compiles to 0 (eval 7). Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn i64_scalar_max_elem_agrees_across_lanes() {
     assert_scalar_parity(
         "max_elem(cast(7, int64), cast(3, int64))",
@@ -266,9 +261,8 @@ fn i64_scalar_max_elem_agrees_across_lanes() {
 /// absent from TRANSCENDENTAL_FLOAT_ONLY_OPS, per chelis#699), so the
 /// correct behavior is identity.
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: floor(5i64) - checker accepts, eval rejects at runtime, compiled C \
-            prints 0. Three lanes, three answers. Correct is 5 everywhere. Run with \
+#[ignore = "chelis#715 Phase 4: the capability-table cell for integer scalar floor is \
+            not ratified end-to-end; eval still rejects it. Run with \
             `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn i64_scalar_floor_is_identity_in_all_lanes() {
     assert_scalar_parity("floor(cast(5, int64))", "int64", "5", "5", "i64_floor");
@@ -277,29 +271,14 @@ fn i64_scalar_floor_is_identity_in_all_lanes() {
 /// The f64 rows of the stub family, distilled from the probe battery
 /// (`docs/investigations/probes/bat_scalar_ops.py`) - chelis#715's title
 /// says EVERY dtype, so the f64 half is asserted too, not just f32.
-/// Observed today: C prints 0 for all seven rows; eval is correct.
+/// Before Phase 3, C printed 0 for all seven rows while eval was correct.
 #[test]
-#[ignore = "chelis#715, now rejected loudly at build per the chelis#730 plan section I1 \
-            (value support tracked by chelis#729). Original finding: the stub fires at f64 for the whole family - tan/atan/ceil/round/\
-            recip/max_elem/min_elem all print 0 from the compiled binary (floor has its \
-            own row above). Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
 fn f64_scalar_stub_family_agrees_across_lanes() {
+    assert_f64_transcendental_parity("tan(cast(1.0, f64))", AgreementOp::Tan, "f64_tan");
+    assert_f64_transcendental_parity("atan(cast(1.0, f64))", AgreementOp::Atan, "f64_atan");
     for (expr, eval_expected, c_expected, name) in [
-        (
-            "tan(cast(1.0, f64))",
-            "1.557407724654902",
-            "1.557407724654902",
-            "f64_tan",
-        ),
-        (
-            "atan(cast(1.0, f64))",
-            "0.7853981633974483",
-            "0.7853981633974483",
-            "f64_atan",
-        ),
-        ("ceil(cast(1.5, f64))", "2.0", "2", "f64_ceil"),
-        ("round(cast(1.5, f64))", "2.0", "2", "f64_round"),
+        ("ceil(cast(1.5, f64))", "2.0", "2.0", "f64_ceil"),
+        ("round(cast(1.5, f64))", "2.0", "2.0", "f64_round"),
         ("recip(cast(4.0, f64))", "0.25", "0.25", "f64_recip"),
         (
             "max_elem(cast(1.5, f64), cast(0.25, f64))",
@@ -319,7 +298,7 @@ fn f64_scalar_stub_family_agrees_across_lanes() {
 }
 
 /// The f64 working-op controls, mirroring the f32 set: bounds the f64 half
-/// of #715 to exactly the seven broken ops above.
+/// of #715 to exactly the seven formerly broken ops above.
 #[test]
 fn working_f64_scalar_ops_agree_across_lanes() {
     if !c_toolchain_available() {
@@ -504,7 +483,7 @@ fn c_f32_tensor_sqrt_ordinary_values_agree_across_lanes() {
 // ===========================================================================
 
 /// The scalar ops that DO work, at f32, with values whose printed form is
-/// identical in both lanes. Bounds #715 to exactly the eight broken ops.
+/// identical in both lanes. Bounds #715 to the eight formerly broken ops.
 #[test]
 fn working_f32_scalar_ops_agree_across_lanes() {
     if !c_toolchain_available() {
@@ -578,8 +557,8 @@ fn working_i64_scalar_ops_agree_across_lanes() {
     }
 }
 
-/// The TENSOR forms of the broken ops are correct in both lanes - the stub
-/// is scalar-only, exactly like #704's tensor/scalar split. (floor and
+/// The TENSOR forms of the formerly broken ops are correct in both lanes -
+/// the stub was scalar-only, exactly like #704's tensor/scalar split. (floor and
 /// max_elem chosen for exact printed values; tan/recip carry rounding
 /// differences that belong to chelis#717/#719, not here.)
 #[test]

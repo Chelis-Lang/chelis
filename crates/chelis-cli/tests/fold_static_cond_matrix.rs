@@ -13,9 +13,8 @@
 //!
 //! Bounding controls: conditions with an effectful branch (`fail`) route
 //! host-lane, do not fold, and the compiled int64 comparison there is exact
-//! (locked below). The ignored int8 row belongs to the Phase 3 compiled-C
-//! trap work; this Phase 2 fold must at least decline when its typed kernel
-//! detects the overflow.
+//! (locked below). The Phase 3 int8 row also proves that folding cannot hide
+//! the required checked-overflow trap.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -105,14 +104,11 @@ const BITS_222: &str = "435e0000";
 // ===========================================================================
 
 /// True f16 rounds cast(2049.0, f16) to 2048, so lt(2048, 2048) is false and
-/// the answer is 222. Observed today: eval prints 222 (correct); the
+/// the answer is 222. Before the compiled Phase 3 fix, eval printed 222
+/// (correct) while the
 /// compiled binary prints 111, and 222's bit pattern is ABSENT from the
 /// emitted C - the correct branch was deleted at compile time.
 #[test]
-#[ignore = "chelis#720 fold semantics are now covered in chelis-ir; the end-to-end C row \
-            remains blocked because C host ABI selection rejects f16 before dead-condition \
-            elimination. Artifact routing and C host ABI support are outside this Phase 2 \
-            slice. Run with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn f16_cast_condition_folds_with_f16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(2048.0, f16), cast(2049.0, f16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
@@ -138,10 +134,6 @@ fn f16_cast_condition_folds_with_f16_semantics() {
 
 /// bf16 sibling at threshold 257 (8-bit mantissa).
 #[test]
-#[ignore = "chelis#720 fold semantics are now covered in chelis-ir; the end-to-end C row \
-            remains blocked because C host ABI selection rejects bf16 before dead-condition \
-            elimination. Artifact routing and C host ABI support are outside this Phase 2 \
-            slice. Run with `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn bf16_cast_condition_folds_with_bf16_semantics() {
     let program = "def pick() -> f32 = if lt(cast(256.0, bf16), cast(257.0, bf16)) \
                    then 111.0 else 222.0\nout = print(pick())\n";
@@ -172,10 +164,6 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
 /// verified when this row was probed). The decided contract (#680/#695)
 /// says the overflow itself must trap in both lanes.
 #[test]
-#[ignore = "chelis#718: an int8 overflow used as a branch condition sends eval and C down \
-            opposite branches (eval wraps to -56 and prints 111; C widens to 200 and prints \
-            222); the contract says the overflow must trap in both lanes. Run with \
-            `cargo test -p chelis-cli --test fold_static_cond_matrix -- --ignored`."]
 fn int8_overflow_condition_traps_in_both_lanes() {
     let program = "def pick() -> f32 = if lt(add(100i8, 100i8), 0i8) \
                    then 111.0 else 222.0\nout = print(pick())\n";
