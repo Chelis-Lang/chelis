@@ -638,7 +638,24 @@ impl CEmitter {
                 self.emit_stride(id, strides, &node.inputs, &node.output_type, dag);
             }
             RiscOp::Realize => self.emit_realize(id, &node.inputs, &node.output_type),
-            RiscOp::Cast { .. } => self.emit_cast(id, &node.inputs, &node.output_type, dag),
+            RiscOp::Cast { .. } => {
+                self.emit_cast(
+                    id,
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    /* trunc = */ false,
+                )
+            }
+            RiscOp::CastTrunc { .. } => {
+                self.emit_cast(
+                    id,
+                    &node.inputs,
+                    &node.output_type,
+                    dag,
+                    /* trunc = */ true,
+                )
+            }
             RiscOp::Store { name } => self.emit_store(id, name.as_str(), &node.inputs),
             RiscOp::FusedElem { ops } => {
                 let in_place =
@@ -844,7 +861,7 @@ impl CEmitter {
                 ),
             }
 
-            if let RiscOp::Cast { new_precision } = node.op
+            if let RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } = node.op
                 && !matches!(
                     new_precision,
                     Prim::F32
@@ -6158,7 +6175,10 @@ impl CEmitter {
     // the canonical intermediate so each leg uses the spec-correct
     // conversion. Pairs not involving `Bf16` / `F16` keep the existing
     // C primitive cast semantics.
-    fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag) {
+    /// Emit a cast-ladder node. `trunc` selects the [05-OP-6] rung:
+    /// the float-to-integer leg truncates toward zero before its range
+    /// check instead of rejecting a fractional value.
+    fn emit_cast(&mut self, id: usize, inputs: &[NodeId], ty: &TensorType, dag: &Dag, trunc: bool) {
         let a = inputs[0].0;
         let src_ty = &dag
             .get(inputs[0])
@@ -6214,18 +6234,19 @@ impl CEmitter {
             } else {
                 src_elem.clone()
             };
-            let domain = NumericTrap::Domain {
-                op: "cast",
-                prim: dst_prec,
-            }
-            .to_string();
-            let overflow = NumericTrap::Overflow {
-                op: "cast",
-                prim: dst_prec,
-            }
-            .to_string();
+            // Both messages are generated from the same `NumericTrap`
+            // the evaluator raises, so the two lanes are byte-identical
+            // by construction rather than by matching literals.
+            let op = if trunc { "cast_trunc" } else { "cast" };
+            let domain = NumericTrap::Domain { op, prim: dst_prec }.to_string();
+            let overflow = NumericTrap::Overflow { op, prim: dst_prec }.to_string();
+            let helper = if trunc {
+                "chelis_trunc_float_to_int"
+            } else {
+                "chelis_checked_float_to_int"
+            };
             format!(
-                "{dst_elem} = ({dst_et})chelis_checked_float_to_int((double)({source_value}), {}, {domain:?}, {overflow:?});",
+                "{dst_elem} = ({dst_et}){helper}((double)({source_value}), {}, {domain:?}, {overflow:?});",
                 Self::integer_width(dst_prec)
             )
         } else if src_reduced && dst_reduced {

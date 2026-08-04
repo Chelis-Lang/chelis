@@ -6,6 +6,31 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`cast_trunc` — the named truncating float-to-integer cast (chelis#759).**
+  New spec atom **[05-OP-6]** (`spec/05-risc-primitives.md` §3.8) authors the
+  chelis#759 ladder's float-to-integer rung, and `cast_trunc(x, T)` implements
+  it on the Surf, eval, and compiled-C surfaces. A finite source truncates
+  toward zero and is finalized at the target width; a truncated integer outside
+  the target range traps `overflow` (never wraps, never saturates); a
+  non-finite source (`NaN`, `±inf`) traps `Domain`. Every source/target pair
+  that is not float-to-integer — including a `bool` target — is a check-time
+  type error naming `cast` as the remedy. `cast_trunc` is **non-differentiable**
+  ([05-OP-6]'s `no_grad` rule): a gradient goal through it is a structured
+  `AdError::NotSupported { reason: PiecewiseConstant }`, never a silent zero.
+  Scalar and tensor surfaces agree, and the eval and compiled lanes are
+  byte-identical over the acceptance matrix.
+
+  The CHECKED default `cast` ([04-NUM-14]) is **unchanged**; only its Domain
+  hint changed, to name `cast_trunc` as the shipped migration target instead
+  of describing it as future work. The callable is registered against
+  [05-OP-6] in the capacity census's `SEMANTIC_REGISTRATIONS`. The HIP target
+  rejects `cast_trunc` loudly (`unimplemented_rejection!(759, ...)`): its cast
+  kernels emit an unguarded device-side conversion with no numeric-trap
+  support, so the C target is canonical for the named ladder. This unblocks
+  chelis#1091 and the downstream shell cast migration.
+
 ## [0.18.2] — 2026-08-03
 
 ### Added

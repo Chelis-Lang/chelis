@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use chelis_deep::CastMode;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_tuple(
@@ -687,6 +688,23 @@ pub(super) fn infer_cast(
     if kids.len() < 2 {
         return malformed_form(list, "cast", "an expression and a target type", errors);
     }
+    let mode = match deep::cast_mode_of(kids) {
+        Ok(mode) => mode,
+        Err(selector) => {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::CastNonTensor,
+                    format!("`{selector}` is not a recognized cast mode selector"),
+                    vec![
+                        "the only named cast rung is `trunc` (`cast_trunc`, \
+                         [05-OP-6]); omit the selector for the checked default"
+                            .to_string(),
+                    ],
+                ),
+            );
+        }
+    };
 
     let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
     let resolved = subst.apply(&expr_ty);
@@ -793,19 +811,33 @@ pub(super) fn infer_cast(
     };
 
     match resolved {
-        Type::Tensor(dims, _) => {
+        Type::Tensor(dims, src_prec) => {
             if !new_prec.is_valid_tensor_precision() {
                 return push_unsupported_precision_error(
                     errors, new_prec, /* tensor = */ true,
                 );
             }
+            if mode == CastMode::Trunc {
+                let source = match src_prec {
+                    TensorPrec::Concrete(p) => Some(p),
+                    TensorPrec::Var(_) => None,
+                };
+                if let Some(error) = trunc_pair_error(source, new_prec) {
+                    return report(errors, error);
+                }
+            }
             Type::Tensor(dims, TensorPrec::Concrete(new_prec))
         }
-        Type::Prim(_) => {
+        Type::Prim(src_prec) => {
             if !new_prec.is_valid_scalar_cast_target() {
                 return push_unsupported_precision_error(
                     errors, new_prec, /* tensor = */ false,
                 );
+            }
+            if mode == CastMode::Trunc
+                && let Some(error) = trunc_pair_error(Some(src_prec), new_prec)
+            {
+                return report(errors, error);
             }
             Type::Prim(new_prec)
         }
@@ -818,6 +850,38 @@ pub(super) fn infer_cast(
                 vec![],
             ),
         ),
+    }
+}
+
+/// The [05-OP-6] source/target contract: `cast_trunc` is float-to-integer
+/// ONLY. Every other pair is a check-time type error naming the checked
+/// `cast` as the remedy, so no program reaches a lane that has no
+/// truncating semantics for it.
+///
+/// `source == None` means the operand's tensor precision is still a
+/// quantified variable; the pair is re-checked once unification binds it,
+/// so accepting it here is not a hole.
+pub(super) fn trunc_pair_error(source: Option<Prim>, target: Prim) -> Option<CheckError> {
+    let hint = "`cast_trunc` truncates a float toward zero into an integer \
+                width ([05-OP-6]); use `cast` for every other conversion"
+        .to_string();
+    if !target.is_integer() {
+        return Some(CheckError::new(
+            CheckErrorKind::CastNonTensor,
+            format!(
+                "`cast_trunc` target `{}` is not an integer dtype",
+                target.name()
+            ),
+            vec![hint],
+        ));
+    }
+    match source {
+        Some(prim) if !prim.is_float() => Some(CheckError::new(
+            CheckErrorKind::CastNonTensor,
+            format!("`cast_trunc` source `{}` is not a float dtype", prim.name()),
+            vec![hint],
+        )),
+        _ => None,
     }
 }
 

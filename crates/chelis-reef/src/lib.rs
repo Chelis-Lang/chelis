@@ -1012,7 +1012,7 @@ fn collect_expr_type_references(expr: &Expr, out: &mut BTreeSet<String>) {
             }
             collect_expr_type_references(body, out);
         }
-        Expr::Cast(inner, name, _) => {
+        Expr::Cast(inner, name, _, _) => {
             collect_expr_type_references(inner, out);
             out.insert(name.clone());
         }
@@ -1110,7 +1110,7 @@ fn collect_expr_constructor_references(expr: &Expr, out: &mut BTreeSet<String>) 
         | Expr::Realize(inner, _)
         | Expr::Copy(inner, _)
         | Expr::Borrow(inner, _)
-        | Expr::Cast(inner, _, _)
+        | Expr::Cast(inner, _, _, _)
         | Expr::Annotate(inner, _, _) => collect_expr_constructor_references(inner, out),
         Expr::Binary(_, left, right, _)
         | Expr::WithSeed(left, right, _)
@@ -1348,7 +1348,7 @@ fn collect_expr_references(expr: &Expr, out: &mut BTreeSet<String>) {
             }
             collect_expr_references(body, out);
         }
-        Expr::Cast(inner, name, _) => {
+        Expr::Cast(inner, name, _, _) => {
             collect_expr_references(inner, out);
             out.insert(name.clone());
         }
@@ -8323,9 +8323,10 @@ fn rewrite_expr(expr: &Expr, resolver: &NameResolver, locals: &mut HashSet<Strin
                 .collect(),
             *span,
         ),
-        Expr::Cast(inner, ty, span) => Expr::Cast(
+        Expr::Cast(inner, ty, mode, span) => Expr::Cast(
             Box::new(rewrite_expr(inner, resolver, locals)),
             ty.clone(),
+            *mode,
             *span,
         ),
         Expr::Grad(inner, wrt, span) => Expr::Grad(

@@ -3927,13 +3927,27 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
                     // runtime diagnostic.
                     let inner = kids.first()?;
                     let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
-                    let cast = match extract_numeric_leaf(inner)? {
-                        StagedScalar::Raw(raw) => {
-                            chelis_types::cast_raw("cast", raw, target).ok()?
-                        }
-                        StagedScalar::Typed(value) => {
-                            chelis_types::cast_scalar("cast", value, target).ok()?
-                        }
+                    // The [05-OP-6] rung folds through its OWN kernel, so
+                    // a statically-recognized `cast_trunc(1.9, int32)`
+                    // contributes 1 rather than declining as the checked
+                    // ladder would. An unrecognized selector declines.
+                    let cast = match chelis_deep::cast_mode_of(kids).ok()? {
+                        chelis_deep::CastMode::Checked => match extract_numeric_leaf(inner)? {
+                            StagedScalar::Raw(raw) => {
+                                chelis_types::cast_raw("cast", raw, target).ok()?
+                            }
+                            StagedScalar::Typed(value) => {
+                                chelis_types::cast_scalar("cast", value, target).ok()?
+                            }
+                        },
+                        chelis_deep::CastMode::Trunc => match extract_numeric_leaf(inner)? {
+                            StagedScalar::Raw(raw) => {
+                                chelis_types::cast_trunc_raw("cast_trunc", raw, target).ok()?
+                            }
+                            StagedScalar::Typed(value) => {
+                                chelis_types::cast_trunc_scalar("cast_trunc", value, target).ok()?
+                            }
+                        },
                     };
                     Some(StagedScalar::Typed(cast))
                 }
@@ -11153,16 +11167,29 @@ impl LowerCtx {
         } else {
             raise_bogus_target("a non-primitive cast target expression")
         };
+        // The mode selector is `elems[4..]` (elems 0/1 are the tag and
+        // the metadata map). An unrecognized selector is a fatal
+        // lowering error, never a silent fall back to the checked rung.
+        let op = match chelis_deep::cast_mode_of(&elems[2..]) {
+            Ok(chelis_deep::CastMode::Checked) => RiscOp::Cast { new_precision },
+            Ok(chelis_deep::CastMode::Trunc) => RiscOp::CastTrunc { new_precision },
+            Err(selector) => raise_fatal_lowering_error(
+                format!(
+                    "`{selector}` is not a recognized cast mode selector; the \
+                     only named rung is `trunc` ([05-OP-6])"
+                ),
+                Some(elems[4].span()),
+                elems[4].span_id().map(ToOwned::to_owned),
+            ),
+        };
         let ty = TensorType {
             dims: input_ty.dims,
             precision: new_precision,
         };
-        LoweredValue::Node(self.dag.add_node(
-            RiscOp::Cast { new_precision },
-            vec![x],
-            ty,
-            self.current_span_id.clone(),
-        ))
+        LoweredValue::Node(
+            self.dag
+                .add_node(op, vec![x], ty, self.current_span_id.clone()),
+        )
     }
 
     /// `(grad {} f)` -- rejected before lowering.

@@ -2575,6 +2575,45 @@ impl<'a> HostEmitter<'a> {
                     .push(format!("{}{target} = {};", self.indent, expr));
                 return Ok(());
             }
+            // [05-OP-6]. Unlike `cast`, this arm has NO identity
+            // fallback: the only legal pair is float source to integer
+            // target, and anything else must be a loud emission failure
+            // rather than a silent un-truncated pass-through.
+            "cast_trunc" => {
+                let expr = match (&arg_vars[0].1, ty) {
+                    (source, target) if is_float_abi(source) && is_integer_abi(target) => {
+                        let prim = integer_abi_prim(target)?;
+                        let domain = NumericTrap::Domain {
+                            op: "cast_trunc",
+                            prim,
+                        }
+                        .to_string();
+                        let overflow = NumericTrap::Overflow {
+                            op: "cast_trunc",
+                            prim,
+                        }
+                        .to_string();
+                        format!(
+                            "({})chelis_trunc_float_to_int({}, {}, {domain:?}, {overflow:?})",
+                            c_type(target)?,
+                            scalar_float_as_double(&arg_vars[0].0, source),
+                            integer_abi_width(target)?
+                        )
+                    }
+                    (source, target) => {
+                        return Err(invalid_abi_shape(
+                            format!(
+                                "`cast_trunc` resolved to {source:?} -> {target:?}; \
+                                 [05-OP-6] is float-to-integer only"
+                            ),
+                            "C host cast_trunc emission",
+                        ));
+                    }
+                };
+                self.lines
+                    .push(format!("{}{target} = {};", self.indent, expr));
+                return Ok(());
+            }
             "copy" => {
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));

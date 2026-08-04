@@ -544,7 +544,9 @@ fn format_expr(expr: &Expr) -> String {
                 parts.iter().map(format_expr).collect::<Vec<_>>().join(", ")
             )
         }
-        Expr::Cast(expr, ty, _) => format!("cast({}, {})", format_expr(expr), ty),
+        Expr::Cast(expr, ty, mode, _) => {
+            format!("{}({}, {})", mode.keyword(), format_expr(expr), ty)
+        }
         Expr::Grad(expr, wrt, _) => match wrt {
             None => format!("grad({})", format_expr(expr)),
             Some(names) if names.len() == 1 => {
@@ -861,7 +863,7 @@ fn wrap_operand(expr: &Expr) -> String {
         | Expr::Tuple(_, _)
         | Expr::Binary(_, _, _, _)
         | Expr::Unary(_, _, _)
-        | Expr::Cast(_, _, _)
+        | Expr::Cast(_, _, _, _)
         | Expr::Grad(_, _, _)
         | Expr::Vmap(_, _, _)
         | Expr::Jit(_, _)

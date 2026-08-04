@@ -1137,7 +1137,12 @@ fn deep_cons_list(items: Vec<DeepExpr>) -> DeepExpr {
 }
 
 fn cast_expr(expr: Expr, ty: &str) -> Expr {
-    Expr::Cast(Box::new(expr), ty.to_string(), chelis_deep::Span::new(0, 0))
+    Expr::Cast(
+        Box::new(expr),
+        ty.to_string(),
+        chelis_surf::ast::CastMode::Checked,
+        chelis_deep::Span::new(0, 0),
+    )
 }
 
 fn deep_span() -> chelis_deep::Span {

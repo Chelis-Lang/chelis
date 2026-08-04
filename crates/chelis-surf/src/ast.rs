@@ -158,6 +158,10 @@ pub struct Param {
 
 // ===== Expressions =====
 
+/// The cast-ladder rung selector. Defined in `chelis-deep` (the Deep
+/// node shape owns it) and re-exported so Surf consumers see one type.
+pub use chelis_deep::CastMode;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Lit(Literal, Span),
@@ -175,7 +179,7 @@ pub enum Expr {
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Lambda(Vec<Param>, Box<Expr>, Span), // fn (x, y) -> body
     Tuple(Vec<Expr>, Span),
-    Cast(Box<Expr>, String, Span), // cast(x, f64)
+    Cast(Box<Expr>, String, CastMode, Span), // cast(x, f64) / cast_trunc(x, int32)
     Grad(Box<Expr>, Option<Vec<String>>, Span),
     Vmap(Box<Expr>, Option<i64>, Span),
     Jit(Box<Expr>, Span),

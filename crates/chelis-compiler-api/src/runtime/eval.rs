@@ -879,6 +879,32 @@ impl<'a> EvalContext<'a> {
         // host eval lane just needs to pick the right re-pack.
         let target_prim = prim_from_name(target)
             .ok_or_else(|| format!("cast target `{target}` is not a recognized primitive type"))?;
+        // [05-OP-6]: the truncating rung has its own sealed kernel and
+        // its own trap brand. The checker has already pinned the pair to
+        // float source / integer target.
+        if chelis_deep::cast_mode_of(kids)
+            .map_err(|selector| format!("`{selector}` is not a recognized cast mode selector"))?
+            == chelis_deep::CastMode::Trunc
+        {
+            return match value {
+                RuntimeValue::Scalar(payload) => {
+                    chelis_types::cast_trunc_scalar("cast_trunc", payload.value(), target_prim)
+                        .map(RuntimeValue::from_scalar_value)
+                        .map_err(|trap| trap.to_string())
+                }
+                RuntimeValue::Tensor(tensor) => cast_trunc_tensor_value(tensor, target_prim),
+                // The checker pins the source to a float scalar or
+                // tensor ([05-OP-6]), so this arm is unreachable for a
+                // well-typed program. It names no value: rendering one
+                // here would need a third numeric formatter, which
+                // `spec/design/faithful_observation.md` B2.4 forbids.
+                _ => Err(format!(
+                    "unsupported cast_trunc operand for target {}; \
+                     [05-OP-6] requires a float scalar or tensor source",
+                    target_prim.name()
+                )),
+            };
+        }
         // The CHECKED default ladder (`chelis_types::cast_scalar`; the
         // chelis#759 one-rule-per-direction obligation), identical to
         // the tensor surfaces: out-of-range integer targets trap,

@@ -1034,6 +1034,20 @@ pub(super) fn cast_tensor_value(
         .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
 }
 
+/// The [05-OP-6] tensor rung, routed through the same sealed kernel the
+/// DAG evaluator uses so the two eval surfaces cannot diverge.
+pub(super) fn cast_trunc_tensor_value(
+    tensor: RuntimeTensorValue,
+    target_prim: Prim,
+) -> Result<RuntimeValue, String> {
+    let RuntimeTensorValue {
+        value: ir_value,
+        precision: _,
+    } = tensor;
+    chelis_ir::eval::cast_trunc_tensor(&ir_value, target_prim)
+        .map(|value| RuntimeValue::Tensor(RuntimeTensorValue::new(value)))
+}
+
 /// Bucket 4b: recursively flatten a nested numeric/bool list into a
 /// rank-N tensor. Every nesting level contributes one outer dimension;
 /// the innermost level must be uniformly numeric or bool. All sibling

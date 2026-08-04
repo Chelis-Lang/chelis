@@ -330,6 +330,23 @@ fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, 
     }
 }
 
+/// Public entry point for the [05-OP-6] tensor rung, mirroring
+/// [`cast_tensor`] so the host runtime and the DAG evaluator share one
+/// kernel.
+pub fn cast_trunc_tensor(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
+    cast_trunc_value(input, dst)
+}
+
+/// Tensor `cast_trunc` ([05-OP-6]): truncate every float element toward
+/// zero, then finalize at the integer target. The source is float and the
+/// target an integer width by the checker's contract, so the sealed
+/// kernel is reached with exactly the shape it accepts.
+fn cast_trunc_value(input: &TensorValue, dst: Prim) -> Result<TensorValue, String> {
+    let storage = chelis_types::cast_trunc_tensor("cast_trunc", input.storage().to_raw(), dst)
+        .map_err(|trap| trap.to_string())?;
+    Ok(TensorValue::from_storage(input.shape.clone(), storage))
+}
+
 fn dropout(input: &TensorValue, rate: f64, seed: u64, prim: Prim) -> Result<TensorValue, String> {
     let keep_scale = if rate >= 1.0 {
         0.0
@@ -2272,6 +2289,10 @@ where
                         .map_err(|trap| trap.to_string())?;
                     TensorValue::from_storage(last.shape.clone(), storage)
                 }
+            }
+            RiscOp::CastTrunc { new_precision } => {
+                let input = &values[&node.inputs[0]];
+                cast_trunc_value(input, *new_precision)?
             }
             RiscOp::Cast { new_precision } => {
                 // #380: a `cast` must apply the dtype conversion, not pass the

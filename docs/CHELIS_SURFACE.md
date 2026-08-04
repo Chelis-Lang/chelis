@@ -451,8 +451,9 @@ primitives (Tier-2 inherit via decomposition).
 - **Zero-gradient by design:** `cmplt` + comparisons (`eq`/`neq`/`lt`/`gt`/`lte`/`gte`),
   `and`/`or`/`not`, `const`, `load`, `uniform_like`.
 - **Non-differentiable — `grad` rejects with a structured `AdError`:** `floor`, `ceil`,
-  `round` (`PiecewiseConstant`); `argmax_reduce`, `argmin_reduce` (index output);
-  `scatter_replace`, `scatter_elements` (`NonDeterministicAtDuplicateIndices`).
+  `round`, `cast_trunc` ([05-OP-6], `PiecewiseConstant`); `argmax_reduce`,
+  `argmin_reduce` (index output); `scatter_replace`, `scatter_elements`
+  (`NonDeterministicAtDuplicateIndices`).
 - **No AD (host lane):** every op in §3 — `cumsum`, `sort`, `einsum`, `fold`, `scan`,
   `tensor_scan`, etc. A differentiable path must stay in the DAG lane.
 - `if/then/else` differentiates (chosen branch); loops/recursion do not differentiate
@@ -504,6 +505,12 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
   `int64`; `bool`; `string`. (`f8e4m3` reserved, not admitted. No unsigned ints.)
 - **Literal defaults:** integer literals → `int32`, float literals → `f32`.
 - **No implicit precision promotion** — widening requires an explicit `cast`.
+- **Cast ladder:** `cast(x, T)` is CHECKED ([04-NUM-14]) — a fractional or
+  non-finite float into an integer target traps `Domain`. `cast_trunc(x, T)`
+  ([05-OP-6]) is the named float-to-integer rung: it truncates toward zero,
+  traps `Overflow` out of range, and traps `Domain` on `NaN`/`±inf`. Every
+  other source/target pair is a type error on `cast_trunc`. The saturating
+  and rounding rungs are future work under chelis#759.
 - **Named dimensions match by name**; symbolic dims (`batch`, `seq`) for runtime-varying
   axes, concrete dims for fixed architecture. Wildcard `*` for length-poly elements.
 - **No broadcasting, ever** — operands' dims must match; use `expand`/`reshape`

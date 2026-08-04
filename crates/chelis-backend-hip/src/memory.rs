@@ -183,6 +183,7 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 | RiscOp::OneHot { .. }
                 | RiscOp::Realize
                 | RiscOp::Cast { .. }
+                | RiscOp::CastTrunc { .. }
                 | RiscOp::FusedElem { .. }
                 | RiscOp::Pad { .. }
                 | RiscOp::Shrink { .. }

@@ -1,8 +1,9 @@
 # Named truncating cast — the float→int rung of the #759 ladder
 
-Status: proposal (2026-08-03). Design doc; the normative text is the drafted
-`[05-OP-N]` atom in §4, to be lifted into `spec/05-risc-primitives.md` when its
-surrounding spec/05 edits settle (currently in flight under #1037/#1039/#1042/#1043).
+Status: **shipped** (2026-08-03). The normative text now lives in
+`spec/05-risc-primitives.md` §3.8 as **[05-OP-6]**; §4 below is the drafting record,
+not the authority. Read the spec/05 atom for the governing contract — where the two
+disagree, the numbered spec wins and this doc has a bug.
 
 Owning tracker: **[#759]** (the named lossy cast ladder). Trigger: **[#1091]** (the
 ecosystem break). This doc does not open a new tracker — #759 already owns the class;
@@ -35,7 +36,11 @@ per site.
   doc authors the **truncate-toward-zero float→int** rung the shells need. `cast_round`
   (round-half-to-even) and `cast_saturate` are follow-on rungs on the same discipline.
 
-## 4. Drafted atom (for lift into spec/05 §"casts")
+## 4. Drafted atom (LIFTED — now `spec/05-risc-primitives.md` §3.8 [05-OP-6])
+
+The text below was lifted verbatim into spec/05 §3.8 with the placeholder resolved to
+`[05-OP-6]` (the next free number in the group after [05-OP-1..5]). It is reproduced
+here as the drafting record only; `spec/05` is the authority.
 
 > **[05-OP-N]** `cast_trunc(source, target)` is the explicit truncating narrowing cast
 > from a float source dtype to an integer target dtype. For a **finite** source value it

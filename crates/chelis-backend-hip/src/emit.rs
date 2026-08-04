@@ -1077,6 +1077,8 @@ impl HipEmitter {
             }
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)?),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)?),
+            // Gated out by `reject_unsupported_hip_ops` before codegen.
+            RiscOp::CastTrunc { .. } => None,
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
             // `kernels::shrink_typed`); the kernel name carries the output
@@ -1340,6 +1342,9 @@ impl HipEmitter {
             RiscOp::ConstTensor { .. } => kernels::fill(name, elem_for_unary()?),
             RiscOp::Realize => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::Cast { .. } => Self::cast_kernel_source(name, node, dag)?,
+            RiscOp::CastTrunc { .. } => {
+                return Err(Self::cast_trunc_unsupported(node));
+            }
             RiscOp::Copy => Self::cast_kernel_source(name, node, dag)?,
             RiscOp::FusedElem { ops } => {
                 let aliased_ext = fused_in_place_spec(node, dag).map(|reusable| {
@@ -1748,6 +1753,7 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
             }
@@ -3426,6 +3432,25 @@ impl HipEmitter {
             && Self::node_is_statically_contiguous(dag, input_node.id)
     }
 
+    /// The [05-OP-6] rung has no guarded device kernel, so it never
+    /// reaches codegen: `reject_unsupported_hip_ops` gates it first.
+    /// These arms exist so a future HIP implementation has to remove
+    /// this rejection deliberately rather than inherit `cast`'s
+    /// unguarded conversion by accident.
+    fn cast_trunc_unsupported(node: &DagNode) -> Unsupported {
+        Unsupported::new(
+            UnsupportedKind::Op("cast_trunc".to_string()),
+            format!("the HIP kernel set (node {})", node.id.0),
+            Stage::Codegen("hip"),
+            chelis_types::unimplemented_rejection!(
+                759,
+                "the HIP cast kernels emit an unguarded device-side conversion, \
+                 so the [05-OP-6] Domain/Overflow traps have no device \
+                 implementation; the C target is canonical for the named cast ladder"
+            ),
+        )
+    }
+
     #[allow(dead_code)]
     fn node_is_statically_contiguous(dag: &Dag, id: NodeId) -> bool {
         match &dag.get(id).unwrap().op {
@@ -3467,6 +3492,7 @@ impl HipEmitter {
             | RiscOp::OneHot { .. }
             | RiscOp::Realize
             | RiscOp::Cast { .. }
+            | RiscOp::CastTrunc { .. }
             | RiscOp::FusedElem { .. }
             | RiscOp::BlasMatmul { .. }
             | RiscOp::Gather { .. }

@@ -353,6 +353,7 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::Drop
         | RiscOp::Realize
         | RiscOp::Cast { .. }
+        | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
         | RiscOp::BlasMatmul { .. }
         | RiscOp::Gather { .. }

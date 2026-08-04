@@ -914,6 +914,14 @@ pub enum RiscOp {
     Cast {
         new_precision: Prim,
     },
+    /// The [05-OP-6] named truncating float-to-integer cast
+    /// (`cast_trunc`). A separate op rather than a mode flag on `Cast`
+    /// so every backend, evaluator, and adjoint site is forced by
+    /// exhaustive matching to state its disposition instead of
+    /// inheriting the checked default's.
+    CastTrunc {
+        new_precision: Prim,
+    },
 
     // --- Fusion ---
     /// A sequence of elementwise ops fused into a single kernel.
@@ -1284,6 +1292,13 @@ impl RiscOp {
             // but the integer-quotient semantics are not part of the
             // pinned real-valued forward-bound surface today.
             RiscOp::FloorDiv | RiscOp::TruncDiv => false,
+
+            // [05-OP-6] `cast_trunc` is the same shape as the integer
+            // quotients above: piecewise constant with an integer output,
+            // so it has no real-valued envelope to bound. The CHECKED
+            // `cast` stays targetable because its float-to-float leg is
+            // real-valued and its integer leg only admits exact values.
+            RiscOp::CastTrunc { .. } => false,
 
             // `OneHot` produces a discrete 0/1 indicator from an integer
             // index; it is an internal lowering marker (dag.rs) consumed
@@ -2095,9 +2110,11 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Round
         | RiscOp::UniformLike { .. }
         | RiscOp::Dropout { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
-        RiscOp::Copy | RiscOp::Drop | RiscOp::Realize | RiscOp::Cast { .. } => {
-            shape_source_for_axis(dag, *node.inputs.first()?, axis)
-        }
+        RiscOp::Copy
+        | RiscOp::Drop
+        | RiscOp::Realize
+        | RiscOp::Cast { .. }
+        | RiscOp::CastTrunc { .. } => shape_source_for_axis(dag, *node.inputs.first()?, axis),
         // chelis#384/#397: an Expand INSERTS a new axis (rank+1) or SETS an
         // existing size-1 axis (rank unchanged) at `expand_axis`. The newly
         // inserted/set axis's extent comes from the Expand's `size`, NOT from
@@ -3189,6 +3206,9 @@ mod tests {
             RiscOp::Cast {
                 new_precision: Prim::F32,
             },
+            RiscOp::CastTrunc {
+                new_precision: Prim::Int32,
+            },
             RiscOp::FusedElem { ops: vec![] },
             RiscOp::BlasMatmul {
                 batch_dims: vec![],
@@ -3213,11 +3233,12 @@ mod tests {
     #[test]
     fn every_risc_op_is_classified_for_verifier_subset() {
         let all = one_of_every_risc_op();
-        // 52-variant closed vocabulary (spec WI-2 / dag.rs RiscOp).
+        // 53-variant closed vocabulary (spec WI-2 / dag.rs RiscOp); the
+        // 53rd is `CastTrunc`, the [05-OP-6] ladder rung (chelis#759).
         assert_eq!(
             all.len(),
-            52,
-            "one_of_every_risc_op must list all 52 RiscOp variants"
+            53,
+            "one_of_every_risc_op must list all 53 RiscOp variants"
         );
 
         // The classifier returns a definite bool for every variant (no
@@ -3229,16 +3250,17 @@ mod tests {
         // (5 binary/cmp + 13 unary, including `round`), 5 reductions, 6
         // movement, 4 memory/blas value nodes (Const, ConstTensor, Load,
         // BlasMatmul), and Cast are targetable (34); stochastic (2),
-        // arg-reductions (2), integer floor/trunc division (2), one_hot (1),
-        // the `Shape` metadata read (1), sparse gather/scatter (4, including
-        // element-wise `ScatterElements`), linearity/lifecycle markers + store
-        // (4), reduce-window-grad (1), and fused-elem (1) are excluded (18).
+        // arg-reductions (2), integer floor/trunc division (2), `cast_trunc`
+        // (1, chelis#759), one_hot (1), the `Shape` metadata read (1), sparse
+        // gather/scatter (4, including element-wise `ScatterElements`),
+        // linearity/lifecycle markers + store (4), reduce-window-grad (1),
+        // and fused-elem (1) are excluded (19).
         assert_eq!(
             targetable, 34,
             "targetable op count drifted from the pinned WI-2 subset"
         );
         assert_eq!(
-            excluded, 18,
+            excluded, 19,
             "excluded op count drifted from the pinned WI-2 subset"
         );
 
@@ -3264,6 +3286,14 @@ mod tests {
         assert!(
             !RiscOp::Argmax { axis: 0 }.is_verifier_targetable(),
             "argmax returns discrete indices, not a real envelope"
+        );
+        assert!(
+            !RiscOp::CastTrunc {
+                new_precision: Prim::Int32
+            }
+            .is_verifier_targetable(),
+            "cast_trunc is piecewise constant with an integer output; it has \
+             no real-valued envelope, unlike the checked `cast`"
         );
     }
 }

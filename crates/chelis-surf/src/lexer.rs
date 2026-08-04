@@ -526,6 +526,7 @@ fn classify_ident(text: &str) -> TokenKind {
         "copy" => TokenKind::Copy,
         "tensor" => TokenKind::Tensor,
         "cast" => TokenKind::Cast,
+        "cast_trunc" => TokenKind::CastTrunc,
         "export" => TokenKind::Export,
         "par" => TokenKind::Par,
         "true" => TokenKind::True,
@@ -834,7 +835,7 @@ mod tests {
     fn all_keywords() {
         assert_eq!(
             lex_kinds(
-                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast export par"
+                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast cast_trunc export par"
             ),
             vec![
                 TokenKind::Def,
@@ -857,6 +858,7 @@ mod tests {
                 TokenKind::Copy,
                 TokenKind::Tensor,
                 TokenKind::Cast,
+                TokenKind::CastTrunc,
                 TokenKind::Export,
                 TokenKind::Par,
             ]

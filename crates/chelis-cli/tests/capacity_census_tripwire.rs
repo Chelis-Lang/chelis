@@ -518,6 +518,16 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
                    JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])",
         atom: "[05-OP-2]",
     },
+    // chelis#759's float-to-integer ladder rung. `cast_trunc` is a
+    // compiler-owned numeric callable, so it lands on no enumerated leg
+    // (it is neither a C export, an exported stdlib `def`, nor a prelude
+    // ADT); the registration is authored directly against its atom so the
+    // callable still cannot exist without one.
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
+                   target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64",
+        atom: "[05-OP-6]",
+    },
 ];
 
 fn repo_root() -> PathBuf {
