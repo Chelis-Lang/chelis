@@ -6,9 +6,10 @@
 let
   rootString = toString root;
   # Build-facing subset only: prose edits must not invalidate packages.
-  # This source feeds automatic graph generation and package behavior checks.
+  # This source contains the tracked graph and package compile inputs.
   defaultRoots = [
     "Cargo.lock"
+    "Cargo.nix"
     "Cargo.toml"
     "crates"
     "rust-toolchain.toml"

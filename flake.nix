@@ -1,8 +1,6 @@
 {
   description = "Chelis compiler, runtime, and toolchain installer packages";
 
-  nixConfig.allow-import-from-derivation = true;
-
   inputs = {
     crate2nix = {
       url = "github:nix-community/crate2nix/0.15.0";

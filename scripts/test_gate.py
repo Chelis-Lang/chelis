@@ -54,20 +54,27 @@ DOCS_ONLY_GATE_IF = (
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 DEVENV_COMPOSITION_TESTS = (
     "run: .venv/bin/python -m unittest scripts.test_devenv_version "
-    "scripts.test_devenv_composition scripts.test_check_nix_lock_parity"
+    "scripts.test_devenv_composition scripts.test_check_nix_lock_parity "
+    "scripts.test_check_crate2nix_sync scripts.test_ci_detect_nix_graph_changes"
 )
 DEVENV_OUTPUT_BUILD = (
-    "run: devenv build --no-tui outputs.chelis outputs.chelis-runtime "
+    "devenv build --no-tui outputs.chelis outputs.chelis-runtime "
     "outputs.chelisup outputs.default > .devenv-package-outputs.json"
 )
-DEVENV_GRAPH_BUILD = (
+DEVENV_GRAPH_REGENERATION = (
     "run: devenv build --no-tui "
-    "chelis.rust.workspaceGraph.generatedCargoNix "
-    "> .devenv-workspace-graph.json"
+    "chelis.rust.workspaceGraph.regenerationCheck"
+)
+DEVENV_GRAPH_REGENERATION_IF = (
+    "if: needs.changes.result != 'success' || "
+    "needs.changes.outputs.cargo_graph_changed == 'true'"
 )
 DEVENV_OUTPUT_CHECK = (
-    "run: .venv/bin/python scripts/check_devenv_package_outputs.py "
-    ".devenv-package-outputs.json .devenv-workspace-graph.json"
+    ".venv/bin/python scripts/check_devenv_package_outputs.py "
+    ".devenv-package-outputs.json Cargo.nix"
+)
+DEVENV_OUTPUT_BUILD_AND_CHECK = (
+    f"run: |\n          {DEVENV_OUTPUT_BUILD}\n          {DEVENV_OUTPUT_CHECK}"
 )
 DEVENV_PACKAGE_CHECKER = REPO_ROOT / "scripts" / "check_devenv_package_outputs.py"
 
@@ -119,9 +126,7 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             f"shell: {PORTABLE_DEVENV_SHELL}",
             "run: devenv test --no-tui",
             DEVENV_COMPOSITION_TESTS,
-            DEVENV_OUTPUT_BUILD,
-            DEVENV_GRAPH_BUILD,
-            DEVENV_OUTPUT_CHECK,
+            DEVENV_OUTPUT_BUILD_AND_CHECK,
         )
         for marker in required_markers:
             actual_count = block.count(marker)
@@ -136,6 +141,41 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             raise AssertionError(
                 f"native Devenv setup in {job!r} must precede the runner verification"
             )
+
+    linux = blocks["nix-linux-x86-64"]
+    for marker in (DEVENV_GRAPH_REGENERATION_IF, DEVENV_GRAPH_REGENERATION):
+        actual_count = len(
+            re.findall(rf"(?m)^        {re.escape(marker)}$", linux)
+        )
+        if actual_count != 1:
+            raise AssertionError(
+                f"the Linux native job must contain one conditional graph "
+                f"regeneration marker {marker!r}, found {actual_count}"
+            )
+
+    darwin = blocks["nix-darwin-arm64"]
+    for marker in (DEVENV_GRAPH_REGENERATION_IF, DEVENV_GRAPH_REGENERATION):
+        if marker in darwin:
+            raise AssertionError(
+                "the macOS native job must not regenerate the platform-independent graph"
+            )
+
+    changes = blocks.get("changes", "")
+    required_change_markers = (
+        "cargo_graph_changed: ${{ steps.detect.outputs.cargo_graph_changed }}",
+        'echo "cargo_graph_changed=true" >> "$GITHUB_OUTPUT"',
+        'python3 scripts/ci_detect_nix_graph_changes.py < "$changed_paths"',
+    )
+    missing_change_markers = [
+        marker
+        for marker in required_change_markers
+        if re.search(rf"(?m)^\s+{re.escape(marker)}$", changes) is None
+    ]
+    if missing_change_markers:
+        raise AssertionError(
+            "the native workflow must detect Cargo graph changes: "
+            f"{missing_change_markers!r}"
+        )
 
     forbidden_markers = (
         "uses: cachix/install-nix-action@",
@@ -666,6 +706,11 @@ class CiParityTests(unittest.TestCase):
 class NixPackagesWorkflowTests(unittest.TestCase):
     """Lock the two native Nix package jobs and their complete check command."""
 
+    def test_local_devenv_build_results_are_ignored(self):
+        ignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("/.devenv-package-outputs.json\n", ignore)
+        self.assertIn("/.devenv-workspace-graph.json\n", ignore)
+
     def test_native_nix_workflow_has_both_authoritative_jobs(self):
         self.assertTrue(NIX_PACKAGES_YML.is_file(), "missing Nix package workflow")
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
@@ -721,6 +766,22 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         _assert_native_devenv_recipe(text)
 
+    def test_dispatch_without_graph_regeneration_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            'echo "cargo_graph_changed=true" >> "$GITHUB_OUTPUT"',
+            'echo "cargo_graph_changed=false" >> "$GITHUB_OUTPUT"',
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "detect Cargo graph changes"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_missing_graph_change_detector_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace("scripts/ci_detect_nix_graph_changes.py", "omitted.py", 1)
+        with self.assertRaisesRegex(AssertionError, "detect Cargo graph changes"):
+            _assert_native_devenv_recipe(mutated)
+
     def test_missing_devenv_composition_tests_fail_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         mutated = text.replace(DEVENV_COMPOSITION_TESTS, "run: omitted", 1)
@@ -733,10 +794,37 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "devenv build"):
             _assert_native_devenv_recipe(mutated)
 
-    def test_missing_devenv_graph_build_fails_the_native_recipe(self):
+    def test_missing_conditional_graph_regeneration_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(DEVENV_GRAPH_BUILD, "run: omitted", 1)
-        with self.assertRaisesRegex(AssertionError, "workspaceGraph"):
+        mutated = text.replace(DEVENV_GRAPH_REGENERATION, "run: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "conditional graph regeneration"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_non_fail_safe_graph_condition_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            DEVENV_GRAPH_REGENERATION_IF,
+            "if: needs.changes.outputs.cargo_graph_changed == 'true'",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "conditional graph regeneration"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_graph_regeneration_in_macos_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        needle = (
+            "      - name: Run the Devenv shell smoke checks\n"
+            "        run: devenv test --no-tui"
+        )
+        first = text.index(needle)
+        second = text.index(needle, first + len(needle))
+        insertion = (
+            f"{needle}\n"
+            f"      - {DEVENV_GRAPH_REGENERATION_IF}\n"
+            f"        {DEVENV_GRAPH_REGENERATION}"
+        )
+        mutated = text[:second] + text[second:].replace(needle, insertion, 1)
+        with self.assertRaisesRegex(AssertionError, "macOS native job"):
             _assert_native_devenv_recipe(mutated)
 
     def test_missing_devenv_package_check_fails_the_native_recipe(self):
@@ -750,7 +838,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         required = (
             "check_inventories",
             "check_behavior",
-            "Cargo-generated.nix",
+            "Cargo.nix",
             "verify_release_smt.py",
             "runtime-consumer.c",
             "shellcheck",

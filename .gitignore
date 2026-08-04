@@ -13,6 +13,8 @@ node_modules/
 # Devenv generates local state from the tracked input files.
 /.devenv/
 /.devenv.flake.nix
+/.devenv-package-outputs.json
+/.devenv-workspace-graph.json
 /.pre-commit-config.yaml
 # WI-13 Option B: the no-sudo local prefix where the dep-setup script builds
 # Sollya + fplll from source. A build artifact, never committed (the committed

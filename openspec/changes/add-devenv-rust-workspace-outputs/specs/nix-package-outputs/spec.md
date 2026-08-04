@@ -1,17 +1,33 @@
 ## MODIFIED Requirements
 
-### Requirement: Rust packages use a pinned automatic crate2nix graph
-The flake and Devenv MUST pin crate2nix 0.15.0. Each package interface MUST generate its graph with crate2nix `generatedCargoNix` and import from derivation.
+### Requirement: Rust packages use one pinned checked-in crate2nix graph
+The flake and Devenv MUST pin crate2nix 0.15.0. The repository MUST track one generated `Cargo.nix` file.
 
 The repository MUST provide one shared workspace graph helper. The root flake adapter and the Devenv workspace import MUST call that helper with their owned inputs.
 
-The root flake MUST enable import from derivation. The repository MUST NOT track a generated `Cargo.nix` file or a graph-input digest.
+Both package interfaces MUST import the same checked-in `Cargo.nix`. Package evaluation MUST NOT use import from derivation.
 
-The generator source MUST contain `Cargo.lock`, the root manifest, every workspace manifest, and the complete workspace source. The source filter MUST exclude generated and ignored build directories.
+Each interface MUST instantiate one graph. The graph MUST contain the `chelis-cli`, `chelis-runtime`, and `chelisup` workspace members. The compiler member MUST enable the `smt` feature.
 
-Each interface MUST generate one graph. The graph MUST contain the `chelis-cli`, `chelis-runtime`, and `chelisup` workspace members. The compiler member MUST enable the `smt` feature.
+The repository MUST record a digest of `Cargo.lock`, the root manifest, and every workspace manifest in `Cargo.nix`.
 
-The generator MUST resolve each dependency through Nix fetchers. It MUST set `CARGO_NET_OFFLINE=true` before Cargo reads the prepared sources.
+The Python suite and root native checks MUST reject an absent or stale digest. They MUST parse workspace members at the input boundary.
+
+An exact regeneration check MUST use the pinned crate2nix source, the configured Rust toolchain, and offline Cargo dependencies.
+
+The regeneration command MUST use `--no-default-features`, `--features chelis-cli/smt`, and `--output Cargo.nix`. It MUST compare the complete regenerated file.
+
+The Linux native job MUST run exact regeneration when a graph input changes. A workflow dispatch MUST select exact regeneration.
+
+If the change detector fails or omits its output, the Linux job MUST run exact regeneration.
+
+The macOS native job MUST NOT regenerate the platform-independent graph. It MUST import and build the checked-in graph.
+
+Graph inputs include `Cargo.nix`, `Cargo.lock`, every `Cargo.toml`, crate2nix pins, toolchain pins, and graph-generation code or configuration.
+
+The exact regeneration source MUST include tracked Cargo configuration and crate2nix configuration or hash files when present.
+
+An ordinary Rust source change MUST NOT select exact graph regeneration. The normal Linux package build MUST still run for that change.
 
 Crate builds MUST remain network-independent.
 
@@ -23,9 +39,7 @@ Other crates MUST keep crate-local sources.
 
 The root flake and Devenv MUST use one shared artifact assembly helper for `chelis`, `chelis-runtime`, and `chelisup`.
 
-The native check set MUST inspect each generated crate2nix artifact and its required workspace members. Generation or import failure MUST fail the check.
-
-Each native Nix job MUST evaluate both graphs for its matching system. Cross-system inventory checks MUST not require a foreign-system generator build.
+The native checks MUST inspect the checked-in graph and its required workspace members. An absent graph or failed import MUST fail the check.
 
 #### Scenario: Separate product members share crate outputs
 - **WHEN** one interface builds the compiler, runtime, and installer packages
@@ -33,16 +47,29 @@ Each native Nix job MUST evaluate both graphs for its matching system. Cross-sys
 
 #### Scenario: Both package interfaces use the shared graph rules
 - **WHEN** native CI evaluates the root flake and Devenv package graphs
-- **THEN** both graphs use the same feature selection, crate overrides, source policy, and artifact assembly
+- **THEN** both interfaces import the same graph with the same overrides and artifact assembly
 
 #### Scenario: A Cargo graph input changes
-- **WHEN** `Cargo.lock`, a workspace manifest, or workspace source changes
-- **THEN** Nix gives each affected generator a new derivation identity
-- **AND** package evaluation imports the new graph without a repository refresh
+- **WHEN** `Cargo.lock` or a workspace manifest changes without a matching `Cargo.nix`
+- **THEN** the graph digest check fails and names `Cargo.nix`
+- **AND** the Linux native job selects exact regeneration
 
-#### Scenario: The repository contains a generated graph
-- **WHEN** the repository tracks `Cargo.nix` or a graph-input digest
-- **THEN** the package contract test fails
+#### Scenario: The generated graph changes
+- **WHEN** `Cargo.nix` differs from pinned crate2nix 0.15.0 output
+- **THEN** the Linux exact regeneration check fails
+
+#### Scenario: Graph-generation configuration changes
+- **WHEN** tracked Cargo or crate2nix configuration changes
+- **THEN** the Linux native job selects exact regeneration
+- **AND** the regeneration source contains the changed configuration
+
+#### Scenario: Rust source changes without a graph change
+- **WHEN** a pull request changes Rust source but no graph input
+- **THEN** the Linux job builds the packages without exact graph regeneration
+
+#### Scenario: The change detector fails
+- **WHEN** the change job fails or omits `cargo_graph_changed`
+- **THEN** the Linux package job runs exact graph regeneration
 
 #### Scenario: The cvc5 override is absent
 - **WHEN** `cvc5-sys` does not receive the fixed cvc5 tree in either package interface
@@ -52,12 +79,12 @@ Each native Nix job MUST evaluate both graphs for its matching system. Cross-sys
 - **WHEN** one listed crate receives only its crate directory
 - **THEN** the crate build fails because a required header or grammar file is absent
 
-#### Scenario: Import from derivation is disabled
-- **WHEN** the Nix configuration prohibits import from derivation
-- **THEN** package evaluation fails before crate compilation
+#### Scenario: Import from derivation is introduced
+- **WHEN** package evaluation generates or imports a derived Cargo graph
+- **THEN** the static package contract test fails
 
-#### Scenario: Devenv generates one graph per output
-- **WHEN** Devenv creates separate crate2nix graphs for the three product outputs
+#### Scenario: Devenv creates one graph per output
+- **WHEN** Devenv imports separate crate2nix graphs for the three product outputs
 - **THEN** the static package contract test fails
 
 ### Requirement: Nix and Devenv share input revisions
@@ -96,7 +123,7 @@ The native jobs MUST check the artifact layout and executable behavior of each D
 
 The `x86_64-linux` job MUST run on every code pull request and push to `main`. A docs-only pull request MUST skip this job through the shared job-level detector.
 
-The `aarch64-darwin` job MUST run identical package steps as a documented manual dispatch gate. Default CI does not run this job.
+The `aarch64-darwin` job MUST run the same package and behavior steps as a manual gate. It MUST omit exact graph regeneration.
 
 A system MUST NOT count as supported from evaluation-only evidence.
 
@@ -153,7 +180,7 @@ The documentation MUST NOT claim separate Nix packages for internal crates, the 
 
 #### Scenario: A contributor compares package interfaces
 - **WHEN** the contributor reads the Devenv package documentation
-- **THEN** the documentation explains the shared contracts and separate graph ownership
+- **THEN** the documentation explains the shared graph and separate package instantiation
 
 #### Scenario: A user needs version routing
 - **WHEN** the user reads the Nix installation boundary

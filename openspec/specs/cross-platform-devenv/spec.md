@@ -146,7 +146,7 @@ The workspace source MUST use the repository source filter. It MUST NOT copy ign
 - **THEN** the static Devenv composition test fails
 
 #### Scenario: A required workspace member is absent
-- **WHEN** the generated graph lacks `chelis-cli`, `chelis-runtime`, or `chelisup`
+- **WHEN** the checked-in graph lacks `chelis-cli`, `chelis-runtime`, or `chelisup`
 - **THEN** package evaluation fails before an output can count as accepted
 
 #### Scenario: A Devenv output imports the unfiltered repository

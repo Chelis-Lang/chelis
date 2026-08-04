@@ -169,11 +169,11 @@ devenv build outputs.chelisup
 Run `devenv build` without an attribute to build all four outputs. The fourth
 output is the `default` alias of `chelis`.
 
-Devenv owns a separate crate2nix workspace graph. It does not evaluate the root
-flake.
+Devenv imports the checked-in `Cargo.nix` with its configured toolchain. It does
+not evaluate the root flake.
 
-Both interfaces share source filters, crate overrides, feature selection, and
-artifact assembly. Dirty worktrees can produce different derivation identities.
+Both interfaces share the graph, source filters, crate overrides, and artifact
+assembly. Dirty worktrees can produce different derivation identities.
 
 Native checks verify the same package layouts and behavior for both interfaces.
 

@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      cargo_graph_changed: ${{ steps.detect.outputs.cargo_graph_changed }}
     steps:
       # Shallow checkout (depth 1); deepen in bash since GitHub Actions
       # expressions have no arithmetic. See ci.yml's changes job.
@@ -43,13 +44,16 @@ jobs:
         run: |
           if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
+            echo "cargo_graph_changed=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): run the full suite and regenerate the graph"
             exit 0
           fi
           git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
-          git diff --name-only "$BASE..$HEAD" \
-            | python3 scripts/ci_detect_docs_only.py
+          changed_paths="$RUNNER_TEMP/nix-changed-paths"
+          git diff --name-only "$BASE..$HEAD" > "$changed_paths"
+          python3 scripts/ci_detect_docs_only.py < "$changed_paths"
+          python3 scripts/ci_detect_nix_graph_changes.py < "$changed_paths"
 
   nix-linux-x86-64:
     name: Nix Packages (x86_64-linux)
@@ -103,15 +107,16 @@ jobs:
       - name: Create the project Python environment
         run: uv venv --python 3.11 .venv
       - name: Run the Devenv input and composition tests
-        run: .venv/bin/python -m unittest scripts.test_devenv_version scripts.test_devenv_composition scripts.test_check_nix_lock_parity
+        run: .venv/bin/python -m unittest scripts.test_devenv_version scripts.test_devenv_composition scripts.test_check_nix_lock_parity scripts.test_check_crate2nix_sync scripts.test_ci_detect_nix_graph_changes
+      - name: Regenerate the checked-in Cargo graph
+        if: needs.changes.result != 'success' || needs.changes.outputs.cargo_graph_changed == 'true'
+        run: devenv build --no-tui chelis.rust.workspaceGraph.regenerationCheck
       - name: Run the Devenv shell smoke checks
         run: devenv test --no-tui
-      - name: Build all Devenv package outputs
-        run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup outputs.default > .devenv-package-outputs.json
-      - name: Build the Devenv workspace graph artifact
-        run: devenv build --no-tui chelis.rust.workspaceGraph.generatedCargoNix > .devenv-workspace-graph.json
-      - name: Check the Devenv package outputs
-        run: .venv/bin/python scripts/check_devenv_package_outputs.py .devenv-package-outputs.json .devenv-workspace-graph.json
+      - name: Build and check all Devenv package outputs
+        run: |
+          devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup outputs.default > .devenv-package-outputs.json
+          .venv/bin/python scripts/check_devenv_package_outputs.py .devenv-package-outputs.json Cargo.nix
       - name: Run the Nix flake contract suite
         run: .venv/bin/python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
@@ -130,7 +135,7 @@ jobs:
     name: Nix Packages (aarch64-darwin)
     # Manual gate: hosted macOS runners are the scarcest CI resource, so
     # pull requests run only the Linux job. Dispatch this workflow to run
-    # the identical darwin check set.
+    # the same package checks without platform-independent graph regeneration.
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     timeout-minutes: 120
@@ -167,15 +172,13 @@ jobs:
       - name: Create the project Python environment
         run: uv venv --python 3.11 .venv
       - name: Run the Devenv input and composition tests
-        run: .venv/bin/python -m unittest scripts.test_devenv_version scripts.test_devenv_composition scripts.test_check_nix_lock_parity
+        run: .venv/bin/python -m unittest scripts.test_devenv_version scripts.test_devenv_composition scripts.test_check_nix_lock_parity scripts.test_check_crate2nix_sync scripts.test_ci_detect_nix_graph_changes
       - name: Run the Devenv shell smoke checks
         run: devenv test --no-tui
-      - name: Build all Devenv package outputs
-        run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup outputs.default > .devenv-package-outputs.json
-      - name: Build the Devenv workspace graph artifact
-        run: devenv build --no-tui chelis.rust.workspaceGraph.generatedCargoNix > .devenv-workspace-graph.json
-      - name: Check the Devenv package outputs
-        run: .venv/bin/python scripts/check_devenv_package_outputs.py .devenv-package-outputs.json .devenv-workspace-graph.json
+      - name: Build and check all Devenv package outputs
+        run: |
+          devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup outputs.default > .devenv-package-outputs.json
+          .venv/bin/python scripts/check_devenv_package_outputs.py .devenv-package-outputs.json Cargo.nix
       - name: Run the Nix flake contract suite
         run: .venv/bin/python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set

@@ -8,6 +8,21 @@
 }:
 let
   source = import ./source.nix { inherit lib root; };
+  regenerationSource = import ./source.nix {
+    inherit lib root;
+    includeRoots = [
+      ".cargo"
+      "Cargo.lock"
+      "Cargo.nix"
+      "Cargo.toml"
+      "crate-hashes.json"
+      "crate2nix.json"
+      "crates"
+      "rust-toolchain.toml"
+      "scripts"
+      "tree-sitter-chelis"
+    ];
+  };
   crateSource = import ./source.nix {
     inherit lib root;
     includeRoots = [
@@ -22,7 +37,7 @@ let
   crate2nixVersion =
     assert crate2nixManifest.package.version == "0.15.0";
     crate2nixManifest.package.version;
-  crate2nixTools = pkgs.callPackage (crate2nix + "/tools.nix") { };
+  cargoNix = source + "/Cargo.nix";
   buildRustCrateForPkgs = import ./crate-overrides.nix {
     inherit
       crateSource
@@ -31,31 +46,27 @@ let
       toolchain
       ;
   };
-  generatedCargoNix =
+  cargoGraph =
     assert crate2nixVersion == "0.15.0";
-    (crate2nixTools.generatedCargoNix {
-      name = "chelis";
-      src = source;
-      cargo = toolchain;
-      additionalCargoNixArgs = [
-        "--no-default-features"
-        "--features"
-        "chelis-cli/smt"
-      ];
-    }).overrideAttrs
-      (_: {
-        CARGO_NET_OFFLINE = "true";
-      });
-  cargoGraph = import generatedCargoNix {
-    inherit buildRustCrateForPkgs pkgs;
-    rootFeatures = [ ];
+    import cargoNix {
+      inherit buildRustCrateForPkgs pkgs;
+      rootFeatures = [ ];
+    };
+  regenerationCheck = import ./crate2nix-regeneration.nix {
+    inherit
+      crate2nix
+      pkgs
+      toolchain
+      ;
+    source = regenerationSource;
   };
 in
 {
   inherit
     cargoGraph
+    cargoNix
     crate2nixVersion
-    generatedCargoNix
+    regenerationCheck
     source
     toolchain
     version

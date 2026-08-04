@@ -317,17 +317,22 @@ Nix is an additive source-build channel. It does not create the version store th
 
 The flake does not export internal crates, the Python extension, `chelis-std`, or documentation as separate packages.
 
-The Rust packages use an automatic graph from crate2nix 0.15.0. The graph gives each Rust crate a separate Nix derivation.
+The Rust packages import one checked-in graph from crate2nix 0.15.0. Each Rust crate remains a separate Nix derivation.
 
-Nix generates the graph from the Cargo workspace through import from derivation. Nix fetchers prepare dependencies before Cargo runs in offline mode.
+The root flake and Devenv import the same `Cargo.nix`. Package evaluation does not use import from derivation.
 
-The repository does not track `Cargo.nix`.
+If `Cargo.lock` or a workspace manifest changes, regenerate the graph:
 
-A Cargo input change gives the generator a new derivation identity. No graph refresh command is necessary.
+```sh
+nix run github:nix-community/crate2nix/7c33e664668faecf7655fa53861d7a80c9e464a2 -- \
+  generate --no-default-features --features chelis-cli/smt --output Cargo.nix
+.venv/bin/python scripts/check_crate2nix_sync.py --write
+.venv/bin/python scripts/check_crate2nix_sync.py
+```
 
-The first evaluation builds the pinned generator before Nix schedules crate builds. Later evaluations can reuse the generated graph from the Nix store.
+The fast digest check runs in each native check set. Linux runs exact regeneration only for graph changes and workflow dispatches.
 
-Each native CI job evaluates its matching graph. A foreign-system package evaluation requires a compatible remote builder.
+The macOS job imports the checked-in graph without regeneration. A foreign-system package evaluation still requires a compatible remote builder.
 
 To bump the shared Nix pins, pick a `cachix/devenv-nixpkgs` revision and read its locked inner `NixOS/nixpkgs` revision. Set that inner revision in `flake.nix` and the outer revision in `devenv.yaml`. Keep the `rust-overlay` revision identical in both files.
 

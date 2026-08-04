@@ -51,7 +51,7 @@ EXPECTED_NIX_STRUCTURE_DIGESTS = {
         "50279230118ef689769333f8c4e1698975ad01fb305c08ef2e3a4aa86f18f11d"
     ),
     "devenv/git-hooks.nix": (
-        "df1b4245d29b7d093e7a83ca9cfcdf1e712fecc1764889050e263937a0fcd91b"
+        "603b5dbe4feafec53b5da262804cbcab704cc70696f164c5994c26c05870d286"
     ),
     "devenv/smoke-tests.nix": (
         "ceb8a5753e0a13482e68093f6c2a96b259598e3b16f2ff8964a1d4b10b985136"

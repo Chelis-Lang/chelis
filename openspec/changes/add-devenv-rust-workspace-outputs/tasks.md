@@ -6,6 +6,7 @@
 - [x] 1.4 Add negative tests for `rootCrate`, `builtins.getFlake`, Rust module replacement, and duplicate graphs.
 - [x] 1.5 Add native fixtures for all output layouts, the default alias, executable behavior, and SMT support.
 - [x] 1.6 Add CI contract tests for all four Devenv outputs and native package checks.
+- [x] 1.7 Add positive and negative contracts for the tracked graph, digest, and conditional regeneration.
 
 ## 2. Extract shared package rules
 
@@ -14,6 +15,8 @@
 - [x] 2.3 Extract compiler, runtime, and chelisup artifact assembly into one shared helper.
 - [x] 2.4 Adapt the root flake package path to the shared helpers without output changes.
 - [x] 2.5 Run the root flake contract tests and native package checks after the refactor.
+- [x] 2.6 Replace package-evaluation IFD with one checked-in graph for both interfaces.
+- [x] 2.7 Add the fast digest check and exact offline regeneration derivation.
 
 ## 3. Add the Devenv workspace path
 
@@ -30,9 +33,11 @@
 
 - [x] 4.1 Update both native jobs to build and check all four Devenv outputs.
 - [x] 4.2 Run the SMT fixture against the Devenv compiler in each native job.
-- [x] 4.3 Update README and installation documentation for separate graph ownership and shared contracts.
+- [x] 4.3 Update README and installation documentation for one graph and separate package instantiation.
 - [x] 4.4 Update the changelog and active package specifications.
 - [x] 4.5 Keep the root flake package and application documentation unchanged for downstream users.
+- [x] 4.6 Select exact graph regeneration only in the Linux job for graph changes and dispatches.
+- [x] 4.7 Remove graph regeneration from the macOS job and update graph documentation.
 
 ## 5. Run local validation
 

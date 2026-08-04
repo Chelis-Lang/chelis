@@ -18,7 +18,7 @@ Devenv documents custom local modules as the extension mechanism for project pol
 
 - Make Devenv own the Rust package graph for `devenv build`.
 - Use Devenv's crate2nix input and configured Rust toolchain.
-- Generate one graph for the complete Chelis virtual workspace.
+- Import one checked-in graph for the complete Chelis virtual workspace.
 - Select the three product crates from `workspaceMembers`.
 - Preserve SMT support, source overrides, package layouts, and launcher behavior.
 - Keep the root flake as the public downstream Nix API.
@@ -79,13 +79,15 @@ The helper receives these typed inputs:
 - the configured Rust toolchain
 - the fixed cvc5 package set
 
-The helper generates one crate2nix graph. It enables `chelis-cli/smt` and selects no product package itself.
+The helper imports the checked-in `Cargo.nix` graph. It selects no product package itself.
 
-The Devenv extension and the root flake adapter call the same helper. Each interface owns its input graph, but both interfaces share package rules.
+The tracked graph records the `chelis-cli/smt` generation feature. The Devenv extension and root flake adapter import that same file.
+
+Each interface owns its package set and toolchain. Both interfaces share graph, override, and artifact rules.
 
 The helper uses `cratePkgs.buildRustCrate`. It retains crate2nix's default overrides before it adds Chelis overrides.
 
-An alternative calls `config.languages.rust.import` three times. That function requires `rootCrate`, and three calls duplicate graph generation.
+An alternative calls `config.languages.rust.import` three times. That function requires `rootCrate`, and three calls duplicate graph instantiation.
 
 An alternative imports `nix/packages.nix` directly from the output module. That path hides the workspace API and couples Devenv to the flake adapter.
 
@@ -138,13 +140,21 @@ The module contains no `builtins.getFlake`, `rootCrate`, second graph call, or i
 
 The static composition test rejects each forbidden path. Negative fixtures also remove one member, one override, and one output alias.
 
-### D7: Preserve source filtering and lazy shell evaluation
+### D7: Use one tracked graph and preserve lazy shell evaluation
 
 The workspace helper uses the existing filtered source policy. It excludes `.git`, `.devenv`, `.venv`, `target`, and other generated directories.
 
-The local function and output values remain lazy. `devenv shell` and `devenv test` do not force crate2nix graph generation.
+The helper imports the repository `Cargo.nix` directly. Package evaluation does not use import from derivation.
 
-`devenv build` forces the graph and imports its generated Nix expression. Import-from-derivation failure is a build failure.
+The local function and output values remain lazy. `devenv shell` and `devenv test` do not build product packages.
+
+A fast digest check covers `Cargo.lock`, the root manifest, and every workspace manifest. It runs in the root native check set.
+
+An exact regeneration derivation uses pinned crate2nix 0.15.0, offline dependencies, and the configured Rust toolchain.
+
+Its filtered input includes tracked Cargo configuration and optional crate2nix configuration or hash files.
+
+The Linux workflow selects exact regeneration for graph changes and workflow dispatches. The macOS workflow imports the tracked graph without regeneration.
 
 A static test rejects an unfiltered repository path. A native probe confirms that shell evaluation does not build a product package.
 
@@ -163,6 +173,12 @@ Each native job runs these checks:
 - package layout and executable checks against the Devenv outputs
 - SMT verification against the Devenv compiler
 
+The Linux job runs exact graph regeneration for graph changes and workflow dispatches. A detector failure also selects this step.
+
+Rust source changes do not select exact regeneration when the detector succeeds.
+
+The macOS job does not regenerate the platform-independent graph. Its package builds still import the same checked-in file.
+
 Local `devenv build --no-tui` output is supporting evidence. A local run cannot replace the required macOS hosted evidence.
 
 ## Risks / Trade-offs
@@ -171,7 +187,7 @@ Local `devenv build --no-tui` output is supporting evidence. A local run cannot 
 
 **[Two interface evaluations create different store paths]** → Share inputs, graph rules, overrides, and assembly. Test behavior and layout instead of dirty-worktree path identity.
 
-**[Import from derivation increases evaluation cost]** → Keep one graph thunk and force it only for package outputs.
+**[The checked-in graph becomes stale]** → Run the fast digest check always and exact Linux regeneration for graph changes.
 
 **[The cvc5 override disappears from one path]** → Keep one shared override function and run an SMT fixture against each native Devenv compiler.
 
@@ -186,11 +202,13 @@ Local `devenv build --no-tui` output is supporting evidence. A local run cannot 
 1. Add failing static tests for the workspace import, graph members, input pins, overrides, outputs, and forbidden self-flake path.
 2. Add failing native fixtures for package layout, SMT support, and the default alias.
 3. Pin crate2nix in Devenv and extend lock parity tests.
-4. Extract the shared graph, override, and artifact assembly helpers.
-5. Add the local Devenv workspace import module.
-6. Replace the self-flake output module with workspace member selection.
-7. Run the Linux native job and the manual macOS job.
-8. Update specifications, contributor documentation, and the changelog.
+4. Track one `Cargo.nix` and add digest plus exact regeneration checks.
+5. Extract the shared graph, override, and artifact assembly helpers.
+6. Add the local Devenv workspace import module.
+7. Replace the self-flake output module with workspace member selection.
+8. Add conditional Linux graph regeneration and keep macOS package-only.
+9. Run the Linux native job and the manual macOS job.
+10. Update specifications, contributor documentation, and the changelog.
 
 Rollback removes the Devenv package output modules and their CI steps. The public root flake remains the stable package path during rollback.
 
