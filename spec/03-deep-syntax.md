@@ -343,7 +343,7 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the reserved names of §1.1.1 are rejected at check time) |
+| `t-prim` | `(t-prim {} f32)` | Primitive type (language set: f32, f64, bf16, f16, int8, int16, int32, int64, bool, string — see `spec/04-type-system.md` §1.1; the reserved primitive names of §1.1.1 — `f8e4m3`, `f8e5m2`, `uint8`/`uint16`/`uint32`/`uint64`, `int4`/`uint4`, `complex64`/`complex128`, `decimal128`/`decimal256` — are rejected at check time) |
 | `t-fn` | `(t-fn {} arg₁ arg₂ ... ret)` | Function type; last child is return |
 | `t-tensor` | `(t-tensor {} dim₁ dim₂ ... precision)` | Tensor type; last child is precision |
 | `t-ref` | `(t-ref {} type)` | Read-only borrow type |
