@@ -3543,9 +3543,9 @@ def apply(
 #include "scatter_runtime_bad.h"
 
 int main(void) {
-    int base_shape[2] = {3, 2};
-    int idx_shape[1] = {2};
-    int updates_shape[2] = {2, 2};
+    int64_t base_shape[2] = {3, 2};
+    int64_t idx_shape[1] = {2};
+    int64_t updates_shape[2] = {2, 2};
 
     chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
     chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
