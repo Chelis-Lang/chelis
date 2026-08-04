@@ -290,6 +290,43 @@ fn f16_bf16_scalar_op_surface_agrees_across_lanes() {
     }
 }
 
+/// [04-NUM-14]: a non-literal f64 host value narrows directly to the declared
+/// reduced width. Literal-only coverage cannot reach this host-cast branch.
+#[test]
+fn c_nonliteral_f64_to_reduced_float_rounds_once() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for (dtype, value, expected, name, helper) in [
+        (
+            "f16",
+            "52847.99970178839",
+            "52830.0",
+            "f64_param_f16",
+            "chelis_host_f64_to_f16",
+        ),
+        (
+            "bf16",
+            "1.0039062500000002",
+            "1.01",
+            "f64_param_bf16",
+            "chelis_host_f64_to_bf16",
+        ),
+    ] {
+        let program = format!(
+            "module M.Main\ndef narrow(x: f64) -> {dtype} = cast(x, {dtype})\n\
+             out = print(narrow(cast({value}, f64)))\n"
+        );
+        assert_eq!(eval_first_line(&program).expect("eval"), expected);
+        let (emitted, stdout) = build_and_run_c(&program, name).expect("compiled lane");
+        assert!(
+            emitted.contains(helper),
+            "missing direct f64 narrowing helper"
+        );
+        assert_eq!(stdout.lines().next().unwrap_or("").trim(), expected);
+    }
+}
+
 /// **The eval scalar comparison rounds casts before comparing.** cast(2049.0,
 /// f16) is 2048, so lt(2048, 2049) at f16 is FALSE. The compiled lane gets
 /// this wrong (chelis#714, wrong-branch row below).
