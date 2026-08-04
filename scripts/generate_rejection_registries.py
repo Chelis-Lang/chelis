@@ -17,6 +17,7 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,11 +30,11 @@ UNIMPLEMENTED_LITERAL = re.compile(
 UNIMPLEMENTED_NAME = re.compile(r"\bunimplemented_rejection\b")
 PRODUCTION_RUST_INCLUDE = re.compile(r"\binclude\s*!\s*\(")
 BUILD_SCRIPT_MODULE = re.compile(
-    r"\b(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
+    r"\bmod\b\s+[^;{}\s][^;{}]*;"
 )
 ATTRIBUTE_START = re.compile(r"#\s*\[")
-PATH_META = re.compile(r"^\s*path\b\s*=")
-CFG_ATTR_META = re.compile(r"^\s*cfg_attr\b\s*\(")
+PATH_META = re.compile(r"^\s*(?:r#)?path\b\s*=")
+CFG_ATTR_META = re.compile(r"^\s*(?:r#)?cfg_attr\b\s*\(")
 UNIMPLEMENTED_DEFINITION = re.compile(
     r"\bmacro_rules\s*!\s*unimplemented_rejection\s*\{"
 )
@@ -99,6 +100,28 @@ def _mask_rust_non_code(source: str) -> str:
             index = len(source) if end < 0 else end + len(terminator)
             _blank(masked, source, start, index)
             continue
+
+        if source[index] == "'":
+            start = index
+            cursor = index + 1
+            if cursor < len(source) and source[cursor] == "\\":
+                cursor += 1
+                if cursor < len(source) and source[cursor] == "u":
+                    if cursor + 1 < len(source) and source[cursor + 1] == "{":
+                        closing_brace = source.find("}", cursor + 2)
+                        cursor = len(source) if closing_brace < 0 else closing_brace + 1
+                    else:
+                        cursor += 1
+                elif cursor < len(source) and source[cursor] == "x":
+                    cursor = min(cursor + 3, len(source))
+                else:
+                    cursor = min(cursor + 1, len(source))
+            else:
+                cursor = min(cursor + 1, len(source))
+            if cursor < len(source) and source[cursor] == "'":
+                index = cursor + 1
+                _blank(masked, source, start, index)
+                continue
 
         if source[index] == '"':
             start = index
@@ -219,6 +242,157 @@ def discover_atoms(spec_dir: Path) -> list[str]:
     return sorted(atoms)
 
 
+def _load_toml(path: Path, label: str) -> dict:
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
+        raise RegistryError(f"cannot read {label} {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise RegistryError(f"{label} {path} is not a TOML table")
+    return payload
+
+
+def _workspace_members(root: Path) -> list[Path]:
+    """Resolve every workspace member declared by the root Cargo manifest."""
+    manifest_path = root / "Cargo.toml"
+    if not manifest_path.is_file():
+        raise RegistryError(f"missing workspace manifest: {manifest_path}")
+    payload = _load_toml(manifest_path, "workspace manifest")
+    workspace = payload.get("workspace")
+    if not isinstance(workspace, dict):
+        raise RegistryError("root Cargo.toml has no workspace table")
+    patterns = workspace.get("members")
+    if not isinstance(patterns, list) or not patterns:
+        raise RegistryError("workspace members must be a non-empty list")
+
+    members: set[Path] = set()
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern:
+            raise RegistryError(f"invalid workspace member pattern: {pattern!r}")
+        relative = Path(pattern)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RegistryError(f"workspace member escapes repository: {pattern}")
+        matches = sorted(path for path in root.glob(pattern) if path.is_dir())
+        if not matches:
+            raise RegistryError(f"workspace member pattern matches nothing: {pattern}")
+        members.update(matches)
+    return sorted(members)
+
+
+def _member_path(root: Path, member: Path, raw: str, label: str) -> Path:
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RegistryError(f"{label} must stay within its workspace member: {raw}")
+    candidate = member / relative
+    try:
+        candidate.resolve().relative_to(member.resolve())
+    except ValueError as error:
+        raise RegistryError(f"{label} escapes workspace member: {raw}") from error
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise RegistryError(f"{label} escapes repository: {raw}") from error
+    cursor = candidate
+    while cursor != member:
+        if cursor.is_symlink():
+            raise RegistryError(
+                f"{label} uses a source symlink: {candidate.relative_to(root)}"
+            )
+        cursor = cursor.parent
+    return candidate
+
+
+def _target_paths(member: Path, manifest: dict) -> list[Path]:
+    """Return explicit lib/bin/example source paths from one package manifest."""
+    paths: list[Path] = []
+    tables: list[tuple[str, object]] = [
+        ("lib", manifest.get("lib")),
+        ("bin", manifest.get("bin", [])),
+        ("example", manifest.get("example", [])),
+    ]
+    for kind, raw_tables in tables:
+        if raw_tables is None:
+            continue
+        rows = [raw_tables] if kind == "lib" else raw_tables
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise RegistryError(f"{member}/Cargo.toml has malformed {kind} targets")
+        for row in rows:
+            raw_path = row.get("path")
+            if raw_path is None:
+                continue
+            if not isinstance(raw_path, str) or not raw_path:
+                raise RegistryError(
+                    f"{member}/Cargo.toml has invalid {kind} target path"
+                )
+            paths.append(Path(raw_path))
+    return paths
+
+
+def _inventory_tree(root: Path, source_root: Path, paths: set[Path]) -> None:
+    """Add Rust files under one lexical root, rejecting symlink edges."""
+    if source_root.is_symlink():
+        raise RegistryError(
+            f"source symlink is forbidden: {source_root.relative_to(root)}"
+        )
+    if not source_root.is_dir():
+        return
+    for entry in source_root.rglob("*"):
+        if entry.is_symlink():
+            raise RegistryError(
+                f"source symlink is forbidden: {entry.relative_to(root)}"
+            )
+    paths.update(source_root.rglob("*.rs"))
+
+
+def _workspace_rust_paths(root: Path) -> tuple[list[Path], set[Path]]:
+    """Derive lexical production roots from workspace package manifests."""
+    paths: set[Path] = set()
+    build_scripts: set[Path] = set()
+    for member in _workspace_members(root):
+        if member.is_symlink():
+            raise RegistryError(
+                f"workspace member symlink is forbidden: {member.relative_to(root)}"
+            )
+        manifest_path = member / "Cargo.toml"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise RegistryError(
+                f"missing ordinary member manifest: {manifest_path.relative_to(root)}"
+            )
+        manifest = _load_toml(manifest_path, "member manifest")
+        package = manifest.get("package")
+        if not isinstance(package, dict):
+            raise RegistryError(f"{manifest_path} has no package table")
+
+        _inventory_tree(root, member / "src", paths)
+        _inventory_tree(root, member / "examples", paths)
+        for raw_target in _target_paths(member, manifest):
+            target = _member_path(root, member, raw_target.as_posix(), "target path")
+            if target.is_symlink() or not target.is_file():
+                raise RegistryError(
+                    f"missing ordinary target source: {target.relative_to(root)}"
+                )
+            _inventory_tree(root, target.parent, paths)
+
+        build_setting = package.get("build")
+        if build_setting is False:
+            build = None
+        elif build_setting is None:
+            default_build = member / "build.rs"
+            build = default_build if default_build.is_file() else None
+        elif isinstance(build_setting, str) and build_setting:
+            build = _member_path(root, member, build_setting, "build script")
+        else:
+            raise RegistryError(f"{manifest_path} has invalid package.build")
+        if build is not None:
+            if build.is_symlink() or not build.is_file():
+                raise RegistryError(
+                    f"missing ordinary build script: {build.relative_to(root)}"
+                )
+            paths.add(build)
+            build_scripts.add(build)
+    return sorted(paths), build_scripts
+
+
 def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
     """Discover every production ``unimplemented_rejection!`` literal.
 
@@ -229,28 +403,7 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
     from its liveness evidence.
     """
     authorities: dict[int, list[AuthoritySite]] = {}
-    crates = root / "crates"
-    if not crates.is_dir():
-        raise RegistryError(f"missing crates source root: {crates}")
-    paths: list[Path] = []
-    for crate in sorted(crates.glob("*")):
-        if not crate.is_dir():
-            continue
-        if crate.is_symlink():
-            raise RegistryError(f"crate source symlink is forbidden: {crate}")
-        src = crate / "src"
-        if src.is_dir():
-            if src.is_symlink():
-                raise RegistryError(f"source symlink is forbidden: {src}")
-            for entry in src.rglob("*"):
-                if entry.is_symlink() and (entry.is_dir() or entry.suffix == ".rs"):
-                    raise RegistryError(f"source symlink is forbidden: {entry}")
-            paths.extend(src.rglob("*.rs"))
-        build = crate / "build.rs"
-        if build.is_file():
-            if build.is_symlink():
-                raise RegistryError(f"source symlink is forbidden: {build}")
-            paths.append(build)
+    paths, build_scripts = _workspace_rust_paths(root)
 
     for path in sorted(set(paths)):
         relative_path = path.relative_to(root)
@@ -259,7 +412,7 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
         relative = relative_path.as_posix()
         code = _mask_owner_macro_definition(code, relative)
         build_module = BUILD_SCRIPT_MODULE.search(code)
-        if path.name == "build.rs" and build_module is not None:
+        if path in build_scripts and build_module is not None:
             line = source.count("\n", 0, build_module.start()) + 1
             raise RegistryError(
                 f"{relative}:{line}: build-script module edge is forbidden "

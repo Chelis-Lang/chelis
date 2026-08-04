@@ -317,6 +317,38 @@ class ClosingReferences(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "malformed closing-issue response"):
             collect_pull_request_closing_issues(42, run=run)
 
+    def test_partial_graphql_data_with_errors_fails_closed(self) -> None:
+        def run(_: list[str], **__: object) -> object:
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stderr": "",
+                    "stdout": json.dumps(
+                        {
+                            "errors": [{"message": "partial result"}],
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        "closingIssuesReferences": {
+                                            "nodes": [],
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    ),
+                },
+            )()
+
+        with self.assertRaisesRegex(RuntimeError, "GraphQL errors"):
+            collect_pull_request_closing_issues(42, run=run)
+
 
 if __name__ == "__main__":
     unittest.main()

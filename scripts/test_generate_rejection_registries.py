@@ -14,7 +14,7 @@ from generate_rejection_registries import (
     OUTPUT_REL,
     RegistryError,
     discover_atoms,
-    discover_issue_authorities,
+    discover_issue_authorities as discover_issue_authorities_from_manifest,
     load_issue_manifest,
     render_issue_manifest,
     render_registry,
@@ -22,6 +22,31 @@ from generate_rejection_registries import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
+    """Give compact synthetic crate fixtures ordinary workspace manifests."""
+    workspace_manifest = root / "Cargo.toml"
+    if not workspace_manifest.exists():
+        crates = root / "crates"
+        members = sorted(path for path in crates.glob("*") if path.is_dir())
+        if members:
+            rendered_members = ", ".join(
+                json.dumps(path.relative_to(root).as_posix()) for path in members
+            )
+            workspace_manifest.write_text(
+                f"[workspace]\nmembers = [{rendered_members}]\nresolver = \"3\"\n"
+            )
+            for member in members:
+                manifest = member / "Cargo.toml"
+                if not manifest.exists():
+                    manifest.write_text(
+                        "[package]\n"
+                        f'name = "{member.name}"\n'
+                        'version = "0.0.0"\n'
+                        'edition = "2024"\n'
+                    )
+    return discover_issue_authorities_from_manifest(root)
 
 
 class DiscoverAtoms(unittest.TestCase):
@@ -48,9 +73,9 @@ class DiscoverAtoms(unittest.TestCase):
 
 
 class IssueManifest(unittest.TestCase):
-    def test_missing_crates_root_fails_closed(self) -> None:
+    def test_missing_workspace_manifest_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            with self.assertRaisesRegex(RegistryError, "missing crates source root"):
+            with self.assertRaisesRegex(RegistryError, "missing workspace manifest"):
                 discover_issue_authorities(Path(raw))
 
     def write_manifest(self, root: Path, issues: list[dict]) -> Path:
@@ -148,6 +173,22 @@ class IssueManifest(unittest.TestCase):
                 {714: [AuthoritySite("crates/example/src/lib.rs", 5)]},
             )
 
+    def test_rust_character_literals_cannot_mask_a_later_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                """const QUOTE: char = '"';
+const APOSTROPHE: char = '\\'';
+let _ = unimplemented_rejection!(714, "live");
+"""
+            )
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {714: [AuthoritySite("crates/example/src/lib.rs", 3)]},
+            )
+
     def test_comments_and_whitespace_around_macro_tokens_cannot_hide_a_site(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -229,6 +270,18 @@ class IssueManifest(unittest.TestCase):
             )
             with self.assertRaisesRegex(RegistryError, "build-script module edge"):
                 discover_issue_authorities(root)
+
+    def test_build_script_raw_and_unicode_module_edges_are_rejected(self) -> None:
+        for module in ("r#type", "δοκιμή"):
+            with self.subTest(module=module), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                build = root / "crates/example/build.rs"
+                build.parent.mkdir(parents=True)
+                build.write_text(f"mod {module};\nfn main() {{}}\n")
+                with self.assertRaisesRegex(
+                    RegistryError, "build-script module edge"
+                ):
+                    discover_issue_authorities(root)
 
     def test_source_tree_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -312,6 +365,23 @@ class IssueManifest(unittest.TestCase):
             with self.assertRaisesRegex(RegistryError, "production path attribute"):
                 discover_issue_authorities(root)
 
+    def test_raw_builtin_path_spellings_are_rejected(self) -> None:
+        spellings = (
+            '#[r#path = "../generated.rs"]\nmod generated;\n',
+            '#[cfg_attr(all(), r#path = "../generated.rs")]\nmod generated;\n',
+            '#[r#cfg_attr(all(), path = "../generated.rs")]\nmod generated;\n',
+        )
+        for spelling in spellings:
+            with self.subTest(spelling=spelling), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                source = root / "crates/example/src/lib.rs"
+                source.parent.mkdir(parents=True)
+                source.write_text(spelling)
+                with self.assertRaisesRegex(
+                    RegistryError, "production path attribute"
+                ):
+                    discover_issue_authorities(root)
+
     def test_path_text_outside_an_attribute_is_not_a_source_edge(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -324,6 +394,60 @@ class IssueManifest(unittest.TestCase):
                 "let path = 1;\n"
             )
             self.assertEqual(discover_issue_authorities(root), {})
+
+    def test_custom_workspace_lib_bin_and_build_roots_are_inventoried(self) -> None:
+        cases = (
+            (
+                "lib",
+                "bindings/rust/lib.rs",
+                '[lib]\npath = "bindings/rust/lib.rs"\n',
+                "",
+            ),
+            (
+                "bin",
+                "tools/runner.rs",
+                '[[bin]]\nname = "runner"\npath = "tools/runner.rs"\n',
+                "",
+            ),
+            (
+                "build",
+                "support/custom_build.rs",
+                "",
+                'build = "support/custom_build.rs"\n',
+            ),
+        )
+        for kind, source_rel, targets, package_extra in cases:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                member = root / "tree-sitter-style"
+                member.mkdir()
+                (root / "Cargo.toml").write_text(
+                    '[workspace]\nmembers = ["tree-sitter-style"]\nresolver = "3"\n'
+                )
+                (member / "Cargo.toml").write_text(
+                    "[package]\n"
+                    'name = "tree-sitter-style"\n'
+                    'version = "0.0.0"\n'
+                    'edition = "2024"\n'
+                    f"{package_extra}\n"
+                    f"{targets}"
+                )
+                source = member / source_rel
+                source.parent.mkdir(parents=True)
+                source.write_text(
+                    "let _ = chelis_types::unimplemented_rejection!(999, \"live\");\n"
+                )
+                self.assertEqual(
+                    discover_issue_authorities(root),
+                    {
+                        999: [
+                            AuthoritySite(
+                                f"tree-sitter-style/{source_rel}",
+                                1,
+                            )
+                        ]
+                    },
+                )
 
     def test_rendered_manifest_carries_sites_and_is_source_derived(self) -> None:
         rendered = render_issue_manifest(

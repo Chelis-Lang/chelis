@@ -344,15 +344,19 @@ REGISTRIES of what actually exists:
   construction site, its exact file and line, and the last-verified facts that
   the number is an ISSUE (not a PR) and is OPEN. The manifest and Rust registry
   are derived together from literal `unimplemented_rejection!` construction
-  sites in crate production sources and `build.rs`; byte-agreement tests reject
-  hand edits and additions/removals that do not follow source. The scanner
+  sites in workspace production sources and build scripts; byte-agreement tests
+  reject hand edits and additions/removals that do not follow source. Workspace
+  members and explicit lib, bin, example, and custom build roots come from the
+  root and package Cargo manifests, so a non-`crates/` member or custom target
+  path is part of the same inventory. The scanner
   masks nested Rust comments and string forms while preserving offsets, so
   historical text cannot manufacture a site and comments or whitespace around
   macro tokens cannot hide one. Macro aliases and re-exports fail generation,
   as do production `include!`, built-in Rust `path` attributes, build-script
   helper-module declarations, and Rust source symlinks: every accepted
-  construction remains in an ordinary Rust file under the scanner's lexical
-  source roots and retains the canonical macro name the inventory can locate.
+  construction remains in an ordinary Rust file under a manifest-derived
+  lexical source root and retains the canonical macro name the inventory can
+  locate.
   Unrelated tool metadata containing a nested `path` key is not a module edge
   and remains accepted. Every `src/**/*.rs` file is conservatively counted,
   including `src/tests/` and co-located `#[cfg(test)]` modules, because directory

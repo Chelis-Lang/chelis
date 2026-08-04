@@ -110,9 +110,14 @@ def collect_pull_request_closing_issues(
         if result.returncode != 0:
             raise RuntimeError(
                 f"cannot fetch PR #{number} closing issues: {result.stderr.strip()}"
-            )
+        )
         try:
             payload = json.loads(result.stdout)
+            graphql_errors = payload.get("errors", [])
+            if not isinstance(graphql_errors, list):
+                raise TypeError("invalid GraphQL errors field")
+            if graphql_errors:
+                raise TypeError("GraphQL errors accompanied a partial response")
             connection = payload["data"]["repository"]["pullRequest"][
                 "closingIssuesReferences"
             ]
