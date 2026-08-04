@@ -339,7 +339,36 @@ once is cheap; a break they make and later unmake is the expensive kind. Like
 the sequencing above, this ordering is advice, not law; a cut may move if a
 cell becomes urgent.
 
-Current baseline (2026-08-01): **v0.18.1 is shipped**. The v0.17 and v0.18 rows
+Current baseline (2026-08-04): **v0.18.3 is shipped**. Two further patch cuts
+landed on the v0.18 line after v0.18.1, and the second of them is a real
+migration cut - do not read the patch-level version as "mechanical".
+
+**v0.18.2** (2026-08-03) was additive: the `chelis-std` CSV/JSON serializers
+(chelis#928), the eval-lane JSON/CSV builtin families (chelis#890, chelis#903),
+`chelis eval --timeout` (chelis#914, chelis#930), Nix packages and a Devenv
+shell (chelis#907), [#729] Phase 2's typed integer semantics, and exact
+trapping integer `abs` in C (chelis#1065). Its one source-visible delta went
+the wrong way and shipped as a **recorded divergence**: eval's `shape` returned
+int32 against [05-DIM-2]'s int64 SHALL, released with an explicit
+do-not-migrate-onto note rather than a migration instruction (chelis#1120).
+
+**v0.18.3** (2026-08-04) is both a **source migration** and an **exact-output
+migration**, per its own release record:
+
+- [05-DIM-1]/[05-DIM-2] extent dtypes shipped (chelis#1130, for chelis#1112):
+  `shape()` now returns int64 and the movement bounds (`shrink`/`pad`/`stride`/
+  `expand` extents) take int64. Bare int32 extent call sites become check
+  errors - extents get `i64` suffixes, while axis parameters stay int32. This
+  also retires 0.18.2's chelis#1120 divergence, so a shell that skipped 0.18.2
+  migrates once rather than twice.
+- Compiled-lane `round` now half-ties to even (chelis#1142): an exact-output
+  change on half-tie values that brings C into conformance with
+  roundTiesToEven. Eval was already conforming.
+- `cast_trunc` exists as [05-OP-6] and is a new reserved word (chelis#1144):
+  identifiers named `cast_trunc` no longer parse, and shells blocked by
+  [04-NUM-14]'s fractional-cast trap migrate each site onto it.
+
+The v0.17 and v0.18 rows
 below are therefore historical records, while v0.19 and v0.20 remain planned
 cuts. v0.18.1 already shipped [05-OBS-6]'s `name = ` prefix in both lanes. It
 did not deliver the manifested root set/order, unavailable-root behavior, or
@@ -378,14 +407,18 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 | **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the one wire break and one root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
 | **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
-Net downstream shape: the original four-cut `conform` model remains one bump,
-probe re-run, and inventory refresh per minor cut. Actual history inserted one
-additional shipped contract patch: **v0.18.1** changed exact root-output
-expectations by adding the [05-OBS-6] prefix. The source-visible waves are now
-shipped **v0.17** (seed suffix + fixing loud-rejected code), shipped
-**v0.18.1** (root label prefix), and planned **v0.19** (wire/capability behavior
+Net downstream shape: the original four-cut `conform` model assumed one bump,
+probe re-run, and inventory refresh per minor cut. Actual history inserted two
+additional shipped contract patches: **v0.18.1** changed exact root-output
+expectations by adding the [05-OBS-6] prefix, and **v0.18.3** changed both
+source (int64 extents) and exact output (compiled `round` half-ties). The
+source-visible waves are now shipped **v0.17** (seed suffix + fixing
+loud-rejected code), shipped **v0.18.1** (root label prefix), shipped
+**v0.18.3** (int64 extents, `round` half-ties, the `cast_trunc` reserved word),
+and planned **v0.19** (wire/capability behavior
 + manifested root topology). v0.20 remains mechanical. No later wave may undo
-or restyle an earlier one.
+or restyle an earlier one - and a patch-level version number is not by itself
+evidence that a cut is mechanical.
 
 Cadence for non-contract work: an **internal-only** change (a refactor, a
 checker-internal fix, doc-only work) normally **rides the next planned cut**
@@ -444,8 +477,11 @@ patch.
 
 Every minor cut gets a mechanical `conform bump` PR wave across the shells;
 the 0.17 and 0.19 source-migration cuts additionally carry real source edits.
-The shipped v0.18.1 patch was an extra exact-output expectation migration and
-therefore owed the same probe and inventory refresh. Each wave carries:
+The shipped v0.18.1 patch was an extra exact-output expectation migration, and
+the shipped v0.18.3 patch carried both a source migration (int64 extents) and
+an exact-output one (compiled `round` half-ties); each owed the same probe and
+inventory refresh, and 0.18.3 owed real source edits as well. Each wave
+carries:
 
 - a migration note as the **breaking-change summary** (the delta below), the
   `chelis#NNN` refs it closes, and the exact surface that changed - not the full
@@ -488,6 +524,15 @@ Migration-note stubs (the breaking delta per cut):
   the `name = value` prefix in both lanes. Update exact stdout expectations;
   payload digits and value shape are unchanged. This does not yet promise the
   complete manifested root set/order or unavailable-root diagnostics."
+- **0.18.3** (source + exact-output migration, shipped) - "`shape()` returns
+  int64 and the movement bounds (`shrink`/`pad`/`stride`/`expand` extents) take
+  int64 per [05-DIM-1]/[05-DIM-2]; bare int32 extent call sites are now check
+  errors, so suffix extents `i64`. Axis parameters are unchanged at int32.
+  Compiled `round` half-ties to even, an exact-output change on half-tie values
+  only. `cast_trunc` is a new reserved word: rename any identifier using it, and
+  migrate sites blocked by [04-NUM-14]'s fractional-cast trap onto it. This cut
+  also retires 0.18.2's recorded int32-`shape` divergence, so do not migrate
+  onto 0.18.2's shape return."
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
   payload shape changed), narrow dtypes preserved end-to-end. Eval float tensor
@@ -557,10 +602,10 @@ a judgement may not.
 | [#683] | `i64::MIN` not writable as a literal | standalone front-end fix; natural moment is [#729] Phase 2 (the exact int lane makes the round-trip testable), but nothing blocks doing it sooner |
 | [#689] | HIP int64 ops emit F32 kernels | two-part: the SILENT half dies at [#730] Phase 1 (`elem_kind` raises); the SUPPORT half is owned by capability-table B-cells `Unimplemented { issue: #689 }` until int64 kernel templates land (see [`capability_table.md`](capability_table.md) seed decisions) |
 | [#690] | HIP has no integer div-by-zero guard | rides the same HIP B-cell work as [#689]; the guard is part of `Implemented` for HIP int division cells |
-| [#691] | C DAG lane emits fmaxf/fabsf for int64 | repaired in [#729] Phase 3: integer min/max/abs dispatch through exact checked integer paths; the original rows remain ordinary regressions |
+| [#691] | C DAG lane emits fmaxf/fabsf for int64 | repaired in [#729] Phase 3: integer min/max/abs dispatch through exact checked integer paths; the original rows remain ordinary regressions. The ISSUE nonetheless stays OPEN under the [#730] rejection-authority liveness pin - `spec/design/loud_unsupported_issue_manifest.json` requires it open while emitter sites cite it (`chelis-backend-c/src/emit.rs:830` and `:3285` today), and `scripts/validate_rejection_issue_manifest.py` in the `rejection-authority-liveness` CI job fails closed on a closed authority - so the repair does not close it; closing it reddens CI, which is what the issue-closing reference in PR #1151's own body demonstrated when that PR merged |
 | [#693] | Metal int64 `abs` zero emission | root cause is [#699] (confirmed by emission); Metal B-cell `Unimplemented { issue: #693 }` until the MSL integer path is wired post-[#699]-fix |
 | [#713] | `pad_sequences` allocates int32 output for int64 input | repaired in [#729] Phase 3 at the typed runtime allocation/copy boundary; the int64 row is in the authoritative Phase 3 oracle |
-| [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3 (now live); dies at [#730] Phase 1, unwritable after Phase 2; rendering via [#732]'s formatter |
+| [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3; the substitution died at [#730] Phase 1 and is unwritable after Phase 2. CLOSED 2026-08-04: the compiled catch-all is now a §C2 `Unsupported`, so the placeholder is gone; the remaining support half - actually rendering tensors and lists via [#732]'s formatter in the C host lane - is tracked at the open [#1059] |
 | [#751] | generated C emits uncompilable / sign-losing float constants (f64::MAX as integer literal; -0.0 as `-0`) | repaired in [#729] Phase 3 by exact-bit C literal emission; all four former `C_LANE_EXCLUDED` rows returned to the always-run corpus and the exclusion ledger is empty |
 | [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3. Scope boundary (2026-07): a verdict proves lane agreement for its RECORDED (target triple, C toolchain + flags incl. -ffp-contract, libm identity) only - never cross-platform determinism by itself; the platform axis compares verdicts across CI matrix entries under the same tolerance table. Platform priority (Jeff, 2026-07-20): server-side Linux x86-64 is the primary verdict platform before any wider matrix. The -ffp-contract entry in the provenance flag set now has a measured in-house exemplar: the pre-[#770]-fix `uniform_like` affine was contraction-dependent (PR #779 removed the sensitivity at the source) |
 | [#763] | `chelis lane-check` - the exact-only, Nix-hermetic first slice of [#754] (owner: brittonr) | child of the [#754] row: same one-comparator rule and proof-scope boundary; for its exact-safe corpus, byte-identity holds TODAY. [#732] Phase 2 unlocked corpus expansion, and [#729] Phase 3 returned the former [#751]/[#761] curated gaps as ordinary regression rows |
@@ -753,6 +798,7 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1003]: https://github.com/Chelis-Lang/chelis/pull/1003
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
+[#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
 [#788]: https://github.com/Chelis-Lang/chelis/issues/788
 [#814]: https://github.com/Chelis-Lang/chelis/issues/814
 [#820]: https://github.com/Chelis-Lang/chelis/issues/820

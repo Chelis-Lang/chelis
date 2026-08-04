@@ -1448,7 +1448,7 @@ across the kernel-split boundary.
 as reference lane, and the not-yet-split `host_ops` helpers now visibly
 awkward (they finalize but still accept `Fn(f64,f64)`).
 
-**Implementation status:** draft PR #1054 delivers this phase as one
+**Implementation status:** PR #1054 landed this phase as one
 consolidated change. It replaces the open host and IR arithmetic closures
 with sealed dtype-keyed kernels, preserves declared-width integer and float
 semantics through standalone and fused evaluation, and makes static-condition
