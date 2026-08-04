@@ -351,7 +351,7 @@ fn check_surf_expr(
                 check_surf_expr(ctx, source, value, catalog, module, out);
             }
         }
-        surf::Expr::Cast(inner, target, span) => {
+        surf::Expr::Cast(inner, target, _, span) => {
             if is_outside_opaque_module(target, module, catalog) {
                 push_violation(
                     ctx,

@@ -690,6 +690,7 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         | RiscOp::Argmin { .. }
         | RiscOp::Realize
         | RiscOp::Cast { .. }
+        | RiscOp::CastTrunc { .. }
         | RiscOp::FusedElem { .. }
         | RiscOp::BlasMatmul { .. }
         | RiscOp::OneHot { .. }

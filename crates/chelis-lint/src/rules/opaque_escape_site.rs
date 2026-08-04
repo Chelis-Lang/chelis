@@ -244,7 +244,7 @@ fn walk_expr(
         Expr::Unary(_, e, _)
         | Expr::Access(e, _, _)
         | Expr::TupleGet(e, _, _)
-        | Expr::Cast(e, _, _)
+        | Expr::Cast(e, _, _, _)
         | Expr::Copy(e, _)
         | Expr::Borrow(e, _)
         | Expr::Annotate(e, _, _) => walk_expr(e, env, scope, ctx, out),
@@ -398,7 +398,7 @@ fn expr_offset(expr: &Expr) -> usize {
         | Expr::Match(_, _, s)
         | Expr::Lambda(_, _, s)
         | Expr::Tuple(_, s)
-        | Expr::Cast(_, _, s)
+        | Expr::Cast(_, _, _, s)
         | Expr::Grad(_, _, s)
         | Expr::Vmap(_, _, s)
         | Expr::Jit(_, s)

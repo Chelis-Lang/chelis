@@ -2456,6 +2456,133 @@ pub fn cast_scalar(
     cast_raw(op, raw, dst)
 }
 
+/// The NAMED truncating cast of [05-OP-6] (the chelis#759 ladder's
+/// float-to-integer rung): the explicit escape hatch from the checked
+/// default's `Domain` trap on a fractional value.
+///
+/// A finite source yields its integer part truncated toward zero,
+/// finalized at the target width through [`finalize_scalar`]; a truncated
+/// integer outside the target range TRAPS `Overflow` (never wraps, never
+/// saturates). A non-finite source (`NaN`, `+-inf`) TRAPS `Domain`:
+/// truncation of a non-finite value has no integer meaning.
+///
+/// The float source and integer target are a CHECK-time contract
+/// (`spec/05-risc-primitives.md` [05-OP-6]); every other pair is a type
+/// error, so no program can reach the panicking arms below.
+pub fn cast_trunc_raw(
+    op: &'static str,
+    raw: RawScalar,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    assert_integer_trunc_target(op, dst);
+    let x = match raw {
+        RawScalar::Float(x) => x,
+        RawScalar::Int(_) => panic!(
+            "cast_trunc_raw: an integer source has no truncating cast \
+             ([05-OP-6] is float-to-integer only); the checker rejects it, \
+             so no program can reach this arm (op {op})"
+        ),
+    };
+    if !x.is_finite() {
+        return Err(NumericTrap::Domain { op, prim: dst });
+    }
+    // `trunc` discards the fractional part toward zero and is exact on
+    // every finite f64, so the single finalize below is the only place a
+    // value can be rejected: `int_wide` sees a finite integral float and
+    // the width check raises `Overflow`.
+    finalize_scalar(op, dst, RawScalar::Float(x.trunc()))
+}
+
+/// [`cast_trunc_raw`] over a sealed scalar: a float source reads through
+/// its exact f64 image (every active float width is exactly representable
+/// in f64, so the reading is lossless and the truncation is the only
+/// value change).
+pub fn cast_trunc_scalar(
+    op: &'static str,
+    value: ScalarValue,
+    dst: Prim,
+) -> Result<ScalarValue, NumericTrap> {
+    assert_float_trunc_source(op, value.prim());
+    cast_trunc_raw(op, RawScalar::Float(value.as_f64_lossy()), dst)
+}
+
+/// Bulk [`cast_trunc_raw`]: one truncation pass, then the monomorphized
+/// [`finalize_tensor`] loop (the section C5 performance contract). Traps
+/// on the first offending element, identically to the scalar surface.
+pub fn cast_trunc_tensor(
+    op: &'static str,
+    raw: RawTensor,
+    dst: Prim,
+) -> Result<TensorStorage, NumericTrap> {
+    assert_integer_trunc_target(op, dst);
+    let values = match raw {
+        RawTensor::Float(v) => v,
+        RawTensor::Int(_) => panic!(
+            "cast_trunc_tensor: an integer source has no truncating cast \
+             ([05-OP-6] is float-to-integer only); the checker rejects it, \
+             so no program can reach this arm (op {op})"
+        ),
+    };
+    // IN-ORDER first-offender, element by element through the scalar
+    // kernel: the compiled C lane is a per-element loop over the same
+    // guard, so this is what makes the two lanes agree on the trap KIND
+    // for a buffer carrying more than one kind of offender, as
+    // [05-OP-6]'s identical-lanes clause requires.
+    //
+    // The bulk `finalize_tensor` path cannot express this: `int_buf`
+    // domain-checks the WHOLE buffer before it width-checks any of it,
+    // so `[300.9, NaN] -> int8` raises Domain there while C raises
+    // Overflow at element 0. Only int64 (where out-of-range and
+    // non-finite are both caught in the same pass) is unaffected.
+    // `cast_value`'s checked rung is per-element for the same reason;
+    // agreeing with the other lane outranks the section C5 bulk-loop
+    // note here.
+    let mut wides = Vec::with_capacity(values.len());
+    for x in values {
+        let value = cast_trunc_raw(op, RawScalar::Float(x), dst)?;
+        wides.push(
+            value
+                .as_i64_exact()
+                .expect("an integer target stores an exact i64"),
+        );
+    }
+    finalize_tensor(op, dst, RawTensor::Int(wides))
+}
+
+/// [05-OP-6] target contract: integer widths only. `bool` is excluded by
+/// [04-NUM-4] and a float target would be a widening, not a truncation.
+fn assert_integer_trunc_target(op: &'static str, dst: Prim) {
+    match dst {
+        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {}
+        Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 | Prim::Bool | Prim::F8e4m3 => panic!(
+            "cast_trunc: `{}` is not an integer target; [05-OP-6] is \
+             float-to-integer only and the checker rejects every other \
+             target (op {op})",
+            dst.name()
+        ),
+        Prim::String => panic!("cast_trunc: string is not a numeric dtype (op {op})"),
+    }
+}
+
+/// [05-OP-6] source contract: float widths only.
+fn assert_float_trunc_source(op: &'static str, src: Prim) {
+    match src {
+        Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 => {}
+        Prim::Int8
+        | Prim::Int16
+        | Prim::Int32
+        | Prim::Int64
+        | Prim::Bool
+        | Prim::F8e4m3
+        | Prim::String => panic!(
+            "cast_trunc: `{}` is not a float source; [05-OP-6] is \
+             float-to-integer only and the checker rejects every other \
+             source (op {op})",
+            src.name()
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------
 // Serialization (chelis#729 rework: the FIFTH storage layer). The IR
 // constant payloads (`RiscOp::Const`/`ConstTensor`) embed the sealed

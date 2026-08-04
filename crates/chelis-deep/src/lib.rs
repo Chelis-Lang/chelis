@@ -19,7 +19,7 @@ pub mod stamp_to_typed;
 pub mod tag;
 pub mod validate;
 
-pub use ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
+pub use ast::{Atom, CastMode, Expr, List, MetaExpr, MetaMap, UnknownFormData, cast_mode_of};
 pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
 pub use parser::{StampOrParseError, parse_and_stamp, parse_and_stamp_file, parse_raw_str};

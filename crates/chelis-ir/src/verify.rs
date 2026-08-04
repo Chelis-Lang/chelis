@@ -319,7 +319,8 @@ pub fn verify(dag: &Dag) -> Vec<String> {
             | RiscOp::Expand { .. }
             | RiscOp::OneHot { .. }
             | RiscOp::Shape { .. }
-            | RiscOp::Cast { .. } => {
+            | RiscOp::Cast { .. }
+            | RiscOp::CastTrunc { .. } => {
                 if arity != 1 {
                     errors.push(format!(
                         "unary op at node {} has {} inputs (expected 1)",
@@ -687,7 +688,9 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         }
 
         // C8: Cast validation — dims must not change, output precision must match target.
-        if let RiscOp::Cast { new_precision } = &node.op
+        // Both ladder rungs share the shape rule; only their element
+        // semantics differ.
+        if let RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } = &node.op
             && arity == 1
         {
             let input = dag.get(node.inputs[0]).unwrap();

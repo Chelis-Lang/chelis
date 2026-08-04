@@ -1454,6 +1454,10 @@ pub enum WireSurfExpr {
     Cast {
         expr: Box<WireSurfExpr>,
         ty: String,
+        /// The chelis#759 ladder rung ([05-OP-6]). Absent means the
+        /// checked default, so a pre-`cast_trunc` payload still decodes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<String>,
         span: Span,
     },
     Grad {
@@ -2068,6 +2072,9 @@ pub enum WireRiscOp {
     Drop,
     Realize,
     Cast {
+        new_precision: String,
+    },
+    CastTrunc {
         new_precision: String,
     },
     FusedElem {

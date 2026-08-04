@@ -277,6 +277,33 @@ static inline int64_t chelis_checked_float_to_int(double value, int bits,
     return (int64_t)value;
 }
 
+/* [05-OP-6] `cast_trunc`: truncate toward zero, then range-check at the
+   target width. Unlike chelis_checked_float_to_int, a fractional value is
+   the WHOLE point and is not a domain error; only a non-finite source is.
+   Truncating BEFORE the range check is what makes the two lanes agree:
+   the evaluator range-checks its already-truncated value too, so e.g.
+   2147483647.9 -> int32 succeeds in both rather than overflowing here and
+   succeeding there. */
+static inline int64_t chelis_trunc_float_to_int(double value, int bits,
+                                                const char *domain_message,
+                                                const char *overflow_message) {
+    double truncated;
+    if (!isfinite(value)) chelis_numeric_trap(domain_message);
+    truncated = trunc(value);
+    if (bits == 64) {
+        if (truncated < -9223372036854775808.0 || truncated >= 9223372036854775808.0) {
+            chelis_numeric_trap(overflow_message);
+        }
+    } else {
+        int64_t minimum, maximum;
+        chelis_int_limits(bits, &minimum, &maximum);
+        if (truncated < (double)minimum || truncated > (double)maximum) {
+            chelis_numeric_trap(overflow_message);
+        }
+    }
+    return (int64_t)truncated;
+}
+
 static inline bool chelis_checked_bool_from_int(int64_t value,
                                                 const char *domain_message) {
     if (value != 0 && value != 1) chelis_numeric_trap(domain_message);

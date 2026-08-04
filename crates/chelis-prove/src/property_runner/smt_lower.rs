@@ -1384,7 +1384,7 @@ fn scalar_dual(
             }
             scalar_dual(body, &env, ctx)
         }
-        Expr::Cast(_, precision, _) if matches!(precision.as_str(), "f32" | "f64") => Err(
+        Expr::Cast(_, precision, _, _) if matches!(precision.as_str(), "f32" | "f64") => Err(
             "scalar grad SMT lowering does not support casts in differentiated bodies".to_string(),
         ),
         Expr::Annotate(inner, _, _) => scalar_dual(inner, env, ctx),
@@ -1533,7 +1533,7 @@ pub(super) fn surf_arith(expr: &Expr, ctx: &InlineCtx) -> Option<crate::solver::
             Box::new(surf_arith(then_e, ctx)?),
             Box::new(surf_arith(else_e, ctx)?),
         )),
-        Expr::Cast(inner, precision, _) if matches!(precision.as_str(), "f32" | "f64") => {
+        Expr::Cast(inner, precision, _, _) if matches!(precision.as_str(), "f32" | "f64") => {
             surf_arith(inner, ctx)
         }
         Expr::Annotate(inner, _, _) => surf_arith(inner, ctx),
@@ -1735,7 +1735,7 @@ fn surf_arith_subst(
             }
             surf_arith_subst(body, &extended_subst, ctx)
         }
-        Expr::Cast(inner, precision, _) if matches!(precision.as_str(), "f32" | "f64") => {
+        Expr::Cast(inner, precision, _, _) if matches!(precision.as_str(), "f32" | "f64") => {
             surf_arith_subst(inner, subst, ctx)
         }
         Expr::Annotate(inner, _, _) => surf_arith_subst(inner, subst, ctx),

@@ -518,6 +518,24 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
                    JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])",
         atom: "[05-OP-2]",
     },
+    // chelis#759's float-to-integer ladder rung. `cast_trunc` is a
+    // compiler-owned numeric callable, so it lands on no enumerated leg
+    // (it is neither a C export, an exported stdlib `def`, nor a prelude
+    // ADT) and the registration is authored directly against its atom.
+    //
+    // What this buys, stated honestly: the ATOM direction is enforced by
+    // `registration_problem` -- a bogus or nonexistent `[05-OP-N]` fails
+    // the tripwire. The PRESENCE of this row is pinned only by
+    // `cast_trunc_is_registered_against_its_authority_atom` below.
+    // Nothing here structurally prevents a FUTURE compiler-owned op from
+    // skipping registration entirely, because no enumerator produces a
+    // row for it to be matched against; that gap is the census's
+    // off-leg blind spot, not something this entry closes.
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
+                   target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64",
+        atom: "[05-OP-6]",
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -4304,6 +4322,47 @@ fn planted_prelude_adt_with_f64_variant_is_detected() {
         render_prelude_census_type(&Type::Prim(Prim::F64)),
         "f64",
         "identity must spell the dtype"
+    );
+}
+
+/// chelis#759 / MEDIUM-2: pin the PRESENCE of `cast_trunc`'s semantic
+/// registration.
+///
+/// `registration_problem` only validates the atom a row points AT; it
+/// never asks whether a given callable has a row, because `cast_trunc`
+/// is compiler-owned and no census enumerator produces one for it. That
+/// left the entry deletable with the whole suite still green. This test
+/// is the missing direction: removing the entry, or repointing it at a
+/// different atom, goes red here.
+#[test]
+fn cast_trunc_is_registered_against_its_authority_atom() {
+    const CAST_TRUNC: &str = "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
+         target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64";
+    let registration = SEMANTIC_REGISTRATIONS
+        .iter()
+        .find(|r| r.callable == CAST_TRUNC)
+        .unwrap_or_else(|| {
+            panic!(
+                "the `cast_trunc` semantic registration is missing. A new numeric \
+                 op requires an exact registration bound to one verbatim [05-OP-N] \
+                 atom in the same change set (AGENTS.md section Numeric Surface \
+                 Discipline; spec/design/dtype_semantics.md section C6). Expected \
+                 callable identity:\n  {CAST_TRUNC}"
+            )
+        });
+    assert_eq!(
+        registration.atom, "[05-OP-6]",
+        "`cast_trunc`'s controlling atom is spec/05-risc-primitives.md section 3.8 \
+         [05-OP-6]; no other atom's normative text governs a truncating cast"
+    );
+    // And the atom it names really exists as a normative definition, so
+    // this test cannot pass against a dangling reference.
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL))
+        .expect("controlling spec/05 must be readable");
+    assert!(
+        registration_problem(*registration, &spec).is_none(),
+        "the `cast_trunc` registration must satisfy the same atom-existence \
+         contract as every other row"
     );
 }
 

@@ -341,7 +341,7 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::Match(_, _, span)
         | Expr::Lambda(_, _, span)
         | Expr::Tuple(_, span)
-        | Expr::Cast(_, _, span)
+        | Expr::Cast(_, _, _, span)
         | Expr::Grad(_, _, span)
         | Expr::Vmap(_, _, span)
         | Expr::Jit(_, span)
@@ -632,7 +632,7 @@ fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
         Expr::Tuple(items, _) | Expr::Par(items, _) => {
             items.iter().any(|item| expr_mentions_name(item, name))
         }
-        Expr::Cast(expr, precision, _) => expr_mentions_name(expr, name) || precision == name,
+        Expr::Cast(expr, precision, _, _) => expr_mentions_name(expr, name) || precision == name,
         Expr::Grad(expr, wrt, _) => {
             expr_mentions_name(expr, name)
                 || wrt
@@ -1518,7 +1518,7 @@ impl DesugarCtx {
                     .collect(),
             ),
 
-            Expr::Cast(e, prec, _) => {
+            Expr::Cast(e, prec, mode, _) => {
                 // Position 4 (spec §P10b / §5.6): first argument of a
                 // `cast(literal, p)` expression. When the inner is a
                 // bare list literal, narrow numeric entries to `p` and
@@ -1540,7 +1540,17 @@ impl DesugarCtx {
                 // keeps its default float source because a decimal cannot
                 // bind at an integer type; the checked cast then requires
                 // the value to be integral (spec/04 [04-NUM-14]).
+                //
+                // The [05-OP-6] truncating rung takes NONE of this: its
+                // target is an integer width and its source must stay a
+                // float, so adopting a literal at the target would turn
+                // `cast_trunc([1.9], int32)` into an int32 tensor and
+                // make the truncating cast a type error on its own
+                // argument.
                 let inner = match e.as_ref() {
+                    _ if *mode == CastMode::Trunc => {
+                        self.desugar_expr_with_scope(e, local_fn_params)
+                    }
                     Expr::List(items, _) => {
                         self.desugar_list_as_tensor_literal(items, prec, local_fn_params)
                     }
@@ -1571,10 +1581,11 @@ impl DesugarCtx {
                     }
                     other => self.desugar_expr_with_scope(other, local_fn_params),
                 };
-                node(
-                    DeepTag::Cast,
-                    vec![inner, node(DeepTag::TPrim, vec![sym(prec)])],
-                )
+                let mut children = vec![inner, node(DeepTag::TPrim, vec![sym(prec)])];
+                if let Some(selector) = mode.deep_selector() {
+                    children.push(sym(selector));
+                }
+                node(DeepTag::Cast, children)
             }
 
             Expr::Grad(f, wrt, _) => self.desugar_grad(f, wrt.as_deref(), local_fn_params),
@@ -3056,7 +3067,12 @@ mod tests {
 
     #[test]
     fn test_cast() {
-        let expr = Expr::Cast(Box::new(tvar("x")), "bf16".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(tvar("x")),
+            "bf16".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (var {} x) (t-prim {} bf16))"
@@ -3074,7 +3090,12 @@ mod tests {
 
     #[test]
     fn cast_of_float_literal_adopts_target_precision() {
-        let expr = Expr::Cast(Box::new(float_lit(1.1)), "f64".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(float_lit(1.1)),
+            "f64".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (lit {type: (t-prim {} f64)} 1.1) (t-prim {} f64))"
@@ -3088,6 +3109,7 @@ mod tests {
         let expr = Expr::Cast(
             Box::new(Expr::Unary(UnaryOp::Neg, Box::new(float_lit(1.1)), s())),
             "f64".to_string(),
+            CastMode::Checked,
             s(),
         );
         assert_eq!(
@@ -3101,7 +3123,12 @@ mod tests {
         // The documented §5.3 escape hatch for out-of-int32-range
         // literals: `cast(3000000000, int64)` must bind the literal at
         // int64 so `infer_lit` does not range-check it against int32.
-        let expr = Expr::Cast(Box::new(int_lit(3_000_000_000)), "int64".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(int_lit(3_000_000_000)),
+            "int64".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (lit {type: (t-prim {} int64)} 3000000000) (t-prim {} int64))"
@@ -3110,7 +3137,12 @@ mod tests {
 
     #[test]
     fn cast_of_int_literal_adopts_float_target() {
-        let expr = Expr::Cast(Box::new(int_lit(5)), "f64".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(int_lit(5)),
+            "f64".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (lit {type: (t-prim {} f64)} 5) (t-prim {} f64))"
@@ -3122,7 +3154,12 @@ mod tests {
         // Negative parity: a float literal cannot "adopt" an integer
         // type — `cast(1.9, int32)` keeps the §5.3 f32 default on the
         // literal, so the checked cast Domain-traps on the fractional value.
-        let expr = Expr::Cast(Box::new(float_lit(1.9)), "int32".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(float_lit(1.9)),
+            "int32".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (lit {type: (t-prim {} f32)} 1.9) (t-prim {} int32))"
@@ -3137,6 +3174,7 @@ mod tests {
         let expr = Expr::Cast(
             Box::new(Expr::Lit(Literal::TypedFloat(1.1, LiteralSuffix::F32), s())),
             "f64".to_string(),
+            CastMode::Checked,
             s(),
         );
         assert_eq!(
@@ -3149,7 +3187,12 @@ mod tests {
     fn cast_of_literal_to_bool_does_not_adopt() {
         // Negative parity: bool is not a numeric binding precision for
         // a numeric literal; keep the default-typed literal + cast.
-        let expr = Expr::Cast(Box::new(int_lit(1)), "bool".to_string(), s());
+        let expr = Expr::Cast(
+            Box::new(int_lit(1)),
+            "bool".to_string(),
+            CastMode::Checked,
+            s(),
+        );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
             "(cast {} (lit {type: (t-prim {} int32)} 1) (t-prim {} bool))"

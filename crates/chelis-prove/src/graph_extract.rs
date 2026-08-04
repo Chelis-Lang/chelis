@@ -233,6 +233,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Drop
             | WireRiscOp::Realize
             | WireRiscOp::Cast { .. }
+            | WireRiscOp::CastTrunc { .. }
             | WireRiscOp::FusedElem { .. }
             | WireRiscOp::BlasMatmul { .. }
             | WireRiscOp::Gather { .. }

@@ -3723,6 +3723,7 @@ fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
         RiscOp::Reshape { .. } => "reshape",
         RiscOp::Expand { .. } => "expand",
         RiscOp::Cast { .. } => "cast",
+        RiscOp::CastTrunc { .. } => "cast_trunc",
         RiscOp::Permute { .. } => "permute",
         RiscOp::Load { .. } => "load",
         RiscOp::Const { .. } => "const",
@@ -4299,8 +4300,19 @@ fn lower_host_expr_kind(
             )?;
             let inferred_ty = host_expr_type(&value);
             let ty = expr_host_type(expr, program, scope);
+            // The rung travels with the callable name so the host lane
+            // and the DAG lane land on the same C guard ([05-OP-6]).
+            let name = match chelis_deep::cast_mode_of(children(list)) {
+                Ok(mode) => mode.keyword().to_string(),
+                Err(selector) => {
+                    return Err(host_expr_lowering_error(
+                        expr,
+                        format!("`{selector}` is not a recognized cast mode selector"),
+                    ));
+                }
+            };
             HostExpr::new(HostExprKind::Builtin {
-                name: "cast".to_string(),
+                name,
                 args: vec![value],
                 ty: if ty.is_unresolved() { inferred_ty } else { ty },
             })
@@ -6487,6 +6499,10 @@ fn dual_eval_app(
         // `cast` between scalar precisions is value-preserving for the dual
         // tree (host scalars are all `double`); the derivative passes
         // through unchanged.
+        // `cast_trunc` deliberately has NO arm here: falling through to
+        // the user-call path yields `None`, which is the [05-OP-6]
+        // `no_grad` rejection. A passthrough dual would be the silent
+        // zero-derivative the atom forbids.
         ("cast", _) if !args.is_empty() => Some(Dual {
             value: v(&args[0]),
             deriv: dv(&args[0]),
@@ -8857,7 +8873,7 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
 fn host_expr_int_literal(expr: &HostExpr) -> Option<i64> {
     match &expr.kind {
         HostExprKind::Int(value) => Some(*value),
-        HostExprKind::Builtin { name, args, .. } if name == "cast" => {
+        HostExprKind::Builtin { name, args, .. } if name == "cast" || name == "cast_trunc" => {
             args.first().and_then(host_expr_int_literal)
         }
         _ => None,

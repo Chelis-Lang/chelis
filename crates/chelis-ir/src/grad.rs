@@ -231,6 +231,18 @@ pub fn grad_dag_checked(
                     reason: AdRejectionReason::PiecewiseConstant,
                 });
             }
+            // [05-OP-6]: `cast_trunc` is piecewise constant, so its
+            // adjoint is zero almost everywhere and undefined at every
+            // integer boundary. Rejecting is the point of the atom's
+            // `no_grad` rule: a silent zero here would mask a modeling
+            // bug rather than report it. The checked `cast` keeps its
+            // float-to-float adjoint.
+            RiscOp::CastTrunc { .. } => {
+                return Err(AdError::NotSupported {
+                    op: "cast_trunc",
+                    reason: AdRejectionReason::PiecewiseConstant,
+                });
+            }
             RiscOp::Scatter { .. } => {
                 // Last-write-wins replace-scatter is fail-closed for
                 // AD: the forward result depends on iteration order at
@@ -317,6 +329,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::Drop => "drop",
         RiscOp::Realize => "realize",
         RiscOp::Cast { .. } => "cast",
+        RiscOp::CastTrunc { .. } => "cast_trunc",
         RiscOp::FusedElem { .. } => "fused_elem",
         RiscOp::BlasMatmul { .. } => "blas_matmul",
         RiscOp::Gather { .. } => "gather",
@@ -1677,6 +1690,12 @@ fn compute_adjoints(
                 Some(vec![(x, zero)])
             }
         }
+        // [05-OP-6] carries the `no_grad` rule: there is NO adjoint, and
+        // emitting a zero here would be exactly the silent masking the
+        // atom forbids. `grad_dag_checked`'s live-node scan already
+        // rejected it with the structured `AdError`; this arm keeps the
+        // unchecked entry point from inventing one.
+        RiscOp::CastTrunc { .. } => None,
         RiscOp::FusedElem { .. } => {
             // Fused nodes should be un-fused before AD; gradient through fusion
             // is not yet supported.

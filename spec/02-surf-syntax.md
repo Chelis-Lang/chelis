@@ -1341,7 +1341,9 @@ There is no Surf `let ... in` expression form. `let` and `in` are ordinary ident
 
 ### 6.4 Transform Recognition
 
-`grad`, `vmap`, `jit`, `cast`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`g = grad`) is a parse error — transforms must always be applied.
+`grad`, `vmap`, `jit`, `cast`, `cast_trunc`, `realize`, `copy` are keywords. In call position (`keyword(`), the parser emits a transform node. Bare usage (`g = grad`) is a parse error — transforms must always be applied.
+
+`cast_trunc(x, T)` is the named truncating float-to-integer cast of [05-OP-6]; it shares the `cast` node shape and differs only by carrying the `trunc` mode selector.
 
 ### 6.5 TypeIdent in Expression Position
 

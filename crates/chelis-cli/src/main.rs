@@ -8049,6 +8049,21 @@ fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn s
             // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
             // cleanly here rather than reaching the launch-emit `todo!`, which
             // would abort the build with an `internal error` panic.
+            // [05-OP-6] demands identical eval-vs-compiled behavior, and
+            // the HIP cast kernels carry no numeric-trap guard at all, so
+            // the Domain/Overflow traps cannot be honored on device.
+            // Mirrors the `chelis-compiler-api` copy of this gate so both
+            // consumers render the same text.
+            chelis_ir::dag::RiscOp::CastTrunc { .. } => {
+                return Err(format!(
+                    "`chelis build --target hip` does not support `cast_trunc`; \
+                     lowered node {} requires it. The HIP cast kernels carry no \
+                     numeric-trap guard, so the [05-OP-6] Domain/Overflow traps \
+                     cannot be honored on device yet; use `--target c`.",
+                    node.id.0
+                )
+                .into());
+            }
             chelis_ir::dag::RiscOp::ReduceWindow { .. } => {
                 return Err(format!(
                     "`chelis build --target hip` does not yet support `reduce_window_*`; \

@@ -1452,10 +1452,13 @@ impl Parser {
         // desugarer's existing pipe-stage handling produces the
         // canonical Deep shape. Anything else (including the two-arg
         // form `cast(value, type)`) falls through to `parse_prefix`.
-        if matches!(self.peek(), TokenKind::Cast)
-            && let Some(precision) = self.peek_one_arg_cast_precision()
+        if let Some(mode) = match self.peek() {
+            TokenKind::Cast => Some(CastMode::Checked),
+            TokenKind::CastTrunc => Some(CastMode::Trunc),
+            _ => None,
+        } && let Some(precision) = self.peek_one_arg_cast_precision()
         {
-            let cast_tok = self.advance(); // consume Cast
+            let cast_tok = self.advance(); // consume Cast / CastTrunc
             let span = cast_tok.span;
             self.advance(); // consume LParen
             self.advance(); // consume Ident
@@ -1464,6 +1467,7 @@ impl Parser {
             let body = Expr::Cast(
                 Box::new(Expr::Var(pipe_param.clone(), span)),
                 precision,
+                mode,
                 span.merge(close.span),
             );
             return Ok(Expr::Lambda(
@@ -1501,8 +1505,11 @@ impl Parser {
         ) {
             pos += 1;
         }
-        // Step over `Cast`.
-        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Cast)) {
+        // Step over `Cast` / `CastTrunc`.
+        if !matches!(
+            self.tokens.get(pos).map(|t| &t.kind),
+            Some(TokenKind::Cast | TokenKind::CastTrunc)
+        ) {
             return None;
         }
         pos += 1;
@@ -1655,7 +1662,8 @@ impl Parser {
             TokenKind::If => self.parse_if()?,
             TokenKind::Match => self.parse_match()?,
             TokenKind::Fn => self.parse_lambda()?,
-            TokenKind::Cast => self.parse_cast()?,
+            TokenKind::Cast => self.parse_cast(CastMode::Checked)?,
+            TokenKind::CastTrunc => self.parse_cast(CastMode::Trunc)?,
             TokenKind::Grad => self.parse_grad()?,
             TokenKind::Vmap => self.parse_vmap()?,
             TokenKind::Jit => self.parse_jit()?,
@@ -1916,14 +1924,19 @@ impl Parser {
         Ok(Expr::Lambda(params, Box::new(body), span))
     }
 
-    fn parse_cast(&mut self) -> Result<Expr, ParseError> {
-        let start = self.advance().span; // consume Cast
+    fn parse_cast(&mut self, mode: CastMode) -> Result<Expr, ParseError> {
+        let start = self.advance().span; // consume Cast / CastTrunc
         self.expect(&TokenKind::LParen)?;
         let expr = self.parse_expr(0)?;
         self.expect(&TokenKind::Comma)?;
         let (precision, _) = self.expect_ident()?;
         let end = self.expect(&TokenKind::RParen)?;
-        Ok(Expr::Cast(Box::new(expr), precision, start.merge(end.span)))
+        Ok(Expr::Cast(
+            Box::new(expr),
+            precision,
+            mode,
+            start.merge(end.span),
+        ))
     }
 
     fn parse_grad(&mut self) -> Result<Expr, ParseError> {
@@ -2818,7 +2831,7 @@ fn expr_span(e: &Expr) -> Span {
         Expr::Match(_, _, s) => *s,
         Expr::Lambda(_, _, s) => *s,
         Expr::Tuple(_, s) => *s,
-        Expr::Cast(_, _, s) => *s,
+        Expr::Cast(_, _, _, s) => *s,
         Expr::Grad(_, _, s) => *s,
         Expr::Vmap(_, _, s) => *s,
         Expr::Jit(_, s) => *s,
@@ -3998,7 +4011,7 @@ mod tests {
     fn cast_expr() {
         let e = body("x = cast(y, f64)");
         match e {
-            Expr::Cast(_, prec, _) => assert_eq!(prec, "f64"),
+            Expr::Cast(_, prec, _, _) => assert_eq!(prec, "f64"),
             _ => panic!("expected Cast, got {e:?}"),
         }
     }

@@ -30,6 +30,7 @@ pub enum TokenKind {
     Copy,
     Tensor,
     Cast,
+    CastTrunc,
     Export,
     Par,
 

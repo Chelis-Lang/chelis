@@ -160,6 +160,72 @@ impl List {
     }
 }
 
+/// Which rung of the chelis#759 cast ladder a `cast` node selects.
+///
+/// The rung lives in the node's optional third child (a bare selector
+/// symbol, read exactly like `grad`'s index selector) rather than in the
+/// metadata map, because [`strip_metadata`] empties every metadata map on
+/// the canonical-display path: a mode parked there would silently turn a
+/// truncating cast back into the checked default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CastMode {
+    /// `(cast {} expr target-type)`: the [04-NUM-14] checked default. A
+    /// fractional or non-finite float into an integer target traps
+    /// `Domain`.
+    #[default]
+    Checked,
+    /// `(cast {} expr target-type trunc)`: the [05-OP-6] named truncating
+    /// float-to-integer cast. Truncates toward zero; traps `Overflow` out
+    /// of range and `Domain` on a non-finite source.
+    Trunc,
+}
+
+impl CastMode {
+    /// The Surf keyword that selects this mode.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            CastMode::Checked => "cast",
+            CastMode::Trunc => "cast_trunc",
+        }
+    }
+
+    /// The Deep mode selector symbol, or `None` for the default rung
+    /// (spelled as the plain two-child `cast` form).
+    pub fn deep_selector(self) -> Option<&'static str> {
+        match self {
+            CastMode::Checked => None,
+            CastMode::Trunc => Some("trunc"),
+        }
+    }
+
+    /// Read a Deep mode selector symbol back. An unrecognized symbol is
+    /// `None` so the caller can reject it loudly rather than defaulting
+    /// to the checked rung.
+    pub fn from_deep_selector(symbol: &str) -> Option<Self> {
+        match symbol {
+            "trunc" => Some(CastMode::Trunc),
+            _ => None,
+        }
+    }
+}
+
+/// The rung selected by a `cast` node's children.
+///
+/// `Ok(mode)` for the two-child checked form and for a recognized
+/// selector; `Err(spelling)` for an unrecognized or non-symbol third
+/// child, which every caller rejects rather than silently treating as
+/// checked.
+pub fn cast_mode_of(children: &[Expr]) -> Result<CastMode, String> {
+    let Some(selector) = children.get(2) else {
+        return Ok(CastMode::Checked);
+    };
+    let symbol = match selector {
+        Expr::Atom(Atom::Name(symbol), _) => symbol.as_str(),
+        other => return Err(crate::printer::print_expr_flat(other)),
+    };
+    CastMode::from_deep_selector(symbol).ok_or_else(|| symbol.to_string())
+}
+
 /// Inline metadata map: `{key: value, ...}` or `{}`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MetaMap {

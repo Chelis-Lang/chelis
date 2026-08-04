@@ -230,13 +230,16 @@ pub fn child_stamp_role(tag: DeepTag, index: usize, _arity: usize) -> ChildStamp
                 Selector
             }
         }
-        DeepTag::Cast => {
-            if index == 0 {
-                RuntimeExpr
-            } else {
-                Type
-            }
-        }
+        DeepTag::Cast => match index {
+            0 => RuntimeExpr,
+            1 => Type,
+            // The optional [05-OP-6] mode child: a bare selector symbol
+            // (`trunc`), read exactly like `grad`'s index selector. The
+            // mode is structural, not metadata, so `strip_metadata` (the
+            // canonical-display path) cannot silently turn a truncating
+            // cast back into the checked default.
+            _ => Selector,
+        },
 
         DeepTag::Quote | DeepTag::Effects | DeepTag::Resource => Syntax,
 
@@ -322,7 +325,7 @@ pub fn arity_contract(tag: DeepTag) -> AritySpec {
         DeepTag::Vmap => AtLeast(1),  // expr [+ selectors]
         DeepTag::Jit => Fixed(1),     // expr
         DeepTag::Realize => Fixed(1), // expr
-        DeepTag::Cast => Fixed(2),    // expr, type
+        DeepTag::Cast => Range(2, 3), // expr, type, optional mode selector
         DeepTag::Copy => Fixed(1),    // expr
 
         DeepTag::Quote => Fixed(1),   // expr

@@ -3403,6 +3403,29 @@ fn reject_unsupported_hip_ops(dag: &Dag) -> Result<()> {
             // it cleanly here rather than letting it reach the launch-emit
             // `todo!`, which would abort the build with an `internal error`
             // panic. The C backend is canonical; use `--target c`.
+            // [05-OP-6] demands identical eval-vs-compiled behavior, and
+            // the HIP `cast` kernel is a raw device-side C++ conversion
+            // with no trap guard at all. Emitting `cast_trunc` through it
+            // would silently skip the Domain/Overflow traps, so the HIP
+            // lane rejects loudly until the guarded kernels land.
+            RiscOp::CastTrunc { .. } => {
+                return Err(unsupported_gate_error(
+                    format!(
+                        "`chelis build --target hip` does not support `cast_trunc`; \
+                         lowered node {} requires it. The HIP cast kernels carry no \
+                         numeric-trap guard, so the [05-OP-6] Domain/Overflow traps \
+                         cannot be honored on device yet; use `--target c`.",
+                        node.id.0
+                    ),
+                    "hip",
+                    chelis_types::unimplemented_rejection!(
+                        759,
+                        "the HIP cast kernels emit an unguarded device-side conversion, \
+                         so the [05-OP-6] traps have no device implementation; the C \
+                         target is canonical for the named cast ladder"
+                    ),
+                ));
+            }
             RiscOp::ReduceWindow { .. } => {
                 return Err(unsupported_gate_error(
                     format!(
@@ -3719,8 +3742,9 @@ fn eval_stage_error(message: String) -> CompilerError {
     if cast_domain && let Some(diagnostic) = error.errors.first_mut() {
         diagnostic.suggestions.push(
             "fractional float-to-int conversion must state its rounding explicitly: \
-             apply `floor` or `round` before `cast`; truncation-to-zero and the \
-             future named lossy cast are tracked by chelis#759"
+             use `cast_trunc` to truncate toward zero ([05-OP-6]), or apply \
+             `floor` or `round` before `cast`; the remaining named lossy cast \
+             forms are tracked by chelis#759"
                 .to_string(),
         );
     }
@@ -4078,9 +4102,10 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
             items: items.iter().map(wire_expr).collect(),
             span: span(*s),
         },
-        Expr::Cast(inner, ty, s) => WireSurfExpr::Cast {
+        Expr::Cast(inner, ty, mode, s) => WireSurfExpr::Cast {
             expr: Box::new(wire_expr(inner)),
             ty: ty.clone(),
+            mode: mode.deep_selector().map(str::to_string),
             span: span(*s),
         },
         Expr::Grad(inner, wrt, s) => WireSurfExpr::Grad {
@@ -4531,6 +4556,9 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
         RiscOp::Copy => WireRiscOp::Copy,
         RiscOp::Drop => WireRiscOp::Drop,
         RiscOp::Realize => WireRiscOp::Realize,
+        RiscOp::CastTrunc { new_precision } => WireRiscOp::CastTrunc {
+            new_precision: new_precision.name().to_string(),
+        },
         RiscOp::Cast { new_precision } => WireRiscOp::Cast {
             new_precision: new_precision.name().to_string(),
         },

@@ -1233,6 +1233,49 @@ deliberately not frozen here.)*
 
 ---
 
+### 3.8 Named Lossy Cast Forms (chelis#759)
+
+[04-NUM-14] makes the default `cast` a CHECKED cast: a fractional or
+non-finite float cast to an integer target traps `Domain`. That default
+does not change. The named forms below are the explicit, auditable escape
+hatches a program opts into when a lossy conversion is the intent. This
+section holds the ladder's float-to-integer rung; the saturating and
+rounding rungs remain future work under chelis#759.
+
+#### Named truncating cast atom
+
+Transitional blockquote authority per `spec/design/spec_provenance.md`
+§C1, matching the §7/§8 atoms of this file.
+
+> **[05-OP-6]** `cast_trunc(source, target)` is the explicit truncating narrowing cast
+> from a float source dtype to an integer target dtype. For a **finite** source value it
+> yields the integer part truncated toward zero (the value with its fractional part
+> discarded), finalized at the target width; if that truncated integer is outside the
+> target range it traps `overflow` (never wraps or saturates). A **non-finite** source
+> (`NaN`, `±inf`) traps `Domain` — truncation of a non-finite value has no integer
+> meaning. On any source/target pair that is not float→integer, `cast_trunc` is a type
+> error (use `cast` / [04-NUM-14]); it never widens, never rounds, and never applies to
+> `bool`. Semantics are identical on scalar and tensor surfaces and identical across the
+> eval and compiled lanes at the declared widths of [04-NUM-8]. `cast_trunc` is
+> **non-differentiable**: its adjoint is zero almost everywhere (the map is piecewise
+> constant), so it carries the `no_grad` rule — a gradient goal through it is a clean
+> error, never a silent zero that masks a modeling bug (same discipline as `argmax`).
+
+`cast_trunc(x, T)` agrees with `cast(x, T)` exactly when `x` is already
+finite and integral and in range (both yield the same integer); it differs
+only by *defining* the fractional case as truncation where `cast` traps
+`Domain`. `cast_trunc` has no accumulator.
+
+*(Implemented by `cast_trunc_raw` / `cast_trunc_scalar` /
+`cast_trunc_tensor` in `crates/chelis-types/src/dtype_semantics.rs`, the
+checker rule in `crates/chelis-types/src/infer/expr_record.rs`, and
+`chelis_checked_float_trunc_to_int` in
+`crates/chelis-runtime/include/chelis_runtime.h` for the compiled lane;
+the acceptance surface is `crates/chelis-cli/tests/cast_trunc.rs`. The
+design record is `spec/design/named_truncating_cast.md`.)*
+
+---
+
 ## 4. Standard Lowerings (Tier 2 → Tier 1)
 
 ### 4.1 Matrix Multiplication

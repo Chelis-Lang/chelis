@@ -735,7 +735,7 @@ fn collect_expr_symbols(
         | Expr::Jit(base, _)
         | Expr::Realize(base, _)
         | Expr::Copy(base, _)
-        | Expr::Cast(base, _, _)
+        | Expr::Cast(base, _, _, _)
         | Expr::Annotate(base, _, _) => {
             collect_expr_symbols(
                 text,
@@ -1327,7 +1327,7 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Match(_, _, span)
         | Expr::Lambda(_, _, span)
         | Expr::Tuple(_, span)
-        | Expr::Cast(_, _, span)
+        | Expr::Cast(_, _, _, span)
         | Expr::Grad(_, _, span)
         | Expr::Vmap(_, _, span)
         | Expr::Jit(_, span)
