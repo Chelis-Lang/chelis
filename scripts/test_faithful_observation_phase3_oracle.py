@@ -1,8 +1,52 @@
 #!/usr/bin/env python3
 
 import unittest
+from unittest import mock
 
 import faithful_observation_phase3_oracle as oracle
+
+
+class RunnerTests(unittest.TestCase):
+    def _run_main_with(self, fake_run):
+        with (
+            mock.patch.object(oracle, "source_violations", return_value=[]),
+            mock.patch.object(oracle, "comparator_violations", return_value=[]),
+            mock.patch.object(
+                oracle, "definition_digest_violations", return_value=[]
+            ),
+            mock.patch.object(oracle.shutil, "which", return_value="/usr/bin/tool"),
+            mock.patch.object(oracle, "run_command", side_effect=fake_run),
+            mock.patch.object(oracle, "receipt_violations", return_value=[]),
+        ):
+            return oracle.main()
+
+    def test_main_executes_every_declared_suite_command(self) -> None:
+        calls = []
+
+        def fake_run(label, command, *, env=None):
+            calls.append((label, command, env))
+            return True
+
+        self.assertEqual(self._run_main_with(fake_run), 0)
+        self.assertEqual(
+            [(label, command) for label, command, _env in calls],
+            list(oracle.SUITE_COMMANDS),
+        )
+        self.assertTrue(all(env is None for _label, _command, env in calls[:-1]))
+        receipt_env = calls[-1][2]
+        self.assertIsNotNone(receipt_env)
+        self.assertTrue(receipt_env["CHELIS_PHASE3_RECEIPT_PATH"])
+
+    def test_main_stops_at_the_first_failed_suite_command(self) -> None:
+        calls = []
+        failed_command = oracle.SUITE_COMMANDS[1]
+
+        def fake_run(label, command, *, env=None):
+            calls.append((label, command))
+            return (label, command) != failed_command
+
+        self.assertEqual(self._run_main_with(fake_run), 1)
+        self.assertEqual(calls, list(oracle.SUITE_COMMANDS[:2]))
 
 
 class IgnoreInventoryTests(unittest.TestCase):

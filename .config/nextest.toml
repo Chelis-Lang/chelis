@@ -3,8 +3,9 @@
 # Profiles:
 #   default  - local `cargo nextest run`. Fast suite only; heavy e2e is excluded.
 #   ci       - per-PR `Workspace Tests` job, via `scripts/gate.py integration`.
-#              Fast suite plus JUnit timing XML. The two capacity-census
-#              binaries run in the parallel required dtype-oracle job instead.
+#              Fast suite plus JUnit timing XML. Complete test binaries named
+#              by the parallel required dtype oracle's `--test` arguments run
+#              only in that job.
 #   nightly  - the `Heavy E2E` workflow (.github/workflows/heavy-e2e.yml), which
 #              runs on a nightly `schedule:` and on `workflow_dispatch:` ONLY.
 #              Runs exactly the heavy e2e suite the other two profiles exclude.
@@ -45,10 +46,10 @@ default-filter = '''
 '''
 
 [profile.ci]
-# Keep the local fast-suite scope, then exclude the two capacity-census
-# binaries that the required Phase 0-3 oracle job runs in parallel. These were
-# the three slowest tests in the measured Linux workspace run; excluding the
-# complete binaries preserves their positive and negative controls together.
+# Keep the local fast-suite scope, then delegate every complete test binary
+# named by a required Phase 0-3 oracle `--test` argument. Selector-based `-E`
+# legs remain in both jobs, including expressions with whole-binary arms. The
+# executable manifest guard derives this list through the inheritance chain.
 default-filter = '''
     not (
         binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
@@ -59,8 +60,35 @@ default-filter = '''
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+        + binary_id(/^chelis-backend-c::exec_compile$/)
+        + binary_id(/^chelis-backend-c::host_emit_dtype_dispatch$/)
+        + binary_id(/^chelis-cli::capacity_census_tripwire$/)
+        + binary_id(/^chelis-cli::domain_checker$/)
+        + binary_id(/^chelis-cli::dtype_phase2_reduction_matrix$/)
+        + binary_id(/^chelis-cli::eval_tensor_narrowing_matrix$/)
+        + binary_id(/^chelis-cli::fold_static_cond_matrix$/)
+        + binary_id(/^chelis-cli::int_width_lane_matrix$/)
+        + binary_id(/^chelis-cli::issue_680_int_exactness$/)
+        + binary_id(/^chelis-cli::issue_687_rejected_cells_corpus$/)
+        + binary_id(/^chelis-cli::issue_729_payload_census$/)
+        + binary_id(/^chelis-cli::issue_734_tostring_placeholder$/)
+        + binary_id(/^chelis-cli::issue_759_checked_cast_default$/)
+        + binary_id(/^chelis-cli::issue_761_subnormal_ingress$/)
+        + binary_id(/^chelis-cli::issue_860_checker_chokepoint$/)
+        + binary_id(/^chelis-cli::narrow_dtype_matrix$/)
+        + binary_id(/^chelis-cli::observation_roundtrip_harness$/)
+        + binary_id(/^chelis-cli::parity$/)
+        + binary_id(/^chelis-cli::precision_matrix$/)
+        + binary_id(/^chelis-cli::prove_int64_exactness$/)
+        + binary_id(/^chelis-cli::reduction_and_bitwise_matrix$/)
+        + binary_id(/^chelis-cli::scalar_stub_matrix$/)
         + binary_id(/^chelis-compiler-api::capacity_census_wire$/)
+        + binary_id(/^chelis-compiler-api::dtype_kernel_boundary$/)
+        + binary_id(/^chelis-e2e::eval_agreement$/)
+        + binary_id(/^chelis-ir::dtype_kernel_boundary$/)
+        + binary_id(/^chelis-prove::dtype_concrete_boundary$/)
         + binary_id(/^chelis-python::capacity_census_bindings$/)
+        + binary_id(/^chelis-types::agreement_tolerance$/)
     )
 '''
 
@@ -72,9 +100,8 @@ path = "junit.xml"
 [profile.nightly]
 # The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
 # default-filter is exactly the heavy set the `default` profile excludes.
-# The `ci` profile additionally delegates its two capacity-census binaries to
-# the required dtype oracle; scripts/test_nextest_profile_partition.py locks
-# the resulting three-lane partition.
+# The `ci` profile additionally delegates binaries named by oracle `--test`
+# arguments; scripts/test_nextest_profile_partition.py locks that handoff.
 default-filter = '''
     binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
     + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)
