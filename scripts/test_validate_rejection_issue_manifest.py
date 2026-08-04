@@ -125,6 +125,9 @@ class ClosingReferences(unittest.TestCase):
                         "pull_request": {
                             "number": 42,
                             "commits": 2,
+                            "head": {
+                                "sha": "9876543210abcdef9876543210abcdef98765432"
+                            },
                             "title": "Part of #729",
                             "body": "Closes #1143",
                         },
@@ -176,7 +179,13 @@ class ClosingReferences(unittest.TestCase):
             return type(
                 "Completed",
                 (),
-                {"returncode": 0, "stderr": "", "stdout": "[[]]"},
+                {
+                    "returncode": 0,
+                    "stderr": "",
+                    "stdout": json.dumps(
+                        [[{"sha": "a" * 40, "commit": {"message": "ordinary"}}]]
+                    ),
+                },
             )()
 
         with tempfile.TemporaryDirectory() as raw:
@@ -187,7 +196,8 @@ class ClosingReferences(unittest.TestCase):
                         "number": 42,
                         "pull_request": {
                             "number": 42,
-                            "commits": 0,
+                            "commits": 1,
+                            "head": {"sha": "a" * 40},
                             "title": "Fixes #729",
                             "body": "Part of #729",
                         },
@@ -203,7 +213,13 @@ class ClosingReferences(unittest.TestCase):
             return type(
                 "Completed",
                 (),
-                {"returncode": 0, "stderr": "", "stdout": "[[]]"},
+                {
+                    "returncode": 0,
+                    "stderr": "",
+                    "stdout": json.dumps(
+                        [[{"sha": "a" * 40, "commit": {"message": "ordinary"}}]]
+                    ),
+                },
             )()
 
         with tempfile.TemporaryDirectory() as raw:
@@ -213,8 +229,8 @@ class ClosingReferences(unittest.TestCase):
                 "number": 42,
                 "pull_request": {
                     "number": 42,
-                    "commits": 0,
-                    "head": {"sha": "same-head"},
+                    "commits": 1,
+                    "head": {"sha": "a" * 40},
                     "title": "Part of #729",
                     "body": "Closes #729",
                 },
@@ -235,7 +251,8 @@ class ClosingReferences(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             event_path = Path(raw) / "event.json"
             event_path.write_text(
-                '{"number":42,"pull_request":{"number":42,"commits":0,'
+                '{"number":42,"pull_request":{"number":42,"commits":1,'
+                '"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},'
                 '"title":"ordinary","body":""}}'
             )
 
@@ -254,6 +271,7 @@ class ClosingReferences(unittest.TestCase):
             event_path = Path(raw) / "event.json"
             event_path.write_text(
                 '{"number":42,"pull_request":{"number":42,"commits":251,'
+                '"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},'
                 '"title":"ordinary","body":""}}'
             )
 
@@ -280,6 +298,7 @@ class ClosingReferences(unittest.TestCase):
             event_path = Path(raw) / "event.json"
             event_path.write_text(
                 '{"number":42,"pull_request":{"number":42,"commits":1,'
+                '"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},'
                 '"title":"ordinary","body":""}}'
             )
 
@@ -311,6 +330,7 @@ class ClosingReferences(unittest.TestCase):
             event_path = Path(raw) / "event.json"
             event_path.write_text(
                 '{"number":42,"pull_request":{"number":42,"commits":1,'
+                '"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},'
                 '"title":"ordinary","body":""}}'
             )
 
@@ -336,6 +356,68 @@ class ClosingReferences(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "invalid or duplicate commit SHA"):
                 collect_pull_request_sources(event_path, run=run)
+
+    def test_rest_commit_inventory_must_end_at_the_event_head(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            event_path = Path(raw) / "event.json"
+            event_path.write_text(
+                json.dumps(
+                    {
+                        "number": 42,
+                        "pull_request": {
+                            "number": 42,
+                            "commits": 1,
+                            "head": {"sha": "a" * 40},
+                            "title": "ordinary",
+                            "body": "",
+                        },
+                    }
+                )
+            )
+
+            def run(_: list[str], **__: object) -> object:
+                return type(
+                    "Completed",
+                    (),
+                    {
+                        "returncode": 0,
+                        "stderr": "",
+                        "stdout": json.dumps(
+                            [[{"sha": "b" * 40, "commit": {"message": "ordinary"}}]]
+                        ),
+                    },
+                )()
+
+            with self.assertRaisesRegex(RuntimeError, "does not match event head"):
+                collect_pull_request_sources(event_path, run=run)
+
+    def test_blank_title_zero_commits_and_malformed_head_fail_closed(self) -> None:
+        malformed = (
+            {"commits": 1, "head": {"sha": "a" * 40}, "title": "   "},
+            {"commits": 0, "head": {"sha": "a" * 40}, "title": "ordinary"},
+            {"commits": 1, "head": {"sha": "NOT-A-SHA"}, "title": "ordinary"},
+        )
+        for pull_request in malformed:
+            with self.subTest(pull_request=pull_request), tempfile.TemporaryDirectory() as raw:
+                event_path = Path(raw) / "event.json"
+                event_path.write_text(
+                    json.dumps(
+                        {
+                            "number": 42,
+                            "pull_request": {
+                                "number": 42,
+                                "body": "",
+                                **pull_request,
+                            },
+                        }
+                    )
+                )
+
+                def run(_: list[str], **__: object) -> object:
+                    self.fail("malformed PR metadata must fail before REST access")
+
+                with self.assertRaisesRegex(RuntimeError, "valid"):
+                    collect_pull_request_sources(event_path, run=run)
 
     def test_collects_manually_linked_closing_issues_across_all_pages(self) -> None:
         responses = iter(

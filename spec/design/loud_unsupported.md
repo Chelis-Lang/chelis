@@ -348,7 +348,9 @@ REGISTRIES of what actually exists:
   reject hand edits and additions/removals that do not follow source. Workspace
   members and explicit lib, bin, example, and custom build roots come from the
   root and package Cargo manifests, so a non-`crates/` member or custom target
-  path is part of the same inventory. The scanner
+  path is part of the same inventory. Every exact non-test Cargo target is
+  counted regardless of its filename suffix; its parent tree is additionally
+  walked for ordinary `*.rs` module files. The scanner
   masks nested Rust comments and string forms while preserving offsets, so
   historical text cannot manufacture a site and comments or whitespace around
   macro tokens cannot hide one. Macro aliases and re-exports fail generation,
@@ -368,9 +370,11 @@ REGISTRIES of what actually exists:
   live-validates the standing source-derived manifest, queries GitHub's
   paginated `closingIssuesReferences` relation (including manual links visible
   at that run), and additionally inspects the PR body and every retrievable
-  commit message for closing keywords. The REST commit inventory must equal the
-  event's declared count; the endpoint's 250-commit ceiling therefore fails
-  closed rather than silently truncating a larger PR. A closing reference to an
+  commit message for closing keywords. The event supplies a canonical positive
+  commit count and exact head object ID; the REST commit inventory must equal
+  that count and end at that head. The endpoint's 250-commit ceiling therefore
+  fails closed rather than silently truncating a larger PR, and a stale or
+  racing response cannot certify another head. A closing reference to an
   issue with live constructors fails and reports every offending `path:line`;
   the constructors and generated artifacts must move to their still-open
   capability owner before the delivered instance can close. The PR title is

@@ -151,6 +151,13 @@ def fetch_issue(
         return None
     try:
         payload = json.loads(result.stdout)
+        if type(payload) is not dict:
+            return None
+        returned_number = payload.get("number")
+        if type(returned_number) is not int or returned_number <= 0:
+            return None
+        if returned_number != number:
+            return None
         state = IssueState(str(payload["state"]).upper())
         kind = (
             IssueKind.PULL_REQUEST

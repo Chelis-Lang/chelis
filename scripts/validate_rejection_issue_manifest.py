@@ -178,15 +178,24 @@ def collect_pull_request_sources(
     pull_request, number = _read_pull_request_event(event_path)
     title = pull_request.get("title")
     body = pull_request.get("body")
-    if not isinstance(title, str):
+    head = pull_request.get("head")
+    if not isinstance(title, str) or not title.strip():
         raise RuntimeError("pull-request event has no valid title")
     if body is not None and not isinstance(body, str):
         raise RuntimeError("pull-request event has no valid body")
+    if type(head) is not dict:
+        raise RuntimeError("pull-request event has no valid head")
+    event_head = head.get("sha")
+    if (
+        not isinstance(event_head, str)
+        or re.fullmatch(r"[0-9a-f]{40}", event_head) is None
+    ):
+        raise RuntimeError("pull-request event has no valid head SHA")
     expected_commits = pull_request.get("commits")
     if (
         not isinstance(expected_commits, int)
         or isinstance(expected_commits, bool)
-        or expected_commits < 0
+        or expected_commits <= 0
     ):
         raise RuntimeError("pull-request event has no valid commit count")
 
@@ -214,6 +223,7 @@ def collect_pull_request_sources(
         pages = json.loads(result.stdout)
         fetched_commits = 0
         seen_shas: set[str] = set()
+        last_sha: str | None = None
         if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
             raise TypeError("commit pages are not lists")
         for page in pages:
@@ -221,11 +231,12 @@ def collect_pull_request_sources(
                 full_sha = commit["sha"]
                 if (
                     not isinstance(full_sha, str)
-                    or re.fullmatch(r"[0-9a-fA-F]{40}", full_sha) is None
+                    or re.fullmatch(r"[0-9a-f]{40}", full_sha) is None
                     or full_sha in seen_shas
                 ):
                     raise TypeError("invalid or duplicate commit SHA")
                 seen_shas.add(full_sha)
+                last_sha = full_sha
                 fetched_commits += 1
                 sha = full_sha[:12]
                 message = commit["commit"]["message"]
@@ -238,6 +249,11 @@ def collect_pull_request_sources(
         raise RuntimeError(
             f"incomplete commit response for PR #{number}: expected "
             f"{expected_commits} commits, received {fetched_commits}"
+        )
+    if last_sha != event_head:
+        raise RuntimeError(
+            f"commit response for PR #{number} does not match event head: "
+            f"expected {event_head}, received {last_sha or 'no commits'}"
         )
     return sources
 

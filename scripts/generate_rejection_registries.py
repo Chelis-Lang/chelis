@@ -490,6 +490,7 @@ def workspace_rust_paths(root: Path) -> tuple[list[Path], set[Path]]:
                 paths.add(target)
                 build_scripts.add(target)
             else:
+                paths.add(target)
                 _inventory_tree(root, target.parent, paths)
     return sorted(paths), build_scripts
 
@@ -622,7 +623,6 @@ def load_issue_manifest(path: Path) -> list[int]:
                 or parsed_site_path.is_absolute()
                 or not parsed_site_path.parts
                 or any(part in {"", ".", ".."} for part in parsed_site_path.parts)
-                or parsed_site_path.suffix != ".rs"
                 or not isinstance(line, int)
                 or isinstance(line, bool)
                 or line <= 0

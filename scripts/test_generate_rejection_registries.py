@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -114,6 +115,22 @@ class IssueManifest(unittest.TestCase):
                 ],
             )
             self.assertEqual(load_issue_manifest(path), [705, 879])
+
+    def test_accepts_site_for_a_cargo_target_with_non_rs_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = self.write_manifest(
+                root,
+                [
+                    {
+                        "number": 729,
+                        "kind": "issue",
+                        "state": "open",
+                        "sites": [{"path": "crates/a/src/lib.rust", "line": 3}],
+                    }
+                ],
+            )
+            self.assertEqual(load_issue_manifest(path), [729])
 
     def test_rejects_zero_duplicate_pr_closed_and_unsorted_rows(self) -> None:
         invalid = [
@@ -462,6 +479,51 @@ let _ = unimplemented_rejection!(714, "live");
                         ]
                     },
                 )
+
+    def test_custom_target_with_non_rs_extension_is_compiled_and_inventoried(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            member = root / "custom-target"
+            member.mkdir()
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["custom-target"]\nresolver = "3"\n'
+            )
+            (member / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "custom-target"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n\n'
+                "[lib]\n"
+                'path = "src/lib.rust"\n'
+            )
+            source = member / "src/lib.rust"
+            source.parent.mkdir()
+            source.write_text(
+                "#[cfg(any())]\n"
+                "fn hidden() {\n"
+                '    let _ = unimplemented_rejection!(729, "live");\n'
+                "}\n"
+                "pub fn compiled() {}\n"
+            )
+            compiled = subprocess.run(
+                [
+                    "cargo",
+                    "check",
+                    "--offline",
+                    "--manifest-path",
+                    str(root / "Cargo.toml"),
+                    "--target-dir",
+                    str(root / "target"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {729: [AuthoritySite("custom-target/src/lib.rust", 3)]},
+            )
 
     def test_root_package_is_an_implicit_workspace_member(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
