@@ -6624,28 +6624,51 @@ mod expression_dispatch_tests {
         );
     }
 
-    /// chelis#1112 fail-closed guard: the emitted reshape helper must trap
-    /// an extent above INT_MAX BEFORE the `(int)` store into the 32-bit
-    /// shape array, so an unrepresentable extent can never truncate into
-    /// a silent wrong answer while the dim carrier is still `int`.
+    /// chelis#1112: the emitted reshape helper stores the extent it read,
+    /// at the width it read it. `chelis_value_as_int64` returns int64 and
+    /// the shape buffer is the ABI's int64 extent carrier, so no cast sits
+    /// between them.
+    ///
+    /// This replaces `reshape_helper_traps_extent_above_int32_before_the_store`,
+    /// which pinned the ordering of a trap against the `(int)` store it
+    /// guarded. Both are gone: the trap existed only because the store was
+    /// lossy, and rejecting a representable extent would now itself be the
+    /// defect. Pinning the ABSENCE of the cast is what stops a later edit
+    /// from quietly reintroducing the narrowing, so several assertions
+    /// below are negative on purpose.
     #[test]
-    fn reshape_helper_traps_extent_above_int32_before_the_store() {
+    fn reshape_helper_stores_the_extent_at_int64_with_no_truncating_cast() {
         let mut out = Vec::new();
         append_tensor_reshape_helper(&mut out);
         let text = out.join("\n");
-        let guard = text
-            .find("if (dim > 2147483647LL) {")
-            .expect("emitted reshape helper must guard dim > INT_MAX");
-        let trap = text
-            .find("exceeds the int32 dim carrier (chelis#1112)")
-            .expect("guard must name the carrier and the owning issue");
-        let store = text
-            .find("shape[i] = (int)dim;")
-            .expect("emitted reshape helper stores into the int shape array");
         assert!(
-            guard < store && trap < store,
-            "the overflow trap must run before the (int) store; \
-             guard at {guard}, trap at {trap}, store at {store}"
+            text.contains("int64_t shape[CHELIS_MAX_DIM] = {0};"),
+            "the shape buffer must be the int64 extent carrier:\n{text}"
+        );
+        let read = text
+            .find("int64_t dim = chelis_value_as_int64(")
+            .expect("the extent is read at int64");
+        let store = text
+            .find("shape[i] = dim;")
+            .expect("the extent is stored without a cast");
+        assert!(
+            read < store,
+            "the extent must be read before it is stored; read at {read}, store at {store}"
+        );
+        assert!(
+            !text.contains("shape[i] = (int)dim;"),
+            "a truncating store into the shape buffer is the defect chelis#1112 removed:\n{text}"
+        );
+        assert!(
+            !text.contains("2147483647LL"),
+            "the int32 extent trap is dead with the cast it guarded:\n{text}"
+        );
+        // The negative-extent guard is NOT dead: a negative dim is invalid
+        // at every carrier width, so the widening must not have taken it
+        // along with the truncation trap.
+        assert!(
+            text.contains("if (dim < 0) {"),
+            "the negative-extent rejection survives the widening:\n{text}"
         );
     }
 }

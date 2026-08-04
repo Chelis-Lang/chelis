@@ -275,7 +275,7 @@ out = grad(f)\n";
 #include "chelis_runtime.h"
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
-    int shape[1] = {4};
+    int64_t shape[1] = {4};
     chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     memcpy(x->data, xd, sizeof(xd));

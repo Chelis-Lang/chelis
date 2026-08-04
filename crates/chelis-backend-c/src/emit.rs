@@ -87,7 +87,7 @@ impl CEmitter {
         // Some Surf signatures surface anonymous (Named("", None)) axes into
         // the lowered DAG (e.g. a rank-1 tensor parameter whose dim has no
         // declared name). These would emit `int  = inputs[0]->shape[0];` and
-        // `(int[]){ }` shape literals, neither of which compiles. Rewrite
+        // `(int64_t[]){ }` shape literals, neither of which compiles. Rewrite
         // empty dim names to a stable synthesized identifier before the
         // emitter walks the DAG.
         let dag_owned = Self::rename_anonymous_dims(dag);
@@ -1211,7 +1211,11 @@ impl CEmitter {
         if dims.is_empty() {
             "NULL".to_string()
         } else {
-            format!("(int[]){{ {} }}", dims.join(", "))
+            // chelis#1112: the compound literal IS the argument to
+            // `chelis_alloc(int, const int64_t *, int)`. An `int[]` here is
+            // both a pointer-type mismatch and, at run time, a 4-byte-aligned
+            // buffer the runtime reads as int64_t.
+            format!("(int64_t[]){{ {} }}", dims.join(", "))
         }
     }
 
@@ -2591,10 +2595,28 @@ impl CEmitter {
         if !is_f64 && self.math_lib == crate::MathLib::VForce {
             if let Some(vf_fn) = Self::vforce_func(func) {
                 // vForce whole-array batch API on macOS (Accelerate.framework).
-                self.line("{");
+                //
+                // chelis#1112: vForce's count parameter is `const int *`, a
+                // foreign ABI this project does not get to widen, so the
+                // element count is the one place an extent must cross into
+                // 32 bits. The narrowing is GUARDED rather than cast: above
+                // INT_MAX the batch call is skipped for the scalar loop,
+                // which computes the same values at any size. A bare
+                // `(int)t->size` here would process a wrapped prefix of the
+                // buffer and leave the rest of the output uninitialized.
+                self.line(&format!("if (t{id}->size <= 2147483647LL) {{"));
                 self.indent += 1;
-                self.line(&format!("int64_t __n_{id} = t{id}->size;"));
+                self.line(&format!("int __n_{id} = (int)t{id}->size;"));
                 self.line(&format!("{vf_fn}(__out_{id}, __in_a_{id}, &__n_{id});"));
+                self.indent -= 1;
+                self.line("} else {");
+                self.indent += 1;
+                self.line("#pragma omp parallel for simd");
+                self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
+                self.indent += 1;
+                self.line(&format!("__out_{id}[i] = {f}(__in_a_{id}[i]);"));
+                self.indent -= 1;
+                self.line("}");
                 self.indent -= 1;
                 self.line("}");
             } else {
@@ -6566,7 +6588,7 @@ mod tests {
         assert!(c.contains("acc0 += __v"));
         assert!(c.contains("acc3 += __v"));
         assert!(c.contains("(acc0 + acc1) + (acc2 + acc3)"));
-        assert!(c.contains("for (int __reduce_i"));
+        assert!(c.contains("for (int64_t __reduce_i"));
     }
 
     #[test]
@@ -6899,7 +6921,7 @@ mod tests {
         assert!(c.contains("chelis_tensor *chelis_slot0 = chelis_alloc("));
         assert!(c.contains("chelis_tensor *t2 = chelis_alloc_view("));
         assert!(c.contains("chelis_indices_to_flat(indices, t1->strides, t1->ndim)"));
-        assert!(!c.contains("chelis_alloc_view(1, (int[]){ 3 }, CHELIS_F32, t1->data)"));
+        assert!(!c.contains("chelis_alloc_view(1, (int64_t[]){ 3 }, CHELIS_F32, t1->data)"));
     }
 
     #[test]
@@ -7126,7 +7148,7 @@ mod tests {
         );
         dag.add_node(RiscOp::Add, vec![a, b], vec_f32(4), None);
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("(int[]){ 4 }"));
+        assert!(c.contains("(int64_t[]){ 4 }"));
     }
 
     #[test]
@@ -7511,7 +7533,7 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(!c.contains("cblas_sgemm("));
-        assert!(c.contains("for (int __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));
+        assert!(c.contains("for (int64_t __reduce_i = 0; __reduce_i < 3; __reduce_i++) {"));
     }
 
     #[test]
@@ -7710,7 +7732,7 @@ mod tests {
         assert!(c.contains("const float* restrict __ext0_2 = t0->data;"));
         assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
         assert!(
-            !c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"),
+            !c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_F32, t0->data);"),
             "C fused codegen must not claim in-place aliasing without reusable_input"
         );
     }
@@ -7776,9 +7798,9 @@ mod tests {
 
         let c = CEmitter::emit_dag(&dag, "embedding_probe").unwrap();
 
-        assert!(c.contains("chelis_alloc(2, (int[]){ 128, 1024 }, CHELIS_F32);"));
+        assert!(c.contains("chelis_alloc(2, (int64_t[]){ 128, 1024 }, CHELIS_F32);"));
         assert!(
-            !c.contains("(int[]){ 128, 50000, 1024 }"),
+            !c.contains("(int64_t[]){ 128, 50000, 1024 }"),
             "sparse gather codegen must not allocate the dense [N,V,D] one-hot/product tensor"
         );
         assert!(
@@ -7931,7 +7953,7 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t1->data);"),
+            c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_F32, t1->data);"),
             "an owned intermediate must still be reused in place; got:\n{c}"
         );
         assert!(!c.contains("float* restrict __out_3 = t3->data;"), "{c}");
@@ -8059,7 +8081,7 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !c.contains("chelis_alloc_view(1, (int[]){ 4 }, CHELIS_F32, t0->data);"),
+            !c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_F32, t0->data);"),
             "multi-consumer reusable input must not be aliased in place"
         );
         assert!(c.contains("float* restrict __out_2 = t2->data;"));

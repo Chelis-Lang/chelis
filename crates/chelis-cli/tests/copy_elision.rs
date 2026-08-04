@@ -67,7 +67,7 @@ fn build_copy_elision_c_source() -> String {
     fs::read_to_string(&c_path).expect("read generated c")
 }
 
-/// Sum of bytes allocated by every `chelis_alloc(N, (int[]){...}, CHELIS_<T>)`
+/// Sum of bytes allocated by every `chelis_alloc(N, (int64_t[]){...}, CHELIS_<T>)`
 /// call in the C source. After M2a this approximates the slot-planned helper
 /// working set because slot backing allocations still use `chelis_alloc`.
 ///
@@ -79,7 +79,7 @@ pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
         let pos = idx + start;
         let after = &c_source[pos..];
         // Find the closing `)` of this alloc call. We use the matching brace
-        // approach: locate the comma after rank, then the `(int[]){ ... }`.
+        // approach: locate the comma after rank, then the `(int64_t[]){ ... }`.
         let dtype_size = if after.contains("CHELIS_F64") && after.find("CHELIS_F64").unwrap() < 200
         {
             8
@@ -95,10 +95,10 @@ pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
         };
 
         // Parse the shape list. Two forms:
-        //   chelis_alloc(N, (int[]){ d1, d2, ... }, CHELIS_<T>)
+        //   chelis_alloc(N, (int64_t[]){ d1, d2, ... }, CHELIS_<T>)
         //   chelis_alloc(0, NULL, CHELIS_<T>)             // scalar tensor
-        let bytes = if let Some(brace_open) = after.find("(int[]){") {
-            let dims_start = brace_open + "(int[]){".len();
+        let bytes = if let Some(brace_open) = after.find("(int64_t[]){") {
+            let dims_start = brace_open + "(int64_t[]){".len();
             if let Some(brace_close) = after[dims_start..].find('}') {
                 let dims_text = &after[dims_start..dims_start + brace_close];
                 let dims: Vec<usize> = dims_text

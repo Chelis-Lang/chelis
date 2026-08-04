@@ -536,7 +536,7 @@ fn matrix_driver(rows: usize, cols: usize, values: &[f64]) -> String {
 #include "chelis_runtime.h"
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {{
-    int shape[2] = {{{rows}, {cols}}};
+    int64_t shape[2] = {{{rows}, {cols}}};
     chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
     float xd[{n}] = {{{init}}};
     memcpy(x->data, xd, sizeof(xd));

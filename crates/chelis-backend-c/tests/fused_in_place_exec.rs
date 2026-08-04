@@ -124,7 +124,7 @@ static void print_tensor(const char *label, chelis_tensor *t) {
 }
 
 int main(void) {
-    int shape4[1] = { 4 };
+    int64_t shape4[1] = { 4 };
 
     chelis_tensor *x = chelis_alloc(1, shape4, CHELIS_F32);
     for (int i = 0; i < 4; i++) x->data[i] = (float)(i + 1);
@@ -136,7 +136,7 @@ int main(void) {
     chelis_free(outputs0[0]);
     chelis_free(x);
 
-    int shape8[1] = { 8 };
+    int64_t shape8[1] = { 8 };
     chelis_tensor *base = chelis_alloc(1, shape8, CHELIS_F32);
     float base_values[8] = { 100.0f, 1.0f, 100.0f, 2.0f, 100.0f, 3.0f, 100.0f, 4.0f };
     for (int i = 0; i < 8; i++) base->data[i] = base_values[i];

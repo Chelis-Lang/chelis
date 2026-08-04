@@ -2394,7 +2394,7 @@ int main(void) {{
         assert!(
             !result
                 .c_source
-                .contains("(int[]){ batch, heads, seq, 3, 2 }"),
+                .contains("(int64_t[]){ batch, heads, seq, 3, 2 }"),
             "specialized batched BLAS must not allocate the dense product"
         );
 

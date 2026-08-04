@@ -423,7 +423,7 @@ fn issue_520_d1_grad_through_static_match_c_backend_agrees() {
 #include "chelis_runtime.h"
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
-    int shape[1] = {2};
+    int64_t shape[1] = {2};
     chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
     float xd[2] = {1.0f, 2.0f};
     memcpy(x->data, xd, sizeof(xd));
