@@ -3,11 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-  # The rejection-authority lifecycle check reads closing relationships from
-  # PR metadata. `edited` is therefore as material as a new head commit: a
-  # body edit can add/remove a closing keyword without changing the SHA.
   pull_request:
-    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -76,33 +72,27 @@ jobs:
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
-  # [05-UNS-5] issue authority is derived from executable construction sites
-  # across Cargo's exact workspace graph. The offline generator establishes
-  # source/manifest/registry agreement; this job also proves each derived
-  # identity is a live OPEN issue and rejects PR merge inputs that would strand
-  # a constructor by closing its authority (chelis#730 §C2.1).
+  # [05-UNS-5] issue authority is admitted through a checked-in membership
+  # manifest, so edits to that admission path require a live exists/kind/state
+  # check before merge. The offline generator and Rust constructors establish
+  # shape and membership; this job prevents a same-PR manifest edit from
+  # blessing a closed issue, pull request, or missing object (chelis#730 §C2.1).
   rejection-authority-liveness:
     name: Rejection Authority Liveness
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
+    needs: [changes]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
     permissions:
       contents: read
       issues: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain for Cargo workspace discovery
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
 
       - name: Create uv-managed venv
         run: uv venv --python 3.11
-
-      - name: Validate source-derived rejection registries
-        run: .venv/bin/python scripts/generate_rejection_registries.py --check
 
       - name: Validate rejection authority construction boundary
         run: .venv/bin/python scripts/check_rejection_authority_boundary.py

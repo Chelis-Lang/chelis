@@ -3354,7 +3354,7 @@ impl<'a> HostEmitter<'a> {
                                 "`scalar_to_tensor` C host emission",
                                 Stage::Codegen("c"),
                                 chelis_types::unimplemented_rejection!(
-                                    729,
+                                    714,
                                     "the resolved result dtype has no scalar-tensor constructor; \
                                      implement the exact target capability instead of selecting f32"
                                 ),

@@ -827,10 +827,10 @@ impl CEmitter {
                 format!("a fused integer tensor at C DAG node {}", node.0),
                 Stage::Codegen("c"),
                 chelis_types::unimplemented_rejection!(
-                    729,
+                    691,
                     "direct integer abs is implemented with an exact trapping kernel; \
-                     general fused integer emission remains capability-table work, so \
-                     this externally supplied fused shape cannot enter the float-only template"
+                     general fused integer emission remains Phase 3 work, so this \
+                     externally supplied fused shape cannot enter the float-only template"
                 ),
             ));
         }
@@ -3260,7 +3260,7 @@ impl CEmitter {
             let authority = match ty.precision {
                 Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
                     chelis_types::unimplemented_rejection!(
-                        729,
+                        691,
                         "integer fused elementwise chains need exact integer step operators rather than libm calls"
                     )
                 }
