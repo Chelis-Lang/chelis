@@ -431,7 +431,7 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
       "flags": [
         "raw-dtype-int"
       ],
@@ -439,7 +439,7 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int * shape , int dtype , float * data ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int64_t * shape , int dtype , float * data ) ;",
       "flags": [
         "float-carrier",
         "raw-dtype-int",
@@ -790,11 +790,11 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int64_t axis ) ;",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int32_t axis ) ;",
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "chelis#1112 axis-domain narrowing per [05-DIM-1]; semantic authority [05-OP-7], registered in capacity_census_tripwire.rs"
     },
     {
       "kind": "header-export",
@@ -1068,7 +1068,7 @@
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { float * data ; int shape [ 8 ] ; int strides [ 8 ] ; int ndim ; int dtype ; int size ; int owns_data ; } chelis_tensor",
+      "id": "chelis_runtime.h: typedef struct { float * data ; int64_t shape [ 8 ] ; int64_t strides [ 8 ] ; int ndim ; int dtype ; int64_t size ; int owns_data ; } chelis_tensor",
       "flags": [
         "float-carrier",
         "raw-dtype-int",

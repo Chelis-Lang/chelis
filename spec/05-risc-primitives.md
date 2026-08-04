@@ -660,7 +660,22 @@ dependency and fails closed when its input is absent (chelis#351).
 | `shape` | `(&tensor[d1,...,dn,p], axis: int32) -> int64` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
 
 The Surf `shape(tensor, axis)` builtin types this read as an `int64` scalar
-per [05-DIM-2] — extent-domain out, axis-domain in. Two lowering shapes
+per [05-DIM-2] — extent-domain out, axis-domain in.
+
+#### Runtime extent read atom
+
+> **[05-OP-7]** The runtime extent read (`shape(x, axis)`; C ABI
+> `chelis_tensor_shape`) returns the stored extent of `x` along `axis` as
+> an exact `int64` ([05-DIM-2]). The read is metadata-exact at every
+> tensor dtype `p`: it performs no arithmetic and no width change on the
+> stored extent, so [04-NUM-8]'s arithmetic-width table is not engaged
+> and the value crosses the boundary exactly ([04-NUM-11]). Its `axis`
+> operand is axis-domain `int32` ([05-DIM-1]); a negative or
+> out-of-range axis is a loud error. The read is non-differentiable: it
+> produces no adjoint and contributes no gradient. No accumulator rule
+> applies.
+
+Two lowering shapes
 exist, and they are distinct:
 
 - **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
