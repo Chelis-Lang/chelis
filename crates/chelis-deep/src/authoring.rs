@@ -18,77 +18,90 @@ const DEF_NAME_INDEX: usize = 2;
 const DEF_VALUE_INDEX: usize = 3;
 const FN_PARAMS_INDEX: usize = 2;
 
-/// Recursively convert all `Expr::Node` and `Expr::BareList` in a tree to
-/// the `Expr::List` form that the authoring module's internal helpers expect.
-/// This is a boundary normalization applied at each public entry point.
-fn normalize_to_list(exprs: &[Expr]) -> Vec<Expr> {
-    exprs.iter().map(normalize_expr).collect()
+/// Recursively bridge stamped trees to the legacy `List` carrier used by the
+/// mutating authoring implementation. Read-only authoring APIs must consume
+/// `Node` directly and therefore never call this adapter.
+fn normalize_for_mutation(exprs: &[Expr]) -> Vec<Expr> {
+    exprs.iter().map(normalize_expr_for_mutation).collect()
 }
 
-fn normalize_expr(expr: &Expr) -> Expr {
+fn normalize_expr_for_mutation(expr: &Expr) -> Expr {
     match expr {
         Expr::Node(node, span) => {
             let list = node.to_list(*span);
-            let elements = list.elements.iter().map(normalize_expr).collect();
-            Expr::List(List { elements }, *span)
-        }
-        Expr::BareList(elems, span) => {
-            let elements = elems.iter().map(normalize_expr).collect();
-            Expr::List(List { elements }, *span)
-        }
-        Expr::List(list, span) => {
-            let elements = list.elements.iter().map(normalize_expr).collect();
-            Expr::List(List { elements }, *span)
-        }
-        Expr::Map(map, span) => {
-            let entries = map
-                .entries
+            let elements = list
+                .elements
                 .iter()
-                .map(|(key, value)| (key.clone(), normalize_expr(value)))
+                .map(normalize_expr_for_mutation)
                 .collect();
-            Expr::Map(MetaMap { entries }, *span)
+            Expr::List(List { elements }, *span)
         }
-        Expr::MetaExpr(meta, span) => {
-            let entries = meta
-                .entries
-                .iter()
-                .map(|(key, value)| (key.clone(), normalize_expr(value)))
-                .collect();
-            Expr::MetaExpr(
-                crate::ast::MetaExpr {
-                    entries,
-                    expr: Box::new(normalize_expr(&meta.expr)),
-                },
-                *span,
-            )
-        }
+        Expr::BareList(elements, span) => Expr::List(
+            List {
+                elements: elements.iter().map(normalize_expr_for_mutation).collect(),
+            },
+            *span,
+        ),
+        Expr::List(list, span) => Expr::List(
+            List {
+                elements: list
+                    .elements
+                    .iter()
+                    .map(normalize_expr_for_mutation)
+                    .collect(),
+            },
+            *span,
+        ),
+        Expr::Map(map, span) => Expr::Map(
+            MetaMap {
+                entries: map
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
+                    .collect(),
+            },
+            *span,
+        ),
+        Expr::MetaExpr(meta, span) => Expr::MetaExpr(
+            crate::ast::MetaExpr {
+                entries: meta
+                    .entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
+                    .collect(),
+                expr: Box::new(normalize_expr_for_mutation(&meta.expr)),
+            },
+            *span,
+        ),
         Expr::UnknownForm(data) => {
-            let children: Vec<Expr> = data.children.iter().map(normalize_expr).collect();
-            Expr::List(
-                List {
-                    elements: {
-                        let mut elems = vec![Expr::Atom(Atom::Name(data.head.clone()), data.span)];
-                        let meta_entries = data
-                            .meta
-                            .entries
-                            .iter()
-                            .map(|(key, value)| (key.clone(), normalize_expr(value)))
-                            .collect();
-                        elems.push(Expr::Map(
-                            MetaMap {
-                                entries: meta_entries,
-                            },
-                            data.span,
-                        ));
-                        elems.extend(children);
-                        elems
-                    },
+            let mut elements = vec![Expr::Atom(Atom::Name(data.head.clone()), data.span)];
+            elements.push(Expr::Map(
+                MetaMap {
+                    entries: data
+                        .meta
+                        .entries
+                        .iter()
+                        .map(|(key, value)| (key.clone(), normalize_expr_for_mutation(value)))
+                        .collect(),
                 },
                 data.span,
-            )
+            ));
+            elements.extend(data.children.iter().map(normalize_expr_for_mutation));
+            Expr::List(List { elements }, data.span)
         }
         Expr::Atom(..) => expr.clone(),
     }
+}
+
+/// Borrowed canonical-node view shared by the legacy and successor carriers.
+///
+/// `children` uses semantic indexing: child 0 is the first element after the
+/// tag and metadata map.  No `List` is reconstructed for a `Node`.
+#[derive(Clone, Copy)]
+struct NodeView<'a> {
+    tag: DeepTag,
+    meta: Option<&'a MetaMap>,
+    children: &'a [Expr],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,31 +188,26 @@ pub enum AuthoringError {
 }
 
 pub fn outline(module_exprs: &[Expr]) -> Result<ModuleOutline, AuthoringError> {
-    let module_exprs = normalize_to_list(module_exprs);
-    let module = single_module(&module_exprs)?;
-    let module_name = module_name(module).unwrap_or_default().to_string();
-    let exports = module
-        .elements
+    let module = single_module_expr(module_exprs)?;
+    let module_name = module_name_view(module).unwrap_or_default().to_string();
+    let exports = module_decls_view(module)
         .iter()
-        .skip(MODULE_DECLS_START)
         .find_map(export_names)
         .unwrap_or_default();
 
-    let defsig_names = defsig_map(module);
-    let functions = module
-        .elements
+    let defsig_names = defsig_map_view(module);
+    let functions = module_decls_view(module)
         .iter()
-        .skip(MODULE_DECLS_START)
         .filter_map(|decl| {
-            let def = tagged_list(decl, DeepTag::Def)?;
-            if !def_is_function(def) {
+            let def = tagged_node_view(decl, DeepTag::Def)?;
+            if !def_is_function_view(def) {
                 return None;
             }
-            let name = decl_name(def)?.to_string();
+            let name = decl_name_view(def)?.to_string();
             let defsig = defsig_names.get(&name);
             let qualified_name = qualify(&module_name, &name);
             Some(FunctionOutline {
-                params: fn_params_from_def_list(def),
+                params: fn_params_from_def_view(def),
                 has_defsig: defsig.is_some(),
                 def_deep: printer::print_expr(decl),
                 defsig_deep: defsig.map(printer::print_expr),
@@ -218,28 +226,27 @@ pub fn outline(module_exprs: &[Expr]) -> Result<ModuleOutline, AuthoringError> {
 }
 
 pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, AuthoringError> {
-    let module_exprs = normalize_to_list(module_exprs);
-    let module = single_module(&module_exprs)?;
-    let module_name = module_name(module).unwrap_or_default().to_string();
+    let module = single_module_expr(module_exprs)?;
+    let module_name = module_name_view(module).unwrap_or_default().to_string();
     let bare = bare_name(symbol);
-    let top_level_names = top_level_function_names(module);
+    let top_level_names = top_level_function_names_view(module);
     let mut references = Vec::new();
 
-    for decl in module.elements.iter().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list(decl, DeepTag::Def) else {
+    for decl in module_decls_view(module) {
+        let Some(def) = tagged_node_view(decl, DeepTag::Def) else {
             continue;
         };
-        if !def_is_function(def) {
+        if !def_is_function_view(def) {
             continue;
         }
-        let Some(caller_name) = decl_name(def) else {
+        let Some(caller_name) = decl_name_view(def) else {
             continue;
         };
         let caller = qualify(&module_name, caller_name);
-        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_list(def)
+        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_view(def)
             .into_iter()
             .collect();
-        collect_metadata_symbol_references(
+        collect_metadata_symbol_references_view(
             def,
             bare,
             &top_level_names,
@@ -247,10 +254,10 @@ pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, Aut
             &caller,
             &mut references,
         );
-        let Some(body) = function_body(decl) else {
+        let Some(body) = function_body_view(def) else {
             continue;
         };
-        let mut scope: BTreeSet<String> = fn_params_from_def_list(def).into_iter().collect();
+        let mut scope: BTreeSet<String> = fn_params_from_def_view(def).into_iter().collect();
         collect_symbol_references(
             body,
             bare,
@@ -269,27 +276,26 @@ pub fn references(module_exprs: &[Expr], symbol: &str) -> Result<References, Aut
 }
 
 pub fn call_graph(module_exprs: &[Expr]) -> Result<CallGraph, AuthoringError> {
-    let module_exprs = normalize_to_list(module_exprs);
-    let module = single_module(&module_exprs)?;
-    let module_name = module_name(module).unwrap_or_default().to_string();
-    let top_level_names = top_level_function_names(module);
+    let module = single_module_expr(module_exprs)?;
+    let module_name = module_name_view(module).unwrap_or_default().to_string();
+    let top_level_names = top_level_function_names_view(module);
     let mut edges = Vec::new();
 
-    for decl in module.elements.iter().skip(MODULE_DECLS_START) {
-        let Some(def) = tagged_list(decl, DeepTag::Def) else {
+    for decl in module_decls_view(module) {
+        let Some(def) = tagged_node_view(decl, DeepTag::Def) else {
             continue;
         };
-        if !def_is_function(def) {
+        if !def_is_function_view(def) {
             continue;
         }
-        let Some(caller_name) = decl_name(def) else {
+        let Some(caller_name) = decl_name_view(def) else {
             continue;
         };
         let caller = qualify(&module_name, caller_name);
-        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_list(def)
+        let mut metadata_scope: BTreeSet<String> = property_quantifier_names_from_def_view(def)
             .into_iter()
             .collect();
-        collect_metadata_call_edges(
+        collect_metadata_call_edges_view(
             def,
             &top_level_names,
             &mut metadata_scope,
@@ -297,10 +303,10 @@ pub fn call_graph(module_exprs: &[Expr]) -> Result<CallGraph, AuthoringError> {
             &module_name,
             &mut edges,
         );
-        let Some(body) = function_body(decl) else {
+        let Some(body) = function_body_view(def) else {
             continue;
         };
-        let mut scope: BTreeSet<String> = fn_params_from_def_list(def).into_iter().collect();
+        let mut scope: BTreeSet<String> = fn_params_from_def_view(def).into_iter().collect();
         collect_call_edges(
             body,
             &top_level_names,
@@ -320,7 +326,7 @@ pub fn rename_function(
     function_name: &str,
     new_name: &str,
 ) -> Result<RenameReport, AuthoringError> {
-    let module_exprs = normalize_to_list(module_exprs);
+    let module_exprs = normalize_for_mutation(module_exprs);
     let resolved = resolve_function(&module_exprs, function_name)?;
     validate_new_symbol(new_name)?;
     let old_name = bare_name(&resolved.qualified_name).to_string();
@@ -401,8 +407,8 @@ pub fn replace_function(
     function_name: &str,
     new_decls: &[Expr],
 ) -> Result<ReplaceFunctionReport, AuthoringError> {
-    let module_exprs = normalize_to_list(module_exprs);
-    let new_decls = normalize_to_list(new_decls);
+    let module_exprs = normalize_for_mutation(module_exprs);
+    let new_decls = normalize_for_mutation(new_decls);
     let resolved = resolve_function(&module_exprs, function_name)?;
     let old_name = bare_name(&resolved.qualified_name).to_string();
     let parsed = parse_function_bundle(&new_decls, Some(&old_name))?;
@@ -459,13 +465,13 @@ pub fn change_signature(
     argument_order: &[String],
     param_renames: &[(String, String)],
 ) -> Result<ChangeSignatureReport, AuthoringError> {
-    let module_exprs = normalize_to_list(module_exprs);
-    let new_defsig = &normalize_expr(new_defsig);
-    let new_params = &normalize_expr(new_params);
+    let module_exprs = normalize_for_mutation(module_exprs);
+    let new_defsig = normalize_expr_for_mutation(new_defsig);
+    let new_params = normalize_expr_for_mutation(new_params);
     let resolved = resolve_function(&module_exprs, function_name)?;
     let target_name = bare_name(&resolved.qualified_name).to_string();
-    validate_new_defsig(new_defsig, &target_name)?;
-    validate_params_node(new_params)?;
+    validate_new_defsig(&new_defsig, &target_name)?;
+    validate_params_node(&new_params)?;
     let old_params = function_params(&module_exprs, function_name)?;
     let old_param_set: BTreeSet<String> = old_params.iter().cloned().collect();
     validate_argument_order(argument_order, &old_param_set)?;
@@ -571,9 +577,8 @@ pub fn function_params(
     module_exprs: &[Expr],
     function_name: &str,
 ) -> Result<Vec<String>, AuthoringError> {
-    let module_exprs = normalize_to_list(module_exprs);
-    let resolved = resolve_function(&module_exprs, function_name)?;
-    let module = single_module(&module_exprs)?;
+    let resolved = resolve_function(module_exprs, function_name)?;
+    let module = single_module(module_exprs)?;
     let def = module
         .elements
         .get(MODULE_DECLS_START + resolved.decl_index)
@@ -594,15 +599,15 @@ pub fn unshadowed_symbol_occurrences(
     Ok(references(module_exprs, symbol)?.references.len())
 }
 
-fn collect_metadata_symbol_references(
-    def: &List,
+fn collect_metadata_symbol_references_view(
+    def: NodeView<'_>,
     symbol: &str,
     top_level_names: &BTreeSet<String>,
     scope: &mut BTreeSet<String>,
     caller: &str,
     out: &mut Vec<Reference>,
 ) {
-    let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
+    let Some(meta) = def.meta else {
         return;
     };
     for (key, value) in &meta.entries {
@@ -618,15 +623,15 @@ fn collect_metadata_symbol_references(
     }
 }
 
-fn collect_metadata_call_edges(
-    def: &List,
+fn collect_metadata_call_edges_view(
+    def: NodeView<'_>,
     top_level_names: &BTreeSet<String>,
     scope: &mut BTreeSet<String>,
     caller: &str,
     module_name: &str,
     out: &mut Vec<Reference>,
 ) {
-    let Some(Expr::Map(meta, _)) = def.elements.get(1) else {
+    let Some(meta) = def.meta else {
         return;
     };
     for (key, value) in &meta.entries {
@@ -915,7 +920,7 @@ fn walk_children<F>(expr: &Expr, scope: &mut BTreeSet<String>, path: String, mut
 where
     F: FnMut(&Expr, &mut BTreeSet<String>, String),
 {
-    let list = match expr {
+    match expr {
         Expr::Map(meta, _) => {
             for (key, value) in &meta.entries {
                 f(value, scope, format!("{path}.{key}"));
@@ -929,47 +934,112 @@ where
             f(&meta.expr, scope, format!("{path}.expr"));
             return;
         }
-        Expr::List(list, _) => list,
         Expr::Atom(..) => return,
-        Expr::Node(node, span) => {
-            // Bridge: reconstruct List so scope-aware traversal works unchanged (#908)
-            let list = node.to_list(*span);
-            let bridged = Expr::List(list, *span);
-            walk_children(&bridged, scope, path, f);
+        Expr::BareList(children, _) => {
+            for (index, child) in children.iter().enumerate() {
+                f(child, scope, format!("{path}.{index}"));
+            }
             return;
         }
-        Expr::BareList(..) | Expr::UnknownForm(..) => return,
-    };
-    let tag = list_tag(list);
-    if let Some(meta) = list.elements.get(1) {
-        f(meta, scope, format!("{path}.meta"));
+        Expr::UnknownForm(data) => {
+            for (key, value) in &data.meta.entries {
+                f(value, scope, format!("{path}.meta.{key}"));
+            }
+            for (index, child) in data.children.iter().enumerate() {
+                f(child, scope, format!("{path}.{index}"));
+            }
+            return;
+        }
+        Expr::List(..) | Expr::Node(..) => {}
     }
-    if tag == Some(DeepTag::Fn) {
-        let added = list
-            .elements
-            .get(FN_PARAMS_INDEX)
+
+    let Some(node) = node_view(expr) else {
+        // chelis#1136 red-team M1: a `List` whose head is not in the
+        // closed tag vocabulary (an unknown form - the shape the
+        // chelis#1088 stamped ingress deliberately preserves) is still
+        // TRAVERSED, mirroring the pre-NodeView walker and the mutating
+        // twin. Skipping it silently drops references inside unknown
+        // forms and desynchronizes rename's cascade accounting.
+        if let Expr::List(list, _) = expr {
+            if let Some(meta) = list.elements.get(1) {
+                f(meta, scope, format!("{path}.meta"));
+            }
+            for (index, child) in list.elements.iter().enumerate().skip(2) {
+                f(child, scope, format!("{path}.{index}"));
+            }
+        }
+        return;
+    };
+    if let Some(meta) = node.meta {
+        for (key, value) in &meta.entries {
+            f(value, scope, format!("{path}.meta.{key}"));
+        }
+    }
+    if node.tag == DeepTag::Fn {
+        let added = node
+            .children
+            .first()
             .and_then(params_node_names)
             .unwrap_or_default();
         with_scope(scope, added, |scope| {
-            if let Some(body) = list.elements.get(3) {
+            if let Some(body) = node.children.get(1) {
                 f(body, scope, format!("{path}.1"));
             }
         });
         return;
     }
-    if tag == Some(DeepTag::Let) {
-        if let Some(bind) = list.elements.get(2) {
-            f(bind, scope, format!("{path}.0"));
-            let added = bind_names(bind);
-            with_scope(scope, added, |scope| {
-                if let Some(body) = list.elements.get(3) {
-                    f(body, scope, format!("{path}.1"));
+    if node.tag == DeepTag::Let {
+        if let Some(bind) = node.children.first() {
+            let mut inserted = Vec::new();
+            if let Some(bind) = tagged_node_view(bind, DeepTag::Bind) {
+                if let Some(meta) = bind.meta {
+                    for (key, value) in &meta.entries {
+                        f(value, scope, format!("{path}.0.meta.{key}"));
+                    }
                 }
-            });
+                for pair_start in (0..bind.children.len()).step_by(2) {
+                    if let Some(name_expr) = bind.children.get(pair_start) {
+                        f(name_expr, scope, format!("{path}.0.{pair_start}"));
+                    }
+                    let has_value = if let Some(value) = bind.children.get(pair_start + 1) {
+                        f(value, scope, format!("{path}.0.{}", pair_start + 1));
+                        true
+                    } else {
+                        false
+                    };
+                    if has_value
+                        && let Some(name) = bind.children.get(pair_start).and_then(symbol)
+                        && scope.insert(name.to_string())
+                    {
+                        inserted.push(name.to_string());
+                    }
+                }
+            } else {
+                f(bind, scope, format!("{path}.0"));
+            }
+            if let Some(body) = node.children.get(1) {
+                f(body, scope, format!("{path}.1"));
+            }
+            for name in inserted {
+                scope.remove(&name);
+            }
         }
         return;
     }
-    for (semantic_index, child) in list.elements.iter().skip(2).enumerate() {
+    if node.tag == DeepTag::Arm {
+        let Some(pattern) = node.children.first() else {
+            return;
+        };
+        f(pattern, scope, format!("{path}.0"));
+        let added = pattern_binders(pattern);
+        with_scope(scope, added, |scope| {
+            for (semantic_index, child) in node.children.iter().enumerate().skip(1) {
+                f(child, scope, format!("{path}.{semantic_index}"));
+            }
+        });
+        return;
+    }
+    for (semantic_index, child) in node.children.iter().enumerate() {
         f(child, scope, format!("{path}.{semantic_index}"));
     }
 }
@@ -1027,13 +1097,60 @@ where
         return;
     }
     if tag == Some(DeepTag::Let) {
-        let added = list.elements.get(2).map(bind_names).unwrap_or_default();
+        let mut inserted = Vec::new();
         if let Some(bind) = list.elements.get_mut(2) {
-            f(bind, scope);
+            if let Some(bind) = tagged_list_mut(bind, DeepTag::Bind) {
+                if let Some(meta) = bind.elements.get_mut(1) {
+                    f(meta, scope);
+                }
+                let mut pair_start = 2;
+                while pair_start < bind.elements.len() {
+                    let name = bind
+                        .elements
+                        .get(pair_start)
+                        .and_then(symbol)
+                        .map(str::to_string);
+                    if let Some(name_expr) = bind.elements.get_mut(pair_start) {
+                        f(name_expr, scope);
+                    }
+                    let has_value = if let Some(value) = bind.elements.get_mut(pair_start + 1) {
+                        f(value, scope);
+                        true
+                    } else {
+                        false
+                    };
+                    if has_value
+                        && let Some(name) = name
+                        && scope.insert(name.clone())
+                    {
+                        inserted.push(name);
+                    }
+                    pair_start += 2;
+                }
+            } else {
+                f(bind, scope);
+            }
+        }
+        if let Some(body) = list.elements.get_mut(3) {
+            f(body, scope);
+        }
+        for name in inserted {
+            scope.remove(&name);
+        }
+        return;
+    }
+    if tag == Some(DeepTag::Arm) {
+        let added = list
+            .elements
+            .get(2)
+            .map(pattern_binders)
+            .unwrap_or_default();
+        if let Some(pattern) = list.elements.get_mut(2) {
+            f(pattern, scope);
         }
         with_scope(scope, added, |scope| {
-            if let Some(body) = list.elements.get_mut(3) {
-                f(body, scope);
+            for child in list.elements.iter_mut().skip(3) {
+                f(child, scope);
             }
         });
         return;
@@ -1268,24 +1385,12 @@ fn top_level_function_names(module: &List) -> BTreeSet<String> {
         .collect()
 }
 
-fn defsig_map(module: &List) -> BTreeMap<String, Expr> {
-    module
-        .elements
-        .iter()
-        .skip(MODULE_DECLS_START)
-        .filter_map(|decl| {
-            let list = tagged_list(decl, DeepTag::Defsig)?;
-            Some((decl_name(list)?.to_string(), decl.clone()))
-        })
-        .collect()
-}
-
 fn export_names(expr: &Expr) -> Option<Vec<String>> {
-    let list = tagged_list(expr, DeepTag::Export)?;
+    let export = tagged_node_view(expr, DeepTag::Export)?;
     Some(
-        list.elements
+        export
+            .children
             .iter()
-            .skip(2)
             .filter_map(symbol)
             .map(str::to_string)
             .collect(),
@@ -1325,42 +1430,131 @@ fn property_quantifier_names_from_def_list(def: &List) -> Vec<String> {
 }
 
 fn tagged_fn_params(expr: &Expr) -> Option<Vec<String>> {
-    let fn_list = tagged_list(expr, DeepTag::Fn)?;
-    fn_list
-        .elements
-        .get(FN_PARAMS_INDEX)
-        .and_then(params_node_names)
+    let function = tagged_node_view(expr, DeepTag::Fn)?;
+    function.children.first().and_then(params_node_names)
 }
 
 fn params_node_names(expr: &Expr) -> Option<Vec<String>> {
-    let params = tagged_list(expr, DeepTag::Params)?;
+    let params = tagged_node_view(expr, DeepTag::Params)?;
     Some(
         params
-            .elements
+            .children
             .iter()
-            .skip(2)
             .filter_map(param_name)
             .map(str::to_string)
             .collect(),
     )
 }
 
-fn bind_names(expr: &Expr) -> Vec<String> {
-    let Some(bind) = tagged_list(expr, DeepTag::Bind) else {
-        return Vec::new();
+fn pattern_binders(expr: &Expr) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_pattern_binders(expr, &mut names);
+    names
+}
+
+fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
+    let Some(pattern) = node_view(expr) else {
+        return;
     };
-    bind.elements
-        .iter()
-        .skip(2)
-        .step_by(2)
-        .filter_map(symbol)
-        .map(str::to_string)
-        .collect()
+    match pattern.tag {
+        DeepTag::PatVar => {
+            if let Some(name) = pattern.children.first().and_then(symbol) {
+                out.push(name.to_string());
+            }
+        }
+        DeepTag::PatAs => {
+            if let Some(name) = pattern.children.first().and_then(symbol) {
+                out.push(name.to_string());
+            }
+            if let Some(inner) = pattern.children.get(1) {
+                collect_pattern_binders(inner, out);
+            }
+        }
+        DeepTag::PatTuple => {
+            for child in pattern.children {
+                collect_pattern_binders(child, out);
+            }
+        }
+        DeepTag::PatCtor => {
+            for child in pattern.children.iter().skip(1) {
+                collect_pattern_binders(child, out);
+            }
+        }
+        DeepTag::PatRecord => {
+            for field in pattern.children.iter().skip(1) {
+                if let Some(kv) = tagged_node_view(field, DeepTag::Kv)
+                    && let Some(field_pattern) = kv.children.get(1)
+                {
+                    collect_pattern_binders(field_pattern, out);
+                }
+            }
+        }
+        DeepTag::PatLit | DeepTag::PatWild => {}
+        // Explicit non-pattern dispositions make a future DeepTag addition a
+        // compile-time decision here instead of silently treating a new
+        // pattern form as binder-free.
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Defsig
+        | DeepTag::Def
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::If
+        | DeepTag::Match
+        | DeepTag::Arm
+        | DeepTag::Fn
+        | DeepTag::Let
+        | DeepTag::Bind
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::App
+        | DeepTag::Record
+        | DeepTag::Access
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::Borrow
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Effects
+        | DeepTag::Resource
+        | DeepTag::HandleEffect
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Kv => {}
+    }
 }
 
 fn param_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::List(list, _) => list.elements.first().and_then(symbol),
+        Expr::BareList(elements, _) => elements.first().and_then(symbol),
         _ => symbol(expr),
     }
 }
@@ -1377,9 +1571,9 @@ fn function_body_mut_expr(def: &mut Expr) -> Option<&mut Expr> {
 }
 
 fn app_name_and_args(expr: &Expr) -> Option<(&str, &[Expr])> {
-    let list = tagged_list(expr, DeepTag::App)?;
-    let callee = list.elements.get(2).and_then(var_name)?;
-    Some((callee, &list.elements[3..]))
+    let app = tagged_node_view(expr, DeepTag::App)?;
+    let callee = app.children.first().and_then(var_name)?;
+    Some((callee, app.children.get(1..).unwrap_or_default()))
 }
 
 fn app_list_mut(expr: &mut Expr) -> Option<&mut List> {
@@ -1387,8 +1581,10 @@ fn app_list_mut(expr: &mut Expr) -> Option<&mut List> {
 }
 
 fn var_name(expr: &Expr) -> Option<&str> {
-    let list = tagged_list(expr, DeepTag::Var)?;
-    list.elements.get(2).and_then(symbol)
+    tagged_node_view(expr, DeepTag::Var)?
+        .children
+        .first()
+        .and_then(symbol)
 }
 
 fn var_name_mut(expr: &mut Expr) -> Option<&mut String> {
@@ -1397,6 +1593,111 @@ fn var_name_mut(expr: &mut Expr) -> Option<&mut String> {
         Expr::Atom(Atom::Name(name), _) => Some(name),
         _ => None,
     }
+}
+
+fn node_view(expr: &Expr) -> Option<NodeView<'_>> {
+    match expr {
+        Expr::Node(node, _) => Some(NodeView {
+            tag: node.tag(),
+            meta: Some(node.meta()),
+            children: node.children_slice(),
+        }),
+        Expr::List(list, _) => {
+            let tag = list.tag()?;
+            let meta = match list.elements.get(1) {
+                Some(Expr::Map(meta, _)) => Some(meta),
+                _ => None,
+            };
+            Some(NodeView {
+                tag,
+                meta,
+                children: list.elements.get(2..).unwrap_or_default(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn tagged_node_view(expr: &Expr, expected: DeepTag) -> Option<NodeView<'_>> {
+    let node = node_view(expr)?;
+    (node.tag == expected).then_some(node)
+}
+
+fn single_module_expr(exprs: &[Expr]) -> Result<&Expr, AuthoringError> {
+    let modules: Vec<&Expr> = exprs
+        .iter()
+        .filter(|expr| tagged_node_view(expr, DeepTag::Module).is_some())
+        .collect();
+    match modules.as_slice() {
+        [] => Err(AuthoringError::NoModule),
+        [module] => Ok(module),
+        many => Err(AuthoringError::MultipleModules { count: many.len() }),
+    }
+}
+
+fn module_name_view(module: &Expr) -> Option<&str> {
+    tagged_node_view(module, DeepTag::Module)?
+        .children
+        .first()
+        .and_then(symbol)
+}
+
+fn module_decls_view(module: &Expr) -> &[Expr] {
+    tagged_node_view(module, DeepTag::Module)
+        .and_then(|module| module.children.get(1..))
+        .unwrap_or_default()
+}
+
+fn decl_name_view(decl: NodeView<'_>) -> Option<&str> {
+    decl.children.first().and_then(symbol)
+}
+
+fn def_is_function_view(def: NodeView<'_>) -> bool {
+    def.children
+        .get(1)
+        .is_some_and(|value| tagged_node_view(value, DeepTag::Fn).is_some())
+}
+
+fn function_body_view(def: NodeView<'_>) -> Option<&Expr> {
+    let function = tagged_node_view(def.children.get(1)?, DeepTag::Fn)?;
+    function.children.get(1)
+}
+
+fn fn_params_from_def_view(def: NodeView<'_>) -> Vec<String> {
+    def.children
+        .get(1)
+        .and_then(tagged_fn_params)
+        .unwrap_or_default()
+}
+
+fn property_quantifier_names_from_def_view(def: NodeView<'_>) -> Vec<String> {
+    def.meta
+        .and_then(|meta| {
+            meta.entries.iter().find_map(|(key, value)| {
+                (key == "property_quantifiers").then(|| params_node_names(value))?
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn top_level_function_names_view(module: &Expr) -> BTreeSet<String> {
+    module_decls_view(module)
+        .iter()
+        .filter_map(|decl| {
+            let def = tagged_node_view(decl, DeepTag::Def)?;
+            def_is_function_view(def).then(|| decl_name_view(def).map(str::to_string))?
+        })
+        .collect()
+}
+
+fn defsig_map_view(module: &Expr) -> BTreeMap<String, Expr> {
+    module_decls_view(module)
+        .iter()
+        .filter_map(|decl| {
+            let defsig = tagged_node_view(decl, DeepTag::Defsig)?;
+            Some((decl_name_view(defsig)?.to_string(), decl.clone()))
+        })
+        .collect()
 }
 
 fn single_module(exprs: &[Expr]) -> Result<&List, AuthoringError> {
