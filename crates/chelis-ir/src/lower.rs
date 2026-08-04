@@ -10660,16 +10660,44 @@ impl LowerCtx {
             };
         }
 
+        // The remaining dtypes carry DIFFERENT authorities and must stay
+        // distinguishable per [05-UNS-5] (the `emit_const` split
+        // precedent): bool and f8e4m3 are decided by spec, a string
+        // numeric-unary cell is unbuilt. Exhaustive so a new `Prim`
+        // forces a decision here.
+        let authority = match input_prec {
+            Prim::Bool => chelis_types::deliberate_rejection!(
+                "[04-NUM-4]",
+                "bool has no arithmetic width; numeric unary ops on bool tensors are \
+                 rejected"
+            ),
+            Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                "[04-DTYPE-1]",
+                "f8e4m3 is reserved but inactive and must not reach IR lowering \
+                 (spec/04-type-system.md section 1.1.1)"
+            ),
+            Prim::String => chelis_types::unimplemented_rejection!(
+                729,
+                "this numeric unary family accepts active float and signed-integer \
+                 dtypes only in the executable IR today; the string cell is owned by \
+                 the target capability table"
+            ),
+            Prim::F32
+            | Prim::F64
+            | Prim::F16
+            | Prim::Bf16
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64 => {
+                unreachable!("float and integer prims returned above in the exact numeric unary")
+            }
+        };
         let unsupported = Unsupported::new(
             UnsupportedKind::Op(format!("{op:?}")),
             format!("`{}` tensors in IR lowering", input_prec.name()),
             Stage::Lowering,
-            chelis_types::unimplemented_rejection!(
-                729,
-                "this numeric unary family accepts active float and signed-integer \
-                 dtypes only in the executable IR today; other dtypes are tracked by \
-                 chelis#729"
-            ),
+            authority,
         );
         if unrepresentable_panic_suppressed() {
             std::panic::panic_any(UnrepresentableDag);

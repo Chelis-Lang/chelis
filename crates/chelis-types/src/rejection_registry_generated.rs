@@ -29,6 +29,7 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
     "[05-DIM-1]",
     "[05-DIM-2]",
     "[05-HOST-1]",
+    "[05-HOST-2]",
     "[05-MOV-1]",
     "[05-OBS-1]",
     "[05-OBS-2]",
@@ -58,7 +59,6 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
 #[rustfmt::skip]
 pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     600,
-    613,
     689,
     691,
     714,
@@ -68,4 +68,5 @@ pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     951,
     1058,
     1059,
+    1138,
 ];

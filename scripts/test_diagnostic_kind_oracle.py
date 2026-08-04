@@ -47,7 +47,7 @@ class DiagnosticKindOracleTests(unittest.TestCase):
         mutated = oracle.mutate_diagnostic_vocabulary(source)
         self.assertNotEqual(mutated, source)
         self.assertEqual(mutated.count("Phase3OracleKind"), 3)
-        self.assertIn("pub const ALL: [Self; 48]", mutated)
+        self.assertIn("pub const ALL: [Self; 49]", mutated)
         self.assertIn(
             'Self::Phase3OracleKind => "phase3_oracle_kind"',
             mutated,

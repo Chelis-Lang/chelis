@@ -1124,6 +1124,21 @@ governing atom states, and a numeric behavior no atom governs does not
 ship. The prelude `Json` ADT's numeric capacity (`JInt int64` beside
 `JNum f64`) is decided by [05-OP-2].
 
+#### Compiled-target rejection atom
+
+The rejection rule this section's opening paragraph states, as the
+family's citable authority. [05-HOST-1] (§3.6) governs only the
+host-runtime tensor BUILDERS; this atom governs the eval-only data-I/O
+family, whose members have no tensor-lane composition equivalent.
+
+> **[05-HOST-2]** An eval-only data-I/O builtin (this section's JSON and
+> CSV families, `round_to`, and `process_run`; the
+> `chelis_ir::host::EVAL_ONLY_HOST_BUILTINS` roster) SHALL be rejected
+> when a compiled target is requested, whole-program, through the §7
+> `Unsupported` channel. It SHALL NOT be lowered to a stub or default
+> value. The diagnostic SHALL direct the caller to the host evaluator
+> (`chelis eval` / `chelis test`).
+
 #### Decimal rounding atom
 
 Transitional blockquote authority per `spec/design/spec_provenance.md`

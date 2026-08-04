@@ -8520,9 +8520,9 @@ fn reject_eval_only_builtins_host(
             "compiled targets (the host interpreter's eval/test lanes only)",
             chelis_types::unsupported::Stage::Codegen(target),
             chelis_types::deliberate_rejection!(
-                "[05-HOST-1]",
+                "[05-HOST-2]",
                 "run the program with `chelis eval` or `chelis test`, or remove the \
-                 call before building (spec/05-risc-primitives.md sections 3.6/3.7)"
+                 call before building (spec/05-risc-primitives.md section 3.7)"
             ),
         )
         .to_string()

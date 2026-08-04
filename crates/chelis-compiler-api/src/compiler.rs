@@ -1151,19 +1151,16 @@ fn strict_entry_decline_error(reason: EntryLaneDecline) -> CompilerError {
                  entry-scoped tensor kernel and does not yet lower transform entries \
                  standalone",
                 chelis_types::unsupported::Stage::Codegen("c"),
-                // PROVISIONAL AUTHORITY - needs maintainer adjudication.
-                // No open issue owns "the entry-scoped compiled lane lowers a
-                // transform entry standalone": the capability owner this code
-                // names for multi-root grad-tuple emission (chelis#309) is
-                // CLOSED, and chelis#817/#818 (the defects that produced this
-                // decline) are closed too. chelis#613 is the nearest OPEN
-                // compiled-lane grad-rejection issue, cited here so the
-                // rejection carries a real open authority per [05-UNS-5]
-                // rather than none. Per spec/design/loud_unsupported.md
-                // section C2.1, membership does NOT prove relevance - if this
-                // capability deserves its own issue, file it and re-point.
+                // chelis#1138 owns this capability: the entry-scoped
+                // compiled lane declines grad/vmap transform entries
+                // standalone (the chelis#817/#818 entry-scoping did not
+                // extend to transform entries). Filed and re-pointed from
+                // the provisional chelis#613 citation after the PR #1037
+                // delta red team adjudicated that #613 (the legacy
+                // whole-program build lane, different predicate) does not
+                // govern this decline.
                 chelis_types::unimplemented_rejection!(
-                    613,
+                    1138,
                     "run the transform through `eval`, or select a non-transform def \
                      with `entry_name=`"
                 ),
@@ -3205,9 +3202,9 @@ fn reject_eval_only_builtins(
                 "compiled targets (the host interpreter's eval/test lanes only)",
                 chelis_types::unsupported::Stage::Codegen(target_label),
                 chelis_types::deliberate_rejection!(
-                    "[05-HOST-1]",
+                    "[05-HOST-2]",
                     "run the program with `chelis eval` or `chelis test`, or remove the \
-                     call before building (spec/05-risc-primitives.md sections 3.6/3.7)"
+                     call before building (spec/05-risc-primitives.md section 3.7)"
                 ),
             ),
         ));
