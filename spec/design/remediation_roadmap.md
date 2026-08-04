@@ -173,9 +173,12 @@ recommended slot but is NOT gated on the capability table or the Buoy
 pilot - its own deliverable stands on "let the emitter's channel speak"
 whether or not the table has landed. This doc previously read as if it
 were gated; per this doc's own rule the plan won and the sentence was
-corrected 2026-07-30. As of 2026-08-01 the focused typed-authority and sealed
-diagnostic-kind slices are implemented; the gate inventory/contract and full
-Phase 3 oracle remain. [#730] Phase 4 (ratchet totality, added
+corrected 2026-07-30. As of 2026-08-04 the focused typed-authority and sealed
+diagnostic-kind slices are implemented, followed by the first gate-contract
+slice: one typed compiler-api policy now serves both public build paths, the
+stale C precision preflights are gone, and an exact no-duplicate-gates
+inventory is executable. The CLI-local Metal/effect diagnostic migration and
+the full Phase 3 oracle remain. [#730] Phase 4 (ratchet totality, added
 2026-07-30: product-source-manifest ratchets with non-Cargo language
 adapters, typed/live exclusion references, the non-product
 mutation-based panic contract, and the change-gated + nightly

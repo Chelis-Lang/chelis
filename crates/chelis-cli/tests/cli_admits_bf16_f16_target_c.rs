@@ -36,12 +36,11 @@ fn write_and_build_c_target(source: &str, name: &str) -> std::process::Output {
 
 #[test]
 fn cli_admits_bf16_program_targeting_c() {
-    // A trivial bf16 program: load + binary add + store. The CLI's
-    // C-backend precision gate (`c_backend_supports_precision` +
-    // `reject_unsupported_c_precisions`) previously rejected this
-    // pre-WS-1 with a "bf16/f16 are admitted only on --target hip"
-    // diagnostic; post-WS-1 the build must succeed and emit a
-    // kernel that contains the convert-on-load helper.
+    // A trivial bf16 program: load + binary add + store. The pre-WS-1 CLI
+    // precision preflight rejected this with a "bf16/f16 are admitted only
+    // on --target hip" diagnostic. The stale preflight is now gone; the
+    // build must succeed and emit a kernel containing the convert-on-load
+    // helper.
     let source =
         "def add_bf16(a: tensor[4, bf16], b: tensor[4, bf16]) -> tensor[4, bf16] = a + b\n";
     let out = write_and_build_c_target(source, "add_bf16");

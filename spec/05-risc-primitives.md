@@ -407,8 +407,8 @@ output axis to the *input* extent — silently mis-allocating the output
 tensor and emitting an out-of-bounds window read. To prevent that, the C
 build **rejects** such a program at compile time with an
 `unsupported_feature` error
-(`chelis_compiler_api::compiler::reject_symbolic_windowed_reduce` and the
-CLI's mirror, with a defensive backstop in the C emitter); it does not
+(`chelis_compiler_api::compiler::reject_symbolic_windowed_reduce`, consumed
+by both public build paths, with a defensive backstop in the C emitter); it does not
 emit a kernel. Window over a statically-sized axis, or pad the input to a
 concrete extent first. (The HIP target is unaffected by this specific
 check: it defers `reduce_window_*` codegen entirely — see **Backend
@@ -421,8 +421,8 @@ carries this restriction.
 Separately, the C `reduce_window_*` emitter is **f32-only** (no bf16/f16
 convert-load path yet). A bf16/f16 windowed reduction is rejected before
 codegen with an `unsupported_feature` error
-(`reject_unsupported_reduce_window_precision`, compiler-api + CLI mirror,
-with the C emitter `panic!` as a defensive backstop), so it surfaces as a
+(`reject_unsupported_reduce_window_precision`, consumed by both public build
+paths, with the C emitter `panic!` as a defensive backstop), so it surfaces as a
 clean diagnostic rather than an emitter crash. Cast to `f32` before the
 windowed reduction; bf16/f16 widening is follow-on work.
 

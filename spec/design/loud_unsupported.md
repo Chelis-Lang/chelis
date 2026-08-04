@@ -8,12 +8,15 @@ execution red team, PASS WITH FINDINGS, every finding dispositioned:
 baselines and the token tripwire remain supporting checks, not completion
 evidence. Phase 3 is in progress: its typed rejection-authority (§C2.1)
 and sealed diagnostic-kind (§C2.2) slices landed on main in PR [#1037]
-(merged 2026-08-04); the gate
-inventory/contract, deduplication, and full phase oracle remain. Those
-remaining deliverables (1, 2, and 5) are unstarted rather than partial -
-re-measured 2026-08-04, the `chelis-cli` gate surface is untouched by
-PR [#1037] and census row 26 is still live. Phase 3 was
-amended 2026-07-30 to absorb those typed slices. Phase 4
+(merged 2026-08-04). The first gate-contract slice then made the typed
+compiler-api definitions the single policy consumed by both public build
+paths, removed the stale C precision preflights, and froze the exact
+`reject_*` inventory in
+`crates/chelis-compiler-api/tests/phase3_gate_inventory.rs`. Census rows
+17-18 are converted; row 26 remains live for the CLI-local Metal/effect
+diagnostics and the full Phase 3 oracle. Deliverables 1, 2, and 5 are
+therefore partial, not complete. Phase 3 was amended 2026-07-30 to absorb
+the typed slices. Phase 4
 (ratchet totality, §C7) was added 2026-07-30 after the nine-PR
 class-coverage review recorded on [#730] found four holes in this plan's
 own detection mechanisms; §C7's opening paragraph states the finding.
@@ -655,7 +658,7 @@ between the amended Phase 3 (row 26) and Phase 4 scope entry plus
 |---|---|---|---|---|
 | 24 | the lowering/emission panic family: `emit_fused_elem`/`emit_fused_reduce` f32-hardcoded panics in `chelis-backend-c/src/emit.rs` plus ~150 production `panic!`/`unreachable!`/`todo!` across `chelis-ir` and the three backends, ~44 of them §C2 rejections wearing panics (row-two: panic, not substitution - the rows 11/12 class, uncensused growth) | - | [#919] (the fused pair) + [#957] (the family) | live (population measured 2026-07-30; the fused pair execution-confirmed per [#919]); backing tests land with the Phase 4 §C7.2 sweep |
 | 25 | `chelis-ir/src/host.rs` einsum output-precision inference: the `.unwrap_or(chelis_types::types::Prim::F32)` site (line 8843 as of 2026-08-04, re-measured; the token is the durable anchor - #975 already moved it once, and the site has drifted again since) - path-qualified, so the `unwrap_or(Prim::` token misses it; in-scope for the class and absent from BASELINE | F32 precision | [#958] | live-suspect (liveness not execution-confirmed - the empty-operand path may be checker-guarded); §C1.4 raise-or-prove applies regardless; converted at Phase 4 |
-| 26 | the unbranded/mislabeled rejection inventory, RE-ANCHORED 2026-08-04 to expression identities rather than line numbers (a deliberate B1 baseline change, and the last one this row should need: line anchors in a frozen artifact drift by construction, which is its own recurrence class, so the durable anchor is the expression - the shape rows 28-30 use. Filed line numbers are retained below as history, not as the anchor): the kindless CLI `reject_*` gate family in `chelis-cli/src/main.rs` (filed at `:8137-8420`, incl. the `process_run` eval-only gate PR [#891] widens 1 -> 21), the hand-typed `"unsupported: "` string literals in the same file (filed at `:7963/:7978/:8055`, re-measured `:8343/:8358/:8435`), ~23 free-literal `"unsupported_feature"` sites and the `format!("{:?}")` / substring-dispatch kind paths in compiler-api, and the two uncited `reduce_window` hints (gate row, the 17/18 precedent) | (gate/kind skew, not a value) | [#959] | live (read-confirmed 2026-07-30, instances executed in the PR sweep); STILL LIVE on main - re-measured 2026-08-04 after PR [#1037]. That PR landed §C2.1/§C2.2 in `chelis-types` and compiler-api; the CLI gate half this row names is untouched. `chelis-cli` has zero `unimplemented_rejection!` uses and still carries hand-typed `"unsupported: "` literals (`main.rs:8343/:8358/:8435`); `reject_unsupported_hip_ops` still exists in two copies that have drifted (`chelis-cli/src/main.rs:8031` collects no `ScatterElements` sparse index where `chelis-compiler-api/src/compiler.rs:3382` does); and `COMPILED_HOST_ONLY_BUILTINS` (`main.rs:8485`) still duplicates `HOST_ONLY_BUILTINS` (`compiler.rs:3136`). Resolution is Phase 3 REMAINING work (deliverables 1, 2, and 5), not delivered |
+| 26 | the rejection-inventory class, anchored to expression identities rather than line numbers: the CLI-local `reject_*` family and hand-typed `"unsupported: "` literals, plus compiler-api free-literal kinds, debug/substr kind dispatch, and uncited window-gate hints | (gate/kind skew, not a value) | [#959] | PARTIALLY CONVERTED (2026-08-04). PR [#1037] sealed the diagnostic-kind and authority channels. The first gate-contract slice then removed the duplicate HIP, host-builtin, eval-only, and windowed-reduction definitions from `chelis-cli`; both public build paths consume the typed compiler-api definitions, the stale C precision pair is deleted, and `phase3_gate_inventory.rs` rejects a second top-level definition. Remaining: the CLI-local Metal/effect gates and one hand-typed `"unsupported: "` literal must move through typed `Unsupported` constructors before the full Phase 3 oracle can pass |
 | 27 | `chelis-python` raw-i32 dtype surface: `dtype: i32` struct fields, no decode-on-entry anywhere, string-gated dtype checks, hardcoded DLPack `code: 2, bits: 32`, 4 production `unwrap_or_default()` - the crate is outside every `UnwrapOr*` tripwire scope and the Phase 2 oracle's evidence set | dtype identity by convention | [#960] (requirement half; representation fix shape is [#893]'s - the runtime-representation tracker, corrected 2026-07-30 from the earlier [#909] misassignment) | live ([#900] is the executed value-corrupting instance); scope entry + §C6.2 row at Phase 4; FFI/representation redesign at [#893] |
 
 `chelis-runtime` is deliberately not a row: it is the reference
@@ -705,8 +708,8 @@ waiting for §C7.4 to discover them.
 | 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead (reachable-surface clearance: `canary_vmap_int64_roots_keep_integer_precision`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead (reachable-surface clearance: `partition_agrees_across_lanes`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 16 | ~25 guarded `Const { 0.0 }` sites in `lower.rs` | zero values | backlog §pattern | dead (bare keywords are parse-guarded per `spec/03-deep-syntax.md` §8.1; canaries `canary_unknown_deep_tag_is_rejected`, `canary_bare_keyword_atom_fails_cleanly`, `canary_dynamic_fail_aborts_loudly`); §C1.4 applies |
-| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#705] | live (test `tensor_scan_does_not_silently_compile_to_a_stub`); [#682] no longer depends on this gate |
-| 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | live (tests `hip_int64_neg_emits_the_f32_fallback_kernel_today` for the [#698] half, `int64_max_reduce_does_not_panic_the_compiler` for the [#697] half) |
+| 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#705] | CONVERTED in the first Phase 3 gate slice: `HOST_ONLY_BUILTINS` now has one definition in compiler-api, and both the CLI and compiler-api build paths consume its typed checked-program and concrete-host-program gates. The fallible host emitter remains the independent defense. The shared `tensor_scan` rejection is pinned by `phase3_gate_inventory_has_one_definition_per_decision` plus the existing CLI/compiler-api `tensor_scan` suites; [#682] no longer depends on this gate |
+| 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | CONVERTED in the first Phase 3 gate slice. For [#697], both stale CLI C precision preflights were deleted: active-dtype admission no longer changes when an unrelated host declaration changes the lowering path, while the checker still rejects deferred `f8e4m3`. For [#698], the CLI consumes compiler-api's typed HIP gate, preserving supported f64/integer/narrow-matmul cells and the `ScatterElements` payload/index validation that the former CLI copy lacked. `phase3_gate_contract.rs` locks the positive and negative behavior, and `phase3_gate_inventory.rs` rejects a second top-level gate definition |
 | 19 | Metal `emit.rs:1419` `host_scalar_literal` pad-fill catch-all | `/* unsupported pad fill dtype */ 0` | [#745] (P0 token-sweep discovery, B2.5) | dead at P0 (canaries `metal_rejects_f64_with_a_specific_diagnostic`, `f8e4m3_is_rejected_in_both_lanes` - the gate/checker were the only defense); CONVERTED - §C1.4's raise-or-prove was applied in PR [#791] and re-typed in PR [#1037]: `host_scalar_literal` is now exhaustive over `Prim` with no catch-all, and f64/f8e4m3/string each return a section C2 `Unsupported` carrying its own authority, so the gate is no longer the only defense; [#745] closed 2026-08-04 |
 
 **Status backing convention** (Phase 0 verification, executed 2026-07-17):
@@ -1730,6 +1733,14 @@ longer carry correctness), the census rows 17-18 and 26, and two live
 demonstrations that the unpoliced shape is actively widening (PR
 [#891]'s 1 -> 21 eval-only gate names; PR [#822]'s `"compile_error"`
 mislabel).
+
+**Delivery status (2026-08-04): the first gate-contract slice is
+implemented, but Phase 3 is not complete.** The CLI now consumes
+compiler-api's typed host-builtin, eval-only, HIP, and windowed-reduction
+gate definitions; its obsolete C precision pair is deleted; and the exact
+top-level `reject_*` inventories are locked by a parsed-source tripwire.
+The remaining row-26 work is the CLI-local Metal/effect diagnostic migration
+and the full oracle below.
 
 **You deliver:**
 
