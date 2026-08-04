@@ -146,9 +146,9 @@ fn cancellation_is_reported_structurally_not_just_in_the_message() {
     assert!(
         err.errors
             .iter()
-            .any(|diagnostic| diagnostic.kind == EVAL_CANCELLED_KIND),
+            .any(|diagnostic| diagnostic.kind().as_str() == EVAL_CANCELLED_KIND),
         "expected a diagnostic with kind {EVAL_CANCELLED_KIND:?}, got {:?}",
-        err.errors.iter().map(|d| &d.kind).collect::<Vec<_>>()
+        err.errors.iter().map(|d| d.kind()).collect::<Vec<_>>()
     );
     assert!(
         is_cancellation(&format!("{err:?}")),
@@ -312,7 +312,7 @@ fn a_real_type_error_is_not_classified_as_cancellation() {
     assert!(
         err.errors
             .iter()
-            .all(|diagnostic| diagnostic.kind != EVAL_CANCELLED_KIND),
+            .all(|diagnostic| diagnostic.kind().as_str() != EVAL_CANCELLED_KIND),
         "no diagnostic should carry the cancellation kind: {err:?}"
     );
 }
@@ -379,6 +379,6 @@ fn cancelled_check_is_an_error_not_a_perfect_score() {
     assert!(
         err.is_cancellation(),
         "must classify structurally via {EVAL_CANCELLED_KIND:?}, got kinds: {:?}",
-        err.errors.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        err.errors.iter().map(|e| e.kind()).collect::<Vec<_>>()
     );
 }

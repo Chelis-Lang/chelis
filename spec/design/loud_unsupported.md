@@ -6,8 +6,10 @@ authoritative oracle green - `PHASE 2 ORACLE: PASS` - and a fresh-context
 execution red team, PASS WITH FINDINGS, every finding dispositioned:
 `docs/investigations/pr799_returned_function_values_redteam.md`). Count
 baselines and the token tripwire remain supporting checks, not completion
-evidence. Phase 3 is pending, amended 2026-07-30 to absorb the typed
-diagnostic-kind and rejection-authority work (§C2.1-C2.2). Phase 4
+evidence. Phase 3 is in progress: its typed rejection-authority (§C2.1)
+and sealed diagnostic-kind (§C2.2) slices are implemented; the gate
+inventory/contract, deduplication, and full phase oracle remain. Phase 3 was
+amended 2026-07-30 to absorb those typed slices. Phase 4
 (ratchet totality, §C7) was added 2026-07-30 after the nine-PR
 class-coverage review recorded on [#730] found four holes in this plan's
 own detection mechanisms; §C7's opening paragraph states the finding.
@@ -198,7 +200,10 @@ Normative, per encounter with an unsupported case, in every stage:
 
 ## C2. The diagnostic shape contract
 
-One error kind, one shape, every stage. Frozen at Phase 1 exit.
+One error kind, one shape, every stage. Phase 1 froze the brand, subject,
+context, and stage clauses; [05-UNS-5] later added the visible typed-authority
+clause because hiding the validated citation behind free-form hint prose did
+not satisfy the normative surface contract.
 
 ```rust
 pub struct Unsupported {
@@ -207,7 +212,7 @@ pub struct Unsupported {
     pub what: UnsupportedKind,
     /// The context of the encounter (the op family, target lane, or
     /// call position) - the `on <context>` clause of the rendering.
-    /// (Added at Phase 1 ratification: the frozen message format always
+    /// (Added at Phase 1 ratification: the branded message format always
     /// carried a context clause; the struct now carries it explicitly.)
     pub context: String,
     /// Which stage refused (checker | lowering | codegen(target) | runtime).
@@ -215,10 +220,10 @@ pub struct Unsupported {
     /// Source span when one exists (lowering/codegen must thread it;
     /// `raise_lowering_error` already takes span + span_id).
     pub span: Option<SpanRef>,
-    /// The supported alternative, when one exists. Not optional prose:
-    /// sites without an alternative say why (deferred per spec §X, file
-    /// an issue, etc.).
-    pub hint: &'static str,
+    /// Opaque typed authority plus the supported alternative. Construction
+    /// distinguishes a numbered-spec decision from tracked implementation
+    /// work and rejects empty or unregistered citations.
+    pub authority: RejectionAuthority,
 }
 ```
 
@@ -226,8 +231,8 @@ Implemented as `chelis_types::unsupported::Unsupported`. The span field is
 boxed so the `Err` variant stays small on Result-typed emission paths; this is
 a representation detail, not a contract change.
 
-**Message format (frozen):**
-`unsupported: <what> on <context> (<stage>); <hint>` - branded with the
+**Message format:**
+`unsupported: <what> on <context> (<stage>); <authority-kind> <citation>: <hint>` - branded with the
 literal prefix `unsupported:` so tests and shells can match it. The three
 existing exemplary messages are the calibration set and must remain
 conformant when migrated:
@@ -251,8 +256,9 @@ gains a rejected-cells section asserting these strings byte-for-byte per
 lane (a rejection emitted differently per lane is lane skew, [#712]'s
 shape).
 
-**STATUS (2026-07-24): the structured `chelis check` surface above is the
-TARGET, not current behavior.** Today no stage constructs `Stage::Checker`
+**STATUS (updated 2026-08-01): the structured `chelis check` surface above is
+still the TARGET, not current behavior.** The `Unsupported` object now carries
+the §C2.1 opaque typed authority, but no stage constructs `Stage::Checker`
 (`chelis check` never reaches lowering or codegen, so no `Unsupported` can
 arrive there), no type on the `Unsupported` path derives `Serialize`, and
 the build surface renders the branded string into a flat
@@ -277,27 +283,35 @@ permission is given an expiry that fires on its own: the `compile_fail`
 doctest oracles in `crates/chelis-types/src/unsupported.rs`, one per type
 on the `Unsupported` path, go red the day any of the four gains
 `Serialize`, which is exactly the moment this note stops being true. They
-run in CI through the `cargo test -p chelis-types --doc` gate stage
+run in CI through the
+`cargo test -p chelis-types -p chelis-compiler-api --doc` gate stage
 ([#875]). When both prerequisites land, this STATUS block and those
 oracles come out together and the bullet above stands as written ([#871]).
 
 **Authored versus unimplemented:** a deliberately unsupported case cites the
 spec atom that decides it (the [#733] linkage); a
 not-yet-implemented case cites its issue. The capability table makes
-the distinction structural - `Rejected(atom)` vs `Unimplemented
-{ issue }` - and this contract's `hint` carries the same citation at
-the diagnostic surface, so "unsupported by decision" and "unsupported
-because nobody built it yet" are never conflated again.
+the same distinction at the capability layer - `Rejected(atom)` vs
+`Unimplemented { issue }` - and `RejectionAuthority` already makes it
+structural on this diagnostic surface. Rendering prints `deliberate [atom]`
+or `unimplemented chelis#N` before the hint, so free-form hint prose cannot
+hide or contradict the validated identity.
 
 ### C2.1 Typed rejection authority (added 2026-07-30; lands at Phase 3)
 
 **Deciding atom: [05-UNS-5]** (spec/05 §7, authored in the same change
 as this section - the numbered spec decides the user-visible rule;
-this section implements it). The rule is convention today: `hint` is a
-bare `&'static str`, 31 of 33 production sites cite an atom or issue
-by discipline, and two do not (the `reduce_window` "f32-only today"
-hints, [#959]) - the accidental-unsupported shape [05-UNS-5] forbids,
-with nothing enforcing it.
+this section implements it). **Delivery status (2026-08-02): the typed
+authority slice is implemented.** `Unsupported` no longer accepts a bare
+hint; every current production constructor supplies an opaque validated
+authority. The windowed-reduction dtype gap cites its implementation owner
+[#729], and runtime-symbolic window extents cite the dynamic-shape owner
+[#600]. Runtime-valued window/stride lists cite their compiled-lowering owner
+[#1058], compiled tensor/list `to_string` cites [#1059], and host-runtime-only
+builders cite the deliberate [05-HOST-1] contract; remediation instances
+[#705], [#725], [#734], and [#959] are not capability owners.
+The remaining Phase 3 work is the gate inventory/contract, deduplication, and
+the full phase oracle; these focused slices do not claim Phase 3 completion.
 
 The amended Phase 3 replaces the bare `hint` field on `Unsupported`
 with an OPAQUE `RejectionAuthority` type. Two things are NOT the
@@ -308,9 +322,17 @@ nowhere, or of chelis#1 (a merged, unrelated PR), is arbitrary prose
 wearing a token. The mechanism is validated construction against
 REGISTRIES of what actually exists:
 
-- Fields are private. The only constructors are
-  `RejectionAuthority::deliberate(atom: SpecAtomRef, hint)` and
-  `RejectionAuthority::unimplemented(issue: IssueRef, hint)`.
+- Fields and scalar constructors are private. Exported macros cross one
+  public implementation edge each, taking the raw literal and performing
+  validation inside `chelis-types`; downstream crates cannot construct a
+  `SpecAtomRef`/`IssueRef` and then compose it with a second generic authority
+  constructor. `scripts/check_rejection_authority_boundary.py` locks the
+  complete public-function inventory of the owning module (free functions as
+  well as methods), rejects extra module/re-export/include edges, rejects
+  direct production calls to the hidden builders, and mutation-tests those
+  bypasses. Construction itself refuses [05-UNS-1..6], so a macro alias or a
+  direct validating-builder call cannot turn the response contract into a
+  semantic authority.
 - `SpecAtomRef` validates in two gates: the `[NN-AAA-N]` grammar,
   then MEMBERSHIP in the derived atom registry - a generated artifact
   parsed from the numbered specs' blockquote atoms and locked by a
@@ -324,18 +346,21 @@ REGISTRIES of what actually exists:
   cites a bogus number can add the manifest row that blesses it (the
   2026-07-30 addendum's countermodel: after a same-PR edit, a closed
   issue, a PR number, and a 404 all "validate"). So manifest
-  ADDITIONS receive blocking LIVE validation: the manifest file is in
-  the §C7.5 change-gated job's path filter, and that job verifies
+  ADDITIONS receive blocking LIVE validation: every construction,
+  registry, validator, imported liveness-helper, detector, and workflow input
+  is in the `Rejection Authority Liveness` change set, and that job verifies
   every added or modified row against the live tracker (exists, is an
-  issue, is open) before the PR can merge. The scheduled job
-  re-verifies the STANDING manifest for drift, so a cited issue
-  closing later makes the stale citation red - the shell contract's
-  "probe flips green, remove the citation" rule, pointed inward.
-  Membership answers the compile-time question; the two jobs answer
-  the truth question, at the two times it can change.
-- Hints are validated non-empty; direct struct-literal construction
-  from outside the owning module is a privacy error, locked by
-  `compile_fail` doctests (the `host_abi.rs` pattern).
+  issue, is open) before the PR can merge. Phase 4's §C7.5 scheduled job
+  will re-verify the STANDING manifest for drift, so a cited issue closing
+  later makes the stale citation red - the shell contract's "probe flips
+  green, remove the citation" rule, pointed inward. Until that Phase 4 job
+  lands, standing-state drift remains a named pending control rather than an
+  implied continuous guarantee. Membership answers the compile-time question;
+  the change-gated job answers the truth question when authority inputs change.
+- Hints are validated non-empty; direct struct-literal construction and the
+  former scalar constructor composition from outside the owning module are
+  privacy errors, locked by `compile_fail` doctests. The required CI job also
+  runs the boundary checker before the network-backed manifest validation.
 - **These registries are the named pre-table authority source.**
   Phase 3 does not wait for [#729]'s capability table; when Table A/B
   lands, its `Rejected(atom)` / `Unimplemented { issue }` cells
@@ -352,9 +377,9 @@ decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
 `IssueRef` therefore MUST NOT be described as proving "the tracking
 issue"; it proves only "a real open issue at last verification" until
-review establishes the relationship. The frozen four-clause message
-format does not change: the authority renders into the existing
-`; <hint>` clause. Negative controls land with the change, one per
+review establishes the relationship. The authority-bearing rendering is
+`;<space>deliberate [atom]: <hint>` or
+`;<space>unimplemented chelis#N: <hint>`. Negative controls land with the change, one per
 admission route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
@@ -364,21 +389,22 @@ or a nonexistent number fails the change-gated live validation. An
 open but unrelated issue (chelis#879) is the supported structural
 control: it passes construction/live validation and MUST fail review
 when attached to an unrelated rejection. The [#687] corpus update
-rides the same PR per B1. Which
-cells are `Deliberate` versus `Unimplemented` remains [#729]
-Table A/B's decision - the plan never authors a capability decision
-(§I1).
+rides the same PR per B1. Before Table A/B exists, each production site is
+adjudicated against an already-controlling numbered-spec rule or the actual
+open issue that implements that capability. Table A/B later derives those
+decisions through the same type; this design document never authors a
+capability decision (§I1).
 
 ### C2.2 The closed kind vocabulary (added 2026-07-30; lands at Phase 3)
 
-The machine-facing diagnostic `kind` is today a bare `String` chosen
-three unpoliced ways: hand-typed literals (~23 sites spell
+Before this slice, the machine-facing diagnostic `kind` was a bare `String`
+chosen three unpoliced ways: hand-typed literals (~23 sites spelled
 `"unsupported_feature"` themselves; `unsupported_stage_error`, the only
 typed `Unsupported -> Diagnostic` path, has 4 call sites), a
 `format!("{:?}", error.kind)` of a foreign enum (an enum rename
 silently rewrites the wire), and message-substring dispatch. A
-capability rejection can be mislabeled `"compile_error"` and every test
-stays green. Inventory and instances: [#959].
+capability rejection could be mislabeled `"compile_error"` and every test
+stayed green. Inventory and instances: [#959].
 
 **Deciding atom: [05-UNS-6]** (spec/05 §7, authored in the same change
 as this section; the stable kind spellings are a user-visible machine
@@ -386,6 +412,21 @@ contract and live in the numbered spec, not here). The amended Phase 3
 implements it with the plan's own §C4.1 move plus a sealed producer -
 a public closed enum alone is NOT the seal, because a public variant
 remains directly constructible:
+
+**Delivery status (2026-08-02): implemented as a focused Phase 3 slice.**
+`DiagnosticKind`, the sealed producer/wire split, the typed general-kind
+projection, the compile-fail controls, the consumer-to-producer conversion
+mutation, the two same-crate planted privacy mutations, and the added-kind
+exhaustiveness mutation now execute through
+`scripts/diagnostic_kind_oracle.py`. The required
+`Diagnostic Kind Mutation Oracle` job runs that actual mutation runner when
+any owner, oracle, detector, or workflow input changes; its path detector is
+self-triggering and fails safe on an unreadable change set. That runner is the
+C2.2 component oracle, not a claim that Phase 3's gate work is complete.
+The old Reef message classifier had no typed cause to justify its
+`package_not_found` / `lockfile_error` guesses, so those substring-invented
+spellings collapse to the honest `reef_error` kind rather than entering the
+closed vocabulary as false precision.
 
 - **Identity**: `DiagnosticKind` joins `chelis-vocab` (stable wire
   spellings via `as_str()`, `Result`-only `decode`, no serde
@@ -422,12 +463,14 @@ remains directly constructible:
   builds the forged value without touching the chokepoint (executed in
   the 2026-07-30 addendum). The producer type therefore derives
   `Serialize` ONLY. Wire READING moves to a separate consumer-side
-  type (`WireDiagnostic`, the `deep_path` module's side of the
-  schema) that derives `Deserialize` for tests, tooling, and shells -
-  and the envelope-assembly APIs (`ApiSuccess`/`ApiFailure`
-  construction) accept only the producer type, so a deserialized
-  value cannot re-enter the production pipeline: there is no
-  `WireDiagnostic -> Diagnostic` conversion. **Threat-model
+  graph (`WireDiagnostic`, `WireApiSuccess`/`WireApiFailure`,
+  `WireApiEnvelope`, `WireCheckResult`, `WireBatchResult`, and
+  `WireBatchResultEnvelope`) that derives `Deserialize` for tests, tooling,
+  and shells. The complete Tide response and batch shapes therefore remain
+  decodable without placing `Deserialize` on a producer carrier. The
+  envelope-assembly APIs accept only producer types, so a deserialized value
+  cannot re-enter the production pipeline: there is no consumer-to-producer
+  conversion. **Threat-model
   calibration, stated:** no type system stops a process from printing
   arbitrary bytes to stdout; what this seals is the PRODUCTION
   pipeline - every diagnostic that reaches the wire through the
@@ -450,7 +493,11 @@ compiler-api module must fail the workspace check, byte-restored
 after (the Phase 2 oracle's planted style, which is how a same-crate
 privacy violation can be continuously proven at all - a
 `compile_fail` doctest compiles as a foreign crate and cannot see
-in-crate privacy); the `format!("{:?}")` and message-substring
+in-crate privacy). A planted `From<WireDiagnostic> for Diagnostic` conversion
+must make the same doctest component oracle go red, proving that the negative
+control tests the conversion route rather than only a direct vector type
+mismatch. The change-path CI job executes these mutations themselves,
+not merely the Python runner's unit tests; the `format!("{:?}")` and message-substring
 dispatch sites are gone.
 The wire field itself remains a `String` - the enum governs producers,
 the string is the rendering - and nothing here adds `Serialize` or
@@ -1543,7 +1590,7 @@ un-ignored" overshot). (2) The [#722] eval rows stay `#[ignore]`d as
 value tests; the loud-not-zero contract they were listed for is locked
 by the new green `grad_through_int_abs_fails_loudly_not_zero`.
 (3) Deliverable 3's message migration landed in full for the runtime
-`to_tensor` exemplar (re-rendered to the frozen 4-clause shape); the
+`to_tensor` exemplar (re-rendered to the branded section C2 shape); the
 HIP admit-gate and Metal f64-gate exemplars carry the `unsupported:`
 brand with their original message bodies - their full-shape
 conformance rides Phase 3's gate work, per B2.1's
@@ -1676,13 +1723,15 @@ mislabel).
    `chelis-vocab`, the `stage_error` signature change, the
    `unsupported_feature`-only-via-`unsupported_stage_error` rule, the
    producer/wire type split (`Serialize`-only producer with the
-   private `kind`; `Deserialize`-only `WireDiagnostic` that no
-   envelope-assembly API accepts), the wire-spelling lock test, and
+   private `kind`; a complete `Deserialize`-only consumer envelope/check/batch
+   graph that no envelope-assembly API accepts), the wire-spelling lock test,
+   the required change-path mutation job, and
    removal of the `format!("{:?}")` and message-substring kind paths.
 4. **The typed rejection authority** (§C2.1): the 33-site `hint ->
    RejectionAuthority` migration, with the [#687] rejected-cells corpus
-   updated in the same PR per B1 (31 sites are mechanical; the two
-   uncited `reduce_window` hints gain their [#959] citation first) -
+   updated in the same PR per B1 (each site is adjudicated against the
+   deciding spec atom or actual implementation owner; the two uncited
+   `reduce_window` hints cite [#729] and [#600], not [#959]) -
    plus the two validation registries the constructors consume: the
    derived atom registry (generated from the numbered specs,
    byte-agreement-tested) and the checked-in issue manifest (whose
@@ -2057,5 +2106,7 @@ and never depends on predicting a path.
 [#957]: https://github.com/Chelis-Lang/chelis/issues/957
 [#958]: https://github.com/Chelis-Lang/chelis/issues/958
 [#959]: https://github.com/Chelis-Lang/chelis/issues/959
+[#1058]: https://github.com/Chelis-Lang/chelis/issues/1058
+[#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912

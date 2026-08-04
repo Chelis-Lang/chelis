@@ -44,7 +44,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::compiler::{CompilerError, bail_if_cancelled, cancelled_or, check_error_diagnostic};
-use crate::schema::Diagnostic;
+use crate::schema::{Diagnostic, GeneralKind};
 
 /// 32-byte content hash of every source file that contributed to a
 /// `CompiledContext`. Phase I disk cache keys on this for invalidation.
@@ -695,9 +695,9 @@ pub fn load_or_compile_with_local_registry_fallback(
 /// diagnostic kind, must propagate as a genuine failure rather than trigger
 /// the uncached-recompile fallback (#822 review round 3, finding 4).
 fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
-    err.errors
-        .iter()
-        .any(|d| d.kind == "hash_error" && d.message.contains("LocalRegistry"))
+    err.errors.iter().any(|d| {
+        d.kind() == chelis_vocab::DiagnosticKind::HashError && d.message.contains("LocalRegistry")
+    })
 }
 
 /// Magic header bytes for the Phase I disk-cache file format.
@@ -1182,48 +1182,23 @@ fn library_structural_summary(exprs: &[chelis_deep::ast::Expr]) -> (usize, usize
 }
 
 fn reef_error(msg: &str) -> CompilerError {
-    let kind = if msg.contains("reef.toml") {
-        "package_not_found"
-    } else if msg.contains("lockfile") {
-        "lockfile_error"
-    } else {
-        "reef_error"
-    };
     CompilerError {
         stage: "compile_reef_context".to_string(),
-        errors: vec![Diagnostic {
-            kind: kind.to_string(),
-            message: msg.to_string(),
-            severity: 0.8,
-            expected: None,
-            got: None,
-            suggestions: vec![],
-            span: None,
-            deep_path: None,
-        }],
+        errors: vec![Diagnostic::general(GeneralKind::ReefError, msg, 0.8)],
     }
 }
 
 fn hash_error(msg: &str) -> CompilerError {
     CompilerError {
         stage: "compile_reef_context".to_string(),
-        errors: vec![Diagnostic {
-            kind: "hash_error".to_string(),
-            message: msg.to_string(),
-            severity: 0.8,
-            expected: None,
-            got: None,
-            suggestions: vec![],
-            span: None,
-            deep_path: None,
-        }],
+        errors: vec![Diagnostic::general(GeneralKind::HashError, msg, 0.8)],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::stage_error;
+    use crate::schema::stage_error;
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1337,7 +1312,7 @@ mod tests {
         let gap = stage_error(
             "context",
             "cannot source-hash dependency `chelis-std` resolved from the LocalRegistry",
-            "hash_error",
+            GeneralKind::HashError,
         );
         assert!(is_local_registry_hash_gap(&gap));
     }
@@ -1348,15 +1323,31 @@ mod tests {
         let other_hash = stage_error(
             "context",
             "content hash mismatch for src/lib.ch",
-            "hash_error",
+            GeneralKind::HashError,
         );
         assert!(!is_local_registry_hash_gap(&other_hash));
         // A non-hash diagnostic naming LocalRegistry is a genuine failure.
         let other_kind = stage_error(
             "context",
             "LocalRegistry package `chelis-std` failed to compile",
-            "compile_error",
+            GeneralKind::CompileError,
         );
         assert!(!is_local_registry_hash_gap(&other_kind));
+    }
+
+    #[test]
+    fn reef_diagnostic_kind_does_not_depend_on_message_substrings() {
+        for message in [
+            "missing reef.toml",
+            "malformed lockfile",
+            "ordinary graph preparation failure",
+        ] {
+            let error = reef_error(message);
+            assert_eq!(error.errors.len(), 1);
+            assert_eq!(
+                error.errors[0].kind(),
+                chelis_vocab::DiagnosticKind::ReefError
+            );
+        }
     }
 }

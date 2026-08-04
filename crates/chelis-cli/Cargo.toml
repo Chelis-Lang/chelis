@@ -35,6 +35,7 @@ chelis-cove.workspace = true
 chelis-lsp.workspace = true
 chelis-tide.workspace = true
 chelis-validate.workspace = true
+chelis-vocab.workspace = true
 chelis-prove = { path = "../chelis-prove", optional = true }
 chelis-lint.workspace = true
 libc.workspace = true

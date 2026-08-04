@@ -8,6 +8,7 @@
 
 use chelis_compiler_api::compiler::{CompilerError, compile, compile_for_execution};
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+use chelis_vocab::DiagnosticKind;
 
 fn c_request(source: &str) -> CompileRequest {
     CompileRequest {
@@ -27,7 +28,7 @@ fn assert_unresolved_host_type<T: std::fmt::Debug>(result: Result<T, CompilerErr
         "unexpected error envelope: {error:?}"
     );
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "lower_error");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::LowerError);
     assert!(
         diagnostic
             .message
@@ -51,14 +52,21 @@ fn assert_unrepresentable_function_value(result: Result<impl std::fmt::Debug, Co
     assert_eq!(error.stage, "lower", "{error:?}");
     assert_eq!(error.errors.len(), 1, "{error:?}");
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "lower_error");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::LowerError);
     assert!(
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("anonymous function value `fn`")
             && diagnostic.message.contains("host expression lowering")
-            && diagnostic.message.contains("[05-UNS-1]")
-            && diagnostic.message.contains("chelis#730"),
-        "the rejection must come from the fallible host-expression boundary: {diagnostic:?}"
+            // [05-UNS-5]: the citation is the TYPED authority, not the
+            // prose `([05-UNS-1]; chelis#730)` this replaced. Construction
+            // refuses [05-UNS-1..6] outright - the response contract does
+            // not decide a semantic case - so the owning capability
+            // (chelis#879, the general C-host function-value ABI) is what
+            // the rejection cites. The trailing colon pins the exact
+            // `{kind} {citation}: {hint}` rendering the contract fixes.
+            && diagnostic.message.contains("unimplemented chelis#879:"),
+        "the rejection must come from the fallible host-expression boundary and cite its \
+         typed authority: {diagnostic:?}"
     );
 }
 
@@ -67,16 +75,21 @@ fn assert_named_function_value_has_no_c_abi(result: Result<impl std::fmt::Debug,
     assert_eq!(error.stage, "compile", "{error:?}");
     assert_eq!(error.errors.len(), 1, "{error:?}");
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "unsupported_feature", "{diagnostic:?}");
+    assert_eq!(
+        diagnostic.kind(),
+        DiagnosticKind::UnsupportedFeature,
+        "{diagnostic:?}"
+    );
     assert!(
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("function value")
             && diagnostic.message.contains("C host ABI")
             && diagnostic.message.contains("(codegen:c)")
-            && diagnostic.message.contains("[05-UNS-1]")
-            && diagnostic.message.contains("chelis#730"),
-        "the target boundary must reject the value without an alternate representation: \
-         {diagnostic:?}"
+            // [05-UNS-5] typed authority, replacing the prose
+            // `([05-UNS-1]; chelis#730)` citation - see the sibling helper.
+            && diagnostic.message.contains("unimplemented chelis#879:"),
+        "the target boundary must reject the value without an alternate representation, \
+         citing its typed authority: {diagnostic:?}"
     );
     assert!(
         !diagnostic.message.contains("grad") && !diagnostic.message.contains("vmap"),
@@ -132,7 +145,7 @@ fn generic_adt_bf16_specialization_reaches_structured_abi_rejection() {
         "unexpected error envelope: {error:?}"
     );
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "unsupported_feature");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
     for expected in [
         "unsupported:",
         "dtype `bf16`",
@@ -163,7 +176,7 @@ fn bf16_callback_reaches_structured_abi_rejection_without_placeholder() {
         "unexpected error envelope: {error:?}"
     );
     let diagnostic = &error.errors[0];
-    assert_eq!(diagnostic.kind, "unsupported_feature");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
     assert!(
         diagnostic.message.contains("unsupported:")
             && diagnostic.message.contains("dtype `bf16`")
@@ -318,7 +331,7 @@ fn nested_generic_adt_access_preserves_bf16_until_abi_rejection() {
         .expect_err("nested generic bf16 must reach target selection");
     assert_eq!(error.stage, "compile", "{error:?}");
     let diagnostic = error.errors.first().expect("one diagnostic");
-    assert_eq!(diagnostic.kind, "unsupported_feature");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::UnsupportedFeature);
     assert!(
         diagnostic.message.contains("dtype `bf16`")
             && diagnostic.message.contains("C host ABI selection")

@@ -3837,32 +3837,52 @@ fn host_expr_lowering_error(
     expr: &Expr,
     detail: impl Into<String>,
 ) -> crate::lower::LowerDiagnostic {
-    let construct = match expr {
-        Expr::List(list, _) if tag(list) == Some(DeepTag::Fn) => {
-            "anonymous function value `fn`".to_string()
-        }
-        Expr::List(list, _) => format!(
-            "Deep expression `{}`",
-            tag(list).map(DeepTag::as_str).unwrap_or("<malformed>")
+    let (construct, authority) = match expr {
+        Expr::List(list, _) if tag(list) == Some(DeepTag::Fn) => (
+            "anonymous function value `fn`".to_string(),
+            chelis_types::unimplemented_rejection!(
+                879,
+                "general C-host function values are not implemented; use a contextual \
+                     callback position or run under `chelis eval`"
+            ),
         ),
-        Expr::Atom(_, _) => "raw Deep atom expression".to_string(),
-        Expr::Map(_, _) => "raw Deep metadata map expression".to_string(),
-        Expr::MetaExpr(_, _) => "wrapped Deep expression".to_string(),
+        Expr::List(list, _) => (
+            format!(
+                "Deep expression `{}`",
+                tag(list).map(DeepTag::as_str).unwrap_or("<malformed>")
+            ),
+            chelis_types::deliberate_rejection!(
+                "[04-TOT-3]",
+                "a malformed or unhandled Deep form cannot lower to a substitute host value"
+            ),
+        ),
+        Expr::Atom(_, _) => malformed_host_authority("raw Deep atom expression"),
+        Expr::Map(_, _) => malformed_host_authority("raw Deep metadata map expression"),
+        Expr::MetaExpr(_, _) => malformed_host_authority("wrapped Deep expression"),
         Expr::Node(node, _) => {
             if node.tag() == DeepTag::Fn {
-                "anonymous function value `fn`".to_string()
+                (
+                    "anonymous function value `fn`".to_string(),
+                    chelis_types::unimplemented_rejection!(
+                        879,
+                        "general C-host function values are not implemented; use a contextual \
+                         callback position or run under `chelis eval`"
+                    ),
+                )
             } else {
-                format!("Deep expression `{}`", node.tag().as_str())
+                malformed_host_authority(&format!("Deep expression `{}`", node.tag().as_str()))
             }
         }
-        Expr::BareList(_, _) => "bare list expression".to_string(),
-        Expr::UnknownForm(data) => format!("unknown form `{}`", data.head),
+        Expr::BareList(_, _) => malformed_host_authority("bare list expression"),
+        Expr::UnknownForm(data) => {
+            malformed_host_authority(&format!("unknown form `{}`", data.head))
+        }
     };
     let unsupported = chelis_types::unsupported::Unsupported::new(
         chelis_types::unsupported::UnsupportedKind::Construct(construct),
         format!("host expression lowering: {}", detail.into()),
         chelis_types::unsupported::Stage::Lowering,
-        "the checked expression must lower to an explicit HostExpr variant; unhandled or malformed forms cannot become Unit or another value ([05-UNS-1]; chelis#730)",
+        authority,
     );
     crate::lower::LowerDiagnostic::new(
         unsupported.to_string(),
@@ -3870,6 +3890,18 @@ fn host_expr_lowering_error(
         expr.span_id().map(str::to_string),
     )
     .fatal()
+}
+
+fn malformed_host_authority(
+    construct: &str,
+) -> (String, chelis_types::unsupported::RejectionAuthority) {
+    (
+        construct.to_string(),
+        chelis_types::deliberate_rejection!(
+            "[04-TOT-3]",
+            "a malformed or unhandled Deep form cannot lower to a substitute host value"
+        ),
+    )
 }
 
 /// Bucket 4e helper: rewrite a pipe stage `f` applied to an accumulator
@@ -4226,10 +4258,13 @@ fn lower_host_expr_kind(
                     chelis_types::unsupported::UnsupportedKind::Dtype(bogus.to_string()),
                     "a `cast` target in host lowering",
                     chelis_types::unsupported::Stage::Lowering,
-                    "the cast target must name an active primitive type \
-                     (spec/04-type-system.md section 1.1); a bogus target previously \
-                     lowered as the operand type silently in the build lane \
-                     (chelis#744, chelis#730 census row 13)",
+                    chelis_types::deliberate_rejection!(
+                        "[04-DTYPE-1]",
+                        "the cast target must name an active primitive type \
+                         (spec/04-type-system.md section 1.1); a bogus target previously \
+                         lowered as the operand type silently in the build lane \
+                         (chelis#744, chelis#730 census row 13)"
+                    ),
                 );
                 crate::lower::raise_fatal_lowering_diagnostic(crate::lower::LowerDiagnostic {
                     message: unsupported.to_string(),
@@ -4303,9 +4338,12 @@ fn lower_host_expr_kind(
                     chelis_types::unsupported::UnsupportedKind::EffectKind(error.to_string()),
                     "a `handle-effect` form in host lowering",
                     chelis_types::unsupported::Stage::Lowering,
-                    "known effect kinds are `random` and `resource` \
-                     (spec/03-deep-syntax.md); an unknown kind previously dropped its \
-                     handler silently (chelis#730 census rows 9/20)",
+                    chelis_types::deliberate_rejection!(
+                        "[04-EFF-1]",
+                        "known effect kinds are `random` and `resource` \
+                         (spec/03-deep-syntax.md); an unknown kind previously dropped its \
+                         handler silently (chelis#730 census rows 9/20)"
+                    ),
                 );
                 crate::lower::LowerDiagnostic {
                     message: unsupported.to_string(),

@@ -193,15 +193,22 @@ primitive — the reductions here, `softmax`, `mean`, `gather`,
 `scatter`, and the movement and ordering ops — and is the convention
 the formula examples below already use (`axis=-1` for the last axis).
 
-The reduction axis must be a compile-time constant (a literal, or a
-`cast(N, int32)`-wrapped literal). Because the output shape is "remove
-the dimension at position `axis`", the type checker cannot determine
-which dimension is dropped from a runtime axis value. A reduction whose
-axis is a runtime expression (for example a function-parameter `int32`)
-is rejected at the reduction call site with a diagnostic naming the
-compile-time-constant requirement, rather than leaving the output shape
-unresolved (chelis#259). The same constraint and diagnostic apply to
-`expand`'s insert axis.
+> **[05-AXIS-1]** A reduction axis and `expand`'s insert axis SHALL be
+> statically resolvable either as an integer constant (a literal or a literal
+> wrapped in an integer cast) or as a named dimension of the operand. A
+> runtime integer expression and an unknown dimension name are type errors at
+> the call site; no lowering or backend SHALL substitute axis zero or another
+> axis.
+
+The reduction axis must resolve statically: a literal, a
+`cast(N, int32)`-wrapped literal, or a named operand dimension as specified by
+`spec/04-type-system.md` §4.5.3. Because the output shape is "remove the
+dimension at position `axis`", the type checker cannot determine which
+dimension is dropped from a runtime integer value. A reduction whose axis is
+a runtime expression (for example a function-parameter `int32`) is rejected
+at the reduction call site with a diagnostic naming the constant-or-named-axis
+requirement, rather than leaving the output shape unresolved (chelis#259).
+The same constraint and diagnostic apply to `expand`'s insert axis.
 
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
 
@@ -283,6 +290,11 @@ explicit mode; this matches `Valid` as the implicit default.
 
 **Shape contract.**
 
+> **[05-RWIN-1]** `reduce_window_*` SHALL receive equal-length, non-empty
+> `window_shape` and `strides` lists; their length SHALL NOT exceed the input
+> rank; and every entry SHALL be a positive int32. A violation is a type
+> error, never an empty-list default, truncated rank, or backend assertion.
+
 - `window_shape` and `strides` are int32 lists of equal length
   `n >= 1`.
 - The trailing `n` axes of the input are the windowed axes. The
@@ -300,8 +312,8 @@ explicit mode; this matches `Valid` as the implicit default.
 `{reducer, window_shape, strides}` triple. The IR evaluator, the host
 runtime, and the C backend each implement it as a direct windowed loop
 nest — `Mean` is implemented as windowed `Sum` divided by the window
-volume, computed inline rather than as a separate `Div` op. (HIP
-codegen is deferred; see **Backend status** below.) There is no Tier-2
+volume, computed inline rather than as a separate `Div` op. (The HIP
+target rejects it under [05-RWIN-2].) There is no Tier-2
 to Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
 own right. The Surf `reduce_window_*` names are the public surface;
 the IR node and backends share the single `ReduceWindow` lowering
@@ -359,8 +371,8 @@ input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
 Like the forward op, `ReduceWindowGrad` is implemented directly by the IR
 evaluator, the host runtime, and the C backend (the C adjoint is emitted
 serially, since overlapping windows scatter-add into shared `din`
-positions); HIP codegen is deferred and rejected before codegen (see
-**Backend status**). Second-order AD through the adjoint itself is not
+positions); the HIP target rejects it before codegen under [05-RWIN-2].
+Second-order AD through the adjoint itself is not
 defined. The adjoints are validated against central
 finite differences for all four reducers over overlapping and strided
 windows (`chelis-ir::eval` unit tests), and the C backend is checked for
@@ -376,17 +388,10 @@ formula `floor((input_dim - window) / stride) + 1` matches
 `jax.lax.reduce_window` / PyTorch pool kernels and is the normative
 contract above.
 
-**Backend status (initial admission).** The C backend is the
-canonical lowering and is exercised by a gcc compile-and-run
-evaluator-parity gate. The HIP backend codegen for `ReduceWindow` (and
-its `ReduceWindowGrad` adjoint) is **deferred**: `chelis build --target
-hip` on a program containing `reduce_window_*` is **rejected** at compile
-time with a clean `unsupported_feature` error
-(`reject_unsupported_hip_ops`, compiler-api + CLI mirror) rather than
-emitting a GPU kernel. The HIP launch-emit arm retains a deferred-feature
-`todo!` as a defensive backstop (matching the `Pad` / `Shrink` HIP stubs),
-reached only if some path bypasses the guard. Use the default C target
-until GPU windowed reductions land.
+> **[05-RWIN-2]** The C target SHALL implement `ReduceWindow` and
+> `ReduceWindowGrad`. The HIP target SHALL reject either node before codegen
+> with an `unsupported_feature` diagnostic that directs the caller to the C
+> target; it SHALL NOT emit a stub kernel or enter a panic backstop.
 
 **Statically-known windowed extents required on the build path.** The
 build/backend path needs each *windowed* axis extent to be known at
@@ -619,9 +624,14 @@ not pull their producers (e.g. a window-count `floor_div`) into the
 differentiability check. A runtime (node-valued) stride STEP has no
 structural adjoint yet and fails loud.
 
-Runtime movement bounds and reshape targets are canonical on the eval and C
-lanes; `--target hip` and `--target metal` reject them with a clean
-diagnostic naming `--target c` (chelis#616).
+> **[05-MOV-1]** Runtime movement bounds and reshape targets SHALL be
+> available on the eval and C lanes. The HIP and Metal targets SHALL reject
+> them with a clean diagnostic naming the C target; they SHALL NOT erase the
+> runtime value, substitute a literal bound, or emit a device kernel with a
+> statically guessed extent.
+
+This is the target disposition of the runtime-bound representation delivered
+under chelis#616.
 
 ### 2.5 Memory
 
@@ -675,6 +685,12 @@ runtime input tensor rather than baked at codegen time. Under `--target hip` a
 metadata op); a `Shape` node reaching the HIP device-kernel path is rejected
 loudly (`reject_unsupported_hip_ops`) and the Metal lane rejects it via its
 emit-time `unsupported`-op arm. eval and C are the mandatory lanes.
+
+> **[05-SHAPE-1]** A scalar `Shape` value SHALL be implemented by evaluation
+> and the C target. A `Shape` node that reaches the HIP device-kernel path
+> SHALL be rejected before codegen with an `unsupported_feature` diagnostic
+> that directs the caller to the C target; it SHALL NOT be replaced by a
+> constant, a default extent, or a stub kernel.
 
 A `shape()` read whose `axis` is not a compile-time literal (a data- or
 metadata-derived runtime axis) is not DAG-representable, because `RiscOp::Shape`
@@ -819,6 +835,12 @@ index operand.
 
 #### Replace-scatter vs scatter-add
 
+> **[05-SPARSE-1]** `Gather`, `ScatterAdd`, `Scatter`, and
+> `ScatterElements` SHALL take int32 or int64 indices. For the three scatter
+> forms, target, updates, and output SHALL have identical precision. A
+> different index dtype or a precision mismatch is a type error, never an
+> implicit cast.
+
 `Scatter` and `ScatterAdd` are intentionally distinct primitives. Both
 take inputs `(target, indices, updates)` with the same shape contract
 (updates shape equals `target.dims[..axis] ++ indices.dims ++
@@ -826,6 +848,12 @@ target.dims[axis+1..]`) and the same precision constraints
 (int32/int64 indices; target/updates/output precision identical).
 They differ only in how duplicate target indices are resolved and in
 their AD policies:
+
+> **[05-SPARSE-2]** `RiscOp::OneHot` is an internal specialization marker,
+> not a backend operation. Specialization SHALL consume it or lower it to
+> ordinary primitive IR before backend emission. A backend boundary that
+> encounters it SHALL reject the broken compiler invariant; it SHALL NOT
+> emit a placeholder result.
 
 | Op | Duplicate-index semantics | AD adjoint |
 |---|---|---|
@@ -935,6 +963,11 @@ The following helper is **host-runtime only**. It runs inside the
 going through a Surf `List` intermediate. It is not in the RISC DAG
 and has no AD adjoint; differentiable code must build its accumulator
 state through the tensor-lane primitives in §2.
+
+> **[05-HOST-1]** A host-runtime builder SHALL be rejected when a compiled
+> target is requested. It SHALL NOT be lowered to a target stub, default
+> value, or null pointer. The diagnostic SHALL direct the caller to the host
+> evaluator or to an equivalent composition of tensor-lane primitives.
 
 | Name | Signature | Semantics |
 |---|---|---|
@@ -1090,6 +1123,21 @@ callable in these families has exactly the numeric behavior its
 governing atom states, and a numeric behavior no atom governs does not
 ship. The prelude `Json` ADT's numeric capacity (`JInt int64` beside
 `JNum f64`) is decided by [05-OP-2].
+
+#### Compiled-target rejection atom
+
+The rejection rule this section's opening paragraph states, as the
+family's citable authority. [05-HOST-1] (§3.6) governs only the
+host-runtime tensor BUILDERS; this atom governs the eval-only data-I/O
+family, whose members have no tensor-lane composition equivalent.
+
+> **[05-HOST-2]** An eval-only data-I/O builtin (this section's JSON and
+> CSV families, `round_to`, and `process_run`; the
+> `chelis_ir::host::EVAL_ONLY_HOST_BUILTINS` roster) SHALL be rejected
+> when a compiled target is requested, whole-program, through the §7
+> `Unsupported` channel. It SHALL NOT be lowered to a stub or default
+> value. The diagnostic SHALL direct the caller to the host evaluator
+> (`chelis eval` / `chelis test`).
 
 #### Decimal rounding atom
 
@@ -1425,48 +1473,12 @@ conforming cross-lane oracle.
 
 ---
 
-## 7. The Unsupported-Case Response Contract (Decided 2026-07; Implementation Tracked As chelis#730)
+## 7. The Unsupported-Case Response Contract
 
-**Status banner - read before citing.** RATIFIED and enforced for the
-censused live sites by chelis#730 Phase 1. Phase 2 is complete and ACCEPTED
-(PR #799, merged 2026-07-24): dependency-bottom `EffectKind`/`RuntimeDType`
-identities, Result-only boundary decoders, exhaustive consumers, immediate
-invalid-ID rejection, generated Rust/C dtype agreement, the staged
-host-type/ABI boundary, and the structured C-expression AST, with the
-authoritative oracle green (`PHASE 2 ORACLE: PASS`) and the fresh
-adversarial review run and dispositioned
-(`docs/investigations/pr799_returned_function_values_redteam.md`). Count
-baselines and the token tripwire are supporting checks, not the authority.
-Atoms [05-UNS-5..6] below were DECIDED 2026-07-30 and are not yet
-enforced; each carries its own status note.
-
-The implementation was explicitly re-planned on 2026-07-22 after execution
-showed that the initial source lint was neither complete nor false-positive
-free. That lint moved to PR #815; it is not part of this atom's proof. The
-final enforcement is the typed construction boundary described below.
-
-The HostType contract consumes checked type metadata, preserves named
-polymorphism, inference identity, bottom, and exact dtype, and permits only a
-resolved `ConcreteHostType` plus an authoritative target capability decision
-to produce `HostAbiType`. Codegen accepts only the ABI vocabulary. This
-contract owns failure representation; grounded dtype semantics and Table A/B
-policy remain owned by chelis#729. The current C decision selects exact
-`int8_t`/`int16_t` ABI variants because those representations already exist,
-while f16/bf16 scalar values reject at selection until chelis#729 supplies
-exact storage and rounding; an accidentally-green widened value is not a
-supported ABI cell.
-Typed C callback parameters and direct statically-known callback arguments
-cross a private callback-declarator path; general function values do not.
-Function results, stored function values, and dynamically selected callables
-return `Unsupported` before emission, and no function type maps to `void *`,
-zero, or a raw call target.
-Residuals are per-atom noted below; [05-UNS-4]'s gate demotion is that
-plan's Phase 3. The delivery plan and full elaboration (the failure
-channel, the census, the typed ratchets) is
-`spec/design/loud_unsupported.md`. Atom IDs are stable, and the current
-blockquote authorities remain normative until selected for chelis#733 Phase 1
-migration. Full revisions are attached and checked through the pinned Buoy
-shell-side integration, not a Chelis provenance lint.
+This section governs how an unsupported case is reported. It does not decide
+which operations, dtypes, targets, or parameter shapes are supported; those
+decisions belong to their owning numbered-spec atoms. The implementation and
+delivery design is `spec/design/loud_unsupported.md`.
 
 > **[05-UNS-1]** When any stage encounters a case it does not support -
 > an op, builtin, dtype, kernel, construct, or parameter shape - it
@@ -1480,14 +1492,6 @@ all semantic matches are exhaustive and wildcard-free. An unknown runtime
 dtype ID must fail before sizing or buffer access. A source-text scanner or
 count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 
-*(Enforced since chelis#730 Phase 1 for the censused sites: the
-formerly substituting encounters of chelis#682/#689/#699/#714/#715/
-#725/#734 now fail loudly. Residual: chelis#716's narrow-float tensor
-boundary cells abort loudly at run time - the print helper's dtype-id
-abort is interim per chelis#728 - and the eval-lane value cells of
-chelis#717 are observation/semantics work owned by chelis#728/#729/
-#732, not substitution.)*
-
 > **[05-UNS-2]** The diagnostic SHALL surface at the earliest competent
 > stage - the checker for type-answerable questions, the build for
 > target- or lowering-decided ones, the runtime only for genuinely
@@ -1495,47 +1499,21 @@ chelis#717 are observation/semantics work owned by chelis#728/#729/
 > prefix, name what was encountered and at which stage, and carry a
 > span where one exists and the supported alternative where one exists.
 
-*(Calibration examples that already conform in substance: the HIP
-narrow-float rejection, the Metal f64 rejection, the runtime `to_tensor`
-dtype abort.)*
-
 > **[05-UNS-3]** A panic or assertion failure reachable from `.ch` or
 > `.dp` source input is a defect; internal panics are reserved for
 > compiler invariants whose upstream guarantee is named at the panic
 > site.
-
-*(Enforced since chelis#730 Phase 1: the chelis#692 reduce-family
-panics and chelis#725's emitter assertions are section C2 diagnostics
-through the Result channel.)*
 
 > **[05-UNS-4]** A pre-codegen gate MAY make an unsupported diagnostic
 > earlier or more specific; it SHALL NOT be the sole defense against an
 > unsupported case reaching emission, and a gate/emitter disagreement is
 > a defect in the gate.
 
-*(Partially honored: since chelis#730 Phase 1 the emitter channel
-speaks even where a gate is missing or permissive, so no gate is the
-sole defense against a SILENT wrong binary any more; the gate
-dedup/demotion itself - chelis#697/#698/#705's gate halves - is that
-plan's Phase 3.)*
-
 > **[05-UNS-5]** An unsupported diagnostic SHALL carry the authority
 > for its rejection: a deliberately unsupported case cites the spec
 > atom that decides it, and a not-yet-implemented case cites its
 > tracking issue. The two SHALL be distinguishable at the diagnostic
 > surface, and a rejection carrying neither citation is a defect.
-
-*(Decided 2026-07-30; NOT yet enforced. Today the citation is a prose
-convention on the diagnostic's hint field - 31 of 33 production sites
-conform and two do not (chelis#959). chelis#730's amended Phase 3
-makes the distinction structural through a validated authority type
-(design doc §C2.1); the capability table (chelis#729 Phase 4) later
-populates the deliberate-versus-unimplemented decision per cell. The
-validator proves citation identity and last-verified issue kind/open
-state, not that a cited issue actually tracks the rejected
-site/capability: that relevance judgment remains a required review
-step, with an open-but-unrelated issue as the negative review control.
-The design doc implements; this atom decides.)*
 
 > **[05-UNS-6]** The machine-facing kind of a diagnostic is drawn from
 > a closed vocabulary with stable spellings; the build surface's
@@ -1544,16 +1522,6 @@ The design doc implements; this atom decides.)*
 > rejection from an internal compiler error by kind alone. Producing
 > this kind for anything other than a typed unsupported rejection, or
 > a different kind for one, is a defect.
-
-*(Decided 2026-07-30; NOT yet enforced. Today kinds are free strings
-chosen independently at each producing site, plus a Debug-format leak
-and message-substring dispatch (chelis#959; PR #822 shipped a
-mislabel). chelis#730's amended Phase 3 delivers the closed
-`DiagnosticKind` vocabulary, the sealed producer chokepoint, and the
-wire-spelling lock test (design doc §C2.2). The structured `check`
-payload remains separately gated per that doc's §C2 STATUS relaxation
-(chelis#871); this atom governs the kind spelling, not the payload
-schema.)*
 
 ---
 

@@ -121,16 +121,17 @@ fn branded_line(text: &str) -> Option<&str> {
     text.lines().find(|l| l.contains("unsupported: "))
 }
 
-/// The frozen section C2 rendering, checked structurally: the literal
-/// brand, an ` on ` context clause, a parenthesized stage, `; ` hint.
+/// The section C2 rendering, checked structurally: the literal brand, an
+/// ` on ` context clause, a parenthesized stage, and typed authority.
 fn assert_frozen_shape(line: &str, ctx: &str) {
     let tail = line
         .split_once("unsupported: ")
         .map(|(_, t)| t)
         .unwrap_or_default();
     assert!(
-        tail.contains(" on ") && line.contains("); "),
-        "{ctx}: not the frozen `unsupported: <what> on <context> (<stage>); <hint>` \
+        tail.contains(" on ")
+            && (line.contains("); deliberate [") || line.contains("); unimplemented chelis#")),
+        "{ctx}: not the authority-bearing `unsupported: <what> on <context> (<stage>); <authority>: <hint>` \
          shape: {line}"
     );
 }

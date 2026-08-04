@@ -809,7 +809,12 @@ impl CEmitter {
                 UnsupportedKind::Op("Abs".to_string()),
                 format!("a fused integer tensor at C DAG node {}", node.0),
                 Stage::Codegen("c"),
-                "direct integer abs is implemented with an exact trapping kernel; general fused integer emission remains Phase 3 work, so this externally supplied fused shape cannot enter the float-only template",
+                chelis_types::unimplemented_rejection!(
+                    691,
+                    "direct integer abs is implemented with an exact trapping kernel; \
+                     general fused integer emission remains Phase 3 work, so this \
+                     externally supplied fused shape cannot enter the float-only template"
+                ),
             ));
         }
         Ok(())
@@ -1694,7 +1699,33 @@ impl CEmitter {
             other => {
                 // chelis#729 rework: a constant the target cannot
                 // represent surfaces through the chelis#730 structured
-                // channel instead of panicking the compiler.
+                // channel instead of panicking the compiler. The two
+                // dtypes that reach here carry DIFFERENT authorities and
+                // must stay distinguishable per [05-UNS-5]: f8e4m3 is
+                // decided by spec, a string constant cell is unbuilt.
+                let authority = match other {
+                    Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                        "[04-DTYPE-1]",
+                        "no C constant representation exists for this dtype: f8e4m3 is \
+                         reserved but inactive and must not reach backend emission \
+                         (spec/04-type-system.md section 1.1.1)"
+                    ),
+                    Prim::String => chelis_types::unimplemented_rejection!(
+                        729,
+                        "no C constant representation exists for this dtype: the \
+                         exhaustive target capability table has no C string storage cell \
+                         (spec/04-type-system.md section 1.1)"
+                    ),
+                    Prim::F32
+                    | Prim::F64
+                    | Prim::F16
+                    | Prim::Bf16
+                    | Prim::Int8
+                    | Prim::Int16
+                    | Prim::Int32
+                    | Prim::Int64
+                    | Prim::Bool => unreachable!("emitted constant precision"),
+                };
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(other.name().to_string()),
                     format!(
@@ -1702,8 +1733,7 @@ impl CEmitter {
                         other.name()
                     ),
                     Stage::Codegen("c"),
-                    "no C constant representation exists for this dtype \
-                     (spec/04-type-system.md section 1.1)",
+                    authority,
                 ));
             }
         }
@@ -3142,6 +3172,31 @@ impl CEmitter {
             // The channel chelis#730 Phase 1 (census row 11) established: a
             // section C3 diagnostic, not a compiler panic. This site is
             // census row 24, not row 11.
+            let authority = match ty.precision {
+                Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
+                    chelis_types::unimplemented_rejection!(
+                        691,
+                        "integer fused elementwise chains need exact integer step operators rather than libm calls"
+                    )
+                }
+                Prim::F16 | Prim::Bf16 => chelis_types::unimplemented_rejection!(
+                    729,
+                    "reduced-float fused chains need the target capability table's convert-compute-finalize kernel"
+                ),
+                Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                    "[04-DTYPE-1]",
+                    "f8e4m3 is reserved but inactive and must not reach backend emission"
+                ),
+                Prim::Bool => chelis_types::deliberate_rejection!(
+                    "[04-NUM-4]",
+                    "bool has no arithmetic width and arithmetic fused chains are rejected"
+                ),
+                Prim::String => chelis_types::unimplemented_rejection!(
+                    729,
+                    "the exhaustive target capability table has no C fused-chain string cell"
+                ),
+                Prim::F32 | Prim::F64 => unreachable!("supported fused precision"),
+            };
             return Err(Unsupported::new(
                 UnsupportedKind::Op("fused elementwise chain".to_string()),
                 format!(
@@ -3149,10 +3204,7 @@ impl CEmitter {
                     ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the fused elementwise kernel emits float or double step variables \
-                 and libm math symbols; it supports f32 and f64 only. Cast to f32 \
-                 or f64 before the fused chain. Widening to the reduced-float and \
-                 integer dtypes is follow-on work (chelis#691)",
+                authority,
             ));
         }
         // Element type and math-symbol precision come from the same
@@ -4505,8 +4557,11 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-                 before the reduction. Non-f32 widening is follow-on work (chelis#692)",
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
+                     before the reduction. The target capability table owns non-f32 widening"
+                ),
             ));
         }
         self.emit_slot_wrapper(id, ty);
@@ -4677,8 +4732,11 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
-                 before the reduction. Non-f32 widening is follow-on work (chelis#692)",
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "the C reduce kernels are f32-hardcoded today (WS-A1/F1); cast to f32 \
+                     before the reduction. The target capability table owns non-f32 widening"
+                ),
             ));
         }
         self.emit_slot_wrapper(id, ty);
@@ -4779,9 +4837,12 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C windowed-reduction emitter is f32-only today; cast to f32 \
-                 before the windowed reduction (spec/05-risc-primitives.md \
-                 section 2.3.1)",
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "the C windowed-reduction emitter is f32-only today; cast to f32 \
+                     before the windowed reduction (spec/05-risc-primitives.md \
+                     section 2.3.1)"
+                ),
             ));
         }
         // chelis#730 Phase 1 (census row 12, chelis#725's assertion half):
@@ -4798,8 +4859,11 @@ impl CEmitter {
                 )),
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
-                "internal desync: lowering guarantees equal-length literal window and \
-                 stride lists (chelis#725; chelis#730 census rows 8/12)",
+                chelis_types::deliberate_rejection!(
+                    "[05-RWIN-1]",
+                    "internal desync: lowering guarantees equal-length literal window and \
+                     stride lists (chelis#725; chelis#730 census rows 8/12)"
+                ),
             ));
         }
         let n = window_shape.len();
@@ -4812,8 +4876,11 @@ impl CEmitter {
                 )),
                 format!("the C DAG emitter (node {id})"),
                 Stage::Codegen("c"),
-                "internal desync: the checker guarantees window arity <= input rank \
-                 (chelis#730 census row 12)",
+                chelis_types::deliberate_rejection!(
+                    "[05-RWIN-1]",
+                    "internal desync: the checker guarantees window arity <= input rank \
+                     (chelis#730 census row 12)"
+                ),
             ));
         }
         let leading = in_rank - n;
@@ -4837,9 +4904,12 @@ impl CEmitter {
                     )),
                     format!("the C DAG emitter (node {id})"),
                     Stage::Codegen("c"),
-                    "the windowed output extent floor((d - window) / stride) + 1 is \
-                     not statically representable; bind the axis to a concrete size \
-                     (spec/05-risc-primitives.md section 2.3.1)",
+                    chelis_types::unimplemented_rejection!(
+                        600,
+                        "the windowed output extent floor((d - window) / stride) + 1 is \
+                         not statically representable; bind the axis to a concrete size \
+                         (spec/05-risc-primitives.md section 2.3.1)"
+                    ),
                 ));
             }
         }
@@ -5096,8 +5166,11 @@ impl CEmitter {
                     input_node.output_type.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the C argmax/argmin kernels read f32 inputs only today (WS-A1/F1); \
-                 cast to f32 before the reduction (chelis#692)",
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "the C argmax/argmin kernels read f32 inputs only today (WS-A1/F1); \
+                     cast to f32 before the reduction; the target capability table owns widening"
+                ),
             ));
         }
         let init = if is_argmax { "-INFINITY" } else { "INFINITY" };
@@ -5231,11 +5304,14 @@ impl CEmitter {
                     out_ty.precision.name()
                 ),
                 Stage::Codegen("c"),
-                "the fused reduction kernel is f32-hardcoded (WS-A1/F1): \
-                 `chelis_fill_f32` zero, a `float` accumulator cascade, and `fmaxf`. \
-                 Cast to f32 before the reduction, or keep the elementwise chain out \
-                 of the reduction so the unfused f64 reduce path runs. Widening is \
-                 follow-on work (chelis#951)",
+                chelis_types::unimplemented_rejection!(
+                    951,
+                    "the fused reduction kernel is f32-hardcoded (WS-A1/F1): \
+                     `chelis_fill_f32` zero, a `float` accumulator cascade, and `fmaxf`. \
+                     Cast to f32 before the reduction, or keep the elementwise chain out \
+                     of the reduction so the unfused f64 reduce path runs. Widening is \
+                     follow-on work (chelis#951)"
+                ),
             ));
         }
         let axis_size = Self::emit_dim_info(&fused_input_type.dims[axis]);

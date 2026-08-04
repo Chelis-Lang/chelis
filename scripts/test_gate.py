@@ -224,6 +224,13 @@ NON_GATE_JOBS = {
     # runs scripts/ci_detect_docs_only.py, no cargo/chelis command, so it
     # is out of gate.py scope by design.
     "changes",
+    # Rule-id: GATE-SCOPE-REJECTION-AUTHORITY -- the network-backed
+    # [05-UNS-5] manifest liveness check is CI-owned and deliberately absent
+    # from the offline developer gate.
+    "rejection-authority-liveness",
+    # Rule-id: GATE-SCOPE-DIAGNOSTIC-KIND -- C2.2's controlled source
+    # mutations are CI-owned and run only when an owner/control path changes.
+    "diagnostic-kind-oracle",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
     # design, like backend-sanitizers; the full prove corpus lives in
@@ -239,6 +246,48 @@ NON_GATE_JOBS = {
     "smt-build-glibc231",
     "smt-build-darwin-arm64",
 }
+
+
+class RejectionAuthorityLivenessJobTests(unittest.TestCase):
+    def test_job_is_change_gated_and_has_issue_read_access(self):
+        block = _ci_job_block("rejection-authority-liveness")
+        self.assertIn("needs: [changes]", block)
+        self.assertIn("needs.changes.outputs.rejection_authority_changed", block)
+        self.assertIn("issues: read", block)
+        self.assertIn("contents: read", block)
+        self.assertIn("scripts/check_rejection_authority_boundary.py", block)
+        self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
+
+
+class DiagnosticKindOracleJobTests(unittest.TestCase):
+    def test_job_is_change_gated_and_executes_the_mutation_oracle(self):
+        block = _ci_job_block("diagnostic-kind-oracle")
+        self.assertIn("needs: [changes]", block)
+        self.assertIn("needs.changes.outputs.diagnostic_kind_changed", block)
+        self.assertIn("contents: read", block)
+        run_lines = [line.strip() for line in block.splitlines() if line.strip().startswith("run:")]
+        self.assertIn(
+            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            run_lines,
+        )
+        self.assertIn("taiki-e/install-action@nextest", block)
+
+    def test_a_quoted_passing_noop_is_not_the_oracle_step(self):
+        block = _ci_job_block("diagnostic-kind-oracle")
+        mutated = block.replace(
+            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            'run: "true # scripts/diagnostic_kind_oracle.py"',
+            1,
+        )
+        run_lines = [
+            line.strip()
+            for line in mutated.splitlines()
+            if line.strip().startswith("run:")
+        ]
+        self.assertNotIn(
+            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            run_lines,
+        )
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
 # `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
@@ -360,10 +409,11 @@ class ListOutputTests(unittest.TestCase):
 
     def test_doctest_stage_is_in_the_local_subset(self):
         # The doctest stage costs well under a second and catches a broken
-        # oracle before push rather than in CI, so it belongs in `--local`
-        # too (chelis#875).
+        # oracles before push rather than in CI, so they belong in `--local`
+        # too (chelis#875 and chelis#959).
         rendered = [gate.render(c) for c in gate.LOCAL_STATIC_COMMANDS]
         self.assertIn("cargo test -p chelis-types --doc", rendered)
+        self.assertIn("cargo test -p chelis-compiler-api --doc", rendered)
 
     def test_pipeline_compile_fail_contracts_are_in_the_lint_and_unit_stage(self):
         rendered = [
@@ -940,6 +990,12 @@ class DocsOnlySkipTests(unittest.TestCase):
         "backend-sanitizers",
         "smt-build",
     }
+    # Jobs that use the same always-present `changes` job but key on a
+    # narrower contract input rather than on the docs-only classification.
+    CHANGE_GATED_JOBS = {
+        "rejection-authority-liveness",
+        "diagnostic-kind-oracle",
+    }
     # Jobs that must ALWAYS run (never gated on docs_only).
     # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
     # (ship-smt) without a docs_only `if`, so today they run unconditionally
@@ -1031,7 +1087,11 @@ class DocsOnlySkipTests(unittest.TestCase):
         # forces a deliberate classification (mirrors the workflow-file
         # scope test).
         attrs = _parse_job_attrs()
-        classified = self.HEAVY_GATED_JOBS | self.ALWAYS_RUN_JOBS
+        classified = (
+            self.HEAVY_GATED_JOBS
+            | self.CHANGE_GATED_JOBS
+            | self.ALWAYS_RUN_JOBS
+        )
         unclassified = set(attrs) - classified
         self.assertEqual(
             unclassified,

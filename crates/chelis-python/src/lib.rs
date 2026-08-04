@@ -3894,7 +3894,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             Err(CompileAndLoadError::Compiler(e)) => e
                 .errors
                 .first()
-                .map(|d| format!("{} {}", d.kind, d.message))
+                .map(|d| format!("{} {}", d.kind().as_str(), d.message))
                 .unwrap_or_else(|| format!("{e:?}")),
         };
         assert!(

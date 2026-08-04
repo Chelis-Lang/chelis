@@ -34,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
+      rejection_authority_changed: ${{ steps.detect.outputs.rejection_authority_changed }}
+      diagnostic_kind_changed: ${{ steps.detect.outputs.diagnostic_kind_changed }}
     steps:
       # Shallow checkout (depth 1); the detect step deepens to the PR
       # commit range. GitHub Actions expressions have no arithmetic, so
@@ -56,6 +58,8 @@ jobs:
             # push-to-main (or any non-PR event) always runs the full
             # suite; do not skip heavy jobs off a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
+            echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
@@ -67,6 +71,76 @@ jobs:
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
+
+  # [05-UNS-5] issue authority is admitted through a checked-in membership
+  # manifest, so edits to that admission path require a live exists/kind/state
+  # check before merge. The offline generator and Rust constructors establish
+  # shape and membership; this job prevents a same-PR manifest edit from
+  # blessing a closed issue, pull request, or missing object (chelis#730 §C2.1).
+  rejection-authority-liveness:
+    name: Rejection Authority Liveness
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Validate rejection authority construction boundary
+        run: .venv/bin/python scripts/check_rejection_authority_boundary.py
+
+      - name: Validate rejection issue authorities against GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .venv/bin/python scripts/validate_rejection_issue_manifest.py
+
+  # C2.2's producer seal depends on same-crate privacy, which an external
+  # compile-fail doctest cannot distinguish from pub(crate). Run the actual
+  # controlled mutations whenever any owner/oracle/control input changes.
+  diagnostic-kind-oracle:
+    name: Diagnostic Kind Mutation Oracle
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.diagnostic_kind_changed != 'false') }}
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TARGET_DIR: target/diagnostic-kind-oracle
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and mutation-oracle build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target/diagnostic-kind-oracle
+
+      - name: Run C2.2 controlled mutations
+        run: .venv/bin/python scripts/diagnostic_kind_oracle.py
 
   lint-and-unit:
     name: Lint and Unit Tests (Linux)

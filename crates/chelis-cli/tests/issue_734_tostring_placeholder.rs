@@ -1,9 +1,11 @@
-//! chelis#734 - `to_string` on a tensor or list compiles to the literal
+//! chelis#734 - `to_string` on a tensor or list compiled to the literal
 //! placeholder string `"<value>"` while eval stringifies the value
 //! properly. Root: `host_emit.rs:2236`'s catch-all arm (`_ =>
 //! chelis_string_from_cstr("<value>")`) - the same
 //! catch-all-returning-a-value shape as #682's stub, one page away from
 //! it, substituting a string instead of a zero.
+//! The site now rejects loudly; chelis#1059 owns implementing compiled
+//! tensor/list stringification.
 //!
 //! This settled census row 3 of `spec/design/loud_unsupported.md`
 //! (previously "unknown - probe"): LIVE. The fix arrives via that plan's
@@ -21,6 +23,7 @@
 use assert_cmd::Command;
 use chelis_compiler_api::compiler::compile;
 use chelis_compiler_api::schema::{CompileRequest, CompileTarget, SourceKind};
+use chelis_vocab::DiagnosticKind;
 use tempfile::tempdir;
 
 #[path = "common/mod.rs"]
@@ -90,9 +93,9 @@ fn c_first_line(program: &str, name: &str) -> String {
 
 /// Observed today: the compiled binary prints the literal `<value>`.
 #[test]
-#[ignore = "chelis#734: to_string(tensor) is now REJECTED loudly at build per the \
-            chelis#730 plan (was the silent '<value>' placeholder); real tensor \
-            rendering arrives with chelis#732's formatter and un-ignores this value \
+#[ignore = "chelis#1059: to_string(tensor) is now REJECTED loudly at build per the \
+            chelis#730 plan (was chelis#734's silent '<value>' placeholder); real tensor \
+            rendering un-ignores this value \
             test. Run with \
             `cargo test -p chelis-cli --test issue_734_tostring_placeholder -- --ignored`."]
 fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
@@ -113,9 +116,9 @@ fn to_string_of_a_tensor_stringifies_in_the_compiled_lane() {
 
 /// Observed today: `<value>` for lists as well.
 #[test]
-#[ignore = "chelis#734: to_string(List) is now REJECTED loudly at build per the \
-            chelis#730 plan (was the silent '<value>' placeholder); real list rendering \
-            arrives with chelis#732's formatter and un-ignores this value test. Run with \
+#[ignore = "chelis#1059: to_string(List) is now REJECTED loudly at build per the \
+            chelis#730 plan (was chelis#734's silent '<value>' placeholder); real list rendering \
+            un-ignores this value test. Run with \
             `cargo test -p chelis-cli --test issue_734_tostring_placeholder -- --ignored`."]
 fn to_string_of_a_list_stringifies_in_the_compiled_lane() {
     if !c_toolchain_available() {
@@ -183,7 +186,11 @@ fn to_string_reduced_float_scalars_reject_before_artifact_emission() {
         assert_eq!(error.stage, "compile", "{dtype}: {error:?}");
         assert_eq!(error.errors.len(), 1, "{dtype}: {error:?}");
         let diagnostic = &error.errors[0];
-        assert_eq!(diagnostic.kind, "unsupported_feature", "{dtype}");
+        assert_eq!(
+            diagnostic.kind(),
+            DiagnosticKind::UnsupportedFeature,
+            "{dtype}"
+        );
         for expected in [
             "unsupported:",
             &format!("dtype `{dtype}`"),

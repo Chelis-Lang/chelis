@@ -110,6 +110,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The closed diagnostic-kind vocabulary gains its 48th kind,
+  `cancelled`** (part of chelis#730 Phase 3, chelis#959). The
+  interruptible-evaluation work (chelis#914/chelis#930) shipped
+  `cancelled` as a producer kind after the sealed vocabulary was
+  designed, so the seal could not express main's own behavior; the kind
+  is now a first-class `DiagnosticKind::Cancelled` with the closed-vocab
+  spelling lock and oracle anchors moved accordingly. Wire bytes are
+  unchanged (`"cancelled"` before and after).
+
 - **A builtin-named function parameter that is *called* in its own body
   is now a check error** (`BuiltinShadowing`): calls dispatch
   builtin-first under eval and lowering, so such a call could never

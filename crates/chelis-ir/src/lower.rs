@@ -8027,10 +8027,12 @@ impl LowerCtx {
                                 )),
                                 "the compiled-backend lowering of `reduce_window_*`",
                                 Stage::Lowering,
-                                "window and stride lists must be integer literals for the \
-                                 compiled lane today; a runtime-parameterized window \
-                                 previously lowered to a silent no-op (chelis#725; \
-                                 chelis#730 census row 8)",
+                                chelis_types::unimplemented_rejection!(
+                                    1058,
+                                    "window and stride lists must be integer literals for the \
+                                     compiled lane today; a runtime-parameterized window \
+                                     previously lowered to a silent no-op; chelis#1058 owns compiled runtime-list support"
+                                ),
                             );
                             raise_fatal_lowering_error(
                                 unsupported.to_string(),
@@ -8263,9 +8265,12 @@ impl LowerCtx {
                             ),
                             "the compiled-backend lowering of `expand`",
                             Stage::Lowering,
-                            "the expand axis must be an integer literal or a named \
-                             dimension; a computed axis previously fell back to axis 0 \
-                             silently (chelis#730 section C1.4, flagged by chelis#782)",
+                            chelis_types::deliberate_rejection!(
+                                "[05-AXIS-1]",
+                                "the expand axis must be an integer literal or a named \
+                                 dimension; a computed axis previously fell back to axis 0 \
+                                 silently (chelis#730 section C1.4, flagged by chelis#782)"
+                            ),
                         );
                         raise_fatal_lowering_error(
                             unsupported.to_string(),
@@ -10177,9 +10182,12 @@ impl LowerCtx {
                 UnsupportedKind::EffectKind(what),
                 "a `handle-effect` form in IR lowering",
                 Stage::Lowering,
-                "known effect kinds are `random` and `resource` \
-                 (spec/03-deep-syntax.md); an unknown kind previously dropped its \
-                 handler silently (chelis#730 census row 9)",
+                chelis_types::deliberate_rejection!(
+                    "[04-EFF-1]",
+                    "known effect kinds are `random` and `resource` \
+                     (spec/03-deep-syntax.md); an unknown kind previously dropped its \
+                     handler silently (chelis#730 census row 9)"
+                ),
             );
             raise_fatal_lowering_error(unsupported.to_string(), None, current_span_id.clone())
         };
@@ -10617,10 +10625,13 @@ impl LowerCtx {
                 UnsupportedKind::Op(format!("{op:?}")),
                 format!("`{}` tensors in IR lowering", input_prec.name()),
                 Stage::Lowering,
-                "this op family is float-only in the executable IR today; cast the \
-                 operand to a float dtype first. Integer support for the well-defined \
-                 cases (abs/floor/ceil/round) is tracked by chelis#729; the silent \
-                 zero this replaced was chelis#699/#722",
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "this op family is float-only in the executable IR today; cast the \
+                     operand to a float dtype first. Integer support for the well-defined \
+                     cases (abs/floor/ceil/round) is tracked by chelis#729; the silent \
+                     zero this replaced was chelis#699/#722"
+                ),
             );
             // The suppression-aware raise ladder (the `reject_lowering_slice`
             // shape): a SPECULATIVE probe unwinds quietly so the host
@@ -10685,11 +10696,44 @@ impl LowerCtx {
             };
         }
 
+        // The remaining dtypes carry DIFFERENT authorities and must stay
+        // distinguishable per [05-UNS-5] (the `emit_const` split
+        // precedent): bool and f8e4m3 are decided by spec, a string
+        // numeric-unary cell is unbuilt. Exhaustive so a new `Prim`
+        // forces a decision here.
+        let authority = match input_prec {
+            Prim::Bool => chelis_types::deliberate_rejection!(
+                "[04-NUM-4]",
+                "bool has no arithmetic width; numeric unary ops on bool tensors are \
+                 rejected"
+            ),
+            Prim::F8e4m3 => chelis_types::deliberate_rejection!(
+                "[04-DTYPE-1]",
+                "f8e4m3 is reserved but inactive and must not reach IR lowering \
+                 (spec/04-type-system.md section 1.1.1)"
+            ),
+            Prim::String => chelis_types::unimplemented_rejection!(
+                729,
+                "this numeric unary family accepts active float and signed-integer \
+                 dtypes only in the executable IR today; the string cell is owned by \
+                 the target capability table"
+            ),
+            Prim::F32
+            | Prim::F64
+            | Prim::F16
+            | Prim::Bf16
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64 => {
+                unreachable!("float and integer prims returned above in the exact numeric unary")
+            }
+        };
         let unsupported = Unsupported::new(
             UnsupportedKind::Op(format!("{op:?}")),
             format!("`{}` tensors in IR lowering", input_prec.name()),
             Stage::Lowering,
-            "this numeric unary family accepts active float and signed-integer dtypes only",
+            authority,
         );
         if unrepresentable_panic_suppressed() {
             std::panic::panic_any(UnrepresentableDag);
@@ -11077,10 +11121,13 @@ impl LowerCtx {
                 UnsupportedKind::Dtype(found.to_string()),
                 "a `cast` target in IR lowering",
                 Stage::Lowering,
-                "the cast target must name an active primitive type \
-                 (spec/04-type-system.md section 1.1); a bogus target previously \
-                 lowered as f32 silently in the build lane (chelis#744, chelis#730 \
-                 census row 13)",
+                chelis_types::deliberate_rejection!(
+                    "[04-DTYPE-1]",
+                    "the cast target must name an active primitive type \
+                     (spec/04-type-system.md section 1.1); a bogus target previously \
+                     lowered as f32 silently in the build lane (chelis#744, chelis#730 \
+                     census row 13)"
+                ),
             );
             raise_fatal_lowering_error(
                 unsupported.to_string(),

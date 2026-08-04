@@ -26,6 +26,23 @@ fn metal_bound_to_usize(b: &RtDim) -> usize {
     }
 }
 
+#[cfg(test)]
+mod rejection_authority_tests {
+    use super::Emitter;
+    use chelis_types::types::Prim;
+
+    #[test]
+    fn pad_fill_rejections_use_case_specific_authorities() {
+        let f64 = Emitter::host_scalar_literal(Prim::F64, 0.0).unwrap_err();
+        let f8 = Emitter::host_scalar_literal(Prim::F8e4m3, 0.0).unwrap_err();
+        let string = Emitter::host_scalar_literal(Prim::String, 0.0).unwrap_err();
+
+        assert!(f64.contains("deliberate [04-TGT-1]"), "{f64}");
+        assert!(f8.contains("deliberate [04-DTYPE-1]"), "{f8}");
+        assert!(string.contains("unimplemented chelis#729"), "{string}");
+    }
+}
+
 fn metal_pairs_to_usize(bounds: &[(RtDim, RtDim)]) -> Vec<(usize, usize)> {
     bounds
         .iter()
@@ -259,7 +276,11 @@ fn reject_integer_abs(dag: &Dag) -> Result<(), String> {
             UnsupportedKind::Op("Abs".to_string()),
             format!("an integer tensor at Metal DAG node {}", node.0),
             Stage::Codegen("metal"),
-            "integer abs code generation waits for the typed, trapping Phase 3 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane",
+            chelis_types::unimplemented_rejection!(
+                729,
+                "integer abs code generation waits for the typed, trapping Phase 3 \
+                 kernel (chelis#699); use `chelis eval` for the Phase 2 reference lane"
+            ),
         )
         .to_string());
     }
@@ -1440,14 +1461,39 @@ impl Emitter {
             Prim::Bool => (if value != 0.0 { "true" } else { "false" }).to_string(),
             Prim::Int8 | Prim::Int16 | Prim::Int32 => format!("{}", value as i64),
             Prim::Int64 => format!("{}LL", value as i64),
-            Prim::F64 | Prim::F8e4m3 | Prim::String => {
+            Prim::F64 => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(prec.name().to_string()),
                     "a Metal pad-fill host scalar literal",
                     Stage::Codegen("metal"),
-                    "the Metal backend rejects f64 (no FP64 ALUs) and the deferred \
-                     dtypes before emission; reaching this arm means the gate was \
-                     bypassed (chelis#745, chelis#730 census row 19)",
+                    chelis_types::deliberate_rejection!(
+                        "[04-TGT-1]",
+                        "the Metal backend rejects f64 because Apple GPUs have no FP64 ALUs; use the C or HIP target"
+                    ),
+                )
+                .to_string());
+            }
+            Prim::F8e4m3 => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Dtype(prec.name().to_string()),
+                    "a Metal pad-fill host scalar literal",
+                    Stage::Codegen("metal"),
+                    chelis_types::deliberate_rejection!(
+                        "[04-DTYPE-1]",
+                        "f8e4m3 is a reserved but inactive dtype and must be rejected before emission"
+                    ),
+                )
+                .to_string());
+            }
+            Prim::String => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Dtype(prec.name().to_string()),
+                    "a Metal pad-fill host scalar literal",
+                    Stage::Codegen("metal"),
+                    chelis_types::unimplemented_rejection!(
+                        729,
+                        "the exhaustive target capability table has not implemented a Metal string storage cell"
+                    ),
                 )
                 .to_string());
             }
