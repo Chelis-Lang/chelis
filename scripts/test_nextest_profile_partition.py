@@ -7,21 +7,21 @@ PR #126 (refined by #127) split the heavyweight end-to-end suite off the
 per-PR integration gate. `.config/nextest.toml` carries three profiles:
 
   - `default` excludes an explicitly-named heavy-e2e set;
-  - `ci` excludes that same set plus two capacity-census binaries that the
-    required Phase 0-3 oracle also executes;
+  - `ci` excludes that same set plus every complete test binary selected by
+    the required Phase 0-3 oracle;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
     `Heavy E2E` workflow runs `cargo nextest run --profile nightly`.
 
-This file locks the original workspace/nightly split plus the narrower
-delegation contract for the two complete census binaries. The dtype oracle
-intentionally overlaps the workspace lane elsewhere, so it is not a third
-disjoint profile.
+This file locks the original workspace/nightly split plus the delegation
+contract for complete oracle-selected binaries. Selector-based oracle legs
+still overlap the workspace lane, so the dtype oracle is not a third disjoint
+profile.
 
 Two tiers of check:
 
   - `FilterTextTests` is a fast, no-compile lock on the *text* of the
-    three filter blocks: `ci` may add only the oracle-owned census binaries to
-    the default exclusion, and the `nightly` positive filter must equal the
+    three filter blocks: `ci` may add only complete oracle-selected binaries
+    to the default exclusion, and the `nightly` positive filter must equal the
     negated inner set of the default exclusion block.
   - `ProfilePartitionTests` is the real set-math oracle: it runs
     `cargo nextest list` for the `ci` and `nightly` profiles plus the
@@ -43,19 +43,11 @@ NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import dtype_phase0_oracle  # noqa: E402
 import dtype_phase1_oracle  # noqa: E402
 import dtype_phase2_oracle  # noqa: E402
 import dtype_phase3_oracle  # noqa: E402
-
-
-ORACLE_OWNED_BINARY_IDS = {
-    "chelis-compiler-api::capacity_census_wire",
-    "chelis-python::capacity_census_bindings",
-}
-ORACLE_OWNED_FILTERS = (
-    "binary_id(/^chelis-compiler-api::capacity_census_wire$/)",
-    "binary_id(/^chelis-python::capacity_census_bindings$/)",
-)
+import faithful_observation_phase3_oracle  # noqa: E402
 
 
 def _filter_blocks() -> list[str]:
@@ -77,22 +69,38 @@ def _negative_filter_inner(block: str) -> str:
     return match.group(1)
 
 
-def _required_phase3_legs() -> tuple[object, ...]:
-    """Resolve the exact Phase 3 -> Phase 2 -> Phase 1 inheritance chain."""
+def _required_phase3_commands() -> tuple[tuple[str, ...], ...]:
+    """Resolve every command inherited by the required Phase 3 oracle."""
     python = sys.executable
     phase3 = dtype_phase3_oracle.oracle_legs(python)
     if phase3[0].argv != (python, "scripts/dtype_phase2_oracle.py"):
         raise AssertionError("Phase 3 no longer inherits dtype_phase2_oracle.py")
+    if phase3[1].argv != (
+        python,
+        "scripts/faithful_observation_phase3_oracle.py",
+    ):
+        raise AssertionError(
+            "Phase 3 no longer inherits faithful_observation_phase3_oracle.py"
+        )
     phase2 = dtype_phase2_oracle.oracle_legs(python)
     if phase2[0].argv != (python, "scripts/dtype_phase1_oracle.py"):
         raise AssertionError("Phase 2 no longer inherits dtype_phase1_oracle.py")
-    return (*phase3, *phase2, *dtype_phase1_oracle.oracle_legs(python))
+    phase1 = dtype_phase1_oracle.oracle_legs(python)
+    if phase1[0].argv != (python, "scripts/dtype_phase0_oracle.py"):
+        raise AssertionError("Phase 1 no longer inherits dtype_phase0_oracle.py")
+
+    return (
+        *(leg.argv for leg in phase3),
+        *(leg.argv for leg in phase2),
+        *(leg.argv for leg in phase1),
+        *(leg.argv for leg in dtype_phase0_oracle.oracle_legs()),
+        *(argv for _name, argv in faithful_observation_phase3_oracle.SUITE_COMMANDS),
+    )
 
 
 def _oracle_selected_test_binaries() -> set[str]:
     selected: set[str] = set()
-    for leg in _required_phase3_legs():
-        argv = leg.argv
+    for argv in _required_phase3_commands():
         if "-p" not in argv:
             continue
         package = argv[argv.index("-p") + 1]
@@ -100,6 +108,13 @@ def _oracle_selected_test_binaries() -> set[str]:
             if argument == "--test":
                 selected.add(f"{package}::{argv[index + 1]}")
     return selected
+
+
+ORACLE_OWNED_BINARY_IDS = frozenset(_oracle_selected_test_binaries())
+ORACLE_OWNED_FILTERS = tuple(
+    f"binary_id(/^{binary_id}$/)"
+    for binary_id in sorted(ORACLE_OWNED_BINARY_IDS)
+)
 
 
 class FilterTextTests(unittest.TestCase):
@@ -125,14 +140,26 @@ class FilterTextTests(unittest.TestCase):
             _norm(_negative_filter_inner(ci_block)),
             expected,
             "the `ci` filter must differ from `default` only by the exact "
-            "capacity-census binaries owned by the required dtype oracle",
+            "complete binaries selected by the required dtype oracle",
         )
 
     def test_ci_only_exclusions_are_executed_by_the_dtype_oracle(self):
+        self.assertEqual(
+            ORACLE_OWNED_BINARY_IDS,
+            _oracle_selected_test_binaries(),
+            "an excluded binary is not selected by the required dtype oracle",
+        )
+
+    def test_inherited_phase0_and_observation_binaries_are_delegated(self):
         self.assertTrue(
-            ORACLE_OWNED_BINARY_IDS <= _oracle_selected_test_binaries(),
-            "a capacity-census binary left the workspace lane without being "
-            "selected by the required dtype oracle",
+            {
+                "chelis-cli::domain_checker",
+                "chelis-cli::parity",
+                "chelis-e2e::eval_agreement",
+                "chelis-cli::issue_687_rejected_cells_corpus",
+                "chelis-types::agreement_tolerance",
+            }
+            <= ORACLE_OWNED_BINARY_IDS
         )
 
     def test_nightly_filter_is_the_negated_exclusion_set(self):
