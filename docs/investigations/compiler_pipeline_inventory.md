@@ -366,7 +366,9 @@ The documentation guard now rejects current compatibility claims without the exa
 
 The authoritative compiler pipeline oracle passed after these corrections.
 The local gate passed for `chelis-compiler-api`, `chelis-pipeline-core`, and `chelis-reef`.
-The hosted macOS Smoke, Docs, and changed-crate evidence is still pending for the final commit.
+Hosted run `30914264791` passed for implementation head `1cf91cf8190b4eb9fb4a4f3bf7684aa8a3300b70`.
+The `macOS Smoke`, `Docs`, `Lint and Unit Tests (Linux)`, and `Integration Tests (Linux)` jobs passed.
+The hosted workspace suite covered all four changed crates and passed.
 
 The change was rebased onto target `e1065d94fbd7a41f086e0690929a66c2335accc5`.
 The Reef baseline harness passed against that target before the extraction.

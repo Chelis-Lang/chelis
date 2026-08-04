@@ -68,4 +68,7 @@
 - [x] 7.4 Run `.venv/bin/python scripts/gate.py --local` as additional local evidence.
 - [x] 7.5 Run a fresh local red-team agent against the specification, code, tests, facade, Reef behavior, and dependency graph.
 - [x] 7.6 Correct each confirmed major finding and rerun the authoritative oracle.
-- [ ] 7.7 Record hosted macOS Smoke, Docs, and changed-crate results for the exact final commit.
+- [x] 7.7 Record hosted macOS Smoke, Docs, and changed-crate results for the exact final commit.
+  - Hosted run `30914264791` passed for implementation head `1cf91cf8190b4eb9fb4a4f3bf7684aa8a3300b70`.
+  - `macOS Smoke`, `Docs`, `Lint and Unit Tests (Linux)`, and `Integration Tests (Linux)` passed.
+  - `Workspace Tests (Linux)` covered all four changed crates and passed.

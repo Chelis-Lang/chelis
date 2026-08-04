@@ -12,21 +12,21 @@ This capability defines implementation architecture only. The pass order remains
 Backend separation remains under [`spec/08-backends.md`](../../../spec/08-backends.md). These requirements do not change language or backend semantics.
 
 ### Requirement: Canonical production pipeline owner
-`chelis-compiler-api` SHALL own production orchestration in the upper-consumer scope. This scope contains `chelis-compiler-api`, `chelis-cli`, and `chelis-e2e`.
+`chelis-pipeline-core` SHALL own production semantic transitions in the guarded scope. This scope contains the core, compiler API, Reef, CLI, and E2E crates.
 
-Production functions in this scope that need two or more semantic stages SHALL delegate to this owner. Lower-layer crates SHALL retain individual stage implementations.
+`chelis-compiler-api` SHALL own source preparation and dynamic goal dispatch. Production functions outside the core that need two or more semantic stages SHALL delegate.
 
-`chelis-reef` package artifact construction SHALL remain one explicit dependency exception. It can run type, effect, and linearity stages directly because `chelis-compiler-api` depends on `chelis-reef`.
-
-Issue #1012 owns removal of this exception through a dependency-bottom pipeline core. No other production crate SHALL use this exception.
+Lower-layer crates SHALL retain individual stage implementations. `chelis-reef` SHALL use the core and SHALL NOT retain a direct semantic sequence.
 
 The source architecture guard SHALL inspect production Rust files under exactly these roots:
 
+- `crates/chelis-pipeline-core/src`
 - `crates/chelis-compiler-api/src`
+- `crates/chelis-reef/src`
 - `crates/chelis-cli/src`
 - `crates/chelis-e2e/src`
 
-The guard SHALL NOT claim coverage for all workspace production files.
+The guard SHALL permit canonical multi-stage orchestration only in the core owner. It SHALL NOT claim coverage for all workspace production files.
 
 The source architecture guard SHALL detect direct stage sequences. It SHALL also detect equivalent sequences composed through local helper calls.
 
@@ -68,17 +68,21 @@ It SHALL NOT classify an unrelated receiver, import, type alias, or external cal
 
 A focused helper that reaches only one semantic stage SHALL remain valid. A production function that reaches two or more stages through helpers SHALL be rejected.
 
-#### Scenario: Production consumer delegates
+#### Scenario: Facade consumer delegates
 - **WHEN** a CLI, edit, compiler-API, or E2E path needs a full semantic check
 - **THEN** the path requests a compiler-API pipeline goal instead of calling the stages in sequence
 
+#### Scenario: Reef package artifact path delegates
+- **WHEN** `chelis-reef` checks a fully linked package before artifact or schema output
+- **THEN** the path passes owned expanded Deep through `chelis-pipeline-core`
+
 #### Scenario: Production consumer duplicates the sequence
-- **WHEN** a guarded production file outside the owner orchestrates two or more canonical semantic stages
+- **WHEN** a guarded production file outside the core owner orchestrates two or more canonical semantic stages
 - **THEN** the source architecture guard rejects the file and identifies the duplicated stage calls
 
-#### Scenario: Reef package artifact path uses the dependency exception
-- **WHEN** `chelis-reef` checks a fully linked package before artifact or schema output
-- **THEN** the documented dependency exception permits its direct type, effect, and linearity sequence
+#### Scenario: Reef recreates the removed exception
+- **WHEN** a Reef negative fixture calls type, effect, and linearity stages directly
+- **THEN** the source architecture guard rejects the fixture and identifies all three stages
 
 #### Scenario: Production consumer composes stage helpers
 - **WHEN** a production function calls separate local helpers that reach type and effect stages
@@ -542,8 +546,160 @@ The oracle SHALL run after the implementation compiles against the target branch
 ### Requirement: Continuous artifact compile-fail enforcement
 The canonical per-PR gate SHALL run `cargo test -p chelis-compiler-api --doc`.
 
-The same gate SHALL run `.venv/bin/python scripts/check_checkpoint_compile_fail.py`. Command-list unit tests SHALL NOT substitute for either executable control.
+The same gate SHALL run `cargo test -p chelis-pipeline-core --doc` and `.venv/bin/python scripts/check_checkpoint_compile_fail.py`.
+
+Command-list unit tests SHALL NOT substitute for these executable controls.
 
 #### Scenario: Hosted CI checks compile-time artifact boundaries
 - **WHEN** hosted CI runs the `lint-and-unit` gate stage
-- **THEN** it executes the compiler-API doctests and the raw-checkpoint compile-fail fixture
+- **THEN** it executes both pipeline doctest suites and the raw-checkpoint compile-fail fixture
+
+
+### Requirement: Dependency-bottom semantic core
+The workspace SHALL contain an unpublished `chelis-pipeline-core` crate. Its direct production dependencies SHALL be exactly the approved lower compiler crates.
+
+The approved direct dependencies SHALL be `chelis-deep`, `chelis-types`, `chelis-effects`, and `chelis-ir`.
+
+The resolved dependency graph from the core SHALL NOT reach compiler API, Reef, source preparation, macros, backends, schemas, wire adapters, or caches.
+
+`chelis-compiler-api` and `chelis-reef` SHALL depend on the core. The core SHALL NOT depend on either upper crate.
+
+A dependency guard SHALL inspect both the core manifest and the resolved workspace graph. It SHALL fail closed on an unknown direct dependency.
+
+#### Scenario: Core uses only approved lower dependencies
+- **WHEN** the dependency guard inspects the shipped core manifest and resolved graph
+- **THEN** it accepts the four approved direct dependencies and finds no path to an upper crate
+
+#### Scenario: Core adds a forbidden direct dependency
+- **WHEN** an in-memory negative fixture adds `chelis-reef` to the core manifest
+- **THEN** the dependency guard rejects the fixture and names `chelis-reef`
+
+#### Scenario: Core reaches an upper crate through another dependency
+- **WHEN** a negative graph fixture adds a transitive path from the core to `chelis-compiler-api`
+- **THEN** the dependency guard rejects the fixture and displays the complete path
+
+#### Scenario: Core adds an unknown dependency
+- **WHEN** an in-memory negative fixture adds a dependency that is not in the approved set
+- **THEN** the dependency guard rejects the fixture instead of classifying it as harmless
+
+### Requirement: Owned expanded-Deep boundary
+The core SHALL accept an owned expanded Deep program. It SHALL NOT parse source, desugar Surf, expand macros, or prune an entry.
+
+`chelis-compiler-api` SHALL complete source preparation before it constructs the core carrier. Reef SHALL complete graph links and source expansion before construction.
+
+The carrier SHALL own its Deep expressions. A borrowed source buffer or source-schema type SHALL NOT cross the core boundary.
+
+#### Scenario: Compiler API prepares source
+- **WHEN** a compiler API request contains Surf source and an entry name
+- **THEN** the facade parses, expands, prunes, and passes owned expanded Deep to the core
+
+#### Scenario: Reef prepares linked Deep
+- **WHEN** Reef checks a linked package
+- **THEN** Reef passes its owned expanded Deep to the same core carrier without source-schema conversion
+
+#### Scenario: Source dependency enters the core
+- **WHEN** a negative manifest fixture adds `chelis-surf` or `chelis-macros` to the core
+- **THEN** the dependency guard rejects the fixture as a boundary violation
+
+### Requirement: Stable compiler API facade
+Existing `chelis_compiler_api::pipeline` imports SHALL compile without a direct `chelis-pipeline-core` dependency. The facade SHALL re-export moved artifacts and wrap policy functions.
+
+`PipelineRequest`, `PipelineGoal`, `PipelineOutcome`, `PreparationError`, and `PipelineRejection` SHALL remain facade-owned public types.
+
+The facade SHALL preserve current cancellation stages and rejection variants. Core artifacts SHALL NOT gain machine-facing wire traits.
+
+The compiler API SHALL retain source preparation, dynamic goal selection, native-error conversion, host policy selection, and backend policy selection.
+
+#### Scenario: Existing consumer imports only compiler API
+- **WHEN** a compile fixture imports the current pipeline types and functions through `chelis_compiler_api::pipeline`
+- **THEN** the fixture compiles without a direct core dependency
+
+#### Scenario: Rejected facade request keeps its stage
+- **WHEN** parse, type, effect, linearity, lower, root-count, or cancellation rejection occurs
+- **THEN** the facade returns the current `PipelineRejection` variant with exact current data
+
+#### Scenario: Core artifact enters a wire model
+- **WHEN** a compile-fail fixture requires a core checked or lowered artifact to implement `serde::Serialize`
+- **THEN** Rust rejects the fixture because the artifact has no wire implementation
+
+#### Scenario: Backend policy enters the core graph
+- **WHEN** a negative dependency fixture adds a backend crate to the core
+- **THEN** the dependency guard rejects the fixture and names the backend dependency
+
+### Requirement: Reef uses canonical semantic transitions
+The Reef package artifact and schema paths SHALL use the core type, effect, and linearity transitions. Reef SHALL NOT call those stages in sequence.
+
+The Reef adapter SHALL preserve its linked-program guard. It SHALL preserve exact accepted artifacts and exact rejected error text.
+
+#### Scenario: Valid linked package keeps its artifact
+- **WHEN** a valid linked package passes through the core transitions
+- **THEN** Reef produces the same checked package, archive content, schema content, and hashes as the baseline
+
+#### Scenario: Invalid linked package keeps its rejection
+- **WHEN** a linked package fails type, effect, or linearity checks
+- **THEN** Reef returns the same error text and order as the baseline
+
+#### Scenario: Linked internal names remain accepted
+- **WHEN** linked Deep contains valid internal mangled names
+- **THEN** the linked-program guard remains active for the complete core semantic check
+
+#### Scenario: Reef restores direct stage calls
+- **WHEN** a negative source fixture restores the former Reef helper sequence
+- **THEN** the source guard rejects the fixture and identifies the repeated stages
+
+### Requirement: Core state remains legal by construction
+The moved core artifacts SHALL preserve the current legal-state guarantees. Rejected states SHALL expose no checked program, DAG, or partial root map.
+
+Exact root construction SHALL reject different tensor-name and DAG-root counts. Explicit accepted host results SHALL retain empty named-root products.
+
+`SemanticRejection` SHALL contain only effect or linearity errors. Core lower errors SHALL contain only lower diagnostics or root-count failures.
+
+#### Scenario: Semantic success creates checked state
+- **WHEN** type, effect, and linearity stages accept owned expanded Deep
+- **THEN** the core returns `CheckedCompilation` with canonical root metadata
+
+#### Scenario: Root counts differ
+- **WHEN** exact root construction receives different name and root counts
+- **THEN** the core returns a root-count error before it creates a lowered state
+
+#### Scenario: Caller swaps root map roles
+- **WHEN** a compile-fail fixture passes a forward-node index where declared roots are required
+- **THEN** Rust rejects the fixture because the artifact types differ
+
+#### Scenario: Rejection exposes success state
+- **WHEN** a compile-fail fixture requests a checked product from a semantic rejection
+- **THEN** Rust rejects the fixture because the rejection has no success accessor
+
+### Requirement: Standard-library blocker inventory
+The change SHALL record why `chelis-pipeline-core` still requires `std`. The inventory SHALL cover direct core use and transitive lower-crate blockers.
+
+The inventory SHALL distinguish collections, allocation, global state, stack support, panic behavior, operating-system dependencies, and dependency features.
+
+The inventory SHALL NOT claim current `#![no_std]` support or assign removal work without separate approval.
+
+#### Scenario: Reviewer reads the blocker inventory
+- **WHEN** a reviewer checks the extracted crate's portability status
+- **THEN** the inventory states that the core requires `std` and names each confirmed blocker class
+
+#### Scenario: Documentation claims current no-std support
+- **WHEN** a documentation negative fixture states that the extracted core supports `#![no_std]`
+- **THEN** the documentation guard rejects the claim because the blocker inventory remains nonempty
+
+### Requirement: Core extraction acceptance oracle
+The authoritative completion oracle SHALL remain `.venv/bin/python scripts/compiler_pipeline_oracle.py`.
+
+The oracle SHALL run core tests, both pipeline doctest suites, dependency guards, source guards, Reef parity, and current consumer parity.
+
+The oracle SHALL contain positive and negative evidence for every new boundary. OpenSpec validation SHALL remain structural evidence only.
+
+#### Scenario: Extracted core satisfies all boundaries
+- **WHEN** the authoritative oracle runs after the migration
+- **THEN** all core, facade, Reef, guard, compile-fail, and consumer parity controls pass
+
+#### Scenario: Forbidden dependency is planted
+- **WHEN** the dependency-guard negative fixture adds a shell dependency to the core
+- **THEN** the authoritative oracle fails and names the forbidden dependency path
+
+#### Scenario: Reef duplicate is planted
+- **WHEN** the source-guard negative fixture restores a direct Reef semantic sequence
+- **THEN** the authoritative oracle fails and names the duplicated stages and source path
