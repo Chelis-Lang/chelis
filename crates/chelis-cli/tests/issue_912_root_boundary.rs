@@ -123,11 +123,11 @@ result = concat(a, b)
 #[ignore] // TODO: enable once def-level precision check routes f64 → Host
 fn precision_determinism_f64_root_routes_host_for_c_target() {
     let source_no_print = r#"
-x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4)
+x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
 y = mul(x, x)
 "#;
     let source_with_print = r#"
-x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4)
+x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
 y = mul(x, x)
 z = print("host")
 "#;

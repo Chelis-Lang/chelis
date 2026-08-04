@@ -383,7 +383,7 @@ fn pad_cast_wrapped_fill_emits_declared_bits_not_silent_zero() {
     let out_dir = dir.path().join("pad_fill-out");
     write_file(
         &path,
-        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], cast(7.0, f32))\n\
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], cast(7.0, f32))\n\
          out = f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n",
     );
     Command::cargo_bin("chelis")
@@ -419,7 +419,7 @@ fn pad_runtime_fill_build_fails_loudly() {
     let out_dir = dir.path().join("pad_rt-out");
     write_file(
         &path,
-        "def f(x: tensor[4, f32], r: f32) -> tensor[6, f32] = pad(&x, [[1, 1]], r)\n\
+        "def f(x: tensor[4, f32], r: f32) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], r)\n\
          out = f(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]), cast(9.0, f32))\n",
     );
     let out = Command::cargo_bin("chelis")

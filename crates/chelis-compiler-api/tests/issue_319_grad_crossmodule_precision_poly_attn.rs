@@ -416,7 +416,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
     });
     let out = out_tensor(&result);
     assert_eq!(out.shape, vec![6], "issue #319 reshape: flattened shape");
-    // permute([[1,2,3],[4,5,6]]) = [[1,4],[2,5],[3,6]], flattened row-major.
+    // permute([[1, 2, 3],[4, 5, 6]]) = [[1i64, 4i64],[2i64, 5i64],[3i64, 6i64]], flattened row-major.
     assert_close(
         &out,
         &TensorValue {
@@ -433,7 +433,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
 #[test]
 fn issue_319_expand_precision_poly_verb_lowers() {
     let src = "sig broadcast: tensor[s, p] -> tensor[s, c, p]\n\
-               def broadcast(b) = expand(b, cast(1, int32), cast(2, int32))\n\
+               def broadcast(b) = expand(b, cast(1, int32), cast(2, int64))\n\
                out = broadcast(to_tensor([1.0, 2.0]))\n";
     let result = try_eval(src).unwrap_or_else(|err| {
         panic!(

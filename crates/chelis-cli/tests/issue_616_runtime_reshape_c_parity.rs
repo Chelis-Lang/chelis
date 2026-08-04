@@ -1,6 +1,6 @@
 //! chelis#616 step 3b: forward eval-vs-C parity for runtime (node-valued)
 //! RESHAPE target extents — the windowed `reshape(stride(shrink(x, ...)),
-//! [1, m])` form of the avgpool oracle's `window_row`, with the window count
+//! [1i64, m])` form of the avgpool oracle's `window_row`, with the window count
 //! `m` computed from `shape()` arithmetic at run time.
 //!
 //! The reshape target `m` lowers to a rank-0 integer scalar node the op
@@ -22,8 +22,8 @@ use tempfile::{TempDir, tempdir};
 /// `[1, 3, 5, ...]` (`m` odd values).
 const WINDOW_BODY: &str = "\
   m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int32)\n\
-  reshape(stride(shrink(x, [[cast(0, int32), extent]]), cast(2, int32)), [cast(1, int64), m])";
+  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
+  reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])";
 
 fn window_source(out_line: &str) -> String {
     format!(
@@ -253,8 +253,8 @@ int main(void) {{
 fn issue_616_runtime_window_grad_eval_matches_c() {
     let source = "module Repro.RtWindowGrad\nsig f: tensor[4, f32] -> f32\ndef f(x) = {\n\
   m = add(floor_div(sub(cast(shape(x, cast(0, int32)), int64), cast(2, int64)), cast(2, int64)), cast(1, int64))\n\
-  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int32)\n\
-  w = reshape(stride(shrink(x, [[cast(0, int32), extent]]), cast(2, int32)), [cast(1, int64), m])\n\
+  extent = cast(add(mul(sub(m, cast(1, int64)), cast(2, int64)), cast(1, int64)), int64)\n\
+  w = reshape(stride(shrink(x, [[cast(0, int64), extent]]), cast(2, int64)), [cast(1, int64), m])\n\
   sum(sum(w, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\nout = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
 

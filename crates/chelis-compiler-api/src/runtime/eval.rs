@@ -2061,11 +2061,11 @@ impl<'a> EvalContext<'a> {
                     .get(axis)
                     .copied()
                     .ok_or_else(|| format!("shape axis {axis} out of bounds"))?;
-                // `shape` is normatively int32 (`spec/05-risc-primitives.md`
-                // §2.2). The old int64 runtime payload only stayed hidden
-                // while arithmetic silently promoted mixed widths; the
-                // closed kernel boundary exposes that mismatch.
-                RuntimeValue::scalar_like_int(Prim::Int32, dim as i64)
+                // `shape` returns an extent-domain int64
+                // (`spec/05-risc-primitives.md` [05-DIM-2]). The closed
+                // kernel boundary rejects mixed widths, so this payload
+                // must carry the dtype the checker assigns.
+                RuntimeValue::scalar_like_int(Prim::Int64, dim as i64)
             }
             "numel" => {
                 let tensor = expect_tensor_arg(args, 0)?;

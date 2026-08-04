@@ -1370,8 +1370,10 @@ pub fn builtin_env() -> (Env, VarGen) {
             body: Type::Fn(
                 vec![
                     borrowed(Type::Var(input)),
+                    // [05-DIM-1]: axis-domain axis (int32), extent-domain
+                    // size (int64).
                     Type::Prim(Prim::Int32),
-                    Type::Prim(Prim::Int32),
+                    Type::Prim(Prim::Int64),
                 ],
                 Box::new(Type::Var(out)),
             ),

@@ -163,7 +163,14 @@ pub(super) fn infer_app(
             if (is_expand_size || is_expand_inserted_name || is_reduction_axis)
                 && symbolic_dim_ref_name(arg).is_some()
             {
-                Type::Prim(Prim::Int32)
+                // [05-DIM-1]: a dim name in the size slot is an extent
+                // (int64); the inserted-axis name and reduction axes are
+                // axis-domain (int32).
+                if is_expand_size {
+                    Type::Prim(Prim::Int64)
+                } else {
+                    Type::Prim(Prim::Int32)
+                }
             } else {
                 infer_expr(arg, env, vg, subst, adt_reg, errors, product)
             }
@@ -172,6 +179,31 @@ pub(super) fn infer_app(
 
     if matches!(func_name.as_deref(), Some("drop")) && arg_tys.len() == 1 {
         return Type::Unit;
+    }
+
+    // [05-DIM-1] fix-naming diagnostic for expand's extent slot: a wrong
+    // size dtype would otherwise surface as the scheme unification's bare
+    // `precision mismatch` pair. Pre-check the resolved size type here so
+    // the rejection names the fix, mirroring shrink/pad/stride/reshape.
+    if matches!(func_name.as_deref(), Some("expand"))
+        && arg_tys.len() >= 3
+        && let Type::Prim(p) = subst.apply(&arg_tys[2])
+        && p != Prim::Int64
+    {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                with_macro_provenance(
+                    &deep::Expr::List(list.clone(), zero_span()),
+                    format!(
+                        "expand expects an int64 size (write Ni64 or cast(N, int64)), got {}",
+                        Type::Prim(p)
+                    ),
+                ),
+                vec![],
+            ),
+        );
     }
 
     // If the *callee* is Error, propagate. With no resolved callee scheme

@@ -1,9 +1,9 @@
 //! Issue #318: `grad` has no backward rule for the SHAPE-DERIVED
 //! expand-of-scalar const-broadcast. Issue #288 fixed the LITERAL-size
-//! form `expand(scalar_to_tensor(c), 0, cast(2, int32))`; the canonical
+//! form `expand(scalar_to_tensor(c), 0, cast(2, int64))`; the canonical
 //! 0.7.x scalar-broadcast helper (`tensor_full_like` / `tensor_full_1d`)
 //! instead emits the SHAPE-DERIVED form
-//! `expand(scalar_to_tensor(c), 0, cast(shape(&x, 0), int32))`, whose
+//! `expand(scalar_to_tensor(c), 0, cast(shape(&x, 0), int64))`, whose
 //! broadcast extent is the runtime dimension of `x` rather than a
 //! literal. That form still failed to grad.
 //!
@@ -15,7 +15,7 @@
 //! def f(x: tensor[2, f32]) -> f32 = {
 //!   k = expand(scalar_to_tensor(cast(3.0, f32)),
 //!              cast(0, int32),
-//!              cast(shape(&x, cast(0, int32)), int32))
+//!              cast(shape(&x, cast(0, int32)), int64))
 //!   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))
 //! }
 //! def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)
@@ -56,7 +56,7 @@ use tempfile::tempdir;
 /// `tensor[2, f32]`, shape-derived `expand` size `shape(&x, 0)`.
 const REPRO_RANK0: &str = "module Repro.GradExpandShape0\n\
 def f(x: tensor[2, f32]) -> f32 = {\n\
-  k = expand(scalar_to_tensor(cast(3.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int32))\n\
+  k = expand(scalar_to_tensor(cast(3.0, f32)), cast(0, int32), cast(shape(&x, cast(0, int32)), int64))\n\
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
@@ -65,7 +65,7 @@ out = df(to_tensor([3.0, 4.0]))\n";
 /// The literal-size form (the #288 fix), kept for negative parity.
 const REPRO_LITERAL: &str = "module Repro.GradExpandLiteral\n\
 def f(x: tensor[2, f32]) -> f32 = {\n\
-  k = expand(scalar_to_tensor(cast(3.0, f32)), cast(0, int32), cast(2, int32))\n\
+  k = expand(scalar_to_tensor(cast(3.0, f32)), cast(0, int32), cast(2, int64))\n\
   tensor_to_scalar(sum(mul(x, k), cast(0, int32)))\n\
 }\n\
 def df(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\

@@ -1,20 +1,20 @@
 def logits(x: tensor[32, 784, f32], labels: tensor[32, 10, f32], w1: tensor[784, 128, f32], b1: tensor[128, f32], w2: tensor[128, 10, f32], b2: tensor[10, f32]) -> tensor[32, 10, f32] = {
-  b1_expanded = expand(b1, 0, 32)
+  b1_expanded = expand(b1, 0, 32i64)
   hidden_linear = matmul(x, w1)
   hidden_pre = add(hidden_linear, b1_expanded)
   h1 = relu(hidden_pre)
   logits_linear = matmul(h1, w2)
-  b2_expanded = expand(b2, 0, 32)
+  b2_expanded = expand(b2, 0, 32i64)
   out = add(logits_linear, b2_expanded)
   out
 }
 def loss(x: tensor[32, 784, f32], labels: tensor[32, 10, f32], w1: tensor[784, 128, f32], b1: tensor[128, f32], w2: tensor[128, 10, f32], b2: tensor[10, f32]) -> tensor[f32] = {
-  b1_expanded = expand(b1, 0, 32)
+  b1_expanded = expand(b1, 0, 32i64)
   hidden_linear = matmul(x, w1)
   hidden_pre = add(hidden_linear, b1_expanded)
   h1 = relu(hidden_pre)
   logits_linear = matmul(h1, w2)
-  b2_expanded = expand(b2, 0, 32)
+  b2_expanded = expand(b2, 0, 32i64)
   logits = add(logits_linear, b2_expanded)
   probs = softmax(logits, 1)
   log_probs = log(probs)

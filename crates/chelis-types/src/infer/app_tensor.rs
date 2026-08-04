@@ -1085,8 +1085,9 @@ pub(super) fn check_named_expand_signature(
         );
     }
 
-    // The named-insert size must be a positive compile-time literal (a bare
-    // int or `cast(N, int32)`). A symbolic-dim or runtime int32 size cannot
+    // The named-insert size must be a positive compile-time literal (an
+    // `Ni64` literal or `cast(N, int64)`; extent-domain under [05-DIM-1]).
+    // A symbolic-dim or runtime int64 size cannot
     // be stamped onto the inserted named dim at lowering: the eval lane has
     // no extent to stage and the C backend would emit an undeclared dim
     // symbol (silent shape-0 output) — both verified failure modes, so the
@@ -1099,7 +1100,7 @@ pub(super) fn check_named_expand_signature(
                 CheckErrorKind::DimensionMismatch,
                 format!(
                     "expand: the named-axis insert form requires a compile-time literal size \
-                 (a literal or `cast(N, int32)` constant), got {}; the inserted axis's \
+                 (an Ni64 literal or `cast(N, int64)` constant), got {}; the inserted axis's \
                  extent must be stampable onto the new named dim at lowering \
                  (spec/04-type-system.md \u{00a7}4.5.3)",
                     describe_axis_arg(arg_exprs.get(2)),

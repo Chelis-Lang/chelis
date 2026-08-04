@@ -658,7 +658,7 @@ fn issue_579_wrong_axis_broadcast_rejected_at_check() {
 /// wrong-shape success.
 #[test]
 fn issue_579_out_of_bounds_insert_axis_fails_eval_with_targeted_reason() {
-    let source = "def bad(g: &tensor[3, f32]) -> tensor[3, 2, 2, f32] = expand(g, 3, 2)\n\
+    let source = "def bad(g: &tensor[3, f32]) -> tensor[3, 2, 2, f32] = expand(g, 3, 2i64)\n\
         out = bad(to_tensor([1.0, 2.0, 3.0]))\n";
     let dir = tempdir().expect("tempdir");
     let stderr = eval_stderr_expecting_failure(dir.path(), source, "issue_579_axis_oob");

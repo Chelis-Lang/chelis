@@ -616,7 +616,7 @@ out = d(1.0, 5.0)\n";
 fn issue_381_scalar_to_tensor_on_captured_scalar_evals_and_matches_backend() {
     let source = "c = cast(1.1, f64)\n\
 def make(n: tensor[2, f64]) -> tensor[2, f64] = \
-add(n, expand(scalar_to_tensor(c), cast(0, int32), cast(2, int32)))\n\
+add(n, expand(scalar_to_tensor(c), cast(0, int32), cast(2, int64)))\n\
 out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
 
     // Eval lane (the reference): 1.1 broadcast-added to [1.0, 2.0].

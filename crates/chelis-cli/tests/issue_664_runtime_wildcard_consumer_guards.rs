@@ -187,7 +187,7 @@ fn assert_value_parity(source: &str, stem: &str, want: &[f64]) {
 #[test]
 fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemStride\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int32))\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemStride\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int64))\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -203,7 +203,7 @@ fn issue_664_elementwise_stride_operand_mismatch_errs_in_both_lanes() {
 #[test]
 fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemPad\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, int32), cast(0, int32)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemPad\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  p = pad(x, [[cast(1, int64), cast(0, int64)]], cast(0.0, f32))\n  add(p, x)\n}}\nout = f(to_tensor([{}]))\n",
         f32_literal(&[1.0, 2.0, 3.0])
     );
     assert_error_parity(
@@ -222,7 +222,7 @@ fn issue_664_elementwise_pad_operand_mismatch_errs_in_both_lanes() {
 #[test]
 fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ElemShrink\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(3, int64)), int32)\n  s = shrink(x, [[cast(0, int32), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemShrink\nsig f: tensor[n, f32] -> tensor[n, f32]\ndef f(x) = {{\n  k = cast(sub(cast(shape(x, cast(0, int32)), int64), cast(3, int64)), int64)\n  s = shrink(x, [[cast(0, int64), k]])\n  add(s, x)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -240,7 +240,7 @@ fn issue_664_elementwise_shrink_control_errs_in_both_lanes() {
 #[test]
 fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ReshapeSym\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int32))\n  reshape(s, [cast(shape(x, cast(0, int32)), int64)])\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ReshapeSym\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int64))\n  reshape(s, [cast(shape(x, cast(0, int32)), int64)])\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -257,7 +257,7 @@ fn issue_664_reshape_sym_target_numel_mismatch_errs_in_both_lanes() {
 #[test]
 fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
     let source = format!(
-        "module Repro.ReshapeStatic\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int32))\n  reshape(s, [cast(6, int64)])\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ReshapeStatic\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  s = stride(x, cast(2, int64))\n  reshape(s, [cast(6, int64)])\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_error_parity(
@@ -273,7 +273,7 @@ fn issue_664_reshape_static_target_over_runtime_input_errs_in_both_lanes() {
 #[test]
 fn issue_664_matching_runtime_operands_still_run() {
     let source = format!(
-        "module Repro.ElemMatch\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  a = stride(x, cast(2, int32))\n  b = stride(x, cast(2, int32))\n  add(a, b)\n}}\nout = f(to_tensor([{}]))\n",
+        "module Repro.ElemMatch\nsig f: tensor[n, f32] -> tensor[u, f32]\ndef f(x) = {{\n  a = stride(x, cast(2, int64))\n  b = stride(x, cast(2, int64))\n  add(a, b)\n}}\nout = f(to_tensor([{}]))\n",
         six()
     );
     assert_value_parity(&source, "elemmatch", &[2.0, 6.0, 10.0]);

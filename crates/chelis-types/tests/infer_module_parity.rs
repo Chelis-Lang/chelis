@@ -216,7 +216,7 @@ fn accepted_shape_operations() {
         "accepted_shape_operations",
         r#"module Parity.ShapeOps
 def project(x: tensor[64, 32, f32], w: tensor[32, 8, f32]) -> tensor[64, 8, f32] = matmul(x, w)
-def broadcast_bias(b: tensor[1, f32]) -> tensor[64, f32] = expand(b, 0, 64)
+def broadcast_bias(b: tensor[1, f32]) -> tensor[64, f32] = expand(b, 0, 64i64)
 def swap(x: tensor[4, 6, f32]) -> tensor[6, 4, f32] = permute(x, 1, 0)
 def collapse(x: tensor[4, 6, f32]) -> tensor[24, f32] = reshape(x, [cast(24, int64)])
 def reduce_rows(x: tensor[4, 6, f32]) -> tensor[4, f32] = mean(x, 1)

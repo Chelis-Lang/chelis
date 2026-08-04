@@ -5,12 +5,12 @@
 //! Headline reproducers (verbatim from the issue):
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(shrink(x, [[cast(0, int32), cast(2, int32)]]), cast(0, int32)))
+//!   tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //! ```chelis
 //! def f(x: tensor[4, f32]) -> f32 =
-//!   tensor_to_scalar(sum(stride(x, cast(2, int32)), cast(0, int32)))
+//!   tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))
 //! def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)
 //! ```
 //!
@@ -25,7 +25,7 @@
 //! Expected gradients:
 //!   * `shrink(x, [0,2))` then sum: `f = x0 + x1`, `df = [1, 1, 0, 0]`
 //!     (cotangent scattered into the sliced positions).
-//!   * `stride(x, 2)` then sum: `f = x0 + x2`, `df = [1, 0, 1, 0]`
+//!   * `stride(x, 2i64)` then sum: `f = x0 + x2`, `df = [1, 0, 1, 0]`
 //!     (cotangent scattered into the strided slots).
 //!
 //! This file is the end-to-end acceptance oracle: `check` clean, `build
@@ -41,20 +41,20 @@ use serde_json::Value;
 use tempfile::tempdir;
 
 const SHRINK_DF: &str = "module Repro.GradShrink\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int32), cast(2, int32)]]), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 
 const SHRINK_EVAL: &str = "module Repro.GradShrink\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int32), cast(2, int32)]]), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(shrink(x, [[cast(0, int64), cast(2, int64)]]), cast(0, int32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
 out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
 
 const STRIDE_DF: &str = "module Repro.GradStride\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int32)), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n";
 
 const STRIDE_EVAL: &str = "module Repro.GradStride\n\
-def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int32)), cast(0, int32)))\n\
+def f(x: tensor[4, f32]) -> f32 = tensor_to_scalar(sum(stride(x, cast(2, int64)), cast(0, int32)))\n\
 def df(x: tensor[4, f32]) -> tensor[4, f32] = grad(f)(x)\n\
 out = df(to_tensor([10.0, 20.0, 30.0, 40.0]))\n";
 

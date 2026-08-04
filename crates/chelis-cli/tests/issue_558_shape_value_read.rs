@@ -375,11 +375,12 @@ fn issue_558_shape_value_forward_matches_c() {
 // ---------------------------------------------------------------------------
 
 // A RUNTIME (metadata-derived, non-literal) shape axis. `ax = shape(x, 0) - 3`
+// (narrowed to int32: `shape` reads an int64 extent, the axis slot is int32)
 // is `0` for a `tensor[3, 2]` input (in range), but it is a data-flow VALUE,
 // so `extract_int_for_dim` cannot fold it to a literal and the DAG lowering
 // has no representable axis. The `def`-body is shared by the two tests below.
 const RUNTIME_AXIS_BODY: &str = "\
-  ax = sub(shape(&x, cast(0, int32)), cast(3, int32))\n\
+  ax = cast(sub(shape(&x, cast(0, int32)), cast(3, int64)), int32)\n\
   n = cast(shape(x, ax), f32)\n\
   s = sum(sum(&x, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
   mul(s, n)";

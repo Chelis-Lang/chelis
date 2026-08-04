@@ -8611,14 +8611,15 @@ impl LowerCtx {
                     .and_then(|a| usize::try_from(a).ok())
                     .expect("axis literal guarded by the arm predicate");
                 let x = self.lower_expr_node(&args[0], "shape input");
-                // The checker types `shape(...)` as an `int32` scalar. Pin
+                // The checker types `shape(...)` as an `int64` scalar
+                // ([05-DIM-2]). Pin
                 // a rank-0 integer output regardless of the incoming `ty`
                 // shape so the value node is always a well-formed scalar
                 // extent (verified by `chelis_ir::verify`).
                 let precision = if ty.precision.is_integer() {
                     ty.precision
                 } else {
-                    Prim::Int32
+                    Prim::Int64
                 };
                 self.dag.add_node(
                     RiscOp::Shape { axis },

@@ -157,7 +157,7 @@ const EXPAND_SRC: &str = r#"
     (def {} x (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} x))
     (def {} e
       (app {type: (t-tensor {} (d-lit {} 4) (d-lit {} 3) (t-prim {} f32))}
-           (var {} expand) (var {} x) (lit {} 0) (lit {} 4)))
+           (var {} expand) (var {} x) (lit {} 0) 4i64))
 "#;
 
 #[test]
@@ -290,7 +290,7 @@ fn sum_unbound_operand_single_diagnostic_no_accept() {
 #[test]
 fn expand_unbound_operand_single_diagnostic_no_accept() {
     assert_single_unbound(
-        "def driver() -> f32 = {\n  e = expand(missing_x, 0, 4)\n  cast(0.0, f32)\n}\n",
+        "def driver() -> f32 = {\n  e = expand(missing_x, 0, 4i64)\n  cast(0.0, f32)\n}\n",
         "missing_x",
         "expand main-pass",
     );
@@ -305,7 +305,7 @@ fn expand_error_size_operand_single_diagnostic_no_accept() {
     // `Error`; the unbound-var diagnostic still fires. Exactly ONE diagnostic
     // — no silent accept, no ICE.
     assert_single_unbound(
-        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = expand(x, 0, add(missing_v, cast(1, int32)))\n  cast(0.0, f32)\n}\n",
+        "def driver(x: tensor[3, f32]) -> f32 = {\n  e = expand(x, 0, add(missing_v, cast(1, int64)))\n  cast(0.0, f32)\n}\n",
         "missing_v",
         "expand error-size main-pass",
     );

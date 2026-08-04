@@ -1094,7 +1094,7 @@ fn tensor_binder_can_be_used_by_shape_queries() {
   {
     n = shape(x, 0)
     _ = drop(x)
-    n == 3
+    n == 3i64
   }
 "#,
     );

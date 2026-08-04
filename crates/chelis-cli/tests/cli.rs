@@ -5151,7 +5151,7 @@ fn build_hip_emits_pad_kernel() {
     // to a typed per-output-element kernel instead of rejecting it.
     write_file(
         &path,
-        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], 0.0)\n",
     );
 
     let json = run_json_check(&path);
@@ -5186,7 +5186,7 @@ fn build_hip_emits_shrink_kernel() {
     // WS-8A: shrink now lowers to a typed per-output-element kernel on HIP.
     write_file(
         &path,
-        "def f(x: tensor[6, f32]) -> tensor[4, f32] = shrink(&x, [[1, 5]])\n",
+        "def f(x: tensor[6, f32]) -> tensor[4, f32] = shrink(&x, [[1i64, 5i64]])\n",
     );
 
     let json = run_json_check(&path);
@@ -6192,7 +6192,7 @@ fn target_metal_emits_pad_kernel() {
     // instead of rejecting it.
     write_file(
         &path,
-        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1, 1]], 0.0)\n",
+        "def f(x: tensor[4, f32]) -> tensor[6, f32] = pad(&x, [[1i64, 1i64]], 0.0)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -6227,7 +6227,7 @@ fn target_metal_emits_shrink_kernel() {
     // WS-8A: the Metal backend now lowers shrink to a typed MSL kernel.
     write_file(
         &path,
-        "def f(x: tensor[4, f32]) -> tensor[2, f32] = shrink(&x, [[1, 3]])\n",
+        "def f(x: tensor[4, f32]) -> tensor[2, f32] = shrink(&x, [[1i64, 3i64]])\n",
     );
 
     Command::cargo_bin("chelis")
@@ -8409,7 +8409,7 @@ fn build_c_to_tensor_2d_nested_literal_matches_eval_output() {
 /// same-rank "replicate-singleton" branch when `in_shape[axis] == 1`,
 /// producing rank-1 `[count]` instead of the rank-2 `[count, 1]` the
 /// typer accepted — the divergence reproduced from the
-/// `examples/linreg.ch` shape (`expand(b, 0, 64)` over a rank-1 bias).
+/// `examples/linreg.ch` shape (`expand(b, 0, 64i64)` over a rank-1 bias).
 #[test]
 fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     let dir = tempdir().expect("tempdir");
@@ -8418,10 +8418,10 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     // Rank-1 [1] bias expanded along axis 0 with count 4 must produce
     // rank-2 [4, 1] output. This is the exact shape pattern the
     // `examples/linreg.ch` predict/loss helpers rely on
-    // (`expand(b, 0, 64)` where `b: tensor[1, f32]`).
+    // (`expand(b, 0, 64i64)` where `b: tensor[1, f32]`).
     write_file(
         &path,
-        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = expand(b, 0, 4)\n\
+        "def broadcast_bias(b: tensor[1, f32]) -> tensor[4, 1, f32] = expand(b, 0, 4i64)\n\
          result = broadcast_bias(to_tensor([cast(7.0, f32)]))\n",
     );
 

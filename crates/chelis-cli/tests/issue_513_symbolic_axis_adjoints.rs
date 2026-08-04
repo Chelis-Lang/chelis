@@ -17,7 +17,7 @@
 //!      the reduced axis needs a concrete size (that stays fail-closed).
 //!   3. `reshape` whose target dims are integer ARITHMETIC over
 //!      statically-sized `shape()` reads (the school im2col witness shape,
-//!      `reshape(p, [mul(b_d, a_d), 1])`): `extract_reshape_dim_list` now
+//!      `reshape(p, [mul(b_d, a_d), 1i64])`): `extract_reshape_dim_list` now
 //!      const-folds the arithmetic to a `Lit` when every leaf is static, so
 //!      the backward `Expand`/`Sum` no longer inherits the checker's
 //!      `Named("*")` wildcard (the dag.rs symbolic-occurrences ICE).
@@ -179,21 +179,21 @@ fn assert_close(label: &str, got: &[f64], want: &[f64], tol: f64) {
 
 // ---------------------------------------------------------------------------
 // Sub-slice 1: Stride adjoint, symbolic batch axis, concrete strided axis.
-// stride(x, 1, 2) over tensor[batch, 4] keeps columns {0, 2}.
+// stride(x, 1i64, 2i64) over tensor[batch, 4] keeps columns {0, 2}.
 // ---------------------------------------------------------------------------
 
 const STRIDE_SIG: &str = "sig f: tensor[batch, 4, f32] -> f32";
 
-const STRIDE_LINEAR_BODY: &str = "  s = stride(&x, cast(1, int32), cast(2, int32))\n\
+const STRIDE_LINEAR_BODY: &str = "  s = stride(&x, cast(1, int64), cast(2, int64))\n\
   sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
 
-const STRIDE_NONLINEAR_BODY: &str = "  s = stride(&x, cast(1, int32), cast(2, int32))\n\
+const STRIDE_NONLINEAR_BODY: &str = "  s = stride(&x, cast(1, int64), cast(2, int64))\n\
   sq = mul(s, s)\n\
   sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
 
 const STRIDE_BASE: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
 
-/// FD oracle, linear: loss = sum(stride(x, 1, 2)), so the gradient is 1 at
+/// FD oracle, linear: loss = sum(stride(x, 1i64, 2i64)), so the gradient is 1 at
 /// the kept columns {0, 2} of every (symbolic-batch) row and 0 elsewhere.
 /// Pre-fix this failed loud: "cannot determine size for symbolic dimension
 /// `batch`" from the stride adjoint's all-axes dim_size sweep.
@@ -211,7 +211,7 @@ fn issue_513_stride_symbolic_batch_grad_linear_matches_fd() {
     assert_close("stride linear grad vs FD", &grad, &fd, 5e-2);
 }
 
-/// FD oracle, nonlinear: loss = sum(square(stride(x, 1, 2))), gradient is 2x
+/// FD oracle, nonlinear: loss = sum(square(stride(x, 1i64, 2i64))), gradient is 2x
 /// at kept columns and 0 elsewhere.
 #[test]
 fn issue_513_stride_symbolic_batch_grad_nonlinear_matches_fd() {
@@ -234,7 +234,7 @@ fn issue_513_stride_symbolic_batch_grad_nonlinear_matches_fd() {
 /// kept columns are {0, 3}, gradient 2x there and 0 elsewhere.
 #[test]
 fn issue_513_stride_overshoot_symbolic_batch_grad_matches_fd() {
-    let body = "  s = stride(&x, cast(1, int32), cast(3, int32))\n\
+    let body = "  s = stride(&x, cast(1, int64), cast(3, int64))\n\
   sq = mul(s, s)\n\
   sum(sum(sq, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar";
     let (shape, grad) = eval_grad(&grad_source(
@@ -335,7 +335,7 @@ fn reshape_arith_source(nonlinear: bool, literal: &str, grad: bool) -> String {
 
 const RESHAPE_BASE: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
 
-/// FD oracle, linear: loss = sum(reshape(permute(x), [b*a, 1])) = sum(x),
+/// FD oracle, linear: loss = sum(reshape(permute(x), [b*a, 1i64])) = sum(x),
 /// gradient all ones. Pre-fix the unresolvable `mul(...)` target fell back to
 /// the checker's `Named("*")` wildcard dims and the backward Expand ICEd in
 /// `symbolic_occurrences` ("symbolic dim `*` ... no Load input declares it").
@@ -737,14 +737,14 @@ fn expect_grad_failure(source: &str, stem: &str, needle: &str, context: &str) {
 
 /// chelis#616: a stride along the SYMBOLIC axis itself now builds the
 /// runtime adjoint cascade (Shape-read trim + runtime merge extent). For
-/// `f(x) = sum(stride(x, 2))` over `[1, 2, 3, 4]`, the loss reads elements
+/// `f(x) = sum(stride(x, 2i64))` over `[1, 2, 3, 4]`, the loss reads elements
 /// 0 and 2, so the gradient is the upsample mask `[1, 0, 1, 0]`.
 #[test]
 fn issue_513_stride_on_symbolic_axis_grad_is_upsample_mask() {
     let source = "module Repro.StrideSymAxis\n\
 sig f: tensor[n, f32] -> f32\n\
 def f(x) = {\n\
-  s = stride(&x, cast(2, int32))\n\
+  s = stride(&x, cast(2, int64))\n\
   sum(s, cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)]))\n";
@@ -787,7 +787,7 @@ fn issue_513_shrink_concrete_bounds_on_symbolic_axis_grad_is_window_mask() {
     let source = "module Repro.ShrinkSymAxis\n\
 sig f: tensor[batch, 4, f32] -> f32\n\
 def f(x) = {\n\
-  s = shrink(&x, [[cast(0, int32), cast(1, int32)], [cast(1, int32), cast(3, int32)]])\n\
+  s = shrink(&x, [[cast(0, int64), cast(1, int64)], [cast(1, int64), cast(3, int64)]])\n\
   sum(sum(s, cast(0, int32)), cast(0, int32)) |> tensor_to_scalar\n\
 }\n\
 out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)], [cast(5.0, f32), cast(6.0, f32), cast(7.0, f32), cast(8.0, f32)]]))\n";
@@ -802,7 +802,7 @@ out = grad(f)(to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4
 }
 
 /// The SYMBOLIC-sig arithmetic reshape target (the true school im2col form,
-/// `tensor[a, b, f32]` with `reshape(p, [mul(b_d, a_d), 1])`) now LOWERS
+/// `tensor[a, b, f32]` with `reshape(p, [mul(b_d, a_d), 1i64])`) now LOWERS
 /// (chelis#616): the runtime product becomes a rank-0 scalar node that the
 /// reshape references as a node-valued target extent, the numel invariant is
 /// enforced at run time, and the backward pass resolves the runtime extent
