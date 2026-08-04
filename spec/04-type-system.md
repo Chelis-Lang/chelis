@@ -2496,7 +2496,7 @@ rejections with no citation).
 > comparison, fold, or output, in every lane and on every surface
 > (scalar and tensor alike).
 
-*(Not honored today: chelis#717, #714, #718, #720, #726.)*
+*(Not honored today: chelis#689, #693, #699, #714.)*
 
 > **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
 > ties-to-even, at the dtype's own STORAGE width (f64 identity; f32
@@ -2505,7 +2505,7 @@ rejections with no citation).
 > infinities preserved. The width at which the op is COMPUTED before
 > finalization is fixed by [04-NUM-8], not by this atom.
 
-*(Honored today only by the eval scalar lane; see chelis#717.)*
+*(Not honored today: chelis#714.)*
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
@@ -2513,15 +2513,11 @@ rejections with no citation).
 > operations of [04-NUM-7]), saturate, or silently widen.
 > In-range integer arithmetic SHALL be exact at every width.
 
-*(Not honored today: int8/16/32 wrap in eval scalars, int64 saturates,
-the compiled scalar lane widens, the compiled tensor lane wraps -
-chelis#680/#718.)*
+*(Not honored today: chelis#689.)*
 
 > **[04-NUM-4]** A `bool` value SHALL be exactly 0 or 1; arithmetic
 > that would produce any other value in a bool-typed position SHALL be
 > rejected by the checker or trap.
-
-*(Not honored today: chelis#726.)*
 
 > **[04-NUM-5]** Comparisons SHALL compare finalized values: a cast's
 > rounding applies before any comparison reads it, including in
@@ -2529,8 +2525,6 @@ chelis#680/#718.)*
 > per-dtype semantics or decline to fold. A fold SHALL never remove a
 > branch that exact semantics would take, and SHALL never fold away or
 > introduce a trap.
-
-*(Not honored today: chelis#711, #720.)*
 
 > **[04-NUM-6]** `f64 add(2^53, 1) == 2^53` and every other correctly
 > rounded float result at the dtype's own mantissa boundary is CORRECT
