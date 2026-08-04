@@ -11,6 +11,9 @@ concurrency:
 
 permissions:
   contents: write
+  # The Phase 3 capacity-census liveness gate resolves cited tracker state.
+  # Keep the token itself scoped to that one integration step below.
+  issues: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -678,6 +681,8 @@ jobs:
       # nested invocation here so all four #729 acceptance contracts are
       # required continuously without adding duplicate commands to gate.py.
       - name: Dtype Phase 0-3 oracle
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
 
       # Informational, non-failing: flags integration tests that have
