@@ -17,6 +17,25 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+# One cargo target directory for BOTH legs, workspace-relative.
+#
+# A target directory is cargo's unit of compiled-artifact reuse. The wire leg
+# documents `chelis-compiler-api` and the binding leg documents
+# `chelis-python`; those two crates share nearly all of the chelis dependency
+# graph, so giving each leg its own directory made each one compile that graph
+# from scratch. Both were consequently the only tests in the repository above
+# nextest's 60s SLOW threshold. Sharing one directory lets whichever leg runs
+# second reuse the first's dependencies.
+#
+# It deliberately is NOT the ambient `target/`: these enumerators run from
+# inside a `cargo nextest` test process, and a nested cargo pointed at the
+# outer build's target directory would contend with that build's lock.
+#
+# The callers do not choose this path. Both legs resolving to the same
+# directory is the entire point, so the constant lives here rather than in two
+# separate Rust test files that could silently drift apart again.
+SHARED_RUSTDOC_TARGET_DIR = Path("target/agents/729-capacity-rustdoc")
+
 NUMERIC_PRIMITIVES = {
     "f32",
     "f64",
@@ -372,16 +391,32 @@ def generate_rustdoc_json(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("wire", "bindings"))
-    parser.add_argument("--target-dir", type=Path, required=True)
+    # Optional, and no caller in the repository passes it: see
+    # SHARED_RUSTDOC_TARGET_DIR. It stays accepted for ad-hoc local runs that
+    # need an isolated directory (the `target/agents/<name>` convention for
+    # concurrent agents), which must not disturb the shared one.
+    parser.add_argument("--target-dir", type=Path, default=None)
     parser.add_argument("--registered", action="append", default=[])
     parser.add_argument("--registered-method", action="append", default=[])
     parser.add_argument("--rustdoc-json", type=Path)
     return parser.parse_args()
 
 
+def resolve_target_dir(root: Path, requested: Path | None) -> Path:
+    """Absolute cargo target directory for the rustdoc build.
+
+    `None` -- the case for every caller in this repository -- resolves to the
+    shared directory, so both legs reuse one compiled dependency graph.
+    """
+    if requested is None:
+        return root / SHARED_RUSTDOC_TARGET_DIR
+    return requested if requested.is_absolute() else root / requested
+
+
 def main() -> int:
     args = parse_args()
     root = Path(__file__).resolve().parent.parent
+    target_dir = resolve_target_dir(root, args.target_dir)
     try:
         if args.rustdoc_json:
             document = json.loads(args.rustdoc_json.read_text())
@@ -390,14 +425,14 @@ def main() -> int:
                 root=root,
                 package="chelis-compiler-api",
                 crate_name="chelis_compiler_api",
-                target_dir=args.target_dir,
+                target_dir=target_dir,
             )
         else:
             document = generate_rustdoc_json(
                 root=root,
                 package="chelis-python",
                 crate_name="chelis_python",
-                target_dir=args.target_dir,
+                target_dir=target_dir,
             )
         rows = (
             wire_rows(document)

@@ -472,8 +472,12 @@ fn run_typed_enumerator() -> Output {
     let root = workspace_root();
     Command::new(root.join(".venv/bin/python"))
         .arg(root.join("scripts/capacity_census_typed.py"))
-        .args(["wire", "--target-dir"])
-        .arg(root.join("target/agents/729-capacity-wire-rustdoc"))
+        // No `--target-dir`: the enumerator owns that choice so the wire and
+        // PyO3 binding censuses cannot drift onto separate cargo target
+        // directories. They previously had one each, so both compiled the
+        // common chelis dependency graph from scratch, which is why they were
+        // the only tests in the repo over nextest's 60s SLOW threshold.
+        .arg("wire")
         .current_dir(&root)
         .output()
         .expect("run typed wire census enumerator")
