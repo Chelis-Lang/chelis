@@ -2719,11 +2719,12 @@ fn propagated_findings(functions: Vec<FunctionFacts>) -> Vec<Finding> {
         .collect()
 }
 
-// This is the upper-consumer scope, not a workspace-wide inventory.
-// `chelis-reef` remains a documented dependency exception. Issue #1012
-// owns the lower-core extraction that will remove that exception.
-const GUARDED_SOURCE_ROOTS: [&str; 3] = [
+// This is the semantic-pipeline scope, not a workspace-wide inventory.
+const CORE_OWNER_ROOT: &str = "crates/chelis-pipeline-core/src";
+const GUARDED_SOURCE_ROOTS: [&str; 5] = [
+    CORE_OWNER_ROOT,
     "crates/chelis-compiler-api/src",
+    "crates/chelis-reef/src",
     "crates/chelis-cli/src",
     "crates/chelis-e2e/src",
 ];
@@ -2752,7 +2753,6 @@ fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
             && !path
                 .file_name()
                 .is_some_and(|name| name == "tests.rs" || name == "source_arch.rs")
-            && !path.ends_with(Path::new("chelis-compiler-api/src/pipeline.rs"))
         {
             files.push(path);
         }
@@ -2810,18 +2810,22 @@ fn actual_workspace_findings(workspace: &Path) -> Vec<Finding> {
         })
         .collect::<Vec<_>>();
     inspect_parsed_sources(&sources)
+        .into_iter()
+        .filter(|finding| !finding.path.starts_with(CORE_OWNER_ROOT))
+        .collect()
 }
 
 #[test]
-fn guarded_source_roots_match_the_upper_consumer_scope() {
+fn guarded_source_roots_match_the_semantic_pipeline_scope() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     let guarded = [
+        "crates/chelis-pipeline-core/src/probe.rs",
         "crates/chelis-compiler-api/src/probe.rs",
+        "crates/chelis-reef/src/probe.rs",
         "crates/chelis-cli/src/probe.rs",
         "crates/chelis-e2e/src/probe.rs",
     ];
-    let reef_exception = "crates/chelis-reef/src/probe.rs";
-    for relative in guarded.iter().chain(std::iter::once(&reef_exception)) {
+    for relative in guarded {
         let path = workspace.path().join(relative);
         fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
         fs::write(path, "fn probe() {}\n").expect("fixture source");
@@ -2838,7 +2842,33 @@ fn guarded_source_roots_match_the_upper_consumer_scope() {
     let expected = guarded.into_iter().map(PathBuf::from).collect();
 
     assert_eq!(actual, expected);
-    assert!(!actual.contains(&PathBuf::from(reef_exception)));
+}
+
+#[test]
+fn planted_reef_semantic_sequence_is_rejected() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let reef = workspace.path().join("crates/chelis-reef/src/duplicate.rs");
+    fs::create_dir_all(reef.parent().expect("fixture parent")).expect("fixture directory");
+    fs::write(
+        &reef,
+        r#"
+            fn checked_program_with_effects(exprs: &[Expr]) {
+                let checked = chelis_types::check_ir_program(exprs).unwrap();
+                let checked = chelis_effects::check_program(&checked).unwrap();
+                chelis_types::check_linearity(&checked).unwrap();
+            }
+        "#,
+    )
+    .expect("fixture source");
+
+    assert_eq!(
+        actual_workspace_findings(workspace.path()),
+        vec![Finding {
+            path: "crates/chelis-reef/src/duplicate.rs".to_string(),
+            function: "checked_program_with_effects".to_string(),
+            stages: vec!["effects", "linearity", "type"],
+        }]
+    );
 }
 
 #[test]
@@ -3252,11 +3282,11 @@ fn imported_stage_module_aliases_cannot_bypass_the_guard() {
 }
 
 #[test]
-fn owner_exclusion_does_not_hide_an_e2e_pipeline_file() {
+fn core_owner_exclusion_does_not_hide_an_e2e_pipeline_file() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     let owner = workspace
         .path()
-        .join("crates/chelis-compiler-api/src/pipeline.rs");
+        .join("crates/chelis-pipeline-core/src/pipeline.rs");
     let e2e = workspace.path().join("crates/chelis-e2e/src/pipeline.rs");
     for path in [&owner, &e2e] {
         fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");

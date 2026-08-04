@@ -1,7 +1,8 @@
 use chelis_compiler_api::pipeline::{
     IrName, LoweringMode, PipelineGoal, PipelineOutcome, PipelineRejection, PipelineRequest,
     PreparedTypeAnalysis, PreparedTypeAnalysisOutcome, SemanticContext, SemanticRejection,
-    analyze_prepared, complete_checks, prepare_source, run_source,
+    analyze_prepared, complete_checks, lower_checked, lower_library, prepare_source, run_prepared,
+    run_source,
 };
 use chelis_compiler_api::schema::SourceKind;
 use chelis_types::TypeAnalysisOutcome;
@@ -143,6 +144,62 @@ fn pre_cancelled_pipeline_rejects_structurally_before_parsing() {
         rejection,
         PipelineRejection::Cancelled { stage: "parse" }
     ));
+}
+
+#[test]
+fn direct_lower_functions_keep_the_lower_cancellation_stage() {
+    let checked = complete_checks(
+        accepted_analysis("def identity(x: tensor[n, f32]) -> tensor[n, f32] = x\n"),
+        SemanticContext::Isolated,
+    )
+    .expect("the fixture must pass semantic checks");
+    let library_program = checked.program().clone();
+
+    let token = chelis_types::CancelToken::new();
+    token.cancel();
+    let _guard = chelis_types::install_cancel_token(token);
+
+    let checked_rejection = lower_checked(checked, LoweringMode::Strict)
+        .expect_err("direct checked lowering must observe cancellation");
+    assert!(matches!(
+        checked_rejection,
+        PipelineRejection::Cancelled { stage: "lower" }
+    ));
+
+    let library_rejection = lower_library(&library_program)
+        .expect_err("direct library lowering must observe cancellation");
+    assert!(matches!(
+        library_rejection,
+        PipelineRejection::Cancelled { stage: "lower" }
+    ));
+}
+
+#[test]
+fn dynamic_pipeline_goals_keep_their_initial_cancellation_stage() {
+    let prepared = [
+        PipelineGoal::TypeAnalysis,
+        PipelineGoal::FullCheck,
+        PipelineGoal::Lower(LoweringMode::Strict),
+    ]
+    .map(|goal| {
+        (
+            goal,
+            prepare_source(SourceKind::Surf, "def answer -> int32 = 42\n", None)
+                .expect("the fixture source must prepare"),
+        )
+    });
+    let token = chelis_types::CancelToken::new();
+    token.cancel();
+    let _guard = chelis_types::install_cancel_token(token);
+
+    for (goal, prepared) in prepared {
+        let rejection = run_prepared(prepared, goal)
+            .expect_err("every dynamic goal must observe cancellation before analysis");
+        assert!(matches!(
+            rejection,
+            PipelineRejection::Cancelled { stage: "check" }
+        ));
+    }
 }
 
 #[test]

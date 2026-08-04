@@ -64,7 +64,10 @@ it necessary.
 
 ### Canonical Pipeline Owner
 
-`chelis_compiler_api::pipeline` owns front-end stage order for compiler API, CLI, and E2E production code.
+`chelis-pipeline-core` owns type analysis, effect checks, linearity checks, root metadata, and lowering.
+
+`chelis_compiler_api::pipeline` remains the public facade. It owns source preparation, dynamic goals, cancellation, host policy, and backend policy.
+
 Consumers select one closed goal:
 
 - `TypeAnalysis` returns fitness and one type-inference product.
@@ -78,10 +81,11 @@ A rejection does not contain a checked or lowered success product.
 The CLI retains style policy, Reef preparation, JSON, exit codes, target selection, and backend emission.
 Backend emitters remain final target-specific correctness boundaries.
 
-`chelis-reef` package artifact construction remains one dependency exception. Issue #1012 owns the lower-core extraction that will remove it.
+`chelis-reef` passes linked expanded Deep to the core. It retains package links, name policy, archives, and schemas.
 
-The source guard checks compiler API, CLI, and E2E production code. It does not claim coverage for all workspace crates.
-The detailed baseline is in `docs/investigations/compiler_pipeline_inventory.md`.
+The source guard checks five production roots. It does not claim coverage for all workspace crates.
+The detailed inventory is in `docs/investigations/compiler_pipeline_inventory.md`.
+The `std` blocker inventory is in `docs/investigations/pipeline_core_std_blockers.md`.
 
 ## Crate Dependency Graph
 
@@ -90,17 +94,21 @@ chelis-cli ───────────────┐
 chelis-e2e ───────────────┤
 chelis-tide ──────────────┼──> chelis-compiler-api
 chelis-python ────────────┘          │
-                                     ├── chelis-surf ──> chelis-deep
-                                     ├── chelis-types ─> chelis-deep
-                                     ├── chelis-effects
-                                     ├── chelis-ir ─────> chelis-types
-                                     ├── chelis-backend-c
-                                     ├── chelis-backend-hip
-                                     └── chelis-reef
+                                     ├──> chelis-pipeline-core
+                                     ├──> chelis-reef ──> chelis-pipeline-core
+                                     ├──> chelis-surf and chelis-macros
+                                     └──> target backends
+
+chelis-pipeline-core
+    ├──> chelis-deep
+    ├──> chelis-types
+    ├──> chelis-effects
+    └──> chelis-ir
 ```
 
 The dependency graph is a strict DAG.
-`chelis-deep` is the foundation. Upper consumer crates delegate shared compiler orchestration to `chelis-compiler-api`.
+The compiler API and Reef use the dependency-bottom semantic core.
+The core has exactly four direct production dependencies.
 
 ## Crates
 

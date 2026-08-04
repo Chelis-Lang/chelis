@@ -1,6 +1,6 @@
 # Compiler Pipeline Inventory
 
-This inventory records production front-end sequences before the canonical pipeline migration.
+This inventory records the current production front-end sequences and ownership boundaries.
 
 The scope covers these consumers:
 
@@ -16,7 +16,7 @@ The scope covers these consumers:
 - Deep authoring and opaque-value decode consumers
 - lenient Deep diagnostics and typed macro expansion
 
-This upper-consumer scope does not include `chelis-reef` package artifact construction. Tests can call individual stages for focused evidence.
+The guarded scope also includes `chelis-pipeline-core` and `chelis-reef`. Tests can call individual stages for focused evidence.
 
 ## Baseline Sequences
 
@@ -41,14 +41,15 @@ The CLI check paths ran inference twice. They called `check_ir_fitness` and `che
 
 ## Canonical Ownership
 
-`chelis_compiler_api::pipeline` now owns these transitions in the upper-consumer scope:
+`chelis-pipeline-core` owns these transitions in the guarded scope:
 
-- source preparation
 - isolated and contextual type analysis
 - effect checks
 - linearity checks
 - isolated and contextual lowering
 - root metadata
+
+`chelis_compiler_api::pipeline` owns source preparation, dynamic goal selection, cancellation, host policy, and backend policy.
 
 Adapters retain presentation and policy. The CLI retains style checks, Reef preparation, JSON, exit codes, target selection, and backend emission.
 
@@ -66,7 +67,9 @@ The macro expander reads internal definitions and typed variable calls.
 
 The source guard checks production functions in exactly these trees:
 
+- `crates/chelis-pipeline-core/src`
 - `crates/chelis-compiler-api/src`
+- `crates/chelis-reef/src`
 - `crates/chelis-cli/src`
 - `crates/chelis-e2e/src`
 
@@ -86,27 +89,29 @@ Branch and loop patterns create lexical bindings. Local macros resolve canonical
 
 The guard ignores uninvoked callable bodies. Mutually exclusive execution paths remain valid.
 
+The guard classifies direct lower-stage calls. It treats core transition calls as adapter delegation.
+
 ## Dependency Boundary
 
-`chelis-reef` remains below `chelis-compiler-api` in the dependency graph. Its package artifact builder cannot call the compiler-API pipeline without a dependency cycle.
+`chelis-pipeline-core` is below `chelis-compiler-api` and `chelis-reef` in the dependency graph.
 
-The package artifact and schema paths call `checked_program_with_effects`. This helper runs type, effect, and linearity stages on fully linked Deep.
+The core depends directly on `chelis-deep`, `chelis-types`, `chelis-effects`, and `chelis-ir`. A dependency guard checks the manifest and resolved graph.
 
-This helper is one explicit dependency exception. The source guard excludes `crates/chelis-reef/src`, and no other production crate uses this exception.
+The package artifact and schema paths pass fully linked expanded Deep to the core. `checked_program_with_effects` retains only the Reef error adapter.
 
-Issue #1012 owns the dependency-bottom pipeline core that will remove the exception. This change does not claim whole-workspace source-guard coverage.
+The Reef exception no longer exists. This inventory does not claim whole-workspace source-guard coverage.
 
 ## Final Artifact Boundaries
 
 | Artifact | Constructor owner | Consumers |
 |---|---|---|
 | `ValidatedModule` | `check_whole_module_edit` | Edit tools and compiler API schema adapters |
-| `AllRootNames` | Compiler pipeline root analysis | Compiler API evaluation and host output adapters |
-| `TensorRootNames` | Compiler pipeline root analysis | Lower policy, CLI root selection, and compiler API evaluation |
-| `NamedRoots` | Exact name-to-DAG alignment | Compiler API schema adapters, evaluation, and E2E tools |
-| `ForwardNodeIndex` | `NamedRoots` plus DAG load aliases | Compiler API gradient adapters |
-| `LoweredParts` | `LoweredCompilation::into_parts` | Compiler API and E2E consumers |
-| `SemanticRejection` | `complete_checks` | Full pipeline adapters, edit validation, layered checks, and CLI checks |
+| `AllRootNames` | Core root analysis | Compiler API evaluation and host output adapters |
+| `TensorRootNames` | Core root analysis | Lower policy, CLI root selection, and compiler API evaluation |
+| `NamedRoots` | Core exact name-to-DAG alignment | Compiler API schema adapters, evaluation, and E2E tools |
+| `ForwardNodeIndex` | Core `NamedRoots` plus DAG load aliases | Compiler API gradient adapters |
+| `LoweredParts` | Core `LoweredCompilation::into_parts` | Compiler API and E2E consumers |
+| `SemanticRejection` | Core `complete_checks` | Full pipeline adapters, edit validation, layered checks, and CLI checks |
 | `DiagnosticCheckpoint` | `DiagnosticSink::checkpoint` | Body inference in `chelis-types` |
 | `LayeredCheck` | Layered compiler checks | CLI report assembly and linked proof checks |
 
@@ -231,7 +236,7 @@ It preserves callable branch results, stable Boolean values, and known array ele
 
 The import inventory now includes `extern crate` aliases and local type aliases. Macro keys now include lexical block identity.
 
-A final fresh post-remediation red-team remains pending.
+That historical post-remediation red-team remained pending at this checkpoint.
 
 ## Acceptance Evidence
 
@@ -301,7 +306,7 @@ The expanded authoritative oracle passed after all target corrections.
 
 The current-target local gate passed for all nine changed crates.
 
-A final fresh review of the exact corrected tree remains pending.
+That historical review remained pending at this checkpoint.
 
 The first local gate found that blanket empty-DAG alignment broke a valid C host-backend program. The revised typed policy preserves that build.
 
@@ -327,10 +332,38 @@ The raw-checkpoint command reported `diagnostic checkpoint compile-fail: PASS`. 
 
 A PR review found that the active ownership requirement exceeded the source guard scope. It also found that hosted CI did not execute two compile-fail controls.
 
-The ownership requirement now names the three guarded roots and the Reef dependency exception. A source-guard test locks this exact root set.
+At that time, the ownership requirement named three guarded roots and the Reef dependency exception. A source-guard test locked that root set.
 
 The canonical gate now runs compiler-API doctests and the raw-checkpoint fixture. Gate unit tests lock both commands in local and hosted stages.
 
 The compiler-API doctests passed five compile-fail tests and one regular doctest. The checkpoint fixture passed with its exact diagnostic checks.
 
 All 29 gate unit tests passed. The complete local gate and authoritative compiler pipeline oracle passed after the correction.
+
+### Functional pipeline core extraction
+
+The Reef parity baseline records source revision `261d64260d5a974c06f15245ecd31b671ecc80a4`.
+The capture used the Reef pipeline before the core extraction.
+The accepted capture records exact artifacts, schema output, and hashes.
+The rejected capture records complete type, effect, and linearity errors.
+
+The canonical gate now runs doctests for `chelis-compiler-api` and `chelis-pipeline-core`.
+It also runs the raw checkpoint fixture.
+Command-list tests lock all three controls in local and hosted stages.
+
+A fresh local red team found three enforceable boundary defects.
+The composition hook permitted safe construction with an unchecked library.
+The dependency guard omitted direct build dependencies.
+The documentation guard accepted broader false portability claims.
+
+The core composition hook is now an unsafe adapter boundary.
+Safe dependent code cannot compose unchecked states through this hook.
+The compiler API retains a crate-private wrapper for the layered adapter.
+
+The manifest guard now scans normal and build dependencies. It also scans target-specific tables.
+Its closed direct set rejects unknown build dependencies.
+The documentation guard now rejects current compatibility claims without the exact attribute spelling.
+
+The authoritative compiler pipeline oracle passed after these corrections.
+The local gate passed for `chelis-compiler-api`, `chelis-pipeline-core`, and `chelis-reef`.
+The hosted macOS Smoke, Docs, and changed-crate evidence is still pending for the final commit.

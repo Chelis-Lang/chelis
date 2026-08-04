@@ -449,6 +449,7 @@ class ListOutputTests(unittest.TestCase):
         ]
         for command in (
             "cargo test -p chelis-compiler-api --doc",
+            "cargo test -p chelis-pipeline-core --doc",
             ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
         ):
             self.assertIn(command, rendered)
@@ -457,6 +458,7 @@ class ListOutputTests(unittest.TestCase):
         rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
         for command in (
             "cargo test -p chelis-compiler-api --doc",
+            "cargo test -p chelis-pipeline-core --doc",
             ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
         ):
             self.assertIn(command, rendered)

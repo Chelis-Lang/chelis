@@ -8615,27 +8615,19 @@ fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Ex
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
-    // RFC v5 (RT-1 F2 bypass): this checks the fully linked package
-    // (`build_package_with_options` flattens `link_graph` output), which
-    // is reef-linker output carrying internal-name-mangled bindings.
-    // Accept the linker name format for this check.
+    // This checks the complete linked package. Keep the guard installed for
+    // all core semantic transitions so internal linker names remain valid.
     let _linked = chelis_types::install_linked_program_guard();
-    let checked = chelis_types::check_ir_program(deep_exprs)
-        .map_err(|r| format!("Type errors: {:?}", r.errors))?;
-    let checked = chelis_effects::check_program(&checked).map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    chelis_types::check_linearity(&checked).map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|error| error.message)
-            .collect::<Vec<_>>()
-            .join("; ")
-    })
+    let prepared = chelis_pipeline_core::PreparedProgram::from_expanded_deep(deep_exprs.to_vec());
+    let analysis = match chelis_pipeline_core::analyze_prepared(prepared) {
+        chelis_pipeline_core::PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+        chelis_pipeline_core::PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+            return Err(format!("Type errors: {:?}", fitness.errors));
+        }
+    };
+    chelis_pipeline_core::complete_checks(analysis, chelis_pipeline_core::SemanticContext::Isolated)
+        .map(|checked| checked.into_parts().2)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

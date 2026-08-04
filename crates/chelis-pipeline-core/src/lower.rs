@@ -1,0 +1,319 @@
+use std::collections::BTreeSet;
+
+use chelis_ir::Dag;
+use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary};
+use chelis_types::CheckedProgram;
+
+use crate::artifacts::RootBindingMode;
+use crate::roots::root_metadata;
+use crate::{
+    CheckedCompilation, CoreLowerError, ForwardNodeIndex, LoweredCompilation, LoweringMode,
+    NamedRoots, RootCountContext,
+};
+
+/// Lower a checked library carrier without target-specific emission.
+pub fn lower_library(program: &CheckedProgram) -> Result<LoweredLibrary, CoreLowerError> {
+    chelis_ir::lower::try_lower_program_to_library(program).map_err(CoreLowerError::Lower)
+}
+
+/// Lower an isolated checked compilation.
+pub fn lower_checked(
+    checked: CheckedCompilation,
+    mode: LoweringMode,
+) -> Result<LoweredCompilation, CoreLowerError> {
+    let lower_result = chelis_ir::lower::try_lower_program_to_library(checked.program());
+    finish_isolated_lowering(checked, mode, lower_result)
+}
+
+fn finish_isolated_lowering(
+    checked: CheckedCompilation,
+    mode: LoweringMode,
+    lower_result: Result<LoweredLibrary, LowerDiagnostic>,
+) -> Result<LoweredCompilation, CoreLowerError> {
+    let (dag, rootless_defs, root_binding_mode) = match lower_result {
+        Ok(library) if mode == LoweringMode::AllowHostBackend && library.dag.roots().is_empty() => {
+            (
+                library.dag,
+                library.rootless_defs,
+                RootBindingMode::SelectedHostBackend,
+            )
+        }
+        Ok(library) => (library.dag, library.rootless_defs, RootBindingMode::Exact),
+        Err(diagnostic)
+            if mode == LoweringMode::AllowHostOnly
+                && !diagnostic.fatal
+                && checked.root_metadata.tensor_names.is_empty() =>
+        {
+            (
+                Dag::new(),
+                BTreeSet::new(),
+                RootBindingMode::AcceptedNonfatalRejection,
+            )
+        }
+        Err(diagnostic) if mode == LoweringMode::AllowHostBackend && !diagnostic.fatal => (
+            Dag::new(),
+            BTreeSet::new(),
+            RootBindingMode::AcceptedNonfatalRejection,
+        ),
+        Err(diagnostic) => return Err(CoreLowerError::Lower(diagnostic)),
+    };
+    finish_lowering(
+        checked,
+        dag,
+        &rootless_defs,
+        RootCountContext::Program,
+        root_binding_mode,
+    )
+}
+
+/// Lower a checked compilation against a reusable library DAG.
+pub fn lower_checked_with_context(
+    mut checked: CheckedCompilation,
+    library: &LoweredLibrary,
+    mode: LoweringMode,
+) -> Result<LoweredCompilation, CoreLowerError> {
+    let lowered_map = chelis_ir::lower::top_level_lowering_map_with_context(
+        library,
+        checked.program.exprs(),
+        checked.program.type_env(),
+    );
+    checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map));
+    let tensor_names = checked.root_metadata.tensor_names.clone();
+
+    let lower_result = chelis_ir::lower::try_lower_program_with_context(library, &checked.program);
+    let (mut dag, rootless_defs, accepted_nonfatal_rejection) = match lower_result {
+        Ok(composed) => (composed.dag, composed.rootless_defs, false),
+        Err(diagnostic)
+            if mode == LoweringMode::AllowHostOnly
+                && !diagnostic.fatal
+                && tensor_names.is_empty() =>
+        {
+            (library.dag.clone(), BTreeSet::new(), true)
+        }
+        Err(diagnostic) => return Err(CoreLowerError::Lower(diagnostic)),
+    };
+
+    let library_root_count = library.dag.roots().len();
+    let root_start = library_root_count.min(dag.roots().len());
+    let new_roots = dag.roots()[root_start..].to_vec();
+    dag.set_roots(new_roots);
+    let root_binding_mode = if accepted_nonfatal_rejection {
+        RootBindingMode::AcceptedNonfatalRejection
+    } else if mode == LoweringMode::AllowHostBackend && dag.roots().is_empty() {
+        RootBindingMode::SelectedHostBackend
+    } else {
+        RootBindingMode::Exact
+    };
+    finish_lowering(
+        checked,
+        dag,
+        &rootless_defs,
+        RootCountContext::NewCode,
+        root_binding_mode,
+    )
+}
+
+fn finish_lowering(
+    checked: CheckedCompilation,
+    dag: Dag,
+    rootless_defs: &BTreeSet<String>,
+    root_context: RootCountContext,
+    root_binding_mode: RootBindingMode,
+) -> Result<LoweredCompilation, CoreLowerError> {
+    let named_roots = match root_binding_mode {
+        RootBindingMode::Exact => NamedRoots::aligned(
+            &checked.root_metadata.tensor_names.without(rootless_defs),
+            dag.roots(),
+            root_context,
+        )?,
+        RootBindingMode::SelectedHostBackend | RootBindingMode::AcceptedNonfatalRejection => {
+            NamedRoots::empty()
+        }
+    };
+    let forward_node_index = ForwardNodeIndex::from_named_roots(&named_roots, &dag);
+
+    Ok(LoweredCompilation {
+        checked,
+        dag,
+        named_roots,
+        forward_node_index,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use chelis_ir::dag::NodeId;
+
+    use super::*;
+    use crate::{
+        IrName, PreparedProgram, PreparedTypeAnalysisOutcome, SemanticContext, TensorRootNames,
+        analyze_prepared, complete_checks,
+    };
+
+    fn checked_compilation(source: &str) -> CheckedCompilation {
+        let expressions = chelis_deep::parser::parse_str(source).expect("test Deep must parse");
+        let prepared = PreparedProgram::from_expanded_deep(expressions);
+        let analysis = match analyze_prepared(prepared) {
+            PreparedTypeAnalysisOutcome::Accepted(analysis) => *analysis,
+            PreparedTypeAnalysisOutcome::Rejected { fitness } => {
+                panic!("test Deep must type-check: {:?}", fitness.errors)
+            }
+        };
+        complete_checks(analysis, SemanticContext::Isolated)
+            .expect("test Deep must pass semantic checks")
+    }
+
+    fn lowered(dag: Dag) -> LoweredLibrary {
+        LoweredLibrary {
+            dag,
+            symbol_table: Default::default(),
+            program_defs: Default::default(),
+            program_types: Default::default(),
+            linearity: Default::default(),
+            lowered_names: Default::default(),
+            rootless_defs: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn strict_successful_empty_dag_rejects_nonempty_tensor_root_names() {
+        let checked = checked_compilation(
+            "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
+        );
+
+        let error =
+            finish_isolated_lowering(checked, LoweringMode::Strict, Ok(lowered(Dag::new())))
+                .expect_err("strict successful lowering must use exact root alignment");
+
+        assert!(matches!(
+            error,
+            CoreLowerError::RootCount {
+                context: RootCountContext::Program,
+                expected: 1,
+                actual: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn successful_empty_dag_aligns_empty_tensor_root_names() {
+        let checked = checked_compilation("(def {} label (lit {} \"host only\"))");
+
+        let lowered =
+            finish_isolated_lowering(checked, LoweringMode::Strict, Ok(lowered(Dag::new())))
+                .expect("empty names and empty roots must align");
+
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn selected_host_backend_accepts_a_successful_empty_dag() {
+        let checked = checked_compilation(
+            "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
+        );
+
+        let lowered = finish_isolated_lowering(
+            checked,
+            LoweringMode::AllowHostBackend,
+            Ok(lowered(Dag::new())),
+        )
+        .expect("the selected host backend owns the output");
+
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn selected_host_backend_accepts_a_nonfatal_lower_rejection() {
+        let checked = checked_compilation(
+            "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
+        );
+        let diagnostic = LowerDiagnostic {
+            message: "host backend required".to_string(),
+            span: None,
+            span_id: None,
+            fatal: false,
+        };
+
+        let lowered =
+            finish_isolated_lowering(checked, LoweringMode::AllowHostBackend, Err(diagnostic))
+                .expect("the selected host backend accepts a nonfatal rejection");
+
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn declared_root_names_drop_reported_rootless_defs() {
+        let names = TensorRootNames(vec![
+            IrName::new("sumsq"),
+            IrName::new("grad_sumsq"),
+            IrName::new("ho_ignores"),
+        ]);
+        let rootless = BTreeSet::from(["grad_sumsq".to_string()]);
+
+        let kept = names.without(&rootless);
+        let kept: Vec<&str> = kept.iter().map(IrName::as_str).collect();
+        assert_eq!(kept, ["sumsq", "ho_ignores"]);
+    }
+
+    #[test]
+    fn declared_root_names_remain_when_no_defs_are_rootless() {
+        let names = TensorRootNames(vec![IrName::new("ho_a"), IrName::new("sumsq")]);
+
+        let kept = names.without(&BTreeSet::new());
+        let kept: Vec<&str> = kept.iter().map(IrName::as_str).collect();
+        assert_eq!(kept, ["ho_a", "sumsq"]);
+    }
+
+    #[test]
+    fn isolated_named_roots_accept_exact_alignment() {
+        let names = TensorRootNames(vec![IrName::new("only")]);
+        let roots = NamedRoots::aligned(&names, &[NodeId(7)], RootCountContext::Program)
+            .expect("isolated names and roots have equal counts");
+
+        assert_eq!(roots.get(&IrName::new("only")), Some(&NodeId(7)));
+    }
+
+    #[test]
+    fn contextual_named_roots_accept_exact_alignment() {
+        let names = TensorRootNames(vec![IrName::new("new_only")]);
+        let roots = NamedRoots::aligned(&names, &[NodeId(11)], RootCountContext::NewCode)
+            .expect("contextual names and roots have equal counts");
+
+        assert_eq!(roots.get(&IrName::new("new_only")), Some(&NodeId(11)));
+    }
+
+    #[test]
+    fn contextual_named_roots_reject_a_count_mismatch() {
+        let names = TensorRootNames(vec![IrName::new("first"), IrName::new("second")]);
+        let error = NamedRoots::aligned(&names, &[NodeId(7)], RootCountContext::NewCode)
+            .expect_err("contextual counts must match before map construction");
+
+        assert!(matches!(
+            error,
+            CoreLowerError::RootCount {
+                context: RootCountContext::NewCode,
+                expected: 2,
+                actual: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn named_roots_reject_a_count_mismatch_without_a_partial_map() {
+        let names = TensorRootNames(vec![IrName::new("first"), IrName::new("second")]);
+        let error = NamedRoots::aligned(&names, &[NodeId(7)], RootCountContext::Program)
+            .expect_err("different counts must reject before map construction");
+
+        assert!(matches!(
+            error,
+            CoreLowerError::RootCount {
+                context: RootCountContext::Program,
+                expected: 2,
+                actual: 1,
+            }
+        ));
+    }
+}

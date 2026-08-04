@@ -200,6 +200,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "lint --check .",
                 "cargo test -p chelis-types --doc",
                 "cargo test -p chelis-compiler-api --doc",
+                "cargo test -p chelis-pipeline-core --doc",
                 ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
             ],
         )

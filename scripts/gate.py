@@ -115,6 +115,13 @@ DOCTEST_COMPILER_API: list[str] = [
     "chelis-compiler-api",
     "--doc",
 ]
+DOCTEST_PIPELINE_CORE: list[str] = [
+    "cargo",
+    "test",
+    "-p",
+    "chelis-pipeline-core",
+    "--doc",
+]
 # This script verifies the exact compiler diagnostic from the standalone
 # raw-offset fixture. Its Python unit tests use fake runners and do not
 # execute the fixture.
@@ -131,6 +138,7 @@ STAGES: dict[str, list[list[str]]] = {
         CHELIS_LINT_CHECK,
         DOCTEST_TYPES,
         DOCTEST_COMPILER_API,
+        DOCTEST_PIPELINE_CORE,
         CHECKPOINT_COMPILE_FAIL,
     ],
     "integration": [
@@ -152,6 +160,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CHELIS_LINT_CHECK,
     DOCTEST_TYPES,
     DOCTEST_COMPILER_API,
+    DOCTEST_PIPELINE_CORE,
     CHECKPOINT_COMPILE_FAIL,
 ]
 

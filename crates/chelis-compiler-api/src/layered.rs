@@ -261,10 +261,11 @@ pub fn check_layered_for_build(
 
     // Compose the cached chelis-std half with the checked non-chelis-std
     // half. The result remains a typed pipeline state for the build lower step.
-    Ok(Some(crate::pipeline::compose_checked(
-        &stdlib_ctx.library_checked,
-        checked,
-    )))
+    // SAFETY: The cache stores a fully checked library. `checked` passed all
+    // semantic checks against that exact library above.
+    Ok(Some(unsafe {
+        crate::pipeline::compose_checked(&stdlib_ctx.library_checked, checked)
+    }))
 }
 
 #[cfg(test)]
