@@ -188,8 +188,10 @@ fn run_typed_enumerator(surface: &RegisteredSurface) -> Output {
     let mut command = Command::new(root.join(".venv/bin/python"));
     command
         .arg(root.join("scripts/capacity_census_typed.py"))
-        .args(["bindings", "--target-dir"])
-        .arg(root.join("target/agents/729-capacity-bindings-rustdoc"))
+        // No `--target-dir`: see the wire census for why the enumerator owns
+        // that choice. Both censuses share one cargo target directory so the
+        // second one to run reuses the first's compiled dependency graph.
+        .arg("bindings")
         .current_dir(&root);
     for name in &surface.functions {
         command.args(["--registered", name]);
