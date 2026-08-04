@@ -2300,11 +2300,11 @@ pub fn finalize_scalar(
             RawScalar::Int(i) => i as f32,
         }),
         Prim::F16 => Bits::F16(match raw {
-            RawScalar::Float(x) => half::f16::from_f64(x),
+            RawScalar::Float(x) => f16_from_f64_rne(x),
             RawScalar::Int(i) => half::f16::from_f64(i as f64),
         }),
         Prim::Bf16 => Bits::Bf16(match raw {
-            RawScalar::Float(x) => half::bf16::from_f64(x),
+            RawScalar::Float(x) => bf16_from_f64_rne(x),
             RawScalar::Int(i) => bf16_from_i64_rne(i),
         }),
         Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
@@ -2636,14 +2636,14 @@ pub fn finalize_tensor(
             RawTensor::Int(v) => v.into_iter().map(|i| i as f32).collect(),
         }),
         Prim::F16 => Buf::F16(match raw {
-            RawTensor::Float(v) => v.into_iter().map(half::f16::from_f64).collect(),
+            RawTensor::Float(v) => v.into_iter().map(f16_from_f64_rne).collect(),
             RawTensor::Int(v) => v
                 .into_iter()
                 .map(|i| half::f16::from_f64(i as f64))
                 .collect(),
         }),
         Prim::Bf16 => Buf::Bf16(match raw {
-            RawTensor::Float(v) => v.into_iter().map(half::bf16::from_f64).collect(),
+            RawTensor::Float(v) => v.into_iter().map(bf16_from_f64_rne).collect(),
             RawTensor::Int(v) => v.into_iter().map(bf16_from_i64_rne).collect(),
         }),
         Prim::Int8 => Buf::I8(int_buf(op, prim, raw)?),
@@ -3184,6 +3184,73 @@ mod tests {
             |bits| f64::from(half::bf16::from_bits(bits)),
             |value| bf16_from_f64_rne(value).to_bits(),
         );
+    }
+
+    #[test]
+    fn production_finalizers_obey_every_finite_reduced_float_midpoint() {
+        fn check(prim: Prim, last_finite: u16, image: impl Fn(u16) -> f64) {
+            for lower_bits in 0..last_finite {
+                let upper_bits = lower_bits + 1;
+                let midpoint = (image(lower_bits) + image(upper_bits)) / 2.0;
+                let below = f64::from_bits(midpoint.to_bits() - 1);
+                let above = f64::from_bits(midpoint.to_bits() + 1);
+                let tie_bits = if lower_bits & 1 == 0 {
+                    lower_bits
+                } else {
+                    upper_bits
+                };
+                let values = [below, midpoint, above, -below, -midpoint, -above];
+                let expected = [
+                    lower_bits,
+                    tie_bits,
+                    upper_bits,
+                    0x8000 | lower_bits,
+                    0x8000 | tie_bits,
+                    0x8000 | upper_bits,
+                ];
+
+                let scalar_bits: Vec<u16> = values
+                    .into_iter()
+                    .map(|value| {
+                        let value =
+                            finalize_scalar("midpoint_finalization", prim, RawScalar::Float(value))
+                                .unwrap();
+                        match value.bits {
+                            Bits::F16(value) => value.to_bits(),
+                            Bits::Bf16(value) => value.to_bits(),
+                            _ => unreachable!("the requested dtype fixes the storage variant"),
+                        }
+                    })
+                    .collect();
+                assert_eq!(
+                    scalar_bits, expected,
+                    "scalar {prim:?} finalization at midpoint below {lower_bits:#06x}"
+                );
+
+                let tensor = finalize_tensor(
+                    "midpoint_finalization",
+                    prim,
+                    RawTensor::Float(values.to_vec()),
+                )
+                .unwrap();
+                let tensor_bits: Vec<u16> = match tensor.buf {
+                    Buf::F16(values) => values.into_iter().map(half::f16::to_bits).collect(),
+                    Buf::Bf16(values) => values.into_iter().map(half::bf16::to_bits).collect(),
+                    _ => unreachable!("the requested dtype fixes the storage variant"),
+                };
+                assert_eq!(
+                    tensor_bits, expected,
+                    "tensor {prim:?} finalization at midpoint below {lower_bits:#06x}"
+                );
+            }
+        }
+
+        check(Prim::F16, 0x7bff, |bits| {
+            f64::from(half::f16::from_bits(bits))
+        });
+        check(Prim::Bf16, 0x7f7f, |bits| {
+            f64::from(half::bf16::from_bits(bits))
+        });
     }
 
     #[test]
