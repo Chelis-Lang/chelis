@@ -339,24 +339,25 @@ REGISTRIES of what actually exists:
   byte-agreement test (the §C4.3 generated-header pattern), so the
   registry cannot drift from `spec/` silently. Citing an atom that no
   numbered spec declares is a construction error.
-- `IssueRef` wraps `NonZeroU32` AND validates membership in a
-  checked-in issue manifest recording, per number: it is an ISSUE
-  (not a PR), and it is OPEN. **A checked-in manifest is
-  self-authorizing unless its edits are gated** - the same PR that
-  cites a bogus number can add the manifest row that blesses it (the
-  2026-07-30 addendum's countermodel: after a same-PR edit, a closed
-  issue, a PR number, and a 404 all "validate"). So manifest
-  ADDITIONS receive blocking LIVE validation: every construction,
-  registry, validator, imported liveness-helper, detector, and workflow input
-  is in the `Rejection Authority Liveness` change set, and that job verifies
-  every added or modified row against the live tracker (exists, is an
-  issue, is open) before the PR can merge. Phase 4's §C7.5 scheduled job
-  will re-verify the STANDING manifest for drift, so a cited issue closing
-  later makes the stale citation red - the shell contract's "probe flips
-  green, remove the citation" rule, pointed inward. Until that Phase 4 job
-  lands, standing-state drift remains a named pending control rather than an
-  implied continuous guarantee. Membership answers the compile-time question;
-  the change-gated job answers the truth question when authority inputs change.
+- `IssueRef` wraps `NonZeroU32` AND validates membership in a generated
+  issue manifest recording, per number: every executable production
+  construction site, its exact file and line, and the last-verified facts that
+  the number is an ISSUE (not a PR) and is OPEN. The manifest and Rust registry
+  are derived together from literal `unimplemented_rejection!` construction
+  sites; byte-agreement tests reject hand edits and additions/removals that do
+  not follow source. The scanner masks nested Rust comments and string forms
+  while preserving offsets, so historical text cannot manufacture a site and
+  an inline comment cannot hide one.
+- `Rejection Authority Liveness` runs on EVERY pull request, not only changes
+  to authority files. It live-validates the standing source-derived manifest,
+  then inspects the PR title/body and every commit message for GitHub closing
+  keywords. A closing reference to an issue with live constructors fails and
+  reports every offending `path:line`; the constructors and generated artifacts
+  must move to their still-open capability owner before the delivered instance
+  can close. Issue comments and repository prose are intentionally not merge
+  inputs and are not scanned. Tracker or PR-commit retrieval failure stays a
+  blocking failure. Membership answers the compile-time question; the per-PR
+  job answers both the current-state and about-to-close lifecycle questions.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also
@@ -368,10 +369,10 @@ REGISTRIES of what actually exists:
   become derivation inputs rather than the standalone source.
 
 **Calibrated claim:** construction proves only citation IDENTITY and
-last-verified tracker STATE - an existing atom, or a manifest member
-that was live-verified as an open ISSUE when its row was added and at
-the last scheduled re-verification since. Between schedules the issue
-manifest means "open at last verification", never "open this instant".
+last-verified tracker STATE - an existing atom, or a source-derived manifest
+member live-verified as an open ISSUE by the most recent pull-request check.
+Between checks the issue manifest means "open at last verification", never
+"open this instant".
 Neither registry proves RELEVANCE: whether an atom semantically
 decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
@@ -384,8 +385,9 @@ admission route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
 the out-of-module struct literal each fail to compile, construct, or
-validate; a same-PR manifest addition of a closed issue, a PR number,
-or a nonexistent number fails the change-gated live validation. An
+validate; a source construction citing a closed issue, a PR number,
+or a nonexistent number fails live validation. A closing PR body or commit
+that would strand an existing construction fails before merge. An
 open but unrelated issue (chelis#879) is the supported structural
 control: it passes construction/live validation and MUST fail review
 when attached to an unrelated rejection. The [#687] corpus update

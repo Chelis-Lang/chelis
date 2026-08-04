@@ -61,8 +61,6 @@ pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
 pub(crate) const REGISTERED_OPEN_ISSUES: &[u32] = &[
     600,
     689,
-    691,
-    714,
     729,
     759,
     829,

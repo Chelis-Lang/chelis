@@ -80,11 +80,11 @@ jobs:
   rejection-authority-liveness:
     name: Rejection Authority Liveness
     runs-on: ubuntu-latest
-    needs: [changes]
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.rejection_authority_changed != 'false') }}
+    if: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
       issues: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v6
 

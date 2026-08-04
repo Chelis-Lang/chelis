@@ -9,11 +9,14 @@ import unittest
 from pathlib import Path
 
 from generate_rejection_registries import (
+    AuthoritySite,
     MANIFEST_REL,
     OUTPUT_REL,
     RegistryError,
     discover_atoms,
+    discover_issue_authorities,
     load_issue_manifest,
+    render_issue_manifest,
     render_registry,
 )
 
@@ -47,7 +50,7 @@ class DiscoverAtoms(unittest.TestCase):
 class IssueManifest(unittest.TestCase):
     def write_manifest(self, root: Path, issues: list[dict]) -> Path:
         path = root / "issues.json"
-        path.write_text(json.dumps({"schema": 1, "issues": issues}))
+        path.write_text(json.dumps({"schema": 2, "issues": issues}))
         return path
 
     def test_accepts_only_sorted_unique_open_issue_rows(self) -> None:
@@ -56,31 +59,109 @@ class IssueManifest(unittest.TestCase):
             path = self.write_manifest(
                 root,
                 [
-                    {"number": 705, "kind": "issue", "state": "open"},
-                    {"number": 879, "kind": "issue", "state": "open"},
+                    {
+                        "number": 705,
+                        "kind": "issue",
+                        "state": "open",
+                        "sites": [{"path": "crates/a/src/lib.rs", "line": 1}],
+                    },
+                    {
+                        "number": 879,
+                        "kind": "issue",
+                        "state": "open",
+                        "sites": [{"path": "crates/b/src/lib.rs", "line": 2}],
+                    },
                 ],
             )
             self.assertEqual(load_issue_manifest(path), [705, 879])
 
     def test_rejects_zero_duplicate_pr_closed_and_unsorted_rows(self) -> None:
         invalid = [
-            [{"number": 0, "kind": "issue", "state": "open"}],
+            [{"number": 0, "kind": "issue", "state": "open", "sites": []}],
             [
-                {"number": 705, "kind": "issue", "state": "open"},
-                {"number": 705, "kind": "issue", "state": "open"},
+                {"number": 705, "kind": "issue", "state": "open", "sites": [{"path": "crates/a/src/lib.rs", "line": 1}]},
+                {"number": 705, "kind": "issue", "state": "open", "sites": [{"path": "crates/a/src/lib.rs", "line": 2}]},
             ],
-            [{"number": 705, "kind": "pull_request", "state": "open"}],
-            [{"number": 705, "kind": "issue", "state": "closed"}],
+            [{"number": 705, "kind": "pull_request", "state": "open", "sites": [{"path": "crates/a/src/lib.rs", "line": 1}]}],
+            [{"number": 705, "kind": "issue", "state": "closed", "sites": [{"path": "crates/a/src/lib.rs", "line": 1}]}],
             [
-                {"number": 879, "kind": "issue", "state": "open"},
-                {"number": 705, "kind": "issue", "state": "open"},
+                {"number": 879, "kind": "issue", "state": "open", "sites": [{"path": "crates/b/src/lib.rs", "line": 1}]},
+                {"number": 705, "kind": "issue", "state": "open", "sites": [{"path": "crates/a/src/lib.rs", "line": 1}]},
             ],
+            [{"number": 705, "kind": "issue", "state": "open", "sites": []}],
         ]
         for index, rows in enumerate(invalid):
             with self.subTest(index=index), tempfile.TemporaryDirectory() as raw:
                 path = self.write_manifest(Path(raw), rows)
                 with self.assertRaises(RegistryError):
                     load_issue_manifest(path)
+
+    def test_discovers_production_construction_sites_with_exact_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "fn first() {\n"
+                "    let _ = unimplemented_rejection!(714, \"first\");\n"
+                "}\n"
+                "fn second() {\n"
+                "    let _ = chelis_types::unimplemented_rejection!(714, \"second\");\n"
+                "}\n"
+            )
+            test_source = root / "crates/example/tests/probe.rs"
+            test_source.parent.mkdir(parents=True)
+            test_source.write_text(
+                "let _ = unimplemented_rejection!(999, \"test-only\");\n"
+            )
+
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {
+                    714: [
+                        AuthoritySite("crates/example/src/lib.rs", 2),
+                        AuthoritySite("crates/example/src/lib.rs", 5),
+                    ]
+                },
+            )
+
+    def test_discovery_ignores_comments_and_strings_but_allows_inner_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "// unimplemented_rejection!(600, \"comment\")\n"
+                "const TEXT: &str = r#\"unimplemented_rejection!(689, \\\"raw\\\")\"#;\n"
+                "/* nested /* unimplemented_rejection!(691, \"block\") */ done */\n"
+                "fn live() {\n"
+                "    let _ = unimplemented_rejection!(/* reviewed */ 714, \"live\");\n"
+                "}\n"
+            )
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {714: [AuthoritySite("crates/example/src/lib.rs", 5)]},
+            )
+
+    def test_rendered_manifest_carries_sites_and_is_source_derived(self) -> None:
+        rendered = render_issue_manifest(
+            {
+                714: [AuthoritySite("crates/backend/src/emit.rs", 17)],
+                879: [AuthoritySite("crates/backend/src/host.rs", 23)],
+            }
+        )
+        payload = json.loads(rendered)
+        self.assertEqual(payload["schema"], 2)
+        self.assertEqual(
+            payload["issues"][0]["sites"],
+            [{"path": "crates/backend/src/emit.rs", "line": 17}],
+        )
+
+    def test_checked_in_manifest_matches_production_construction_sites(self) -> None:
+        self.assertEqual(
+            (ROOT / MANIFEST_REL).read_text(),
+            render_issue_manifest(discover_issue_authorities(ROOT)),
+        )
 
 
 class RenderRegistry(unittest.TestCase):
@@ -93,9 +174,10 @@ class RenderRegistry(unittest.TestCase):
         self.assertEqual(rendered, render_registry(["[04-NUM-1]", "[05-UNS-1]"], [705, 879]))
 
     def test_checked_in_registry_is_byte_identical_to_its_sources(self) -> None:
+        authorities = discover_issue_authorities(ROOT)
         expected = render_registry(
             discover_atoms(ROOT / "spec"),
-            load_issue_manifest(ROOT / MANIFEST_REL),
+            sorted(authorities),
         )
         self.assertEqual((ROOT / OUTPUT_REL).read_text(), expected)
 

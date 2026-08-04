@@ -258,11 +258,12 @@ NON_GATE_JOBS = {
 
 
 class RejectionAuthorityLivenessJobTests(unittest.TestCase):
-    def test_job_is_change_gated_and_has_issue_read_access(self):
+    def test_job_runs_on_every_pr_and_has_issue_and_pr_read_access(self):
         block = _ci_job_block("rejection-authority-liveness")
-        self.assertIn("needs: [changes]", block)
-        self.assertIn("needs.changes.outputs.rejection_authority_changed", block)
+        self.assertNotIn("needs.changes.outputs.rejection_authority_changed", block)
+        self.assertIn("github.event_name == 'pull_request'", block)
         self.assertIn("issues: read", block)
+        self.assertIn("pull-requests: read", block)
         self.assertIn("contents: read", block)
         self.assertIn("scripts/check_rejection_authority_boundary.py", block)
         self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
@@ -1101,8 +1102,11 @@ class DocsOnlySkipTests(unittest.TestCase):
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
-        "rejection-authority-liveness",
         "diagnostic-kind-oracle",
+    }
+    # Jobs that run for every pull request but have no push-to-main role.
+    PULL_REQUEST_ONLY_JOBS = {
+        "rejection-authority-liveness",
     }
     # Jobs that must ALWAYS run (never gated on docs_only).
     # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
@@ -1207,6 +1211,16 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"always-run job '{job}' must not carry a docs_only `if`",
             )
 
+    def test_pull_request_only_jobs_are_not_diff_gated(self):
+        attrs = _parse_job_attrs()
+        for job in self.PULL_REQUEST_ONLY_JOBS:
+            self.assertIn(job, attrs, f"pull-request-only job '{job}' missing")
+            self.assertNotIn("needs", attrs[job])
+            condition = attrs[job].get("if", "")
+            self.assertIn("github.event_name == 'pull_request'", condition)
+            self.assertNotIn("needs.changes", condition)
+            self.assertNotIn("docs_only", condition)
+
     def test_every_job_is_classified(self):
         # Every ci.yml job is either heavy-gated or always-run; a new job
         # forces a deliberate classification (mirrors the workflow-file
@@ -1216,6 +1230,7 @@ class DocsOnlySkipTests(unittest.TestCase):
             self.HEAVY_GATED_JOBS
             | self.HEAVY_AGGREGATOR_JOBS
             | self.CHANGE_GATED_JOBS
+            | self.PULL_REQUEST_ONLY_JOBS
             | self.ALWAYS_RUN_JOBS
         )
         unclassified = set(attrs) - classified

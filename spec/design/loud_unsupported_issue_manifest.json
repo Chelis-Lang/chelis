@@ -1,17 +1,231 @@
 {
-  "schema": 1,
+  "schema": 2,
   "issues": [
-    { "number": 600, "kind": "issue", "state": "open" },
-    { "number": 689, "kind": "issue", "state": "open" },
-    { "number": 691, "kind": "issue", "state": "open" },
-    { "number": 714, "kind": "issue", "state": "open" },
-    { "number": 729, "kind": "issue", "state": "open" },
-    { "number": 759, "kind": "issue", "state": "open" },
-    { "number": 829, "kind": "issue", "state": "open" },
-    { "number": 879, "kind": "issue", "state": "open" },
-    { "number": 951, "kind": "issue", "state": "open" },
-    { "number": 1058, "kind": "issue", "state": "open" },
-    { "number": 1059, "kind": "issue", "state": "open" },
-    { "number": 1138, "kind": "issue", "state": "open" }
+    {
+      "number": 600,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 5036
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3028
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3081
+        }
+      ]
+    },
+    {
+      "number": 689,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-backend-hip/src/emit.rs",
+          "line": 177
+        },
+        {
+          "path": "crates/chelis-backend-hip/src/emit.rs",
+          "line": 3742
+        }
+      ]
+    },
+    {
+      "number": 729,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 829
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 1731
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 3262
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 3267
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 3279
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 4689
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 4864
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 4969
+        },
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 5298
+        },
+        {
+          "path": "crates/chelis-backend-c/src/host_emit.rs",
+          "line": 3356
+        },
+        {
+          "path": "crates/chelis-backend-metal/src/emit.rs",
+          "line": 279
+        },
+        {
+          "path": "crates/chelis-backend-metal/src/emit.rs",
+          "line": 1493
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3122
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3563
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3596
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3651
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3684
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3711
+        },
+        {
+          "path": "crates/chelis-ir/src/lower.rs",
+          "line": 10642
+        },
+        {
+          "path": "crates/chelis-ir/src/lower.rs",
+          "line": 10729
+        }
+      ]
+    },
+    {
+      "number": 759,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-backend-hip/src/emit.rs",
+          "line": 3448
+        },
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 3421
+        }
+      ]
+    },
+    {
+      "number": 829,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 1496
+        }
+      ]
+    },
+    {
+      "number": 879,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-backend-c/src/host_abi.rs",
+          "line": 582
+        },
+        {
+          "path": "crates/chelis-backend-c/src/host_abi.rs",
+          "line": 596
+        },
+        {
+          "path": "crates/chelis-backend-c/src/host_abi.rs",
+          "line": 613
+        },
+        {
+          "path": "crates/chelis-backend-c/src/host_abi.rs",
+          "line": 625
+        },
+        {
+          "path": "crates/chelis-backend-c/src/host_emit.rs",
+          "line": 6317
+        },
+        {
+          "path": "crates/chelis-ir/src/host.rs",
+          "line": 3844
+        },
+        {
+          "path": "crates/chelis-ir/src/host.rs",
+          "line": 3867
+        }
+      ]
+    },
+    {
+      "number": 951,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-backend-c/src/emit.rs",
+          "line": 5436
+        }
+      ]
+    },
+    {
+      "number": 1058,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-ir/src/lower.rs",
+          "line": 8044
+        }
+      ]
+    },
+    {
+      "number": 1059,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-backend-c/src/host_emit.rs",
+          "line": 3314
+        }
+      ]
+    },
+    {
+      "number": 1138,
+      "kind": "issue",
+      "state": "open",
+      "sites": [
+        {
+          "path": "crates/chelis-compiler-api/src/compiler.rs",
+          "line": 1162
+        }
+      ]
+    }
   ]
 }
