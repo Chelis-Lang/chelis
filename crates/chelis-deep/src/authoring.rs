@@ -954,6 +954,20 @@ where
     }
 
     let Some(node) = node_view(expr) else {
+        // chelis#1136 red-team M1: a `List` whose head is not in the
+        // closed tag vocabulary (an unknown form - the shape the
+        // chelis#1088 stamped ingress deliberately preserves) is still
+        // TRAVERSED, mirroring the pre-NodeView walker and the mutating
+        // twin. Skipping it silently drops references inside unknown
+        // forms and desynchronizes rename's cascade accounting.
+        if let Expr::List(list, _) = expr {
+            if let Some(meta) = list.elements.get(1) {
+                f(meta, scope, format!("{path}.meta"));
+            }
+            for (index, child) in list.elements.iter().enumerate().skip(2) {
+                f(child, scope, format!("{path}.{index}"));
+            }
+        }
         return;
     };
     if let Some(meta) = node.meta {

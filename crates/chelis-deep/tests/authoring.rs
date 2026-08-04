@@ -1,5 +1,5 @@
 use chelis_deep::authoring::{
-    call_graph, change_signature, outline, rename_function, replace_function,
+    call_graph, change_signature, outline, references, rename_function, replace_function,
 };
 
 const MODULE: &str = r#"(module {}
@@ -196,4 +196,33 @@ fn change_signature_rejects_duplicate_argument_order_before_rewrite() {
             .contains("argument_order contains duplicate old parameter `x`"),
         "error should explain the malformed cascade request: {error}"
     );
+}
+
+/// chelis#1136 red-team M1: an unknown form (a `List` whose head is not in
+/// the 62-tag vocabulary - the shape the chelis#1088 stamped ingress
+/// deliberately preserves) must still be TRAVERSED by the read-only
+/// walkers. The salvaged NodeView traversal skipped it, so `references`
+/// dropped to 0 on the List carrier while the mutating walker still
+/// rewrote inside it, and `rename_function` failed its cascade
+/// accounting. Lenient parse: `parse_str` accepts the unknown head that
+/// `parse_str_strict` rejects.
+#[test]
+fn unknown_form_subtrees_are_traversed_not_dropped() {
+    let source = r#"(module {}
+  m.unknown_form
+  (def {} target
+    (fn {} (params {} (x {type: (t-prim {} bool)})) (var {} x)))
+  (def {} caller
+    (fn {} (params {})
+      (future-form {} (app {} (var {} target) (lit {} true))))))"#;
+    let exprs = chelis_deep::parser::parse_str(source).expect("lenient deep parses");
+    let refs = references(&exprs, "target").expect("references");
+    assert_eq!(
+        refs.references.len(),
+        1,
+        "the reference inside the unknown form must be found"
+    );
+    let report = rename_function(&exprs, "target", "renamed").expect("rename");
+    assert_eq!(report.renamed_references, 1);
+    assert_eq!(report.residual_old_references, 0);
 }
