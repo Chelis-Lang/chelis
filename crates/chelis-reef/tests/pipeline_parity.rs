@@ -56,7 +56,7 @@ fn pretty_json(value: &impl Serialize) -> String {
 
 #[test]
 fn baseline_records_the_pre_migration_revision() {
-    assert!(BASELINE_PROVENANCE.contains("261d64260d5a974c06f15245ecd31b671ecc80a4"));
+    assert!(BASELINE_PROVENANCE.contains("e1065d94fbd7a41f086e0690929a66c2335accc5"));
     assert!(BASELINE_PROVENANCE.contains("before the core extraction"));
 }
 

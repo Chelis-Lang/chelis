@@ -2721,6 +2721,7 @@ fn propagated_findings(functions: Vec<FunctionFacts>) -> Vec<Finding> {
 
 // This is the semantic-pipeline scope, not a workspace-wide inventory.
 const CORE_OWNER_ROOT: &str = "crates/chelis-pipeline-core/src";
+const CANONICAL_SOURCE_GUARD_PATH: &str = "crates/chelis-compiler-api/src/source_arch.rs";
 const GUARDED_SOURCE_ROOTS: [&str; 5] = [
     CORE_OWNER_ROOT,
     "crates/chelis-compiler-api/src",
@@ -2745,14 +2746,9 @@ fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "tests") {
-                continue;
-            }
             collect_rust_files(&path, files);
         } else if path.extension().is_some_and(|extension| extension == "rs")
-            && !path
-                .file_name()
-                .is_some_and(|name| name == "tests.rs" || name == "source_arch.rs")
+            && !path.ends_with(CANONICAL_SOURCE_GUARD_PATH)
         {
             files.push(path);
         }
@@ -2842,6 +2838,37 @@ fn guarded_source_roots_match_the_semantic_pipeline_scope() {
     let expected = guarded.into_iter().map(PathBuf::from).collect();
 
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn production_test_named_paths_cannot_bypass_the_guard() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let planted = [
+        "crates/chelis-reef/src/tests.rs",
+        "crates/chelis-reef/src/tests/duplicate.rs",
+        "crates/chelis-reef/src/source_arch.rs",
+    ];
+    for relative in planted {
+        let path = workspace.path().join(relative);
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
+        fs::write(
+            path,
+            r#"
+                fn duplicate(exprs: &[Expr]) {
+                    let checked = chelis_types::check_ir_program(exprs).unwrap();
+                    let checked = chelis_effects::check_program(&checked).unwrap();
+                    chelis_types::check_linearity(&checked).unwrap();
+                }
+            "#,
+        )
+        .expect("fixture source");
+    }
+
+    let paths = actual_workspace_findings(workspace.path())
+        .into_iter()
+        .map(|finding| finding.path)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(paths, planted.into_iter().map(str::to_string).collect());
 }
 
 #[test]

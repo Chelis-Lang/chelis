@@ -342,7 +342,7 @@ All 29 gate unit tests passed. The complete local gate and authoritative compile
 
 ### Functional pipeline core extraction
 
-The Reef parity baseline records source revision `261d64260d5a974c06f15245ecd31b671ecc80a4`.
+The Reef parity baseline records source revision `e1065d94fbd7a41f086e0690929a66c2335accc5`.
 The capture used the Reef pipeline before the core extraction.
 The accepted capture records exact artifacts, schema output, and hashes.
 The rejected capture records complete type, effect, and linearity errors.
@@ -367,3 +367,20 @@ The documentation guard now rejects current compatibility claims without the exa
 The authoritative compiler pipeline oracle passed after these corrections.
 The local gate passed for `chelis-compiler-api`, `chelis-pipeline-core`, and `chelis-reef`.
 The hosted macOS Smoke, Docs, and changed-crate evidence is still pending for the final commit.
+
+The change was rebased onto target `e1065d94fbd7a41f086e0690929a66c2335accc5`.
+The Reef baseline harness passed against that target before the extraction.
+The extracted implementation produced the same accepted and rejected results.
+
+A fresh local red team checked the rebased tree.
+It verified rootless-definition behavior with three CLI controls and one external contextual probe.
+It also verified the facade, cancellation, guards, compile-fail controls, and Reef parity.
+
+The review found one source-guard bypass.
+Production files named `tests.rs`, files under `tests/`, and other `source_arch.rs` files escaped the scan.
+The collector now scans every Rust file except the canonical guard implementation.
+A negative fixture locks all three former bypass paths.
+All 77 source-guard tests passed after the correction.
+
+The authoritative compiler pipeline oracle passed after the rebased-tree correction.
+The local gate also passed after that correction.

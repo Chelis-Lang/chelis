@@ -4384,7 +4384,7 @@ struct LowerCtx {
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: HashSet<String>,
     /// chelis#1095: top-level def names whose lowered value held no tensor
-    /// node, so they contributed no DAG root. `chelis-compiler-api`
+    /// node, so they contributed no DAG root. `chelis-pipeline-core`
     /// subtracts these from the declared root names before aligning them
     /// against `dag.roots()`.
     rootless_defs: BTreeSet<String>,
@@ -4995,7 +4995,7 @@ impl LowerCtx {
             }
             // chelis#1095: record the defs whose lowered value holds no
             // tensor node at all, so `add_named_roots` below contributes
-            // nothing. The declared-root accounting in chelis-compiler-api
+            // nothing. The declared-root accounting in chelis-pipeline-core
             // subtracts exactly these names; recording the OUTCOME rather
             // than predicting it from the signature is what keeps the two
             // sides in agreement. A predicate over the declared type
