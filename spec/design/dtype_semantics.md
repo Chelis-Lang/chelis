@@ -10,7 +10,9 @@ reduction/adjoint consumers landed through PR #1054. PR #1065 began Phase 3
 with exact, minimum-trapping signed-integer `abs`; this revision delivers the
 remaining C scalar/tensor value work and continuously wires
 `.venv/bin/python scripts/dtype_phase3_oracle.py`, which inherits Phases 0-2
-and the faithful-observation Phase 3 contract. Phase 4 has not started.
+and the faithful-observation Phase 3 contract. Phase 4 entry has begun with
+the capacity-disposition closure; the capability table and its generated
+consumer projections have not landed.
 Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (the authored overflow/rounding and
 per-dtype value contract), `spec/05-risc-primitives.md` (op result semantics),
@@ -549,9 +551,11 @@ ADT-shape identity AND capacity classification, non-function ABI
 inventory, total linemarker attribution, a derived and recursively
 walked published-header set, an INVERTED type-word rule that rejects
 unrecognized arithmetic spellings rather than classifying them
-dtype-free, runtime/stdlib numeric-callable authority registration,
-public-header context invariance, both pre-ratchet citation sets frozen
-by identity, and issue-kind-aware liveness are executable tripwires. The
+dtype-free, post-ratchet runtime/stdlib numeric-callable authority
+registration, public-header context invariance, the grandfathered seam
+disposition and initial non-seam permanent disposition frozen as complete
+`(kind, id, flags)` descriptor sets, and issue-kind-aware liveness are
+executable tripwires. The
 typed wire-schema and registered-PyO3 legs in this change complete the
 pre-Phase-1 inventory with separate generated baselines and mutation
 controls. Their named commands below remain the hard Phase 1 entry evidence;
@@ -596,7 +600,7 @@ classification escapes, and this paragraph freezes its exact strength:
   `float`, `int`, `short`, `long`, `signed`, `unsigned`, `size_t`,
   `ptrdiff_t`, `intptr_t`, `uintptr_t`, and the exact-width signed/unsigned
   integer types. Bare `int` is not generally control plumbing
-  (`bare_int_export_is_numeric_op_and_requires_registration`).
+  (`new_post_ratchet_bare_int_export_is_numeric_op_and_requires_registration`).
 - **The classification rule is INVERTED, so the conservatism above is real**
   (round-4 red team N1, folded 2026-07-31). `NUMERIC_C_TYPES` alone is an
   allowlist, and an allowlist of arithmetic spellings can never be complete:
@@ -627,14 +631,15 @@ classification escapes, and this paragraph freezes its exact strength:
   reproduced byte-for-byte here:
 
   ```text
-  chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;
+  chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;
   chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;
   chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;
   ```
 
   `apply_exact_integer_plumbing_exemption` removes `numeric-op` only when the
-  complete canonical identity is in that list AND
-  `GRANDFATHER_SEAM_IDS`; `integer_plumbing_exemptions_are_exact_and_closed`
+  complete canonical identity is in that list AND an exact reviewed seam
+  disposition set (`GRANDFATHER_SEAM_ROWS` or PR #1149's one-off successor
+  override); `integer_plumbing_exemptions_are_exact_and_closed`
   locks the count, membership, and same-shaped-neighbor behavior. A name,
   parameter spelling, substring, or newly added identity cannot inherit the
   exemption. Neither this follow-up nor the round-3 closure adds a
@@ -658,21 +663,24 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    path, not every carrier family.) Until a family's typed mechanism
    lands, the guard is the capacity census and tripwire (deliverable 1
    below).
-3. **Ops**: a numeric operation exists only with a decided row in the
+3. **Ops**: a new numeric operation exists only with a decided row in the
    registry that owns its FAMILY. Table A's key is
    (builtin, surface, dtype) and stays the LANGUAGE-BUILTIN law;
    runtime exports, prelude/stdlib defs, and binding functions do not
    fit that key - no `BuiltinId`, no `Scalar|Tensor` surface (PR #950
    red team P1-2, which also caught the pre-existing strain in the
-   `to_string` x Tensor/List seed row). Totality is therefore
-   REGISTRIES PER FAMILY, each exhaustive over its own enumeration:
+   `to_string` x Tensor/List seed row). Post-ratchet growth totality is
+   therefore REGISTRIES PER FAMILY, each exhaustive over new members of its
+   own enumerated surface:
    language builtins in Table A, with checker acceptance DERIVED from
    it at Phase 4 so an unregistered builtin is `UnknownForm` by
-   construction; runtime exports and exported prelude/stdlib defs in
-   deliverable 1's structured operation-semantic registry; binding
+   construction; new runtime exports and exported prelude/stdlib defs in
+   deliverable 1's structured operation-semantic registry (the frozen
+   legacy capacity rows are not retroactively semantic-registered by this
+   closure slice); binding
    callables in the same registry shape once the rustdoc-JSON leg
-   lands. Each non-Table-A entry binds the callable's exact canonical
-   identity to one verbatim `[05-OP-N]` authority. The registry
+   lands. Each registered non-Table-A entry binds the callable's exact
+   canonical identity to one verbatim `[05-OP-N]` authority. The registry
    validates chapter `05`, group `OP`, and a normative definition line
    beginning `> **[05-OP-N]**`; a free-text chapter substring or
    cross-reference, a missing `[05-OP-999]`, or an observation atom such
@@ -680,12 +688,29 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    infer whether the selected existing OP atom is semantically relevant;
    review verifies that its normative text already governs the callable
    but cannot make a mismatched atom authoritative. If no atom governs
-   the callable, the numbered spec gains the decision first. Existing
-   numeric-callable rows at the initial baseline are grandfathered, and
-   the grandfathering is an IDENTITY set, never a citation string: BOTH
-   pre-ratchet citations (the seam one and the plain one) are frozen to
-   exact `(id)` lists in the tripwire source, which ordinary baseline
-   regeneration cannot rewrite and which may only shrink. The prior
+   the callable, the numbered spec gains the decision first. The 156
+   non-seam rows at the initial baseline retain a permanent capacity
+   disposition, and the disposition is an enforcement-descriptor set, never a
+   reusable string. The seam citation and the initial non-seam permanent
+   disposition are frozen to exact `(kind, id, flags)` complete-descriptor
+   sets in the tripwire source, which ordinary baseline regeneration cannot
+   rewrite and which may only shrink. A rename, signature change, or
+   reclassification is therefore a REMOVAL of the old descriptor plus an
+   ADDITION of its successor, never an in-place inheritance of the old
+   disposition. The successor follows the same addition rules as every other
+   new row: a flagged successor needs the named
+   `maintainer-override(<reason>, chelis#N)` review path. A general mechanism
+   for tamper-evident old-to-new mappings is owned separately by chelis#1160;
+   until that mechanism lands, resemblance and unchanged flags confer no
+   automatic relocation authority. PR #1149 is the concrete one-off use of
+   that path: its three exact int64 dimension-carrier successors carry a named
+   chelis#1112 override, remain outside `GRANDFATHER_SEAM_ROWS`, and are locked
+   by an executable history-specific control. Those underlying runtime
+   surfaces predate the semantic-registration ratchet and the widening added
+   no new numeric operation, so that exact closed successor set retains their
+   no-retroactive-registration status; a generic maintainer override never
+   waives semantic registration. This is not #1160's general mapping.
+   The prior
    revision froze only the seam list and recorded the gap as a known
    residual - the plain citation was copyable onto a brand-new numeric
    row to skip the hook, which the 2026-07-31 red team executed.
@@ -696,10 +721,19 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    implementation record is `SemanticRegistration { callable, atom }` in
    `SEMANTIC_REGISTRATIONS`; `callable` is exactly
    `[<kind>] <canonical id>`, so family identity is part of the key.
-   This registration is deliberately separate from the capacity row's issue citation: the
-   citation owns liveness, while the structured authority binding owns
-   meaning. An operation registered in no family's registry is a build
-   failure, not a doc comment (`capability_table.md` §New numeric ops
+   Atom allocation re-checks the highest existing `[05-OP-N]` on current
+   `main`; parallel branches do not reserve numbers. After adding the
+   normative atom, the same change runs
+   `.venv/bin/python scripts/generate_rejection_registries.py --write` and
+   commits `crates/chelis-types/src/rejection_registry_generated.rs`. That
+   generated membership artifact keeps rejection-authority validation aware
+   of the new atom; it does not replace the callable's exact
+   `SemanticRegistration` or create semantic authority.
+   This registration is deliberately separate from the capacity row's
+   disposition: an issue-bound disposition owns liveness, an exact permanent
+   disposition records a completed capacity review, and the structured
+   authority binding owns meaning. A new operation registered in no family's
+   registry is a build failure, not a doc comment (`capability_table.md` §New numeric ops
    carries the interim authoring rule).
 
    **Language legality and backend capability stay decoupled, here as
@@ -716,9 +750,10 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    the family registries must preserve that stage split rather than
    collapse a backend gap into language illegality.
 
-   Numeric-ness is STRUCTURAL, never declared: any callable whose
+   Numeric-ness is STRUCTURAL, never declared: any post-ratchet callable whose
    canonical signature mentions a numeric dtype requires a row and an
-   authority binding, and the
+   authority binding. The frozen legacy descriptors retain capacity
+   dispositions without retroactive registrations. The
    non-numeric classification exists only for genuinely dtype-free
    surface - so the cheapest evasion (an op classifying itself
    non-numeric) is not representable. That sentence holds because the
@@ -749,7 +784,7 @@ cannot exist (PR #950 red team P1-3):
 | execution wire schema | per-dtype tagged payload | [#729] Phase 1 (§C3) | types |
 | language ops | checker acceptance derived from Table A | [#729] Phase 4 | derivation |
 | published C signatures | tokenized canonical declaration inventory over callables AND non-function data, frozen derived classification, and a mechanically enforced ban on context-varying public ABI; this detects and blocks drift but does not generate the whole header | deliverable 1; the `RuntimeDType` fragment remains [#729] Phase 3 | census/tripwire |
-| prelude / stdlib value ADTs | permanent census whose identity preserves type, variant, and numeric field shape, CLASSIFIED on the same rule as the C families: a float primitive in an untagged variant or field is a `float-carrier` seam with no citation path, an integer primitive is a `numeric-op` owing a semantic decision. A numeric field is legal Surf, so no type seal can exist for this family - the seam classification is the strongest rung available | deliverable 1 | census/tripwire |
+| prelude / stdlib value ADTs | permanent census whose descriptor preserves type, variant, numeric field shape, family, and flags, CLASSIFIED on the same rule as the C families: a float primitive in an untagged variant or field is a `float-carrier` seam with no citation path; on a new post-ratchet descriptor, an integer primitive is a `numeric-op` requiring exact semantic registration. Frozen legacy descriptors retain their capacity dispositions without retroactive registration. A numeric field is legal Surf, so no type seal can exist for this family - the seam classification is the strongest rung available | deliverable 1 | census/tripwire |
 | binding (PyO3) signatures | rustdoc-JSON registry + typed raw-dtype mutation oracle | the named pre-Phase-1 binding leg below | census/registry |
 
 [#729] can close Phase 4 while chelis#893 remains open. Any
@@ -830,7 +865,7 @@ Deliverables, with phase homes:
    Deep stamping are outside this task entirely.
 
    Binding-baseline dispositions (each entry is the C6 review a frozen
-   fingerprint update cites):
+   descriptor-manifest update cites):
 
    - 2026-08-02, chelis#816 (PRs #819/#822): `compile_and_load` gains
      `project_root: Option<&str>, force_bare: bool` and `eval_json` gains
@@ -838,6 +873,35 @@ Deliverables, with phase homes:
      parameters are dtype-free control/path inputs (a filesystem path and a
      lane selector); the enumerator classifies both rows `[]`, no numeric
      capacity enters the surface, and no raw dtype id is introduced.
+
+   **Permanent closure dispositions.** Closing the plan must not make the
+   capacity oracle depend on a closed tracker, and replacing that dependency
+   with arbitrary prose would remove the liveness guard. The accepted forms
+   are therefore closed and exact:
+
+   - the 156 initial non-seam header/stdlib descriptors carry
+     `permanent-disposition(C6 initial non-seam complete descriptor set ratified
+     2026-08-04)` and remain bound to the hand-maintained
+     `PERMANENT_PLAIN_ROWS` set, including exact kind and capacity flags;
+   - the one source-faithful prelude `Json` carrier carries its exact
+     `[05-OP-2]` permanent disposition, whose label says `exact descriptor`
+     and is bound to its complete `(kind, id, flags)` descriptor;
+   - the typed wire and registered-PyO3 baselines carry distinct permanent
+     dispositions covered by separate hand-maintained complete-row manifests.
+
+   None is a spelling that a new row may inherit. The primary tripwire rejects
+   either permanent row disposition when kind, canonical id, or capacity
+   flags differ. The typed tests reject any row not in their hand-maintained
+   `(kind, id, flags)` manifests, including a copied top-level disposition
+   plus an added row. `capacity_census_liveness.py` binds each of the four
+   exact strings to its owning census family and rejects cross-family swaps
+   or any other reference-free prose. The pre-ratchet seams still present
+   are not closure-disposed: they stay issue-bound to
+   chelis#893 until that peer class removes or separately adjudicates them;
+   PR #1149's three exact successor rows instead carry their named chelis#1112
+   maintainer override.
+   New unflagged rows still cite their own open issue; new flagged rows still
+   have no ordinary citation path.
 
    Acceptance requirements, from the 2026-07-30 and 2026-07-31
    adversarial passes. Each bullet names the standing control that turns
@@ -942,8 +1006,9 @@ Deliverables, with phase homes:
      `std-adt-numeric` or `std-def-numeric` row is classified, not merely
      inventoried: a float primitive (`f64`/`f32`/`f16`/`bf16`) in an
      untagged public position makes the row a `float-carrier` SEAM with no
-     citation path, and an integer primitive makes it `numeric-op`, owing
-     the same semantic registration a runtime callable owes. Before this
+     citation path, and an integer primitive makes it `numeric-op`. On a new,
+     post-ratchet row that classification requires the same semantic
+     registration as a new runtime callable. Before this
      the ADT leg emitted no flags at all, so adding `| JsonBigNum(f64)` to
      `io/json.ch` landed by regenerating and citing an open issue - the
      P1-1 shape closed for the header family only, and a direct
@@ -982,10 +1047,11 @@ Deliverables, with phase homes:
      discovered and keyed by exact canonical callable identity. Their
      separate semantic registry names one exact `[05-OP-N]` atom and
      validates its chapter/group and normative `> **[05-OP-N]**`
-     definition. Initial numeric-callable
-     rows are grandfathered; a new callable authors a new OP atom and
-     mapping together. Positive controls bind known callables to their
-     decisions.
+     definition. All 156 initial non-seam rows retain their exact permanent
+     `(kind, id, flags)` capacity disposition. Those legacy capacity
+     dispositions do not assert semantic registration. Every new numeric
+     callable authors a new OP atom and mapping together. Positive controls
+     bind registered callables to their decisions.
      Negative mutations add an unregistered runtime export and stdlib
      `export def`, name absent `[05-OP-999]`, and substitute
      `[05-OBS-1]`; all fail. An issue citation or a bare chapter
@@ -1004,24 +1070,27 @@ Deliverables, with phase homes:
      CI fails on TODO. An UNFLAGGED row names an OPEN issue (invariant
      7 governs the release). A FLAGGED capacity row has NO
      issue-citation path: the grandfathered 2026-07-30 seam set is
-     frozen by exact citation, row identity, and derived
-     classification. Removing one seam cannot relocate its citation to
+     frozen by exact citation and complete `(kind, id, flags)` descriptor.
+     Removing one seam cannot silently relocate its citation to
      a new row, and adding one alongside the whole original set is the
      same rejection (`grandfather_citation_cannot_be_copied_onto_new_rows`).
-     There is deliberately no separate COUNT lock. The identity freeze
-     subsumes it - `GRANDFATHER_SEAM_IDS` IS the set, so a row carrying
-     the citation is either one of those identities or already a
+     There is deliberately no separate COUNT lock. The descriptor freeze
+     subsumes it - `GRANDFATHER_SEAM_ROWS` IS the complete-descriptor set, so
+     a row carrying the citation either matches one of those descriptors or is already a
      rejection - and the count branch it replaced could not be reached
      by any input, which makes it an untested claim rather than a second
-     guard (round-4 red team N7). The PLAIN pre-ratchet citation is frozen the same way
-     and for the same reason - a citation string any new row may copy
+     guard (round-4 red team N7). The initial non-seam permanent disposition
+     is frozen the same way and for the same reason - a disposition string
+     any new row may copy
      is not a disposition, and leaving it unfrozen let a brand-new
      numeric export skip the semantic hook
-     (`plain_baseline_citation_cannot_be_copied_onto_a_new_row`).
+     (`permanent_plain_disposition_cannot_be_copied_onto_a_new_row`).
      Both lists are hand-maintained and SHRINK-ONLY, deliberately not
      regenerated: a generator that re-derived them from the baseline
      would re-bless whatever a contributor had just pasted the citation
-     onto. The only sanctioned outcomes are redesign onto the
+     onto. PR #1149's separate exact successor-override set is likewise
+     closed and shrink-only; its named citation is rejected on every other
+     descriptor. The only sanctioned outcomes are redesign onto the
      tagged carrier, removal, or
      `maintainer-override(<reason>, chelis#N)`, which is assigned to
      human review; opening an issue is not authorization. That marker
@@ -1030,9 +1099,16 @@ Deliverables, with phase homes:
      INSIDE the parentheses, so an unterminated marker or a reference
      that sits after the closing paren is a forgery and fails
      (`malformed_maintainer_overrides_fail_and_the_exact_form_passes`).
-   - **Liveness is issue-typed.** Every sanctioned `chelis#N`
-     reference must exist, must be an ISSUE rather than a pull request,
-     and must be OPEN. A closed, missing, or PR reference fails and
+     An identity change follows that same law as explicit removal plus
+     addition: the old descriptor leaves its frozen manifest, while the
+     successor is issue-bound if unflagged and requires the validated
+     maintainer override if flagged. chelis#1160 may add a stricter recorded
+     relocation form later, with its own negative controls; it is not implied
+     by matching flags today.
+   - **Liveness is issue-typed; permanent dispositions are closed.** Every
+     sanctioned `chelis#N` reference must exist, must be an ISSUE rather than
+     a pull request, and must be OPEN. An invented reference-free disposition,
+     or a closed, missing, or PR reference, fails and
      forces re-adjudication. `capacity_census_liveness.py` represents
      the result as `IssueRecord { kind: IssueKind, state: IssueState }`;
      `fetch_issue` calls
@@ -1042,9 +1118,12 @@ Deliverables, with phase homes:
      open PR.
      The division of labour is deliberate and stated here so nobody
      infers more from a green tripwire run than it proves: **the
-     tripwire checks citation SHAPE only** - that a `chelis#N`
-     reference is present, and that a `maintainer-override(...)` marker
-     is balanced with its issue inside the parentheses - because it
+     tripwire checks exact `(kind, id, flags)` membership for permanent
+     dispositions and syntax for issue-bound dispositions** - either a
+     complete descriptor in its frozen manifest or a `chelis#N` reference,
+     with any
+     `maintainer-override(...)` marker balanced and its issue inside the
+     parentheses - because it
      runs offline and network access would make it flaky and
      unrunnable in a sandbox. **Existence, kind, and open-state are the
      LIVENESS gate's job**: `.venv/bin/python
@@ -1073,7 +1152,7 @@ Deliverables, with phase homes:
      human owner but does not block (`require_code_owner_reviews` is
      off and bypasses exist). Enabling the code-owner toggle is a
      separate repository-policy decision. The structural enforcement
-     here is the executable identity/metadata/registry freeze plus the
+     here is the executable descriptor/registry freeze plus the
      ordinary required review; this document claims no more.
 2. **Phase 1**: the census re-derivation defines §C3's atomic set (the
    §C3 amendment above); the tripwire baseline regenerates in the same
@@ -1089,8 +1168,9 @@ Deliverables, with phase homes:
    generated with a byte-for-byte regeneration test ([#730] §C4.3);
    the census asserts the fragment-owned rows against regeneration
    rather than diff. The rest of the public header is structurally
-   guarded by canonical inventory, metadata freeze, semantic
-   registration, and the no-context-variance rule; it is NOT generated,
+   guarded by canonical inventory, complete-descriptor manifests for legacy
+   rows, exact semantic registration for every new post-ratchet numeric
+   callable, and the no-context-variance rule; it is NOT generated,
    and a hand-added export remains representable but cannot pass the
    tripwire without its sanctioned disposition. FULL header generation
    is in no phase contract today. Adopting it would be a stronger
@@ -1108,7 +1188,8 @@ Deliverables, with phase homes:
 Scope honesty, sharpened by the 2026-07-30 and 2026-07-31 adversarial
 passes. On the
 families PR #956 covers, additions, removals, classification drift,
-missing semantic registrations, ADT-shape growth, ADT and stdlib-def
+missing semantic registrations on new numeric callables, ADT-shape growth,
+ADT and stdlib-def
 capacity classification, non-function data ABI, unattributed
 declarations, unreached published headers, and context-varying
 public ABI are executable build failures. Those mechanisms are
@@ -1192,7 +1273,7 @@ numeric form is type-unrepresentable.
 | §C4 element-formatting rules 1-4 and 6 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + [#687] corpus update |
 | §C4 root envelope rule 7 | [05-OBS-6] authored 2026-07-31; full implementation acceptance pending [#1023] | spec/05 [05-OBS-6] + `faithful_observation.md` + this doc + the release roadmap + root-boundary corpus, one change set |
 | §C5 kernel signatures | Phase 2 | this doc |
-| §C6 covered-family census + tripwire | at PR #956 landing: canonical row identities, complete derived classifications, stdlib ADT shapes AND their capacity flags, callable-to-`[05-OP-N]` registrations, public-header context invariance, and BOTH grandfathered identity sets (seam and plain) all freeze; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (a shape-validated maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
+| §C6 covered-family census + tripwire | canonical row identities, complete derived classifications, stdlib ADT shapes AND their capacity flags, post-ratchet callable-to-`[05-OP-N]` registrations, public-header context invariance, the seam complete-descriptor set, and the exact non-seam/Json permanent complete-descriptor freezes; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (a shape-validated maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
 | §C6 typed wire/PyO3 leg state | before Phase 1 entry: frozen when each named enumerator and mutation command is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
 | capability table schema | Phase 4 entry | `capability_table.md` (the owning doc) + this doc |
 

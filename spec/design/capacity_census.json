@@ -83,55 +83,55 @@
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_value_as_bool ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -139,67 +139,67 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_adt * chelis_value_as_adt ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_value_as_dict ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -207,19 +207,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -227,31 +227,31 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_from_tensor ( const chelis_tensor * tensor ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -259,7 +259,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -267,13 +267,13 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -281,7 +281,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -289,19 +289,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -309,79 +309,79 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_value_as_list ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option_f64 chelis_dict_get_f64 ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option_f64 chelis_parse_f64 ( chelis_string value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option_i64 chelis_dict_get_i64 ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option_i64 chelis_parse_int64 ( chelis_string value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_from_bool ( _Bool value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -407,7 +407,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -415,19 +415,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_value_as_string ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -435,7 +435,7 @@
       "flags": [
         "raw-dtype-int"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
     },
     {
       "kind": "header-export",
@@ -445,19 +445,19 @@
         "raw-dtype-int",
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * t ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_value pad_value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -465,7 +465,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -491,19 +491,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lo , const chelis_tensor * hi ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -511,7 +511,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -519,7 +519,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -527,19 +527,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -555,7 +555,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -563,7 +563,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -571,19 +571,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * cond , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_value_as_tensor ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -591,7 +591,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -599,13 +599,13 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tuple * chelis_value_as_tuple ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -613,7 +613,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -621,7 +621,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -629,25 +629,25 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_adt ( chelis_adt * value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_bool ( _Bool value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_dict ( chelis_dict * value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -664,37 +664,37 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_list ( chelis_list * value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_string ( chelis_string value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_tensor ( chelis_tensor * value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_tuple ( chelis_tuple * value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -738,7 +738,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -746,7 +746,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -754,7 +754,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -762,7 +762,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -770,7 +770,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -778,7 +778,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -786,7 +786,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -802,7 +802,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -810,19 +810,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -837,13 +837,13 @@
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -878,7 +878,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -886,7 +886,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -894,7 +894,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -911,7 +911,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -928,7 +928,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -936,103 +936,103 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_free ( chelis_tensor * t ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_value_retain ( chelis_value value ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef enum { CHELIS_VALUE_INT64 , CHELIS_VALUE_FLOAT64 , CHELIS_VALUE_BOOL , CHELIS_VALUE_STRING , CHELIS_VALUE_TENSOR , CHELIS_VALUE_LIST , CHELIS_VALUE_TUPLE , CHELIS_VALUE_DICT , CHELIS_VALUE_ADT } chelis_value_tag",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { _Bool is_some ; chelis_value value ; } chelis_option_value",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-struct",
@@ -1049,13 +1049,13 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-struct",
@@ -1074,13 +1074,13 @@
         "raw-dtype-int",
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
     },
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
       "flags": [],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "prelude-adt-numeric",
@@ -1089,7 +1089,7 @@
         "float-carrier",
         "numeric-op"
       ],
-      "citation": "maintainer-override(source-faithful JSON ingestion ADT for the #890/#903 eval-lane I/O surface: JNum f64 is the exact carrier of the source format's float production, landed integer-capable from the start with JInt int64 beside it per roadmap invariant 7 and the io/json JsonInt/JsonFloat precedent; [05-OP-2] decides the split; liveness-bound to the open capacity class, chelis#729)"
+      "citation": "permanent-disposition([05-OP-2] source-faithful prelude Json numeric split; exact descriptor ratified 2026-08-04)"
     },
     {
       "kind": "std-adt-numeric",
@@ -1097,7 +1097,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-adt-numeric",
@@ -1114,7 +1114,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-adt-numeric",
@@ -1122,7 +1122,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-adt-numeric",
@@ -1130,7 +1130,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1146,7 +1146,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1154,7 +1154,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1170,7 +1170,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1178,7 +1178,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1194,7 +1194,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1202,7 +1202,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1210,7 +1210,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1274,7 +1274,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1282,7 +1282,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1290,7 +1290,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1298,7 +1298,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1306,7 +1306,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1338,7 +1338,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1346,7 +1346,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1354,7 +1354,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1395,7 +1395,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1427,7 +1427,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1435,7 +1435,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1443,7 +1443,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1451,7 +1451,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1459,7 +1459,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1467,7 +1467,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1475,7 +1475,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1483,7 +1483,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1491,7 +1491,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1499,7 +1499,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1507,7 +1507,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1515,7 +1515,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1523,7 +1523,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "std-def-numeric",
@@ -1531,7 +1531,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet surface (chelis#729 C6 initial census)"
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     }
   ]
 }
