@@ -3,8 +3,9 @@
 # Profiles:
 #   default  - local `cargo nextest run`. Fast suite only; heavy e2e is excluded.
 #   ci       - per-PR `Workspace Tests` job, via `scripts/gate.py integration`.
-#              Fast suite plus JUnit timing XML. Complete test binaries selected
-#              by the parallel required dtype oracle run only in that job.
+#              Fast suite plus JUnit timing XML. Complete test binaries named
+#              by the parallel required dtype oracle's `--test` arguments run
+#              only in that job.
 #   nightly  - the `Heavy E2E` workflow (.github/workflows/heavy-e2e.yml), which
 #              runs on a nightly `schedule:` and on `workflow_dispatch:` ONLY.
 #              Runs exactly the heavy e2e suite the other two profiles exclude.
@@ -46,9 +47,9 @@ default-filter = '''
 
 [profile.ci]
 # Keep the local fast-suite scope, then delegate every complete test binary
-# selected by the required Phase 0-3 oracle. Selector-based `-E` legs remain in
-# both jobs because they do not own a complete binary. The executable manifest
-# guard derives this list through the full Phase 3 inheritance chain.
+# named by a required Phase 0-3 oracle `--test` argument. Selector-based `-E`
+# legs remain in both jobs, including expressions with whole-binary arms. The
+# executable manifest guard derives this list through the inheritance chain.
 default-filter = '''
     not (
         binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
@@ -99,8 +100,8 @@ path = "junit.xml"
 [profile.nightly]
 # The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
 # default-filter is exactly the heavy set the `default` profile excludes.
-# The `ci` profile additionally delegates complete oracle-selected binaries;
-# scripts/test_nextest_profile_partition.py locks that coverage handoff.
+# The `ci` profile additionally delegates binaries named by oracle `--test`
+# arguments; scripts/test_nextest_profile_partition.py locks that handoff.
 default-filter = '''
     binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
     + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)

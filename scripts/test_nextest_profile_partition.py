@@ -7,22 +7,22 @@ PR #126 (refined by #127) split the heavyweight end-to-end suite off the
 per-PR integration gate. `.config/nextest.toml` carries three profiles:
 
   - `default` excludes an explicitly-named heavy-e2e set;
-  - `ci` excludes that same set plus every complete test binary selected by
-    the required Phase 0-3 oracle;
+  - `ci` excludes that same set plus every complete test binary named by a
+    required Phase 0-3 oracle `--test` argument;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
     `Heavy E2E` workflow runs `cargo nextest run --profile nightly`.
 
 This file locks the original workspace/nightly split plus the delegation
-contract for complete oracle-selected binaries. Selector-based oracle legs
-still overlap the workspace lane, so the dtype oracle is not a third disjoint
-profile.
+contract for binaries named by oracle `--test` arguments. Selector-based
+oracle legs still overlap the workspace lane, including `-E` expressions with
+whole-binary arms, so the dtype oracle is not a third disjoint profile.
 
 Two tiers of check:
 
   - `FilterTextTests` is a fast, no-compile lock on the *text* of the
-    three filter blocks: `ci` may add only complete oracle-selected binaries
-    to the default exclusion, and the `nightly` positive filter must equal the
-    negated inner set of the default exclusion block.
+    three filter blocks: `ci` may add only binaries named by oracle `--test`
+    arguments to the default exclusion, and the `nightly` positive filter must
+    equal the negated inner set of the default exclusion block.
   - `ProfilePartitionTests` is the real set-math oracle: it runs
     `cargo nextest list` for the `ci` and `nightly` profiles plus the
     full unfiltered list and asserts the partition. It is skipped when
@@ -99,6 +99,7 @@ def _required_phase3_commands() -> tuple[tuple[str, ...], ...]:
 
 
 def _oracle_selected_test_binaries() -> set[str]:
+    """Return complete binaries explicitly named by oracle `--test` arguments."""
     selected: set[str] = set()
     for argv in _required_phase3_commands():
         if "-p" not in argv:
@@ -140,7 +141,7 @@ class FilterTextTests(unittest.TestCase):
             _norm(_negative_filter_inner(ci_block)),
             expected,
             "the `ci` filter must differ from `default` only by the exact "
-            "complete binaries selected by the required dtype oracle",
+            "complete binaries named by required dtype oracle `--test` arguments",
         )
 
     def test_ci_only_exclusions_are_executed_by_the_dtype_oracle(self):

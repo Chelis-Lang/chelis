@@ -538,23 +538,28 @@ def main() -> int:
         print("PHASE 3 ORACLE: FAIL: cargo is required", file=sys.stderr)
         return 1
 
-    for label, command in SUITE_COMMANDS[:-1]:
-        if not run_command(label, command):
-            return 1
+    for index, (label, command) in enumerate(SUITE_COMMANDS):
+        if index != len(SUITE_COMMANDS) - 1:
+            if not run_command(label, command):
+                return 1
+            continue
 
-    label, command = SUITE_COMMANDS[-1]
-    with tempfile.TemporaryDirectory(prefix="chelis-phase3-receipts-") as temp_dir:
-        receipt_path = Path(temp_dir) / "eval-agreement.tsv"
-        env = os.environ.copy()
-        env["CHELIS_PHASE3_RECEIPT_PATH"] = str(receipt_path)
-        if not run_command(label, command, env=env):
-            return 1
-        receipt_text = receipt_path.read_text(encoding="utf-8") if receipt_path.exists() else ""
-        violations = receipt_violations(receipt_text)
-        if violations:
-            for violation in violations:
-                print(f"PHASE 3 ORACLE: FAIL: {violation}", file=sys.stderr)
-            return 1
+        with tempfile.TemporaryDirectory(prefix="chelis-phase3-receipts-") as temp_dir:
+            receipt_path = Path(temp_dir) / "eval-agreement.tsv"
+            env = os.environ.copy()
+            env["CHELIS_PHASE3_RECEIPT_PATH"] = str(receipt_path)
+            if not run_command(label, command, env=env):
+                return 1
+            receipt_text = (
+                receipt_path.read_text(encoding="utf-8")
+                if receipt_path.exists()
+                else ""
+            )
+            violations = receipt_violations(receipt_text)
+            if violations:
+                for violation in violations:
+                    print(f"PHASE 3 ORACLE: FAIL: {violation}", file=sys.stderr)
+                return 1
 
     print("\nPHASE 3 ORACLE: PASS")
     return 0
