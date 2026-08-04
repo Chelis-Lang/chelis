@@ -121,3 +121,41 @@ workstream, not this change.
 - After (`cargo nextest run --workspace`, local): 99.71s
 - The authoritative before/after for the CI job itself is the PR's own
   "Integration Tests (Linux)" run time; see the PR description.
+
+## 2026-08-03 Phase 0-3 oracle follow-up
+
+Run 30872705111, job 91877802907 measured a newer source of serialization:
+
+| Step | Wall |
+|---|---:|
+| Workspace integration gate | 14m56s |
+| Dtype Phase 0-3 oracle | 7m22s |
+| Combined serial tail | 22m18s |
+
+The oracle is an independent acceptance contract, so it does not need artifacts
+produced by the workspace nextest step. CI now runs those two expensive legs as
+parallel jobs. A small fail-closed aggregator retains the required
+`Integration Tests (Linux)` context and succeeds only when both legs succeed.
+
+The same run's three slowest workspace tests were:
+
+| Time | Binary | Test |
+|---:|---|---|
+| 89.353s | `chelis-compiler-api::capacity_census_wire` | `wire_schema_numeric_fields_match_the_reviewed_baseline` |
+| 63.618s | `chelis-python::capacity_census_bindings` | `a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected` |
+| 62.314s | `chelis-python::capacity_census_bindings` | `registered_pyfunctions_match_the_reviewed_rustdoc_signatures` |
+
+These are slow because each test launches a nested `cargo rustdoc` JSON build in
+an isolated target directory. The two bindings tests target the same directory,
+so one builds while the other waits on Cargo's target lock; the wire census
+builds a second dependency graph concurrently. An immediate warm repeat took
+under 0.4s for all four census tests, confirming that the assertions are not the
+expensive part.
+
+The Phase 1 portion of the required dtype oracle already runs both complete
+census binaries. The Linux `ci` nextest profile therefore excludes those two
+binaries from the workspace leg, preserving both positive and negative controls
+in the oracle without paying for them twice. The local `default` profile and
+macOS workspace run remain unchanged. A profile-partition oracle checks that
+the CI-only exclusions are selected by the required dtype oracle, so a future
+rename cannot silently drop them.

@@ -12,8 +12,9 @@ Four things are locked here:
       `cargo run -p chelis-cli --bin chelis -- ...` form is caught by
       the `cargo ` prefix). This is the lock that turns future
       CI-vs-gate drift into a test failure. The non-gate jobs
-      (sanitizer, macOS-smoke, docs, LOC-report, no-AI-authorship) are
-      excluded by name so the exclusion is explicit and reviewable;
+      (dtype oracle/aggregator, sanitizer, macOS-smoke, docs, LOC-report,
+      no-AI-authorship) are excluded by name so the exclusion is explicit
+      and reviewable;
   (c) `--list` prints the canonical full list;
   (d) no-ai-authorship patterns cover the current banned tool identities.
 """
@@ -212,7 +213,7 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
 
 
 # CI jobs that are deliberately NOT part of the per-PR developer gate.
-# `gate.py` only owns the `lint-and-unit` and `integration` jobs; these
+# `gate.py` only owns the `lint-and-unit` and `workspace-tests` jobs; these
 # are listed by name so the parity test's exclusion is visible.
 NON_GATE_JOBS = {
     "macos-smoke",
@@ -231,6 +232,12 @@ NON_GATE_JOBS = {
     # Rule-id: GATE-SCOPE-DIAGNOSTIC-KIND -- C2.2's controlled source
     # mutations are CI-owned and run only when an owner/control path changes.
     "diagnostic-kind-oracle",
+    # Rule-id: GATE-SCOPE-DTYPE-ORACLE -- the authoritative Phase 0-3
+    # acceptance driver is CI-owned. It runs beside the workspace suite,
+    # while the integration job below aggregates both outcomes under the
+    # stable branch-protection context.
+    "dtype-phase3-oracle",
+    "integration",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
     # design, like backend-sanitizers; the full prove corpus lives in
@@ -590,18 +597,18 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
 class CiParityTests(unittest.TestCase):
     """The lock: every cargo/chelis gate invocation in the CI workflow
     must be produced by `gate.py`. If a future edit hand-inlines a
-    cargo command into the `lint-and-unit` or `integration` job, this
+    cargo command into the `lint-and-unit` or `workspace-tests` job, this
     test fails."""
 
     def test_ci_file_exists(self):
         self.assertTrue(CI_YML.is_file(), f"missing {CI_YML}")
 
     def test_gate_jobs_call_gate_py(self):
-        # The `lint-and-unit` and `integration` jobs must invoke
+        # The `lint-and-unit` and `workspace-tests` jobs must invoke
         # `python3 scripts/gate.py <stage>` and must NOT hand-inline
         # any `cargo` or `chelis` command.
         invocations = _parse_ci_gate_invocations()
-        for job in ("lint-and-unit", "integration"):
+        for job in ("lint-and-unit", "workspace-tests"):
             self.assertIn(job, invocations, f"CI job '{job}' not found")
             self.assertEqual(
                 invocations[job],
@@ -630,28 +637,58 @@ class CiParityTests(unittest.TestCase):
             ),
         )
 
-    def test_nested_dtype_phase3_oracle_is_continuous(self):
-        block = _ci_job_block("integration")
+    def test_dtype_phase3_oracle_runs_beside_the_workspace_suite(self):
+        workspace_block = _ci_job_block("workspace-tests")
+        oracle_block = _ci_job_block("dtype-phase3-oracle")
+        aggregate_block = _ci_job_block("integration")
         workflow = CI_YML.read_text()
         top_level_permissions = workflow[
             workflow.index("permissions:\n") : workflow.index("\nenv:\n")
         ]
         numpy_command = "run: uv pip install --python .venv/bin/python 'numpy>=2.0'"
         oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
-        gate_command = "run: python3 scripts/gate.py integration"
         authenticated_oracle = (
             "env:\n"
             "          GH_TOKEN: ${{ github.token }}\n"
             f"        {oracle_command}"
         )
         self.assertNotIn("  issues: read", top_level_permissions)
-        self.assertEqual(block.count("    contents: read"), 1)
-        self.assertEqual(block.count("    issues: read"), 1)
-        self.assertEqual(block.count(numpy_command), 1)
-        self.assertEqual(block.count(oracle_command), 1)
-        self.assertEqual(block.count(authenticated_oracle), 1)
-        self.assertLess(block.index(numpy_command), block.index(oracle_command))
-        self.assertLess(block.index(gate_command), block.index(oracle_command))
+        self.assertNotIn(oracle_command, workspace_block)
+        self.assertEqual(oracle_block.count("    contents: read"), 1)
+        self.assertEqual(oracle_block.count("    issues: read"), 1)
+        self.assertEqual(oracle_block.count(numpy_command), 1)
+        self.assertEqual(oracle_block.count(oracle_command), 1)
+        self.assertEqual(oracle_block.count(authenticated_oracle), 1)
+        self.assertLess(
+            oracle_block.index(numpy_command),
+            oracle_block.index(oracle_command),
+        )
+        self.assertIn("needs: [changes]", workspace_block)
+        self.assertIn("needs: [changes]", oracle_block)
+        self.assertNotIn("workspace-tests", oracle_block)
+        self.assertNotIn("dtype-phase3-oracle", workspace_block)
+        self.assertIn("name: Integration Tests (Linux)", aggregate_block)
+        self.assertIn(
+            "needs: [changes, workspace-tests, dtype-phase3-oracle]",
+            aggregate_block,
+        )
+        self.assertIn("always()", aggregate_block)
+        self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_quoted_oracle_name_is_not_an_executable_oracle_step(self):
+        block = _ci_job_block("dtype-phase3-oracle")
+        oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
+        mutated = block.replace(
+            oracle_command,
+            'run: "true # scripts/dtype_phase3_oracle.py"',
+            1,
+        )
+        run_lines = [
+            line.strip()
+            for line in mutated.splitlines()
+            if line.strip().startswith("run:")
+        ]
+        self.assertNotIn(oracle_command, run_lines)
 
     def test_non_gate_jobs_are_excluded_by_name(self):
         # The non-gate jobs are allowed to keep their own cargo/chelis
@@ -702,7 +739,7 @@ class CiParityTests(unittest.TestCase):
         # the line-based parity parser. Disallow it for the two gate
         # jobs so parity stays enforceable.
         invocations = _parse_ci_gate_invocations()
-        for job in ("lint-and-unit", "integration"):
+        for job in ("lint-and-unit", "workspace-tests"):
             self.assertNotIn(
                 "<multiline-run-block>",
                 invocations.get(job, []),
@@ -1008,11 +1045,15 @@ class DocsOnlySkipTests(unittest.TestCase):
 
     # Jobs that must skip on a docs-only PR.
     HEAVY_GATED_JOBS = {
-        "integration",
+        "workspace-tests",
+        "dtype-phase3-oracle",
         "macos-smoke",
         "backend-sanitizers",
         "smt-build",
     }
+    # The stable required context aggregates the two parallel integration
+    # legs, so it needs their results as well as the docs-only classification.
+    HEAVY_AGGREGATOR_JOBS = {"integration"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
     CHANGE_GATED_JOBS = {
@@ -1090,6 +1131,23 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"'{job}' if must include !cancelled(): {cond!r}",
             )
 
+    def test_integration_aggregator_is_fail_closed_and_docs_gated(self):
+        attrs = _parse_job_attrs()
+        integration = attrs["integration"]
+        self.assertEqual(
+            integration.get("needs"),
+            "[changes, workspace-tests, dtype-phase3-oracle]",
+        )
+        cond = integration.get("if", "")
+        self.assertIn("always()", cond)
+        self.assertIn("!cancelled()", cond)
+        self.assertIn("needs.changes.result != 'success'", cond)
+        self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
+        block = _ci_job_block("integration")
+        self.assertIn("needs.workspace-tests.result", block)
+        self.assertIn("needs.dtype-phase3-oracle.result", block)
+        self.assertIn("scripts/ci_require_success.py", block)
+
     def test_always_run_jobs_are_not_gated(self):
         attrs = _parse_job_attrs()
         for job in self.ALWAYS_RUN_JOBS:
@@ -1112,6 +1170,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         attrs = _parse_job_attrs()
         classified = (
             self.HEAVY_GATED_JOBS
+            | self.HEAVY_AGGREGATOR_JOBS
             | self.CHANGE_GATED_JOBS
             | self.ALWAYS_RUN_JOBS
         )

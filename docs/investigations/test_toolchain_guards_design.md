@@ -33,7 +33,7 @@ Three failure modes kept recurring in CI:
 
 ### Design
 
-- The CI integration job runs `cargo nextest run --workspace`. A `ci`
+- The CI workspace-tests job runs `cargo nextest run --workspace`. A `ci`
   nextest profile (`.config/nextest.toml`) adds a `[profile.ci.junit]`
   section so nextest writes machine-readable per-test JUnit XML to
   `target/nextest/ci/junit.xml`.
@@ -129,8 +129,10 @@ charset checker was added: that would be a second source of truth for
 - `scripts/gate.py` is the single source of truth for the per-PR
   developer-runnable gate. It defines the command list once, split by
   CI stage (`lint-and-unit`, `integration`), with the union as the
-  full gate. `--stage` runs one subset; `--list` prints the canonical
-  full list.
+  full gate. The workflow's `workspace-tests` job invokes the integration
+  stage; the stable `Integration Tests (Linux)` context aggregates that job
+  with the parallel Phase 0-3 oracle. `--stage` runs one subset; `--list`
+  prints the canonical full list.
 - The canonical full list:
   - `cargo build --workspace --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
@@ -142,9 +144,9 @@ charset checker was added: that would be a second source of truth for
   cargo/chelis commands.
 - `AGENTS.md` "Minimum repo gate" points at `python3 scripts/gate.py`
   plus a `--list` echo of the canonical list.
-- Scope is the per-PR developer-runnable gate ONLY. The sanitizer,
-  macOS-smoke, LOC-report, no-AI-authorship, and docs CI jobs are out
-  of scope by design.
+- Scope is the per-PR developer-runnable gate ONLY. The dtype oracle and
+  result aggregator, sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
+  and docs CI jobs are out of scope by design.
 
 ### The parity lock
 

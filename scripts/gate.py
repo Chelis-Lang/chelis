@@ -59,8 +59,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # The canonical gate command list, split by CI stage. The CI workflow
-# has two developer-gate jobs, `lint-and-unit` and `integration`; each
-# runs its own subset, and the union is the full per-PR gate. Every
+# has two developer-gate jobs, `lint-and-unit` and `workspace-tests`; each
+# runs its own subset (`workspace-tests` invokes the `integration` stage), and
+# the union is the full per-PR gate. Every
 # command is a list of argv tokens (no shell).
 #
 # Keep this in lockstep with `.github/workflows/ci.yml`: the parity
