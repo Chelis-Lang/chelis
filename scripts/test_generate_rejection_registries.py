@@ -176,6 +176,32 @@ class IssueManifest(unittest.TestCase):
             with self.assertRaisesRegex(RegistryError, "noncanonical"):
                 discover_issue_authorities(root)
 
+    def test_macro_owner_file_still_inventories_real_construction_sites(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/chelis-types/src/unsupported.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "#[macro_export]\n"
+                "macro_rules! unimplemented_rejection {\n"
+                "    ($issue:literal) => {{ helper($issue) }};\n"
+                "}\n"
+                "fn live() {\n"
+                "    let _ = crate::unimplemented_rejection!(999);\n"
+                "}\n"
+            )
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {
+                    999: [
+                        AuthoritySite(
+                            "crates/chelis-types/src/unsupported.rs",
+                            6,
+                        )
+                    ]
+                },
+            )
+
     def test_build_script_is_a_production_authority_owner(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -190,6 +216,34 @@ class IssueManifest(unittest.TestCase):
                 discover_issue_authorities(root),
                 {714: [AuthoritySite("crates/example/build.rs", 2)]},
             )
+
+    def test_build_script_module_edge_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            build = root / "crates/example/build.rs"
+            build.parent.mkdir(parents=True)
+            build.write_text("mod helper;\nfn main() {}\n")
+            helper = root / "crates/example/helper.rs"
+            helper.write_text(
+                "let _ = chelis_types::unimplemented_rejection!(999, \"hidden\");\n"
+            )
+            with self.assertRaisesRegex(RegistryError, "build-script module edge"):
+                discover_issue_authorities(root)
+
+    def test_source_tree_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            src = root / "crates/example/src"
+            src.mkdir(parents=True)
+            (src / "lib.rs").write_text("mod generated;\n")
+            generated = root / "generated"
+            generated.mkdir()
+            (generated / "mod.rs").write_text(
+                "let _ = chelis_types::unimplemented_rejection!(999, \"hidden\");\n"
+            )
+            (src / "generated").symlink_to(generated, target_is_directory=True)
+            with self.assertRaisesRegex(RegistryError, "source symlink"):
+                discover_issue_authorities(root)
 
     def test_src_test_named_module_is_conservatively_inventoried(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -251,7 +305,8 @@ class IssueManifest(unittest.TestCase):
             source = root / "crates/example/src/lib.rs"
             source.parent.mkdir(parents=True)
             source.write_text(
-                '#[cfg_attr(feature = "generated", path = "../generated.rs")]\n'
+                '#[cfg_attr(all(feature = "generated", any(unix, windows)), '
+                'path = "../generated.rs")]\n'
                 "mod generated;\n"
             )
             with self.assertRaisesRegex(RegistryError, "production path attribute"):
@@ -265,6 +320,7 @@ class IssueManifest(unittest.TestCase):
             source.write_text(
                 '// #[path = "comment.rs"]\n'
                 'const TEXT: &str = r##"#[path = "raw.rs"]"##;\n'
+                '#[some_tool(metadata(path = "not-a-module.rs"))]\n'
                 "let path = 1;\n"
             )
             self.assertEqual(discover_issue_authorities(root), {})

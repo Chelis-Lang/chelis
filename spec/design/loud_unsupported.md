@@ -349,12 +349,16 @@ REGISTRIES of what actually exists:
   masks nested Rust comments and string forms while preserving offsets, so
   historical text cannot manufacture a site and comments or whitespace around
   macro tokens cannot hide one. Macro aliases and re-exports fail generation,
-  as do production `include!` and Rust `path` attributes: every accepted
-  construction remains in an ordinary Rust file under the scanner's source
-  roots and retains the canonical macro name the inventory can locate. Every
-  `src/**/*.rs` file is conservatively counted, including `src/tests/` and
-  co-located `#[cfg(test)]` modules, because directory names do not establish
-  Rust reachability and this lexical inventory does not evaluate configurations.
+  as do production `include!`, built-in Rust `path` attributes, build-script
+  helper-module declarations, and Rust source symlinks: every accepted
+  construction remains in an ordinary Rust file under the scanner's lexical
+  source roots and retains the canonical macro name the inventory can locate.
+  Unrelated tool metadata containing a nested `path` key is not a module edge
+  and remains accepted. Every `src/**/*.rs` file is conservatively counted,
+  including `src/tests/` and co-located `#[cfg(test)]` modules, because directory
+  names do not establish Rust reachability and this lexical inventory does not
+  evaluate configurations. The macro owner is scanned on the same terms; only
+  its balanced canonical `macro_rules!` definition span is masked.
 - `Rejection Authority Liveness` runs on every pull request and re-runs when
   its body is edited, not only when authority files or the head SHA change. It
   live-validates the standing source-derived manifest, queries GitHub's

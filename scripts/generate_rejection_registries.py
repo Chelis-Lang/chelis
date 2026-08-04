@@ -28,7 +28,15 @@ UNIMPLEMENTED_LITERAL = re.compile(
 )
 UNIMPLEMENTED_NAME = re.compile(r"\bunimplemented_rejection\b")
 PRODUCTION_RUST_INCLUDE = re.compile(r"\binclude\s*!\s*\(")
-PRODUCTION_PATH_ATTRIBUTE = re.compile(r"#\s*\[[^\]]*\bpath\s*=")
+BUILD_SCRIPT_MODULE = re.compile(
+    r"\b(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
+)
+ATTRIBUTE_START = re.compile(r"#\s*\[")
+PATH_META = re.compile(r"^\s*path\b\s*=")
+CFG_ATTR_META = re.compile(r"^\s*cfg_attr\b\s*\(")
+UNIMPLEMENTED_DEFINITION = re.compile(
+    r"\bmacro_rules\s*!\s*unimplemented_rejection\s*\{"
+)
 RAW_STRING_START = re.compile(r"(?:br|r)(?P<hashes>#{0,255})\"")
 MANIFEST_REL = Path("spec/design/loud_unsupported_issue_manifest.json")
 OUTPUT_REL = Path("crates/chelis-types/src/rejection_registry_generated.rs")
@@ -109,6 +117,96 @@ def _mask_rust_non_code(source: str) -> str:
     return "".join(masked)
 
 
+def _matching_delimiter(code: str, opening: int) -> int | None:
+    """Return the close paired with ``code[opening]`` in masked Rust."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closing = {value: key for key, value in pairs.items()}
+    opener = code[opening]
+    if opener not in pairs:
+        raise ValueError(f"not an opening delimiter: {opener!r}")
+    stack = [opener]
+    for index in range(opening + 1, len(code)):
+        token = code[index]
+        if token in pairs:
+            stack.append(token)
+        elif token in closing:
+            if not stack or stack[-1] != closing[token]:
+                return None
+            stack.pop()
+            if not stack:
+                return index
+    return None
+
+
+def _split_top_level_commas(meta: str) -> list[str]:
+    """Split Rust meta items without splitting nested predicate arguments."""
+    parts: list[str] = []
+    start = 0
+    stack: list[str] = []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closing = {value: key for key, value in pairs.items()}
+    for index, token in enumerate(meta):
+        if token in pairs:
+            stack.append(token)
+        elif token in closing:
+            if stack and stack[-1] == closing[token]:
+                stack.pop()
+        elif token == "," and not stack:
+            parts.append(meta[start:index])
+            start = index + 1
+    parts.append(meta[start:])
+    return parts
+
+
+def _meta_contains_path_attribute(meta: str) -> bool:
+    """Recognize built-in ``path`` meta, including nested ``cfg_attr``."""
+    if PATH_META.match(meta):
+        return True
+    cfg_attr = CFG_ATTR_META.match(meta)
+    if cfg_attr is None:
+        return False
+    opening = cfg_attr.end() - 1
+    closing = _matching_delimiter(meta, opening)
+    if closing is None:
+        return False
+    arguments = _split_top_level_commas(meta[opening + 1 : closing])
+    return any(_meta_contains_path_attribute(item) for item in arguments[1:])
+
+
+def _path_attribute_offset(code: str) -> int | None:
+    """Return the first built-in Rust module ``path`` attribute offset."""
+    for attribute in ATTRIBUTE_START.finditer(code):
+        opening = code.find("[", attribute.start(), attribute.end())
+        closing = _matching_delimiter(code, opening)
+        if closing is None:
+            continue
+        if _meta_contains_path_attribute(code[opening + 1 : closing]):
+            return attribute.start()
+    return None
+
+
+def _mask_owner_macro_definition(code: str, relative: str) -> str:
+    """Mask only the canonical macro definition, never its whole owner file."""
+    if relative != "crates/chelis-types/src/unsupported.rs":
+        return code
+    definitions = list(UNIMPLEMENTED_DEFINITION.finditer(code))
+    if len(definitions) != 1:
+        raise RegistryError(
+            f"{relative}: expected exactly one canonical "
+            "unimplemented_rejection macro definition"
+        )
+    definition = definitions[0]
+    opening = definition.end() - 1
+    closing = _matching_delimiter(code, opening)
+    if closing is None:
+        raise RegistryError(f"{relative}: unterminated unimplemented_rejection macro")
+    masked = list(code)
+    for index in range(definition.start(), closing + 1):
+        if masked[index] != "\n":
+            masked[index] = " "
+    return "".join(masked)
+
+
 def discover_atoms(spec_dir: Path) -> list[str]:
     """Return every normative atom declared by the numbered specs."""
     atoms: list[str] = []
@@ -138,22 +236,37 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
     for crate in sorted(crates.glob("*")):
         if not crate.is_dir():
             continue
+        if crate.is_symlink():
+            raise RegistryError(f"crate source symlink is forbidden: {crate}")
         src = crate / "src"
         if src.is_dir():
+            if src.is_symlink():
+                raise RegistryError(f"source symlink is forbidden: {src}")
+            for entry in src.rglob("*"):
+                if entry.is_symlink() and (entry.is_dir() or entry.suffix == ".rs"):
+                    raise RegistryError(f"source symlink is forbidden: {entry}")
             paths.extend(src.rglob("*.rs"))
         build = crate / "build.rs"
         if build.is_file():
+            if build.is_symlink():
+                raise RegistryError(f"source symlink is forbidden: {build}")
             paths.append(build)
 
     for path in sorted(set(paths)):
         relative_path = path.relative_to(root)
-        if relative_path.as_posix() == "crates/chelis-types/src/unsupported.rs":
-            # This is the macro definition and private builder owner, not a
-            # construction site. Its shape is locked by the boundary checker.
-            continue
         source = path.read_text(encoding="utf-8")
         code = _mask_rust_non_code(source)
         relative = relative_path.as_posix()
+        code = _mask_owner_macro_definition(code, relative)
+        build_module = BUILD_SCRIPT_MODULE.search(code)
+        if path.name == "build.rs" and build_module is not None:
+            line = source.count("\n", 0, build_module.start()) + 1
+            raise RegistryError(
+                f"{relative}:{line}: build-script module edge is forbidden "
+                "because helper modules fall outside the source-derived "
+                "authority inventory; keep helper code inline or extend the "
+                "inventory before adding this edge"
+            )
         include = PRODUCTION_RUST_INCLUDE.search(code)
         if include is not None:
             line = source.count("\n", 0, include.start()) + 1
@@ -163,9 +276,9 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
                 "edges; move the Rust source into an ordinary module or extend "
                 "the inventory before using this edge"
             )
-        path_attribute = PRODUCTION_PATH_ATTRIBUTE.search(code)
+        path_attribute = _path_attribute_offset(code)
         if path_attribute is not None:
-            line = source.count("\n", 0, path_attribute.start()) + 1
+            line = source.count("\n", 0, path_attribute) + 1
             raise RegistryError(
                 f"{relative}:{line}: production path attribute is forbidden "
                 "because the source-derived authority inventory does not follow "
