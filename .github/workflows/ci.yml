@@ -3,7 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+  # The rejection-authority lifecycle check reads closing relationships from
+  # PR metadata. `edited` is therefore as material as a new head commit: a
+  # body edit can add/remove a closing keyword without changing the SHA.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -93,6 +97,9 @@ jobs:
 
       - name: Create uv-managed venv
         run: uv venv --python 3.11
+
+      - name: Validate source-derived rejection registries
+        run: .venv/bin/python scripts/generate_rejection_registries.py --check
 
       - name: Validate rejection authority construction boundary
         run: .venv/bin/python scripts/check_rejection_authority_boundary.py

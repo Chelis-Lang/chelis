@@ -143,6 +143,59 @@ class IssueManifest(unittest.TestCase):
                 {714: [AuthoritySite("crates/example/src/lib.rs", 5)]},
             )
 
+    def test_comments_and_whitespace_around_macro_tokens_cannot_hide_a_site(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "fn live() {\n"
+                "    let _ = chelis_types::unimplemented_rejection /* gap */ !\n"
+                "        /* gap */ (714, \"live\");\n"
+                "}\n"
+            )
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {714: [AuthoritySite("crates/example/src/lib.rs", 2)]},
+            )
+
+    def test_macro_alias_is_rejected_instead_of_silently_uninventoried(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "use chelis_types::unimplemented_rejection as pending;\n"
+                "fn live() { let _ = pending!(714, \"live\"); }\n"
+            )
+            with self.assertRaisesRegex(RegistryError, "noncanonical"):
+                discover_issue_authorities(root)
+
+    def test_build_script_is_a_production_authority_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/build.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "fn main() {\n"
+                "    let _ = chelis_types::unimplemented_rejection!(714, \"live\");\n"
+                "}\n"
+            )
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {714: [AuthoritySite("crates/example/build.rs", 2)]},
+            )
+
+    def test_src_test_module_is_not_a_production_authority_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/tests/probe.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "let _ = chelis_types::unimplemented_rejection!(999, \"test-only\");\n"
+            )
+            self.assertEqual(discover_issue_authorities(root), {})
+
     def test_rendered_manifest_carries_sites_and_is_source_derived(self) -> None:
         rendered = render_issue_manifest(
             {

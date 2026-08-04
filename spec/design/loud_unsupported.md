@@ -344,20 +344,28 @@ REGISTRIES of what actually exists:
   construction site, its exact file and line, and the last-verified facts that
   the number is an ISSUE (not a PR) and is OPEN. The manifest and Rust registry
   are derived together from literal `unimplemented_rejection!` construction
-  sites; byte-agreement tests reject hand edits and additions/removals that do
-  not follow source. The scanner masks nested Rust comments and string forms
-  while preserving offsets, so historical text cannot manufacture a site and
-  an inline comment cannot hide one.
-- `Rejection Authority Liveness` runs on EVERY pull request, not only changes
-  to authority files. It live-validates the standing source-derived manifest,
-  then inspects the PR title/body and every commit message for GitHub closing
-  keywords. A closing reference to an issue with live constructors fails and
-  reports every offending `path:line`; the constructors and generated artifacts
-  must move to their still-open capability owner before the delivered instance
-  can close. Issue comments and repository prose are intentionally not merge
-  inputs and are not scanned. Tracker or PR-commit retrieval failure stays a
-  blocking failure. Membership answers the compile-time question; the per-PR
-  job answers both the current-state and about-to-close lifecycle questions.
+  sites in crate production sources and `build.rs`; byte-agreement tests reject
+  hand edits and additions/removals that do not follow source. The scanner
+  masks nested Rust comments and string forms while preserving offsets, so
+  historical text cannot manufacture a site and comments or whitespace around
+  macro tokens cannot hide one. Macro aliases and re-exports fail generation:
+  every accepted construction retains the canonical macro name the inventory
+  can locate, while explicit `src/tests/` trees remain test-only.
+- `Rejection Authority Liveness` runs on every pull request and re-runs when
+  its body is edited, not only when authority files or the head SHA change. It
+  live-validates the standing source-derived manifest, queries GitHub's
+  paginated `closingIssuesReferences` relation (including manual links), and
+  additionally inspects the PR body and every retrievable commit message for
+  closing keywords. The REST commit inventory must equal the event's declared
+  count; the endpoint's 250-commit ceiling therefore fails closed rather than
+  silently truncating a larger PR. A closing reference to an issue with live
+  constructors fails and reports every offending `path:line`; the constructors
+  and generated artifacts must move to their still-open capability owner before
+  the delivered instance can close. Issue comments, PR titles, and repository
+  prose are intentionally not closing-capable merge inputs and are not scanned.
+  Tracker, GraphQL pagination, or PR-commit retrieval failure stays a blocking
+  failure. Membership answers the compile-time question; the per-PR job answers
+  both the current-state and about-to-close lifecycle questions at each run.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also

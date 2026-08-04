@@ -258,6 +258,13 @@ NON_GATE_JOBS = {
 
 
 class RejectionAuthorityLivenessJobTests(unittest.TestCase):
+    def test_workflow_rechecks_when_closing_references_can_change(self):
+        trigger = CI_YML.read_text().split("concurrency:", 1)[0]
+        self.assertIn(
+            "pull_request:\n    types: [opened, synchronize, reopened, edited]",
+            trigger,
+        )
+
     def test_job_runs_on_every_pr_and_has_issue_and_pr_read_access(self):
         block = _ci_job_block("rejection-authority-liveness")
         self.assertNotIn("needs.changes.outputs.rejection_authority_changed", block)
@@ -265,6 +272,7 @@ class RejectionAuthorityLivenessJobTests(unittest.TestCase):
         self.assertIn("issues: read", block)
         self.assertIn("pull-requests: read", block)
         self.assertIn("contents: read", block)
+        self.assertIn("scripts/generate_rejection_registries.py --check", block)
         self.assertIn("scripts/check_rejection_authority_boundary.py", block)
         self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
 

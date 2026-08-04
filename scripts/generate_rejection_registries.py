@@ -23,8 +23,10 @@ from pathlib import Path
 ATOM = re.compile(r"^> \*\*(\[[0-9]{2}-[A-Z]+-[1-9][0-9]*\])\*\*", re.MULTILINE)
 NUMBERED_SPEC = re.compile(r"^(?:0[0-9]|1[0-2])-[^/]+\.md$")
 UNIMPLEMENTED_LITERAL = re.compile(
-    r"\bunimplemented_rejection!\(\s*([0-9][0-9_]*)", re.MULTILINE
+    r"\b(?P<name>unimplemented_rejection)\s*!\s*\(\s*([0-9][0-9_]*)",
+    re.MULTILINE,
 )
+UNIMPLEMENTED_NAME = re.compile(r"\bunimplemented_rejection\b")
 RAW_STRING_START = re.compile(r"(?:br|r)(?P<hashes>#{0,255})\"")
 MANIFEST_REL = Path("spec/design/loud_unsupported_issue_manifest.json")
 OUTPUT_REL = Path("crates/chelis-types/src/rejection_registry_generated.rs")
@@ -127,12 +129,40 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
     """
     authorities: dict[int, list[AuthoritySite]] = {}
     crates = root / "crates"
-    for path in sorted(crates.glob("*/src/**/*.rs")):
+    paths: list[Path] = []
+    for crate in sorted(crates.glob("*")):
+        if not crate.is_dir():
+            continue
+        src = crate / "src"
+        if src.is_dir():
+            paths.extend(src.rglob("*.rs"))
+        build = crate / "build.rs"
+        if build.is_file():
+            paths.append(build)
+
+    for path in sorted(set(paths)):
+        relative_path = path.relative_to(root)
+        if "tests" in relative_path.parts:
+            continue
+        if relative_path.as_posix() == "crates/chelis-types/src/unsupported.rs":
+            # This is the macro definition and private builder owner, not a
+            # construction site. Its shape is locked by the boundary checker.
+            continue
         source = path.read_text(encoding="utf-8")
         code = _mask_rust_non_code(source)
-        relative = path.relative_to(root).as_posix()
-        for match in UNIMPLEMENTED_LITERAL.finditer(code):
-            number = int(match.group(1).replace("_", ""))
+        relative = relative_path.as_posix()
+        matches = list(UNIMPLEMENTED_LITERAL.finditer(code))
+        canonical_names = {match.start("name") for match in matches}
+        for name in UNIMPLEMENTED_NAME.finditer(code):
+            if name.start() not in canonical_names:
+                line = source.count("\n", 0, name.start()) + 1
+                raise RegistryError(
+                    f"{relative}:{line}: noncanonical unimplemented_rejection "
+                    "spelling; macro aliases and re-exports are forbidden so "
+                    "the source-derived authority inventory stays complete"
+                )
+        for match in matches:
+            number = int(match.group(2).replace("_", ""))
             line = source.count("\n", 0, match.start()) + 1
             authorities.setdefault(number, []).append(AuthoritySite(relative, line))
     return {
