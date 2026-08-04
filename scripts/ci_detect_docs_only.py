@@ -27,8 +27,10 @@ Writes `docs_only=<bool>`, `rejection_authority_changed=<bool>`, and
 the file named by `$GITHUB_OUTPUT` (the GitHub Actions step-output
 mechanism); if that env var is unset it prints both lines to stdout so the
 script is runnable and testable off CI. Exit status is always 0. An empty or
-unreadable change set fails safe in both directions: it runs the full build
-and the network-backed rejection-authority liveness check.
+unreadable change set fails safe for the build and mutation-oracle decisions.
+The rejection-authority output remains diagnostic; its liveness job now runs
+on every pull request so closing references cannot evade it through an
+unrelated diff.
 """
 
 from __future__ import annotations
@@ -134,7 +136,7 @@ def is_docs_only(paths: list[str]) -> bool:
 
 
 def rejection_authority_changed(paths: list[str]) -> bool:
-    """Whether the diff must run live validation; empty input fails safe."""
+    """Whether authority inputs changed; retained as a diagnostic output."""
     cleaned = [p.strip().strip('"') for p in paths if p.strip()]
     if not cleaned:
         return True

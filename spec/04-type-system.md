@@ -2496,8 +2496,6 @@ rejections with no citation).
 > comparison, fold, or output, in every lane and on every surface
 > (scalar and tensor alike).
 
-*(Not honored today: chelis#717, #714, #718, #720, #726.)*
-
 > **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
 > ties-to-even, at the dtype's own STORAGE width (f64 identity; f32
 > 24-bit, f16 11-bit including subnormals, bf16 8-bit mantissa), with
