@@ -2,10 +2,14 @@ name: CI
 
 on:
   pull_request:
-  # Strict branch protection already requires an up-to-date PR head to pass
-  # every required context before merge. Keep an explicit exact-main rerun
-  # escape hatch without automatically spending the full matrix a second time
-  # on the resulting main-branch commit.
+  # Pull-request runs publish the required contexts, but the expensive jobs
+  # skip there. The merge queue reruns those jobs on the queued merge candidate
+  # immediately before GitHub may merge it; authors do not have to rebase onto
+  # each new main commit. `main` MUST require the merge queue before this policy
+  # lands, or the skipped PR contexts could permit an untested direct merge.
+  merge_group:
+    types: [checks_requested]
+  # Explicit on-request full run for a selected ref.
   workflow_dispatch:
 
 concurrency:
@@ -19,8 +23,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Detect docs-only pull requests so the heavy jobs (Integration, macOS
-  # Smoke, SMT Feature Build, Backend Sanitizers, Hull Conformance Gate)
+  # Detect docs-only PRs and queued merge candidates so the heavy jobs
+  # (Integration, macOS Smoke, SMT Feature Build, Backend Sanitizers, Hull)
   # can skip them via a job-level `if` (chelis#419). This MUST be a job
   # output consumed by each build/test job's `if`, never a workflow-level
   # `paths-ignore`: a required check filtered out by `paths-ignore` never
@@ -30,8 +34,8 @@ jobs:
   #
   # This job itself is intentionally NOT a required status check, is
   # cheap (no toolchain, no build), and runs on every event. On manual
-  # dispatch (no pull_request context) it emits docs_only=false so the
-  # requested exact-main run executes the full suite.
+  # dispatch it emits docs_only=false so the requested run executes the full
+  # suite. A merge-group diff uses the queue payload's exact base/head SHAs.
   changes:
     name: Detect docs-only changes
     runs-on: ubuntu-latest
@@ -41,9 +45,9 @@ jobs:
       # Shallow checkout (depth 1); the detect step deepens to the PR
       # commit range. GitHub Actions expressions have no arithmetic, so
       # `commits + 1` is computed in bash, not in the YAML `fetch-depth`.
-      # On push the detect step short-circuits without needing history.
+      # On manual dispatch the detect step short-circuits without history.
       - name: Checkout
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
@@ -54,31 +58,40 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            # A manual exact-main run always executes the full suite; do
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Deepen head to the PR commit count + 1 (the +1 reaches the
+            # base tip's parent so base..head resolves), then backstop-fetch
+            # the base commit so it is present as an object even on a stale
+            # count (force-push between the event and the run).
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          elif [ "$EVENT_NAME" = "merge_group" ]; then
+            BASE="$MERGE_BASE"
+            HEAD="$MERGE_HEAD"
+            # A tree diff needs both objects but not their full history.
+            git fetch --depth=1 origin "$HEAD" 2>/dev/null || true
+            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          else
+            # A manual run always executes the full suite; do
             # not skip build/test jobs without a PR diff.
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          # Deepen head to the PR commit count + 1 (the +1 reaches the
-          # base tip's parent so base..head resolves), then backstop-fetch
-          # the base commit so it is present as an object even on a stale
-          # count (force-push between the event and the run).
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
   lint-and-unit:
     name: Lint and Unit Tests (Linux)
     runs-on: ubuntu-latest
-    # Pure documentation changes cannot affect Cargo compilation, Rust
-    # formatting, doctests, or the Chelis source lint corpus. The Docs job
-    # remains live and validates mdBook plus embedded package examples.
+    # PR admission always publishes this context as skipped success. On a
+    # queued merge candidate, pure docs cannot affect Cargo compilation, Rust
+    # formatting, doctests, or the Chelis source lint corpus; Docs remains live.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo from the dev/test build. Debuginfo is the dominant
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
@@ -181,16 +194,16 @@ jobs:
     # In steady state this job LINKS a durable prebuilt cvc5 (a GitHub Release
     # asset published by build-cvc5.yml, rustc-independent, no cache TTL/LRU),
     # so it runs ~3m warm. The from-source cvc5 compile (~22m) is off the
-    # per-PR path: it only recurs on a cvc5-sys version bump before
+    # required pre-merge path: it only recurs on a cvc5-sys version bump before
     # build-cvc5.yml republishes the asset (see docs/smt_build_setup.md for the
     # bump runbook). 25m covers a warm link plus a fully cold Rust workspace
     # recompile (e.g. after a stable-toolchain bump) with margin, and fails
     # fast instead of silently absorbing a stray from-source cvc5 build.
     timeout-minutes: 25
-    # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success. Runs on every code PR and manual exact-main dispatch.
+    # Publish a skipped success context on PRs, then run on a non-docs queued
+    # merge candidate or an explicit manual dispatch.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # cvc5 builds from source into target/ on top of the workspace build —
     # the heaviest disk consumer of any Linux job — so it gets both the
     # free-disk reclaim and the debuginfo strip (chelis#392). It was the
@@ -202,7 +215,7 @@ jobs:
       - uses: actions/checkout@v6
 
       # cvc5 (cvc5-sys) builds from source via CMake+make (~22m cold). To keep
-      # that off the per-PR path we LINK a prebuilt cvc5, tried in two layers
+      # that off the required pre-merge path we LINK a prebuilt cvc5, tried in two layers
       # (see docs/smt_build_setup.md and scripts/ci_cvc5_cache.py):
       #   1. DURABLE (primary): a GitHub Release asset published by
       #      build-cvc5.yml, keyed on the cvc5-sys version + namespace (NOT
@@ -322,9 +335,9 @@ jobs:
     name: SMT Feature Build (Linux, glibc 2.31)
     runs-on: ubuntu-latest
     # Like the primary SMT smoke, this release-compatibility build has no
-    # input on a pure documentation PR.
+    # input on a pure documentation merge candidate and skips PR-time work.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     container: debian:11
     defaults:
       run:
@@ -456,9 +469,9 @@ jobs:
     name: SMT Feature Build (darwin-arm64)
     runs-on: macos-latest
     # Like the primary SMT smoke, this release-compatibility build has no
-    # input on a pure documentation PR.
+    # input on a pure documentation merge candidate and skips PR-time work.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -492,7 +505,7 @@ jobs:
       # path. The release.yml darwin job uses a DIFFERENT cache key (no `key:`
       # override) and no cvc5 cache, so it does not share either cache and is
       # the authoritative cold-build proof for the SHIPPED artifact; treat a
-      # release-job cvc5 failure as real even when this per-PR lane is green.
+      # release-job cvc5 failure as real even when this pre-merge lane is green.
       # If a cvc5/toolchain bump is in the diff, force a cold build by bumping
       # this `key:` (e.g. `smt-darwin-arm64-v2`) AND the cvc5 CACHE_SCHEMA in
       # the same PR so both cold paths are proven before release relies on it.
@@ -560,11 +573,11 @@ jobs:
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
-    # Skip on docs-only PRs (chelis#419). A skipped required job reports
-    # success, so branch protection stays satisfied. A manual dispatch emits
-    # docs_only=false. `needs: [changes]` makes the output readable.
+    # Publish a skipped success context on PRs, then run on a non-docs queued
+    # merge candidate or explicit dispatch. `needs: [changes]` makes the
+    # output readable.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -635,12 +648,11 @@ jobs:
     name: macOS Smoke
     runs-on: macos-latest
     timeout-minutes: 20
-    # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success. macOS Smoke is the authoritative workspace oracle, so it
-    # runs on every code PR and manual exact-main dispatch; only a pure-prose
-    # PR skips it.
+    # Publish a skipped success context on PRs. macOS Smoke remains the
+    # authoritative workspace oracle on queued code merges and manual runs;
+    # only a pure-prose queue candidate skips it.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
@@ -701,10 +713,10 @@ jobs:
   backend-sanitizers:
     name: Backend Sanitizers
     runs-on: ubuntu-latest
-    # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success. Runs on every code PR and manual exact-main dispatch.
+    # Publish a skipped success context on PRs, then run on a non-docs queued
+    # merge candidate or an explicit manual dispatch.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     env:
       CHELIS_C_TEST_EXTRA_FLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
@@ -738,22 +750,38 @@ jobs:
     name: No AI authorship markers
     runs-on: ubuntu-latest
     steps:
-      # Shallow the clone to the PR's commit range instead of the whole
-      # repo history (chelis#421). GitHub Actions expressions have no
-      # arithmetic, so the depth-1 checkout is deepened to the PR commit
-      # count + 1 in bash below (the `+1` reaches the base tip's parent so
-      # `base..head` resolves). A backstop fetch guarantees `base.sha` is
-      # present even if the count is stale (a force-push between the event
-      # and the run). On push, depth 2 covers `HEAD~1..HEAD`.
-      - uses: actions/checkout@v6
+      # Keep the ordinary PR scan shallow (chelis#421). A merge-group payload
+      # has no commit count, so fetch its complete candidate history to ensure
+      # every queued commit is scanned rather than only the synthetic tip.
+      - name: Checkout pull request history
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
+
+      - name: Checkout merge-group history
+        if: github.event_name == 'merge_group'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Checkout manual candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
 
       - name: Check commits for AI authorship markers
         env:
           COMMITS: ${{ github.event.pull_request.commits }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            BASE="$MERGE_BASE"
+            HEAD="$MERGE_HEAD"
+            RANGE="$BASE..$HEAD"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
             HEAD="${{ github.event.pull_request.head.sha }}"
             # Deepen head to the PR commit range, then backstop-fetch the
@@ -763,7 +791,6 @@ jobs:
             git fetch --depth=1 origin "$BASE" 2>/dev/null || true
             RANGE="$BASE..$HEAD"
           else
-            git fetch --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
             RANGE="HEAD~1..HEAD"
           fi
           FOUND=0

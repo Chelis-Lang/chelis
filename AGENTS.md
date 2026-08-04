@@ -494,16 +494,20 @@ macOS.
 
 Documentation-only changes (Markdown/prose with no code, fixture, or
 example edits) are exempt from `--local`: skip the local gate, push,
-and require green CI instead. The gate's clippy/build/test stages
-cannot be affected by prose, so CI reports those required jobs as skipped
-and still runs the Docs job (mdBook build and the `skill_suite` example
-validator), which covers everything a docs-only diff can break.
+and require green CI instead. Pull-request runs publish skipped success
+contexts for the expensive Cargo, SMT, macOS, sanitizer, and Hull jobs while
+still running Docs (mdBook plus the `skill_suite` example validator) and the
+authorship check. When the PR enters the required merge queue, those expensive
+jobs run against the queued merge candidate; a docs-only candidate skips them
+again because prose cannot affect their acceptance surfaces.
 
-The expensive required CI and Hull workflows run on pull requests, not again
-on the resulting push to `main`. This relies on `main` branch protection's
-strict up-to-date required checks; both workflows retain `workflow_dispatch`
-for an explicit exact-main rerun. If that protection is relaxed, restore the
-push trigger before relying on a PR result for the merged tree.
+The expensive required CI and Hull workflows run on `merge_group` immediately
+before merge, not on every pull-request update or on the resulting push to
+`main`. `main` MUST require the GitHub merge queue: the skipped PR contexts are
+only admission contexts and are not validation evidence. Both workflows retain
+`workflow_dispatch` for an explicit on-request full run. Do not remove the
+merge-queue requirement while this trigger policy is active; restore full PR
+execution first if direct merges are re-enabled.
 
 Default-gate discipline:
 

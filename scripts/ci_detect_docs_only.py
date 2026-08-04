@@ -3,8 +3,9 @@
 
 The CI workflow skips build/test jobs (Lint and Unit, Integration, macOS
 Smoke, all SMT Feature Build lanes, Backend Sanitizers, Hull Conformance
-Gate) on docs-only pull requests via a *job-level* `if`, never `paths-ignore`
-(chelis#419). A required check that is path-filtered out never reports
+Gate) on pull-request admission runs and on docs-only merge-queue candidates
+via a *job-level* `if`, never `paths-ignore` (chelis#419). A required check that
+is path-filtered out never reports
 its status context, so branch protection waits on it forever and the PR
 can never merge; a required check whose *job* is skipped by an `if`
 reports its context as success, which satisfies branch protection. So

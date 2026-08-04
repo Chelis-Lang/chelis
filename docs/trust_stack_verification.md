@@ -90,11 +90,12 @@ What Hull proves, precisely:
   hand-curated reference-gap corpus exercising the reject direction.
 - It is CI-enforced in this repo: the frozen corpus under
   `tests/conformance/hull/` runs against the just-built binary via
-  `.github/workflows/conformance.yml` per PR, failing on any `CompilerUnsound` /
-  unexplained `Disagree` / `EvalDisagree`; an injected-unsound step verifies the
-  gate has teeth. Strict branch protection makes that PR current with `main`
-  before merge, and the workflow retains a manual exact-main dispatch. The full
-  fresh 10k campaign runs nightly.
+  `.github/workflows/conformance.yml` on the GitHub merge-queue candidate,
+  failing on any `CompilerUnsound` / unexplained `Disagree` / `EvalDisagree`;
+  an injected-unsound step verifies the gate has teeth. The required merge queue
+  constructs that candidate from current `main` without requiring the PR author
+  to update their branch. The workflow also retains a manual on-request run, and
+  the full fresh 10k campaign runs nightly.
 
 Scope: the PURE in-fragment surface (tensor/scalar/lambda/let/if/match/grad
 surface). Grad conservatism is a build-time differential (v0.2.0); effects,

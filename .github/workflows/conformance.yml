@@ -10,12 +10,15 @@ name: Hull Conformance
 #
 # This is a CI job like backend-sanitizers, NOT part of the per-PR developer
 # `gate.py` quartet (scripts/test_gate.py knows conformance.yml is out of scope
-# by design -- see the CONFORMANCE_YML reference there). It runs per PR, with
-# manual exact-main dispatch available; the FULL >=10k fresh campaign runs
-# nightly in conformance-nightly.yml.
+# by design -- see the CONFORMANCE_YML reference there). PR runs publish its
+# skipped required context; the real gate runs on the queued merge candidate or
+# by manual request. The FULL >=10k fresh campaign runs nightly in
+# conformance-nightly.yml.
 
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 
 concurrency:
@@ -32,9 +35,9 @@ jobs:
   # Same docs-only detector as ci.yml's `changes` job (chelis#419). The
   # conformance gate lives in its own workflow file, so `needs:` cannot
   # reach ci.yml's changes job; this replicates it here so the required
-  # `Hull Conformance Gate (Linux)` context skips on a docs-only PR
-  # (skipped required job reports success) while running on every code PR
-  # and a manual exact-main dispatch. Kept as a separate file (no
+  # `Hull Conformance Gate (Linux)` context skips on PR events and docs-only
+  # queue candidates while running on queued code merges and manual dispatch.
+  # Kept as a separate file (no
   # required-context move) to avoid
   # the branch-protection deadlock footgun in chelis#420; the build-once /
   # shared-artifact fold is escalated separately.
@@ -47,7 +50,7 @@ jobs:
       # Shallow checkout (depth 1); deepen in bash since GitHub Actions
       # expressions have no arithmetic. See ci.yml's changes job.
       - name: Checkout
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
@@ -58,25 +61,33 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           COMMITS: ${{ github.event.pull_request.commits }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          MERGE_HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          elif [ "$EVENT_NAME" = "merge_group" ]; then
+            BASE="$MERGE_BASE"
+            HEAD="$MERGE_HEAD"
+            git fetch --depth=1 origin "$HEAD" 2>/dev/null || true
+            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          else
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
             exit 0
           fi
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
           git diff --name-only "$BASE..$HEAD" \
             | python3 scripts/ci_detect_docs_only.py
 
   conformance:
     name: Hull Conformance Gate (Linux)
     runs-on: ubuntu-latest
-    # Skip on docs-only PRs (chelis#419); a skipped required job reports
-    # success, and the `if` fails safe (runs when the changes job did not
-    # succeed) so a broken detector never skips the gate on a code PR.
+    # Publish a skipped success context on PRs, then run on a non-docs queued
+    # merge candidate or explicit dispatch. The `if` fails safe when the
+    # changes job did not succeed.
     needs: [changes]
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     # ~1,500 subprocess calls at ~50-80 ms/call under contention across 2-4
     # cores is ~30-45 s of subprocess wall; the binary build dominates. Allow
     # generous head room for a cold cargo cache.

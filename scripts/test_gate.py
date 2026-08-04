@@ -52,6 +52,7 @@ DOCS_ONLY_GATE_IF = (
     "if: ${{ !cancelled() && (needs.changes.result != 'success' "
     "|| needs.changes.outputs.docs_only != 'true') }}"
 )
+PREMERGE_HEAVY_GATE_MARKER = "github.event_name != 'pull_request'"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 
 
@@ -161,23 +162,51 @@ def _assert_darwin_manual_dispatch(workflow: str) -> None:
         raise AssertionError("the Linux Nix job must keep pull request coverage")
 
 
-def _assert_pr_or_dispatch_only(workflow: str) -> None:
-    """Required PR gates must not rerun wholesale after merge.
-
-    Strict branch protection requires the PR head to be current with main and
-    green before merge. Keep a manual exact-main escape hatch, but do not spend
-    a second full matrix on the resulting main-branch commit.
-    """
+def _assert_pr_queue_or_dispatch_only(workflow: str) -> None:
+    """Required gates publish PR contexts, then run fully in the merge queue."""
     trigger_section = workflow.split("jobs:", 1)[0]
     trigger_keys = set(
         re.findall(r"(?m)^  ([a-z_]+):\s*$", trigger_section)
     )
     if "pull_request" not in trigger_keys:
-        raise AssertionError("required CI must run on pull_request")
+        raise AssertionError("required CI must publish pull_request contexts")
+    if "merge_group" not in trigger_keys:
+        raise AssertionError("required CI must run before merge via merge_group")
+    if "types: [checks_requested]" not in trigger_section:
+        raise AssertionError("merge_group must be limited to checks_requested")
     if "workflow_dispatch" not in trigger_keys:
         raise AssertionError("required CI must keep a manual dispatch escape hatch")
     if "push" in trigger_keys:
         raise AssertionError("required PR CI must not rerun on push-to-main")
+
+
+def _assert_merge_group_diff_support(workflow: str) -> None:
+    """The docs-only detector must diff the queued merge candidate exactly."""
+    changes = _workflow_job_blocks(workflow).get("changes", "")
+    for marker in (
+        "github.event.merge_group.base_sha",
+        "github.event.merge_group.head_sha",
+        '"$EVENT_NAME" = "merge_group"',
+    ):
+        if marker not in changes:
+            raise AssertionError(
+                f"merge-group docs-only detection missing {marker!r}"
+            )
+
+
+def _assert_merge_group_authorship_range(workflow: str) -> None:
+    """Authorship scanning must cover every commit in a queued merge group."""
+    block = _workflow_job_blocks(workflow).get("no-ai-authorship", "")
+    for marker in (
+        'if [ "${{ github.event_name }}" = "merge_group" ]',
+        "github.event.merge_group.base_sha",
+        "github.event.merge_group.head_sha",
+        'RANGE="$BASE..$HEAD"',
+    ):
+        if marker not in block:
+            raise AssertionError(
+                f"merge-group authorship range missing {marker!r}"
+            )
 
 
 def _assert_bounded_hull_teeth(workflow: str) -> None:
@@ -895,8 +924,8 @@ class SmtCiSplitTests(unittest.TestCase):
         text = SMT_FULL_PROVE_YML.read_text()
         required = [
             # Nightly + manual only (the PR trigger was removed: the ~46m
-            # corpus is too heavy for the per-PR path and is not a required
-            # check; the per-PR cvc5 signal is ci.yml's fast smoke).
+            # corpus is too heavy for the required queue path and is not a
+            # required check; ci.yml's fast smoke is the queued cvc5 signal).
             "schedule:",
             "workflow_dispatch:",
             "shared-key: smt-smt-build",
@@ -946,12 +975,11 @@ class SmtCiSplitTests(unittest.TestCase):
         )
 
 
-def _parse_job_attrs() -> dict[str, dict[str, str]]:
-    """Parse `.github/workflows/ci.yml` and return, per job, its
+def _parse_job_attrs_from(text: str) -> dict[str, dict[str, str]]:
+    """Parse workflow text and return, per job, its
     top-level `needs:` and `if:` lines (the first occurrence at the
     job's own indent). Line-based to match the existing parser style and
     avoid a PyYAML dependency the CI venv may not carry."""
-    text = CI_YML.read_text()
     lines = text.splitlines()
     current_job: str | None = None
     attrs: dict[str, dict[str, str]] = {}
@@ -981,16 +1009,19 @@ def _parse_job_attrs() -> dict[str, dict[str, str]]:
     return attrs
 
 
-class DocsOnlySkipTests(unittest.TestCase):
-    """chelis#419: heavy jobs skip on docs-only PRs via a JOB-LEVEL `if`
-    keyed on the `changes` job output, never `paths-ignore` (a path-
-    filtered required check hangs pending forever -> merge deadlock). A
-    skipped required job reports its context as success, so the skip
-    direction is safe; the `if` must also fail SAFE (run the heavy job)
-    when the `changes` job did not succeed, or a broken detector would
-    silently skip the gate on a code PR."""
+def _parse_job_attrs() -> dict[str, dict[str, str]]:
+    return _parse_job_attrs_from(CI_YML.read_text())
 
-    # Jobs that must skip on a docs-only PR.
+
+class DocsOnlySkipTests(unittest.TestCase):
+    """chelis#419: heavy jobs skip on PR admission and docs-only queue runs.
+
+    The job-level `if` is keyed on event plus the `changes` output, never
+    `paths-ignore` (a path-filtered required check hangs pending forever).
+    The `if` must fail SAFE on the queue when detection fails.
+    """
+
+    # Jobs that must skip on PR admission and a docs-only queue candidate.
     HEAVY_GATED_JOBS = {
         "lint-and-unit",
         "integration",
@@ -1044,6 +1075,11 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"'{job}' must `needs: [changes]` to read docs_only",
             )
             cond = attrs[job].get("if", "")
+            self.assertIn(
+                PREMERGE_HEAVY_GATE_MARKER,
+                cond,
+                f"'{job}' must skip expensive work on pull_request: {cond!r}",
+            )
             # Must reference the docs_only output ...
             self.assertIn(
                 "needs.changes.outputs.docs_only != 'true'",
@@ -1062,6 +1098,12 @@ class DocsOnlySkipTests(unittest.TestCase):
                 cond,
                 f"'{job}' if must include !cancelled(): {cond!r}",
             )
+
+    def test_hull_gate_runs_only_in_queue_or_on_request(self):
+        attrs = _parse_job_attrs_from(CONFORMANCE_YML.read_text())
+        cond = attrs["conformance"].get("if", "")
+        self.assertIn(PREMERGE_HEAVY_GATE_MARKER, cond)
+        self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
 
     def test_always_run_jobs_are_not_gated(self):
         attrs = _parse_job_attrs()
@@ -1094,37 +1136,43 @@ class DocsOnlySkipTests(unittest.TestCase):
 
 
 class RequiredWorkflowTriggerTests(unittest.TestCase):
-    """Run the expensive required matrix once per reviewed change.
+    """Run expensive required jobs only on queue admission or by request."""
 
-    The live main branch has strict required-status checks, so the merge result
-    has already been validated as an up-to-date PR tree. A manual dispatch
-    remains available when an exact-main rerun is useful.
-    """
-
-    def test_ci_and_hull_are_pull_request_or_manual_only(self):
+    def test_ci_and_hull_are_pr_queue_or_manual_only(self):
         for path in (CI_YML, CONFORMANCE_YML):
             with self.subTest(workflow=path.name):
-                _assert_pr_or_dispatch_only(path.read_text())
+                _assert_pr_queue_or_dispatch_only(path.read_text())
 
     def test_reintroduced_push_trigger_fails_the_lock(self):
         workflow = """name: CI
 on:
   push:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
 jobs:
 """
         with self.assertRaisesRegex(AssertionError, "push-to-main"):
-            _assert_pr_or_dispatch_only(workflow)
+            _assert_pr_queue_or_dispatch_only(workflow)
 
-    def test_missing_pull_request_trigger_fails_the_lock(self):
+    def test_missing_merge_group_trigger_fails_the_lock(self):
         workflow = """name: CI
 on:
+  pull_request:
   workflow_dispatch:
 jobs:
 """
-        with self.assertRaisesRegex(AssertionError, "pull_request"):
-            _assert_pr_or_dispatch_only(workflow)
+        with self.assertRaisesRegex(AssertionError, "merge_group"):
+            _assert_pr_queue_or_dispatch_only(workflow)
+
+    def test_merge_group_diff_is_supported_in_both_workflows(self):
+        for path in (CI_YML, CONFORMANCE_YML):
+            with self.subTest(workflow=path.name):
+                _assert_merge_group_diff_support(path.read_text())
+
+    def test_no_ai_authorship_scans_the_merge_group_range(self):
+        _assert_merge_group_authorship_range(CI_YML.read_text())
 
 
 class HullTeethRuntimeTests(unittest.TestCase):
