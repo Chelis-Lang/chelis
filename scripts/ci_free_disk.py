@@ -33,6 +33,7 @@ tool cache — not the whole `$AGENT_TOOLSDIRECTORY` — so the Rust toolchain,
 
 from __future__ import annotations
 
+import concurrent.futures
 import shutil
 import subprocess
 import sys
@@ -85,14 +86,28 @@ def free_disk_space() -> int:
     print("ci_free_disk: disk usage before cleanup:")
     _df()
 
-    for path in PURGE_PATHS:
-        # `sudo` is required: these live under root-owned system dirs on
-        # the runner. A missing path or a non-zero exit is fine.
-        rc = _run(["sudo", "rm", "-rf", path])
-        print(f"ci_free_disk: rm -rf {path} -> exit {rc}")
-
+    # `sudo` is required: these live under root-owned system dirs on the
+    # runner. A missing path or a non-zero exit is fine.
+    #
+    # The removals are disjoint directory trees, and the step is dominated
+    # by unlink syscalls rather than CPU, so running them one at a time
+    # left the runner blocked on I/O for the whole step: measured 0.8-3.5
+    # min per job across the five Linux jobs that call this. Dispatching
+    # them together overlaps that wait. Threads (not processes) are the
+    # right tool because every worker blocks inside `subprocess.run`,
+    # which releases the GIL. The docker prune joins the same batch: it is
+    # independent of every path above.
+    commands = [["sudo", "rm", "-rf", path] for path in PURGE_PATHS]
     if shutil.which("docker") is not None:
-        _run(["sudo", "docker", "image", "prune", "--all", "--force"])
+        commands.append(["sudo", "docker", "image", "prune", "--all", "--force"])
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(commands)) as pool:
+        # `map` yields in submission order, so the log stays deterministic
+        # even though the removals do not finish in that order.
+        codes = list(pool.map(_run, commands))
+
+    for cmd, rc in zip(commands, codes):
+        print(f"ci_free_disk: {' '.join(cmd[1:])} -> exit {rc}")
 
     print("ci_free_disk: disk usage after cleanup:")
     _df()
