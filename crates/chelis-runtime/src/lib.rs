@@ -2300,7 +2300,7 @@ unsafe fn chelis_flatten_nested_list_typed(
                 RuntimeDType::F16 => {
                     let bits = match item.tag {
                         chelis_value_tag::CHELIS_VALUE_FLOAT64 => {
-                            half::f16::from_f64(item.as_.f64_).to_bits()
+                            ieee_narrow::f64_to_f16_bits_rne(item.as_.f64_)
                         }
                         chelis_value_tag::CHELIS_VALUE_TENSOR => {
                             let tensor = item.as_.tensor;
@@ -2311,7 +2311,7 @@ unsafe fn chelis_flatten_nested_list_typed(
                             if dtype == RuntimeDType::F16 {
                                 *((*tensor).data as *const u16)
                             } else {
-                                half::f16::from_f64(read_scalar_as_f64(tensor, dtype)).to_bits()
+                                ieee_narrow::f64_to_f16_bits_rne(read_scalar_as_f64(tensor, dtype))
                             }
                         }
                         _ => {
@@ -2323,7 +2323,7 @@ unsafe fn chelis_flatten_nested_list_typed(
                 RuntimeDType::Bf16 => {
                     let bits = match item.tag {
                         chelis_value_tag::CHELIS_VALUE_FLOAT64 => {
-                            half::bf16::from_f64(item.as_.f64_).to_bits()
+                            ieee_narrow::f64_to_bf16_bits_rne(item.as_.f64_)
                         }
                         chelis_value_tag::CHELIS_VALUE_TENSOR => {
                             let tensor = item.as_.tensor;
@@ -2334,7 +2334,7 @@ unsafe fn chelis_flatten_nested_list_typed(
                             if dtype == RuntimeDType::Bf16 {
                                 *((*tensor).data as *const u16)
                             } else {
-                                half::bf16::from_f64(read_scalar_as_f64(tensor, dtype)).to_bits()
+                                ieee_narrow::f64_to_bf16_bits_rne(read_scalar_as_f64(tensor, dtype))
                             }
                         }
                         _ => runtime_fail!(

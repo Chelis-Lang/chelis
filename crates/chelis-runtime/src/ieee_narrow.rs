@@ -1,10 +1,9 @@
 //! Private target-width IEEE narrowing for runtime-owned f64 carriers.
 //!
 //! This is deliberately not exported through the C ABI: numeric values cross
-//! that boundary on tagged or declared-width carriers. The shortest-round-trip
-//! formatter begins with an exact f64 image of the stored value, so parse-back
-//! validation needs the same one-step [04-NUM-14] conversion as the reference
-//! renderer.
+//! that boundary on tagged or declared-width carriers. Runtime list ingress
+//! and shortest-round-trip validation still begin with a Rust `f64`, so they
+//! need the same one-step [04-NUM-14] conversion as the evaluator.
 
 fn round_shift_even_u64(value: u64, shift: u32) -> u64 {
     match shift {

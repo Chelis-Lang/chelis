@@ -1684,16 +1684,17 @@ impl CEmitter {
                 self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
             }
             // WS-1: bf16 / f16 Const fill. The literal's exact 16-bit
-            // pattern is computed at codegen time via the `half` crate
+            // pattern is computed at codegen time via the dtype-semantic
+            // one-rounding conversion
             // so the runtime never needs an f64 -> reduced converter
             // call per element; it just stamps the precomputed
             // pattern via `chelis_fill_bf16` / `chelis_fill_f16`.
             Prim::Bf16 => {
-                let bits = half::bf16::from_f64(wide).to_bits();
+                let bits = chelis_types::bf16_from_f64_rne(wide).to_bits();
                 self.line(&format!("chelis_fill_bf16(t{id}, 0x{bits:04X}u);"));
             }
             Prim::F16 => {
-                let bits = half::f16::from_f64(wide).to_bits();
+                let bits = chelis_types::f16_from_f64_rne(wide).to_bits();
                 self.line(&format!("chelis_fill_f16(t{id}, 0x{bits:04X}u);"));
             }
             other => {

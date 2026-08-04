@@ -235,6 +235,18 @@ fn f16_bf16_scalar_op_surface_agrees_across_lanes() {
         ("mul(cast(0.1, f16), cast(0.1, f16))", "f16", "0.009995"),
         ("mul(cast(65504.0, f16), cast(2.0, f16))", "f16", "inf"),
         ("cast(2049.0, f16)", "f16", "2048.0"),
+        // [04-NUM-14] + section 5.6 position 4: an unsuffixed literal
+        // adopts the cast target and rounds there once.  These values sit
+        // immediately beyond a reduced-float midpoint while still rounding
+        // to that midpoint in f32, so an f64 -> f32 -> reduced path selects
+        // the wrong neighbor.
+        ("cast(52847.99970178839, f16)", "f16", "52830.0"),
+        ("cast(1.0039062500000002, bf16)", "bf16", "1.01"),
+        // Negative parity: an explicit f32 suffix really does bind the
+        // source at f32 first.  Do not repair the unsuffixed case by erasing
+        // that source-width distinction.
+        ("cast(52847.99970178839f32, f16)", "f16", "52860.0"),
+        ("cast(1.0039062500000002f32, bf16)", "bf16", "1.0"),
         ("cast(cast(2049.0, f16), f32)", "f32", "2048.0"),
         ("mul(cast(0.1, bf16), cast(0.1, bf16))", "bf16", "0.01"),
         ("cast(257.0, bf16)", "bf16", "256.0"),
@@ -560,8 +572,9 @@ fn c_f16_tensor_literal_constructs() {
 }
 
 /// Phase 3 host-ingress parity: a narrow scalar converted to a rank-0 tensor
-/// keeps its exact storage width before `expand` materializes a rank-1 result.
-/// This covers the scalar-to-tensor edge separately from list-literal ingress.
+/// keeps its exact storage width. This covers the scalar-to-tensor edge
+/// separately from list-literal ingress without introducing a movement-op
+/// extent boundary owned by chelis#1112.
 #[test]
 fn c_narrow_scalar_to_tensor_preserves_declared_width() {
     if !c_toolchain_available() {
@@ -572,17 +585,14 @@ fn c_narrow_scalar_to_tensor_preserves_declared_width() {
         ("bf16", "0.334", "0.334", "bf16_scalar_to_tensor"),
     ] {
         let program = format!(
-            "module M.Main\ndef run() -> tensor[2, {dtype}] = \
-             expand(scalar_to_tensor(cast({value}, {dtype})), cast(0, int32), cast(2, int32))\n\
+            "module M.Main\ndef run() -> tensor[{dtype}] = \
+             scalar_to_tensor(cast({value}, {dtype}))\n\
              out = print(run())\n"
         );
         let eval = eval_first_line(&program).expect("eval lane");
         let (_, stdout) = build_and_run_c(&program, name).expect("compiled lane");
         let compiled = stdout.lines().next().unwrap_or("").trim();
-        assert!(
-            eval.contains(&format!("data=[{expected}, {expected}]")),
-            "{dtype} eval scalar_to_tensor drift: {eval}"
-        );
+        assert_eq!(eval, expected, "{dtype} eval scalar_to_tensor drift");
         assert_eq!(compiled, eval, "{dtype} scalar_to_tensor lane divergence");
     }
 }

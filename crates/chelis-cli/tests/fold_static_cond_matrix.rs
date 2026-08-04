@@ -94,17 +94,10 @@ fn eval_first_line(program: &str) -> Result<String, String> {
         .to_string())
 }
 
-/// Bit patterns of the 222.0 branch payload. Depending on whether the host
-/// literal is finalized before or after expression emission, the exact-bit
-/// constructor carries the f32 or f64 representation. Either proves that the
-/// semantically selected branch survived; stdout below proves its final dtype.
-const BITS_222_F32: &str = "435e0000";
-const BITS_222_F64: &str = "406bc00000000000";
-
-fn emitted_contains_222(emitted: &str) -> bool {
-    let emitted = emitted.to_lowercase();
-    emitted.contains(BITS_222_F32) || emitted.contains(BITS_222_F64)
-}
+/// f32 bit pattern of the 222.0 branch payload as it appears in emitted
+/// `chelis_fill_f32_bits` calls (111.0 is 0x42de0000; the broken rows
+/// assert on the DELETED branch's bits, which is 222.0's).
+const BITS_222: &str = "435e0000";
 
 // ===========================================================================
 // chelis#720 - the Cast arm deletes the IEEE-correct branch
@@ -130,8 +123,8 @@ fn f16_cast_condition_folds_with_f16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_f16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted_contains_222(&emitted),
-        "the 222 branch must exist in the emitted C at f32 or f64 width; it was deleted"
+        emitted.to_lowercase().contains(BITS_222),
+        "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
         stdout.lines().next().unwrap_or("").trim() == "222.0",
@@ -151,8 +144,8 @@ fn bf16_cast_condition_folds_with_bf16_semantics() {
     let (emitted, stdout, _, ok) = build_and_run_c(program, "fold_bf16").expect("C lane");
     assert!(ok);
     assert!(
-        emitted_contains_222(&emitted),
-        "the 222 branch must exist in the emitted C at f32 or f64 width; it was deleted"
+        emitted.to_lowercase().contains(BITS_222),
+        "the 222 branch (0x435e0000) must exist in the emitted C; it was deleted"
     );
     assert!(
         stdout.lines().next().unwrap_or("").trim() == "222.0",

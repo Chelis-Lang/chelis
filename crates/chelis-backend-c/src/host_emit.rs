@@ -427,6 +427,8 @@ pub(crate) fn emit_host_abi_program(
     let mut helper_requirements = HelperRequirements::default();
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
+    append_host_scalar_conversion_helpers(&mut body);
+    body.push(String::new());
     append_tensor_print_helper(&mut body);
     body.push(String::new());
     append_uniform_sample_helper(&mut body);
@@ -727,6 +729,113 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("    float inner = c * (x + k * x * x * x);".to_string());
     out.push("    return 0.5f * x * (1.0f + tanhf(inner));".to_string());
     out.push("}".to_string());
+}
+
+/// Private scalar-cast helpers for the generated translation unit.
+///
+/// A C `(float)` intermediate is not a conforming f64 -> f16/bf16 cast:
+/// values on the f32 rounding cell around a reduced-float midpoint can round
+/// twice to the wrong neighbor. These helpers round the binary64 or exact
+/// signed-integer significand directly to the destination's IEEE layout.
+/// They stay TU-local so the published runtime ABI does not gain an untagged
+/// numeric callable (dtype_semantics.md section C6).
+fn append_host_scalar_conversion_helpers(out: &mut Vec<String>) {
+    out.extend(
+        [
+            "static uint64_t chelis_host_round_shift_even_u64(uint64_t value, int shift) {",
+            "    if (shift <= 0) return value;",
+            "    if (shift >= 64) return 0;",
+            "    uint64_t quotient = value >> shift;",
+            "    uint64_t remainder = value & ((UINT64_C(1) << shift) - UINT64_C(1));",
+            "    uint64_t halfway = UINT64_C(1) << (shift - 1);",
+            "    if (remainder > halfway || (remainder == halfway && (quotient & UINT64_C(1)) != 0)) quotient++;",
+            "    return quotient;",
+            "}",
+            "",
+            "static uint16_t chelis_host_f64_to_ieee16(double value, int exponent_bits, int mantissa_bits, int bias) {",
+            "    uint64_t bits;",
+            "    memcpy(&bits, &value, sizeof bits);",
+            "    uint16_t sign = (uint16_t)((bits >> 48) & UINT64_C(0x8000));",
+            "    uint32_t source_exponent = (uint32_t)((bits >> 52) & UINT64_C(0x7ff));",
+            "    uint64_t source_mantissa = bits & UINT64_C(0x000fffffffffffff);",
+            "    uint32_t target_exponent_max = (UINT32_C(1) << exponent_bits) - UINT32_C(1);",
+            "    if (source_exponent == UINT32_C(0x7ff)) {",
+            "        uint16_t target_exponent = (uint16_t)(target_exponent_max << mantissa_bits);",
+            "        if (source_mantissa == 0) return (uint16_t)(sign | target_exponent);",
+            "        return (uint16_t)(sign | target_exponent | (UINT16_C(1) << (mantissa_bits - 1)));",
+            "    }",
+            "    if (source_exponent == 0 && source_mantissa == 0) return sign;",
+            "    int exponent;",
+            "    uint64_t significand;",
+            "    if (source_exponent == 0) {",
+            "        exponent = -1022;",
+            "        significand = source_mantissa;",
+            "    } else {",
+            "        exponent = (int)source_exponent - 1023;",
+            "        significand = (UINT64_C(1) << 52) | source_mantissa;",
+            "    }",
+            "    int minimum_exponent = 1 - bias;",
+            "    int maximum_exponent = (int)target_exponent_max - 1 - bias;",
+            "    if (exponent > maximum_exponent) return (uint16_t)(sign | (uint16_t)(target_exponent_max << mantissa_bits));",
+            "    uint64_t rounded;",
+            "    if (exponent >= minimum_exponent) {",
+            "        rounded = chelis_host_round_shift_even_u64(significand, 52 - mantissa_bits);",
+            "        if (rounded == (UINT64_C(1) << (mantissa_bits + 1))) {",
+            "            rounded >>= 1;",
+            "            exponent++;",
+            "            if (exponent > maximum_exponent) return (uint16_t)(sign | (uint16_t)(target_exponent_max << mantissa_bits));",
+            "        }",
+            "        uint16_t target_exponent = (uint16_t)((exponent + bias) << mantissa_bits);",
+            "        uint16_t target_mantissa = (uint16_t)(rounded & ((UINT64_C(1) << mantissa_bits) - UINT64_C(1)));",
+            "        return (uint16_t)(sign | target_exponent | target_mantissa);",
+            "    }",
+            "    int shift = (52 - mantissa_bits) + (minimum_exponent - exponent);",
+            "    rounded = chelis_host_round_shift_even_u64(significand, shift);",
+            "    return (uint16_t)(sign | (uint16_t)rounded);",
+            "}",
+            "",
+            "static uint16_t chelis_host_i64_to_ieee16(int64_t value, int exponent_bits, int mantissa_bits, int bias) {",
+            "    uint16_t sign = value < 0 ? UINT16_C(0x8000) : UINT16_C(0);",
+            "    uint64_t magnitude = value < 0 ? (uint64_t)(-(value + 1)) + UINT64_C(1) : (uint64_t)value;",
+            "    if (magnitude == 0) return sign;",
+            "    int exponent = 0;",
+            "    for (uint64_t probe = magnitude; probe > UINT64_C(1); probe >>= 1) exponent++;",
+            "    uint32_t target_exponent_max = (UINT32_C(1) << exponent_bits) - UINT32_C(1);",
+            "    int maximum_exponent = (int)target_exponent_max - 1 - bias;",
+            "    if (exponent > maximum_exponent) return (uint16_t)(sign | (uint16_t)(target_exponent_max << mantissa_bits));",
+            "    uint64_t rounded = exponent > mantissa_bits",
+            "        ? chelis_host_round_shift_even_u64(magnitude, exponent - mantissa_bits)",
+            "        : magnitude << (mantissa_bits - exponent);",
+            "    if (rounded == (UINT64_C(1) << (mantissa_bits + 1))) {",
+            "        rounded >>= 1;",
+            "        exponent++;",
+            "        if (exponent > maximum_exponent) return (uint16_t)(sign | (uint16_t)(target_exponent_max << mantissa_bits));",
+            "    }",
+            "    uint16_t target_exponent = (uint16_t)((exponent + bias) << mantissa_bits);",
+            "    uint16_t target_mantissa = (uint16_t)(rounded & ((UINT64_C(1) << mantissa_bits) - UINT64_C(1)));",
+            "    return (uint16_t)(sign | target_exponent | target_mantissa);",
+            "}",
+            "",
+            "static uint16_t chelis_host_f64_to_f16(double value) { return chelis_host_f64_to_ieee16(value, 5, 10, 15); }",
+            "static uint16_t chelis_host_f64_to_bf16(double value) { return chelis_host_f64_to_ieee16(value, 8, 7, 127); }",
+            "static uint16_t chelis_host_i64_to_f16(int64_t value) { return chelis_host_i64_to_ieee16(value, 5, 10, 15); }",
+            "static uint16_t chelis_host_i64_to_bf16(int64_t value) { return chelis_host_i64_to_ieee16(value, 8, 7, 127); }",
+            "",
+            "static chelis_tensor *chelis_host_scalar_tensor_from_f16(uint16_t value) {",
+            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_F16);",
+            "    *((uint16_t *)tensor->data) = value;",
+            "    return tensor;",
+            "}",
+            "",
+            "static chelis_tensor *chelis_host_scalar_tensor_from_bf16(uint16_t value) {",
+            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_BF16);",
+            "    *((uint16_t *)tensor->data) = value;",
+            "    return tensor;",
+            "}",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
 }
 
 /// One emitted `case` of the per-dtype element printer, or `None` for a
@@ -2111,6 +2220,44 @@ impl<'a> HostEmitter<'a> {
         args: &[HostExpr],
         ty: &HostType,
     ) -> Result<(), Unsupported> {
+        // A checker-stamped float literal is represented as a cast around
+        // its lexical f64 image. Materialize that literal directly at the
+        // declared width: this both preserves the one-rounding contract and
+        // leaves an own-width bit artifact in generated C. An explicit
+        // nested source cast (for example `1.0f32` cast to f16) does not take
+        // this fast path at the outer cast, so its two authored conversions
+        // remain distinct.
+        if name == "cast"
+            && let [arg] = args
+            && let HostExprKind::Float(value) = &arg.kind
+        {
+            let assignment = match ty {
+                HostType::Float64 => Some(format!(
+                    "chelis_f64_from_bits(UINT64_C(0x{:016x}))",
+                    value.to_bits()
+                )),
+                HostType::Float32 => Some(format!(
+                    "chelis_f32_from_bits(UINT32_C(0x{:08x}))",
+                    (*value as f32).to_bits()
+                )),
+                HostType::Float16 => Some(format!(
+                    "UINT16_C(0x{:04x})",
+                    chelis_types::f16_from_f64_rne(*value).to_bits()
+                )),
+                HostType::BFloat16 => Some(format!(
+                    "UINT16_C(0x{:04x})",
+                    chelis_types::bf16_from_f64_rne(*value).to_bits()
+                )),
+                _ => None,
+            };
+            if let Some(assignment) = assignment {
+                self.emit_span_comments(arg);
+                self.lines
+                    .push(format!("{}{target} = {assignment};", self.indent));
+                return Ok(());
+            }
+        }
+
         let mut arg_vars: Vec<(String, HostType)> = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let arg_name = self.next_temp(&format!("arg{index}"));
@@ -2309,10 +2456,22 @@ impl<'a> HostEmitter<'a> {
                         format!("(float){}", arg_vars[0].0)
                     }
                     (source, HostType::Float16) if is_integer_abi(source) => {
-                        format!("chelis_f32_to_f16((float){})", arg_vars[0].0)
+                        format!("chelis_host_i64_to_f16((int64_t){})", arg_vars[0].0)
                     }
                     (source, HostType::BFloat16) if is_integer_abi(source) => {
-                        format!("chelis_f32_to_bf16((float){})", arg_vars[0].0)
+                        format!("chelis_host_i64_to_bf16((int64_t){})", arg_vars[0].0)
+                    }
+                    (HostType::Bool, HostType::Float64) => {
+                        format!("({0} ? 1.0 : 0.0)", arg_vars[0].0)
+                    }
+                    (HostType::Bool, HostType::Float32) => {
+                        format!("({0} ? 1.0f : 0.0f)", arg_vars[0].0)
+                    }
+                    (HostType::Bool, HostType::Float16) => {
+                        format!("chelis_host_i64_to_f16((int64_t){})", arg_vars[0].0)
+                    }
+                    (HostType::Bool, HostType::BFloat16) => {
+                        format!("chelis_host_i64_to_bf16((int64_t){})", arg_vars[0].0)
                     }
                     (source, target) if is_float_abi(source) && is_integer_abi(target) => {
                         let prim = integer_abi_prim(target)?;
@@ -2345,10 +2504,10 @@ impl<'a> HostEmitter<'a> {
                         format!("(double){0}", arg_vars[0].0)
                     }
                     (HostType::Float64, HostType::Float16) => {
-                        format!("chelis_f32_to_f16((float){0})", arg_vars[0].0)
+                        format!("chelis_host_f64_to_f16({0})", arg_vars[0].0)
                     }
                     (HostType::Float64, HostType::BFloat16) => {
-                        format!("chelis_f32_to_bf16((float){0})", arg_vars[0].0)
+                        format!("chelis_host_f64_to_bf16({0})", arg_vars[0].0)
                     }
                     (HostType::Float32, HostType::Float16) => {
                         format!("chelis_f32_to_f16({0})", arg_vars[0].0)
@@ -3130,6 +3289,12 @@ impl<'a> HostEmitter<'a> {
                         Prim::Int64 => EmittedExpr::call("chelis_scalar_tensor_from_i64", [arg(0)]),
                         Prim::F64 => EmittedExpr::call("chelis_scalar_tensor_from_f64", [arg(0)]),
                         Prim::F32 => EmittedExpr::call("chelis_scalar_tensor_from_f32", [arg(0)]),
+                        Prim::F16 => {
+                            EmittedExpr::call("chelis_host_scalar_tensor_from_f16", [arg(0)])
+                        }
+                        Prim::Bf16 => {
+                            EmittedExpr::call("chelis_host_scalar_tensor_from_bf16", [arg(0)])
+                        }
                         precision => {
                             return Err(Unsupported::new(
                                 UnsupportedKind::HostType(format!(
