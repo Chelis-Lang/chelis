@@ -75,7 +75,40 @@ def _read_issue_state(
 
 
 def _format_sites(sites: list[AuthoritySite]) -> str:
-    return "\n".join(f"- `{site.path}:{site.line}`" for site in sites)
+    rendered: list[str] = []
+    for site in sites:
+        if (
+            not isinstance(site, AuthoritySite)
+            or not isinstance(site.path, str)
+            or not site.path
+            or not isinstance(site.line, int)
+            or isinstance(site.line, bool)
+            or site.line <= 0
+        ):
+            raise TypeError(f"malformed authority site: {site!r}")
+        rendered.append(f"- `{site.path}:{site.line}`")
+    return "\n".join(rendered)
+
+
+def _validate_authorities(
+    authorities: object,
+) -> dict[int, list[AuthoritySite]]:
+    """Validate the complete discovery result before trusting absence."""
+    if type(authorities) is not dict:
+        raise TypeError("authority inventory is not an ordinary mapping")
+    for authority_number, sites in authorities.items():
+        if (
+            not isinstance(authority_number, int)
+            or isinstance(authority_number, bool)
+            or authority_number <= 0
+        ):
+            raise TypeError(f"malformed authority number: {authority_number!r}")
+        if not isinstance(sites, list):
+            raise TypeError(
+                f"authority sites for chelis#{authority_number} are not a list"
+            )
+        _format_sites(sites)
+    return authorities
 
 
 def _reopen(
@@ -140,14 +173,13 @@ def guard_closed_issue(
     failures are unsafe ambiguity and therefore reopen the issue fail-closed.
     """
     try:
-        authorities = discover(root)
-    except Exception as error:
-        reason = f"Authority inventory failed closed: `{error}`"
-    else:
+        authorities = _validate_authorities(discover(root))
         sites = authorities.get(number, [])
         if not sites:
             return False
         reason = "Executable authority sites still present:\n\n" + _format_sites(sites)
+    except Exception as error:
+        reason = f"Authority inventory failed closed: `{error}`"
 
     if _read_issue_state(number, run=run) == "open":
         return False

@@ -63,7 +63,7 @@ def _source_closing_references(source: ClosingSource) -> set[int]:
 
 
 def find_closing_references(sources: list[ClosingSource]) -> set[int]:
-    """Return all issue numbers a PR body or commit would close."""
+    """Return all issue numbers a PR title, body, or commit would close."""
     return set().union(*(_source_closing_references(source) for source in sources), set())
 
 
@@ -166,8 +166,9 @@ def collect_pull_request_sources(
     """Load closing-capable text from the current pull-request event.
 
     Issue comments and repository prose are intentionally absent: they are
-    historical context, not merge inputs. Commit messages are fetched because
-    GitHub can apply their closing keywords when the commit reaches ``main``.
+    historical context, not merge inputs. The title is included because this
+    repository uses it as the squash commit title. Commit messages are fetched
+    because GitHub can apply their closing keywords when they reach ``main``.
     """
     if event_path is None:
         raw = os.environ.get("GITHUB_EVENT_PATH", "").strip()
@@ -175,6 +176,12 @@ def collect_pull_request_sources(
             return []
         event_path = Path(raw)
     pull_request, number = _read_pull_request_event(event_path)
+    title = pull_request.get("title")
+    body = pull_request.get("body")
+    if not isinstance(title, str):
+        raise RuntimeError("pull-request event has no valid title")
+    if body is not None and not isinstance(body, str):
+        raise RuntimeError("pull-request event has no valid body")
     expected_commits = pull_request.get("commits")
     if (
         not isinstance(expected_commits, int)
@@ -184,7 +191,8 @@ def collect_pull_request_sources(
         raise RuntimeError("pull-request event has no valid commit count")
 
     sources = [
-        ClosingSource("pull request body", str(pull_request.get("body") or "")),
+        ClosingSource("pull request title", title),
+        ClosingSource("pull request body", body or ""),
     ]
     result = run(
         [

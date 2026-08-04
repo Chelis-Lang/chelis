@@ -166,6 +166,43 @@ class ClosureGuard(unittest.TestCase):
         )
         self.assertTrue(any("inventory failed closed" in arg for arg in calls[2]))
 
+    def test_malformed_inventory_results_also_reopen_fail_closed(self) -> None:
+        malformed = (
+            None,
+            {729: None},
+            {729: [object()]},
+            {714: [object()]},
+        )
+        for result in malformed:
+            with self.subTest(result=result):
+                calls: list[list[str]] = []
+
+                def run(args: list[str], **_: object) -> object:
+                    calls.append(args)
+                    if len(calls) == 1:
+                        stdout = '{"state":"closed","number":729}'
+                    elif len(calls) == 2:
+                        stdout = '{"state":"open","number":729}'
+                    else:
+                        stdout = "{}"
+                    return type(
+                        "Completed",
+                        (),
+                        {"returncode": 0, "stdout": stdout, "stderr": ""},
+                    )()
+
+                self.assertTrue(
+                    guard_closed_issue(
+                        Path("/repo"),
+                        729,
+                        discover=lambda _, result=result: result,  # type: ignore[arg-type]
+                        run=run,
+                    )
+                )
+                self.assertTrue(
+                    any("inventory failed closed" in arg for arg in calls[2])
+                )
+
     def test_github_failure_does_not_report_success(self) -> None:
         def run(_: list[str], **__: object) -> object:
             return type(

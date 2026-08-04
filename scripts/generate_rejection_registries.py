@@ -2,8 +2,9 @@
 """Generate the [05-UNS-5] atom and issue membership tables.
 
 The atom input is derived from normative blockquote definitions in numbered
-specs. The issue input is the checked-in manifest whose rows are separately
-validated against GitHub by ``validate_rejection_issue_manifest.py``.
+specs. The issue input is derived from executable construction sites across
+Cargo's exact workspace graph, rendered into a checked-in manifest, and then
+live-validated against GitHub by ``validate_rejection_issue_manifest.py``.
 
 Run with the uv-managed interpreter:
 

@@ -64,11 +64,38 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
             any("redteam_unchecked_authority" in error for error in errors), errors
         )
 
+    def test_same_module_private_constructor_composition_is_rejected(self):
+        mutated = self.source + (
+            "\nfn redteam_private_authority() -> RejectionAuthority {\n"
+            "    let issue = IssueRef::new(729).unwrap();\n"
+            "    RejectionAuthority::unimplemented(issue, \"forged\").unwrap()\n"
+            "}\n"
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("private authority token" in error for error in errors), errors)
+
+    def test_same_module_private_constructor_alias_is_rejected(self):
+        mutated = self.source + (
+            "\nfn redteam_private_alias() {\n"
+            "    use self::IssueRef as HiddenIssue;\n"
+            "    let _ = HiddenIssue::new(729);\n"
+            "}\n"
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("private authority token" in error for error in errors), errors)
+
     def test_direct_public_builder_call_is_rejected_in_production(self):
         errors = MODULE.validate_usage_source(
             "crates/example/src/lib.rs",
             'let _ = chelis_types::unsupported::__build_deliberate_rejection('
             '"[04-TOT-2]", "hint");',
+        )
+        self.assertTrue(any("direct authority builder" in error for error in errors), errors)
+
+    def test_crate_root_cannot_call_public_builder_directly(self):
+        errors = MODULE.validate_usage_source(
+            "crates/chelis-types/src/lib.rs",
+            'let _ = crate::unsupported::__build_unimplemented_rejection(729, "hidden");',
         )
         self.assertTrue(any("direct authority builder" in error for error in errors), errors)
 

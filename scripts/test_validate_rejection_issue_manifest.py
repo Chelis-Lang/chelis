@@ -164,11 +164,39 @@ class ClosingReferences(unittest.TestCase):
         self.assertEqual(
             [source.label for source in sources],
             [
+                "pull request title",
                 "pull request body",
                 "commit abcdef012345",
                 "commit 9876543210ab",
             ],
         )
+
+    def test_squash_merge_title_closing_keyword_is_rejected(self) -> None:
+        def run(_: list[str], **__: object) -> object:
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stderr": "", "stdout": "[[]]"},
+            )()
+
+        with tempfile.TemporaryDirectory() as raw:
+            event_path = Path(raw) / "event.json"
+            event_path.write_text(
+                json.dumps(
+                    {
+                        "number": 42,
+                        "pull_request": {
+                            "number": 42,
+                            "commits": 0,
+                            "title": "Fixes #729",
+                            "body": "Part of #729",
+                        },
+                    }
+                )
+            )
+            sources = collect_pull_request_sources(event_path, run=run)
+        self.assertEqual(find_closing_references(sources), {729})
+        self.assertEqual(sources[0].label, "pull request title")
 
     def test_edited_body_is_rechecked_without_a_head_change(self) -> None:
         def run(_: list[str], **__: object) -> object:
@@ -187,6 +215,7 @@ class ClosingReferences(unittest.TestCase):
                     "number": 42,
                     "commits": 0,
                     "head": {"sha": "same-head"},
+                    "title": "Part of #729",
                     "body": "Closes #729",
                 },
             }
@@ -206,7 +235,8 @@ class ClosingReferences(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             event_path = Path(raw) / "event.json"
             event_path.write_text(
-                '{"number":42,"pull_request":{"number":42,"commits":0}}'
+                '{"number":42,"pull_request":{"number":42,"commits":0,'
+                '"title":"ordinary","body":""}}'
             )
 
             def run(_: list[str], **__: object) -> object:
@@ -223,7 +253,8 @@ class ClosingReferences(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             event_path = Path(raw) / "event.json"
             event_path.write_text(
-                '{"number":42,"pull_request":{"number":42,"commits":251}}'
+                '{"number":42,"pull_request":{"number":42,"commits":251,'
+                '"title":"ordinary","body":""}}'
             )
 
             def run(_: list[str], **__: object) -> object:

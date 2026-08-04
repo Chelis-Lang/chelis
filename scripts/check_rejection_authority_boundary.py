@@ -35,6 +35,12 @@ PUBLIC_FN = re.compile(
     r"^\s*pub(?:\([^)]*\))?\s+(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
+ANY_FN = re.compile(
+    r"\b(?:pub(?:\([^)]*\))?\s+)?"
+    r"(?:(?:const|async|unsafe|extern(?:\s+\"[^\"]+\")?)\s+)*"
+    r"fn\s+([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
 
 EXPECTED_PUBLIC_FUNCTIONS = Counter(
     {
@@ -51,6 +57,37 @@ EXPECTED_PUBLIC_FUNCTIONS = Counter(
         "new": 1,
         "compiled_host_only_builtin": 1,
         "with_span": 1,
+    }
+)
+EXPECTED_IMPL_FUNCTIONS = {
+    "SpecAtomRef": Counter({"new": 1, "as_str": 1, "registry": 1}),
+    "IssueRef": Counter({"new": 1, "number": 1, "registry": 1}),
+    "RejectionAuthority": Counter(
+        {
+            "deliberate": 1,
+            "unimplemented": 1,
+            "kind": 1,
+            "atom": 1,
+            "issue": 1,
+            "hint": 1,
+            "citation": 1,
+        }
+    ),
+}
+PRIVATE_AUTHORITY_TOKEN = re.compile(
+    r"\b(?:SpecAtomRef|IssueRef|RejectionAuthority|RejectionCitation|"
+    r"AuthorityConstructionError|__build_deliberate_rejection|"
+    r"__build_unimplemented_rejection)\b"
+)
+EXPECTED_PRIVATE_AUTHORITY_TOKENS = Counter(
+    {
+        "SpecAtomRef": 6,
+        "IssueRef": 6,
+        "RejectionAuthority": 10,
+        "RejectionCitation": 12,
+        "AuthorityConstructionError": 16,
+        "__build_deliberate_rejection": 2,
+        "__build_unimplemented_rejection": 2,
     }
 )
 DIRECT_BUILDER = re.compile(
@@ -84,6 +121,7 @@ def _impl_body(source: str, type_name: str) -> str:
 
 def validate_source(source: str) -> list[str]:
     errors: list[str] = []
+    code = _mask_rust_non_code(source)
     public_functions = Counter(PUBLIC_FN.findall(source))
     if public_functions != EXPECTED_PUBLIC_FUNCTIONS:
         for name in sorted(set(public_functions) | set(EXPECTED_PUBLIC_FUNCTIONS)):
@@ -103,7 +141,7 @@ def validate_source(source: str) -> list[str]:
 
     for type_name, allowed in ALLOWED_PUBLIC_METHODS.items():
         try:
-            body = _impl_body(source, type_name)
+            body = _impl_body(code, type_name)
         except ValueError as error:
             errors.append(str(error))
             continue
@@ -114,6 +152,23 @@ def validate_source(source: str) -> list[str]:
                 f"{type_name} exposes unapproved public constructor/method(s): "
                 + ", ".join(unexpected)
             )
+
+        functions = Counter(ANY_FN.findall(body))
+        expected_functions = EXPECTED_IMPL_FUNCTIONS[type_name]
+        if functions != expected_functions:
+            errors.append(
+                f"{type_name} private/public function inventory changed: "
+                f"found {dict(sorted(functions.items()))}, expected "
+                f"{dict(sorted(expected_functions.items()))}"
+            )
+
+    private_tokens = Counter(PRIVATE_AUTHORITY_TOKEN.findall(code))
+    if private_tokens != EXPECTED_PRIVATE_AUTHORITY_TOKENS:
+        errors.append(
+            "unsupported.rs private authority token inventory changed: "
+            f"found {dict(sorted(private_tokens.items()))}, expected "
+            f"{dict(sorted(EXPECTED_PRIVATE_AUTHORITY_TOKENS.items()))}"
+        )
 
     required_private_edges = (
         "const fn new(atom: &'static str)",
@@ -142,12 +197,11 @@ def validate_source(source: str) -> list[str]:
 def validate_usage_source(path: str, source: str) -> list[str]:
     errors: list[str] = []
     code = _mask_rust_non_code(source)
-    if path != "crates/chelis-types/src/lib.rs":
-        for builder in sorted(set(DIRECT_BUILDER.findall(code))):
-            errors.append(
-                f"{path}: direct authority builder `{builder}` bypasses the canonical "
-                "literal macro; use deliberate_rejection! or unimplemented_rejection!"
-            )
+    for builder in sorted(set(DIRECT_BUILDER.findall(code))):
+        errors.append(
+            f"{path}: direct authority builder `{builder}` bypasses the canonical "
+            "literal macro; use deliberate_rejection! or unimplemented_rejection!"
+        )
     for atom in DELIBERATE_LITERAL.findall(source):
         if atom in RESPONSE_ONLY_ATOMS:
             errors.append(
@@ -169,6 +223,7 @@ def validate_production_usage(root: Path = ROOT) -> list[str]:
     for path in paths:
         relative = path.relative_to(root)
         if relative.as_posix() == "crates/chelis-types/src/unsupported.rs":
+            errors.extend(validate_source(path.read_text(encoding="utf-8")))
             continue
         errors.extend(
             validate_usage_source(
@@ -179,8 +234,7 @@ def validate_production_usage(root: Path = ROOT) -> list[str]:
 
 
 def main() -> int:
-    errors = validate_source(SOURCE.read_text(encoding="utf-8"))
-    errors.extend(validate_production_usage())
+    errors = validate_production_usage()
     if errors:
         for error in errors:
             print(f"REJECTION AUTHORITY BOUNDARY: {error}", file=sys.stderr)
