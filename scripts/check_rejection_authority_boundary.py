@@ -58,9 +58,9 @@ SENSITIVE_IMPL = re.compile(
 )
 AUTHORITY_ALIAS = re.compile(
     r"\b(?:"
-    r"use\b[^;{}]*\b(?:SpecAtomRef|IssueRef|RejectionAuthority|"
+    r"use\b[^;]*\b(?:SpecAtomRef|IssueRef|RejectionAuthority|"
     r"RejectionCitation|__build_deliberate_rejection|"
-    r"__build_unimplemented_rejection)\b[^;{}]*\bas\b[^;{}]*;|"
+    r"__build_unimplemented_rejection)\b[^;]*\bas\b[^;]*;|"
     r"type\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*[^;{}]*\b"
     r"(?:SpecAtomRef|IssueRef|RejectionAuthority|RejectionCitation)\b[^;{}]*;"
     r")"

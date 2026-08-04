@@ -711,6 +711,111 @@ let _ = unimplemented_rejection!(714, "live");
             ):
                 discover_issue_authorities(root)
 
+    def test_crates_io_patch_dependency_is_compiled_but_rejected_from_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            app = root / "app"
+            rogue = root / "rogue"
+            for member in (app, rogue):
+                member.mkdir()
+                (member / "Cargo.toml").write_text(
+                    "[package]\n"
+                    f'name = "{member.name}"\n'
+                    'version = "0.1.0"\n'
+                    'edition = "2024"\n'
+                )
+            (root / "Cargo.toml").write_text(
+                "[workspace]\n"
+                'members = ["app"]\n'
+                'exclude = ["rogue"]\n'
+                'resolver = "3"\n\n'
+                "[patch.crates-io]\n"
+                'rogue = { path = "rogue" }\n'
+            )
+            (app / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "app"\n'
+                'version = "0.1.0"\n'
+                'edition = "2024"\n\n'
+                "[dependencies]\n"
+                'rogue = "0.1.0"\n'
+            )
+            app_source = app / "src/lib.rs"
+            app_source.parent.mkdir()
+            app_source.write_text("pub fn app() { rogue::compiled(); }\n")
+            rogue_source = rogue / "src/lib.rs"
+            rogue_source.parent.mkdir()
+            rogue_source.write_text(
+                "#[cfg(any())]\n"
+                "fn hidden() {\n"
+                '    let _ = unimplemented_rejection!(999_999, "hidden");\n'
+                "}\n"
+                "pub fn compiled() {}\n"
+            )
+            compiled = subprocess.run(
+                [
+                    "cargo",
+                    "check",
+                    "--offline",
+                    "--manifest-path",
+                    str(root / "Cargo.toml"),
+                    "--target-dir",
+                    str(root / "target"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            with self.assertRaisesRegex(RegistryError, "dependency override"):
+                discover_issue_authorities(root)
+
+    def test_manifest_replace_and_cargo_config_overrides_are_rejected(self) -> None:
+        cases = (
+            (
+                "manifest-replace",
+                '[replace]\n"rogue:0.1.0" = { path = "rogue" }\n',
+                None,
+            ),
+            ("config-paths", "", 'paths = ["rogue"]\n'),
+            (
+                "config-patch",
+                "",
+                '[patch.crates-io]\nrogue = { path = "rogue" }\n',
+            ),
+            (
+                "config-source",
+                "",
+                '[source.crates-io]\nreplace-with = "vendored"\n',
+            ),
+        )
+        for name, manifest_extra, config in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                app = root / "app"
+                app.mkdir()
+                (root / "Cargo.toml").write_text(
+                    "[workspace]\n"
+                    'members = ["app"]\n'
+                    'resolver = "3"\n\n'
+                    f"{manifest_extra}"
+                )
+                (app / "Cargo.toml").write_text(
+                    "[package]\n"
+                    'name = "app"\n'
+                    'version = "0.1.0"\n'
+                    'edition = "2024"\n'
+                )
+                source = app / "src/lib.rs"
+                source.parent.mkdir()
+                source.write_text("pub fn app() {}\n")
+                if config is not None:
+                    cargo_dir = root / ".cargo"
+                    cargo_dir.mkdir()
+                    (cargo_dir / "config.toml").write_text(config)
+                with self.assertRaisesRegex(RegistryError, "dependency override"):
+                    discover_issue_authorities(root)
+
     def test_rendered_manifest_carries_sites_and_is_source_derived(self) -> None:
         rendered = render_issue_manifest(
             {

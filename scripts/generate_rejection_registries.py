@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -290,6 +292,35 @@ def _declared_workspace_member_check(root: Path, payload: dict) -> None:
             _reject_symlink_components(root, match, "workspace member")
 
 
+def _reject_cargo_dependency_overrides(root: Path, payload: dict) -> None:
+    """Forbid Cargo routes that can substitute uninventoried local packages."""
+    manifest_keys = sorted({"patch", "replace"} & set(payload))
+    if manifest_keys:
+        raise RegistryError(
+            "Cargo dependency override is forbidden by the rejection-authority "
+            f"inventory: root manifest defines {', '.join(manifest_keys)}"
+        )
+
+    cargo_dir = root / ".cargo"
+    for name in ("config", "config.toml"):
+        config_path = cargo_dir / name
+        if not config_path.exists() and not config_path.is_symlink():
+            continue
+        _reject_symlink_components(root, config_path, "Cargo config")
+        if config_path.is_symlink() or not config_path.is_file():
+            raise RegistryError(
+                f"Cargo config is not an ordinary file: {config_path.relative_to(root)}"
+            )
+        config = _load_toml(config_path, "Cargo config")
+        config_keys = sorted({"patch", "paths", "replace", "source"} & set(config))
+        if config_keys:
+            raise RegistryError(
+                "Cargo dependency override is forbidden by the rejection-authority "
+                f"inventory: {config_path.relative_to(root)} defines "
+                f"{', '.join(config_keys)}"
+            )
+
+
 def _cargo_metadata(root: Path) -> dict:
     """Ask Cargo for its authoritative workspace-member and target graph."""
     manifest_path = root / "Cargo.toml"
@@ -297,6 +328,7 @@ def _cargo_metadata(root: Path) -> dict:
         raise RegistryError(f"missing workspace manifest: {manifest_path}")
     payload = _load_toml(manifest_path, "workspace manifest")
     _declared_workspace_member_check(root, payload)
+    _reject_cargo_dependency_overrides(root, payload)
     command = [
         "cargo",
         "metadata",
@@ -309,14 +341,31 @@ def _cargo_metadata(root: Path) -> dict:
     if (root / "Cargo.lock").is_file():
         command.append("--locked")
     try:
-        result = subprocess.run(
-            command,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
+        with tempfile.TemporaryDirectory(
+            prefix="chelis-rejection-cargo-metadata-"
+        ) as scratch_raw:
+            scratch = Path(scratch_raw)
+            cargo_home = scratch / "cargo-home"
+            cargo_home.mkdir()
+            env = os.environ.copy()
+            env["CARGO_HOME"] = str(cargo_home)
+            for key in tuple(env):
+                if (
+                    key == "CARGO_PATHS"
+                    or key.startswith("CARGO_PATCH_")
+                    or key.startswith("CARGO_REPLACE_")
+                    or key.startswith("CARGO_SOURCE_")
+                ):
+                    del env[key]
+            result = subprocess.run(
+                command,
+                cwd=scratch,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RegistryError(f"cannot derive Cargo workspace metadata: {error}") from error
     if result.returncode != 0:

@@ -153,6 +153,33 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         errors = MODULE.validate_source(mutated)
         self.assertTrue(any("authority alias" in error for error in errors), errors)
 
+    def test_balanced_grouped_use_alias_trait_impl_is_rejected(self):
+        mutated = self.source.replace(
+            "    pub const fn issue(self) -> Option<IssueRef> {",
+            "    pub const fn issue(self) -> Option<RedteamIssueAlias> {",
+            1,
+        ).replace(
+            "    authority: RejectionAuthority,",
+            "    authority: RedteamAuthorityAlias,",
+            1,
+        )
+        mutated += (
+            "\nuse self::{IssueRef as RedteamIssueAlias, "
+            "RejectionAuthority as RedteamAuthorityAlias};\n"
+            "impl From<u32> for RedteamIssueAlias {\n"
+            "    fn from(value: u32) -> Self {\n"
+            "        Self(NonZeroU32::new(value).unwrap())\n"
+            "    }\n"
+            "}\n"
+            "impl From<RedteamIssueAlias> for RedteamAuthorityAlias {\n"
+            "    fn from(issue: RedteamIssueAlias) -> Self {\n"
+            "        Self::unimplemented(issue, \"forged\").unwrap()\n"
+            "    }\n"
+            "}\n"
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("authority alias" in error for error in errors), errors)
+
     def test_unicode_public_method_cannot_evade_the_owner_inventory(self):
         mutated = self.source.replace(
             "impl IssueRef {",
@@ -200,6 +227,15 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
             "as redteam_rogue;\n"
         )
         errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("authority alias" in error for error in errors), errors)
+
+    def test_grouped_builder_alias_cannot_escape_the_owner(self):
+        errors = MODULE.validate_usage_source(
+            "crates/chelis-types/src/lib.rs",
+            "use crate::unsupported::{"
+            "__build_unimplemented_rejection as redteam_build};\n"
+            "let _ = redteam_build(729, \"hidden\");\n",
+        )
         self.assertTrue(any("authority alias" in error for error in errors), errors)
 
     def test_direct_public_builder_call_is_rejected_in_production(self):

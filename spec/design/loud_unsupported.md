@@ -350,7 +350,13 @@ REGISTRIES of what actually exists:
   root and package Cargo manifests, so a non-`crates/` member or custom target
   path is part of the same inventory. Every exact non-test Cargo target is
   counted regardless of its filename suffix; its parent tree is additionally
-  walked for ordinary `*.rs` module files. The scanner
+  walked for ordinary `*.rs` module files. Every path dependency must resolve
+  to a workspace member. Root-manifest `patch`/`replace` and Cargo-config
+  `patch`/`paths`/`replace`/`source` overrides are forbidden because they can
+  substitute compiled local packages that `metadata --no-deps` does not expose
+  as paths. The metadata query runs from an isolated working directory and
+  Cargo home after clearing dependency-override environment keys, so a
+  developer-global override cannot change the inventoried graph. The scanner
   masks nested Rust comments and string forms while preserving offsets, so
   historical text cannot manufacture a site and comments or whitespace around
   macro tokens cannot hide one. Macro aliases and re-exports fail generation,
@@ -364,7 +370,10 @@ REGISTRIES of what actually exists:
   including `src/tests/` and co-located `#[cfg(test)]` modules, because directory
   names do not establish Rust reachability and this lexical inventory does not
   evaluate configurations. The macro owner is scanned on the same terms; only
-  its balanced canonical `macro_rules!` definition span is masked.
+  its balanced canonical `macro_rules!` definition span is masked. The
+  privileged owner boundary forbids authority type/import aliases, including
+  grouped and nested `use` trees, so balanced token substitutions cannot attach
+  a standard public trait implementation to a hidden alias.
 - `Rejection Authority Liveness` runs on every pull request and re-runs when
   its body is edited, not only when authority files or the head SHA change. It
   live-validates the standing source-derived manifest, queries GitHub's
