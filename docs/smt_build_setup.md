@@ -212,6 +212,33 @@ asset produced by `build-cvc5.yml`. A `build-cvc5.yml` bug therefore can never
 silently reach a shipped artifact. Treat a `release.yml` cvc5 failure as real
 even when the per-PR SMT lanes are green off the asset.
 
+### The cold build's fetch is retried; its compile is not (chelis#1004)
+
+Building cvc5 cold begins by pulling the cvc5 source and its dependencies
+over the network, so the release jobs are the only lanes exposed to a
+transient GitHub refusal there. Because `publish-release` has `needs:` on all
+three build jobs, one such failure skips the publish and leaves a pushed tag
+with no GitHub Release: the v0.18.0 release (run 30673030685) needed three
+attempts, failing at `cvc5-sys` `build.rs:231` (dependency downloads, HTTP
+403) and then at `build.rs:276` (the source clone) with no change to the tree.
+
+Each `Build chelis-cli (release, smt)` step therefore runs through
+`scripts/ci_cvc5_build.py`, which retries **only** when the failing attempt's
+output carried a transient-fetch signature. This does not weaken anything
+above: no prebuilt is linked, no compile is skipped, and a compile, CMake
+configure, or link failure is **not** retried at all -- it fails on the first
+attempt exactly as before. "Treat a `release.yml` cvc5 failure as real" still
+holds, because the only failures the wrapper absorbs are ones that never
+reached the compiler. A sustained outage still fails the job once the bounded
+attempts are exhausted.
+
+The signature list is deliberately narrow, and
+`scripts/test_ci_cvc5_build.py` pins both directions: the observed 403 and
+clone-failure lines classify as transient, while an `error[E0308]`, a
+`CMake Error`, a linker failure, and a bare `build.rs` panic with no fetch
+diagnostic above it do not. Widening that list is a decision to retry
+something new; make it deliberately.
+
 ## Downstream Impact
 
 Shell repos consuming the chelis workspace (Shoals, Coral, Nautilus, Hull) do

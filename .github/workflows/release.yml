@@ -13,6 +13,11 @@ jobs:
   build-linux-x86_64:
     name: Build chelis (linux-x86_64)
     runs-on: ubuntu-latest
+    # chelis#1004: a cold cvc5 build measures ~30m here, and the retry
+    # wrapper can add a couple of fast-failing fetch attempts on top. This
+    # job had no ceiling at all, so a stalled fetch would have run toward
+    # the 6-hour runner cap; 75m bounds it while leaving real headroom.
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -39,8 +44,15 @@ jobs:
       # the GPL CLN path (ENABLE_GPL=OFF, USE_CLN=OFF), so the artifact
       # is distributable. The verify step below proves the feature is
       # live in the shipped binary.
+      #
+      # Wrapped in scripts/ci_cvc5_build.py (chelis#1004): the cold build
+      # starts by fetching cvc5 and its deps over the network, and a
+      # transient GitHub refusal there fails this job and skips the publish.
+      # The wrapper retries ONLY a fetch-signature failure; a real build
+      # failure still fails on the first attempt, so this job remains the
+      # cold-build proof docs/smt_build_setup.md says it is.
       - name: Build chelis-cli (release, smt)
-        run: cargo build --release -p chelis-cli --features smt
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
 
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
@@ -115,6 +127,9 @@ jobs:
     # GLIBC_2.39 requirement (Rust std's weak pidfd refs) and refuses to
     # load on anything older (#330).
     container: debian:11
+    # chelis#1004: see the linux-x86_64 job. Same measured ~30m cold build,
+    # same previously-unbounded wall clock.
+    timeout-minutes: 75
     # Container jobs default `run:` steps to `sh`, which rejects
     # `set -o pipefail` and `${VAR::8}`; debian:11 ships bash.
     defaults:
@@ -177,9 +192,10 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale.
+      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
+      # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: cargo build --release -p chelis-cli --features smt
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
 
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
@@ -288,8 +304,11 @@ jobs:
     runs-on: macos-latest
     # cvc5 builds from source under `--features smt` (chelis#422); the
     # 10-minute cap from the no-feature build is too tight for the cold
-    # cvc5 compile on a cache miss.
-    timeout-minutes: 30
+    # cvc5 compile on a cache miss. Raised from 30 for chelis#1004: a
+    # measured cold build is ~14m here, and a fetch failure aborts in ~3m,
+    # so three attempts fit in ~21m -- but 30 left no margin for a slow
+    # runner on top of that.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -310,9 +329,10 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale.
+      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
+      # chelis#1004 fetch-retry rationale.
       - name: Build chelis-cli (release, smt)
-        run: cargo build --release -p chelis-cli --features smt
+        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
 
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
