@@ -817,9 +817,12 @@ impl CEmitter {
             .collect()
     }
 
-    /// The direct integer-Abs node has a typed, trapping C kernel. General
-    /// fused integer emission is a later Phase 3 slice, so externally supplied
-    /// fused IR remains loud instead of entering its float-only template.
+    /// The direct integer-Abs node has a typed, trapping C kernel
+    /// (`emit_integer_abs`), which is what chelis#691 asked for and what
+    /// `precision_matrix.rs` now locks as an ordinary regression. General
+    /// fused integer emission is a separate dtype capability that chelis#729
+    /// owns, so externally supplied fused IR remains loud instead of entering
+    /// the float-only template.
     fn reject_fused_integer_abs(dag: &Dag) -> Result<(), Unsupported> {
         if let Some(node) = chelis_ir::analysis::first_fused_integer_abs_node(dag) {
             return Err(Unsupported::new(
@@ -827,10 +830,11 @@ impl CEmitter {
                 format!("a fused integer tensor at C DAG node {}", node.0),
                 Stage::Codegen("c"),
                 chelis_types::unimplemented_rejection!(
-                    691,
+                    729,
                     "direct integer abs is implemented with an exact trapping kernel; \
-                     general fused integer emission remains Phase 3 work, so this \
-                     externally supplied fused shape cannot enter the float-only template"
+                     general fused integer emission remains dtype capability work, so \
+                     this externally supplied fused shape cannot enter the float-only \
+                     template"
                 ),
             ));
         }
@@ -3264,7 +3268,9 @@ impl CEmitter {
         // bf16/f16 are stored as `uint16_t` and need the
         // convert-then-compute routing that `emit_unary_func_reduced_f`
         // uses, and the integer dtypes need integer step operators
-        // (chelis#691) rather than libm calls.
+        // (chelis#729) rather than libm calls. chelis#691 covered the
+        // DIRECT `emit_binary_func` / abs nodes and is repaired: those
+        // now emit an exact integer ternary and `emit_integer_abs`.
         //
         // The pre-#919 comment claimed the fuse pass "currently only
         // produces f32 fused chains in practice", making this a
@@ -3282,7 +3288,7 @@ impl CEmitter {
             let authority = match ty.precision {
                 Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
                     chelis_types::unimplemented_rejection!(
-                        691,
+                        729,
                         "integer fused elementwise chains need exact integer step operators rather than libm calls"
                     )
                 }

@@ -3339,6 +3339,12 @@ impl<'a> HostEmitter<'a> {
                         Prim::Bf16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_bf16", [arg(0)])
                         }
+                        // chelis#714 asked for the f16/bf16 host-scalar
+                        // representation and is repaired: both dtypes have
+                        // their own constructor arm above. What survives here
+                        // is the general dtype-capability gap chelis#729
+                        // owns, for the precisions that still have no
+                        // scalar-tensor constructor at all.
                         precision => {
                             return Err(Unsupported::new(
                                 UnsupportedKind::HostType(format!(
@@ -3348,7 +3354,7 @@ impl<'a> HostEmitter<'a> {
                                 "`scalar_to_tensor` C host emission",
                                 Stage::Codegen("c"),
                                 chelis_types::unimplemented_rejection!(
-                                    714,
+                                    729,
                                     "the resolved result dtype has no scalar-tensor constructor; \
                                      implement the exact target capability instead of selecting f32"
                                 ),
