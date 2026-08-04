@@ -6,6 +6,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.3] — 2026-08-04
+
 ### Added
 
 - **`cast_trunc` — the named truncating float-to-integer cast (chelis#759).**
