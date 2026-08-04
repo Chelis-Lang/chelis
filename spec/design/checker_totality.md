@@ -859,6 +859,20 @@ metadata rather than as a diagnostic.
    in this design doc is the drift shape the repo contract calls out.
 3. **Both fixes, derived from the decision, in one change set** - not a patch
    at each site.
+4. **An explicit in-or-out record for [#783].** Whoever lands this states
+   whether [#783]'s writeback invariant rides here or stays standalone, and
+   why. The condition is real - if the decision changes what an unresolved
+   parameter type may BECOME, the writeback is downstream of the same value
+   and landing it separately risks a second, contradicting rule - but a
+   conditional left implicit in a plan is how a half gets dropped. Recording
+   the choice costs a sentence; leaving it to be inferred is how [#780] and
+   [#847] spent three phases attached to a note that scheduled nothing.
+
+**This item names no owner and no date, and that is its one live risk.** The
+sequencing notes it replaces failed for exactly that reason rather than for
+being wrongly scoped: they described a dependency without anyone holding it.
+A named deliverable is a better artifact than a sequencing note only if
+someone is assigned to decide it.
 
 This entry does not decide the semantics. It contracts that ONE decision is
 made, states what the decision must cover, and binds both fixes to it; open
