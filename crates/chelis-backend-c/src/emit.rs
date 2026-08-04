@@ -6204,7 +6204,24 @@ impl CEmitter {
         // non-contiguous; resolve its element via the standard
         // `chelis_flat_to_indices` + `chelis_indices_to_flat` dance
         // used by `emit_realize` and friends.
-        self.line("#pragma omp parallel for");
+        //
+        // The [05-OP-6] rung runs this loop SERIALLY. A buffer can carry
+        // more than one kind of offender (an out-of-range element and a
+        // non-finite one), and each traps a different kind; under
+        // `omp parallel for` whichever thread reaches `chelis_numeric_trap`
+        // first decides, so the reported kind became thread-race
+        // dependent -- observed on Linux CI at two elements. [05-OP-6]
+        // declares the eval and compiled lanes identical, and the
+        // evaluator is an in-order first-offender walk, so a
+        // deterministic serial loop is the contract; parallel throughput
+        // does not outrank it on a guarded per-element conversion.
+        //
+        // The checked `cast` keeps its pragma: the same divergence class
+        // exists there and is filed separately, and widening this change
+        // to touch it is out of scope for chelis#759.
+        if !trunc {
+            self.line("#pragma omp parallel for");
+        }
         self.line(&format!("for (int i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line("int indices[CHELIS_MAX_DIM];");
@@ -6759,6 +6776,69 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_contiguous(t0); /* store: out */"));
+    }
+
+    /// chelis#759 / [05-OP-6]: the truncating rung's conversion loop must
+    /// be SERIAL.
+    ///
+    /// A buffer can carry both an out-of-range element and a non-finite
+    /// one, and those trap different kinds. Under `omp parallel for`
+    /// whichever thread reaches `chelis_numeric_trap` first decides, so
+    /// the reported kind is race-dependent -- Linux CI caught exactly
+    /// that at two elements while macOS agreed 10/10 only because clang
+    /// without libomp ignores the pragma. That makes a runtime test an
+    /// unreliable local guard, so the invariant is pinned on the emitted
+    /// source instead.
+    #[test]
+    fn cast_trunc_conversion_loop_is_serial_while_checked_cast_stays_parallel() {
+        fn emit(op: RiscOp, precision: Prim) -> String {
+            let mut dag = Dag::new();
+            let a = dag.add_node(
+                RiscOp::synth_const(scalar_f32().precision, 1.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let dst_ty = TensorType {
+                dims: vec![],
+                precision,
+            };
+            dag.add_node(op, vec![a], dst_ty, None);
+            CEmitter::emit_dag(&dag, "test_fn").expect("emit")
+        }
+
+        let trunc = emit(
+            RiscOp::CastTrunc {
+                new_precision: Prim::Int32,
+            },
+            Prim::Int32,
+        );
+        assert!(
+            trunc.contains("chelis_trunc_float_to_int"),
+            "expected the [05-OP-6] guard in the emitted C; got:\n{trunc}"
+        );
+        assert!(
+            !trunc.contains("#pragma omp"),
+            "the cast_trunc conversion loop must be serial so the FIRST \
+             offending element deterministically decides the trap kind, \
+             matching the evaluator's in-order walk ([05-OP-6] declares the \
+             lanes identical); got:\n{trunc}"
+        );
+
+        // Control: the checked rung is deliberately untouched. Its
+        // same-class divergence is pre-existing and filed separately;
+        // this assertion keeps the scope of the chelis#759 change honest.
+        let checked = emit(
+            RiscOp::Cast {
+                new_precision: Prim::Int32,
+            },
+            Prim::Int32,
+        );
+        assert!(
+            checked.contains("#pragma omp parallel for"),
+            "the checked `cast` keeps its pragma; narrowing it is out of scope \
+             for chelis#759; got:\n{checked}"
+        );
     }
 
     #[test]
