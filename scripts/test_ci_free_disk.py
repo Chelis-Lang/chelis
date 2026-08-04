@@ -60,8 +60,57 @@ class LinuxBehaviorTests(unittest.TestCase):
             for call in run.call_args_list
             if call.args and call.args[0][:3] == ["sudo", "rm", "-rf"]
         ]
-        # Every advertised path is attempted, exactly once each.
-        self.assertEqual(rm_targets, list(cfd.PURGE_PATHS))
+        # Every advertised path is attempted, exactly once each. The
+        # removals are dispatched concurrently, so this compares as a
+        # multiset: which paths get removed is the contract, the order
+        # they happen to finish in is not.
+        self.assertEqual(len(rm_targets), len(cfd.PURGE_PATHS))
+        self.assertEqual(sorted(rm_targets), sorted(cfd.PURGE_PATHS))
+
+    def test_log_lines_stay_in_declared_order(self):
+        # Concurrency must not make the CI log nondeterministic: the
+        # per-path result lines are emitted in PURGE_PATHS order after the
+        # batch joins, whatever order the removals actually completed in.
+        with (
+            mock.patch.object(cfd.sys, "platform", "linux"),
+            mock.patch.object(cfd.shutil, "which", return_value=None),
+            mock.patch.object(cfd.subprocess, "run", return_value=self._completed()),
+            mock.patch("builtins.print") as printed,
+        ):
+            cfd.free_disk_space()
+
+        logged = [
+            call.args[0]
+            for call in printed.call_args_list
+            if call.args and str(call.args[0]).startswith("ci_free_disk: rm -rf ")
+        ]
+        self.assertEqual(
+            logged,
+            [f"ci_free_disk: rm -rf {path} -> exit 0" for path in cfd.PURGE_PATHS],
+        )
+
+    def test_one_failed_removal_does_not_cancel_the_others(self):
+        # A failure inside the concurrent batch must not abort the batch:
+        # every other path still gets its own attempt, and the step still
+        # reports success.
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[-1] == "/usr/lib/jvm":
+                raise OSError("boom")
+            return self._completed()
+
+        with (
+            mock.patch.object(cfd.sys, "platform", "linux"),
+            mock.patch.object(cfd.shutil, "which", return_value=None),
+            mock.patch.object(cfd.subprocess, "run", side_effect=fake_run) as run,
+        ):
+            self.assertEqual(cfd.free_disk_space(), 0)
+
+        attempted = {
+            call.args[0][-1]
+            for call in run.call_args_list
+            if call.args and call.args[0][:3] == ["sudo", "rm", "-rf"]
+        }
+        self.assertEqual(attempted, set(cfd.PURGE_PATHS))
 
     def test_purge_paths_are_targeted_not_the_whole_tool_cache(self):
         # Guard the safety invariant: only the CodeQL subdir of the tool

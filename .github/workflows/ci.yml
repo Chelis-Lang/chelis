@@ -771,6 +771,20 @@ jobs:
     # runs on every code PR and every push; only a pure-prose PR skips it.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    # Every other cargo *test* job in this workflow drops debuginfo; this
+    # one was the only omission, and it is the workflow's critical path
+    # (the `Workspace tests` step alone is longer than any whole job).
+    # macOS pays for debuginfo twice: rustc emits it, then the linker
+    # walks the debug map for every test binary the workspace produces.
+    # Nothing here reads debuginfo -- the job asserts binary architecture
+    # and runs two codegen smoke scripts -- so the only visible cost is
+    # unsymbolicated frames in a `RUST_BACKTRACE` dump on failure, which
+    # is exactly the tradeoff the Linux jobs already accept. The release
+    # SMT jobs are deliberately not in this set: they build `--release`,
+    # which these dev/test profile vars do not reach.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
