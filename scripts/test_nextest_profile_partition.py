@@ -6,25 +6,23 @@ from repo root, or `python3 scripts/test_nextest_profile_partition.py`.
 PR #126 (refined by #127) split the heavyweight end-to-end suite off the
 per-PR integration gate. `.config/nextest.toml` carries three profiles:
 
-  - `default` and `ci` share a `default-filter` that EXCLUDES an
-    explicitly-named heavy-e2e set;
+  - `default` excludes an explicitly-named heavy-e2e set;
+  - `ci` excludes that same set plus two capacity-census binaries that the
+    required Phase 0-3 oracle also executes;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
     `Heavy E2E` workflow runs `cargo nextest run --profile nightly`.
 
-The invariant this file locks: **every non-ignored test is on the
-per-PR gate XOR the nightly gate -- never neither, never both.** A test
-that falls into NEITHER profile silently stopped running; a test in
-BOTH wastes the per-PR gate budget the split exists to protect. Nothing
-in the merged change tested this invariant -- it was asserted in prose
-in `.config/nextest.toml` and `heavy-e2e.yml` but never executed.
+This file locks the original workspace/nightly split plus the narrower
+delegation contract for the two complete census binaries. The dtype oracle
+intentionally overlaps the workspace lane elsewhere, so it is not a third
+disjoint profile.
 
 Two tiers of check:
 
   - `FilterTextTests` is a fast, no-compile lock on the *text* of the
-    three filter blocks: the `default` and `ci` exclusion blocks must be
-    byte-identical, and the `nightly` positive filter must equal the
-    negated inner set of the exclusion block. A hand-edit that drifts
-    one block trips this immediately.
+    three filter blocks: `ci` may add only the oracle-owned census binaries to
+    the default exclusion, and the `nightly` positive filter must equal the
+    negated inner set of the default exclusion block.
   - `ProfilePartitionTests` is the real set-math oracle: it runs
     `cargo nextest list` for the `ci` and `nightly` profiles plus the
     full unfiltered list and asserts the partition. It is skipped when
@@ -36,11 +34,28 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NEXTEST_TOML = REPO_ROOT / ".config" / "nextest.toml"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import dtype_phase1_oracle  # noqa: E402
+import dtype_phase2_oracle  # noqa: E402
+import dtype_phase3_oracle  # noqa: E402
+
+
+ORACLE_OWNED_BINARY_IDS = {
+    "chelis-compiler-api::capacity_census_wire",
+    "chelis-python::capacity_census_bindings",
+}
+ORACLE_OWNED_FILTERS = (
+    "binary_id(/^chelis-compiler-api::capacity_census_wire$/)",
+    "binary_id(/^chelis-python::capacity_census_bindings$/)",
+)
 
 
 def _filter_blocks() -> list[str]:
@@ -53,6 +68,38 @@ def _filter_blocks() -> list[str]:
 def _norm(s: str) -> str:
     """Collapse all whitespace runs to single spaces and strip."""
     return re.sub(r"\s+", " ", s).strip()
+
+
+def _negative_filter_inner(block: str) -> str:
+    match = re.search(r"not\s*\((.*)\)\s*$", block, re.DOTALL)
+    if match is None:
+        raise AssertionError("filter is not in the expected `not ( <set> )` shape")
+    return match.group(1)
+
+
+def _required_phase3_legs() -> tuple[object, ...]:
+    """Resolve the exact Phase 3 -> Phase 2 -> Phase 1 inheritance chain."""
+    python = sys.executable
+    phase3 = dtype_phase3_oracle.oracle_legs(python)
+    if phase3[0].argv != (python, "scripts/dtype_phase2_oracle.py"):
+        raise AssertionError("Phase 3 no longer inherits dtype_phase2_oracle.py")
+    phase2 = dtype_phase2_oracle.oracle_legs(python)
+    if phase2[0].argv != (python, "scripts/dtype_phase1_oracle.py"):
+        raise AssertionError("Phase 2 no longer inherits dtype_phase1_oracle.py")
+    return (*phase3, *phase2, *dtype_phase1_oracle.oracle_legs(python))
+
+
+def _oracle_selected_test_binaries() -> set[str]:
+    selected: set[str] = set()
+    for leg in _required_phase3_legs():
+        argv = leg.argv
+        if "-p" not in argv:
+            continue
+        package = argv[argv.index("-p") + 1]
+        for index, argument in enumerate(argv[:-1]):
+            if argument == "--test":
+                selected.add(f"{package}::{argv[index + 1]}")
+    return selected
 
 
 class FilterTextTests(unittest.TestCase):
@@ -70,16 +117,22 @@ class FilterTextTests(unittest.TestCase):
             "(default, ci, nightly)",
         )
 
-    def test_default_and_ci_exclusion_blocks_are_byte_identical(self):
-        # The `default` and `ci` exclusion blocks are hand-duplicated.
-        # Any drift between them is a real bug: the local dev gate and
-        # the CI gate would then run different test sets.
+    def test_ci_adds_only_oracle_owned_binaries_to_default_exclusion(self):
         default_block, ci_block, _nightly = _filter_blocks()
+        expected = _norm(_negative_filter_inner(default_block))
+        expected += " + " + " + ".join(ORACLE_OWNED_FILTERS)
         self.assertEqual(
-            default_block,
-            ci_block,
-            "the `default` and `ci` default-filter blocks have drifted; "
-            "they are hand-duplicated and must stay byte-identical",
+            _norm(_negative_filter_inner(ci_block)),
+            expected,
+            "the `ci` filter must differ from `default` only by the exact "
+            "capacity-census binaries owned by the required dtype oracle",
+        )
+
+    def test_ci_only_exclusions_are_executed_by_the_dtype_oracle(self):
+        self.assertTrue(
+            ORACLE_OWNED_BINARY_IDS <= _oracle_selected_test_binaries(),
+            "a capacity-census binary left the workspace lane without being "
+            "selected by the required dtype oracle",
         )
 
     def test_nightly_filter_is_the_negated_exclusion_set(self):
@@ -87,17 +140,11 @@ class FilterTextTests(unittest.TestCase):
         # exactly `<set>`. If these drift, a test lands in neither
         # profile (dropped coverage) or both (double-run).
         default_block, _ci, nightly_block = _filter_blocks()
-        inner = re.search(r"not\s*\((.*)\)\s*$", default_block, re.DOTALL)
-        self.assertIsNotNone(
-            inner,
-            "the `default` filter is not in the expected "
-            "`not ( <set> )` shape",
-        )
         self.assertEqual(
-            _norm(inner.group(1)),
+            _norm(_negative_filter_inner(default_block)),
             _norm(nightly_block),
             "the `nightly` positive filter does not equal the negated "
-            "inner set of the `default`/`ci` exclusion filter; a test "
+            "inner set of the `default` exclusion filter; a test "
             "now falls into neither profile or both",
         )
 
@@ -153,10 +200,9 @@ def _list_profile(profile: str | None) -> dict[str, tuple[str, bool]]:
 class ProfilePartitionTests(unittest.TestCase):
     """The real oracle: `cargo nextest list` set math across profiles.
 
-    The invariant: every non-ignored test is in exactly one of `ci` /
-    `nightly`. `#[ignore]`-d tests (HIP/Metal manual gates and friends)
-    are intentionally on neither automated profile and are excluded
-    from the partition.
+    The invariant: every non-ignored test is in the workspace `ci` profile,
+    the `nightly` profile, or an explicitly selected required-oracle binary.
+    `#[ignore]`-d tests are intentionally outside this partition.
     """
 
     @classmethod
@@ -181,10 +227,18 @@ class ProfilePartitionTests(unittest.TestCase):
             if ign
         }
         non_ignored = universe - ignored
-        return ci_matches, nightly_matches, non_ignored
+        oracle_matches = {
+            key
+            for key in non_ignored
+            if any(
+                key.startswith(f"{binary_id}::")
+                for binary_id in ORACLE_OWNED_BINARY_IDS
+            )
+        }
+        return ci_matches, nightly_matches, oracle_matches, non_ignored
 
     def test_ci_and_nightly_are_disjoint(self):
-        ci_matches, nightly_matches, _ = self._sets()
+        ci_matches, nightly_matches, _oracle_matches, _ = self._sets()
         overlap = ci_matches & nightly_matches
         self.assertEqual(
             overlap,
@@ -195,32 +249,32 @@ class ProfilePartitionTests(unittest.TestCase):
         )
 
     def test_no_non_ignored_test_falls_into_neither_profile(self):
-        ci_matches, nightly_matches, non_ignored = self._sets()
-        gap = non_ignored - ci_matches - nightly_matches
+        ci_matches, nightly_matches, oracle_matches, non_ignored = self._sets()
+        gap = non_ignored - ci_matches - nightly_matches - oracle_matches
         self.assertEqual(
             gap,
             set(),
-            f"{len(gap)} non-ignored test(s) are on NEITHER the per-PR `ci` "
-            f"gate nor the `nightly` gate -- they silently stopped running "
+            f"{len(gap)} non-ignored test(s) are on neither the workspace, "
+            f"nightly, nor required-oracle lanes -- they silently stopped running "
             f"(dropped coverage): {sorted(gap)[:20]}",
         )
 
-    def test_ci_union_nightly_covers_every_non_ignored_test(self):
-        # Belt-and-braces statement of the partition: the union of the
-        # two automated profiles is exactly the non-ignored universe.
-        ci_matches, nightly_matches, non_ignored = self._sets()
-        covered = (ci_matches | nightly_matches) & non_ignored
+    def test_profiles_plus_delegated_binaries_cover_every_non_ignored_test(self):
+        # Belt-and-braces coverage statement; this is not a disjoint
+        # three-lane partition because the dtype oracle overlaps `ci` elsewhere.
+        ci_matches, nightly_matches, oracle_matches, non_ignored = self._sets()
+        covered = (ci_matches | nightly_matches | oracle_matches) & non_ignored
         self.assertEqual(
             covered,
             non_ignored,
-            "the union of the `ci` and `nightly` profiles does not cover "
-            "every non-ignored test",
+            "the union of workspace, nightly, and required-oracle tests does "
+            "not cover every non-ignored test",
         )
 
     def test_nightly_set_is_nonempty(self):
         # A `nightly` profile that matched nothing would mean the split
         # silently dropped the entire heavy-e2e suite.
-        _ci, nightly_matches, _ = self._sets()
+        _ci, nightly_matches, _oracle_matches, _ = self._sets()
         self.assertGreater(
             len(nightly_matches),
             0,

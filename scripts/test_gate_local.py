@@ -243,11 +243,16 @@ class ListAnnotationTests(unittest.TestCase):
             command, annotation = line.split("  # ", 1)
             self.assertIn(
                 annotation,
-                (gate.LOCAL_ANNOTATION, gate.CI_OWNED_ANNOTATION),
+                (
+                    gate.LOCAL_ANNOTATION,
+                    gate.CI_OWNED_ANNOTATION,
+                    gate.FULL_GATE_SPLIT_ANNOTATION,
+                ),
             )
             annotations[command] = annotation
-        # The local subset: clippy, fmt, chelis lint. CI-owned: the
-        # workspace build and the workspace nextest suite.
+        # The local subset: clippy, fmt, chelis lint. The workspace build is
+        # CI-owned; the full gate's default-profile workspace suite is covered
+        # in CI by the split workspace and dtype-oracle jobs.
         self.assertEqual(
             annotations[gate.render(gate.CLIPPY_WORKSPACE)],
             gate.LOCAL_ANNOTATION,
@@ -266,7 +271,7 @@ class ListAnnotationTests(unittest.TestCase):
         )
         self.assertEqual(
             annotations[gate.render(gate.NEXTEST_WORKSPACE)],
-            gate.CI_OWNED_ANNOTATION,
+            gate.FULL_GATE_SPLIT_ANNOTATION,
         )
 
     def test_dynamic_local_stage_is_documented_in_list_output(self):

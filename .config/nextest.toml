@@ -2,9 +2,9 @@
 #
 # Profiles:
 #   default  - local `cargo nextest run`. Fast suite only; heavy e2e is excluded.
-#   ci       - per-PR `Integration Tests` job, via `scripts/gate.py integration`.
-#              Fast suite only (same default-filter as `default`), plus JUnit
-#              timing XML for `scripts/test_timing_check.py`.
+#   ci       - per-PR `Workspace Tests` job, via `scripts/gate.py integration`.
+#              Fast suite plus JUnit timing XML. The two capacity-census
+#              binaries run in the parallel required dtype-oracle job instead.
 #   nightly  - the `Heavy E2E` workflow (.github/workflows/heavy-e2e.yml), which
 #              runs on a nightly `schedule:` and on `workflow_dispatch:` ONLY.
 #              Runs exactly the heavy e2e suite the other two profiles exclude.
@@ -45,8 +45,10 @@ default-filter = '''
 '''
 
 [profile.ci]
-# Same fast-suite scope as `default`; the only additions are the JUnit
-# timing report and the shared exclusion of the heavy e2e suite.
+# Keep the local fast-suite scope, then exclude the two capacity-census
+# binaries that the required Phase 0-3 oracle job runs in parallel. These were
+# the three slowest tests in the measured Linux workspace run; excluding the
+# complete binaries preserves their positive and negative controls together.
 default-filter = '''
     not (
         binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
@@ -57,6 +59,8 @@ default-filter = '''
         + (binary_id(/^chelis-cli::cli$/) & test(/^reef_build_emits_shell_and_archive$/))
         + (binary_id(/^chelis-cli::bundled_chelis_std_loader$/) & test(/^phaseA_bundled_chelis_std_loader_property_oracle$/))
         + (binary_id(/^chelis-cli::reef_install_from_monorepo$/) & test(/^reef_install_from_monorepo_populates_registry_and_unblocks_check$/))
+        + binary_id(/^chelis-compiler-api::capacity_census_wire$/)
+        + binary_id(/^chelis-python::capacity_census_bindings$/)
     )
 '''
 
@@ -67,8 +71,10 @@ path = "junit.xml"
 
 [profile.nightly]
 # The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
-# default-filter is exactly the set the `default`/`ci` profiles exclude, so
-# the two stay in lockstep: a test is on the per-PR gate XOR the nightly gate.
+# default-filter is exactly the heavy set the `default` profile excludes.
+# The `ci` profile additionally delegates its two capacity-census binaries to
+# the required dtype oracle; scripts/test_nextest_profile_partition.py locks
+# the resulting three-lane partition.
 default-filter = '''
     binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
     + binary_id(/^chelis-cli::stdlib_typecheck_cache_concurrency$/)

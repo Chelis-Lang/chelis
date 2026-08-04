@@ -60,6 +60,7 @@ class CommandManifestTests(unittest.TestCase):
     def test_inherited_leg_uses_the_oracle_interpreter(self) -> None:
         inherited = oracle.oracle_legs("/chosen/python")[0]
         self.assertEqual(inherited.argv[0], "/chosen/python")
+        self.assertEqual(inherited.argv[1], "scripts/dtype_phase1_oracle.py")
 
 
 class RunnerTests(unittest.TestCase):

@@ -613,15 +613,9 @@ jobs:
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
 
-  integration:
-    name: Integration Tests (Linux)
+  workspace-tests:
+    name: Workspace Tests (Linux)
     runs-on: ubuntu-latest
-    # The Phase 3 capacity-census liveness gate resolves cited tracker state.
-    # Keep both the permission and token scoped to this job; only the oracle
-    # step below receives GH_TOKEN.
-    permissions:
-      contents: read
-      issues: read
     # Skip on docs-only PRs (chelis#419). A skipped required job reports
     # success, so branch protection stays satisfied; on push docs_only is
     # always false. `needs: [changes]` is what makes the output readable.
@@ -655,11 +649,10 @@ jobs:
       - name: Create uv-managed venv + wire libpython rpath
         run: python3 scripts/ci_setup_uv_python.py
 
-      - name: Install dtype-oracle Python dependency
-        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
-
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -680,13 +673,11 @@ jobs:
       - name: Gate (integration subset)
         run: python3 scripts/gate.py integration
 
-      # Phase 3 inherits Phase 2, which inherits Phases 1 and 0. Keep one
-      # nested invocation here so all four #729 acceptance contracts are
-      # required continuously without adding duplicate commands to gate.py.
-      - name: Dtype Phase 0-3 oracle
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: .venv/bin/python scripts/dtype_phase3_oracle.py
+      # This structural oracle needs cargo-nextest, which the script-unit job
+      # intentionally does not install. Run it here after the workspace build
+      # is warm so its three `nextest list` calls are continuously enforced.
+      - name: Verify nextest profile coverage
+        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
       # Informational, non-failing: flags integration tests that have
       # regressed past their committed timing baseline or that are new
@@ -699,6 +690,73 @@ jobs:
         if: always()
         continue-on-error: true
         run: python3 scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
+
+  # Run the inherited Phase 0-3 acceptance contract beside the workspace
+  # nextest suite. On the measured #1118 run these steps took 7m22s after a
+  # 14m56s workspace gate; making them independent removes that serial tail.
+  dtype-phase3-oracle:
+    name: Dtype Phase 0-3 Oracle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Install dtype-oracle Python dependency
+        run: uv pip install --python .venv/bin/python 'numpy>=2.0'
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          # Both parallel jobs restore the same cache; only workspace-tests
+          # saves it, avoiding a second multi-GB entry in the 10 GB cache pool.
+          save-if: false
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Dtype Phase 0-3 oracle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .venv/bin/python scripts/dtype_phase3_oracle.py
+
+  # Keep the existing required status context while making both expensive
+  # legs parallel. `!cancelled()` lets this job inspect dependency failures
+  # while still suppressing work after cancellation.
+  integration:
+    name: Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes, workspace-tests, dtype-phase3-oracle]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require both integration legs
+        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }}
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
