@@ -96,8 +96,8 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
 
     def test_private_scalar_tuple_field_cannot_be_made_public(self):
         mutated = self.source.replace(
-            "pub struct IssueRef(NonZeroU32);",
-            "pub struct IssueRef(pub NonZeroU32);",
+            "    struct IssueRef(NonZeroU32);",
+            "    pub(crate) struct IssueRef(pub NonZeroU32);",
             1,
         )
         errors = MODULE.validate_source(mutated)
@@ -152,6 +152,25 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         )
         errors = MODULE.validate_source(mutated)
         self.assertTrue(any("authority alias" in error for error in errors), errors)
+
+    def test_balanced_generic_default_alias_trait_impl_is_rejected(self):
+        mutated = self.source.replace(
+            "            issue: IssueRef,",
+            "            issue: HiddenIssue,",
+            1,
+        ).replace(
+            "mod authority {",
+            "mod authority {\n"
+            "    type HiddenIssue<T = IssueRef> = T;\n"
+            "    impl From<u32> for HiddenIssue {\n"
+            "        fn from(value: u32) -> Self {\n"
+            "            Self(NonZeroU32::new(value).unwrap())\n"
+            "        }\n"
+            "    }",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("type declaration" in error for error in errors), errors)
 
     def test_balanced_grouped_use_alias_trait_impl_is_rejected(self):
         mutated = self.source.replace(
@@ -226,9 +245,9 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
     def test_protected_wrapper_cannot_gain_an_unreviewed_derive(self):
         mutated = self.source.replace(
             "    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n"
-            "    pub struct IssueRef(NonZeroU32);",
+            "    struct IssueRef(NonZeroU32);",
             "    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, RedteamForge)]\n"
-            "    pub struct IssueRef(NonZeroU32);",
+            "    struct IssueRef(NonZeroU32);",
             1,
         )
         errors = MODULE.validate_source(mutated)
@@ -281,6 +300,23 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
             any("private authority constructor" in error for error in errors),
             errors,
         )
+
+    def test_macro_cannot_generate_protected_impl_in_production(self):
+        errors = MODULE.validate_usage_source(
+            "crates/chelis-types/src/lib.rs",
+            "macro_rules! redteam_implement_from {\n"
+            "    ($target:ty) => {\n"
+            "        impl From<u32> for $target {\n"
+            "            fn from(_: u32) -> Self {\n"
+            "                crate::unimplemented_rejection!(729, \"hidden\")"
+            ".issue().unwrap()\n"
+            "            }\n"
+            "        }\n"
+            "    };\n"
+            "}\n"
+            "redteam_implement_from!(crate::unsupported::IssueRef);\n",
+        )
+        self.assertTrue(any("macro token tree" in error for error in errors), errors)
 
     def test_unicode_alias_cannot_evade_the_production_boundary(self):
         errors = MODULE.validate_usage_source(

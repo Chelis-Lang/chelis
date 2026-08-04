@@ -329,8 +329,11 @@ REGISTRIES of what actually exists:
   constructor. The authority carriers and their private fields live in a
   sealed child module, so a sibling descendant of `unsupported` cannot use
   Rust's ancestor-module visibility to add a constructor or trait
-  implementation; the owner exposes only an exact type re-export and the two
-  validating macro helpers. `scripts/check_rejection_authority_boundary.py`
+  implementation. `SpecAtomRef` and `IssueRef` remain private even to sibling
+  modules; the public authority accessors return only the raw read-only atom or
+  issue value. The owner exposes only the exact `RejectionAuthority` API types
+  and the two validating macro helpers.
+  `scripts/check_rejection_authority_boundary.py`
   locks the complete public-function inventory of the owning module (free
   functions as well as methods), locks those module and re-export edges,
   rejects any extra module/re-export/include edge, rejects direct production
@@ -376,8 +379,12 @@ REGISTRIES of what actually exists:
   evaluate configurations. The macro owner is scanned on the same terms; only
   its balanced canonical `macro_rules!` definition span is masked. The
   privileged owner boundary forbids authority type/import aliases, including
-  grouped and nested `use` trees, so balanced token substitutions cannot attach
-  a standard public trait implementation to a hidden alias.
+  grouped and nested `use` trees, and forbids every `type` declaration in the
+  owner, including generic-default aliases and associated types, so balanced
+  token substitutions cannot attach a standard public trait implementation to
+  a hidden identity. Outside the owner, balanced macro token trees are walked;
+  a macro definition or invocation that carries a protected authority identity
+  is rejected instead of being trusted to expand without a hidden impl.
 - `Rejection Authority Liveness` runs on every pull request and re-runs when
   its body is edited, not only when authority files or the head SHA change. It
   live-validates the standing source-derived manifest, queries GitHub's

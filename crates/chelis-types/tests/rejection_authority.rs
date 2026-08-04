@@ -12,6 +12,8 @@ fn registered_atom_constructs_a_deliberate_authority() {
     .expect("the numbered spec declares this atom");
 
     assert_eq!(authority.kind(), RejectionAuthorityKind::Deliberate);
+    assert_eq!(authority.atom(), Some("[04-TOT-3]"));
+    assert_eq!(authority.issue(), None);
     assert_eq!(authority.citation(), "[04-TOT-3]");
     assert_eq!(authority.hint(), "malformed typed forms are rejected");
 }
@@ -52,6 +54,8 @@ fn registered_open_issue_constructs_an_unimplemented_authority() {
     .expect("chelis#879 is in the live-verified manifest");
 
     assert_eq!(authority.kind(), RejectionAuthorityKind::Unimplemented);
+    assert_eq!(authority.atom(), None);
+    assert_eq!(authority.issue(), Some(879));
     assert_eq!(authority.citation(), "chelis#879");
     assert_eq!(authority.hint(), "general C closure ABI is pending");
 }

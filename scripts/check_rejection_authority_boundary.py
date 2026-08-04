@@ -18,6 +18,7 @@ from pathlib import Path
 from generate_rejection_registries import (
     UNIMPLEMENTED_LITERAL,
     _mask_rust_non_code,
+    _matching_delimiter,
     workspace_rust_paths,
 )
 
@@ -26,8 +27,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/chelis-types/src/unsupported.rs"
 
 ALLOWED_PUBLIC_METHODS = {
-    "SpecAtomRef": {"as_str", "registry"},
-    "IssueRef": {"number", "registry"},
+    "SpecAtomRef": set(),
+    "IssueRef": set(),
     "RejectionAuthority": {"kind", "atom", "issue", "hint", "citation"},
 }
 
@@ -70,6 +71,7 @@ AUTHORITY_ALIAS = re.compile(
     r"(?:SpecAtomRef|IssueRef|RejectionAuthority|RejectionCitation)\b[^;{}]*;"
     r")"
 )
+TYPE_DECLARATION = re.compile(r"\btype\b")
 PRIVATE_AUTHORITY_CONSTRUCTION = re.compile(
     r"(?:"
     r"\b(?:SpecAtomRef|IssueRef)\s*::\s*new\b|"
@@ -93,9 +95,6 @@ DERIVE_ATTRIBUTE = re.compile(r"#\s*\[\s*derive\s*\(([^\]]*)\)\s*\]")
 
 EXPECTED_PUBLIC_FUNCTIONS = Counter(
     {
-        "as_str": 1,
-        "registry": 2,
-        "number": 1,
         "kind": 1,
         "atom": 1,
         "issue": 1,
@@ -109,8 +108,8 @@ EXPECTED_PUBLIC_FUNCTIONS = Counter(
     }
 )
 EXPECTED_IMPL_FUNCTIONS = {
-    "SpecAtomRef": Counter({"new": 1, "as_str": 1, "registry": 1}),
-    "IssueRef": Counter({"new": 1, "number": 1, "registry": 1}),
+    "SpecAtomRef": Counter({"new": 1, "as_str": 1}),
+    "IssueRef": Counter({"new": 1, "number": 1}),
     "RejectionAuthority": Counter(
         {
             "deliberate": 1,
@@ -130,8 +129,8 @@ PRIVATE_AUTHORITY_TOKEN = re.compile(
 )
 EXPECTED_PRIVATE_AUTHORITY_TOKENS = Counter(
     {
-        "SpecAtomRef": 7,
-        "IssueRef": 7,
+        "SpecAtomRef": 5,
+        "IssueRef": 5,
         "RejectionAuthority": 11,
         "RejectionCitation": 12,
         "AuthorityConstructionError": 17,
@@ -142,16 +141,14 @@ EXPECTED_PRIVATE_AUTHORITY_TOKENS = Counter(
 EXPECTED_MODULE_ITEMS = Counter({("authority", "{"): 1, ("tests", "{"): 1})
 EXPECTED_PUBLIC_USES = Counter(
     {
-        "authority::{AuthorityConstructionError,IssueRef,RejectionAuthority,"
-        "RejectionAuthorityKind,SpecAtomRef,}": 1,
+        "authority::{AuthorityConstructionError,RejectionAuthority,"
+        "RejectionAuthorityKind}": 1,
         "authority::{__build_deliberate_rejection,"
         "__build_unimplemented_rejection}": 1,
     }
 )
 EXPECTED_PUBLIC_ITEMS = Counter(
     {
-        ("struct", "SpecAtomRef"): 1,
-        ("struct", "IssueRef"): 1,
         ("enum", "RejectionAuthorityKind"): 1,
         ("struct", "RejectionAuthority"): 1,
         ("enum", "AuthorityConstructionError"): 1,
@@ -202,11 +199,11 @@ PRIVATE_COPY_EQ_HASH_DERIVE = (
 PRIVATE_AUTHORITY_LAYOUTS = {
     "SpecAtomRef tuple field": re.compile(
         PRIVATE_COPY_EQ_HASH_DERIVE
-        + r"pub\s+struct\s+SpecAtomRef\s*\(\s*&'static\s+str\s*\)\s*;"
+        + r"struct\s+SpecAtomRef\s*\(\s*&'static\s+str\s*\)\s*;"
     ),
     "IssueRef tuple field": re.compile(
         PRIVATE_COPY_EQ_HASH_DERIVE
-        + r"pub\s+struct\s+IssueRef\s*\(\s*NonZeroU32\s*\)\s*;"
+        + r"struct\s+IssueRef\s*\(\s*NonZeroU32\s*\)\s*;"
     ),
     "RejectionCitation enum": re.compile(
         PRIVATE_COPY_EQ_HASH_DERIVE + r"enum\s+RejectionCitation\s*\{\s*"
@@ -334,6 +331,12 @@ def validate_source(source: str) -> list[str]:
             "unsupported.rs authority alias is forbidden; keep every "
             "construction edge under its canonical identity"
         )
+    if TYPE_DECLARATION.search(code):
+        errors.append(
+            "unsupported.rs type declaration is forbidden; the privileged "
+            "authority owner may not hide a protected impl behind an alias "
+            "or associated type"
+        )
 
     public_items = Counter(PUBLIC_ITEM.findall(code))
     public_items.update(("const", name) for name in PUBLIC_CONST.findall(code))
@@ -423,6 +426,20 @@ def validate_usage_source(path: str, source: str) -> list[str]:
         errors.append(
             f"{path}: authority alias bypasses the canonical construction boundary"
         )
+    for match in MACRO_INVOCATION.finditer(code):
+        opening = match.end() - 1
+        closing = _matching_delimiter(code, opening)
+        if closing is None:
+            errors.append(
+                f"{path}: malformed macro token tree cannot be audited for "
+                "authority construction"
+            )
+            continue
+        if PRIVATE_AUTHORITY_TOKEN.search(code[opening + 1 : closing]):
+            errors.append(
+                f"{path}: macro token tree carries a protected authority identity; "
+                "write the canonical authority operation explicitly"
+            )
     if PRIVATE_AUTHORITY_CONSTRUCTION.search(code):
         errors.append(
             f"{path}: private authority constructor is confined to unsupported.rs; "

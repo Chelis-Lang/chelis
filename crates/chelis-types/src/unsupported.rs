@@ -86,7 +86,7 @@ mod authority {
     /// Construction validates both the `[NN-GROUP-N]` grammar and membership in
     /// the registry generated from normative blockquote atoms in `spec/00-12`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct SpecAtomRef(&'static str);
+    struct SpecAtomRef(&'static str);
 
     impl SpecAtomRef {
         const fn new(atom: &'static str) -> Result<Self, AuthorityConstructionError> {
@@ -102,19 +102,14 @@ mod authority {
             Ok(Self(atom))
         }
 
-        pub const fn as_str(self) -> &'static str {
+        const fn as_str(self) -> &'static str {
             self.0
-        }
-
-        /// The generated registry, exposed read-only for byte-agreement tooling.
-        pub const fn registry() -> &'static [&'static str] {
-            REGISTERED_SPEC_ATOMS
         }
     }
 
     /// A nonzero member of the checked-in, live-validated issue manifest.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct IssueRef(NonZeroU32);
+    struct IssueRef(NonZeroU32);
 
     impl IssueRef {
         const fn new(number: u32) -> Result<Self, AuthorityConstructionError> {
@@ -127,13 +122,8 @@ mod authority {
             Ok(Self(number))
         }
 
-        pub const fn number(self) -> u32 {
+        const fn number(self) -> u32 {
             self.0.get()
-        }
-
-        /// The generated membership set, exposed read-only for agreement tooling.
-        pub const fn registry() -> &'static [u32] {
-            REGISTERED_OPEN_ISSUES
         }
     }
 
@@ -160,6 +150,18 @@ mod authority {
     }
 
     /// Opaque, validated authority for an unsupported diagnostic.
+    ///
+    /// The scalar citation carriers are private implementation details. Public
+    /// read access returns their raw atom/issue values, so no sibling module or
+    /// downstream crate can name a carrier as a trait-implementation target:
+    ///
+    /// ```compile_fail
+    /// fn accepts(_: chelis_types::unsupported::SpecAtomRef) {}
+    /// ```
+    ///
+    /// ```compile_fail
+    /// fn accepts(_: chelis_types::unsupported::IssueRef) {}
+    /// ```
     ///
     /// The fields are intentionally private. External code cannot manufacture a
     /// citation-bearing value with an empty or unregistered identity:
@@ -228,16 +230,16 @@ mod authority {
             }
         }
 
-        pub const fn atom(self) -> Option<SpecAtomRef> {
+        pub const fn atom(self) -> Option<&'static str> {
             match self.citation {
-                RejectionCitation::Atom(atom) => Some(atom),
+                RejectionCitation::Atom(atom) => Some(atom.as_str()),
                 RejectionCitation::Issue(_) => None,
             }
         }
 
-        pub const fn issue(self) -> Option<IssueRef> {
+        pub const fn issue(self) -> Option<u32> {
             match self.citation {
-                RejectionCitation::Issue(issue) => Some(issue),
+                RejectionCitation::Issue(issue) => Some(issue.number()),
                 RejectionCitation::Atom(_) => None,
             }
         }
@@ -408,9 +410,7 @@ mod authority {
 
 #[doc(hidden)]
 pub use authority::{__build_deliberate_rejection, __build_unimplemented_rejection};
-pub use authority::{
-    AuthorityConstructionError, IssueRef, RejectionAuthority, RejectionAuthorityKind, SpecAtomRef,
-};
+pub use authority::{AuthorityConstructionError, RejectionAuthority, RejectionAuthorityKind};
 
 /// Build a deliberate authority in a const context. Invalid or unregistered
 /// literals are compile errors instead of runtime fallbacks.
