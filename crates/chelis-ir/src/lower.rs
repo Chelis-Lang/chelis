@@ -3745,11 +3745,45 @@ fn symbolic_dim_var_name(expr: &Expr) -> Option<String> {
 #[derive(Debug, Clone, PartialEq)]
 struct LiteralToTensor {
     shape: Vec<usize>,
-    /// Exact raw elements (chelis#856): integer leaves travel their
-    /// exact i64, float leaves the f64 image OF THEIR OWN DECLARED WIDTH
-    /// (chelis#864); finalization at the tensor's ascribed dtype happens
-    /// ONCE in `emit_literal_tensor`.
-    data: Vec<chelis_types::RawScalar>,
+    /// Typed staged elements (chelis#856, chelis#1116): a leaf whose
+    /// checked dtype is known travels as the finalized value itself
+    /// (the tag never discarded); a leaf with no checked dtype of its
+    /// own stays raw and takes the single finalize at the tensor's
+    /// ascribed dtype in `emit_literal_tensor`.
+    data: Vec<StagedScalar>,
+}
+
+/// One extracted literal leaf, staged for `emit_literal_tensor`.
+///
+/// chelis#1116: the staging carrier keeps the dtype with the value. A
+/// `Typed` leaf is the sealed [`chelis_types::ScalarValue`] the checked
+/// ladder produced - the tag is never discarded into an untagged f64
+/// ([04-NUM-11]: a value survives transport at its declared dtype). A
+/// `Raw` leaf has no checked dtype of its own (bare atom, metadata-free
+/// literal) and defers to the tensor's ascribed dtype, the pre-existing
+/// behavior.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StagedScalar {
+    Typed(chelis_types::ScalarValue),
+    Raw(chelis_types::RawScalar),
+}
+
+/// Stable per-dtype ordinal for `emit_literal_tensor`'s uniformity key.
+/// Total over `Prim` so a new dtype cannot compile without a row here.
+fn prim_ordinal(prim: Prim) -> u8 {
+    match prim {
+        Prim::F64 => 0,
+        Prim::F32 => 1,
+        Prim::F16 => 2,
+        Prim::Bf16 => 3,
+        Prim::Int64 => 4,
+        Prim::Int32 => 5,
+        Prim::Int16 => 6,
+        Prim::Int8 => 7,
+        Prim::Bool => 8,
+        Prim::F8e4m3 => 9,
+        Prim::String => 10,
+    }
 }
 
 /// If `expr` is a `to_tensor(...)` application whose single argument
@@ -3797,7 +3831,7 @@ fn extract_cons_chain_tensor(expr: &Expr) -> Option<LiteralToTensor> {
     if let Some(scalars) = elements
         .iter()
         .map(|e| extract_numeric_leaf(e))
-        .collect::<Option<Vec<chelis_types::RawScalar>>>()
+        .collect::<Option<Vec<StagedScalar>>>()
     {
         return Some(LiteralToTensor {
             shape: vec![scalars.len()],
@@ -3846,12 +3880,12 @@ const MAX_TOTAL_INLINE_DEPTH: usize = 1024;
 ///     `(app (var neg) (lit 1.0))`; the recognizer returns the
 ///     negated inner value. Nested casts and lits are handled by the
 ///     recursive call.
-fn extract_numeric_leaf(expr: &Expr) -> Option<chelis_types::RawScalar> {
+fn extract_numeric_leaf(expr: &Expr) -> Option<StagedScalar> {
     use chelis_types::RawScalar;
     match expr {
-        Expr::Atom(Atom::Int(n), _) => Some(RawScalar::Int(*n)),
-        Expr::Atom(Atom::Float(f), _) => Some(RawScalar::Float(*f)),
-        Expr::Atom(Atom::Bool(b), _) => Some(RawScalar::Int(i64::from(*b))),
+        Expr::Atom(Atom::Int(n), _) => Some(StagedScalar::Raw(RawScalar::Int(*n))),
+        Expr::Atom(Atom::Float(f), _) => Some(StagedScalar::Raw(RawScalar::Float(*f))),
+        Expr::Atom(Atom::Bool(b), _) => Some(StagedScalar::Raw(RawScalar::Int(i64::from(*b)))),
         Expr::List(_, _) | Expr::Node(_, _) => {
             let (tag, _, kids) = stamped_parts(expr)?;
             match tag {
@@ -3864,20 +3898,22 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<chelis_types::RawScalar> {
                     };
                     // chelis#864: a float literal carries its checked width
                     // in its OWN type metadata (`0.1f32`), with no Cast node
-                    // following to apply it. Materialize that width here or
+                    // following to apply it. Finalize at that width here or
                     // an enclosing f64 tensor widens the LEXICAL f64 `0.1`
                     // instead of the stored f32 value, and the DAG root
-                    // disagrees with `print` before rendering begins.
-                    // Integer leaves keep their exact i64 (chelis#856); the
+                    // disagrees with `print` before rendering begins. The
+                    // finalized value stays TYPED (chelis#1116,
+                    // [04-NUM-11]: the dtype travels with the value); the
                     // cast ladder is total into a float target, so this
-                    // finalize cannot trap. Absent metadata narrows nothing.
+                    // finalize cannot trap. Integer leaves and absent
+                    // metadata stay raw and defer to the tensor's dtype.
                     let declared = expr_type_metadata(expr).and_then(LowerCtx::try_extract_prim);
                     match (raw, declared) {
                         (RawScalar::Float(_), Some(prim)) if prim.is_float() => {
                             let finalized = chelis_types::cast_raw("lit", raw, prim).ok()?;
-                            Some(RawScalar::Float(finalized.as_f64_lossy()))
+                            Some(StagedScalar::Typed(finalized))
                         }
-                        _ => Some(raw),
+                        _ => Some(StagedScalar::Raw(raw)),
                     }
                 }
                 DeepTag::Cast => {
@@ -3890,13 +3926,16 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<chelis_types::RawScalar> {
                     // evaluates the same cast and traps with its full
                     // runtime diagnostic.
                     let inner = kids.first()?;
-                    let raw = extract_numeric_leaf(inner)?;
                     let target = LowerCtx::try_extract_prim(kids.get(1)?)?;
-                    let cast = chelis_types::cast_raw("cast", raw, target).ok()?;
-                    Some(match cast.as_i64_exact() {
-                        Some(i) => RawScalar::Int(i),
-                        None => RawScalar::Float(cast.as_f64_lossy()),
-                    })
+                    let cast = match extract_numeric_leaf(inner)? {
+                        StagedScalar::Raw(raw) => {
+                            chelis_types::cast_raw("cast", raw, target).ok()?
+                        }
+                        StagedScalar::Typed(value) => {
+                            chelis_types::cast_scalar("cast", value, target).ok()?
+                        }
+                    };
+                    Some(StagedScalar::Typed(cast))
                 }
                 DeepTag::App => {
                     // Negative literal: `-x` desugars to
@@ -3910,8 +3949,20 @@ fn extract_numeric_leaf(expr: &Expr) -> Option<chelis_types::RawScalar> {
                     }
                     let inner = kids.get(1)?;
                     Some(match extract_numeric_leaf(inner)? {
-                        RawScalar::Int(i) => RawScalar::Int(i.checked_neg()?),
-                        RawScalar::Float(f) => RawScalar::Float(-f),
+                        StagedScalar::Raw(RawScalar::Int(i)) => {
+                            StagedScalar::Raw(RawScalar::Int(i.checked_neg()?))
+                        }
+                        StagedScalar::Raw(RawScalar::Float(f)) => {
+                            StagedScalar::Raw(RawScalar::Float(-f))
+                        }
+                        StagedScalar::Typed(value) => {
+                            let negated = if value.prim().is_float() {
+                                chelis_types::float_unop(chelis_types::FloatUnOp::Neg, value)
+                            } else {
+                                chelis_types::int_unop(chelis_types::IntUnOp::Neg, value)
+                            };
+                            StagedScalar::Typed(negated.ok()?)
+                        }
                     })
                 }
                 _ => None,
@@ -8697,7 +8748,7 @@ impl LowerCtx {
     /// shape (the metadata's symbolic `Named("list", None)` dim is
     /// not usable here).
     fn emit_literal_tensor(&mut self, literal: &LiteralToTensor, ty: &TensorType) -> NodeId {
-        use chelis_types::{RawScalar, RawTensor};
+        use chelis_types::RawScalar;
         let shape: Vec<DimInfo> = literal.shape.iter().map(|n| DimInfo::Lit(*n)).collect();
         let precision = ty.precision;
         let tensor_ty = TensorType {
@@ -8705,10 +8756,12 @@ impl LowerCtx {
             precision,
         };
 
-        // The exact raw leaves finalize ONCE at the ascribed dtype
-        // (chelis#856): integer families through the exact i64 lane
-        // (no f64 laundering above 2^53), float families through their
-        // f64 images. An out-of-domain literal is a loud lowering
+        // Every staged leaf becomes a finalized value AT the ascribed
+        // dtype (chelis#856, chelis#1116): a Typed leaf converts
+        // typed-to-typed (identity at its own prim), a Raw leaf takes
+        // the single deferred finalize. Integer families stay on the
+        // exact i64 lane inside finalize (no f64 laundering above
+        // 2^53). An out-of-domain literal is a loud lowering
         // diagnostic; cast leaves already applied the checked ladder
         // (or declined static recognition) in `extract_numeric_leaf`.
         let raise_on = |trap: chelis_types::NumericTrap, span_id: Option<String>| -> ! {
@@ -8723,13 +8776,31 @@ impl LowerCtx {
                 span_id,
             )
         };
+        let finalize_staged = |staged: &StagedScalar| match staged {
+            StagedScalar::Raw(raw) => chelis_types::finalize_scalar("const", precision, *raw),
+            StagedScalar::Typed(value) => chelis_types::cast_scalar("const", *value, precision),
+        };
 
         // Uniform-value fast path (bit-level key so NaN-uniform lists
-        // still collapse to one Const).
-        let key = |raw: &RawScalar| -> (u8, u64) {
-            match raw {
-                RawScalar::Int(i) => (0, *i as u64),
-                RawScalar::Float(f) => (1, f.to_bits()),
+        // still collapse to one Const, and -0.0 never merges with
+        // +0.0).
+        let key = |staged: &StagedScalar| -> (u8, u8, u64) {
+            match staged {
+                StagedScalar::Raw(RawScalar::Int(i)) => (0, 0, *i as u64),
+                StagedScalar::Raw(RawScalar::Float(f)) => (1, 0, f.to_bits()),
+                StagedScalar::Typed(value) => {
+                    let ord = prim_ordinal(value.prim());
+                    match value.as_i64_exact() {
+                        // Integer and bool prims read exactly: no f64
+                        // image above 2^53 can merge two distinct
+                        // int64s.
+                        Some(i) => (2, ord, i as u64),
+                        // Float prims key by their exact f64 image
+                        // bits (injective per width; distinguishes
+                        // -0.0/+0.0 and NaN payloads).
+                        None => (3, ord, value.as_f64_lossy().to_bits()),
+                    }
+                }
             }
         };
         if literal
@@ -8737,8 +8808,12 @@ impl LowerCtx {
             .windows(2)
             .all(|pair| key(&pair[0]) == key(&pair[1]))
         {
-            let raw = literal.data.first().copied().unwrap_or(RawScalar::Int(0));
-            let value = match chelis_types::finalize_scalar("const", precision, raw) {
+            let staged = literal
+                .data
+                .first()
+                .copied()
+                .unwrap_or(StagedScalar::Raw(RawScalar::Int(0)));
+            let value = match finalize_staged(&staged) {
                 Ok(value) => value,
                 Err(trap) => raise_on(trap, self.current_span_id.clone()),
             };
@@ -8750,58 +8825,18 @@ impl LowerCtx {
             );
         }
 
-        // Non-uniform: one ConstTensor with sealed per-dtype storage.
-        // Integer/bool targets take the exact integer lane; a float
-        // leaf reaching an integer target here is integral or the
-        // finalize diagnostic fires (cast leaves were already applied).
-        let raw_tensor = if precision.is_integer() || precision == Prim::Bool {
-            let mut ints = Vec::with_capacity(literal.data.len());
-            for raw in &literal.data {
-                match raw {
-                    RawScalar::Int(i) => ints.push(*i),
-                    RawScalar::Float(f) => {
-                        if f.fract() != 0.0 || !f.is_finite() {
-                            raise_on(
-                                chelis_types::NumericTrap::Domain {
-                                    op: "const",
-                                    prim: precision,
-                                },
-                                self.current_span_id.clone(),
-                            );
-                        }
-                        // Reject before the saturating `as` cast: an
-                        // integral f64 outside i64's range must not
-                        // silently clamp to i64::MAX/MIN.
-                        if *f < -9_223_372_036_854_775_808.0 || *f >= 9_223_372_036_854_775_808.0 {
-                            raise_on(
-                                chelis_types::NumericTrap::Overflow {
-                                    op: "const",
-                                    prim: precision,
-                                },
-                                self.current_span_id.clone(),
-                            );
-                        }
-                        ints.push(*f as i64);
-                    }
-                }
+        // Non-uniform: finalize each staged leaf at the ascribed dtype
+        // and insert the finalized values exactly - the dtype travels
+        // with the value into the sealed storage, never through an
+        // untagged f64 intermediate (chelis#1116, [04-NUM-11]).
+        let mut values = Vec::with_capacity(literal.data.len());
+        for staged in &literal.data {
+            match finalize_staged(staged) {
+                Ok(value) => values.push(value),
+                Err(trap) => raise_on(trap, self.current_span_id.clone()),
             }
-            RawTensor::Int(ints)
-        } else {
-            RawTensor::Float(
-                literal
-                    .data
-                    .iter()
-                    .map(|raw| match raw {
-                        RawScalar::Int(i) => *i as f64,
-                        RawScalar::Float(f) => *f,
-                    })
-                    .collect(),
-            )
-        };
-        let data = match chelis_types::finalize_tensor("const", precision, raw_tensor) {
-            Ok(data) => data,
-            Err(trap) => raise_on(trap, self.current_span_id.clone()),
-        };
+        }
+        let data = chelis_types::tensor_from_scalars(precision, &values);
         self.dag.add_node(
             RiscOp::ConstTensor { data },
             vec![],
@@ -11820,10 +11855,13 @@ mod tests {
         );
         let cast = Expr::node(DeepTag::Cast, meta, vec![literal, int64], span);
 
+        let expected = chelis_types::scalar_from_i64("test", Prim::Int64, 9_007_199_254_740_993)
+            .expect("in-range int64");
         assert_eq!(
             extract_numeric_leaf(&cast),
-            Some(chelis_types::RawScalar::Int(9_007_199_254_740_993)),
-            "the stamped carrier must not project an exact int64 through f64"
+            Some(StagedScalar::Typed(expected)),
+            "the stamped carrier must keep an exact int64 TYPED - never \
+             projected through f64 (chelis#1116)"
         );
     }
 
@@ -11878,6 +11916,36 @@ mod tests {
             extract_numeric_leaf(&neg),
             None,
             "negating signed MIN must decline rather than overflow or wrap"
+        );
+
+        // chelis#1123 red-team finding 2: negating a TYPED leaf at its
+        // width's minimum overflows in the typed kernel and declines to
+        // the dynamic path, which reports "overflow in neg at int8" when
+        // the def is actually called (the uncalled-def silence is the
+        // pre-existing chelis#1132 class).
+        let typed_min_neg = Expr::node(
+            DeepTag::App,
+            meta.clone(),
+            vec![
+                Expr::node(
+                    DeepTag::Var,
+                    meta.clone(),
+                    vec![Expr::Atom(Atom::Name("neg".into()), span)],
+                    span,
+                ),
+                Expr::node(
+                    DeepTag::Cast,
+                    meta.clone(),
+                    vec![int_lit(-128), prim("int8")],
+                    span,
+                ),
+            ],
+            span,
+        );
+        assert_eq!(
+            extract_numeric_leaf(&typed_min_neg),
+            None,
+            "typed negation overflow must decline static recognition"
         );
     }
 

@@ -2630,6 +2630,177 @@ where
     Ok(out)
 }
 
+/// Build sealed storage from ALREADY-finalized scalars, exactly.
+///
+/// The transport companion of [`finalize_tensor`] for values that carry
+/// their dtype with them ([04-NUM-11]: a value survives transport at its
+/// declared dtype; chelis#1116). Insertion is not a numeric op: no
+/// rounding, no widening intermediate, bits in as bits out. Every
+/// element must already carry `prim` - the caller finalizes or casts
+/// first - so a mismatched element is a caller bug and panics, mirroring
+/// the `reuse_*` family's dtype-mismatch contract.
+pub fn tensor_from_scalars(prim: Prim, values: &[ScalarValue]) -> TensorStorage {
+    fn read<T>(prim: Prim, v: &ScalarValue, out: Option<T>) -> T {
+        match out {
+            Some(x) => x,
+            None => panic!(
+                "tensor_from_scalars: element dtype {} does not match tensor \
+                 dtype {} (finalize or cast the element first; insertion \
+                 performs no conversion)",
+                v.prim().name(),
+                prim.name()
+            ),
+        }
+    }
+    let buf = match prim {
+        Prim::F64 => Buf::F64(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::F64(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::F32 => Buf::F32(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::F32(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::F16 => Buf::F16(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::F16(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::Bf16 => Buf::Bf16(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::Bf16(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::Int64 => Buf::I64(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::I64(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::Int32 => Buf::I32(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::I32(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::Int16 => Buf::I16(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::I16(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::Int8 => Buf::I8(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::I8(x) => Some(x),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::Bool => Buf::Bool(
+            values
+                .iter()
+                .map(|v| {
+                    read(
+                        prim,
+                        v,
+                        match v.bits {
+                            Bits::Bool(b) => Some(u8::from(b)),
+                            _ => None,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Prim::F8e4m3 => panic!(
+            "tensor_from_scalars: f8e4m3 is not in the active dtype set \
+             (spec/04-type-system.md section 1.1.1); no finalized value can \
+             carry it"
+        ),
+        Prim::String => panic!(
+            "tensor_from_scalars: string is not a numeric dtype and has no \
+             tensor storage"
+        ),
+    };
+    TensorStorage { buf }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2640,6 +2811,87 @@ mod tests {
 
     fn fin_i(prim: Prim, i: i64) -> Result<ScalarValue, NumericTrap> {
         finalize_scalar("test_op", prim, RawScalar::Int(i))
+    }
+
+    // ---- chelis#1116: exact insertion from already-finalized scalars ----
+
+    #[test]
+    fn tensor_from_scalars_inserts_f16_bits_exactly() {
+        let v = fin(Prim::F16, 0.1).unwrap();
+        let storage = tensor_from_scalars(Prim::F16, &[v, v]);
+        assert_eq!(storage.prim(), Prim::F16);
+        assert_eq!(storage.scalar_at(0), v);
+        assert_eq!(storage.scalar_at(1), v);
+    }
+
+    #[test]
+    fn tensor_from_scalars_preserves_negative_zero_sign() {
+        let v = fin(Prim::F32, -0.0).unwrap();
+        let storage = tensor_from_scalars(Prim::F32, &[v]);
+        assert_eq!(storage.element_f64_lossy(0).to_bits(), (-0.0f64).to_bits());
+    }
+
+    #[test]
+    fn tensor_from_scalars_keeps_int64_above_2p53_exact() {
+        let v = fin_i(Prim::Int64, 9_007_199_254_740_993).unwrap();
+        let storage = tensor_from_scalars(Prim::Int64, &[v]);
+        assert_eq!(
+            storage.to_i64_exact_vec(),
+            Some(vec![9_007_199_254_740_993])
+        );
+    }
+
+    #[test]
+    fn tensor_from_scalars_stores_bool_bytes() {
+        let t = fin_i(Prim::Bool, 1).unwrap();
+        let f = fin_i(Prim::Bool, 0).unwrap();
+        let storage = tensor_from_scalars(Prim::Bool, &[t, f]);
+        assert_eq!(storage.scalar_at(0).as_bool_exact(), Some(true));
+        assert_eq!(storage.scalar_at(1).as_bool_exact(), Some(false));
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match tensor")]
+    fn tensor_from_scalars_rejects_mismatched_element_dtype() {
+        let v = fin(Prim::F32, 1.0).unwrap();
+        let _ = tensor_from_scalars(Prim::F64, &[v]);
+    }
+
+    // ---- chelis#1123 red-team finding 1: integer ingest single-rounds ----
+
+    #[test]
+    fn int_ingest_into_f32_single_rounds_not_via_f64() {
+        // Verified images differ for this value: single rounding i64->f32
+        // yields bits 0x5A800001; double rounding through f64 first yields
+        // 0x5A800000. Finalize takes the single-rounding path ([04-NUM-1]:
+        // one rounding, at the declared width).
+        let single = fin_i(Prim::F32, 18_014_399_583_223_809).unwrap();
+        let bits = match single.element_ref() {
+            ElementRef::F32(v) => v.to_bits(),
+            other => panic!("expected f32 storage, got {other:?}"),
+        };
+        assert_eq!(bits, 0x5A80_0001, "finalize must single-round i64->f32");
+        let double = ((18_014_399_583_223_809i64 as f64) as f32).to_bits();
+        assert_eq!(
+            double, 0x5A80_0000,
+            "control: the double-rounded image is a different f32"
+        );
+    }
+
+    #[test]
+    fn int_ingest_into_bf16_single_rounds_not_via_f64() {
+        let x: i64 = 18_084_767_253_659_649;
+        let single = fin_i(Prim::Bf16, x).unwrap().as_f64_lossy();
+        let double = f64::from(half::bf16::from_f64(x as f64));
+        assert_ne!(
+            single, double,
+            "bf16 integer ingest must not round through f64"
+        );
+        // Correct rounding is nearest: the single-rounded image sits
+        // strictly closer to the true integer than the double-rounded one.
+        let err_single = (x - single as i64).abs();
+        let err_double = (x - double as i64).abs();
+        assert!(err_single < err_double);
     }
 
     // ---- section C1 row: f64 (identity; specials preserved) ----
