@@ -46,6 +46,16 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
                         'version = "0.0.0"\n'
                         'edition = "2024"\n'
                     )
+                manifest_text = manifest.read_text()
+                if (
+                    not (member / "src/lib.rs").is_file()
+                    and not (member / "src/main.rs").is_file()
+                    and "[lib]" not in manifest_text
+                    and "[[bin]]" not in manifest_text
+                ):
+                    default_source = member / "src/lib.rs"
+                    default_source.parent.mkdir(exist_ok=True)
+                    default_source.write_text("pub fn fixture_target() {}\n")
     return discover_issue_authorities_from_manifest(root)
 
 
@@ -437,6 +447,10 @@ let _ = unimplemented_rejection!(714, "live");
                 source.write_text(
                     "let _ = chelis_types::unimplemented_rejection!(999, \"live\");\n"
                 )
+                if kind == "build":
+                    default_source = member / "src/lib.rs"
+                    default_source.parent.mkdir()
+                    default_source.write_text("pub fn fixture_target() {}\n")
                 self.assertEqual(
                     discover_issue_authorities(root),
                     {
@@ -448,6 +462,153 @@ let _ = unimplemented_rejection!(714, "live");
                         ]
                     },
                 )
+
+    def test_root_package_is_an_implicit_workspace_member(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            member = root / "crates/member"
+            member.mkdir(parents=True)
+            (root / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "root-package"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n\n'
+                "[workspace]\n"
+                'members = ["crates/member"]\n'
+                'resolver = "3"\n'
+            )
+            root_source = root / "src/lib.rs"
+            root_source.parent.mkdir()
+            root_source.write_text(
+                'let _ = unimplemented_rejection!(997, "root member");\n'
+            )
+            (member / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "member"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n'
+            )
+            member_source = member / "src/lib.rs"
+            member_source.parent.mkdir()
+            member_source.write_text("pub fn member() {}\n")
+
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {997: [AuthoritySite("src/lib.rs", 1)]},
+            )
+
+    def test_in_tree_path_dependency_is_an_implicit_workspace_member(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            app = root / "crates/app"
+            hidden = root / "support/hidden"
+            app.mkdir(parents=True)
+            hidden.mkdir(parents=True)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/app"]\nresolver = "3"\n'
+            )
+            (app / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "app"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n\n'
+                "[dependencies]\n"
+                'hidden = { path = "../../support/hidden" }\n'
+            )
+            app_source = app / "src/lib.rs"
+            app_source.parent.mkdir()
+            app_source.write_text("pub fn app() {}\n")
+            (hidden / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "hidden"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n'
+            )
+            hidden_source = hidden / "src/lib.rs"
+            hidden_source.parent.mkdir()
+            hidden_source.write_text(
+                'let _ = unimplemented_rejection!(998, "path member");\n'
+            )
+
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {998: [AuthoritySite("support/hidden/src/lib.rs", 1)]},
+            )
+
+    def test_proc_macro_workspace_target_is_rejected_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            member = root / "crates/macros"
+            member.mkdir(parents=True)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/macros"]\nresolver = "3"\n'
+            )
+            (member / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "macros"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n\n'
+                "[lib]\nproc-macro = true\n"
+            )
+            source = member / "src/lib.rs"
+            source.parent.mkdir()
+            source.write_text(
+                'const GENERATED: &str = "unimplemented_rejection!(999, hidden)";\n'
+            )
+
+            with self.assertRaisesRegex(RegistryError, "proc-macro"):
+                discover_issue_authorities(root)
+
+    def test_workspace_member_intermediate_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            real_parent = root / "real"
+            member = real_parent / "member"
+            member.mkdir(parents=True)
+            (root / "linked").symlink_to(real_parent, target_is_directory=True)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["linked/member"]\nresolver = "3"\n'
+            )
+            (member / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "member"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n'
+            )
+            source = member / "src/lib.rs"
+            source.parent.mkdir()
+            source.write_text("pub fn member() {}\n")
+
+            with self.assertRaisesRegex(RegistryError, "workspace member symlink"):
+                discover_issue_authorities(root)
+
+    def test_workspace_exclude_is_not_over_inventoried(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            included = root / "crates/included"
+            excluded = root / "crates/excluded"
+            for member in (included, excluded):
+                member.mkdir(parents=True)
+                (member / "Cargo.toml").write_text(
+                    "[package]\n"
+                    f'name = "{member.name}"\n'
+                    'version = "0.0.0"\n'
+                    'edition = "2024"\n'
+                )
+                source = member / "src/lib.rs"
+                source.parent.mkdir()
+                source.write_text("pub fn target() {}\n")
+            (root / "Cargo.toml").write_text(
+                "[workspace]\n"
+                'members = ["crates/*"]\n'
+                'exclude = ["crates/excluded"]\n'
+                'resolver = "3"\n'
+            )
+            (excluded / "src/lib.rs").write_text(
+                'let _ = unimplemented_rejection!(996, "not a member");\n'
+            )
+
+            self.assertEqual(discover_issue_authorities(root), {})
 
     def test_rendered_manifest_carries_sites_and_is_source_derived(self) -> None:
         rendered = render_issue_manifest(

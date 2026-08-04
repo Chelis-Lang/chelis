@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -96,6 +97,72 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
             'let _ = unimplemented_rejection!(959, "unrelated capability");',
         )
         self.assertTrue(any("diagnostic migration" in error for error in errors), errors)
+
+    def test_diagnostic_issue_with_token_spacing_is_still_rejected(self):
+        errors = MODULE.validate_usage_source(
+            "crates/example/src/lib.rs",
+            'let _ = unimplemented_rejection /* gap */ ! (959, "unrelated");',
+        )
+        self.assertTrue(any("diagnostic migration" in error for error in errors), errors)
+
+    def test_non_crates_custom_target_cannot_call_builder_directly(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            member = root / "tree-sitter-style"
+            member.mkdir()
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["tree-sitter-style"]\nresolver = "3"\n'
+            )
+            (member / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "tree-sitter-style"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n\n'
+                "[lib]\n"
+                'path = "bindings/rust/lib.rs"\n'
+            )
+            source = member / "bindings/rust/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "let _ = chelis_types::unsupported::"
+                '__build_unimplemented_rejection(729, "hidden");\n'
+            )
+
+            errors = MODULE.validate_production_usage(root)
+            self.assertTrue(
+                any("direct authority builder" in error for error in errors),
+                errors,
+            )
+
+    def test_reachable_src_tests_module_cannot_call_builder_directly(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            member = root / "crates/example"
+            member.mkdir(parents=True)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/example"]\nresolver = "3"\n'
+            )
+            (member / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "example"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n'
+            )
+            lib = member / "src/lib.rs"
+            lib.parent.mkdir()
+            lib.write_text("mod tests;\n")
+            source = member / "src/tests/prod.rs"
+            source.parent.mkdir()
+            source.write_text(
+                "let _ = chelis_types::unsupported::"
+                '__build_unimplemented_rejection(729, "hidden");\n'
+            )
+
+            errors = MODULE.validate_production_usage(root)
+            self.assertTrue(
+                any("direct authority builder" in error for error in errors),
+                errors,
+            )
 
 
 if __name__ == "__main__":

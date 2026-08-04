@@ -19,7 +19,6 @@ from typing import Any, Callable
 
 from generate_rejection_registries import (
     AuthoritySite,
-    RegistryError,
     discover_issue_authorities,
 )
 
@@ -142,7 +141,7 @@ def guard_closed_issue(
     """
     try:
         authorities = discover(root)
-    except (OSError, UnicodeError, RegistryError) as error:
+    except Exception as error:
         reason = f"Authority inventory failed closed: `{error}`"
     else:
         sites = authorities.get(number, [])

@@ -16,10 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ATOM = re.compile(r"^> \*\*(\[[0-9]{2}-[A-Z]+-[1-9][0-9]*\])\*\*", re.MULTILINE)
 NUMBERED_SPEC = re.compile(r"^(?:0[0-9]|1[0-2])-[^/]+\.md$")
@@ -252,20 +253,29 @@ def _load_toml(path: Path, label: str) -> dict:
     return payload
 
 
-def _workspace_members(root: Path) -> list[Path]:
-    """Resolve every workspace member declared by the root Cargo manifest."""
-    manifest_path = root / "Cargo.toml"
-    if not manifest_path.is_file():
-        raise RegistryError(f"missing workspace manifest: {manifest_path}")
-    payload = _load_toml(manifest_path, "workspace manifest")
+def _reject_symlink_components(root: Path, candidate: Path, label: str) -> None:
+    """Reject every symlink on a repository-relative lexical path."""
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise RegistryError(f"{label} escapes repository: {candidate}") from error
+    cursor = candidate
+    while cursor != root:
+        if cursor.is_symlink():
+            raise RegistryError(
+                f"{label} symlink is forbidden: {candidate.relative_to(root)}"
+            )
+        cursor = cursor.parent
+
+
+def _declared_workspace_member_check(root: Path, payload: dict) -> None:
+    """Reject ambiguous explicit workspace-member paths before Cargo resolves them."""
     workspace = payload.get("workspace")
     if not isinstance(workspace, dict):
         raise RegistryError("root Cargo.toml has no workspace table")
-    patterns = workspace.get("members")
-    if not isinstance(patterns, list) or not patterns:
-        raise RegistryError("workspace members must be a non-empty list")
-
-    members: set[Path] = set()
+    patterns = workspace.get("members", [])
+    if not isinstance(patterns, list):
+        raise RegistryError("workspace members must be a list")
     for pattern in patterns:
         if not isinstance(pattern, str) or not pattern:
             raise RegistryError(f"invalid workspace member pattern: {pattern!r}")
@@ -275,57 +285,57 @@ def _workspace_members(root: Path) -> list[Path]:
         matches = sorted(path for path in root.glob(pattern) if path.is_dir())
         if not matches:
             raise RegistryError(f"workspace member pattern matches nothing: {pattern}")
-        members.update(matches)
-    return sorted(members)
+        for match in matches:
+            _reject_symlink_components(root, match, "workspace member")
 
 
-def _member_path(root: Path, member: Path, raw: str, label: str) -> Path:
-    relative = Path(raw)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise RegistryError(f"{label} must stay within its workspace member: {raw}")
-    candidate = member / relative
-    try:
-        candidate.resolve().relative_to(member.resolve())
-    except ValueError as error:
-        raise RegistryError(f"{label} escapes workspace member: {raw}") from error
-    try:
-        candidate.resolve().relative_to(root.resolve())
-    except ValueError as error:
-        raise RegistryError(f"{label} escapes repository: {raw}") from error
-    cursor = candidate
-    while cursor != member:
-        if cursor.is_symlink():
-            raise RegistryError(
-                f"{label} uses a source symlink: {candidate.relative_to(root)}"
-            )
-        cursor = cursor.parent
-    return candidate
-
-
-def _target_paths(member: Path, manifest: dict) -> list[Path]:
-    """Return explicit lib/bin/example source paths from one package manifest."""
-    paths: list[Path] = []
-    tables: list[tuple[str, object]] = [
-        ("lib", manifest.get("lib")),
-        ("bin", manifest.get("bin", [])),
-        ("example", manifest.get("example", [])),
+def _cargo_metadata(root: Path) -> dict:
+    """Ask Cargo for its authoritative workspace-member and target graph."""
+    manifest_path = root / "Cargo.toml"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise RegistryError(f"missing workspace manifest: {manifest_path}")
+    payload = _load_toml(manifest_path, "workspace manifest")
+    _declared_workspace_member_check(root, payload)
+    command = [
+        "cargo",
+        "metadata",
+        "--no-deps",
+        "--format-version=1",
+        "--offline",
+        "--manifest-path",
+        str(manifest_path),
     ]
-    for kind, raw_tables in tables:
-        if raw_tables is None:
-            continue
-        rows = [raw_tables] if kind == "lib" else raw_tables
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise RegistryError(f"{member}/Cargo.toml has malformed {kind} targets")
-        for row in rows:
-            raw_path = row.get("path")
-            if raw_path is None:
-                continue
-            if not isinstance(raw_path, str) or not raw_path:
-                raise RegistryError(
-                    f"{member}/Cargo.toml has invalid {kind} target path"
-                )
-            paths.append(Path(raw_path))
-    return paths
+    if (root / "Cargo.lock").is_file():
+        command.append("--locked")
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RegistryError(f"cannot derive Cargo workspace metadata: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "cargo metadata failed"
+        raise RegistryError(f"cannot derive Cargo workspace metadata: {detail}")
+    try:
+        metadata = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise RegistryError(f"Cargo workspace metadata is malformed: {error}") from error
+    if not isinstance(metadata, dict):
+        raise RegistryError("Cargo workspace metadata is not an object")
+    try:
+        workspace_root = Path(metadata["workspace_root"])
+    except (KeyError, TypeError) as error:
+        raise RegistryError("Cargo workspace metadata has no workspace_root") from error
+    if workspace_root.resolve() != root.resolve():
+        raise RegistryError(
+            f"Cargo workspace root mismatch: expected {root}, got {workspace_root}"
+        )
+    return metadata
 
 
 def _inventory_tree(root: Path, source_root: Path, paths: set[Path]) -> None:
@@ -344,17 +354,48 @@ def _inventory_tree(root: Path, source_root: Path, paths: set[Path]) -> None:
     paths.update(source_root.rglob("*.rs"))
 
 
-def _workspace_rust_paths(root: Path) -> tuple[list[Path], set[Path]]:
-    """Derive lexical production roots from workspace package manifests."""
+def workspace_rust_paths(root: Path) -> tuple[list[Path], set[Path]]:
+    """Derive lexical production roots from Cargo's exact workspace graph."""
     paths: set[Path] = set()
     build_scripts: set[Path] = set()
-    for member in _workspace_members(root):
-        if member.is_symlink():
+    metadata = _cargo_metadata(root)
+    raw_members = metadata.get("workspace_members")
+    raw_packages = metadata.get("packages")
+    if (
+        not isinstance(raw_members, list)
+        or not raw_members
+        or any(not isinstance(member, str) for member in raw_members)
+        or not isinstance(raw_packages, list)
+        or any(not isinstance(package, dict) for package in raw_packages)
+    ):
+        raise RegistryError("Cargo workspace metadata has malformed members/packages")
+    packages_by_id = {
+        package.get("id"): package
+        for package in raw_packages
+        if isinstance(package.get("id"), str)
+    }
+    if len(packages_by_id) != len(raw_packages):
+        raise RegistryError("Cargo workspace metadata has duplicate/missing package ids")
+
+    for member_id in sorted(set(raw_members)):
+        package_metadata = packages_by_id.get(member_id)
+        if package_metadata is None:
+            raise RegistryError(f"Cargo workspace member has no package: {member_id}")
+        raw_manifest_path = package_metadata.get("manifest_path")
+        if not isinstance(raw_manifest_path, str):
+            raise RegistryError(f"Cargo workspace member has no manifest: {member_id}")
+        manifest_path = Path(raw_manifest_path)
+        if not manifest_path.is_absolute():
+            raise RegistryError(f"Cargo member manifest is not absolute: {manifest_path}")
+        try:
+            manifest_path.resolve().relative_to(root.resolve())
+        except ValueError as error:
             raise RegistryError(
-                f"workspace member symlink is forbidden: {member.relative_to(root)}"
-            )
-        manifest_path = member / "Cargo.toml"
-        if manifest_path.is_symlink() or not manifest_path.is_file():
+                f"Cargo member manifest escapes repository: {manifest_path}"
+            ) from error
+        _reject_symlink_components(root, manifest_path, "workspace member")
+        member = manifest_path.parent
+        if manifest_path.name != "Cargo.toml" or not manifest_path.is_file():
             raise RegistryError(
                 f"missing ordinary member manifest: {manifest_path.relative_to(root)}"
             )
@@ -365,31 +406,50 @@ def _workspace_rust_paths(root: Path) -> tuple[list[Path], set[Path]]:
 
         _inventory_tree(root, member / "src", paths)
         _inventory_tree(root, member / "examples", paths)
-        for raw_target in _target_paths(member, manifest):
-            target = _member_path(root, member, raw_target.as_posix(), "target path")
+        targets = package_metadata.get("targets")
+        if not isinstance(targets, list) or any(
+            not isinstance(target, dict) for target in targets
+        ):
+            raise RegistryError(f"Cargo package targets are malformed: {member_id}")
+        for target_metadata in targets:
+            kinds = target_metadata.get("kind")
+            crate_types = target_metadata.get("crate_types")
+            if (
+                not isinstance(kinds, list)
+                or any(not isinstance(kind, str) for kind in kinds)
+                or not isinstance(crate_types, list)
+                or any(not isinstance(kind, str) for kind in crate_types)
+            ):
+                raise RegistryError(f"Cargo target kinds are malformed: {member_id}")
+            if "proc-macro" in kinds or "proc-macro" in crate_types:
+                raise RegistryError(
+                    f"workspace proc-macro target is forbidden by the lexical "
+                    f"rejection-authority inventory: {manifest_path.relative_to(root)}"
+                )
+            if kinds and set(kinds) <= {"test", "bench"}:
+                continue
+            raw_target = target_metadata.get("src_path")
+            if not isinstance(raw_target, str):
+                raise RegistryError(f"Cargo target has no source path: {member_id}")
+            target = Path(raw_target)
+            if not target.is_absolute():
+                raise RegistryError(f"Cargo target path is not absolute: {raw_target}")
+            try:
+                target.resolve().relative_to(member.resolve())
+            except ValueError as error:
+                raise RegistryError(
+                    f"target path escapes workspace member: {raw_target}"
+                ) from error
+            _reject_symlink_components(root, target, "target path")
             if target.is_symlink() or not target.is_file():
                 raise RegistryError(
                     f"missing ordinary target source: {target.relative_to(root)}"
                 )
-            _inventory_tree(root, target.parent, paths)
-
-        build_setting = package.get("build")
-        if build_setting is False:
-            build = None
-        elif build_setting is None:
-            default_build = member / "build.rs"
-            build = default_build if default_build.is_file() else None
-        elif isinstance(build_setting, str) and build_setting:
-            build = _member_path(root, member, build_setting, "build script")
-        else:
-            raise RegistryError(f"{manifest_path} has invalid package.build")
-        if build is not None:
-            if build.is_symlink() or not build.is_file():
-                raise RegistryError(
-                    f"missing ordinary build script: {build.relative_to(root)}"
-                )
-            paths.add(build)
-            build_scripts.add(build)
+            if "custom-build" in kinds:
+                paths.add(target)
+                build_scripts.add(target)
+            else:
+                _inventory_tree(root, target.parent, paths)
     return sorted(paths), build_scripts
 
 
@@ -403,7 +463,7 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
     from its liveness evidence.
     """
     authorities: dict[int, list[AuthoritySite]] = {}
-    paths, build_scripts = _workspace_rust_paths(root)
+    paths, build_scripts = workspace_rust_paths(root)
 
     for path in sorted(set(paths)):
         relative_path = path.relative_to(root)
@@ -513,9 +573,15 @@ def load_issue_manifest(path: Path) -> list[int]:
                 )
             site_path = site["path"]
             line = site["line"]
+            parsed_site_path = (
+                PurePosixPath(site_path) if isinstance(site_path, str) else None
+            )
             if (
-                not isinstance(site_path, str)
-                or not site_path.startswith("crates/")
+                parsed_site_path is None
+                or parsed_site_path.is_absolute()
+                or not parsed_site_path.parts
+                or any(part in {"", ".", ".."} for part in parsed_site_path.parts)
+                or parsed_site_path.suffix != ".rs"
                 or not isinstance(line, int)
                 or isinstance(line, bool)
                 or line <= 0

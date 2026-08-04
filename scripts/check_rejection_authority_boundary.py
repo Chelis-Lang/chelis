@@ -15,6 +15,12 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from generate_rejection_registries import (
+    UNIMPLEMENTED_LITERAL,
+    _mask_rust_non_code,
+    workspace_rust_paths,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "crates/chelis-types/src/unsupported.rs"
@@ -53,10 +59,6 @@ DIRECT_BUILDER = re.compile(
 
 DELIBERATE_LITERAL = re.compile(
     r"deliberate_rejection!\(\s*\"(\[[0-9]{2}-[A-Z]+-[0-9]+\])\"",
-    re.MULTILINE,
-)
-UNIMPLEMENTED_LITERAL = re.compile(
-    r"unimplemented_rejection!\(\s*([0-9][0-9_]*)",
     re.MULTILINE,
 )
 RESPONSE_ONLY_ATOMS = {f"[05-UNS-{index}]" for index in range(1, 7)}
@@ -139,8 +141,9 @@ def validate_source(source: str) -> list[str]:
 
 def validate_usage_source(path: str, source: str) -> list[str]:
     errors: list[str] = []
+    code = _mask_rust_non_code(source)
     if path != "crates/chelis-types/src/lib.rs":
-        for builder in sorted(set(DIRECT_BUILDER.findall(source))):
+        for builder in sorted(set(DIRECT_BUILDER.findall(code))):
             errors.append(
                 f"{path}: direct authority builder `{builder}` bypasses the canonical "
                 "literal macro; use deliberate_rejection! or unimplemented_rejection!"
@@ -151,8 +154,8 @@ def validate_usage_source(path: str, source: str) -> list[str]:
                 f"{path}: {atom} governs the response contract, not the semantic case; "
                 "cite the deciding atom"
             )
-    for raw_issue in UNIMPLEMENTED_LITERAL.findall(source):
-        if int(raw_issue.replace("_", "")) == 959:
+    for match in UNIMPLEMENTED_LITERAL.finditer(code):
+        if int(match.group(2).replace("_", "")) == 959:
             errors.append(
                 f"{path}: chelis#959 owns diagnostic migration, not implementation of a "
                 "rejected capability"
@@ -162,12 +165,10 @@ def validate_usage_source(path: str, source: str) -> list[str]:
 
 def validate_production_usage(root: Path = ROOT) -> list[str]:
     errors: list[str] = []
-    crates = root / "crates"
-    for path in sorted(crates.rglob("*.rs")):
+    paths, _ = workspace_rust_paths(root)
+    for path in paths:
         relative = path.relative_to(root)
-        if "tests" in relative.parts or relative.as_posix().endswith(
-            "chelis-types/src/unsupported.rs"
-        ):
+        if relative.as_posix() == "crates/chelis-types/src/unsupported.rs":
             continue
         errors.extend(
             validate_usage_source(
