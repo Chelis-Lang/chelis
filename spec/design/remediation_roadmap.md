@@ -60,7 +60,9 @@ small-wins-early:
 
 **Wave 0 - all five Phase 0s, in any order, immediately.** STATUS
 2026-07-20: four of five LANDED 2026-07-17 - the domain-validity
-invariant + [#687] oracle lanes ([#729] P0, PR #758), the substitution
+invariant + [#687] oracle lanes ([#729] P0, PR #758; named receipt
+`.venv/bin/python scripts/dtype_phase0_oracle.py`, continuously inherited by
+the Phase 1/2 chain), the substitution
 census verification + token tripwire ([#730] P0, PR #746), the
 `Type::Error` census + red totality invariant ([#731] P0, PR #757 -
 `issue_731_totality_invariant.rs`), the round-trip harness + exit
@@ -133,7 +135,11 @@ at) is hard-gated on byte-identical rendering.
 
 **Wave 3 - the semantics refactor.** [#729] Phases 1-3 in order (the
 module + storage decision; the kernel split + prove; backend adoption),
-validated by everything Waves 0-2 built. Entry gate: the [#729] §C6
+validated by everything Waves 0-2 built. Phases 1 and 2 landed through PRs
+#1049 and #1054; PR #1065 is the bounded Phase 3 integer-`abs` seed and the
+remainder of Phase 3 stays open. The required Linux Integration job runs the
+nested `.venv/bin/python scripts/dtype_phase2_oracle.py`, making the Phase
+0-2 acceptance chain continuous. Entry gate: the [#729] §C6
 covered-family capacity census/tripwire (PR #956) lands BEFORE Phase 1
 entry. This change completes the two typed hard edges: the wire-schema and
 PyO3 binding commands in [#729] §C6 are implemented with reviewed baselines

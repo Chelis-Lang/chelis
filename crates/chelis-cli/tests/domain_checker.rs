@@ -6,8 +6,8 @@
 //! The checker implements ONLY the value-set column of the §C1 table in
 //! `spec/design/dtype_semantics.md` over printed lane output. Its API is
 //! frozen at Phase 0 exit; these tests are the executable statement of
-//! its membership semantics, including the two documented text-level
-//! accommodations (print-truncation slack and own-width shortest forms).
+//! its membership semantics, including the documented own-width shortest
+//! form. Print-truncation slack is retired: membership is exact.
 //!
 //! New cells the checker exposes that the audit did not enumerate get
 //! their own `#[ignore]`d rows in the matrix files with a fresh issue
@@ -17,7 +17,12 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{assert_elements_in_domain, element_domain_violation, printed_value_tokens};
+use chelis_types::observation::{ElementRef, format_element};
+use chelis_types::types::Prim;
+use common::{
+    DOMAIN_PRINT_TRUNCATION_SLACK, assert_elements_in_domain, element_domain_violation,
+    printed_value_tokens,
+};
 
 fn is_member(prim: &str, token: &str) -> bool {
     element_domain_violation(prim, token).is_none()
@@ -153,30 +158,31 @@ fn f64_accepts_every_parseable_value_including_specials() {
 }
 
 #[test]
-fn f32_accepts_exact_widened_and_shortest_and_print_truncated_forms() {
+fn f32_accepts_exact_widened_and_own_width_shortest_forms() {
     // Exact widened rendering (eval's f64-shortest of an f32 value).
     assert!(is_member("f32", "0.30000001192092896"));
     assert!(is_member("f32", "16777216"));
     assert!(is_member("f32", "1.4142135381698608"));
     // Own-width shortest rendering (Rust {:?} of the f32). Note this
-    // branch accepts EXACTLY the {:?} form, not every near-rendering:
-    // the lanes print exact-widened, %.16g-truncated, or shortest forms,
-    // and those three are the accepted grammar.
+    // branch accepts EXACTLY the {:?} form, not every near-rendering.
     assert!(is_member("f32", "0.1"));
     assert!(is_member("f32", "0.3"));
-    // %.16g print truncation of the widened value (the compiled lane's
-    // rendering; relative error ~1e-16, inside the 1e-13 slack).
-    assert!(is_member("f32", "0.300000011920929"));
     // Specials.
     assert!(is_member("f32", "inf"));
     assert!(is_member("f32", "nan"));
 }
 
 #[test]
+fn f32_rejects_the_retired_percent_g_truncation_form() {
+    assert_eq!(DOMAIN_PRINT_TRUNCATION_SLACK, 0.0);
+    assert!(!is_member("f32", "0.300000011920929"));
+}
+
+#[test]
 fn f32_rejects_unrounded_f64_values() {
     // The chelis#717 shapes: raw f64 results in an f32 tensor. Each sits
-    // ~1e-8 relative from the nearest f32, five orders of magnitude
-    // outside the print-truncation slack.
+    // ~1e-8 relative from the nearest f32. With exact-zero slack, only the
+    // exact widened value or the dtype's own-width shortest form is accepted.
     assert!(!is_member("f32", "0.30000000447034836"));
     assert!(!is_member("f32", "0.3333333333333333"));
     assert!(!is_member("f32", "0.6666666666666666"));
@@ -194,6 +200,8 @@ fn f16_membership_at_11_bit_mantissa() {
         "65504",
         "-1.5",
         "1.4140625",
+        // Own-width shortest form of the stored f16 value nearest 1/3.
+        "0.3333",
         // Exact widened f16 products from the locked eval-scalar rows.
         "0.0099945068359375",
         "0.333251953125",
@@ -208,15 +216,48 @@ fn f16_membership_at_11_bit_mantissa() {
     assert!(!is_member("f16", "131008"));
     // The chelis#716 misprint (an f16 buffer read as f32).
     assert!(!is_member("f16", "0.0004898309707641602"));
+    // A nearby decimal that merely rounds to the same f16 is not the
+    // canonical own-width shortest rendering.
+    assert!(!is_member("f16", "0.3334"));
 }
 
 #[test]
 fn bf16_membership_at_8_bit_mantissa() {
-    for t in ["256", "256.0", "0.75", "0.010009765625", "inf"] {
+    for t in [
+        "256",
+        "256.0",
+        "0.75",
+        "0.010009765625",
+        // Own-width shortest form of the stored bf16 value nearest 1/3.
+        "0.334",
+        "inf",
+    ] {
         assert!(is_member("bf16", t), "{t} must be in the bf16 value set");
     }
     assert!(!is_member("bf16", "257"));
     assert!(!is_member("bf16", "257.0"));
+    // A nearby decimal that merely rounds to the same bf16 is not the
+    // canonical own-width shortest rendering.
+    assert!(!is_member("bf16", "0.3339"));
+}
+
+#[test]
+fn every_half_width_canonical_rendering_is_a_domain_member() {
+    for bits in 0..=u16::MAX {
+        let f16_value = half::f16::from_bits(bits);
+        let f16_token = format_element(Prim::F16, ElementRef::F16(f16_value));
+        assert!(
+            is_member("f16", &f16_token),
+            "f16 bits {bits:#06x} rendered as {f16_token:?}"
+        );
+
+        let bf16_value = half::bf16::from_bits(bits);
+        let bf16_token = format_element(Prim::Bf16, ElementRef::Bf16(bf16_value));
+        assert!(
+            is_member("bf16", &bf16_token),
+            "bf16 bits {bits:#06x} rendered as {bf16_token:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
