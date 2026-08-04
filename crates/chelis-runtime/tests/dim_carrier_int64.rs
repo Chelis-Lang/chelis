@@ -68,11 +68,7 @@ fn a_view_carries_an_extent_above_int32_without_truncation() {
             1,
             "the row-major stride of the leading axis of a `[n, 1]` view"
         );
-        assert_eq!(
-            (*tensor).strides[1],
-            1,
-            "the innermost stride is always 1"
-        );
+        assert_eq!((*tensor).strides[1], 1, "the innermost stride is always 1");
         chelis_free(tensor);
     }
 }

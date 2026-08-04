@@ -122,8 +122,9 @@ fn fan_in_literal_equal_shapes_aliases_reusable_input() {
 
     // Exact-shape: the in-place wrapper must alias the FusedElem output
     // view to the reusable input's data buffer.
-    let expected_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let expected_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         c.contains(&expected_alias),
         "expected literal-shape fan-in to alias t{fused_id} onto t{a_id}->data; got:\n{c}"
@@ -171,8 +172,9 @@ fn fan_in_binder_equivalent_lit_to_named_aliases_reusable_input() {
 
     // Shape literal: `Named("seq", Some(4))` lowers to `DimExpr::Concrete(4)`
     // so the emitted shape array is `(int64_t[]){ 4 }`, not `(int64_t[]){ seq }`.
-    let expected_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let expected_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         c.contains(&expected_alias),
         "binder-equivalent Lit->Named fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
@@ -206,8 +208,9 @@ fn fan_in_binder_equivalent_named_to_lit_aliases_reusable_input() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let expected_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let expected_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         c.contains(&expected_alias),
         "binder-equivalent Named->Lit fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
@@ -234,8 +237,9 @@ fn fan_in_same_named_binder_aliases_reusable_input() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let expected_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let expected_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         c.contains(&expected_alias),
         "same-binder Named fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
@@ -261,8 +265,9 @@ fn fan_in_named_binder_with_unknown_size_aliases() {
 
     // The FusedElem's output_type is `Named("seq", Some(4))`, so the
     // shape array lowers to `(int64_t[]){ 4 }` from the FusedElem side.
-    let expected_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let expected_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         c.contains(&expected_alias),
         "binder-equivalent Named(unsized)->Named(sized) fan-in must alias t{fused_id} onto t{a_id}->data; got:\n{c}"
@@ -288,8 +293,9 @@ fn fan_in_different_named_binders_does_not_alias() {
     // No in-place alias: the FusedElem output must be slot-backed, not
     // view-aliased to the reusable input. Shape lowers to `(int64_t[]){ 4 }`
     // because every Named dim has a known size of 4.
-    let forbidden_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let forbidden_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         !c.contains(&forbidden_alias),
         "different-binder fan-in must NOT alias t{fused_id} onto t{a_id}->data; got:\n{c}"
@@ -328,8 +334,9 @@ fn fan_in_same_binder_different_known_size_does_not_alias() {
 
     // FusedElem's output is `Named("seq", Some(8))` so it would lower
     // to `(int64_t[]){ 8 }` if the in-place wrapper fired.
-    let forbidden_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 8 }}, CHELIS_F32, t{a_id}->data);");
+    let forbidden_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 8 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         !c.contains(&forbidden_alias),
         "binder with conflicting known sizes must NOT alias; got:\n{c}"
@@ -350,8 +357,9 @@ fn fan_in_different_precision_does_not_alias() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let forbidden_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let forbidden_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         !c.contains(&forbidden_alias),
         "different-precision fan-in must NOT alias t{fused_id} onto t{a_id}->data; got:\n{c}"
@@ -400,8 +408,9 @@ fn fan_in_multi_consumer_reusable_input_does_not_alias() {
     let fused_id = fused.0;
     let a_id = a.0;
 
-    let forbidden_alias =
-        format!("t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);");
+    let forbidden_alias = format!(
+        "t{fused_id} = chelis_alloc_view(1, (int64_t[]){{ 4 }}, CHELIS_F32, t{a_id}->data);"
+    );
     assert!(
         !c.contains(&forbidden_alias),
         "multi-consumer reusable input must NOT alias even with binder-equivalent shapes; got:\n{c}"

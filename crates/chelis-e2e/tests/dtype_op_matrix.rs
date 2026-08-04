@@ -596,7 +596,7 @@ unsafe fn split_two_halves(
     lhs_size: i64,
 ) -> (*mut chelis_tensor, *mut chelis_tensor) {
     unsafe {
-        let rhs_size = (*t).shape[0] as i64 - lhs_size;
+        let rhs_size = (*t).shape[0] - lhs_size;
         let sizes = chelis_list_empty();
         let sizes = chelis_list_append(sizes, chelis_runtime::chelis_value_from_int64(lhs_size));
         let sizes = chelis_list_append(sizes, chelis_runtime::chelis_value_from_int64(rhs_size));

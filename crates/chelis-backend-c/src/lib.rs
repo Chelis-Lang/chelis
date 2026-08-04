@@ -2261,7 +2261,11 @@ int main(void) {{
 
         let result = codegen(&dag, "test_symbolic_batch").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
-        assert!(result.c_source.contains("int64_t batch = inputs[0]->shape[0];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = inputs[0]->shape[0];")
+        );
         assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
 
         let lines = compile_and_run_input_cases(
@@ -2316,7 +2320,11 @@ int main(void) {{
 
         let result = codegen(&dag, "test_symbolic_matmul").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
-        assert!(result.c_source.contains("int64_t batch = inputs[0]->shape[0];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = inputs[0]->shape[0];")
+        );
 
         let lines = compile_and_run_input_cases(
             &dag,
@@ -2388,7 +2396,11 @@ int main(void) {{
         )
         .unwrap();
         assert!(result.requirements.needs_blas);
-        assert!(result.c_source.contains("int64_t seq = inputs[0]->shape[2];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t seq = inputs[0]->shape[2];")
+        );
         assert!(result.c_source.contains("cblas_sgemm"));
         assert!(result.c_source.contains("_batch_count = (batch * heads);"));
         assert!(
@@ -2504,7 +2516,11 @@ int main(void) {{
         dag.add_root(xyz);
 
         let result = codegen(&dag, "test_symbolic_occurrences").unwrap();
-        assert!(result.c_source.contains("int64_t batch = inputs[0]->shape[0];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = inputs[0]->shape[0];")
+        );
         assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
         assert!(result.c_source.contains("inputs[2]->shape[0] != batch"));
     }

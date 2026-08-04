@@ -4545,8 +4545,10 @@ impl<'a> HostEmitter<'a> {
             "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target}->data;",
             self.indent
         ));
-        self.lines
-            .push(format!("{}int64_t {target}_before = {before};", self.indent));
+        self.lines.push(format!(
+            "{}int64_t {target}_before = {before};",
+            self.indent
+        ));
         self.lines.push(format!(
             "{}int64_t {target}_axis_size = {axis_size};",
             self.indent
@@ -4661,8 +4663,10 @@ impl<'a> HostEmitter<'a> {
             "{}memcpy({target}->data, {target_ct}->data, (size_t){target}->size * {target_elem_size});",
             self.indent
         ));
-        self.lines
-            .push(format!("{}int64_t {target}_before = {before};", self.indent));
+        self.lines.push(format!(
+            "{}int64_t {target}_before = {before};",
+            self.indent
+        ));
         self.lines.push(format!(
             "{}int64_t {target}_axis_size = {axis_size};",
             self.indent

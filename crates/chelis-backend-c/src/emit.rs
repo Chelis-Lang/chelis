@@ -4148,7 +4148,9 @@ impl CEmitter {
         let axis_size = Self::emit_dim_info(&data_ty.dims[axis]);
         self.line(&format!("int t{id}_axis = {axis};"));
         self.line(&format!("int64_t t{id}_axis_size = {axis_size};"));
-        self.line(&format!("int64_t t{id}_update_count = t{id}_updates->size;"));
+        self.line(&format!(
+            "int64_t t{id}_update_count = t{id}_updates->size;"
+        ));
         for d in 0..rank {
             let idx_dim = Self::emit_dim_info(&indices_ty.dims[d]);
             let data_dim = Self::emit_dim_info(&data_ty.dims[d]);

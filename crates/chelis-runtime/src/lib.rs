@@ -1082,7 +1082,7 @@ pub unsafe extern "C" fn chelis_tensor_numel(t: *const chelis_tensor) -> i64 {
     if t.is_null() {
         0
     } else {
-        (*t).size as i64
+        (*t).size
     }
 }
 
