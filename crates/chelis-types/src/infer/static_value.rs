@@ -563,13 +563,36 @@ pub(super) fn resolve_axis_pair_member(
 /// reports a diagnostic and returns the witness-carrying `Type::Error` as the
 /// `Err` value (chelis#731 §C3), so the caller propagates it with a plain
 /// `return` rather than minting a fresh `Type::Error`.
+///
+/// `axis_ty` is the axis argument's resolved (subst-applied) type. An axis
+/// names a rank position and is int32 in every enforced surface; chelis#1113
+/// owns the numbered-atom classification, and until it lands this guard
+/// keeps the acceptance closed so no caller silently admits an int64 axis
+/// the way `cumsum`/`concat` once did while `sum` rejected one.
 pub(super) fn resolve_builtin_axis(
     op: &str,
     axis_expr: Option<&deep::Expr>,
+    axis_ty: &Type,
     tensor_ty: &Type,
     list: &deep::List,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<usize, Type> {
+    match axis_ty {
+        Type::Prim(Prim::Int32) | Type::Var(_) | Type::Error(_) => {}
+        other => {
+            return Err(report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::TypeMismatch,
+                    with_macro_provenance(
+                        &deep::Expr::List(list.clone(), zero_span()),
+                        format!("{op} expects int32 axis, got {other}"),
+                    ),
+                    vec![],
+                ),
+            ));
+        }
+    }
     // Issue #216: cast-aware extractor; see `resolve_axis_pair_member`.
     let raw_axis = axis_expr.and_then(extract_int_for_dim);
     match (tensor_ty, raw_axis) {

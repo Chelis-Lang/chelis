@@ -1050,6 +1050,17 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     );
     out.push("            exit(1);".to_string());
     out.push("        }".to_string());
+    // chelis#1112: the C lane's dim carrier is still 32-bit `int`. Until
+    // that carrier widens to int64_t, an extent above INT_MAX must trap
+    // loudly here; the `(int)` store below would otherwise truncate it
+    // silently and the only guard (dim < 0) runs before the cast.
+    out.push("        if (dim > 2147483647LL) {".to_string());
+    out.push(
+        "            fprintf(stderr, \"reshape extent %lld exceeds the int32 dim carrier (chelis#1112)\\n\", (long long)dim);"
+            .to_string(),
+    );
+    out.push("            exit(1);".to_string());
+    out.push("        }".to_string());
     out.push("        shape[i] = (int)dim;".to_string());
     out.push("        expected *= dim;".to_string());
     out.push("    }".to_string());
@@ -6577,6 +6588,31 @@ mod expression_dispatch_tests {
         assert_eq!(
             error.what,
             UnsupportedKind::Builtin("future_unimplemented_builtin".into())
+        );
+    }
+
+    /// chelis#1112 fail-closed guard: the emitted reshape helper must trap
+    /// an extent above INT_MAX BEFORE the `(int)` store into the 32-bit
+    /// shape array, so an unrepresentable extent can never truncate into
+    /// a silent wrong answer while the dim carrier is still `int`.
+    #[test]
+    fn reshape_helper_traps_extent_above_int32_before_the_store() {
+        let mut out = Vec::new();
+        append_tensor_reshape_helper(&mut out);
+        let text = out.join("\n");
+        let guard = text
+            .find("if (dim > 2147483647LL) {")
+            .expect("emitted reshape helper must guard dim > INT_MAX");
+        let trap = text
+            .find("exceeds the int32 dim carrier (chelis#1112)")
+            .expect("guard must name the carrier and the owning issue");
+        let store = text
+            .find("shape[i] = (int)dim;")
+            .expect("emitted reshape helper stores into the int shape array");
+        assert!(
+            guard < store && trap < store,
+            "the overflow trap must run before the (int) store; \
+             guard at {guard}, trap at {trap}, store at {store}"
         );
     }
 }

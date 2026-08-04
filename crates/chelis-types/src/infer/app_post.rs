@@ -905,11 +905,17 @@ pub(super) fn finish_unified_app(
                 }
                 let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let indices_ty = type_for_readonly_check(&arg_tys[1], subst);
-                let axis =
-                    match resolve_builtin_axis("gather", kids.get(3), &tensor_ty, list, errors) {
-                        Ok(axis) => axis,
-                        Err(err) => return err,
-                    };
+                let axis = match resolve_builtin_axis(
+                    "gather",
+                    kids.get(3),
+                    &subst.apply(&arg_tys[2]),
+                    &tensor_ty,
+                    list,
+                    errors,
+                ) {
+                    Ok(axis) => axis,
+                    Err(err) => return err,
+                };
                 match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
                     Ok(ty) => return ty,
                     Err(message) => {
@@ -991,6 +997,7 @@ pub(super) fn finish_unified_app(
                 let _axis = match resolve_builtin_axis(
                     "cumsum",
                     kids.get(2),
+                    &subst.apply(&arg_tys[1]),
                     &cumsum_operand,
                     list,
                     errors,
@@ -1166,11 +1173,17 @@ pub(super) fn finish_unified_app(
                     return report_builtin_arity(errors, list, fname, 2, arg_tys.len());
                 }
                 let sort_operand = type_for_readonly_check(&arg_tys[0], subst);
-                let _axis =
-                    match resolve_builtin_axis("sort", kids.get(2), &sort_operand, list, errors) {
-                        Ok(axis) => axis,
-                        Err(err) => return err,
-                    };
+                let _axis = match resolve_builtin_axis(
+                    "sort",
+                    kids.get(2),
+                    &subst.apply(&arg_tys[1]),
+                    &sort_operand,
+                    list,
+                    errors,
+                ) {
+                    Ok(axis) => axis,
+                    Err(err) => return err,
+                };
                 match sort_operand {
                     Type::Tensor(dims, precision) => {
                         return Type::Tuple(vec![
@@ -1201,11 +1214,17 @@ pub(super) fn finish_unified_app(
                 let base_ty = subst.apply(&arg_tys[0]);
                 let indices_ty = subst.apply(&arg_tys[1]);
                 let updates_ty = subst.apply(&arg_tys[2]);
-                let axis =
-                    match resolve_builtin_axis("scatter", kids.get(4), &base_ty, list, errors) {
-                        Ok(axis) => axis,
-                        Err(err) => return err,
-                    };
+                let axis = match resolve_builtin_axis(
+                    "scatter",
+                    kids.get(4),
+                    &subst.apply(&arg_tys[3]),
+                    &base_ty,
+                    list,
+                    errors,
+                ) {
+                    Ok(axis) => axis,
+                    Err(err) => return err,
+                };
                 let mode = kids.get(5).and_then(extract_string_literal);
                 match mode.as_deref() {
                     Some("replace") | Some("add") => {}
@@ -1260,6 +1279,7 @@ pub(super) fn finish_unified_app(
                 let axis = match resolve_builtin_axis(
                     "scatter_replace",
                     kids.get(4),
+                    &subst.apply(&arg_tys[3]),
                     &base_ty,
                     list,
                     errors,
@@ -1422,6 +1442,28 @@ pub(super) fn finish_unified_app(
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
                 match (lhs, rhs) {
+                    // chelis#1113 fail-closed guard: an axis names a rank
+                    // position and is int32 in every enforced surface; a
+                    // non-int32 integer axis was silently accepted here
+                    // while `sum` rejected one.
+                    (Type::Adt(lhs_name, lhs_args), Type::Prim(precision))
+                        if lhs_name == "List"
+                            && lhs_args.len() == 1
+                            && precision.is_integer()
+                            && precision != Prim::Int32 =>
+                    {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                with_macro_provenance(
+                                    &deep::Expr::List(list.clone(), zero_span()),
+                                    format!("concat expects int32 axis, got {}", precision.name()),
+                                ),
+                                vec![],
+                            ),
+                        );
+                    }
                     (Type::Adt(lhs_name, lhs_args), Type::Prim(precision))
                         if lhs_name == "List" && lhs_args.len() == 1 && precision.is_integer() =>
                     {
