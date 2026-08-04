@@ -21,6 +21,10 @@ CENSUS_CALL_SITES = (
     REPO_ROOT / "crates/chelis-compiler-api/tests/capacity_census_wire.rs",
     REPO_ROOT / "crates/chelis-python/tests/capacity_census_bindings.rs",
 )
+# Flags that let a call site decide what gets built or censused. Both exist
+# for ad-hoc local runs; neither belongs in a test that guards a frozen
+# baseline.
+FORBIDDEN_CALL_SITE_FLAGS = ("--target-dir", "--rustdoc-json")
 
 
 def serialized_struct_document(field_type: dict | None) -> dict:
@@ -156,22 +160,27 @@ class SharedRustdocTargetDir(unittest.TestCase):
             Path("/elsewhere/rustdoc"),
         )
 
-    def test_no_census_call_site_passes_its_own_target_dir(self) -> None:
-        # The drift guard. A call site that reintroduces `--target-dir` opts
-        # its leg back out of the shared build without any other signal.
-        for path in CENSUS_CALL_SITES:
-            source = path.read_text()
-            invocations = [
-                line
-                for line in source.splitlines()
-                if "--target-dir" in line and not re.match(r"\s*//", line)
-            ]
-            self.assertEqual(
-                invocations,
-                [],
-                f"{path.name} passes --target-dir; it must let the enumerator "
-                f"choose {SHARED_RUSTDOC_TARGET_DIR} so both legs share one build",
-            )
+    def test_no_census_call_site_opts_out_of_the_shared_build(self) -> None:
+        # The drift guard. `--target-dir` opts a leg back out of the shared
+        # build. `--rustdoc-json` is worse: it skips the cargo invocation
+        # entirely and censuses whatever document it is handed, so a call site
+        # spelled that way turns this guard artifact green in ~90ms having
+        # built nothing. No caller passes either; the enumerator chooses.
+        for flag in FORBIDDEN_CALL_SITE_FLAGS:
+            for path in CENSUS_CALL_SITES:
+                source = path.read_text()
+                invocations = [
+                    line
+                    for line in source.splitlines()
+                    if flag in line and not re.match(r"\s*//", line)
+                ]
+                self.assertEqual(
+                    invocations,
+                    [],
+                    f"{path.name} passes {flag}; it must let the enumerator "
+                    f"build into {SHARED_RUSTDOC_TARGET_DIR} so both legs share "
+                    f"one build and neither can census a supplied document",
+                )
 
     def test_target_dir_has_exactly_one_spelling(self) -> None:
         # argparse's default prefix abbreviation would accept `--t`, which

@@ -152,14 +152,24 @@ builds a second dependency graph concurrently. An immediate warm repeat took
 under 0.4s for all four census tests, confirming that the assertions are not the
 expensive part.
 
-> **Superseded mechanism; the measurements above stand as a dated record.** The
-> two censuses no longer hold one target directory each. `capacity_census_typed.py`
-> owns a single `SHARED_RUSTDOC_TARGET_DIR`, so the second leg to run reuses the
-> first's compiled dependency graph rather than building a second one. Measured
-> on CI when that landed, the census total fell from 207.9s to 88.0s on macOS
-> Smoke and from 101.2s to 75.9s on the Linux dtype oracle. The wire leg by
-> itself remains above nextest's 60s SLOW threshold; only the following leg
-> becomes a delta.
+> **2026-08-04: mechanism superseded. The measurements above stand as a dated
+> record of the arrangement they describe.** The two censuses no longer hold one
+> target directory each. `capacity_census_typed.py` owns a single
+> `SHARED_RUSTDOC_TARGET_DIR`, so the second leg to run reuses the first's
+> compiled dependency graph rather than building a second one. Measured across
+> the base and branch CI runs of that change, the census total fell from 207.9s
+> to 88.0s on macOS Smoke and from 101.2s to 75.9s on the Linux dtype oracle,
+> with the binding pair carrying the win (58.5s + 57.0s to 13.0s + 13.4s on
+> macOS).
+>
+> Two things that table's reader should not have to discover elsewhere. The wire
+> leg by itself remains above nextest's 60s SLOW threshold: sharing makes the
+> *following* leg a delta, it does not make the first leg cheap. And the wire
+> leg measured 47.4s on the base Linux run against 61.6s on the branch, one
+> sample each and no instrumented explanation. It is not cache carryover: the
+> only job that saves the `linux-workspace` cache is `workspace-tests`, whose
+> `ci` profile excludes both census binaries, so no census rustdoc artifact has
+> ever been in that cache, before or after the rename.
 
 The Phase 1 portion of the required dtype oracle already runs both complete
 census binaries. The Linux `ci` nextest profile therefore excludes those two
