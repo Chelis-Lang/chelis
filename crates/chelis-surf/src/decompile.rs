@@ -784,9 +784,13 @@ impl<'a> IdiomaticDecompiler<'a> {
                     // [05-OP-6] rung decompiles to its keyword call.
                     Ok(CastMode::Trunc) => format!("cast_trunc({value}, {ty})"),
                     Ok(CastMode::Checked) => format!("({value} as {ty})"),
-                    Err(selector) => {
-                        format!("(/* unknown cast mode {selector} */ {value} as {ty})")
-                    }
+                    // The decompiler's round-trip invariant is that its
+                    // output reparses. A comment naming the bogus
+                    // selector would not, so fail loudly instead.
+                    Err(selector) => panic!(
+                        "decompile: `{selector}` is not a recognized cast mode selector; \
+                         the only named rung is `trunc` ([05-OP-6])"
+                    ),
                 }
             }
             Some(DeepTag::Grad) => format_grad_expr(
@@ -1770,7 +1774,10 @@ fn decompile_list_expr(list: &List) -> String {
             match cast_mode_of(kids) {
                 Ok(CastMode::Trunc) => format!("cast_trunc({e}, {ty})"),
                 Ok(CastMode::Checked) => format!("({e} as {ty})"),
-                Err(selector) => format!("(/* unknown cast mode {selector} */ {e} as {ty})"),
+                Err(selector) => panic!(
+                    "decompile: `{selector}` is not a recognized cast mode selector; \
+                     the only named rung is `trunc` ([05-OP-6])"
+                ),
             }
         }
         Some(DeepTag::Grad) => format_grad_expr(

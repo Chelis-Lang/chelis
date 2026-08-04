@@ -2523,14 +2523,30 @@ pub fn cast_trunc_tensor(
              so no program can reach this arm (op {op})"
         ),
     };
-    let mut truncated = Vec::with_capacity(values.len());
+    // IN-ORDER first-offender, element by element through the scalar
+    // kernel: the compiled C lane is a per-element loop over the same
+    // guard, so this is what makes the two lanes agree on the trap KIND
+    // for a buffer carrying more than one kind of offender, as
+    // [05-OP-6]'s identical-lanes clause requires.
+    //
+    // The bulk `finalize_tensor` path cannot express this: `int_buf`
+    // domain-checks the WHOLE buffer before it width-checks any of it,
+    // so `[300.9, NaN] -> int8` raises Domain there while C raises
+    // Overflow at element 0. Only int64 (where out-of-range and
+    // non-finite are both caught in the same pass) is unaffected.
+    // `cast_value`'s checked rung is per-element for the same reason;
+    // agreeing with the other lane outranks the section C5 bulk-loop
+    // note here.
+    let mut wides = Vec::with_capacity(values.len());
     for x in values {
-        if !x.is_finite() {
-            return Err(NumericTrap::Domain { op, prim: dst });
-        }
-        truncated.push(x.trunc());
+        let value = cast_trunc_raw(op, RawScalar::Float(x), dst)?;
+        wides.push(
+            value
+                .as_i64_exact()
+                .expect("an integer target stores an exact i64"),
+        );
     }
-    finalize_tensor(op, dst, RawTensor::Float(truncated))
+    finalize_tensor(op, dst, RawTensor::Int(wides))
 }
 
 /// [05-OP-6] target contract: integer widths only. `bool` is excluded by

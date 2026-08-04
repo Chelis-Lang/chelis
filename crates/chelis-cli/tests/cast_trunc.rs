@@ -343,6 +343,104 @@ fn compiled_c_lane_traps_domain_on_non_finite_with_the_same_brand() {
     );
 }
 
+/// chelis#759 MEDIUM-1: for a tensor carrying BOTH an out-of-range and a
+/// non-finite element, both lanes must report the kind belonging to
+/// whichever element comes FIRST. Eval used to run a whole-buffer
+/// non-finite pre-pass and answer `domain` where C answered `overflow`,
+/// which contradicts [05-OP-6]'s identical-lanes clause.
+///
+/// The int8 rows are the discriminating ones: at int64 both offender
+/// kinds are caught in the same pass, so a narrower width is required to
+/// see the divergence at all.
+#[test]
+fn mixed_offender_tensors_agree_on_the_trap_kind_across_lanes() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    // `sqrt` over a tensor produces both offender kinds in one DAG-lane
+    // op: a finite out-of-range element and a NaN. Building the buffer
+    // from scalar expressions instead (`to_tensor([1e30, sqrt(-1.0)])`)
+    // would route it through the HOST tensor lane, which is a different
+    // code path and not what MEDIUM-1 is about.
+    let cases = [
+        ("mix_over_first_i32", "[1e30, -1.0]", "int32", "overflow"),
+        ("mix_nan_first_i32", "[-1.0, 1e30]", "int32", "domain"),
+        // The discriminating rows: 90000.0 -> sqrt -> 300.0, which fits
+        // i64 but not int8. Only a narrow width exposes an out-of-order
+        // width check.
+        ("mix_over_first_i8", "[90000.0, -1.0]", "int8", "overflow"),
+        ("mix_nan_first_i8", "[-1.0, 90000.0]", "int8", "domain"),
+    ];
+    for (label, elements, target, expected_kind) in cases {
+        let expr = format!("cast_trunc(sqrt(to_tensor({elements})), {target})");
+        let eval_err = eval_expr(&expr).expect_err("both elements offend; one must trap");
+        let branded = format!("numeric trap: {expected_kind} in cast_trunc at {target}");
+        assert!(
+            eval_err.contains(&branded),
+            "{label}: eval must report the FIRST offender's kind (`{branded}`): {eval_err}"
+        );
+
+        let program = format!(
+            "module M.Main\n\
+             def f() -> tensor[2, {target}] = {expr}\n\
+             out = print(f())\n"
+        );
+        let (stdout, stderr, ok) = c_lane_run(&program, label).expect("C lane");
+        assert!(
+            !ok && stderr.contains(&branded),
+            "{label}: the compiled lane must report the SAME kind as eval \
+             (`{branded}`); got ok={ok} stdout={stdout} stderr={stderr}"
+        );
+    }
+}
+
+/// The HOST tensor lane (a tensor built from scalar expressions, which
+/// carries `*` dims rather than lowering into the DAG) has no
+/// `cast_trunc` emission yet, and it must REJECT LOUDLY rather than fall
+/// through to an identity pass-through.
+///
+/// This is pinned deliberately, because the checked `cast`'s host arm
+/// ends in `_ => arg_vars[0].0.clone()` and therefore emits NO conversion
+/// at all for this shape -- it reinterprets the f32 buffer as int32. That
+/// is a pre-existing silent-wrong-answer path on `cast` (chelis#729 /
+/// chelis#730 territory, not fixed here). `cast_trunc` must not acquire
+/// the same hole by someone "fixing" this rejection with a fallback arm.
+#[test]
+fn host_lane_tensor_cast_trunc_rejects_loudly_rather_than_passing_through() {
+    let program = "module M.Main\n\
+                   def f() -> tensor[2, int32] = \
+                   cast_trunc(to_tensor([1.9, sqrt(4.0)]), int32)\n\
+                   out = print(f())\n";
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("m.ch");
+    write_file(&path, program);
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("out").to_str().unwrap(),
+        ])
+        .output()
+        .expect("chelis build should run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the host tensor lane has no cast_trunc emission; it must not build. \
+         If this starts passing, verify the emitted C actually CONVERTS rather \
+         than reinterpreting the buffer: stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("cast_trunc") && stderr.contains("float-to-integer only"),
+        "the rejection must be the typed [05-OP-6] one naming the op, not a \
+         generic failure: {stderr}"
+    );
+}
+
 // ===========================================================================
 // Surface round-trips
 // ===========================================================================

@@ -1077,7 +1077,10 @@ impl HipEmitter {
             }
             RiscOp::Realize => Some(Self::cast_kernel_name(node, dag)?),
             RiscOp::Cast { .. } => Some(Self::cast_kernel_name(node, dag)?),
-            // Gated out by `reject_unsupported_hip_ops` before codegen.
+            // Both `reject_unsupported_hip_ops` copies (chelis-cli and
+            // chelis-compiler-api) gate this out before codegen; the
+            // emitter arms below are the backstop if a future caller
+            // reaches the backend without passing a gate.
             RiscOp::CastTrunc { .. } => None,
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /

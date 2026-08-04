@@ -325,6 +325,87 @@ fn tensor_surface_traps_on_the_first_offending_element() {
     );
 }
 
+/// chelis#759 MEDIUM-1: a buffer carrying BOTH an out-of-range and a
+/// non-finite element must report the kind belonging to whichever comes
+/// FIRST, because the compiled C lane is a per-element loop and
+/// [05-OP-6] declares the lanes identical.
+///
+/// The narrow-width rows are the ones that actually bite: the bulk
+/// `finalize_tensor` path domain-checks the whole buffer before it
+/// width-checks any of it, so `[300.9, NaN] -> int8` reported `Domain`
+/// there while C reports `Overflow` at element 0. int64 alone is immune
+/// (both offenders are caught in the same pass), so testing only int32
+/// or int64 would have missed the divergence.
+#[test]
+fn mixed_offender_buffers_report_the_first_offender_in_order() {
+    let cases: [(&str, Vec<f64>, Prim, NumericTrap); 6] = [
+        // Out-of-range first, then non-finite.
+        (
+            "[1e30, NaN] -> int32",
+            vec![1e30, f64::NAN],
+            Prim::Int32,
+            NumericTrap::Overflow {
+                op: "cast_trunc",
+                prim: Prim::Int32,
+            },
+        ),
+        (
+            "[300.9, NaN] -> int8",
+            vec![300.9, f64::NAN],
+            Prim::Int8,
+            NumericTrap::Overflow {
+                op: "cast_trunc",
+                prim: Prim::Int8,
+            },
+        ),
+        (
+            "[40000.5, inf] -> int16",
+            vec![40000.5, f64::INFINITY],
+            Prim::Int16,
+            NumericTrap::Overflow {
+                op: "cast_trunc",
+                prim: Prim::Int16,
+            },
+        ),
+        // Non-finite first, then out-of-range.
+        (
+            "[NaN, 1e30] -> int32",
+            vec![f64::NAN, 1e30],
+            Prim::Int32,
+            NumericTrap::Domain {
+                op: "cast_trunc",
+                prim: Prim::Int32,
+            },
+        ),
+        (
+            "[NaN, 300.9] -> int8",
+            vec![f64::NAN, 300.9],
+            Prim::Int8,
+            NumericTrap::Domain {
+                op: "cast_trunc",
+                prim: Prim::Int8,
+            },
+        ),
+        (
+            "[-inf, 40000.5] -> int16",
+            vec![f64::NEG_INFINITY, 40000.5],
+            Prim::Int16,
+            NumericTrap::Domain {
+                op: "cast_trunc",
+                prim: Prim::Int16,
+            },
+        ),
+    ];
+    for (label, values, target, expected) in cases {
+        assert_eq!(
+            cast_trunc_tensor("cast_trunc", RawTensor::Float(values), target)
+                .expect_err("both elements offend; one of them must trap"),
+            expected,
+            "{label}: the FIRST offending element decides the trap kind"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------
 // Contract violations the checker is supposed to make unreachable
 // ---------------------------------------------------------------------

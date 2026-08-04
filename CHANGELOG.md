@@ -31,6 +31,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   support, so the C target is canonical for the named ladder. This unblocks
   chelis#1091 and the downstream shell cast migration.
 
+  **Source compatibility:** `cast_trunc` is now a reserved word, so it can no
+  longer be used as an identifier (`def cast_trunc(...)` no longer parses),
+  matching the existing treatment of `cast`, `grad`, `vmap`, `jit`, `realize`,
+  and `copy`.
+
 ## [0.18.2] — 2026-08-03
 
 ### Added
