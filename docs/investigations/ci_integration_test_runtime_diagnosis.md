@@ -152,6 +152,15 @@ builds a second dependency graph concurrently. An immediate warm repeat took
 under 0.4s for all four census tests, confirming that the assertions are not the
 expensive part.
 
+> **Superseded mechanism; the measurements above stand as a dated record.** The
+> two censuses no longer hold one target directory each. `capacity_census_typed.py`
+> owns a single `SHARED_RUSTDOC_TARGET_DIR`, so the second leg to run reuses the
+> first's compiled dependency graph rather than building a second one. Measured
+> on CI when that landed, the census total fell from 207.9s to 88.0s on macOS
+> Smoke and from 101.2s to 75.9s on the Linux dtype oracle. The wire leg by
+> itself remains above nextest's 60s SLOW threshold; only the following leg
+> becomes a delta.
+
 The Phase 1 portion of the required dtype oracle already runs both complete
 census binaries. The Linux `ci` nextest profile therefore excludes those two
 binaries from the workspace leg, preserving both positive and negative controls

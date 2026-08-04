@@ -11,6 +11,7 @@ from capacity_census_typed import (
     SHARED_RUSTDOC_TARGET_DIR,
     CensusError,
     binding_rows,
+    build_parser,
     resolve_target_dir,
     wire_rows,
 )
@@ -171,6 +172,18 @@ class SharedRustdocTargetDir(unittest.TestCase):
                 f"{path.name} passes --target-dir; it must let the enumerator "
                 f"choose {SHARED_RUSTDOC_TARGET_DIR} so both legs share one build",
             )
+
+    def test_target_dir_has_exactly_one_spelling(self) -> None:
+        # argparse's default prefix abbreviation would accept `--t`, which
+        # splits the legs back apart in a spelling the call-site guard above
+        # cannot see. Locked with allow_abbrev=False.
+        parser = build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["wire", "--t", "/tmp/abbreviated"])
+        self.assertEqual(
+            parser.parse_args(["wire", "--target-dir", "/tmp/explicit"]).target_dir,
+            Path("/tmp/explicit"),
+        )
 
     def test_call_site_guard_reads_the_real_files(self) -> None:
         # Guard the guard: a renamed or moved census test must fail loudly

@@ -388,8 +388,12 @@ def generate_rustdoc_json(
         raise CensusError(f"cannot read generated rustdoc JSON {path}: {error}") from error
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+def build_parser() -> argparse.ArgumentParser:
+    # `allow_abbrev=False` so `--target-dir` has exactly one spelling. With
+    # argparse's default, `--t` is an unambiguous prefix and silently splits
+    # the legs back onto separate directories in a form the call-site drift
+    # guard in test_capacity_census_typed.py cannot see.
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("mode", choices=("wire", "bindings"))
     # Optional, and no caller in the repository passes it: see
     # SHARED_RUSTDOC_TARGET_DIR. It stays accepted for ad-hoc local runs that
@@ -399,7 +403,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--registered", action="append", default=[])
     parser.add_argument("--registered-method", action="append", default=[])
     parser.add_argument("--rustdoc-json", type=Path)
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def resolve_target_dir(root: Path, requested: Path | None) -> Path:
