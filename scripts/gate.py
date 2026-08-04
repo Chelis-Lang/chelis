@@ -24,9 +24,11 @@ Usage:
                                        # annotated local-vs-CI-owned
     python3 scripts/gate.py --local    # run the developer pre-push subset
 
-Local/CI stage split (chelis#360): the full
-`cargo nextest run --workspace --profile ci` stage stays in the
-canonical list but is CI-owned -- macOS Smoke is the authoritative
+Local/CI stage split (chelis#360): the full developer gate runs
+`cargo nextest run --workspace` with the default profile, while the CI
+integration stage uses the `ci` profile and delegates its two census binaries
+to the required dtype oracle. The workspace execution stays out of `--local` --
+macOS Smoke is the authoritative
 workspace oracle, and on the macOS workstation the mass first-exec
 burst it triggers can wedge assessment entirely (see
 docs/local_macos_environment.md). `--local` is the pre-push
@@ -58,10 +60,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The canonical gate command list, split by CI stage. The CI workflow
+# The canonical CI-stage command list. The CI workflow
 # has two developer-gate jobs, `lint-and-unit` and `workspace-tests`; each
-# runs its own subset (`workspace-tests` invokes the `integration` stage), and
-# the union is the full per-PR gate. Every
+# runs its own subset (`workspace-tests` invokes the `integration` stage).
+# The full developer gate substitutes the complete default nextest profile for
+# CI's split profile so the delegated census binaries are not dropped locally.
+# Every
 # command is a list of argv tokens (no shell).
 #
 # Keep this in lockstep with `.github/workflows/ci.yml`: the parity
@@ -85,11 +89,13 @@ CHELIS_LINT_CHECK: list[str] = [
     "--check",
     ".",
 ]
-# The `ci` nextest profile (.config/nextest.toml) writes per-test JUnit
-# timing XML to target/nextest/ci/junit.xml, which
-# scripts/test_timing_check.py consumes. Running it locally too keeps
-# the dev gate and CI on one command.
+# The default profile is the complete developer workspace suite. The `ci`
+# profile writes JUnit XML and delegates two census binaries to the parallel
+# dtype oracle.
 NEXTEST_WORKSPACE: list[str] = [
+    "cargo", "nextest", "run", "--workspace",
+]
+NEXTEST_WORKSPACE_CI: list[str] = [
     "cargo", "nextest", "run", "--workspace", "--profile", "ci",
 ]
 # chelis#875: `cargo nextest` does not execute doctests. Each crate with
@@ -128,7 +134,7 @@ STAGES: dict[str, list[list[str]]] = {
         CHECKPOINT_COMPILE_FAIL,
     ],
     "integration": [
-        NEXTEST_WORKSPACE,
+        NEXTEST_WORKSPACE_CI,
     ],
 }
 
@@ -151,6 +157,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
 
 LOCAL_ANNOTATION = "local + ci"
 CI_OWNED_ANNOTATION = "ci-owned"
+FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 LOCAL_DYNAMIC_NOTE = (
     "# --local also runs: cargo nextest run -p <crate> "
     "for each crate changed vs origin/main"
@@ -158,13 +165,14 @@ LOCAL_DYNAMIC_NOTE = (
 
 
 def full_command_list() -> list[list[str]]:
-    """The canonical full gate list: the union of every stage subset,
-    in stage order. `cargo build` deliberately comes first so a compile
-    failure surfaces before the slower clippy/test commands."""
-    commands: list[list[str]] = []
-    for stage in STAGE_ORDER:
-        commands.extend(STAGES[stage])
-    return commands
+    """The complete developer gate.
+
+    CI runs the same lint-and-unit list, but its integration stage uses the
+    split `ci` profile and delegates two census binaries to the required dtype
+    oracle. The developer command uses the default profile so those tests stay
+    present without requiring a hosted-only parallel job.
+    """
+    return [*STAGES["lint-and-unit"], NEXTEST_WORKSPACE]
 
 
 def render(command: list[str]) -> str:
@@ -176,6 +184,8 @@ def list_annotation(command: list[str]) -> str:
     `--local` pre-push subset includes it or CI owns it."""
     if command in LOCAL_STATIC_COMMANDS:
         return LOCAL_ANNOTATION
+    if command == NEXTEST_WORKSPACE:
+        return FULL_GATE_SPLIT_ANNOTATION
     return CI_OWNED_ANNOTATION
 
 
@@ -325,8 +335,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         nargs="?",
         choices=STAGE_ORDER,
         help=(
-            "Run only this CI stage's gate subset. Omit to run the full "
-            "gate (the union of every stage)."
+            "Run only this CI stage's gate subset. Omit to run the complete "
+            "developer gate."
         ),
     )
     p.add_argument(

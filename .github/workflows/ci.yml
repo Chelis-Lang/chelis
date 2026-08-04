@@ -651,6 +651,8 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -670,6 +672,12 @@ jobs:
       # commands into this job (see scripts/test_gate.py parity lock).
       - name: Gate (integration subset)
         run: python3 scripts/gate.py integration
+
+      # This structural oracle needs cargo-nextest, which the script-unit job
+      # intentionally does not install. Run it here after the workspace build
+      # is warm so its three `nextest list` calls are continuously enforced.
+      - name: Verify nextest profile coverage
+        run: .venv/bin/python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
       # Informational, non-failing: flags integration tests that have
       # regressed past their committed timing baseline or that are new
@@ -720,6 +728,11 @@ jobs:
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          # Both parallel jobs restore the same cache; only workspace-tests
+          # saves it, avoiding a second multi-GB entry in the 10 GB cache pool.
+          save-if: false
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -730,15 +743,15 @@ jobs:
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
 
   # Keep the existing required status context while making both expensive
-  # legs parallel. `always()` lets this job inspect failures instead of being
-  # skipped by GitHub's implicit success() dependency guard.
+  # legs parallel. `!cancelled()` lets this job inspect dependency failures
+  # while still suppressing work after cancellation.
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
     permissions:
       contents: read
     needs: [changes, workspace-tests, dtype-phase3-oracle]
-    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 

@@ -7,16 +7,15 @@ PR #126 (refined by #127) split the heavyweight end-to-end suite off the
 per-PR integration gate. `.config/nextest.toml` carries three profiles:
 
   - `default` excludes an explicitly-named heavy-e2e set;
-  - `ci` excludes that same set plus the two capacity-census binaries
-    owned by the required Phase 0-3 oracle job;
+  - `ci` excludes that same set plus two capacity-census binaries that the
+    required Phase 0-3 oracle also executes;
   - `nightly` carries the EXACT SAME set as a positive filter, and the
     `Heavy E2E` workflow runs `cargo nextest run --profile nightly`.
 
-The invariant this file locks: **every non-ignored test is on exactly one
-continuous Linux lane: workspace, nightly, or the dtype oracle.** A test that
-falls into none silently stopped running; a test in multiple lanes wastes the
-CI budget the split exists to protect. The macOS workspace lane remains a
-deliberate cross-platform duplicate and uses the unchanged default profile.
+This file locks the original workspace/nightly split plus the narrower
+delegation contract for the two complete census binaries. The dtype oracle
+intentionally overlaps the workspace lane elsewhere, so it is not a third
+disjoint profile.
 
 Two tiers of check:
 
@@ -45,6 +44,8 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import dtype_phase1_oracle  # noqa: E402
+import dtype_phase2_oracle  # noqa: E402
+import dtype_phase3_oracle  # noqa: E402
 
 
 ORACLE_OWNED_BINARY_IDS = {
@@ -76,9 +77,21 @@ def _negative_filter_inner(block: str) -> str:
     return match.group(1)
 
 
+def _required_phase3_legs() -> tuple[object, ...]:
+    """Resolve the exact Phase 3 -> Phase 2 -> Phase 1 inheritance chain."""
+    python = sys.executable
+    phase3 = dtype_phase3_oracle.oracle_legs(python)
+    if phase3[0].argv != (python, "scripts/dtype_phase2_oracle.py"):
+        raise AssertionError("Phase 3 no longer inherits dtype_phase2_oracle.py")
+    phase2 = dtype_phase2_oracle.oracle_legs(python)
+    if phase2[0].argv != (python, "scripts/dtype_phase1_oracle.py"):
+        raise AssertionError("Phase 2 no longer inherits dtype_phase1_oracle.py")
+    return (*phase3, *phase2, *dtype_phase1_oracle.oracle_legs(python))
+
+
 def _oracle_selected_test_binaries() -> set[str]:
     selected: set[str] = set()
-    for leg in dtype_phase1_oracle.oracle_legs(sys.executable):
+    for leg in _required_phase3_legs():
         argv = leg.argv
         if "-p" not in argv:
             continue
@@ -235,16 +248,6 @@ class ProfilePartitionTests(unittest.TestCase):
             f"{sorted(overlap)[:20]}",
         )
 
-    def test_oracle_lane_is_disjoint_from_workspace_and_nightly(self):
-        ci_matches, nightly_matches, oracle_matches, _ = self._sets()
-        overlap = oracle_matches & (ci_matches | nightly_matches)
-        self.assertEqual(
-            overlap,
-            set(),
-            f"{len(overlap)} required-oracle test(s) also run in the Linux "
-            f"workspace or nightly lane: {sorted(overlap)[:20]}",
-        )
-
     def test_no_non_ignored_test_falls_into_neither_profile(self):
         ci_matches, nightly_matches, oracle_matches, non_ignored = self._sets()
         gap = non_ignored - ci_matches - nightly_matches - oracle_matches
@@ -256,9 +259,9 @@ class ProfilePartitionTests(unittest.TestCase):
             f"(dropped coverage): {sorted(gap)[:20]}",
         )
 
-    def test_all_continuous_linux_lanes_cover_every_non_ignored_test(self):
-        # Belt-and-braces statement of the partition: the union of the three
-        # continuous Linux lanes is exactly the non-ignored universe.
+    def test_profiles_plus_delegated_binaries_cover_every_non_ignored_test(self):
+        # Belt-and-braces coverage statement; this is not a disjoint
+        # three-lane partition because the dtype oracle overlaps `ci` elsewhere.
         ci_matches, nightly_matches, oracle_matches, non_ignored = self._sets()
         covered = (ci_matches | nightly_matches | oracle_matches) & non_ignored
         self.assertEqual(

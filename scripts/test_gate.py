@@ -5,7 +5,9 @@ or `python3 scripts/test_gate.py`.
 
 Four things are locked here:
 
-  (a) the per-stage subsets union exactly to the full canonical list;
+  (a) the full developer gate keeps the complete default nextest profile while
+      CI delegates its two census binaries from the `ci` profile to the dtype
+      oracle;
   (b) a parity assertion: every `cargo`/`chelis` invocation in a gate
       step of `.github/workflows/ci.yml` is produced by `gate.py`. This
       covers both `cargo ...` and bare `chelis ...` commands (the
@@ -272,10 +274,9 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
         self.assertIn("needs: [changes]", block)
         self.assertIn("needs.changes.outputs.diagnostic_kind_changed", block)
         self.assertIn("contents: read", block)
-        run_lines = [line.strip() for line in block.splitlines() if line.strip().startswith("run:")]
-        self.assertIn(
-            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
-            run_lines,
+        _assert_executable_run_once(
+            block,
+            ".venv/bin/python scripts/diagnostic_kind_oracle.py",
         )
         self.assertIn("taiki-e/install-action@nextest", block)
 
@@ -286,15 +287,11 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
             'run: "true # scripts/diagnostic_kind_oracle.py"',
             1,
         )
-        run_lines = [
-            line.strip()
-            for line in mutated.splitlines()
-            if line.strip().startswith("run:")
-        ]
-        self.assertNotIn(
-            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
-            run_lines,
-        )
+        with self.assertRaises(AssertionError):
+            _assert_executable_run_once(
+                mutated,
+                ".venv/bin/python scripts/diagnostic_kind_oracle.py",
+            )
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
 # `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
@@ -341,15 +338,12 @@ NON_GATE_WORKFLOWS = {
 
 
 class StageUnionTests(unittest.TestCase):
-    def test_stage_subsets_union_to_full_list(self):
-        union = []
-        for stage in gate.STAGE_ORDER:
-            union.extend(gate.STAGES[stage])
-        self.assertEqual(
-            union,
-            gate.full_command_list(),
-            "the per-stage subsets must union exactly to the full list",
-        )
+    def test_full_gate_keeps_censuses_while_ci_uses_the_split_profile(self):
+        self.assertEqual(gate.STAGES["integration"], [gate.NEXTEST_WORKSPACE_CI])
+        self.assertIn(gate.NEXTEST_WORKSPACE, gate.full_command_list())
+        self.assertNotIn(gate.NEXTEST_WORKSPACE_CI, gate.full_command_list())
+        self.assertNotIn("--profile", gate.NEXTEST_WORKSPACE)
+        self.assertEqual(gate.NEXTEST_WORKSPACE_CI[-2:], ["--profile", "ci"])
 
     def test_stage_order_covers_every_stage(self):
         self.assertEqual(
@@ -541,6 +535,28 @@ def _ci_job_block(job: str) -> str:
     return _workflow_job_block(CI_YML, job)
 
 
+def _assert_executable_run_once(job_block: str, command: str) -> None:
+    """Require one executable, unquoted single-line `run:` scalar.
+
+    Comments and quoted no-ops that merely contain `command` are deliberately
+    excluded; substring counting would let either masquerade as the oracle.
+    """
+    run_scalar = re.compile(r"^\s+run:\s*(?P<command>\S.*?)\s*$")
+    executable = []
+    for line in job_block.splitlines():
+        match = run_scalar.match(line)
+        if match is None:
+            continue
+        value = match.group("command")
+        if value not in {"|", ">", "|-", ">-"}:
+            executable.append(value)
+    count = executable.count(command)
+    if count != 1:
+        raise AssertionError(
+            f"expected exactly one executable `run: {command}`, found {count}"
+        )
+
+
 def _workflow_job_block(path: Path, job: str) -> str:
     """Return the raw workflow text block for one job."""
     lines = path.read_text().splitlines()
@@ -657,7 +673,7 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(oracle_block.count("    contents: read"), 1)
         self.assertEqual(oracle_block.count("    issues: read"), 1)
         self.assertEqual(oracle_block.count(numpy_command), 1)
-        self.assertEqual(oracle_block.count(oracle_command), 1)
+        _assert_executable_run_once(oracle_block, oracle_command.removeprefix("run: "))
         self.assertEqual(oracle_block.count(authenticated_oracle), 1)
         self.assertLess(
             oracle_block.index(numpy_command),
@@ -665,15 +681,33 @@ class CiParityTests(unittest.TestCase):
         )
         self.assertIn("needs: [changes]", workspace_block)
         self.assertIn("needs: [changes]", oracle_block)
-        self.assertNotIn("workspace-tests", oracle_block)
+        self.assertEqual(oracle_block.count("    needs:"), 1)
+        self.assertNotIn("needs.workspace-tests", oracle_block)
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
             "needs: [changes, workspace-tests, dtype-phase3-oracle]",
             aggregate_block,
         )
-        self.assertIn("always()", aggregate_block)
+        self.assertNotIn("always()", aggregate_block)
+        self.assertIn("!cancelled()", aggregate_block)
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
+        workspace_inputs = _rust_cache_inputs(_ci_job_block("workspace-tests"))
+        oracle_inputs = _rust_cache_inputs(_ci_job_block("dtype-phase3-oracle"))
+        self.assertEqual(workspace_inputs.get("shared-key"), "linux-workspace")
+        self.assertEqual(oracle_inputs.get("shared-key"), "linux-workspace")
+        self.assertNotEqual(workspace_inputs.get("save-if"), "false")
+        self.assertEqual(oracle_inputs.get("save-if"), "false")
+
+    def test_profile_partition_set_math_runs_continuously(self):
+        workspace_block = _ci_job_block("workspace-tests")
+        _assert_executable_run_once(
+            workspace_block,
+            ".venv/bin/python -m unittest "
+            "scripts.test_nextest_profile_partition.ProfilePartitionTests",
+        )
 
     def test_quoted_oracle_name_is_not_an_executable_oracle_step(self):
         block = _ci_job_block("dtype-phase3-oracle")
@@ -683,12 +717,22 @@ class CiParityTests(unittest.TestCase):
             'run: "true # scripts/dtype_phase3_oracle.py"',
             1,
         )
-        run_lines = [
-            line.strip()
-            for line in mutated.splitlines()
-            if line.strip().startswith("run:")
-        ]
-        self.assertNotIn(oracle_command, run_lines)
+        with self.assertRaises(AssertionError):
+            _assert_executable_run_once(
+                mutated,
+                oracle_command.removeprefix("run: "),
+            )
+
+    def test_commented_oracle_plus_noop_is_not_an_executable_oracle_step(self):
+        block = _ci_job_block("dtype-phase3-oracle")
+        command = ".venv/bin/python scripts/dtype_phase3_oracle.py"
+        mutated = block.replace(
+            f"run: {command}",
+            f"# run: {command}\n        run: \"true\"",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            _assert_executable_run_once(mutated, command)
 
     def test_non_gate_jobs_are_excluded_by_name(self):
         # The non-gate jobs are allowed to keep their own cargo/chelis
@@ -1139,7 +1183,7 @@ class DocsOnlySkipTests(unittest.TestCase):
             "[changes, workspace-tests, dtype-phase3-oracle]",
         )
         cond = integration.get("if", "")
-        self.assertIn("always()", cond)
+        self.assertNotIn("always()", cond)
         self.assertIn("!cancelled()", cond)
         self.assertIn("needs.changes.result != 'success'", cond)
         self.assertIn("needs.changes.outputs.docs_only != 'true'", cond)
