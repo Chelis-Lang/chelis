@@ -10,10 +10,102 @@ use std::process::{Command, Output};
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyModule, PyType};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+const PERMANENT_BINDING_DISPOSITION: &str = "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)";
 
-const FROZEN_BASELINE_SHA256: &str =
-    "f5a8f16eb2cd7abcd6845f21fc76fc0827f54974ff43ab6ad35b60f77b1b41ec";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrozenSurfaceRow {
+    kind: &'static str,
+    id: &'static str,
+    flags: &'static [&'static str],
+}
+
+const FROZEN_BINDING_ROWS: &[FrozenSurfaceRow] = &[
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::check_json(py: Python<'_>, source: &str, source_kind: &str) -> PyResult<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::compile_and_load(py: Python<'_>, source_path: &str, target: &str, source_kind: &str, entry_name: Option<String>, artifact_dir: Option<&str>, project_root: Option<&str>, force_bare: bool) -> PyResult<NativeCompiledModel>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::compile_json(py: Python<'_>, source: &str, target: &str, source_kind: &str, entry_name: Option<String>) -> PyResult<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::decompile_json(py: Python<'_>, source: &str) -> PyResult<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::desugar_json(py: Python<'_>, source: &str) -> PyResult<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::eval_json(py: Python<'_>, source: &str, bindings_json: &str, source_kind: &str, project_root: Option<&str>) -> PyResult<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::load(py: Python<'_>, path: &str) -> PyResult<NativeCompiledModel>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pyfunction",
+        id: "chelis_python::validate_json(py: Python<'_>, source: &str, mode: &str) -> PyResult<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::CompiledModel::__call__(self: &Self, py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::CompiledModel::input_names(self: &Self) -> Vec<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::CompiledModel::output_names(self: &Self) -> Vec<String>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::CompiledModel::path(self: &Self) -> String",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::CompiledModel::target(self: &Self) -> String",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::NativeTensor::__dlpack__(self: &Self, py: Python<'_>, stream: Option<usize>, max_version: Option<&Bound<'_, PyAny>>, dl_device: Option<&Bound<'_, PyAny>>, copy: Option<bool>) -> PyResult<PyObject>",
+        flags: &["numeric-param"],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::NativeTensor::__dlpack_device__(self: &Self) -> (i32, i32)",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::NativeTensor::dtype(self: &Self) -> PyResult<&'static str>",
+        flags: &[],
+    },
+    FrozenSurfaceRow {
+        kind: "binding-pymethod",
+        id: "chelis_python::NativeTensor::shape(self: &Self) -> Vec<usize>",
+        flags: &[],
+    },
+];
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct SurfaceRow {
@@ -113,21 +205,52 @@ fn baseline_bytes() -> Vec<u8> {
         .expect("read reviewed binding census baseline")
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+fn frozen_surface_rows() -> Vec<SurfaceRow> {
+    FROZEN_BINDING_ROWS
+        .iter()
+        .map(|row| SurfaceRow {
+            kind: row.kind.to_string(),
+            id: row.id.to_string(),
+            flags: row.flags.iter().map(|flag| (*flag).to_string()).collect(),
+        })
+        .collect()
+}
+
+fn permanent_baseline_problem(bytes: &[u8]) -> Option<String> {
+    let baseline: Baseline = match serde_json::from_slice(bytes) {
+        Ok(baseline) => baseline,
+        Err(error) => return Some(format!("binding baseline is not valid JSON: {error}")),
+    };
+    if baseline.version != 1 {
+        return Some(format!(
+            "unknown binding census baseline version {}",
+            baseline.version
+        ));
+    }
+    if baseline.citation != PERMANENT_BINDING_DISPOSITION {
+        return Some(format!(
+            "binding disposition changed: expected {PERMANENT_BINDING_DISPOSITION:?}, got {:?}",
+            baseline.citation
+        ));
+    }
+    if baseline.rows != frozen_surface_rows() {
+        return Some(
+            "binding baseline rows differ from the hand-maintained permanent kind/id/flags manifest"
+                .to_string(),
+        );
+    }
+    None
 }
 
 #[test]
 fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
     let baseline_bytes = baseline_bytes();
-    assert_eq!(
-        sha256(&baseline_bytes),
-        FROZEN_BASELINE_SHA256,
+    assert!(
+        permanent_baseline_problem(&baseline_bytes).is_none(),
         "binding census guard changed: editing the baseline is not the fix; dispose the \
          registered signature under dtype_semantics.md section C6 and update the frozen \
-         fingerprint only with that review"
+         complete hand-maintained descriptor manifest only with that review: {:?}",
+        permanent_baseline_problem(&baseline_bytes)
     );
     let baseline: Baseline =
         serde_json::from_slice(&baseline_bytes).expect("binding baseline JSON");
@@ -135,10 +258,7 @@ fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
         baseline.version, 1,
         "unknown binding census baseline version"
     );
-    assert!(
-        baseline.citation.contains("chelis#729"),
-        "the frozen binding baseline must remain liveness-bound to chelis#729"
-    );
+    assert_eq!(baseline.citation, PERMANENT_BINDING_DISPOSITION);
 
     let output = run_typed_enumerator(&registered_surface(false));
     assert!(
@@ -155,6 +275,42 @@ fn registered_pyfunctions_match_the_reviewed_rustdoc_signatures() {
          has no ordinary issue-citation path: redesign onto the typed carrier, remove the \
          ingress, or obtain the explicit C6 review disposition"
     );
+}
+
+#[test]
+fn permanent_binding_disposition_is_bound_to_the_complete_descriptor_set() {
+    let baseline_bytes = baseline_bytes();
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&baseline_bytes).expect("binding baseline JSON");
+    baseline["rows"]
+        .as_array_mut()
+        .expect("binding rows")
+        .push(serde_json::json!({
+            "kind": "binding-pyfunction",
+            "id": "chelis_python::reviewer_probe(dtype: i32) -> i32",
+            "flags": ["raw-dtype-int"]
+        }));
+    let mutated = serde_json::to_vec(&baseline).expect("serialize mutated binding baseline");
+    let problem = permanent_baseline_problem(&mutated)
+        .expect("copying the permanent top-level disposition onto an added row must fail");
+    assert!(
+        problem.contains("permanent kind/id/flags manifest"),
+        "the production manifest guard must reject the copied disposition: {problem}"
+    );
+}
+
+#[test]
+fn a_typed_permanent_disposition_cannot_move_between_families() {
+    let baseline_bytes = baseline_bytes();
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&baseline_bytes).expect("binding baseline JSON");
+    baseline["citation"] = serde_json::json!(
+        "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)"
+    );
+    let mutated = serde_json::to_vec(&baseline).expect("serialize wrong-family binding baseline");
+    let problem = permanent_baseline_problem(&mutated)
+        .expect("the wire disposition must not ratify a binding manifest");
+    assert!(problem.contains("binding disposition changed"), "{problem}");
 }
 
 #[test]
