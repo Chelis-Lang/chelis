@@ -27,6 +27,7 @@ UNIMPLEMENTED_LITERAL = re.compile(
     re.MULTILINE,
 )
 UNIMPLEMENTED_NAME = re.compile(r"\bunimplemented_rejection\b")
+PRODUCTION_RUST_INCLUDE = re.compile(r"\binclude\s*!\s*\(")
 RAW_STRING_START = re.compile(r"(?:br|r)(?P<hashes>#{0,255})\"")
 MANIFEST_REL = Path("spec/design/loud_unsupported_issue_manifest.json")
 OUTPUT_REL = Path("crates/chelis-types/src/rejection_registry_generated.rs")
@@ -122,10 +123,11 @@ def discover_atoms(spec_dir: Path) -> list[str]:
 def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
     """Discover every production ``unimplemented_rejection!`` literal.
 
-    Tests and fixtures are deliberately excluded: only executable production
-    constructors keep an implementation issue live. The checked-in manifest is
-    rendered from this map, so a constructor addition/removal cannot drift from
-    its liveness evidence.
+    Dedicated test trees and fixtures are deliberately excluded. Co-located
+    ``cfg(test)`` code is conservatively counted because this lexical inventory
+    does not evaluate Rust configurations. The checked-in manifest is rendered
+    from this map, so a production constructor addition/removal cannot drift
+    from its liveness evidence.
     """
     authorities: dict[int, list[AuthoritySite]] = {}
     crates = root / "crates"
@@ -151,6 +153,15 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
         source = path.read_text(encoding="utf-8")
         code = _mask_rust_non_code(source)
         relative = relative_path.as_posix()
+        include = PRODUCTION_RUST_INCLUDE.search(code)
+        if include is not None:
+            line = source.count("\n", 0, include.start()) + 1
+            raise RegistryError(
+                f"{relative}:{line}: production include! is forbidden because "
+                "the source-derived authority inventory does not follow include "
+                "edges; move the Rust source into an ordinary module or extend "
+                "the inventory before using this edge"
+            )
         matches = list(UNIMPLEMENTED_LITERAL.finditer(code))
         canonical_names = {match.start("name") for match in matches}
         for name in UNIMPLEMENTED_NAME.finditer(code):

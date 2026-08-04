@@ -348,9 +348,12 @@ REGISTRIES of what actually exists:
   hand edits and additions/removals that do not follow source. The scanner
   masks nested Rust comments and string forms while preserving offsets, so
   historical text cannot manufacture a site and comments or whitespace around
-  macro tokens cannot hide one. Macro aliases and re-exports fail generation:
-  every accepted construction retains the canonical macro name the inventory
-  can locate, while explicit `src/tests/` trees remain test-only.
+  macro tokens cannot hide one. Macro aliases and re-exports fail generation,
+  as does production `include!`: every accepted construction remains in an
+  ordinary Rust module under the scanner's source roots and retains the
+  canonical macro name the inventory can locate. Explicit `src/tests/` trees
+  remain test-only. Co-located `#[cfg(test)]` modules are conservatively counted
+  because this lexical inventory does not evaluate Rust configurations.
 - `Rejection Authority Liveness` runs on every pull request and re-runs when
   its body is edited, not only when authority files or the head SHA change. It
   live-validates the standing source-derived manifest, queries GitHub's

@@ -196,6 +196,30 @@ class IssueManifest(unittest.TestCase):
             )
             self.assertEqual(discover_issue_authorities(root), {})
 
+    def test_production_rust_include_is_rejected_as_an_uninventoried_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text('include! /* gap */ ("../generated.rs");\n')
+            included = root / "crates/example/generated.rs"
+            included.write_text(
+                "let _ = chelis_types::unimplemented_rejection!(999, \"hidden\");\n"
+            )
+            with self.assertRaisesRegex(RegistryError, "production include!"):
+                discover_issue_authorities(root)
+
+    def test_data_include_macros_do_not_create_rust_source_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                'const TEXT: &str = include_str!("data.txt");\n'
+                'const BYTES: &[u8] = include_bytes!("data.bin");\n'
+            )
+            self.assertEqual(discover_issue_authorities(root), {})
+
     def test_rendered_manifest_carries_sites_and_is_source_derived(self) -> None:
         rendered = render_issue_manifest(
             {
