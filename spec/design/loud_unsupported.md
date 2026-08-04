@@ -349,26 +349,34 @@ REGISTRIES of what actually exists:
   masks nested Rust comments and string forms while preserving offsets, so
   historical text cannot manufacture a site and comments or whitespace around
   macro tokens cannot hide one. Macro aliases and re-exports fail generation,
-  as does production `include!`: every accepted construction remains in an
-  ordinary Rust module under the scanner's source roots and retains the
-  canonical macro name the inventory can locate. Explicit `src/tests/` trees
-  remain test-only. Co-located `#[cfg(test)]` modules are conservatively counted
-  because this lexical inventory does not evaluate Rust configurations.
+  as do production `include!` and Rust `path` attributes: every accepted
+  construction remains in an ordinary Rust file under the scanner's source
+  roots and retains the canonical macro name the inventory can locate. Every
+  `src/**/*.rs` file is conservatively counted, including `src/tests/` and
+  co-located `#[cfg(test)]` modules, because directory names do not establish
+  Rust reachability and this lexical inventory does not evaluate configurations.
 - `Rejection Authority Liveness` runs on every pull request and re-runs when
   its body is edited, not only when authority files or the head SHA change. It
   live-validates the standing source-derived manifest, queries GitHub's
-  paginated `closingIssuesReferences` relation (including manual links), and
-  additionally inspects the PR body and every retrievable commit message for
-  closing keywords. The REST commit inventory must equal the event's declared
-  count; the endpoint's 250-commit ceiling therefore fails closed rather than
-  silently truncating a larger PR. A closing reference to an issue with live
-  constructors fails and reports every offending `path:line`; the constructors
-  and generated artifacts must move to their still-open capability owner before
-  the delivered instance can close. Issue comments, PR titles, and repository
-  prose are intentionally not closing-capable merge inputs and are not scanned.
-  Tracker, GraphQL pagination, or PR-commit retrieval failure stays a blocking
-  failure. Membership answers the compile-time question; the per-PR job answers
-  both the current-state and about-to-close lifecycle questions at each run.
+  paginated `closingIssuesReferences` relation (including manual links visible
+  at that run), and additionally inspects the PR body and every retrievable
+  commit message for closing keywords. The REST commit inventory must equal the
+  event's declared count; the endpoint's 250-commit ceiling therefore fails
+  closed rather than silently truncating a larger PR. A closing reference to an
+  issue with live constructors fails and reports every offending `path:line`;
+  the constructors and generated artifacts must move to their still-open
+  capability owner before the delivered instance can close. Issue comments, PR
+  titles, and repository prose are intentionally not closing-capable merge
+  inputs and are not scanned. Tracker, GraphQL pagination, or PR-commit
+  retrieval failure stays a blocking failure. GitHub emits no pull-request
+  workflow activity when a manual sidebar link is added, so the required check
+  cannot claim a new run for that metadata change. A separate
+  `issues.closed` workflow derives authorities from the current default branch
+  and reopens the issue with exact sites when such a late link or direct close
+  strands an authority; inventory ambiguity also reopens fail-closed. Thus
+  membership answers the compile-time question, the per-PR job rejects every
+  closing input observable at each run, and the compensating guard restores the
+  OPEN-state invariant after otherwise unobservable closure metadata.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also

@@ -1,0 +1,34 @@
+name: Rejection Authority Closure Guard
+
+on:
+  issues:
+    types: [closed]
+
+concurrency:
+  group: rejection-authority-closure-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  guard:
+    name: Restore rejection authority liveness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv
+        run: uv venv --python 3.11
+
+      - name: Reopen an issue with live rejection authorities
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .venv/bin/python scripts/reopen_rejection_authority_issue.py

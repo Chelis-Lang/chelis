@@ -43,6 +43,9 @@ def _load_module():
 gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+REJECTION_CLOSURE_YML = (
+    REPO_ROOT / ".github" / "workflows" / "rejection-authority-closure.yml"
+)
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = (
@@ -276,6 +279,18 @@ class RejectionAuthorityLivenessJobTests(unittest.TestCase):
         self.assertIn("scripts/check_rejection_authority_boundary.py", block)
         self.assertIn("scripts/validate_rejection_issue_manifest.py", block)
 
+    def test_closed_issue_backstop_uses_current_default_branch_and_write_scope(self):
+        workflow = REJECTION_CLOSURE_YML.read_text()
+        self.assertIn("issues:\n    types: [closed]", workflow)
+        self.assertIn("ref: ${{ github.event.repository.default_branch }}", workflow)
+        self.assertIn("permissions: {}", workflow)
+        self.assertEqual(workflow.count("      issues: write"), 1)
+        self.assertEqual(workflow.count("      contents: read"), 1)
+        self.assertIn(
+            ".venv/bin/python scripts/reopen_rejection_authority_issue.py",
+            workflow,
+        )
+
 
 class DiagnosticKindOracleJobTests(unittest.TestCase):
     def test_job_is_change_gated_and_executes_the_mutation_oracle(self):
@@ -312,6 +327,9 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
 # and .github/workflows/conformance.yml).
 NON_GATE_WORKFLOWS = {
     "ci.yml",
+    # Closed-issue compensation for [05-UNS-5] runs only on issue lifecycle
+    # events and invokes a network-backed Python guard, not the developer gate.
+    "rejection-authority-closure.yml",
     "smt-full-prove.yml",
     "heavy-e2e.yml",
     "release.yml",

@@ -48,6 +48,11 @@ class DiscoverAtoms(unittest.TestCase):
 
 
 class IssueManifest(unittest.TestCase):
+    def test_missing_crates_root_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaisesRegex(RegistryError, "missing crates source root"):
+                discover_issue_authorities(Path(raw))
+
     def write_manifest(self, root: Path, issues: list[dict]) -> Path:
         path = root / "issues.json"
         path.write_text(json.dumps({"schema": 2, "issues": issues}))
@@ -186,7 +191,7 @@ class IssueManifest(unittest.TestCase):
                 {714: [AuthoritySite("crates/example/build.rs", 2)]},
             )
 
-    def test_src_test_module_is_not_a_production_authority_owner(self) -> None:
+    def test_src_test_named_module_is_conservatively_inventoried(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             source = root / "crates/example/src/tests/probe.rs"
@@ -194,7 +199,14 @@ class IssueManifest(unittest.TestCase):
             source.write_text(
                 "let _ = chelis_types::unimplemented_rejection!(999, \"test-only\");\n"
             )
-            self.assertEqual(discover_issue_authorities(root), {})
+            self.assertEqual(
+                discover_issue_authorities(root),
+                {
+                    999: [
+                        AuthoritySite("crates/example/src/tests/probe.rs", 1),
+                    ]
+                },
+            )
 
     def test_production_rust_include_is_rejected_as_an_uninventoried_edge(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -217,6 +229,43 @@ class IssueManifest(unittest.TestCase):
             source.write_text(
                 'const TEXT: &str = include_str!("data.txt");\n'
                 'const BYTES: &[u8] = include_bytes!("data.bin");\n'
+            )
+            self.assertEqual(discover_issue_authorities(root), {})
+
+    def test_production_path_attribute_is_rejected_as_an_uninventoried_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text('#[path /* gap */ = "../generated.rs"]\nmod generated;\n')
+            included = root / "crates/example/generated.rs"
+            included.write_text(
+                "let _ = chelis_types::unimplemented_rejection!(999, \"hidden\");\n"
+            )
+            with self.assertRaisesRegex(RegistryError, "production path attribute"):
+                discover_issue_authorities(root)
+
+    def test_cfg_attr_path_is_also_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                '#[cfg_attr(feature = "generated", path = "../generated.rs")]\n'
+                "mod generated;\n"
+            )
+            with self.assertRaisesRegex(RegistryError, "production path attribute"):
+                discover_issue_authorities(root)
+
+    def test_path_text_outside_an_attribute_is_not_a_source_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                '// #[path = "comment.rs"]\n'
+                'const TEXT: &str = r##"#[path = "raw.rs"]"##;\n'
+                "let path = 1;\n"
             )
             self.assertEqual(discover_issue_authorities(root), {})
 

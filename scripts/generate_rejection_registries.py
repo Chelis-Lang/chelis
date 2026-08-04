@@ -28,6 +28,7 @@ UNIMPLEMENTED_LITERAL = re.compile(
 )
 UNIMPLEMENTED_NAME = re.compile(r"\bunimplemented_rejection\b")
 PRODUCTION_RUST_INCLUDE = re.compile(r"\binclude\s*!\s*\(")
+PRODUCTION_PATH_ATTRIBUTE = re.compile(r"#\s*\[[^\]]*\bpath\s*=")
 RAW_STRING_START = re.compile(r"(?:br|r)(?P<hashes>#{0,255})\"")
 MANIFEST_REL = Path("spec/design/loud_unsupported_issue_manifest.json")
 OUTPUT_REL = Path("crates/chelis-types/src/rejection_registry_generated.rs")
@@ -131,6 +132,8 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
     """
     authorities: dict[int, list[AuthoritySite]] = {}
     crates = root / "crates"
+    if not crates.is_dir():
+        raise RegistryError(f"missing crates source root: {crates}")
     paths: list[Path] = []
     for crate in sorted(crates.glob("*")):
         if not crate.is_dir():
@@ -144,8 +147,6 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
 
     for path in sorted(set(paths)):
         relative_path = path.relative_to(root)
-        if "tests" in relative_path.parts:
-            continue
         if relative_path.as_posix() == "crates/chelis-types/src/unsupported.rs":
             # This is the macro definition and private builder owner, not a
             # construction site. Its shape is locked by the boundary checker.
@@ -161,6 +162,15 @@ def discover_issue_authorities(root: Path) -> dict[int, list[AuthoritySite]]:
                 "the source-derived authority inventory does not follow include "
                 "edges; move the Rust source into an ordinary module or extend "
                 "the inventory before using this edge"
+            )
+        path_attribute = PRODUCTION_PATH_ATTRIBUTE.search(code)
+        if path_attribute is not None:
+            line = source.count("\n", 0, path_attribute.start()) + 1
+            raise RegistryError(
+                f"{relative}:{line}: production path attribute is forbidden "
+                "because the source-derived authority inventory does not follow "
+                "out-of-tree module edges; use the ordinary module layout or "
+                "extend the inventory before using this attribute"
             )
         matches = list(UNIMPLEMENTED_LITERAL.finditer(code))
         canonical_names = {match.start("name") for match in matches}
