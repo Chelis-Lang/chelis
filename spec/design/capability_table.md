@@ -143,7 +143,7 @@ authored:
 | C-DAG x int64 x `max_elem`/`abs` etc. ([#691]) | B-cells `Unimplemented { issue: #691 }` until integer kernels land - the fmaxf/fabsf substitution becomes a rejection. Status 2026-08-04: the direct DAG integer path is repaired ([#729] Phase 3 dispatches integer min/max/abs through exact checked integer paths, per the roadmap's unclaimed-issue ledger), and [#691] stays OPEN only under the [#730] rejection-authority liveness pin until PR #1164 rehomes the emitter citations |
 | Metal x int64 x `abs` ([#693]/[#699]) | A is `Supported`; Metal B-cell `Implemented` once [#699]'s raise lands and the MSL integer path is wired; until then `Unimplemented { issue: #693 }` |
 | `bitand`/`bitor`/`bitxor`/`shl`/`shr` x Scalar x int widths ([#682]) | `Supported`; C B-cells `Implemented`; shifts use the width-bounded unsigned helpers required by [04-NUM-13], never raw signed C shifts |
-| `to_string` x Tensor/List ([#734]) | `Supported` (eval already stringifies); C B-cell `Unimplemented { issue: #734 }` until the emitter renders via [#732]'s formatter |
+| `to_string` x Tensor/List ([#1059]) | `Supported` (eval already stringifies); C B-cell `Unimplemented { issue: #1059 }` until the emitter renders via [#732]'s formatter. Re-cited 2026-08-04: [#734] owned only removing the `<value>` substitution and closed when the rejection landed, so it can no longer authorize a cell; [#1059] owns implementing the compiled capability and is the open owner |
 | `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
 | named lossy cast x directions x dtypes ([#759]) | future explicit truncating/narrowing rung over the checked-cast DEFAULT. Phase 1 implements the default only ([04-NUM-14]: target finalization; fractional float-to-int traps `Domain`; strict 0/1 bool; int-to-float IEEE RNE may lose exactness). Per-direction lossy rules remain to be authored as atoms (same discipline as [#753]) and implemented with [#729] Phase 2's kernel work - never the default; bool remains out of scope per [04-NUM-4] |
 
@@ -276,6 +276,7 @@ before it lands.
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
 [#733]: https://github.com/Chelis-Lang/chelis/issues/733
 [#734]: https://github.com/Chelis-Lang/chelis/issues/734
+[#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
 [#753]: https://github.com/Chelis-Lang/chelis/issues/753
 [#759]: https://github.com/Chelis-Lang/chelis/issues/759
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908

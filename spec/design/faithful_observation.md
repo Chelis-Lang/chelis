@@ -730,23 +730,24 @@ observation harness, this plan's own instrument. Phase 4 capability cells and
 the staged manual Decimal fixtures remain outside this oracle; no Phase 3
 value cell is hidden behind `#[ignore]`.
 
-**Continuous execution:** this command is a MANUAL gate. Neither
-`scripts/faithful_observation_phase2_oracle.py` nor
-`scripts/faithful_observation_phase3_oracle.py` is invoked under its own name by
-any CI workflow or by `scripts/gate.py`. What runs on every PR is the Phase 3
-oracle as a nested leg of `.venv/bin/python scripts/dtype_phase3_oracle.py`,
-which the required Linux `Dtype Phase 0-3 Oracle` job runs and the Integration
-job depends on. Re-measured 2026-08-04, that nesting does not reach THIS
-command: `dtype_phase3_oracle.py`'s legs are `dtype_phase2_oracle.py`,
+**Continuous execution:** THIS Phase 2 command is a MANUAL gate, and the split
+matters. `scripts/faithful_observation_phase2_oracle.py` is invoked by no CI
+workflow, by `scripts/gate.py`, and by no other oracle: re-measured 2026-08-04,
+`dtype_phase3_oracle.py`'s legs are `dtype_phase2_oracle.py`,
 `faithful_observation_phase3_oracle.py`, and the compiled-C cargo suites, and
-none of them invokes this script. The ledger equality, `FORMAT_CLASS_TABLE`,
+none of them reaches this script. The ledger equality, `FORMAT_CLASS_TABLE`,
 doc-citation parity, `B2_RULE_INSTRUMENTS` manifest, and runtime
 consumed-result receipts therefore run only when this command is invoked by
-hand. The constituent Rust cells still run continuously, under macOS Smoke's
-`cargo nextest run --workspace`, so a red CELL is caught on every PR while a
-narrowed corpus or a tampered instrument is not. Wiring this oracle into the
-same nesting is open work; this plan owns its contents and pass criteria
-either way.
+hand. The **Phase 3** oracle is the opposite case and runs continuously: it is
+a nested leg of `.venv/bin/python scripts/dtype_phase3_oracle.py`, which the
+Linux `Dtype Phase 0-3 Oracle` job runs on every non-docs-only PR (that job and
+macOS Smoke both skip when `changes.outputs.docs_only` is true), and
+`scripts/test_nextest_profile_partition.py` fails if the nesting is removed.
+The Phase 2 corpus's constituent Rust cells also run under macOS Smoke's
+`cargo nextest run --workspace` on those same PRs, so a red CELL is caught
+continuously while a narrowed corpus or a tampered instrument is not. Wiring
+this Phase 2 command into the same nesting is open work; this plan owns its
+contents and pass criteria either way.
 
 **Delivered** (2026-07-24), with five recorded notes (note 5 added
 2026-07-28, with the oracle it describes). (1) The
@@ -881,11 +882,17 @@ make it pass.
 The sole allowed ignore is
 `parity_transformer_block_library_only`, whose exact reason is the
 environmental system-CBLAS prerequisite. There are no value-divergence
-ignores. This composite command is a MANUAL gate: no CI workflow and no
-`scripts/gate.py` stage invokes it under its own name. It reaches CI only as a
-nested leg of `.venv/bin/python scripts/dtype_phase3_oracle.py`, which the
-required Linux `Dtype Phase 0-3 Oracle` job runs on every PR (verified
-2026-08-04). The individual Rust suites run continuously under workspace
+ignores. This composite command runs CONTINUOUSLY, though not under its own
+name: no CI workflow and no `scripts/gate.py` stage invokes it directly, and it
+reaches CI as a nested leg of
+`.venv/bin/python scripts/dtype_phase3_oracle.py`, which the Linux
+`Dtype Phase 0-3 Oracle` job runs on every non-docs-only PR (verified
+2026-08-04; that job skips when `changes.outputs.docs_only` is true, as does
+macOS Smoke). The nesting is not incidental:
+`scripts/test_nextest_profile_partition.py` fails with "Phase 3 no longer
+inherits faithful_observation_phase3_oracle.py" if it is removed, and it reads
+this oracle's `SUITE_COMMANDS` as the executable manifest of what the dtype
+oracle covers. The individual Rust suites also run under workspace
 nextest, while `scripts/test_faithful_observation_phase3_oracle.py` runs in
 CI's script-unit stage and mutation-checks the oracle's structural guards.
 Run the composite command before phase acceptance; byte-exact output is the

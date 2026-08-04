@@ -340,13 +340,35 @@ the sequencing above, this ordering is advice, not law; a cut may move if a
 cell becomes urgent.
 
 Current baseline (2026-08-04): **v0.18.3 is shipped**. Two further patch cuts
-landed on the v0.18 line after v0.18.1: **v0.18.2** (2026-08-03) added the
-`chelis-std` CSV/JSON serializers (chelis#928) and the eval-lane JSON I/O
-builtins (chelis#890), and **v0.18.3** (2026-08-04) added `cast_trunc`, the
-named truncating float-to-integer cast (chelis#759). Neither moved an
-exact-output or wire expectation, so neither is a migration cut in the sense
-the table below uses; v0.18.3's one source-visible delta is that `cast_trunc`
-became a reserved word. The v0.17 and v0.18 rows
+landed on the v0.18 line after v0.18.1, and the second of them is a real
+migration cut - do not read the patch-level version as "mechanical".
+
+**v0.18.2** (2026-08-03) was additive: the `chelis-std` CSV/JSON serializers
+(chelis#928), the eval-lane JSON/CSV builtin families (chelis#890, chelis#903),
+`chelis eval --timeout` (chelis#914, chelis#930), Nix packages and a Devenv
+shell (chelis#907), [#729] Phase 2's typed integer semantics, and exact
+trapping integer `abs` in C (chelis#1065). Its one source-visible delta went
+the wrong way and shipped as a **recorded divergence**: eval's `shape` returned
+int32 against [05-DIM-2]'s int64 SHALL, released with an explicit
+do-not-migrate-onto note rather than a migration instruction (chelis#1120).
+
+**v0.18.3** (2026-08-04) is both a **source migration** and an **exact-output
+migration**, per its own release record:
+
+- [05-DIM-1]/[05-DIM-2] extent dtypes shipped (chelis#1130, for chelis#1112):
+  `shape()` now returns int64 and the movement bounds (`shrink`/`pad`/`stride`/
+  `expand` extents) take int64. Bare int32 extent call sites become check
+  errors - extents get `i64` suffixes, while axis parameters stay int32. This
+  also retires 0.18.2's chelis#1120 divergence, so a shell that skipped 0.18.2
+  migrates once rather than twice.
+- Compiled-lane `round` now half-ties to even (chelis#1142): an exact-output
+  change on half-tie values that brings C into conformance with
+  roundTiesToEven. Eval was already conforming.
+- `cast_trunc` exists as [05-OP-6] and is a new reserved word (chelis#1144):
+  identifiers named `cast_trunc` no longer parse, and shells blocked by
+  [04-NUM-14]'s fractional-cast trap migrate each site onto it.
+
+The v0.17 and v0.18 rows
 below are therefore historical records, while v0.19 and v0.20 remain planned
 cuts. v0.18.1 already shipped [05-OBS-6]'s `name = ` prefix in both lanes. It
 did not deliver the manifested root set/order, unavailable-root behavior, or
@@ -385,14 +407,18 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 | **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the one wire break and one root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
 | **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
-Net downstream shape: the original four-cut `conform` model remains one bump,
-probe re-run, and inventory refresh per minor cut. Actual history inserted one
-additional shipped contract patch: **v0.18.1** changed exact root-output
-expectations by adding the [05-OBS-6] prefix. The source-visible waves are now
-shipped **v0.17** (seed suffix + fixing loud-rejected code), shipped
-**v0.18.1** (root label prefix), and planned **v0.19** (wire/capability behavior
+Net downstream shape: the original four-cut `conform` model assumed one bump,
+probe re-run, and inventory refresh per minor cut. Actual history inserted two
+additional shipped contract patches: **v0.18.1** changed exact root-output
+expectations by adding the [05-OBS-6] prefix, and **v0.18.3** changed both
+source (int64 extents) and exact output (compiled `round` half-ties). The
+source-visible waves are now shipped **v0.17** (seed suffix + fixing
+loud-rejected code), shipped **v0.18.1** (root label prefix), shipped
+**v0.18.3** (int64 extents, `round` half-ties, the `cast_trunc` reserved word),
+and planned **v0.19** (wire/capability behavior
 + manifested root topology). v0.20 remains mechanical. No later wave may undo
-or restyle an earlier one.
+or restyle an earlier one - and a patch-level version number is not by itself
+evidence that a cut is mechanical.
 
 Cadence for non-contract work: an **internal-only** change (a refactor, a
 checker-internal fix, doc-only work) normally **rides the next planned cut**
@@ -451,8 +477,11 @@ patch.
 
 Every minor cut gets a mechanical `conform bump` PR wave across the shells;
 the 0.17 and 0.19 source-migration cuts additionally carry real source edits.
-The shipped v0.18.1 patch was an extra exact-output expectation migration and
-therefore owed the same probe and inventory refresh. Each wave carries:
+The shipped v0.18.1 patch was an extra exact-output expectation migration, and
+the shipped v0.18.3 patch carried both a source migration (int64 extents) and
+an exact-output one (compiled `round` half-ties); each owed the same probe and
+inventory refresh, and 0.18.3 owed real source edits as well. Each wave
+carries:
 
 - a migration note as the **breaking-change summary** (the delta below), the
   `chelis#NNN` refs it closes, and the exact surface that changed - not the full
@@ -495,6 +524,15 @@ Migration-note stubs (the breaking delta per cut):
   the `name = value` prefix in both lanes. Update exact stdout expectations;
   payload digits and value shape are unchanged. This does not yet promise the
   complete manifested root set/order or unavailable-root diagnostics."
+- **0.18.3** (source + exact-output migration, shipped) - "`shape()` returns
+  int64 and the movement bounds (`shrink`/`pad`/`stride`/`expand` extents) take
+  int64 per [05-DIM-1]/[05-DIM-2]; bare int32 extent call sites are now check
+  errors, so suffix extents `i64`. Axis parameters are unchanged at int32.
+  Compiled `round` half-ties to even, an exact-output change on half-tie values
+  only. `cast_trunc` is a new reserved word: rename any identifier using it, and
+  migrate sites blocked by [04-NUM-14]'s fractional-cast trap onto it. This cut
+  also retires 0.18.2's recorded int32-`shape` divergence, so do not migrate
+  onto 0.18.2's shape return."
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
   payload shape changed), narrow dtypes preserved end-to-end. Eval float tensor
