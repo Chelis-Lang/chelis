@@ -1,4 +1,4 @@
-# The Capability Table: schema for the op x dtype x lane authority
+# The Capability Table: schema for the op x parameter x lane authority
 
 **Status:** Schema contract, pre-implementation. The table is delivered by
 `spec/design/dtype_semantics.md` ([#729]) Phase 4. This document owns the
@@ -22,7 +22,9 @@ representation only. Numeric finalization, storage, operation semantics, and
 kernel behavior remain in `dtype_semantics.md` and its consumers.
 
 The schema separates target-independent operation semantics from
-per-backend implementation status.
+per-backend implementation status. Tables A and B cover operations; the
+companion host-ABI constructor table applies the same closed-disposition rule
+to recursive host types without becoming a third operation authority.
 
 The same separation governs host types. `HostTypeTerm -> ConcreteHostType` is
 a logical-resolution boundary over checked metadata and does not consult a
@@ -56,7 +58,17 @@ not a Table-A or Table-B row expansion.
 
 ### Table A - the semantic table (target-independent; the checker's law)
 
-One row per **(builtin, surface, dtype)**:
+One row per **(builtin, surface, operand dtype, semantic-parameter case)**.
+Every builtin declares a finite semantic-parameter product. The product is
+`Unit` for an op with no dtype-valued parameter. A dtype-valued argument adds
+one closed `Prim` axis, so checked `cast` expands to every
+`(source Prim, target Prim, surface)` case rather than one ambiguous "cast x
+dtype" row. Multiple dtype-valued arguments form the ordinary Cartesian
+product. Authoring macros may state a class, but the machine form expands
+every `Prim`; a new `Prim` or parameter axis therefore creates compile-time
+holes rather than silently inheriting a neighbor's disposition.
+
+The row fields are:
 
 - **builtin** - the user-facing name (`add`, `mean`, `bitand`, `abs`,
   `reduce_window_max`, `to_string`, ...). NOT `RiscOp`: several audited
@@ -66,10 +78,15 @@ One row per **(builtin, surface, dtype)**:
 - **surface** - `Scalar | Tensor`, always separate rows. Non-negotiable:
   the audit measured opposite behaviors per surface within single lanes
   ([#715] scalar-stubs vs correct tensors; [#718]'s inverted width matrix).
-- **dtype** - one row per `Prim` (rows may be authored via dtype-class
+- **operand dtype** - one row per `Prim` (rows may be authored via dtype-class
   macros - "all integer widths" - but EXPAND to per-Prim rows in the
   machine-readable form, so a new Prim variant leaves visible holes the
   generator turns into compile errors).
+- **semantic-parameter case** - the expanded tuple of dtype-valued arguments
+  that can change legality or semantics. For `cast`, this is the target Prim;
+  paired with the operand dtype it is the complete source x target matrix.
+  Literal values, axes, and windows do not become unbounded table axes: their
+  validity remains a rule in `sig`.
 - **cell** - `Supported { sig, atom }` or `Rejected { reason, atom }`:
   - `sig`: the result type/shape rule (e.g. `mean: tensor[n, f32] ->
     tensor[f32]`), which the checker derives from - deleting the
@@ -87,7 +104,9 @@ One row per **(builtin, surface, dtype)**:
 Effects are NOT rows (they are constructs, not ops - `EffectKind` +
 checker totality, [#730]/[#731]). Movement ops and reductions are ordinary
 rows; parameter constraints (axis validity, window literalness per [#725]'s
-resolution) live in `sig`, not in extra axes.
+resolution) live in `sig`, not in extra axes. The finite product is only for
+closed semantic choices such as a target dtype; it is not an enumeration of
+runtime values.
 
 ### Table B - the backend table (per-target reality)
 
@@ -112,6 +131,35 @@ reference lane needs conformance rows too):
     existing exemplary diagnostic becomes this cell's rendering; Metal's
     rank-1 limit is a `sig`-level constraint on its B-cells).
 
+### Companion host-ABI constructor table
+
+Concrete host types are recursive, so enumerating observed complete shapes
+would recreate [#955] whenever constructors nest in a new order. The machine
+schema therefore carries a companion closed table keyed by
+**(host constructor, position, backend)**. `position` distinguishes a
+constructor's represented fields when their ABI roles differ. Each cell is:
+
+- `Represented { abi-constructor }`;
+- `Unimplemented { issue, diagnostic }`; or
+- `RejectedByDesign { reason, atom }`.
+
+Primitive leaves use the operation-specific typed-carrier projection of the
+corresponding Table-B row. Product,
+tuple, `List`, `Option`, and every other admitted host constructor compose
+recursively from their cell and their children's dispositions. A composite is
+represented if and only if its constructor and every child are represented;
+otherwise the first structural child in source order returns its exact typed
+authority. There is no `Unknown`, wildcard ABI, or concrete-shape exception.
+Consequently, if `List`, `Option`, and `T` are represented for `c-host`, then
+both `List<Option<T>>` and `Option<List<T>>` are represented without new rows.
+
+The generated constructor-pair suite nests every constructor inside every
+other constructor in each legal position, in both orders where distinct, and
+checks a represented leaf plus every negative disposition. Adding a
+constructor makes both the recursive resolver and this suite incomplete at
+compile time. This is [#730] LU4's permanent mechanism for [#955], not a table
+of the shapes that happened to appear in the report.
+
 ## Derivations (what consumes which table)
 
 | consumer | derives from | mechanism |
@@ -121,7 +169,9 @@ reference lane needs conformance rows too):
 | build gates | B | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
 | backend dispatch | B | macro-generated skeletons; missing arm = compile error |
 | [#912] builtin realizability and target sets | A + B | generated routing projection; target-independent legality comes from A and per-backend availability from B, with no independently authored support list |
-| conformance suite | A x B | every (`Supported`, `Implemented`) cell executed in every backend, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it |
+| conformance suite | expanded A parameter product x B + host constructor table | every (`Supported`, `Implemented`) source x semantic-parameter x surface x backend cell executed, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it; every legal constructor pair is composed in both nesting orders |
+| checked host-cast plan | expanded `cast` A rows + c-host B cells | [#730] LU6 derives an exhaustive source x target plan; exact same-type pairs alone are identity, and every other pair selects its checked implementation or exact typed rejection |
+| host-type resolution | host constructor table + operation-specific Table-B typed-carrier projections | recursive composition; no inventory of concrete nested shapes and no default ABI |
 | [#733] citations | A + B | the table schema requires controlling atom revisions; the pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
 
 ## Seed decisions the table must ship with
@@ -149,6 +199,7 @@ authored:
 | `to_string` x Tensor/List ([#1059]) | `Supported` (eval already stringifies); C B-cell `Unimplemented { issue: #1059 }` until the emitter renders via [#732]'s formatter. Re-cited 2026-08-04: [#734] owned only removing the `<value>` substitution and closed when the rejection landed, so it can no longer authorize a cell; [#1059] owns implementing the compiled capability and is the open owner |
 | `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
 | named lossy cast x directions x dtypes ([#759]) | future explicit truncating/narrowing rung over the checked-cast DEFAULT. Phase 1 implements the default only ([04-NUM-14]: target finalization; fractional float-to-int traps `Domain`; strict 0/1 bool; int-to-float IEEE RNE may lose exactness). Per-direction lossy rules remain to be authored as atoms (same discipline as [#753]) and implemented with [#729] Phase 2's kernel work - never the default; bool remains out of scope per [04-NUM-4] |
+| checked `cast` x source dtype x target dtype x both surfaces ([#1150], [#1152]) | `Supported` and governed by [04-NUM-14] for every admitted pair; identity exists only where source and target Prim are equal. Every B-cell either names the checked implementation or carries an exact typed rejection. The generated conformance rows include in-range, fractional, non-finite, overflow, and mixed-offender tensors. Per [04-NUM-15], mixed offenders select the trap attached to the lowest row-major flat index in every lane, including parallel C. [#730] LU6 consumes these cells for host emission; [#729] owns conversion and indexed-trap semantics |
 
 ## New numeric ops before the table lands (added 2026-07-30)
 
@@ -182,7 +233,8 @@ runtime or exported stdlib
 numeric callable authors a new `[05-OP-N]` normative atom in spec/05
 and adds its exact registry mapping in the same change set. The
 deferred PyO3 leg must deliver the same identity-to-authority shape
-before Phase 1 entry. Table A's (builtin, surface, dtype) key
+before Phase 1 entry. Table A's
+(builtin, surface, operand dtype, semantic-parameter case) key
 deliberately does NOT stretch to those families: runtime exports and
 PyO3 functions have no `BuiltinId`, and container/boundary callables
 have no `Scalar|Tensor` surface - the `to_string` x Tensor/List seed
@@ -251,8 +303,10 @@ before it lands.
    exactness, are per-path facts).
 3. Signature language for `sig` (how much shape/param constraint is
    expressible; where [#725]'s "window must be literal" rule sits).
-4. Row count management (builtins x 2 surfaces x 10 dtypes is a few
-   thousand cells; the dtype-class authoring macro's ergonomics).
+4. Row count management (builtins x surfaces x operand dtypes x each finite
+   semantic-parameter product is a few thousand cells before cast-like
+   products; the authoring macros must stay compact while the machine form
+   remains fully expanded).
 5. Surface axis for container/boundary callables: the `to_string` x
    Tensor/List seed row already names a `List` surface the
    `Scalar|Tensor` axis forbids (PR #950 red team P1-2). Decide before
@@ -292,5 +346,8 @@ Phase 4 under those atoms, not as a grandfathered exemption.
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#937]: https://github.com/Chelis-Lang/chelis/issues/937
+[#955]: https://github.com/Chelis-Lang/chelis/issues/955
 [#1009]: https://github.com/Chelis-Lang/chelis/issues/1009
+[#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
+[#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717

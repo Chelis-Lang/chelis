@@ -679,7 +679,8 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    below).
 3. **Ops**: a new numeric operation exists only with a decided row in the
    registry that owns its FAMILY. Table A's key is
-   (builtin, surface, dtype) and stays the LANGUAGE-BUILTIN law;
+   (builtin, surface, operand dtype, semantic-parameter case) and stays the
+   LANGUAGE-BUILTIN law;
    runtime exports, prelude/stdlib defs, and binding functions do not
    fit that key - no `BuiltinId`, no `Scalar|Tensor` surface (PR #950
    red team P1-2, which also caught the pre-existing strain in the
@@ -1594,18 +1595,65 @@ The required Linux Integration job invokes this nested oracle after the
 normal integration gate, so Phases 0-3 remain continuous without duplicating
 their commands in `scripts/gate.py`.
 
+## Post-Phase-3 checked-cast maintenance ([#1150], [#1152])
+
+This is a named maintenance item under [#729], not a new phase and not a
+license to patch either reported site independently. [04-NUM-14] already
+decides checked conversion and [04-NUM-15] already decides multi-offender
+order. The implementation must make those rules one construction shared by
+every checked-cast lane.
+
+The capability schema expands checked `cast` over the finite
+`source Prim x target Prim x surface x backend` product. Every admitted pair
+has an exact conversion plan; identity is legal only when source and target
+are the same Prim. The evaluator finalizer, C DAG emitter, and C host emitter
+consume that plan or a mechanically equivalent generated projection. No lane
+may carry an `_ => input` arm or invent its own source/target roster. [#730]
+LU6 owns the typed host-emission boundary and its rejection rendering; this
+item owns which checked conversion a supported cell performs.
+
+Elementwise trapping conversions produce a shared semantic value equivalent
+to:
+
+```text
+IndexedTrapCandidate { flat_index, trap }
+```
+
+where `flat_index` is the row-major flat index governed by [04-NUM-15] and
+`trap` is the exact [04-NUM-14] failure at that element. A lane reduces
+candidates by minimum `flat_index` and reports that candidate's trap. The
+evaluator therefore has no domain-first whole-buffer pre-pass. A parallel C
+lane accumulates a private candidate per worker and reduces those candidates
+after the parallel region; it never races on a shared trap flag and need not
+serialize correct element conversion. Empty candidate sets complete
+successfully.
+
+The work item lands atomically with a generated interim conformance matrix
+over every active source/target pair and both scalar/tensor surfaces in eval,
+C DAG, and C host lanes. Each applicable pair has positive in-range coverage
+and negative fractional, non-finite, and overflow coverage. Mixed-offender
+tensors permute trap kinds across lower and higher flat indices and run the C
+case at multiple thread counts; all lanes select the lowest index. Structural
+mutations replace one non-identity conversion with identity, restore the
+domain-first pre-pass, and make the C winner schedule-dependent; each is red.
+Phase 4 generates this same product permanently from Tables A/B rather than
+retaining a cast-specific hand list.
+
 ## Phase 4 - the capability table becomes the permanent guard
 
-The table's SCHEMA is owned by `spec/design/capability_table.md` (the
-two-table design: semantic table A, per-backend table B; per-Prim rows;
-scalar/tensor surfaces separate; atom citations mandatory) - read it
-before this phase; its seed-decision list is this phase's work-list.
+The table's SCHEMA is owned by `spec/design/capability_table.md` (the two
+operation tables: semantic table A and per-backend table B; finite
+semantic-parameter products expanded per Prim; scalar/tensor surfaces
+separate; atom citations mandatory; plus the companion recursive host-ABI
+constructor table) - read it before this phase; its seed-decision list is this
+phase's work-list.
 
 **You inherit:** two agreeing lanes and a hand-curated matrix of tests.
 
 **You deliver:**
 
-1. The `const` op x dtype table (`Supported | Rejected(&'static str)`),
+1. The `const` op x dtype x finite-semantic-parameter table
+   (`Supported | Rejected(&'static str)`),
    with the never-authored cells decided on the record: integer `mean`
    ([#724] - reject, widen, or authored floor-mean), bool arithmetic
    ([#726] - proposal default: reject, diagnostics pointing at explicit
@@ -1617,9 +1665,10 @@ before this phase; its seed-decision list is this phase's work-list.
 3. Backend dispatch skeletons macro-generated from the table: a
    `Supported` cell with no kernel is a compile error in that backend; a
    kernel with no cell is dead code the build flags.
-4. The generated conformance suite: every `Supported` cell executed in
-   every lane asserting exact agreement (or the spec/05 §8 tolerance row
-   §C4.5 points at), every
+4. The generated conformance suite: every expanded `Supported` cell executed
+   in every lane asserting exact agreement (or the spec/05 §8 tolerance row
+   §C4.5 points at), including the complete checked-cast source x target
+   product; every
    `Rejected` cell asserting the same diagnostic from every lane. This
    suite REPLACES the hand-written matrix files as the standing guard;
    the audit files remain as regression archaeology.
@@ -1627,6 +1676,10 @@ before this phase; its seed-decision list is this phase's work-list.
    capability sets become generated projections of Tables A/B. The root
    manifest may consume those projections and the checked root set, but it
    cannot remain an independently authored builtin/backend authority.
+6. The recursive host-ABI constructor table and generated pairwise
+   composition suite. Host-type lowering derives concrete nestings from
+   constructor and child dispositions; it never curates an inventory of
+   shapes such as the [#955] `Option`/`List` report.
 
 **Why deliverable 4 is generated rather than curated (measured, chelis#937).**
 `uniform_like` on an f64 tensor in the compiled C lane returned near-zero
@@ -1674,6 +1727,14 @@ different decisions:
 - Before Table B is generated, [#730] may use only a private exhaustive target
   adapter whose negative decisions cite a spec atom or implementation issue.
   Phase 4 replaces those decisions without changing the HostType/ABI boundary.
+- The companion host-ABI constructor table composes recursive host types from
+  closed constructor and child dispositions. [#730] LU4 owns the total typed
+  resolver and rejection channel; this plan owns the backend dispositions.
+  Neither plan may enumerate concrete `Option`/`List` nestings as policy.
+- Checked `cast` is a finite source x target x surface x backend product.
+  This plan owns conversion semantics and `IndexedTrapCandidate`'s lowest-flat-
+  index selection ([#1150], [#1152]); [#730] LU6 owns exhaustive host-emission
+  planning and the typed negative channel. Identity is not a fallback.
 - Table A rejections are reported by the checker because they are
   target-independent. Table B `Unimplemented` and `RejectedByDesign` cells are
   reported by build/lowering where the target is known, using [#730]'s
@@ -1703,6 +1764,7 @@ updates this section, `loud_unsupported.md` §I1, and
 | 2 | [#680], [#688], [#711], [#718] eval cells, [#722] eval half |
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
 | 4 | [#692], [#712], [#715] lane skew, [#724]/[#726] authored, future lane skew as a class |
+| maintenance | [#878] migrates the last raw Pad constant carrier; [#937] supplies the missing-cell evidence for the generated matrix; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
 Orthogonal, do not wait: [#703]'s loud-fallback discipline (now its own
 plan: `spec/design/loud_unsupported.md`, tracking [#730], whose §I1
@@ -1733,6 +1795,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#753]: https://github.com/Chelis-Lang/chelis/issues/753
 [#759]: https://github.com/Chelis-Lang/chelis/issues/759
 [#775]: https://github.com/Chelis-Lang/chelis/issues/775
+[#878]: https://github.com/Chelis-Lang/chelis/issues/878
 [#688]: https://github.com/Chelis-Lang/chelis/issues/688
 [#692]: https://github.com/Chelis-Lang/chelis/issues/692
 [#695]: https://github.com/Chelis-Lang/chelis/issues/695
@@ -1765,4 +1828,8 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#878]: https://github.com/Chelis-Lang/chelis/issues/878
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#937]: https://github.com/Chelis-Lang/chelis/issues/937
+[#955]: https://github.com/Chelis-Lang/chelis/issues/955
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
+[#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
+[#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
