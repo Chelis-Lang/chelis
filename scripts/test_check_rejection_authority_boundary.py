@@ -125,6 +125,44 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         errors = MODULE.validate_source(mutated)
         self.assertTrue(any("public item inventory" in error for error in errors), errors)
 
+    def test_balanced_private_alias_standard_trait_impl_is_rejected(self):
+        mutated = self.source.replace(
+            "        issue: IssueRef,",
+            "        issue: RedteamIssueAlias,",
+            1,
+        ).replace(
+            "    authority: RejectionAuthority,",
+            "    authority: RedteamAuthorityAlias,",
+            1,
+        )
+        mutated += (
+            "\ntype RedteamIssueAlias = IssueRef;\n"
+            "type RedteamAuthorityAlias = RejectionAuthority;\n"
+            "impl From<u32> for RedteamIssueAlias {\n"
+            "    fn from(value: u32) -> Self {\n"
+            "        Self(NonZeroU32::new(value).unwrap())\n"
+            "    }\n"
+            "}\n"
+            "impl From<u32> for RedteamAuthorityAlias {\n"
+            "    fn from(value: u32) -> Self {\n"
+            "        Self::unimplemented(RedteamIssueAlias::from(value), \"forged\")"
+            ".unwrap()\n"
+            "    }\n"
+            "}\n"
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("authority alias" in error for error in errors), errors)
+
+    def test_unicode_public_method_cannot_evade_the_owner_inventory(self):
+        mutated = self.source.replace(
+            "impl IssueRef {",
+            "impl IssueRef {\n"
+            "    pub fn \u751f\u6210(number: NonZeroU32) -> Self { Self(number) }",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("non-ASCII Rust token" in error for error in errors), errors)
+
     def test_macro_cannot_generate_an_uninventoried_associated_const(self):
         mutated = self.source.replace(
             "impl IssueRef {",
@@ -151,6 +189,19 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         errors = MODULE.validate_source(mutated)
         self.assertTrue(any("private authority layout" in error for error in errors), errors)
 
+    def test_balanced_builder_alias_cannot_escape_the_owner(self):
+        mutated = self.source.replace(
+            "$crate::unsupported::__build_unimplemented_rejection($issue, $hint)",
+            "$crate::unsupported::redteam_rogue($issue, $hint)",
+            1,
+        )
+        mutated += (
+            "\npub(crate) use self::__build_unimplemented_rejection "
+            "as redteam_rogue;\n"
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("authority alias" in error for error in errors), errors)
+
     def test_direct_public_builder_call_is_rejected_in_production(self):
         errors = MODULE.validate_usage_source(
             "crates/example/src/lib.rs",
@@ -165,6 +216,32 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
             'let _ = crate::unsupported::__build_unimplemented_rejection(729, "hidden");',
         )
         self.assertTrue(any("direct authority builder" in error for error in errors), errors)
+
+    def test_descendant_module_cannot_call_private_owner_constructors(self):
+        errors = MODULE.validate_usage_source(
+            "crates/chelis-types/src/unsupported/redteam.rs",
+            "let issue = super::IssueRef::new(729).unwrap();\n"
+            "let _ = super::RejectionAuthority::unimplemented(issue, \"hidden\");\n",
+        )
+        self.assertTrue(
+            any("private authority constructor" in error for error in errors),
+            errors,
+        )
+
+    def test_unicode_alias_cannot_evade_the_production_boundary(self):
+        errors = MODULE.validate_usage_source(
+            "crates/chelis-types/src/unsupported/redteam.rs",
+            "type \u4f2a = super::IssueRef;\n"
+            "let _ = \u4f2a::new(729).unwrap();\n",
+        )
+        self.assertTrue(any("non-ASCII Rust token" in error for error in errors), errors)
+
+    def test_non_ascii_comments_and_literals_remain_allowed(self):
+        errors = MODULE.validate_usage_source(
+            "crates/example/src/lib.rs",
+            "// Unicode prose: \u03bb\nconst MESSAGE: &str = \"\u4f60\u597d\";\n",
+        )
+        self.assertEqual(errors, [])
 
     def test_public_builder_cannot_skip_registry_validation(self):
         mutated = self.source.replace(

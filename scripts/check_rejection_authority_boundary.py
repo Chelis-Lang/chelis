@@ -56,6 +56,25 @@ PUBLIC_CONST = re.compile(
 SENSITIVE_IMPL = re.compile(
     r"\bimpl\b[^\{;]*\b(SpecAtomRef|IssueRef|RejectionAuthority)\b\s*\{"
 )
+AUTHORITY_ALIAS = re.compile(
+    r"\b(?:"
+    r"use\b[^;{}]*\b(?:SpecAtomRef|IssueRef|RejectionAuthority|"
+    r"RejectionCitation|__build_deliberate_rejection|"
+    r"__build_unimplemented_rejection)\b[^;{}]*\bas\b[^;{}]*;|"
+    r"type\s+(?:r#)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*[^;{}]*\b"
+    r"(?:SpecAtomRef|IssueRef|RejectionAuthority|RejectionCitation)\b[^;{}]*;"
+    r")"
+)
+PRIVATE_AUTHORITY_CONSTRUCTION = re.compile(
+    r"(?:"
+    r"\b(?:SpecAtomRef|IssueRef)\s*::\s*new\b|"
+    r"\bRejectionAuthority\s*::\s*(?:deliberate|unimplemented)\b|"
+    r"\b(?:SpecAtomRef|IssueRef)\s*\(|"
+    r"\bRejectionAuthority\s*\{|"
+    r"\bRejectionCitation\s*::|"
+    r"\bimpl\b[^\{;]*\b(?:SpecAtomRef|IssueRef|RejectionAuthority)\b\s*\{"
+    r")"
+)
 MACRO_RULES_DEFINITION = re.compile(
     r"\bmacro_rules\s*!\s*(?:r#)?([A-Za-z_][A-Za-z0-9_]*)"
 )
@@ -219,6 +238,11 @@ def _impl_body(source: str, type_name: str) -> str:
 def validate_source(source: str) -> list[str]:
     errors: list[str] = []
     code = _mask_rust_non_code(source)
+    if not code.isascii():
+        errors.append(
+            "unsupported.rs contains a non-ASCII Rust token; the authority owner "
+            "must use identifiers the closed lexical inventory can classify"
+        )
     public_functions = Counter(PUBLIC_FN.findall(source))
     if public_functions != EXPECTED_PUBLIC_FUNCTIONS:
         for name in sorted(set(public_functions) | set(EXPECTED_PUBLIC_FUNCTIONS)):
@@ -271,6 +295,12 @@ def validate_source(source: str) -> list[str]:
             "unsupported.rs private authority token inventory changed: "
             f"found {dict(sorted(private_tokens.items()))}, expected "
             f"{dict(sorted(EXPECTED_PRIVATE_AUTHORITY_TOKENS.items()))}"
+        )
+
+    if AUTHORITY_ALIAS.search(code):
+        errors.append(
+            "unsupported.rs authority alias is forbidden; keep every "
+            "construction edge under its canonical identity"
         )
 
     public_items = Counter(PUBLIC_ITEM.findall(code))
@@ -347,10 +377,24 @@ def validate_source(source: str) -> list[str]:
 def validate_usage_source(path: str, source: str) -> list[str]:
     errors: list[str] = []
     code = _mask_rust_non_code(source)
+    if not code.isascii() and PRIVATE_AUTHORITY_TOKEN.search(code):
+        errors.append(
+            f"{path}: non-ASCII Rust token is forbidden in authority-bearing "
+            "production source"
+        )
     for builder in sorted(set(DIRECT_BUILDER.findall(code))):
         errors.append(
             f"{path}: direct authority builder `{builder}` bypasses the canonical "
             "literal macro; use deliberate_rejection! or unimplemented_rejection!"
+        )
+    if AUTHORITY_ALIAS.search(code):
+        errors.append(
+            f"{path}: authority alias bypasses the canonical construction boundary"
+        )
+    if PRIVATE_AUTHORITY_CONSTRUCTION.search(code):
+        errors.append(
+            f"{path}: private authority constructor is confined to unsupported.rs; "
+            "use deliberate_rejection! or unimplemented_rejection!"
         )
     for atom in DELIBERATE_LITERAL.findall(source):
         if atom in RESPONSE_ONLY_ATOMS:

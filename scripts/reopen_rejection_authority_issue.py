@@ -107,7 +107,13 @@ def _validate_authorities(
             raise TypeError(
                 f"authority sites for chelis#{authority_number} are not a list"
             )
+        if not sites:
+            raise TypeError(f"authority sites for chelis#{authority_number} are empty")
         _format_sites(sites)
+        if sites != sorted(set(sites)):
+            raise TypeError(
+                f"authority sites for chelis#{authority_number} are not sorted/unique"
+            )
     return authorities
 
 

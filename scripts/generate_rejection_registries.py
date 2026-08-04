@@ -378,6 +378,16 @@ def workspace_rust_paths(root: Path) -> tuple[list[Path], set[Path]]:
     if len(packages_by_id) != len(raw_packages):
         raise RegistryError("Cargo workspace metadata has duplicate/missing package ids")
 
+    member_roots: set[Path] = set()
+    for member_id in raw_members:
+        package_metadata = packages_by_id.get(member_id)
+        if package_metadata is None:
+            raise RegistryError(f"Cargo workspace member has no package: {member_id}")
+        raw_manifest_path = package_metadata.get("manifest_path")
+        if not isinstance(raw_manifest_path, str):
+            raise RegistryError(f"Cargo workspace member has no manifest: {member_id}")
+        member_roots.add(Path(raw_manifest_path).resolve().parent)
+
     for member_id in sorted(set(raw_members)):
         package_metadata = packages_by_id.get(member_id)
         if package_metadata is None:
@@ -404,6 +414,36 @@ def workspace_rust_paths(root: Path) -> tuple[list[Path], set[Path]]:
         package = manifest.get("package")
         if not isinstance(package, dict):
             raise RegistryError(f"{manifest_path} has no package table")
+
+        dependencies = package_metadata.get("dependencies")
+        if not isinstance(dependencies, list) or any(
+            not isinstance(dependency, dict) for dependency in dependencies
+        ):
+            raise RegistryError(f"Cargo package dependencies are malformed: {member_id}")
+        for dependency in dependencies:
+            raw_dependency_path = dependency.get("path")
+            if raw_dependency_path is None:
+                continue
+            if not isinstance(raw_dependency_path, str):
+                raise RegistryError(f"Cargo path dependency is malformed: {member_id}")
+            dependency_path = Path(raw_dependency_path)
+            if not dependency_path.is_absolute():
+                raise RegistryError(
+                    f"Cargo path dependency is not absolute: {raw_dependency_path}"
+                )
+            try:
+                dependency_path.resolve().relative_to(root.resolve())
+            except ValueError as error:
+                raise RegistryError(
+                    "repository source graph uses an external path dependency: "
+                    f"{raw_dependency_path}"
+                ) from error
+            _reject_symlink_components(root, dependency_path, "path dependency")
+            if dependency_path.resolve() not in member_roots:
+                raise RegistryError(
+                    "repository-local path dependency is not a workspace member: "
+                    f"{dependency_path.relative_to(root)}"
+                )
 
         _inventory_tree(root, member / "src", paths)
         _inventory_tree(root, member / "examples", paths)

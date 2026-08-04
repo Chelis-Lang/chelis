@@ -169,9 +169,23 @@ class ClosureGuard(unittest.TestCase):
     def test_malformed_inventory_results_also_reopen_fail_closed(self) -> None:
         malformed = (
             None,
+            {729: []},
+            {714: []},
             {729: None},
             {729: [object()]},
             {714: [object()]},
+            {
+                729: [
+                    AuthoritySite("z.rs", 2),
+                    AuthoritySite("a.rs", 1),
+                ]
+            },
+            {
+                729: [
+                    AuthoritySite("a.rs", 1),
+                    AuthoritySite("a.rs", 1),
+                ]
+            },
         )
         for result in malformed:
             with self.subTest(result=result):

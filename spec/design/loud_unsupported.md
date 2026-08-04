@@ -373,8 +373,9 @@ REGISTRIES of what actually exists:
   closed rather than silently truncating a larger PR. A closing reference to an
   issue with live constructors fails and reports every offending `path:line`;
   the constructors and generated artifacts must move to their still-open
-  capability owner before the delivered instance can close. Issue comments, PR
-  titles, and repository prose are intentionally not closing-capable merge
+  capability owner before the delivered instance can close. The PR title is
+  scanned because it becomes the squash commit subject. Issue comments and
+  repository prose are historical context rather than closing-capable merge
   inputs and are not scanned. Tracker, GraphQL pagination, or PR-commit
   retrieval failure stays a blocking failure. GitHub emits no pull-request
   workflow activity when a manual sidebar link is added, so the required check

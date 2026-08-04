@@ -610,6 +610,45 @@ let _ = unimplemented_rejection!(714, "live");
 
             self.assertEqual(discover_issue_authorities(root), {})
 
+    def test_repository_local_non_workspace_dependency_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            app = root / "app"
+            rogue = root / "rogue"
+            for member in (app, rogue):
+                member.mkdir()
+                (member / "Cargo.toml").write_text(
+                    "[package]\n"
+                    f'name = "{member.name}"\n'
+                    'version = "0.0.0"\n'
+                    'edition = "2024"\n'
+                )
+                source = member / "src/lib.rs"
+                source.parent.mkdir()
+                source.write_text("pub fn target() {}\n")
+            (root / "Cargo.toml").write_text(
+                "[workspace]\n"
+                'members = ["app"]\n'
+                'exclude = ["rogue"]\n'
+                'resolver = "3"\n'
+            )
+            (app / "Cargo.toml").write_text(
+                "[package]\n"
+                'name = "app"\n'
+                'version = "0.0.0"\n'
+                'edition = "2024"\n\n'
+                "[dependencies]\n"
+                'rogue = { path = "../rogue" }\n'
+            )
+            (rogue / "src/lib.rs").write_text(
+                'let _ = unimplemented_rejection!(999999, "hidden");\n'
+            )
+
+            with self.assertRaisesRegex(
+                RegistryError, "repository-local path dependency.*workspace member"
+            ):
+                discover_issue_authorities(root)
+
     def test_rendered_manifest_carries_sites_and_is_source_derived(self) -> None:
         rendered = render_issue_manifest(
             {

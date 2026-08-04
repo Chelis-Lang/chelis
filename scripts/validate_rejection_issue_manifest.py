@@ -221,14 +221,16 @@ def collect_pull_request_sources(
                 full_sha = commit["sha"]
                 if (
                     not isinstance(full_sha, str)
-                    or not full_sha
+                    or re.fullmatch(r"[0-9a-fA-F]{40}", full_sha) is None
                     or full_sha in seen_shas
                 ):
                     raise TypeError("invalid or duplicate commit SHA")
                 seen_shas.add(full_sha)
                 fetched_commits += 1
                 sha = full_sha[:12]
-                message = str(commit["commit"]["message"])
+                message = commit["commit"]["message"]
+                if not isinstance(message, str):
+                    raise TypeError("invalid commit message")
                 sources.append(ClosingSource(f"commit {sha}", message))
     except (json.JSONDecodeError, KeyError, TypeError) as error:
         raise RuntimeError(f"malformed commit response for PR #{number}: {error}") from error

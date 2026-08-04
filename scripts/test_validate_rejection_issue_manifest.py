@@ -144,13 +144,13 @@ class ClosingReferences(unittest.TestCase):
                             [
                                 [
                                     {
-                                        "sha": "abcdef0123456789",
+                                        "sha": "abcdef0123456789abcdef0123456789abcdef01",
                                         "commit": {"message": "Fixes #691"},
                                     }
                                 ],
                                 [
                                     {
-                                        "sha": "9876543210abcdef",
+                                        "sha": "9876543210abcdef9876543210abcdef98765432",
                                         "commit": {"message": "Part of #729"},
                                     }
                                 ],
@@ -273,6 +273,68 @@ class ClosingReferences(unittest.TestCase):
                 )()
 
             with self.assertRaisesRegex(RuntimeError, "expected 251 commits, received 250"):
+                collect_pull_request_sources(event_path, run=run)
+
+    def test_malformed_commit_message_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            event_path = Path(raw) / "event.json"
+            event_path.write_text(
+                '{"number":42,"pull_request":{"number":42,"commits":1,'
+                '"title":"ordinary","body":""}}'
+            )
+
+            def run(_: list[str], **__: object) -> object:
+                return type(
+                    "Completed",
+                    (),
+                    {
+                        "returncode": 0,
+                        "stderr": "",
+                        "stdout": json.dumps(
+                            [
+                                [
+                                    {
+                                        "sha": "a" * 40,
+                                        "commit": {"message": None},
+                                    }
+                                ]
+                            ]
+                        ),
+                    },
+                )()
+
+            with self.assertRaisesRegex(RuntimeError, "invalid commit message"):
+                collect_pull_request_sources(event_path, run=run)
+
+    def test_malformed_commit_sha_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            event_path = Path(raw) / "event.json"
+            event_path.write_text(
+                '{"number":42,"pull_request":{"number":42,"commits":1,'
+                '"title":"ordinary","body":""}}'
+            )
+
+            def run(_: list[str], **__: object) -> object:
+                return type(
+                    "Completed",
+                    (),
+                    {
+                        "returncode": 0,
+                        "stderr": "",
+                        "stdout": json.dumps(
+                            [
+                                [
+                                    {
+                                        "sha": "not-a-full-object-id",
+                                        "commit": {"message": "ordinary"},
+                                    }
+                                ]
+                            ]
+                        ),
+                    },
+                )()
+
+            with self.assertRaisesRegex(RuntimeError, "invalid or duplicate commit SHA"):
                 collect_pull_request_sources(event_path, run=run)
 
     def test_collects_manually_linked_closing_issues_across_all_pages(self) -> None:
