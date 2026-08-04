@@ -70,3 +70,66 @@ pub use stdlib_cache::{
 /// Single source of truth for the workspace compiler pin string used by
 /// integration tests across `chelis-cli` and `chelis-compiler-api`.
 pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Per-BUILD identity of the running compiler, for cache keying.
+///
+/// [`COMPILER_VERSION`] identifies a *release*, not a *build*: every
+/// binary compiled from any commit that carries the same
+/// `workspace.package.version` reports the same string. Type-checking
+/// semantics, however, change between such builds — a released `0.18.2`
+/// and a `0.18.2`-versioned `main` that has since landed a dtype change
+/// disagree about what a program means. Keying a compiled-context cache
+/// on the version alone lets those two binaries read each other's
+/// entries, so a program is checked under the *other* build's semantics:
+/// either a spurious rejection of valid code, or — worse — silent
+/// acceptance of code this build would reject.
+///
+/// This fingerprint adds a discriminator derived from the running
+/// executable (byte length + modification time), which changes on every
+/// rebuild while staying stable across invocations of one binary. It is
+/// deliberately conservative: if the executable cannot be inspected, it
+/// degrades to [`COMPILER_VERSION`] (the previous behaviour), and a
+/// same-binary copy that lands at a different path or timestamp only
+/// costs a cache miss (recompile), never a stale hit.
+pub fn build_fingerprint() -> &'static str {
+    static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FINGERPRINT.get_or_init(|| {
+        let Ok(exe) = std::env::current_exe() else {
+            return COMPILER_VERSION.to_string();
+        };
+        let Ok(meta) = std::fs::metadata(&exe) else {
+            return COMPILER_VERSION.to_string();
+        };
+        let len = meta.len();
+        let mtime_nanos = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{COMPILER_VERSION}+{len:x}.{mtime_nanos:x}")
+    })
+}
+
+#[cfg(test)]
+mod build_fingerprint_tests {
+    /// chelis#1156: the fingerprint must be stable within one process
+    /// (otherwise every invocation is a cache miss and the compiled-
+    /// context cache stops working at all).
+    #[test]
+    fn build_fingerprint_is_stable_across_calls() {
+        assert_eq!(super::build_fingerprint(), super::build_fingerprint());
+    }
+
+    /// It must remain a superset of the release identity: a version bump
+    /// alone still changes the key.
+    #[test]
+    fn build_fingerprint_carries_the_compiler_version() {
+        assert!(
+            super::build_fingerprint().starts_with(super::COMPILER_VERSION),
+            "fingerprint {} must extend the compiler version {}",
+            super::build_fingerprint(),
+            super::COMPILER_VERSION
+        );
+    }
+}

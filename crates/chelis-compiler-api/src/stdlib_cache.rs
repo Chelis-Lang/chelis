@@ -229,9 +229,16 @@ pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
     // typecheck / lowering SEMANTICS change while the bundled chelis-std
     // bytes stay the same. Without this, a `chelis` binary built from
     // different compiler source but the same bundled stdlib would
-    // stale-hit an older binary's cached sub-context. Folding
-    // `COMPILER_VERSION` in flips the key on any compiler rebuild.
-    let compiler_version = crate::COMPILER_VERSION;
+    // stale-hit an older binary's cached sub-context.
+    //
+    // This must be the BUILD fingerprint, not `COMPILER_VERSION`: the
+    // bare crate version does not change between two builds from
+    // different commits of the same unreleased version, so it does not
+    // "flip the key on any compiler rebuild" the way this cache needs
+    // (chelis#1156). The stdlib sub-context is keyed without a package
+    // root, so it is shared by every package on the machine — a stale
+    // hit here reaches further than the per-package context cache.
+    let compiler_version = crate::build_fingerprint();
     hasher.update(b"compiler_version");
     hasher.update((compiler_version.len() as u64).to_le_bytes());
     hasher.update(compiler_version.as_bytes());
@@ -527,7 +534,10 @@ mod tests {
         // Regression for the compiler-build-identity gap: a chelis binary
         // built from different compiler source but the same bundled
         // chelis-std must NOT stale-hit an older binary's cached
-        // sub-context. The real key must fold COMPILER_VERSION in.
+        // sub-context. The real key must fold the BUILD fingerprint in —
+        // `COMPILER_VERSION` alone is a release identity, not a build
+        // identity, and does not change between two builds of the same
+        // unreleased version (chelis#1156).
         //
         // We cannot rebuild the compiler mid-test, so we recompute the
         // key with the compiler-version component perturbed and confirm
@@ -570,13 +580,26 @@ mod tests {
             hasher.finalize().into()
         };
 
-        // Recomputing with the REAL compiler version reproduces the key
+        // Recomputing with the REAL build fingerprint reproduces the key
         // exactly (proves the recompute mirror is faithful)...
         assert_eq!(
             real,
-            recompute_with_compiler_version(crate::COMPILER_VERSION),
-            "recompute mirror must match the real key for the real compiler version"
+            recompute_with_compiler_version(crate::build_fingerprint()),
+            "recompute mirror must match the real key for the real build fingerprint"
         );
+        // ...and the bare crate version is NOT what the key folds in: a
+        // key built from the release string would be shared by every
+        // build of that version, which is the stale-hit this guards.
+        // Skipped only on the documented degrade path, where the running
+        // executable cannot be inspected and the fingerprint IS the bare
+        // version (then this cache is no worse than before the fix).
+        if crate::build_fingerprint() != crate::COMPILER_VERSION {
+            assert_ne!(
+                real,
+                recompute_with_compiler_version(crate::COMPILER_VERSION),
+                "cache key must fold the build fingerprint, not the bare crate version"
+            );
+        }
         // ...and recomputing with a DIFFERENT compiler version flips it.
         assert_ne!(
             real,
