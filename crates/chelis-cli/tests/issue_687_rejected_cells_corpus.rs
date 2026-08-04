@@ -178,14 +178,6 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
          to use tensor-lane primitives\n",
     ),
     (
-        "c_stub_scalar_floor",
-        "def f(x: f32) -> f32 = floor(x)\nout = f(3.5)\n",
-        "c",
-        "error: unsupported: builtin `floor` on `chelis build` host emission (codegen:c); \
-         deliberate [04-TOT-2]: the checked builtin vocabulary and C expression vocabulary \
-         disagree; no fallback expression is permitted\n",
-    ),
-    (
         "c_to_string_tensor",
         "def f(x: tensor[2, f32]) -> string = to_string(x)\n\
          out = f(to_tensor([1.5, 2.5]))\n",

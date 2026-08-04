@@ -6260,10 +6260,6 @@ fn invalid_abi_shape(detail: String, context: &'static str) -> Unsupported {
 
 fn unsupported_value_boxing(ty: &HostType, context: &'static str) -> Unsupported {
     let authority = match ty {
-        HostType::ReducedFloatBoxed(_) => chelis_types::unimplemented_rejection!(
-            714,
-            "the C host lane has no exact scalar representation for f16/bf16 boxing"
-        ),
         HostType::Callback(_, _) => chelis_types::unimplemented_rejection!(
             879,
             "the C host lane has no general first-class function-value box"

@@ -11,9 +11,6 @@ concurrency:
 
 permissions:
   contents: write
-  # The Phase 3 capacity-census liveness gate resolves cited tracker state.
-  # Keep the token itself scoped to that one integration step below.
-  issues: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -619,6 +616,12 @@ jobs:
   integration:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
+    # The Phase 3 capacity-census liveness gate resolves cited tracker state.
+    # Keep both the permission and token scoped to this job; only the oracle
+    # step below receives GH_TOKEN.
+    permissions:
+      contents: read
+      issues: read
     # Skip on docs-only PRs (chelis#419). A skipped required job reports
     # success, so branch protection stays satisfied; on push docs_only is
     # always false. `needs: [changes]` is what makes the output readable.

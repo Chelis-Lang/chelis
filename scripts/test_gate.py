@@ -633,6 +633,9 @@ class CiParityTests(unittest.TestCase):
     def test_nested_dtype_phase3_oracle_is_continuous(self):
         block = _ci_job_block("integration")
         workflow = CI_YML.read_text()
+        top_level_permissions = workflow[
+            workflow.index("permissions:\n") : workflow.index("\nenv:\n")
+        ]
         numpy_command = "run: uv pip install --python .venv/bin/python 'numpy>=2.0'"
         oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
         gate_command = "run: python3 scripts/gate.py integration"
@@ -641,7 +644,9 @@ class CiParityTests(unittest.TestCase):
             "          GH_TOKEN: ${{ github.token }}\n"
             f"        {oracle_command}"
         )
-        self.assertEqual(workflow.count("  issues: read"), 1)
+        self.assertNotIn("  issues: read", top_level_permissions)
+        self.assertEqual(block.count("    contents: read"), 1)
+        self.assertEqual(block.count("    issues: read"), 1)
         self.assertEqual(block.count(numpy_command), 1)
         self.assertEqual(block.count(oracle_command), 1)
         self.assertEqual(block.count(authenticated_oracle), 1)
