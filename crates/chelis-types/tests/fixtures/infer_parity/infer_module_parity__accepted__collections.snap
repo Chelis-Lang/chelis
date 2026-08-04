@@ -1,5 +1,5 @@
 == annotated deep ==
-(module {}
+(module {surf_path: "Parity.Collections"}
   parity.collections
   (defsig {} values (t-adt {} List (t-prim {} int32)))
   (def {type: (t-adt {} List (t-prim {} int32))}
@@ -73,7 +73,7 @@
       (var {span: "surf:258..262"} take)
       (var {span: "surf:263..269"} values)
       (cast {span: "surf:271..285", type: (t-prim {} int64)}
-        (lit {span: "surf:276..277", type: (t-prim {} int64)} 2)
+        (lit {span: "surf:276..277", surf_literal_style: "unsuffixed", type: (t-prim {} int64)} 2)
         (t-prim {} int64))))
   (def {type: (t-adt {} List (t-tuple {} (t-prim {} int32) (t-prim {} int32)))}
     paired

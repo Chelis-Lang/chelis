@@ -193,9 +193,7 @@ fn borrow_of_non_tensor_is_still_rejected() {
         &fixture,
         "module Issue256NonTensor\n\
          def consume_t(t: &tensor[a, c, h, w, f32]) -> bool = true\n\
-         def forward(x: int32) -> bool = {\n\
-           consume_t(&x)\n\
-         }\n",
+         def forward(x: int32) -> bool = consume_t(&x)\n",
     );
     fmt_inplace(&fixture);
 
@@ -267,9 +265,7 @@ fn issue_154_tensor_carrying_record_adt_still_borrows() {
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
          sig borrow_params: &BatchNormParams[n] -> bool\n\
          def borrow_params(p) = true\n\
-         def consume_params[n](p: BatchNormParams[n]) -> bool = {\n\
-           borrow_params(&p)\n\
-         }\n",
+         def consume_params[n](p: BatchNormParams[n]) -> bool = borrow_params(&p)\n",
     );
     fmt_inplace(&fixture);
 

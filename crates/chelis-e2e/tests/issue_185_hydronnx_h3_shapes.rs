@@ -82,9 +82,17 @@ fn assert_close(actual: f64, expected: f64, tol: f64, label: &str) {
 /// given `shape`. Each scalar leaf becomes `cast(<value>, f32)`. The list
 /// nesting depth equals `shape.len()`.
 fn nested_list_literal(shape: &[usize], data: &[f32]) -> String {
+    fn canonical_f32(value: f32) -> String {
+        let mut text = value.to_string();
+        if !text.contains(['.', 'e', 'E']) {
+            text.push_str(".0");
+        }
+        text
+    }
+
     fn recurse(shape: &[usize], data: &[f32]) -> String {
         if shape.is_empty() {
-            return format!("cast({:.8}, f32)", data[0]);
+            return format!("cast({}, f32)", canonical_f32(data[0]));
         }
         let head = shape[0];
         let tail = &shape[1..];

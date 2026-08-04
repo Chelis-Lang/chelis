@@ -68,9 +68,9 @@ fn library_consume_does_not_steal_new_code_input_tensor() {
     // code calls it with its OWN input tensor. The new-code call should
     // consume only the new-code's `my_x`, not anything carried over from
     // the library body.
-    let library_src = "def lib_consume(t: tensor[4, f32]): tensor[4, f32] = realize(t)";
+    let library_src = "def lib_consume(t: tensor[4, f32]) -> tensor[4, f32] = realize(t)";
     let new_src = r#"
-def caller(my_x: tensor[4, f32]): tensor[4, f32] =
+def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
   lib_consume(my_x)
 "#;
 
@@ -85,11 +85,11 @@ fn library_matmul_call_on_new_code_inputs_succeeds() {
     // Both new-code inputs must be consumed exactly once at the call;
     // no leak of library param names.
     let library_src = r#"
-def lib_matmul(a: &tensor[4, f32], b: &tensor[4, f32]): tensor[4, f32] =
+def lib_matmul(a: &tensor[4, f32], b: &tensor[4, f32]) -> tensor[4, f32] =
   add(a, b)
 "#;
     let new_src = r#"
-def caller(my_x: tensor[4, f32], my_w: tensor[4, f32]): tensor[4, f32] =
+def caller(my_x: tensor[4, f32], my_w: tensor[4, f32]) -> tensor[4, f32] =
   {
     out: tensor[4, f32] = lib_matmul(my_x, my_w)
     _ = drop(my_x)
@@ -108,10 +108,10 @@ fn new_code_consuming_fanout_is_accepted_with_context() {
     // source fan-out and inserts an IR Copy during lowering, so the
     // with-context checker must agree with the monolithic checker.
     let library_src = r#"
-def lib_id(t: tensor[4, f32]): tensor[4, f32] = t
+def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t
 "#;
     let new_src = r#"
-def bad(my_x: tensor[4, f32]): tensor[4, f32] =
+def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(my_x)
     lib_id(my_x)
@@ -135,10 +135,10 @@ fn library_def_reference_is_non_linear_no_consumption() {
     // linearity error. Library def types are functions, which are
     // non-linear — they carry no tensor content directly.
     let library_src = r#"
-def lib_id(t: tensor[4, f32]): tensor[4, f32] = t
+def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t
 "#;
     let new_src = r#"
-def use_lib(my_x: tensor[4, f32]): tensor[4, f32] =
+def use_lib(my_x: tensor[4, f32]) -> tensor[4, f32] =
   lib_id(my_x)
 "#;
     check_new_with_context(library_src, new_src).expect("library def reference is non-consuming");
@@ -152,16 +152,16 @@ fn no_leak_between_snippets_against_same_library() {
     // linearity model. After running it, snippet B must still succeed. This
     // exercises function-purity: no shared mutable checker state.
     let library_program =
-        check_library_with_linearity("def lib_id(t: tensor[4, f32]): tensor[4, f32] = t");
+        check_library_with_linearity("def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t");
 
-    let lib_deep = surf_to_deep("def lib_id(t: tensor[4, f32]): tensor[4, f32] = t");
+    let lib_deep = surf_to_deep("def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t");
     let ctx = build_type_env_from_library(&lib_deep).expect("ctx OK");
 
     // Snippet A: consuming fan-out — accepted and handled later by Copy
     // insertion during lowering.
     let bad_deep = surf_to_deep(
         r#"
-def bad(my_x: tensor[4, f32]): tensor[4, f32] =
+def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(my_x)
     lib_id(my_x)
@@ -177,7 +177,7 @@ def bad(my_x: tensor[4, f32]): tensor[4, f32] =
     );
 
     // Snippet B: clean — must still succeed despite snippet A's failure.
-    let good_deep = surf_to_deep("def good(my_x: tensor[4, f32]): tensor[4, f32] = lib_id(my_x)");
+    let good_deep = surf_to_deep("def good(my_x: tensor[4, f32]) -> tensor[4, f32] = lib_id(my_x)");
     let good_checked = check_ir_with_context(&ctx, &good_deep).expect("IR check clean");
     let good_res = check_linearity_with_context(&library_program, &good_checked);
     assert!(
@@ -191,9 +191,9 @@ def bad(my_x: tensor[4, f32]): tensor[4, f32] =
 
 #[test]
 fn parity_pair_one_clean_library_call() {
-    let library_src = "def lib_relu(t: &tensor[4, f32]): tensor[4, f32] = relu(t)";
+    let library_src = "def lib_relu(t: &tensor[4, f32]) -> tensor[4, f32] = relu(t)";
     let new_src = r#"
-def caller(my_x: tensor[4, f32]): tensor[4, f32] =
+def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = lib_relu(my_x)
     _ = drop(my_x)
@@ -213,9 +213,9 @@ def caller(my_x: tensor[4, f32]): tensor[4, f32] =
 
 #[test]
 fn parity_pair_two_consuming_fanout_accepted() {
-    let library_src = "def lib_id(t: tensor[4, f32]): tensor[4, f32] = t";
+    let library_src = "def lib_id(t: tensor[4, f32]) -> tensor[4, f32] = t";
     let new_src = r#"
-def bad(my_x: tensor[4, f32]): tensor[4, f32] =
+def bad(my_x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(my_x)
     lib_id(my_x)
@@ -236,10 +236,10 @@ def bad(my_x: tensor[4, f32]): tensor[4, f32] =
 #[test]
 fn parity_pair_three_borrow_keeps_caller_live() {
     let library_src = r#"
-def lib_rank(t: &tensor[4, f32]): int32 = rank(t)
+def lib_rank(t: &tensor[4, f32]) -> int32 = rank(t)
 "#;
     let new_src = r#"
-def caller(my_x: tensor[4, f32]): tensor[4, f32] =
+def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
   {
     n: int32 = lib_rank(my_x)
     y: tensor[4, f32] = relu(my_x)
@@ -262,9 +262,9 @@ def caller(my_x: tensor[4, f32]): tensor[4, f32] =
 fn parity_pair_four_copy_allows_reuse() {
     // Explicit `copy` remains valid under the implicit model. Same
     // semantics with or without context.
-    let library_src = "def lib_consume(t: tensor[4, f32]): tensor[4, f32] = realize(t)";
+    let library_src = "def lib_consume(t: tensor[4, f32]) -> tensor[4, f32] = realize(t)";
     let new_src = r#"
-def caller(my_x: tensor[4, f32]): tensor[4, f32] =
+def caller(my_x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = lib_consume(copy(my_x))
     out: tensor[4, f32] = add(my_x, y)
@@ -286,10 +286,10 @@ fn parity_pair_five_observational_query_does_not_consume() {
     // Library def whose new-code call passes a tensor through an
     // observational builtin (`shape`) — must not consume `my_x`.
     let library_src = r#"
-def lib_shape0(t: &tensor[2, 3, f32]): int64 = shape(t, 0)
+def lib_shape0(t: &tensor[2, 3, f32]) -> int64 = shape(t, 0)
 "#;
     let new_src = r#"
-def caller(my_x: tensor[2, 3, f32]): tensor[2, 3, f32] =
+def caller(my_x: tensor[2, 3, f32]) -> tensor[2, 3, f32] =
   {
     n: int64 = lib_shape0(my_x)
     y: tensor[2, 3, f32] = relu(my_x)
@@ -324,11 +324,11 @@ fn library_assert_then_assert_does_not_double_consume_caller() {
     // separate tensor. The call sites pass `actual` to two consecutive
     // library calls, which monolithic linearity accepts.
     let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32]): int32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]): int32 = rank(a)
+def assert_shape_lib(t: &tensor[4, f32]) -> int32 = rank(t)
+def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> int32 = rank(a)
 "#;
     let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
   {
     _shape: int32 = assert_shape_lib(&actual)
     close: int32 = assert_close_lib(actual, expected)
@@ -364,12 +364,12 @@ def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
 #[test]
 fn library_underscore_discard_then_call_with_context_matches_monolithic() {
     let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32], n: int64): int32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]): int32 = rank(a)
+def assert_shape_lib(t: &tensor[4, f32], n: int64) -> int32 = rank(t)
+def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> int32 = rank(a)
 "#;
     // Use `_ =` discard form, mirroring the chelis-std pattern.
     let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
   {
     _ = assert_shape_lib(actual, cast(4, int64))
     close: int32 = assert_close_lib(actual, expected)
@@ -400,11 +400,11 @@ def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
 #[test]
 fn library_calls_aliased_without_explicit_borrow_match_monolithic() {
     let library_src = r#"
-def assert_shape_lib(t: &tensor[4, f32], n: int64): int32 = rank(t)
-def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]): int32 = rank(a)
+def assert_shape_lib(t: &tensor[4, f32], n: int64) -> int32 = rank(t)
+def assert_close_lib(a: &tensor[4, f32], b: &tensor[4, f32]) -> int32 = rank(a)
 "#;
     let new_src = r#"
-def caller(actual: tensor[4, f32], expected: tensor[4, f32]): int32 =
+def caller(actual: tensor[4, f32], expected: tensor[4, f32]) -> int32 =
   {
     _shape: int32 = assert_shape_lib(actual, cast(4, int64))
     close: int32 = assert_close_lib(actual, expected)
@@ -442,11 +442,11 @@ fn library_two_consecutive_borrowing_calls_do_not_consume() {
     // `assert_shape(&t)` and `assert_close_tensor(&a, &b)` are
     // observational.
     let library_src = r#"
-def lib_a(t: &tensor[4, f32]): int32 = rank(t)
-def lib_b(t: &tensor[4, f32]): int32 = rank(t)
+def lib_a(t: &tensor[4, f32]) -> int32 = rank(t)
+def lib_b(t: &tensor[4, f32]) -> int32 = rank(t)
 "#;
     let new_src = r#"
-def caller(actual: tensor[4, f32]): tensor[4, f32] =
+def caller(actual: tensor[4, f32]) -> tensor[4, f32] =
   {
     _x: int32 = lib_a(actual)
     _y: int32 = lib_b(actual)
@@ -486,7 +486,7 @@ sig lib_borrow_params: &BatchNormParams[n] -> bool
 def lib_borrow_params(p) = true
 "#;
     let new_src = r#"
-def use_params[n](p: BatchNormParams[n]): bool = lib_borrow_params(&p)
+def use_params[n](p: BatchNormParams[n]) -> bool = lib_borrow_params(&p)
 "#;
 
     let with_ctx = check_new_with_context(library_src, new_src);
@@ -528,7 +528,7 @@ type Outer[n] =
 
 sig borrow_outer: &Outer[n] -> bool
 def borrow_outer(o) = true
-def consume_outer[n](o: Outer[n]): bool = borrow_outer(&o)
+def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)
 "#;
 
     let with_ctx = check_new_with_context(library_src, new_src);
@@ -587,7 +587,7 @@ type Outer[n] =
 
 sig borrow_outer: &Outer[n] -> bool
 def borrow_outer(o) = true
-def consume_outer[n](o: Outer[n]): bool = borrow_outer(&o)
+def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)
 "#;
 
     // Interleave the calls to make any leaked state fail loudly.
@@ -629,7 +629,7 @@ fn empty_library_matches_monolithic() {
     let empty_lib_program = check_library_with_linearity("");
     let new_deep = surf_to_deep(
         r#"
-def f(x: tensor[4, f32]): tensor[4, f32] =
+def f(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = relu(x)
     _ = drop(x)

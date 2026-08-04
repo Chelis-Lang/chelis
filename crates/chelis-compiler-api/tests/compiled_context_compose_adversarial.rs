@@ -143,12 +143,12 @@ fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
     // against it with both arms — should accept and produce the unwrapped
     // value parity-equal to the monolithic baseline.
     let library = "module Mylib.Math\nexport (lib_some)\n\n\
-                   def lib_some -> Option[int32] = Some(cast(7, int32))\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+                   def lib_some() -> Option[int32] = Some(cast(7, int32))\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     let snippet = "module App.Eval\nimport Mylib.Math (lib_some)\n\n\
-                   def unwrapped -> int32 = match lib_some with {\n  | Some(x) => x\n  | None => 0\n}\n";
+                   def unwrapped() -> int32 = match lib_some with {\n  | Some(x) => x\n  | None => 0\n}\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval ok");
@@ -180,12 +180,12 @@ fn g2_adt_non_exhaustive_match_in_new_code_is_rejected() {
     // a checker that silently misses non-exhaustive matches against
     // library types).
     let library = "module Mylib.Math\nexport (lib_some)\n\n\
-                   def lib_some -> Option[int32] = Some(cast(7, int32))\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+                   def lib_some() -> Option[int32] = Some(cast(7, int32))\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     let bad_snippet = "module App.Eval\nimport Mylib.Math (lib_some)\n\n\
-                       def bad -> int32 = match lib_some with {\n  | Some(x) => x\n}\n";
+                       def bad() -> int32 = match lib_some with {\n  | Some(x) => x\n}\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let in_context = check_in_context(&ctx, bad_snippet);
@@ -233,14 +233,14 @@ fn g3_recursive_newcode_def_calling_library_helper() {
     let _linked = chelis_compiler_api::install_linked_program_guard();
     let library = "module Mylib.Math\nexport (mul)\n\n\
                    def mul(x: int32, y: int32) -> int32 = x * y\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     // Recursive new-code def that also calls a library function.
     let snippet = "module App.Eval\nimport Mylib.Math (mul)\n\n\
                    def fact(n: int32) -> int32 =\n  \
                      if (n <= 1) then 1 else mul(n, fact(n - 1))\n\
-                   def fact5 -> int32 = fact(5)\n";
+                   def fact5() -> int32 = fact(5)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval ok");
@@ -269,7 +269,7 @@ fn g4_bincode_tampering_truncates_library_then_eval_must_not_silently_succeed() 
     // contents are tampered to remove `lib_double`.
     let library = "module Mylib.Math\nexport (lib_double)\n\n\
                    def lib_double(x: int32) -> int32 = x + x\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
@@ -309,7 +309,7 @@ fn g4_bincode_tampering_truncates_library_then_eval_must_not_silently_succeed() 
     // fail at check_in_context or eval_in_context; it must NOT silently
     // succeed.
     let snippet = "module App.Eval\nimport Mylib.Math (lib_double)\n\n\
-                   def out -> int32 = lib_double(21)\n";
+                   def out() -> int32 = lib_double(21)\n";
 
     let check_outcome = check_in_context(&restored, snippet);
     let eval_outcome = eval_in_context(&restored, snippet);
@@ -342,11 +342,11 @@ fn g5_cold_path_overhead_at_most_2x_monolithic() {
                    def c(x: int32) -> int32 = x + 3\n\
                    def d(x: int32) -> int32 = x + 4\n\
                    def e(x: int32) -> int32 = x + 5\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     let snippet = "module App.Eval\nimport Mylib.Math (a, b, c, d, e)\n\n\
-                   def out -> int32 = a(b(c(d(e(0)))))\n";
+                   def out() -> int32 = a(b(c(d(e(0)))))\n";
 
     // Warm caches by running each path once first (so we measure the
     // steady-state cold path, not first-time compilation overhead in the
@@ -406,9 +406,9 @@ fn g5_cold_path_overhead_at_most_2x_monolithic() {
 
 #[test]
 fn g6_source_hash_changes_when_library_mutates_between_encode_and_recompile() {
-    let library_v1 = "module Mylib.Math\nexport (k)\n\ndef k -> int32 = 1\n";
-    let library_v2 = "module Mylib.Math\nexport (k)\n\ndef k -> int32 = 2\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let library_v1 = "module Mylib.Math\nexport (k)\n\ndef k() -> int32 = 1\n";
+    let library_v2 = "module Mylib.Math\nexport (k)\n\ndef k() -> int32 = 2\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
 
     let (_dir, root) = build_pkg(library_v1, main);
 
@@ -446,7 +446,7 @@ fn g6_source_hash_changes_when_library_mutates_between_encode_and_recompile() {
 fn g7_eval_many_in_context_one_failing_root_does_not_poison_others() {
     let library = "module Mylib.Math\nexport (add)\n\n\
                    def add(x: int32, y: int32) -> int32 = x + y\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     // Two roots: one references an unbound name (so the SHARED compile
@@ -456,8 +456,8 @@ fn g7_eval_many_in_context_one_failing_root_does_not_poison_others() {
     // shared-compile-failure path because that's the only way to get
     // structurally heterogeneous outcomes from a single new_source.
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def good -> int32 = add(1, 2)\n\
-                   def bad -> int32 = nonexistent_function(1, 2)\n";
+                   def good() -> int32 = add(1, 2)\n\
+                   def bad() -> int32 = nonexistent_function(1, 2)\n";
 
     let names = vec!["good".to_string(), "bad".to_string()];
     let outcomes = eval_many_in_context(
@@ -484,12 +484,12 @@ fn g7_eval_many_in_context_runtime_isolation_matches_combined() {
     // eval_in_context — that's the per-root isolation contract.
     let library = "module Mylib.Math\nexport (add)\n\n\
                    def add(x: int32, y: int32) -> int32 = x + y\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def good_a -> int32 = add(1, 2)\n\
-                   def good_b -> int32 = add(10, 20)\n";
+                   def good_a() -> int32 = add(1, 2)\n\
+                   def good_b() -> int32 = add(10, 20)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -546,7 +546,7 @@ fn g9_newcode_shadows_library_def_for_new_callers() {
     let _linked = chelis_compiler_api::install_linked_program_guard();
     let library = "module Mylib.Math\nexport (foo)\n\n\
                    def foo(x: int32) -> int32 = x + 100\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     // New-code redef of foo with a different body. Another new-code def
@@ -555,7 +555,7 @@ fn g9_newcode_shadows_library_def_for_new_callers() {
     // (returns 0 + 1 = 1), NOT the library's (which returns 100).
     let snippet = "module App.Eval\nimport Mylib.Math (foo)\n\n\
                    def foo(x: int32) -> int32 = x + 1\n\
-                   def caller -> int32 = foo(0)\n";
+                   def caller() -> int32 = foo(0)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval ok");
@@ -582,7 +582,7 @@ fn g9_newcode_shadows_library_def_for_new_callers() {
 fn g11_check_in_context_does_not_run_user_code() {
     let library = "module Mylib.Math\nexport (add)\n\n\
                    def add(x: int32, y: int32) -> int32 = x + y\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     // The probe: a body that WOULD crash at runtime (integer division by
@@ -595,7 +595,7 @@ fn g11_check_in_context_does_not_run_user_code() {
     // uses the well-typed-but-runtime-trapping `trunc_div(x, 0)`.)
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
                    def landmine(x: int32) -> int32 = trunc_div(x, cast(0, int32))\n\
-                   def safe -> int32 = add(1, 2)\n";
+                   def safe() -> int32 = add(1, 2)\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     // check_in_context: must succeed; the landmine fn is well-typed but
@@ -604,7 +604,7 @@ fn g11_check_in_context_does_not_run_user_code() {
 
     // Eval likewise succeeds; landmine fn is unreferenced and never
     // applied, so no runtime division-by-zero fires. (We don't assert on
-    // safe's appearance in roots — `def safe -> int32` is a 0-arg fn,
+    // safe's appearance in roots — `def safe() -> int32` is a 0-arg fn,
     // documented as not necessarily lowerable to a tensor root in the
     // existing compiled_context fixture.)
     let _ = eval_in_context(&ctx, snippet).expect("eval ok");
@@ -614,9 +614,9 @@ fn g11_check_in_context_does_not_run_user_code() {
 
 #[test]
 fn g12_source_hash_differs_when_library_text_differs_by_one_char() {
-    let library_a = "module Mylib.Math\nexport (k)\n\ndef k -> int32 = 1\n";
-    let library_b = "module Mylib.Math\nexport (k)\n\ndef k -> int32 = 2\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let library_a = "module Mylib.Math\nexport (k)\n\ndef k() -> int32 = 1\n";
+    let library_b = "module Mylib.Math\nexport (k)\n\ndef k() -> int32 = 2\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (dir_a, root_a) = build_pkg(library_a, main);
     let (dir_b, root_b) = build_pkg(library_b, main);
     let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx a");
@@ -635,8 +635,8 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
     // package_version, module_name, sha256), so renaming the package
     // alone should change the digest even if every byte of every source
     // file is identical.
-    let library = "module Mylib.Math\nexport (k)\n\ndef k -> int32 = 1\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let library = "module Mylib.Math\nexport (k)\n\ndef k() -> int32 = 1\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
 
     // Build two packages whose root reef.toml differs only in the
     // package name field.
@@ -688,7 +688,7 @@ fn g1_newcode_inheriting_test_effect_from_library_with_strict_signature_rejected
     // UnhandledEffect.
     let library = "module Mylib.Math\nexport (lib_check_eq)\n\n\
                    def lib_check_eq(a: int64, b: int64) -> unit = test_assert_eq_int(a, b, \"lib_check_eq\")\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     // Honest declaration `! { Test }` must accept; absent / `! {}` must
@@ -757,12 +757,12 @@ fn g4_deep_tamper_keeps_referenced_lib_eval_correct_or_fails_loudly() {
     let library = "module Mylib.Math\nexport (lib_used, lib_unused)\n\n\
                    def lib_used(x: int32) -> int32 = x + 100\n\
                    def lib_unused(x: int32) -> int32 = x * 999\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
     let snippet = "module App.Eval\nimport Mylib.Math (lib_used)\n\n\
-                   def out -> int32 = lib_used(5)\n";
+                   def out() -> int32 = lib_used(5)\n";
     let pristine = eval_in_context(&ctx, snippet).expect("pristine eval");
     let pristine_by = collect_named_roots_json(&pristine.roots, &["out"]);
 
@@ -827,7 +827,7 @@ fn g10_newcode_tensor_use_after_consume_through_library_call() {
     // _with_context's linearity is leaky, this may pass when it shouldn't.
     let library = "module Mylib.Math\nexport (id_tensor)\n\n\
                    def id_tensor(x: tensor[3, f32]) -> tensor[3, f32] = x\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -873,7 +873,7 @@ fn multi_module_fixture() -> (TempDir, PathBuf) {
         "App",
         &[(
             "src/main.ch",
-            "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
         )],
         &[("mylib", "./mylib")],
     );
@@ -912,7 +912,7 @@ fn g8_multi_module_parity_with_monolithic() {
 
     // Snippet imports from BOTH library modules and combines them.
     let snippet = "module App.Eval\nimport Mylib.Math (add)\nimport Mylib.Util (square_plus_one)\n\n\
-                   def out -> int32 = add(square_plus_one(4), square_plus_one(5))\n";
+                   def out() -> int32 = add(square_plus_one(4), square_plus_one(5))\n";
 
     let in_context = eval_in_context(&ctx, snippet).expect("in-context eval");
     let formatted = format_library_plus_snippet(&root, snippet);
@@ -940,14 +940,14 @@ fn gextra_eval_many_parity_with_eval_in_context_for_each_root_individually() {
     // paths must agree on every per-root outcome.
     let library = "module Mylib.Math\nexport (add)\n\n\
                    def add(x: int32, y: int32) -> int32 = x + y\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def root_a -> int32 = add(1, 2)\n\
-                   def root_b -> int32 = add(3, 4)\n\
-                   def root_c -> int32 = add(5, 6)\n";
+                   def root_a() -> int32 = add(1, 2)\n\
+                   def root_b() -> int32 = add(3, 4)\n\
+                   def root_c() -> int32 = add(5, 6)\n";
 
     let names: Vec<String> = ["root_a", "root_b", "root_c"]
         .iter()
@@ -972,8 +972,8 @@ fn gextra_source_hash_independent_of_tempdir_path() {
     // package_root path differs but source contents are identical, so
     // source_hash MUST be equal — otherwise the Phase I disk cache will
     // never share artifacts across reef-home moves or symlink changes.
-    let library = "module Mylib.Math\nexport (k)\n\ndef k -> int32 = 42\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let library = "module Mylib.Math\nexport (k)\n\ndef k() -> int32 = 42\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir1, root1) = build_pkg(library, main);
     let (_dir2, root2) = build_pkg(library, main);
     let ctx1 = compile_reef_context(Path::new("/tmp/x"), &root1).expect("ctx1");
@@ -1005,7 +1005,7 @@ fn g9deep_effect_inference_uses_newcode_shadow_not_library_for_inferred_row() {
     // If the library's Io leaks through, the validator rejects.
     let library = "module Mylib.Math\nexport (lib_io)\n\n\
                    def lib_io(x: int32) -> int32 = { ignore = print(\"in lib\")\n  x }\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -1046,12 +1046,12 @@ fn gextra_eval_in_context_is_thread_safe_across_arc_clones() {
 
     let library = "module Mylib.Math\nexport (add)\n\n\
                    def add(x: int32, y: int32) -> int32 = x + y\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = Arc::new(compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx"));
 
     let snippet = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                   def out -> int32 = add(7, 8)\n";
+                   def out() -> int32 = add(7, 8)\n";
 
     let handles: Vec<_> = (0..4)
         .map(|_| {
@@ -1099,7 +1099,7 @@ fn gextra_newcode_referencing_removed_library_def_fails() {
                         def lib_b(x: int32) -> int32 = x + 2\n";
     let library_partial = "module Mylib.Math\nexport (lib_a)\n\n\
                            def lib_a(x: int32) -> int32 = x + 1\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
 
     let (_dir1, root_full) = build_pkg(library_full, main);
     let (_dir2, root_partial) = build_pkg(library_partial, main);
@@ -1109,7 +1109,7 @@ fn gextra_newcode_referencing_removed_library_def_fails() {
         compile_reef_context(Path::new("/tmp/x"), &root_partial).expect("ctx partial");
 
     let snippet = "module App.Eval\nimport Mylib.Math (lib_a, lib_b)\n\n\
-                   def out -> int32 = lib_a(0) + lib_b(0)\n";
+                   def out() -> int32 = lib_a(0) + lib_b(0)\n";
 
     let _ = check_in_context(&ctx_full, snippet).expect("snippet checks against full lib");
     let outcome = check_in_context(&ctx_partial, snippet);
@@ -1128,7 +1128,7 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
     // If they don't, Phase I will reuse cached artifacts across modules
     // that have identical bodies but different export names — a poison
     // vector.
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
 
     let dir_a = TempDir::new().expect("tempdir A");
     let root_a = dir_a.path().join("myapp");
@@ -1146,7 +1146,7 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
         "Mylib",
         &[(
             "src/math.ch",
-            "module Mylib.Math\nexport (k)\n\ndef k -> int32 = 1\n",
+            "module Mylib.Math\nexport (k)\n\ndef k() -> int32 = 1\n",
         )],
         &[],
     );
@@ -1168,7 +1168,7 @@ fn gextra_source_hash_differs_when_only_module_name_differs() {
         "Mylib",
         &[(
             "src/util.ch",
-            "module Mylib.Util\nexport (k)\n\ndef k -> int32 = 1\n",
+            "module Mylib.Util\nexport (k)\n\ndef k() -> int32 = 1\n",
         )],
         &[],
     );
@@ -1197,7 +1197,7 @@ fn gextra_library_random_call_from_new_code_must_be_handled_or_rejected() {
     // composition contract for new code at the Phase G surface.)
     let library = "module Mylib.Math\nexport (lib_drop)\n\n\
                    def lib_drop(t: tensor[3, f32]) -> tensor[3, f32] = dropout(t, cast(0.5, f32))\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -1233,7 +1233,7 @@ fn gextra_repeated_calls_against_same_context_are_independent() {
     // exprs leak into its effect/linearity tracking.
     let library = "module Mylib.Math\nexport (add)\n\n\
                    def add(x: int32, y: int32) -> int32 = x + y\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
 
@@ -1241,7 +1241,7 @@ fn gextra_repeated_calls_against_same_context_are_independent() {
                      sig my_test: int64 -> unit ! { Test }\n\
                      def my_test(x: int64) -> unit = test_assert_eq_int(x, x, \"a\")\n";
     let snippet_b = "module App.Eval\nimport Mylib.Math (add)\n\n\
-                     def pure_b -> int32 = add(1, 2)\n";
+                     def pure_b() -> int32 = add(1, 2)\n";
 
     // Call order: A then B; B then A; both should produce identical
     // verdicts each time.

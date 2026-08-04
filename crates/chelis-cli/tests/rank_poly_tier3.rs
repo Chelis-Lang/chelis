@@ -1653,7 +1653,7 @@ fn vmap_over_dim_var_formal_named_reduce_evals_and_matches_backend() {
 fn vmap_axis_one_over_rank_poly_named_reduce_evals_and_matches_backend() {
     let source = "def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32] = sum(x, seq)\n\
          def inner(x: &tensor[seq, hidden, f32]) -> tensor[hidden, f32] = reduce_seq(x)\n\
-         out = vmap(inner, 1)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
+         out = vmap(inner, axis=1)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n\
          outz = vmap(inner)(to_tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]))\n";
     assert_clean(&check_json(source), "#351 vmap axis-1 checks clean");
     let backend = build_compile_run(source, "vmap_axis1_rank_poly");
@@ -1834,11 +1834,9 @@ fn dim_var_formal_routes_and_matches_backend() {
 fn match_pattern_operand_is_a_pinned_gap() {
     let source = "type Box =\n\
          \x20\x20| Wrap(tensor[batch, seq, f32])\n\
-         def h(b: Box) -> tensor[batch, f32] = {\n\
-         \x20\x20match b with {\n\
+         def h(b: Box) -> tensor[batch, f32] = match b with {\n\
          \x20\x20\x20\x20| Wrap(v) => sum(v, seq)\n\
          \x20\x20}\n\
-         }\n\
          out = h(Wrap(to_tensor([[1.0, 2.0], [3.0, 4.0]])))\n";
     let backend = build_compile_run(source, "match_pattern_gap");
     let tensors = parse_printed_tensors(&backend);

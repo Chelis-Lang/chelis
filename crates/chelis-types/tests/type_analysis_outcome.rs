@@ -88,7 +88,7 @@ fn analysis_accepts_a_deep_finite_expression() {
     for _ in 0..32 {
         body = format!("add({body}, 1)");
     }
-    let surf = format!("module Deep\ndef value -> int32 = {body}\n");
+    let surf = format!("module Deep\ndef value() -> int32 = {body}\n");
     let decls = chelis_surf::parser::parse_str(&surf).expect("deep Surf fixture must parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
 

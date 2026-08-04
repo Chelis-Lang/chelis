@@ -84,14 +84,14 @@ const SDPA_BODY: &str = "{\n  \
   weights = softmax(mul(scores, scale), -1)\n  \
   matmul(weights, v)\n}";
 
-/// Concrete-`f32` test inputs and the scalar-loss + `grad(loss, wrt=(q))`
+/// Concrete-`f32` test inputs and the scalar-loss + `grad(loss, wrt=q)`
 /// driver, parameterized over the callee name (so the imported and inline
 /// forms share one driver and must produce identical gradients).
 fn grad_driver(callee: &str) -> String {
     format!(
         "def loss(q: tensor[2, 3, f32], k: tensor[2, 3, f32], v: tensor[2, 3, f32], scale: tensor[2, 2, f32]) -> f32 =\n\
          \x20 tensor_to_scalar(sum(sum({callee}(q, k, v, scale), cast(0, int32)), cast(0, int32)))\n\
-         out = grad(loss, wrt=(q))(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]]))\n",
+         out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]), to_tensor([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]), to_tensor([[1.0, 0.0], [0.0, 1.0]]))\n",
     )
 }
 
@@ -250,7 +250,7 @@ fn issue_319_imported_precision_poly_sdpa_grad_lowers_and_matches_inline() {
                      scores = matmul(q, kt)\n  \
                      weights = softmax(mul(scores, scale), -1)\n  \
                      matmul(weights, v)\n}\n";
-    let main = "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n";
+    let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
     let snippet = format!(
@@ -336,14 +336,14 @@ fn assert_separate_sig_grad_matches_inline(
         "def verb({inline_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
            tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
-         out = grad(loss, wrt=(q))({call})\n",
+         out = grad(loss, wrt=q)({call})\n",
         call_args = bare_params,
     );
     let sep_src = format!(
         "{sig}\ndef verb({bare_params}) = {body}\n\
          def loss({loss_params}) -> f32 =\n  \
            tensor_to_scalar(sum(sum(verb({call_args}), cast(0, int32)), cast(0, int32)))\n\
-         out = grad(loss, wrt=(q))({call})\n",
+         out = grad(loss, wrt=q)({call})\n",
         call_args = bare_params,
     );
     let inline = out_tensor(&try_eval(&inline_src).unwrap_or_else(|err| {
@@ -473,7 +473,7 @@ fn issue_319_two_precision_vars_both_pinned_same_precision_grads() {
                   def f(q, b) = {\n  qt = permute(q, 1, 0)\n  qb = permute(qt, 1, 0)\n  add(qb, b)\n}\n\
                   def loss(q: tensor[2, 3, f32], b: tensor[2, 3, f32]) -> f32 =\n  \
                     tensor_to_scalar(sum(sum(f(q, b), cast(0, int32)), cast(0, int32)))\n\
-                  out = grad(loss, wrt=(q))(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
+                  out = grad(loss, wrt=q)(to_tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), to_tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]))\n";
     let result = try_eval(twovar).unwrap_or_else(|err| {
         panic!("issue #319 [two-pvar monomorphic]: must grad when both vars pin to f32: {err}")
     });

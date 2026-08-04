@@ -80,9 +80,12 @@ const EFFECT_KIND_CONSUMERS: &[Consumer] = &[
         ],
     },
     Consumer {
-        source: ConsumerSource::File("crates/chelis-surf/src/decompile.rs"),
-        role: "both Deep-to-Surf handle-effect decompilers",
-        required: &["use chelis_vocab::EffectKind", "decode_effect_kind("],
+        source: ConsumerSource::File("crates/chelis-surf/src/resugar.rs"),
+        role: "shared Deep-to-Surf AST handle-effect resugaring",
+        required: &[
+            "use chelis_vocab::{EffectKind, EffectKindInput}",
+            "decode_effect_kind(",
+        ],
         forbidden: &[
             "Some(\"random\") => format!(\"with seed",
             "Some(\"resource\") => format!(\"with device",

@@ -457,7 +457,7 @@ bad = gt(bools, true)
 }
 
 /// Issue #5 regression: when a comparison op is used in `gt(scalar, tensor)`
-/// form inside a `def name -> tensor[D, bool] = ...` body, type inference
+/// form inside a `def name() -> tensor[D, bool] = ...` body, type inference
 /// must produce `tensor[D, bool]` (not `bool`) so the declared signature
 /// matches. v0.3.1's broadcast rewrite handled the unification, but the
 /// comparison-op return-type override at the post-unify site only inspected
@@ -477,12 +477,12 @@ fn coral_comparison_ops_broadcast_scalar_first_with_declared_signature() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-def above -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
-def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
-def lt_right -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), 2.5)
-def lt_left -> tensor[3, bool] = lt(2.5, to_tensor([1.0, 2.0, 3.0]))
-def eq_right -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), 2.0)
-def eq_left -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
+def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
+def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
+def lt_right() -> tensor[3, bool] = lt(to_tensor([1.0, 2.0, 3.0]), 2.5)
+def lt_left() -> tensor[3, bool] = lt(2.5, to_tensor([1.0, 2.0, 3.0]))
+def eq_right() -> tensor[3, bool] = eq(to_tensor([1.0, 2.0, 3.0]), 2.0)
+def eq_left() -> tensor[3, bool] = eq(2.0, to_tensor([1.0, 2.0, 3.0]))
 "#,
     );
 

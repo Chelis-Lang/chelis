@@ -1,5 +1,5 @@
 == annotated deep ==
-(module {}
+(module {surf_path: "Parity.GenericCalls"}
   parity.genericcalls
   (defsig {}
     apply_twice

@@ -250,7 +250,7 @@ impl Expander {
             }
             elements[2] = node_with_meta(
                 DeepTag::Bind,
-                list.elements[1].clone(),
+                bind_list.elements[1].clone(),
                 new_bind_children,
                 *bind_span,
             );

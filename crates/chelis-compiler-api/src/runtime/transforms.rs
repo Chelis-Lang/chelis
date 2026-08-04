@@ -58,7 +58,7 @@ impl<'a> EvalContext<'a> {
             },
         }
         let mut arg_repacks: Vec<ArgRepack> = Vec::with_capacity(args.len());
-        // wrt indices for this grad call, if narrowed (`grad(f, wrt=(i))`).
+        // wrt indices for this grad call, if narrowed (`grad(f, wrt=i)`).
         // `None` means differentiate every differentiable argument, exactly
         // as the checker's `grad_result_type` and the IR lowering's
         // `is_selected_wrt` do.

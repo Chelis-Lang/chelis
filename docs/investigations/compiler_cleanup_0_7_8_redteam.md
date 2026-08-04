@@ -56,7 +56,7 @@ PR #80's fixtures cover bare zero-arg `result = go()` for each scalar
 return type, plus a one-arg negative control. They do not cover:
 
 - Nested zero-arg (`def outer -> i32 = inner()`).
-- Three-level chain (`def deepest = ...; def middle = deepest(); def outer = middle()`).
+- Three-level chain (`def deepest() = ...; def middle() = deepest(); def outer() = middle()`).
 - Zero-arg call as a subexpression (`result = add(go(), 1)`).
 - Zero-arg call inside another zero-arg fn's body.
 - Large i64 above f32 representable range.
@@ -233,7 +233,7 @@ Finding F1 below.
   arity guard), but the regression fixtures only exercise the
   top-level `result = go()` shape. The same guard fires for nested
   forms (`add(go(), 1)`) and zero-arg-inside-zero-arg
-  (`def go = add(helper(), 3)`). A future regression that re-tightens
+  (`def go() = add(helper(), 3)`). A future regression that re-tightens
   the guard would still pass the existing fixtures.
 - **Verification:** Inspected `host_eval_scalar_fn_call.rs` — all five
   fixtures use the top-level shape.

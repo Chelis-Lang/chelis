@@ -11,11 +11,17 @@ pub enum LexError {
     #[error("invalid escape sequence '\\{ch}' at byte {offset}")]
     InvalidEscape { ch: char, offset: usize },
 
+    #[error("unescaped control character U+{code:04X} in string at byte {offset}")]
+    UnescapedControl { code: u32, offset: usize },
+
     #[error("invalid number '{text}' at byte {offset}")]
     InvalidNumber { text: String, offset: usize },
 
     #[error("unexpected character '{ch}' at byte {offset}")]
     UnexpectedChar { ch: char, offset: usize },
+
+    #[error("keyword '{keyword}' is reserved for future use at byte {offset}")]
+    ReservedForFuture { keyword: String, offset: usize },
 
     #[error("unterminated block comment starting at byte {offset}")]
     UnterminatedBlockComment { offset: usize },
@@ -484,6 +490,12 @@ fn lex_inner(
                     i += 1;
                 }
                 let text = &source[start..i];
+                if is_future_reserved(text) {
+                    return Err(LexError::ReservedForFuture {
+                        keyword: text.to_string(),
+                        offset: start,
+                    });
+                }
                 let kind = classify_ident(text);
                 tokens.push(Token {
                     kind,
@@ -502,6 +514,10 @@ fn lex_inner(
 
 fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn is_future_reserved(text: &str) -> bool {
+    matches!(text, "effect" | "handler" | "perform" | "resume" | "borrow")
 }
 
 fn classify_ident(text: &str) -> TokenKind {
@@ -529,6 +545,10 @@ fn classify_ident(text: &str) -> TokenKind {
         "cast_trunc" => TokenKind::CastTrunc,
         "export" => TokenKind::Export,
         "par" => TokenKind::Par,
+        "do" => TokenKind::Do,
+        "quote" => TokenKind::Quote,
+        "unquote" => TokenKind::Unquote,
+        "splice" => TokenKind::Splice,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         _ => {
@@ -569,6 +589,34 @@ fn lex_string(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     b't' => s.push('\t'),
                     b'r' => s.push('\r'),
                     b'0' => s.push('\0'),
+                    b'u' => {
+                        *i += 1;
+                        if *i >= bytes.len() || bytes[*i] != b'{' {
+                            return Err(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: *i - 1,
+                            });
+                        }
+                        *i += 1;
+                        let digits_start = *i;
+                        while *i < bytes.len() && bytes[*i].is_ascii_hexdigit() {
+                            *i += 1;
+                        }
+                        if digits_start == *i || *i >= bytes.len() || bytes[*i] != b'}' {
+                            return Err(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: digits_start.saturating_sub(2),
+                            });
+                        }
+                        let scalar = u32::from_str_radix(&source[digits_start..*i], 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or(LexError::InvalidEscape {
+                                ch: 'u',
+                                offset: digits_start.saturating_sub(2),
+                            })?;
+                        s.push(scalar);
+                    }
                     other => {
                         return Err(LexError::InvalidEscape {
                             ch: other as char,
@@ -580,6 +628,12 @@ fn lex_string(source: &str, i: &mut usize) -> Result<Token, LexError> {
             }
             _ => {
                 let ch = source[*i..].chars().next().unwrap();
+                if ch.is_control() {
+                    return Err(LexError::UnescapedControl {
+                        code: ch as u32,
+                        offset: *i,
+                    });
+                }
                 s.push(ch);
                 *i += ch.len_utf8();
             }
@@ -602,6 +656,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     *i += 1;
                 }
                 let text = &source[start..*i];
+                if !underscores_separate_digits(&text[2..], |byte| byte.is_ascii_hexdigit()) {
+                    return Err(LexError::InvalidNumber {
+                        text: text.to_string(),
+                        offset: start,
+                    });
+                }
                 let digits: String = text[2..].chars().filter(|c| *c != '_').collect();
                 let val =
                     i64::from_str_radix(&digits, 16).map_err(|_| LexError::InvalidNumber {
@@ -638,6 +698,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
                     *i += 1;
                 }
                 let text = &source[start..*i];
+                if !underscores_separate_digits(&text[2..], |byte| matches!(byte, b'0' | b'1')) {
+                    return Err(LexError::InvalidNumber {
+                        text: text.to_string(),
+                        offset: start,
+                    });
+                }
                 let digits: String = text[2..].chars().filter(|c| *c != '_').collect();
                 let val = i64::from_str_radix(&digits, 2).map_err(|_| LexError::InvalidNumber {
                     text: text.to_string(),
@@ -699,6 +765,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
     }
 
     let text = &source[start..*i];
+    if !underscores_separate_digits(text, |byte| byte.is_ascii_digit()) {
+        return Err(LexError::InvalidNumber {
+            text: text.to_string(),
+            offset: start,
+        });
+    }
     let clean: String = text.chars().filter(|c| *c != '_').collect();
     let suffix = lex_literal_suffix(source, i, text, start, /* on_hex = */ false)?;
     if is_float {
@@ -725,6 +797,12 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             })
         }
     } else {
+        if clean == "9223372036854775808" && matches!(suffix, None | Some(LiteralSuffix::I64)) {
+            return Ok(Token {
+                kind: TokenKind::IntMinMagnitude(suffix),
+                span: Span::new(start, *i - start),
+            });
+        }
         let val: i64 = clean.parse().map_err(|_| LexError::InvalidNumber {
             text: text.to_string(),
             offset: start,
@@ -738,6 +816,17 @@ fn lex_number(source: &str, i: &mut usize) -> Result<Token, LexError> {
             span: Span::new(start, *i - start),
         })
     }
+}
+
+fn underscores_separate_digits(text: &str, is_digit: impl Fn(u8) -> bool) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'_'
+            || (index > 0
+                && index + 1 < bytes.len()
+                && is_digit(bytes[index - 1])
+                && is_digit(bytes[index + 1]))
+    })
 }
 
 /// Detect whether a hex digit sequence (without the `0x` prefix) ends in
@@ -835,7 +924,7 @@ mod tests {
     fn all_keywords() {
         assert_eq!(
             lex_kinds(
-                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast cast_trunc export par"
+                "def sig type dim macro match with fn module import if then else grad vmap jit realize copy tensor cast cast_trunc export par do quote unquote splice"
             ),
             vec![
                 TokenKind::Def,
@@ -861,6 +950,10 @@ mod tests {
                 TokenKind::CastTrunc,
                 TokenKind::Export,
                 TokenKind::Par,
+                TokenKind::Do,
+                TokenKind::Quote,
+                TokenKind::Unquote,
+                TokenKind::Splice,
             ]
         );
     }

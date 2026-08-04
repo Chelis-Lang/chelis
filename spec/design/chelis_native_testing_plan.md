@@ -16,24 +16,24 @@ Core assertion functions:
 
 ```chelis
 -- Equality
-def assert_eq(actual: f32, expected: f32, label: String) -> () ! { Test }
-def assert_eq_int(actual: int64, expected: int64, label: String) -> () ! { Test }
-def assert_eq_bool(actual: bool, expected: bool, label: String) -> () ! { Test }
-def assert_eq_string(actual: String, expected: String, label: String) -> () ! { Test }
+def assert_eq(actual: f32, expected: f32, label: String) -> unit ! { Test }
+def assert_eq_int(actual: int64, expected: int64, label: String) -> unit ! { Test }
+def assert_eq_bool(actual: bool, expected: bool, label: String) -> unit ! { Test }
+def assert_eq_string(actual: String, expected: String, label: String) -> unit ! { Test }
 
 -- Approximate equality (for floating point)
-def assert_close(actual: f32, expected: f32, tol: f32, label: String) -> () ! { Test }
-def assert_close_tensor(actual: tensor[n, f32], expected: tensor[n, f32], tol: f32, label: String) -> () ! { Test }
+def assert_close(actual: f32, expected: f32, tol: f32, label: String) -> unit ! { Test }
+def assert_close_tensor(actual: tensor[n, f32], expected: tensor[n, f32], tol: f32, label: String) -> unit ! { Test }
 
 -- Boolean
-def assert_true(cond: bool, label: String) -> () ! { Test }
-def assert_false(cond: bool, label: String) -> () ! { Test }
+def assert_true(cond: bool, label: String) -> unit ! { Test }
+def assert_false(cond: bool, label: String) -> unit ! { Test }
 
 -- Tensor shape / properties
-def assert_shape(t: tensor[n, f32], expected_n: int64, label: String) -> () ! { Test }
+def assert_shape(t: tensor[n, f32], expected_n: int64, label: String) -> unit ! { Test }
 
 -- Failure (unconditional)
-def fail(msg: String) -> () ! { Test }
+def fail(msg: String) -> unit ! { Test }
 ```
 
 The `Test` effect is a new algebraic effect. Assertion functions perform the `Test` effect. The `chelis test` CLI command handles `Test` by collecting pass/fail results. This means:

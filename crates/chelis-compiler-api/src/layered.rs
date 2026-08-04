@@ -291,7 +291,7 @@ mod artifact_outcome_tests {
         ));
 
         let linearity = check(
-            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n",
         );
         assert!(matches!(
             linearity,

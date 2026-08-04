@@ -22,7 +22,23 @@ generator never decides where to attach it.
 Metadata keys SHALL use the identifier charset `[A-Za-z_][A-Za-z0-9_]*` (no hyphens) and
 carry compiler-relevant annotations. The `type` key SHALL be checked rather than trusted, and
 metadata fields SHALL be preserved by all spec-defined transformations and round-trip through
-canonical form.
+canonical form. The `surf_*` namespace SHALL be closed to `surf_path`,
+`surf_dim_group_size`, `surf_pipe_stage`, `surf_literal_style`, and
+`surf_binding_type`; an unknown key in that namespace SHALL be rejected. Known keys SHALL
+also be rejected outside their closed contracts: `surf_path` is a string on a module or
+import whose ASCII-lowercased value equals the node's lowered path child,
+`surf_dim_group_size` is a positive integer on the first grouped `defdim`,
+`surf_pipe_stage` is `"call-first"` on an `fn` used as a non-initial pipe stage,
+`surf_literal_style` is `"unsuffixed"` or `"explicit"` on a `lit`, and
+`surf_binding_type` is `"inferred"` or `"explicit"` on a `bind` value. The latter two
+markers preserve authored-versus-inferred Surf distinctions and do not change evaluation.
+Round-trip normalization MAY erase those two origin markers only when their value and
+placement are valid and after they select the Surf reconstruction. It MAY also erase a
+`surf_path` equal to the deterministic default spelling of its lowered child and a correctly
+placed `surf_dim_group_size: 1`; malformed, misplaced, and non-default markers and all other
+validated `surf_*` values SHALL remain visible.
+Repeatable Surf `with contract = "..."` property options SHALL be represented by ordered
+`property_contracts: (tuple {} string...)` metadata on the property `def`.
 
 #### Scenario: Producer-specific metadata key accepted
 
@@ -211,6 +227,8 @@ SHALL be available without import; standard-library names SHALL require an expli
 Deep SHALL use explicit multi-argument application rather than currying: `(app {} f x y z)`.
 Supplying the wrong number of arguments to a function SHALL be a type error, not partial
 application; partial application SHALL require explicit closure construction with `fn`.
+A nested `app` whose callee is another expression SHALL remain nested and SHALL NOT be
+flattened; canonical Surf SHALL group that callee explicitly.
 
 #### Scenario: Full application type-checks
 
@@ -226,7 +244,10 @@ application; partial application SHALL require explicit closure construction wit
 
 `pipe` SHALL be preserved in Deep as a first-class node rather than desugared to nested `app`,
 with `(pipe {} e1 e2 e3)` evaluating as `(app {} e3 (app {} e2 e1))`. Each element after the
-first SHALL be a function or lambda.
+first SHALL be a function or lambda. A canonical Surf producer SHALL resugar a nested Deep
+`app` chain as a pipeline only when typed information proves a linear first-argument chain;
+without that proof it SHALL preserve application syntax. (This promotion is not fully
+implemented; see chelis#1171.)
 
 #### Scenario: Pipe evaluation order
 
@@ -238,17 +259,23 @@ first SHALL be a function or lambda.
 - **WHEN** a pipe stage after the first is not a function or lambda
 - **THEN** it is rejected because every stage after the first must be callable
 
+#### Scenario: Application promotion requires typed proof
+
+- **WHEN** a Deep application chain is eligible for canonical Surf output
+- **THEN** it becomes a pipeline only when the typed proof establishes value-preserving first-argument insertion
+
 ### Requirement: Canonical form and ordering
 
 Deep SHALL have exactly one textual representation per program: 2-space indent, 80-column flat
 threshold, structured multi-line `fn`/`let`/`bind`, no comments, and single trailing newline.
-Import names and record `kv` pairs SHALL be alphabetized while module declarations, match arms,
-and `let` bind pairs SHALL preserve declaration order.
+Import names SHALL be alphabetized while module declarations, record/record-update `kv`
+pairs, match arms, and `let` bind pairs SHALL preserve declaration order. Record order is
+the left-to-right evaluation order.
 
-#### Scenario: Record kv pairs alphabetized
+#### Scenario: Record kv pairs preserve written order
 
 - **WHEN** a record is written `(record {} Adam (kv {} lr ...) (kv {} eps ...))`
-- **THEN** canonical form emits `eps` before `lr`
+- **THEN** canonical form retains `lr` before `eps`
 
 #### Scenario: Match arms keep declaration order
 
@@ -257,15 +284,71 @@ and `let` bind pairs SHALL preserve declaration order.
 
 ### Requirement: Literal normalization and defaults
 
-Canonical Deep SHALL normalize literals: integers to decimal without leading zeros, floats to
-`d.d` minimum, scientific floats to `d.dE±d`. An unsuffixed integer literal SHALL bind at
-`int32` and an unsuffixed float at `f32`, overridable only by a suffix, contextual
+Canonical Deep SHALL normalize literals: integers to decimal without leading zeros and finite
+floats to the shortest round-trippable spelling, adding `.0` when otherwise integer-like and
+using lowercase `e` only when selected by that printer. An unsuffixed integer literal SHALL
+bind at `int32` and an unsuffixed float at `f32`, overridable only by a suffix, contextual
 tensor-literal inference, or an explicit `cast`. The closed suffix set SHALL match Surf's.
 
 #### Scenario: Float canonicalization
 
-- **WHEN** a literal is written `1.` or `1e3`
-- **THEN** canonical form emits `1.0` and `1.0E+3`
+- **WHEN** a producer supplies `1.` or a longer spelling of the same finite value
+- **THEN** canonical form emits the shortest representation, such as `1.0`
+
+#### Scenario: Non-finite float is not public Deep
+
+- **WHEN** a producer constructs a NaN or infinity float literal
+- **THEN** validation/resugaring rejects it because canonical Surf has no representation
+
+### Requirement: Total canonical Surf resugaring
+
+Every structurally valid public Deep tag SHALL have a canonical Surf AST representation.
+Deep-to-Surf emitters SHALL construct that shared AST and use the canonical Surf printer;
+they SHALL NOT maintain a second handwritten source dialect. Desugaring the result SHALL
+recover Deep modulo only the derived metadata normalization named by the numbered source spec.
+That normalization SHALL materialize a checked standalone `def` type as a `defsig`, map empty
+`tuple`/`t-tuple` to unit without mapping any zero-argument `app` to a `var`; uppercase
+constructor `var`, zero-argument `app`, and zero-field `record` forms SHALL remain distinct
+without erasing semantic type data. Multi-pair `bind` nodes SHALL resugar in
+their written sequential order; empty `pat-tuple` SHALL resugar directly as `()`.
+Negative Deep literals SHALL normalize to Surf's unary-minus application shape. The full
+`int64` minimum SHALL use Surf's direct signed-minimum literal, while a narrower signed
+minimum SHALL use a non-overflowing decomposition; float-typed integer atoms SHALL normalize
+to the equivalent float atom. Negative `pat-lit` values SHALL instead resugar directly as an
+unsuffixed negative pattern, including negative zero and the full `int64` minimum. Nested
+application SHALL preserve its association through an explicitly grouped Surf callee. Every
+Deep string SHALL use Surf's named or minimal lowercase control escape and remain
+representable. Any public Deep name that cannot occupy its corresponding Surf identifier
+position SHALL fail resugaring explicitly rather than be rewritten.
+Surf property syntax SHALL represent user-authored properties only. A property carrying
+`property_source_kind: "bridge:c-earchin"` or any `property_source_id` SHALL fail resugaring
+explicitly rather than be rewritten with user provenance. `property_quantifiers` SHALL be
+present and SHALL exactly match the property `fn` parameter list before resugaring.
+
+#### Scenario: Direct Deep forms remain distinct
+
+- **WHEN** Deep contains `block`, `record-update`, `quote`, `unquote`, or `splice`
+- **THEN** resugaring uses `do`, `with`, `quote`, `unquote`, or `splice` respectively
+
+#### Scenario: Unrepresentable input fails explicitly
+
+- **WHEN** malformed Deep reaches the resugaring boundary
+- **THEN** resugaring returns a structural error rather than a placeholder Surf expression
+
+#### Scenario: Invalid surface name fails explicitly
+
+- **WHEN** a Deep value or field name contains punctuation or uses the wrong Surf casing
+- **THEN** resugaring returns an identifier error rather than emitting invalid or meaning-changing Surf
+
+#### Scenario: Property provenance is not forged through Surf
+
+- **WHEN** a Deep property carries bridge provenance or a producer-local source ID
+- **THEN** resugaring fails explicitly rather than emitting a user-authored `@property`
+
+#### Scenario: Property binders must agree
+
+- **WHEN** `property_quantifiers` differs from the property `fn` parameter list
+- **THEN** resugaring fails rather than emitting renamed binders and free variables
 
 #### Scenario: Unsigned suffix rejected at lex time
 

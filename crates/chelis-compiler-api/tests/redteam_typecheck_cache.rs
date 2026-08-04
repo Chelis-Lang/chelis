@@ -94,7 +94,7 @@ fn make_pkg(name: &str, version: &str, main_ch: &str) -> (TempDir, PathBuf) {
     (dir, root)
 }
 
-const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value -> int32 = cast(0, int32)\n";
+const TRIVIAL_MAIN: &str = "module Rt.Main\n\ndef rt_value() -> int32 = cast(0, int32)\n";
 
 /// Build a context, save it to a scratch path, and return the path plus
 /// the saved bytes. The scratch dir guard is kept alive by the caller.
@@ -225,7 +225,7 @@ fn rt1_distinct_source_packages_still_do_not_collide() {
     let (_dir_b, root_b) = make_pkg(
         "rt-distinct",
         "0.1.0",
-        "module Rt.Main\n\ndef rt_value -> int32 = cast(1, int32)\n",
+        "module Rt.Main\n\ndef rt_value() -> int32 = cast(1, int32)\n",
     );
 
     let ctx_a = compile_reef_context(Path::new("/tmp/unused"), &root_a).expect("ctx a");
@@ -568,7 +568,7 @@ fn stdlib_cache_key_is_deterministic_for_one_decl_slice() {
     // share one entry. A non-deterministic key would silently disable the
     // cache (perpetual cold cost), not corrupt anything, but it is still
     // a regression worth pinning.
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample -> int32 = 1\n")
+    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
         .expect("sample decls parse");
     assert_eq!(
         stdlib_cache_key(&decls),
@@ -586,9 +586,9 @@ fn stdlib_cache_key_depends_on_the_decls_themselves() {
     // package resolves the checkout's own source, not the bundle). A key
     // that ignored the decl bytes would let an edited runtime silently
     // reuse the unedited runtime's typecheck result.
-    let decls_a = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_a -> int32 = 1\n")
+    let decls_a = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_a() -> int32 = 1\n")
         .expect("decls a parse");
-    let decls_b = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_b -> int32 = 2\n")
+    let decls_b = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_b() -> int32 = 2\n")
         .expect("decls b parse");
     assert_ne!(
         decls_a, decls_b,
@@ -616,7 +616,7 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     // is the tripwire.
     use sha2::{Digest, Sha256};
 
-    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample -> int32 = 1\n")
+    let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
         .expect("sample decls parse");
     let real = stdlib_cache_key(&decls);
 

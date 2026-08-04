@@ -79,7 +79,7 @@ integer position where the batch dimension is inserted, defaulting to `0`.
 def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
 
 def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] =
-  xs |> vmap(process, axis=0)
+  xs |> vmap(process)
 ```
 
 ```chelis-deep-fragment
@@ -98,7 +98,7 @@ gradient vector, which is what per-example gradient clipping needs. This is not 
 vmapped function, reduce its result to a scalar first:
 
 ```chelis-surf-fragment
-grad(fn (xs) -> sum(vmap(process, axis=0)(xs), 0))
+grad(fn (xs) -> sum(vmap(process)(xs), 0))
 ```
 
 When you are unsure whether a particular composition is supported, write a small program and

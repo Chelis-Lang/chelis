@@ -302,17 +302,17 @@ fn le_deep_subtree_walk_applies_workspace_rooted_exception() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
     write_workspace_marker(root);
-    let fixture_dir = root.join("crates/chelis-surf/tests/fixtures");
+    let fixture_dir = root.join("crates/chelisup/bootstrap");
     fs::create_dir_all(&fixture_dir).expect("mkdir");
     fs::write(
-        fixture_dir.join("block_binding_expr.ch"),
-        "def f(x: f32): f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n",
+        fixture_dir.join("chelisup.sh"),
+        "#!/bin/sh\necho bootstrap\n",
     )
     .expect("write fixture");
 
-    let (code_deep, out_deep, _) = run_chelis(root, &["lint", "--check", "crates/chelis-surf"]);
+    let (code_deep, out_deep, _) = run_chelis(root, &["lint", "--check", "crates/chelisup"]);
     assert!(
-        !out_deep.contains("surf-def-arrow-form"),
+        !out_deep.contains("no-shell-scripts"),
         "deep subtree walk must apply workspace-rooted exception; out={out_deep}"
     );
     assert_eq!(code_deep, 0, "exit 0 required; out={out_deep}");
@@ -326,11 +326,11 @@ fn le_mixed_file_and_dir_targets_apply_workspace_rooted_exception() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
     write_workspace_marker(root);
-    let fixture_dir = root.join("crates/chelis-surf/tests/fixtures");
+    let fixture_dir = root.join("crates/chelisup/bootstrap");
     fs::create_dir_all(&fixture_dir).expect("mkdir");
     fs::write(
-        fixture_dir.join("operators.ch"),
-        "def add_mul(x: f32, y: f32): f32 = mul(add(x, y), x)\n",
+        fixture_dir.join("chelisup.sh"),
+        "#!/bin/sh\necho bootstrap\n",
     )
     .expect("write fixture");
     // Add an unrelated docs file so the mixed-target invocation has
@@ -340,7 +340,7 @@ fn le_mixed_file_and_dir_targets_apply_workspace_rooted_exception() {
 
     let (code, out, _) = run_chelis(root, &["lint", "--check", "crates", "docs"]);
     assert!(
-        !out.contains("surf-def-arrow-form"),
+        !out.contains("no-shell-scripts"),
         "mixed walk targets must apply workspace-rooted exception; out={out}"
     );
     assert_eq!(code, 0, "exit 0 required; out={out}");
@@ -356,8 +356,8 @@ fn le_mixed_file_and_dir_targets_apply_workspace_rooted_exception() {
 /// When a developer runs `chelis lint --check .` from `crates/` (a
 /// subdirectory of the workspace), the "workspace root" is taken to be
 /// `<repo>/crates`, and workspace-rooted exception patterns like
-/// `crates/chelis-surf/tests/fixtures/*.ch` fail to match because the
-/// relative path is `chelis-surf/tests/fixtures/*.ch` (no leading
+/// `crates/chelisup/bootstrap/chelisup.sh` fail to match because the
+/// relative path is `chelisup/bootstrap/chelisup.sh` (no leading
 /// `crates/` segment).
 ///
 /// The §5 closure entry claims that `chelis lint --check .` and
@@ -376,21 +376,21 @@ fn le_leak_a_cwd_not_workspace_root_breaks_workspace_rooted_exception() {
     let dir = tempdir().expect("tempdir");
     let root = dir.path();
     write_workspace_marker(root);
-    let fixture_dir = root.join("crates/chelis-surf/tests/fixtures");
+    let fixture_dir = root.join("crates/chelisup/bootstrap");
     fs::create_dir_all(&fixture_dir).expect("mkdir");
     fs::write(
-        fixture_dir.join("block_binding_expr.ch"),
-        "def f(x: f32): f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n",
+        fixture_dir.join("chelisup.sh"),
+        "#!/bin/sh\necho bootstrap\n",
     )
     .expect("write fixture");
 
     // Invoke from `<root>/crates`, not from `<root>`. The exception
-    // pattern `crates/chelis-surf/tests/fixtures/*.ch` should still
+    // pattern `crates/chelisup/bootstrap/chelisup.sh` should still
     // apply because the violation IS in `crates/chelis-surf/...`.
     let crates_dir = root.join("crates");
     let (code, out, _err) = run_chelis(&crates_dir, &["lint", "--check", "."]);
     assert!(
-        !out.contains("surf-def-arrow-form"),
+        !out.contains("no-shell-scripts"),
         "leak: workspace-rooted exception must apply regardless of CWD; ran from {}; out={out}",
         crates_dir.display()
     );
@@ -403,7 +403,7 @@ fn le_leak_a_cwd_not_workspace_root_breaks_workspace_rooted_exception() {
 /// .` issued from the workspace root. Pre-fix, `detect_lint_workspace_root`
 /// returned `canonicalize(cwd)` — so a run from a sibling path anchored
 /// exception matching against the sibling, not the workspace, and the
-/// `crates/chelis-surf/tests/fixtures/*.ch` exception failed to match.
+/// `crates/chelisup/bootstrap/chelisup.sh` exception failed to match.
 #[test]
 fn le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation() {
     let dir = tempdir().expect("tempdir");
@@ -412,18 +412,18 @@ fn le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation() {
     let sibling = root.join("sibling");
     fs::create_dir_all(&sibling).expect("mkdir sibling");
     write_workspace_marker(&workspace);
-    let fixture_dir = workspace.join("crates/chelis-surf/tests/fixtures");
+    let fixture_dir = workspace.join("crates/chelisup/bootstrap");
     fs::create_dir_all(&fixture_dir).expect("mkdir");
     fs::write(
-        fixture_dir.join("block_binding_expr.ch"),
-        "def f(x: f32): f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n",
+        fixture_dir.join("chelisup.sh"),
+        "#!/bin/sh\necho bootstrap\n",
     )
     .expect("write fixture");
 
     // Baseline: from the workspace root, `chelis lint --check .`.
     let (code_root, out_root, _) = run_chelis(&workspace, &["lint", "--check", "."]);
     assert!(
-        !out_root.contains("surf-def-arrow-form"),
+        !out_root.contains("no-shell-scripts"),
         "baseline: workspace-root invocation must apply the exception; out={out_root}"
     );
     assert_eq!(code_root, 0, "baseline exit 0 required; out={out_root}");
@@ -435,7 +435,7 @@ fn le_leak_fix_sibling_path_invocation_matches_workspace_root_invocation() {
         &["lint", "--check", workspace.to_str().expect("utf8 path")],
     );
     assert!(
-        !out_sib.contains("surf-def-arrow-form"),
+        !out_sib.contains("no-shell-scripts"),
         "sibling-path invocation must apply the workspace-rooted exception; out={out_sib}"
     );
     assert_eq!(code_sib, 0, "sibling-path exit 0 required; out={out_sib}");

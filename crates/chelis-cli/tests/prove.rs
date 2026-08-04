@@ -225,7 +225,7 @@ import Mylib.Math (double, quotient)
 @property double_identity forall(x: f32):
   double(x) == x + x
 @property imported_grad_formula forall(d: f32, r: f32, g: f32)
-where (r > g):
+where r > g:
   (grad(quotient, wrt=r)(d, r, g)
     == (0.0 - d) / ((r - g) * (r - g)))
 "#,
@@ -2312,7 +2312,7 @@ fn goal_field_carries_the_full_proposition_for_a_guarded_fuzz_pass() {
     // The guard travels with the goal: a consumer never sees `(log(x) < x)`
     // (which would claim it holds unconditionally) but the guarded proposition.
     assert_eq!(
-        records[0]["goal"], "forall(x: f32) where (x > 0.0): (log(x) < x)",
+        records[0]["goal"], "forall(x: f32) where x > 0.0: (log(x) < x)",
         "a guarded property's goal is the full discharged proposition: {}",
         records[0]
     );
@@ -2520,7 +2520,7 @@ fn goal_for_a_guarded_property_is_not_the_unconditional_body() {
     let records = property_records(&output.stdout);
     assert_eq!(records.len(), 1, "records: {records:?}");
     let goal = records[0]["goal"].as_str().expect("goal");
-    assert_eq!(goal, "forall(x: f32) where (x > 0.0): (x <= x)");
+    assert_eq!(goal, "forall(x: f32) where x > 0.0: (x <= x)");
     assert_ne!(
         goal, "(x <= x)",
         "a guarded goal must not collapse to the unconditional body: {goal}"
@@ -2723,7 +2723,7 @@ fn issue_923_scalar_grad_and_corrupt_twin_receive_smt_verdicts() {
     let source = r#"module Audit.Main
 
 @property inline_grad_negative forall(d: f32, r: f32, g: f32)
-where (d > 0.5), (r > g), (r < 9.5):
+where d > 0.5, r > g, r < 9.5:
   (grad(fn (dd: f32, rr: f32, gg: f32) ->
     (dd / (rr - gg)), wrt=rr)(d, r, g) < 0.0)
 "#;
@@ -2872,7 +2872,7 @@ fn issue_923_unsupported_grad_intrinsic_is_prompt_and_specific() {
         r#"module Audit.Main
 
 @property exp_grad_positive forall(x: f32)
-where (x > 0.5), (x < 9.5):
+where x > 0.5, x < 9.5:
   (grad(fn (xx: f32) -> exp(xx), wrt=xx)(x) > 0.0)
 "#,
     );
@@ -3293,7 +3293,7 @@ def bs_call(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {
   d2 = d1 - sig_sqrt_t
   s * normal_cdf(d1) - k * exp(-r * t) * normal_cdf(d2)
 }
-@property bs_call_positive forall(s: f32, k: f32, r: f32, sigma: f32, t: f32) where (s > 0.0), (k > 0.0), (sigma > 0.0), (t > 0.0), (r >= 0.0):
+@property bs_call_positive forall(s: f32, k: f32, r: f32, sigma: f32, t: f32) where s > 0.0, k > 0.0, sigma > 0.0, t > 0.0, r >= 0.0:
   (bs_call(s, k, r, sigma, t) > 0.0)
 "#;
 

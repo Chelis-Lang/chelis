@@ -11,5 +11,5 @@ def test_reshape_rank1_to_rank3_concrete_dims() -> unit ! { Test } = {
   _ = assert_eq_int(d2, cast(3, int64), "reshape rank-3 d2 = 3")
   back = reshape(shaped, [cast(6, int64)])
   expected = to_tensor([cast(1.0, f32), cast(2.0, f32), cast(3.0, f32), cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)])
-  assert_close_tensor(back, expected, cast(0.000001, f32), "reshape rank-3 back to rank-1 preserves elements")
+  assert_close_tensor(back, expected, cast(1e-6, f32), "reshape rank-3 back to rank-1 preserves elements")
 }

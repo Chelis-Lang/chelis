@@ -158,7 +158,7 @@ SCALAR_VARIANT = "(variant {} T (field {} value (t-prim {} f32)))"
 PROB_HEADER = """module Stats.Prob
 export ({exports})
 @opaque
-@invariant(p) p.value >= 0.0 && p.value <= 1.0
+@invariant(p) ((p.value >= 0.0) && (p.value <= 1.0))
 type Probability =
   | Probability { value: f32 }
 """
@@ -604,8 +604,7 @@ def build_programs() -> list[Program]:
         filename="prove_pass_direct_clamp.ch",
         source=prob_module(
             "clamp_prob",
-            "def clamp_prob(x: f32) -> Probability =\n"
-            "  Probability { value: if x >= 0.0 then (if x <= 1.0 then x else 1.0) else 0.0 }\n",
+            "def clamp_prob(x: f32) -> Probability = Probability { value: if (x >= 0.0) then if (x <= 1.0) then x else 1.0 else 0.0 }\n",
         ),
         targets=["status:passed", "pos:prove_clean", "position:Direct"],
         expect_exit=0,
@@ -620,8 +619,7 @@ def build_programs() -> list[Program]:
         filename="prove_pass_option_flagship.ch",
         source=prob_module(
             "probability",
-            "def probability(x: f32) -> Option[Probability] =\n"
-            "  if x >= 0.0 && x <= 1.0 then Some(Probability { value: x }) else None\n",
+            "def probability(x: f32) -> Option[Probability] = if ((x >= 0.0) && (x <= 1.0)) then Some(Probability { value: x }) else None\n",
         ),
         targets=["status:passed", "pos:prove_clean", "position:Option"],
         expect_exit=0,
@@ -636,8 +634,7 @@ def build_programs() -> list[Program]:
         filename="prove_pass_tuple.ch",
         source=prob_module(
             "mk",
-            "def mk(x: f32) -> Option[(Probability, f32)] =\n"
-            "  if x >= 0.0 && x <= 1.0 then Some((Probability { value: x }, x)) else None\n",
+            "def mk(x: f32) -> Option[(Probability, f32)] = if ((x >= 0.0) && (x <= 1.0)) then Some((Probability { value: x }, x)) else None\n",
         ),
         targets=["status:passed", "pos:prove_clean", "position:tuple"],
         expect_exit=0,
@@ -652,8 +649,7 @@ def build_programs() -> list[Program]:
         filename="prove_fail_counterexample.ch",
         source=prob_module(
             "bad_prob",
-            "def bad_prob(x: f32) -> Option[Probability] =\n"
-            "  if x >= 0.0 then Some(Probability { value: x }) else None\n",
+            "def bad_prob(x: f32) -> Option[Probability] = if (x >= 0.0) then Some(Probability { value: x }) else None\n",
         ),
         targets=["status:failed"],
         expect_exit=1,
@@ -682,9 +678,11 @@ def build_programs() -> list[Program]:
         source="""module M
 export (make_wrapped)
 @opaque
-@invariant(p) p.value >= 0.0 && p.value <= 1.0
-type T = | T { value: f32 }
-type Wrapper = | Wrapper { inner: T }
+@invariant(p) ((p.value >= 0.0) && (p.value <= 1.0))
+type T =
+  | T { value: f32 }
+type Wrapper =
+  | Wrapper { inner: T }
 def make_wrapped(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
 """,
         targets=["status:error", "reason:Wrapper"],
@@ -701,10 +699,12 @@ def make_wrapped(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
         source="""module M
 export (make_w)
 @opaque
-@invariant(p) p.value >= 0.0 && p.value <= 1.0
-type T = | T { value: f32 }
+@invariant(p) ((p.value >= 0.0) && (p.value <= 1.0))
+type T =
+  | T { value: f32 }
 type TA = T
-type Wrapper = | Wrapper { inner: TA }
+type Wrapper =
+  | Wrapper { inner: TA }
 def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
 """,
         targets=["status:error", "reason:make_w"],
@@ -719,7 +719,7 @@ def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
         filename="prove_error_caller_receives.ch",
         source=prob_module(
             "with_prob",
-            "def with_prob(f: (Probability) -> f32) -> f32 = f(default_prob())\n"
+            "def with_prob(f: Probability -> f32) -> f32 = f(default_prob())\n"
             "def default_prob() -> Probability = Probability { value: 0.0 }\n",
         ),
         targets=["status:error", "reason:with_prob"],
@@ -751,11 +751,10 @@ def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
         filename="prove_inject_pass.ch",
         source=prob_module(
             "clamp_prob",
-            "def clamp_prob(x: f32) -> Probability =\n"
-            "  Probability { value: if x >= 0.0 then (if x <= 1.0 then x else 1.0) else 0.0 }\n"
+            "def clamp_prob(x: f32) -> Probability = Probability { value: if (x >= 0.0) then if (x <= 1.0) then x else 1.0 else 0.0 }\n"
             "def prob_value(p: Probability) -> f32 = p.value\n"
             "@property bounded forall(p: Probability):\n"
-            "  prob_value(p) <= 1.0\n",
+            "  (prob_value(p) <= 1.0)\n",
         ),
         prove_args=["--only", "bounded", "--samples", "30"],
         targets=["inject:pass", "pos:prove_clean"],
@@ -771,11 +770,10 @@ def make_w(x: f32) -> Wrapper = Wrapper { inner: T { value: 99.0 } }
         filename="prove_inject_false_fails.ch",
         source=prob_module(
             "clamp_prob",
-            "def clamp_prob(x: f32) -> Probability =\n"
-            "  Probability { value: if x >= 0.0 then (if x <= 1.0 then x else 1.0) else 0.0 }\n"
+            "def clamp_prob(x: f32) -> Probability = Probability { value: if (x >= 0.0) then if (x <= 1.0) then x else 1.0 else 0.0 }\n"
             "def prob_value(p: Probability) -> f32 = p.value\n"
             "@property too_strong forall(p: Probability):\n"
-            "  prob_value(p) <= 0.5\n",
+            "  (prob_value(p) <= 0.5)\n",
         ),
         prove_args=["--only", "too_strong", "--samples", "80"],
         targets=["inject:false_fails"],
@@ -796,7 +794,7 @@ type Token =
 def mk(x: f32) -> Token = Token { value: x }
 def token_value(t: Token) -> f32 = t.value
 @property tok_bounded forall(t: Token):
-  token_value(t) <= 1.0
+  (token_value(t) <= 1.0)
 """,
         prove_args=["--only", "tok_bounded", "--samples", "30"],
         targets=["inject:free_not_injected"],
@@ -813,13 +811,13 @@ def token_value(t: Token) -> f32 = t.value
         filename="prove_starve_exact_eq.ch",
         source="""module M.Exact
 @opaque
-@invariant(p) p.value == 0.5
+@invariant(p) (p.value == 0.5)
 type Exact =
   | Exact { value: f32 }
 def mk(x: f32) -> Exact = Exact { value: x }
 def exact_value(p: Exact) -> f32 = p.value
 @property always forall(p: Exact):
-  exact_value(p) >= 0.0
+  (exact_value(p) >= 0.0)
 """,
         prove_args=["--only", "always", "--samples", "10"],
         targets=["status:unsupported", "starve:equality-atoms", "starve:Tier B", "starve:starvation"],
@@ -834,13 +832,13 @@ def exact_value(p: Exact) -> f32 = p.value
         filename="prove_starve_min_rate_zero.ch",
         source="""module M.Exact
 @opaque
-@invariant(p) p.value == 0.5
+@invariant(p) (p.value == 0.5)
 type Exact =
   | Exact { value: f32 }
 def mk(x: f32) -> Exact = Exact { value: x }
 def exact_value(p: Exact) -> f32 = p.value
 @property always forall(p: Exact):
-  exact_value(p) >= 0.0
+  (exact_value(p) >= 0.0)
 """,
         prove_args=["--only", "always", "--samples", "10", "--invariant-min-rate", "0.0"],
         targets=["starve:legacy_error"],
@@ -870,8 +868,7 @@ def exact_value(p: Exact) -> f32 = p.value
     # error == producer count == summary.obligations).
     perf_exports = ", ".join(f"clamp{i}" for i in range(PERF_PRODUCER_COUNT))
     perf_defs = "".join(
-        f"def clamp{i}(x: f32) -> Probability =\n"
-        "  Probability { value: if x >= 0.0 then (if x <= 1.0 then x else 1.0) else 0.0 }\n"
+        f"def clamp{i}(x: f32) -> Probability = Probability {{ value: if (x >= 0.0) then if (x <= 1.0) then x else 1.0 else 0.0 }}\n"
         for i in range(PERF_PRODUCER_COUNT)
     )
     progs.append(Program(

@@ -414,7 +414,7 @@ export (make_w)
 @invariant(p) p.value >= 0.0 && p.value <= 1.0
 type T = | T { value: f32 }
 type Wrapper =
-  | Empty { }
+  | Empty
   | Full { inner: T }
 def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
 ",
@@ -450,7 +450,7 @@ export (make_w)
 @invariant(p) p.value >= 0.0 && p.value <= 1.0
 type T = | T { value: f32 }
 type Wrapper =
-  | Empty { }
+  | Empty
   | Pair { both: (T, f32) }
 def make_w(x: f32) -> Wrapper = Pair { both: (T { value: 99.0 }, x) }
 ",
@@ -471,7 +471,7 @@ export (make_w)
 type T = | T { value: f32 }
 type Wrapper =
   | Full { inner: T }
-  | Empty { }
+  | Empty
 def make_w(x: f32) -> Wrapper = Full { inner: T { value: 99.0 } }
 ",
         "make_w",

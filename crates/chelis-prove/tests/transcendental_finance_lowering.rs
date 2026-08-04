@@ -68,7 +68,7 @@ def bs_call(s: f32, k: f32, r: f32, sigma: f32, t: f32) -> f32 = {
   d2 = d1 - sig_sqrt_t
   s * normal_cdf(d1) - k * exp(-r * t) * normal_cdf(d2)
 }
-@property bs_call_positive forall(s: f32, k: f32, r: f32, sigma: f32, t: f32) where (s > 0.0), (k > 0.0), (sigma > 0.0), (t > 0.0), (r >= 0.0):
+@property bs_call_positive forall(s: f32, k: f32, r: f32, sigma: f32, t: f32) where s > 0.0, k > 0.0, sigma > 0.0, t > 0.0, r >= 0.0:
   (bs_call(s, k, r, sigma, t) > 0.0)
 "#;
 
@@ -189,7 +189,7 @@ fn bs_call_positive_is_never_falsely_proven_under_auto() {
 /// over [0,1] is in `[0, 0.843]`, strictly under 0.9, argument bounded — so the
 /// certified `erf` envelope discharges the residual.
 const ERF_BOUND_SOURCE: &str = r#"module M
-@property erf_bounded forall(x: f32) where (x >= 0.0), (x <= 1.0):
+@property erf_bounded forall(x: f32) where x >= 0.0, x <= 1.0:
   (erf(x) <= 0.9)
 "#;
 
@@ -198,7 +198,7 @@ const ERF_BOUND_SOURCE: &str = r#"module M
 /// argument but the residual is falsifiable, so the lane must HONESTLY DECLINE
 /// (unsupported under smt-only), NEVER green and NEVER a false disproof.
 const ERF_FALSE_SOURCE: &str = r#"module M
-@property erf_false forall(x: f32) where (x >= 0.0), (x <= 1.0):
+@property erf_false forall(x: f32) where x >= 0.0, x <= 1.0:
   (erf(x) <= 0.5)
 "#;
 

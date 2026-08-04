@@ -299,12 +299,12 @@ fn bool_neg_through_bare_pipe_stage_rejected() {
 }
 
 #[test]
-fn bool_add_through_pipe_lambda_stage_rejected() {
+fn bool_add_through_canonical_pipe_call_stage_rejected() {
     assert_check_rejects(
         "module M.Main\n\
-         out = print(to_tensor([true, false]) |> fn (v) -> add(v, v))\n",
+         out = print(to_tensor([true, false]) |> add(to_tensor([true, false])))\n",
         "chelis#726",
-        "bool_add_pipe_lambda",
+        "bool_add_pipe_call_stage",
     );
 }
 

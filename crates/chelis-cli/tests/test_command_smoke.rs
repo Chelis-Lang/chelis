@@ -612,8 +612,8 @@ def test_visible() -> unit = test_assert(true, "ok")
 
 #[test]
 fn chelis_test_non_unit_returning_def_is_not_enumerated() {
-    // RT3 H4: `def test_x : bool = true` parses as a zero-param FunDef but
-    // is not a test — it's a typed value binding with non-unit type. The
+    // RT3 H4: `def test_x() -> bool = true` is a nullary function but is not
+    // a test because its result is non-unit. The
     // enumerator must skip it so the real `def test_real() -> unit`
     // alongside it runs and passes.
     let (_dir, pkg) = make_reef_package("phase3t-smoke-non-unit");
@@ -621,7 +621,7 @@ fn chelis_test_non_unit_returning_def_is_not_enumerated() {
         &pkg.join("tests/mixed.ch"),
         r#"module Smoke.Tests.Mixed
 
-def test_x : bool = true
+def test_x() -> bool = true
 
 def test_real() -> unit = test_assert(true, "real test runs")
 "#,

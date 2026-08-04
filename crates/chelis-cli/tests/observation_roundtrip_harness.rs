@@ -443,7 +443,7 @@ const F16_ROWS: &[FRow] = &[
     },
     FRow {
         label: "f16-min-subnormal",
-        elem: "0.000000059604644775390625",
+        elem: "5.960464477539063e-8",
         value: 5.960464477539063e-8,
         c_print_safe: true,
     },

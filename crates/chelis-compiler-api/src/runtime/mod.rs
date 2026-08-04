@@ -357,7 +357,7 @@ impl RuntimeValue {
 pub(crate) struct RuntimeOutcome {
     pub(crate) host_bindings: HashMap<String, RuntimeValue>,
     /// Applied values of host-lane *zero-argument fn* top-level roots
-    /// (the desugared shape of the arrow-form `def name -> T = body`,
+    /// (the desugared shape of the arrow-form `def name() -> T = body`,
     /// which the Surf desugarer wraps as `(def name (fn () body))`).
     /// Such a def is a nullary thunk of type `() -> T`: it is a display
     /// root whose value is the result of APPLYING it, but it is NOT a
@@ -539,7 +539,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     }
 
     // Surface host-lane *zero-argument fn* roots. The arrow-form
-    // `def priced -> T = body` desugars to `(def priced (fn () body))`,
+    // `def priced() -> T = body` desugars to `(def priced (fn () body))`,
     // a nullary thunk of type `() -> T`. `register_top_level_defs`'
     // `is_fn` guard skips it from the eager value-binding order (it looks
     // like a function), yet `root_names_from_checked_exprs` lists it as a

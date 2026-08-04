@@ -43,7 +43,7 @@ rest as constants. The gradient result SHALL contain entries only for the listed
 
 #### Scenario: wrt restricts the gradient set
 
-- **WHEN** `grad(loss, wrt=(w))` is applied to `loss(w, x, y)`
+- **WHEN** `grad(loss, wrt=w)` is applied to `loss(w, x, y)`
 - **THEN** only `w`'s gradient is returned and `x`/`y` are treated as constants
 
 #### Scenario: wrt on a non-differentiable parameter is a type error
@@ -163,7 +163,7 @@ be broadcast (shared across the batch), and an out-of-bounds axis SHALL be `axis
 
 #### Scenario: Batch dimension passes through elementwise ops
 
-- **WHEN** `vmap(f, axis=0)` rewrites an elementwise DAG
+- **WHEN** the canonical default-axis form `vmap(f)` rewrites an elementwise DAG
 - **THEN** the batch dimension is added and passes through without being reduced
 
 #### Scenario: Out-of-bounds vmap axis is an error

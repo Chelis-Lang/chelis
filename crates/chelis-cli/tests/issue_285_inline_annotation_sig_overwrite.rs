@@ -283,16 +283,16 @@ fn explicit_eff_less_sig_preserves_bare_def_empty_effect_bound() {
 }
 
 /// Positive: the inherited bound is the *def's* clause, so an honest
-/// `! { io }` def whose body performs exactly `IO` under an eff-less sig
+/// `! { IO }` def whose body performs exactly `IO` under an eff-less sig
 /// must stay clean. The fix must not over-reject by inheriting a wrong
 /// (e.g. empty) bound.
 #[test]
 fn honest_def_io_effect_clause_under_eff_less_sig_type_checks() {
     let json = check_json(
         "sig f: &tensor[n, f32] -> unit\n\
-         def f(x) -> unit ! { io } = print(x)\n",
+         def f(x) -> unit ! { IO } = print(x)\n",
     );
-    assert_clean(&json, "honest def !{io} under eff-less sig");
+    assert_clean(&json, "honest def !{IO} under eff-less sig");
 }
 
 /// Control: the same effect lie WITHOUT an explicit sig is caught by the
@@ -302,6 +302,15 @@ fn honest_def_io_effect_clause_under_eff_less_sig_type_checks() {
 fn effect_lie_inline_only_no_sig_control_still_rejected() {
     let json = check_json("def f(x: &tensor[n, f32]) -> unit ! {} = print(x)\n");
     assert_effect_rejected(&json, "effect lie control (no inline sig)");
+}
+
+#[test]
+fn untyped_nullary_effect_clause_synthesizes_its_contract() {
+    let rejected = check_json("def pure() ! {} = print(\"x\")\n");
+    assert_effect_rejected(&rejected, "untyped nullary declared-pure effect lie");
+
+    let accepted = check_json("def honest() ! { IO } = print(\"x\")\n");
+    assert_clean(&accepted, "untyped nullary honest IO declaration");
 }
 
 /// Structural lock: an eff-less explicit `sig` plus a `def` with an effect

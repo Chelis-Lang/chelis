@@ -89,7 +89,7 @@ fn prove_with_kind(source: &str, seed: u64, deep: bool) -> (i32, Value) {
 
 const NARROW_VAR_GUARD: &str = "module Risk.Guards
 @property confidence_tail_order forall(alpha1: f32, alpha2: f32)
-where (alpha1 > 0.99), (alpha1 < alpha2), (alpha2 < 1.0):
+where alpha1 > 0.99, alpha1 < alpha2, alpha2 < 1.0:
   ((1.0 - alpha2) < (1.0 - alpha1))
 ";
 
@@ -149,7 +149,7 @@ fn corrupt_var_es_order_finds_an_in_domain_witness() {
 fn inconsistent_scalar_guard_fails_closed_without_sampling() {
     let source = "module Risk.Invalid
 @property impossible forall(alpha: f32)
-where (alpha > 0.99), (alpha < 0.5):
+where alpha > 0.99, alpha < 0.5:
   (alpha == alpha)
 ";
     let (code, record) = prove(source, 7);
@@ -170,7 +170,7 @@ where (alpha > 0.99), (alpha < 0.5):
 fn unsupported_scalar_guard_shape_fails_closed_without_sampling() {
     let source = "module Risk.Unsupported
 @property coupled_sum forall(alpha1: f32, alpha2: f32)
-where ((alpha1 + alpha2) < 1.0):
+where (alpha1 + alpha2) < 1.0:
   (alpha1 == alpha1)
 ";
     let (code, record) = prove(source, 7);
@@ -201,7 +201,7 @@ fn default_non_smt_build_uses_the_shared_constraint_sampler() {
 fn f32_and_f64_interval_bounds_are_not_clipped_to_the_uniform_range() {
     for (ty, suffix) in [("f32", ""), ("f64", "f64")] {
         let source = format!(
-            "module Risk.Outside\n@property outside forall(x: {ty})\nwhere (x > 20.0{suffix}), (x < 30.0{suffix}):\n  (x == x)\n"
+            "module Risk.Outside\n@property outside forall(x: {ty})\nwhere x > 20.0{suffix}, x < 30.0{suffix}:\n  (x == x)\n"
         );
         let (code, record) = prove(&source, 5);
         assert_eq!(code, 0, "{ty}: {record}");
@@ -227,7 +227,7 @@ fn exhausted_run_preserves_the_accepted_sample_count() {
 fn wide_finite_f64_interval_is_representable_without_span_overflow() {
     let source = "module Risk.Wide64
 @property wide forall(x: f64)
-where (x > -1e308f64), (x < 1e308f64):
+where x > -1e308f64, x < 1e308f64:
   (x == x)
 ";
     let (code, record) = prove(source, 29);
@@ -250,7 +250,7 @@ fn one_sided_extreme_intervals_clamp_windows_to_the_binder_range() {
             format!("x > {lower}")
         };
         let source = format!(
-            "module Risk.{module}\n@property extreme forall(x: {ty})\nwhere ({guard}):\n  (x == x)\n"
+            "module Risk.{module}\n@property extreme forall(x: {ty})\nwhere {guard}:\n  (x == x)\n"
         );
         let (code, record) = prove(&source, 31);
         assert_eq!(code, 0, "{module}: {record}");
@@ -265,7 +265,7 @@ fn one_sided_extreme_intervals_clamp_windows_to_the_binder_range() {
 fn negative_literals_and_reversed_comparisons_are_directed() {
     let source = "module Risk.Negative
 @property negative forall(x: f32)
-where (-1.0 < x), (0.0 > x):
+where -1.0 < x, 0.0 > x:
   (x < 0.0)
 ";
     let (code, record) = prove(source, 11);
@@ -279,7 +279,7 @@ where (-1.0 < x), (0.0 > x):
 fn non_strict_order_allows_equal_singleton_domains() {
     for (ty, suffix) in [("f32", ""), ("f64", "f64")] {
         let source = format!(
-            "module Risk.Equal\n@property equal forall(x: {ty}, y: {ty})\nwhere (x >= 1.0{suffix}), (x <= 1.0{suffix}), (y >= 1.0{suffix}), (y <= 1.0{suffix}), (x <= y):\n  (x == y)\n"
+            "module Risk.Equal\n@property equal forall(x: {ty}, y: {ty})\nwhere x >= 1.0{suffix}, x <= 1.0{suffix}, y >= 1.0{suffix}, y <= 1.0{suffix}, x <= y:\n  (x == y)\n"
         );
         let (code, record) = prove(&source, 13);
         assert_eq!(code, 0, "{ty}: {record}");
@@ -292,7 +292,7 @@ fn non_strict_order_allows_equal_singleton_domains() {
 fn narrow_f64_interval_uses_representable_successors_not_fixed_epsilon() {
     let source = "module Risk.Narrow64
 @property narrow forall(x: f64, y: f64)
-where (x > 0.9999999999999997f64), (x < y), (y < 1.0000000000000002f64):
+where x > 0.9999999999999997f64, x < y, y < 1.0000000000000002f64:
   (x < y)
 ";
     let (code, record) = prove(source, 17);
@@ -306,7 +306,7 @@ where (x > 0.9999999999999997f64), (x < y), (y < 1.0000000000000002f64):
 fn narrow_f32_interval_uses_representable_successors() {
     let source = "module Risk.Narrow32
 @property narrow forall(x: f32, y: f32)
-where (x > 0.9999998), (x < y), (y < 1.0000002):
+where x > 0.9999998, x < y, y < 1.0000002:
   (x < y)
 ";
     let (code, record) = prove(source, 19);
@@ -320,7 +320,7 @@ where (x > 0.9999998), (x < y), (y < 1.0000002):
 fn interval_without_enough_machine_values_fails_closed() {
     let source = "module Risk.NoSlots
 @property no_slots forall(x: f32, y: f32)
-where (x > 0.9999999), (x < y), (y < 1.0):
+where x > 0.9999999, x < y, y < 1.0:
   (x < y)
 ";
     let (code, record) = prove(source, 21);

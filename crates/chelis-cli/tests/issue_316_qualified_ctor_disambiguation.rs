@@ -87,8 +87,8 @@ fn qualified_constructor_references_disambiguate_same_named_modes() {
     write_file(
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
-         import Demo.Dropout ()\n\
-         import Demo.Sd ()\n\
+         import Demo.Dropout\n\
+         import Demo.Sd\n\
          def go() -> i64 = add(Demo.Dropout.use(Demo.Dropout.Eval), Demo.Sd.use(Demo.Sd.Train))\n",
     );
 
@@ -152,7 +152,7 @@ fn qualified_reference_to_unexported_name_is_rejected() {
     write_file(
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
-         import Demo.Dropout ()\n\
+         import Demo.Dropout\n\
          def go() -> i64 = Demo.Dropout.use(Demo.Dropout.Missing)\n",
     );
 
@@ -178,7 +178,7 @@ fn qualified_pattern_to_unexported_name_is_rejected() {
     write_file(
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
-         import Demo.Dropout ()\n\
+         import Demo.Dropout\n\
          def go() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Missing => 0 }\n",
     );
 
@@ -206,8 +206,8 @@ fn qualified_constructor_patterns_match_per_module() {
     write_file(
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
-         import Demo.Dropout ()\n\
-         import Demo.Sd ()\n\
+         import Demo.Dropout\n\
+         import Demo.Sd\n\
          def classify_dropout() -> i64 = match Demo.Dropout.Train with { | Demo.Dropout.Train => 1 | Demo.Dropout.Eval => 0 }\n\
          def classify_sd() -> i64 = match Demo.Sd.Eval with { | Demo.Sd.Train => 1 | Demo.Sd.Eval => 0 }\n",
     );
@@ -242,8 +242,8 @@ fn qualified_type_annotation_resolves_per_module() {
     write_file(
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
-         import Demo.Dropout ()\n\
-         import Demo.Sd ()\n\
+         import Demo.Dropout\n\
+         import Demo.Sd\n\
          def relay(m: Demo.Dropout.Mode) -> i64 = Demo.Dropout.use(m)\n",
     );
 
@@ -277,8 +277,8 @@ fn qualified_type_annotation_distinguishes_modules() {
     write_file(
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
-         import Demo.Dropout ()\n\
-         import Demo.Sd ()\n\
+         import Demo.Dropout\n\
+         import Demo.Sd\n\
          def bad(m: Demo.Dropout.Mode) -> i64 = Demo.Sd.use(m)\n",
     );
 
@@ -312,7 +312,7 @@ fn qualified_type_to_unexported_name_is_rejected() {
     write_file(
         &root.join("src/combo.ch"),
         "module Demo.Combo\n\
-         import Demo.Dropout ()\n\
+         import Demo.Dropout\n\
          def relay(m: Demo.Dropout.Nope) -> i64 = 0\n",
     );
 
