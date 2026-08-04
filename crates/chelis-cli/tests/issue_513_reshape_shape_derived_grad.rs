@@ -280,7 +280,7 @@ int main(void) {
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     memcpy(x->data, xd, sizeof(xd));
     chelis_tensor* g = out(x);
-    if (g->size != 4) { printf("FAIL_SIZE %d\n", g->size); return 1; }
+    if (g->size != 4) { printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }
     for (int i = 0; i < 4; i++) printf("%.6f\n", g->data[i]);
     return 0;
 }

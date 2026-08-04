@@ -258,7 +258,7 @@ int main(void) {{
     chelis_list* shape = build_shape_list_i64(dims, 2);
     chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
     if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    if (out->size != 4) {{ printf("FAIL_SIZE %d\n", out->size); return 1; }}
+    if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
     double* d = (double*)out->data;
     printf("%.17g %.17g %.17g %.17g\n", d[0], d[1], d[2], d[3]);
     return 0;
@@ -324,7 +324,7 @@ int main(void) {{
     chelis_list* shape = build_shape_list_i64(dims, 2);
     chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
     if (out->dtype != CHELIS_I64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    if (out->size != 4) {{ printf("FAIL_SIZE %d\n", out->size); return 1; }}
+    if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
     int64_t* d = (int64_t*)out->data;
     printf("%llx %llx %llx %llx\n",
         (long long)d[0], (long long)d[1], (long long)d[2], (long long)d[3]);
@@ -380,7 +380,7 @@ int main(void) {{
     chelis_list* shape = build_shape_list_i64(dims, 2);
     chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
     if (out->dtype != CHELIS_F32) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
-    if (out->size != 4) {{ printf("FAIL_SIZE %d\n", out->size); return 1; }}
+    if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
     float* d = (float*)out->data;
     printf("%.9g %.9g %.9g %.9g\n", d[0], d[1], d[2], d[3]);
     return 0;
@@ -395,5 +395,80 @@ int main(void) {{
     assert_eq!(
         trimmed, "1.5 2.5 3.5 4.5",
         "expected f32 reshape control to pass; got stdout={trimmed:?}"
+    );
+}
+
+/// chelis#1112, the zero-product corner. PR #1145 added a fail-closed trap
+/// on `dim > INT_MAX` in the emitted reshape helper; its commit message
+/// records that the window the trap actually closed was this one. With a
+/// 32-bit shape carrier, reshaping a 0-element tensor to `[2^32, 0]` stored
+/// the truncated `0` and reported shape `[0, 0]` while exiting successfully,
+/// because `expected *= dim` accumulates the UNtruncated product and `0`
+/// matched `input->size` either way. Every nonzero-product case was already
+/// caught by that element-count check, so this was the one input the store
+/// could corrupt silently.
+///
+/// Widening the carrier makes the trap unnecessary rather than merely
+/// redundant: the reshape now SUCCEEDS with the shape the caller asked for.
+/// Asserting the right answer, not an error, is the point -- a version of
+/// this change that kept the trap would reject a representable extent and
+/// still be wrong, just loudly.
+///
+/// The tensor holds zero elements, so nothing is allocated and this runs in
+/// default CI. `dim_carrier_int64.rs` covers the allocating case.
+#[test]
+fn cbackend_reshape_zero_element_tensor_keeps_an_extent_above_int32() {
+    let build = chelis_build_c(
+        "module Demo\n\
+         src = to_tensor([1.5, 2.5, 3.5, 4.5])\n\
+         result = reshape(src, [cast(2, int64), cast(2, int64)])\n",
+        "reshape_demo",
+    );
+    let kernel_c = build.path().join("reshape_demo.c");
+    patch_emitted_kernel(&kernel_c);
+    let main_c = build.path().join("main.c");
+    fs::write(
+        &main_c,
+        format!(
+            r#"{HARNESS_INCLUDES}
+{BUILD_SHAPE_LIST_HELPER}
+
+int main(void) {{
+    /* A rank-1 tensor of zero elements. `data` is never dereferenced:
+     * reshape copies `size * elem_bytes` == 0 bytes. */
+    float in_data[1] = {{0.0f}};
+    chelis_tensor t;
+    memset(&t, 0, sizeof(t));
+    t.data = in_data;
+    t.shape[0] = 0;
+    t.strides[0] = 1;
+    t.ndim = 1;
+    t.dtype = CHELIS_F32;
+    t.size = 0;
+    t.owns_data = 0;
+
+    int64_t dims[2] = {{4294967296LL, 0}};
+    chelis_list* shape = build_shape_list_i64(dims, 2);
+    chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
+    printf("%d %lld %lld %lld\n",
+           out->ndim,
+           (long long)out->shape[0],
+           (long long)out->shape[1],
+           (long long)out->size);
+    return 0;
+}}
+"#
+        ),
+    )
+    .expect("write main.c");
+
+    let stdout = gcc_compile_and_run(build.path(), &kernel_c, &main_c);
+    let trimmed = stdout.trim();
+    assert_eq!(
+        trimmed, "2 4294967296 0 0",
+        "the requested extent must survive the shape store exactly; \
+         `2 0 0 0` is the truncating store PR #1145 trapped, and a nonzero \
+         exit is the trap itself outliving the narrowing it guarded. \
+         got stdout={trimmed:?}"
     );
 }

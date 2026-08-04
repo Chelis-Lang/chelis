@@ -541,7 +541,7 @@ int main(void) {{
     float xd[{n}] = {{{init}}};
     memcpy(x->data, xd, sizeof(xd));
     chelis_tensor* g = out(x);
-    if (g->size != {n}) {{ printf("FAIL_SIZE %d\n", g->size); return 1; }}
+    if (g->size != {n}) {{ printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }}
     for (int i = 0; i < {n}; i++) printf("%.6f\n", g->data[i]);
     return 0;
 }}
