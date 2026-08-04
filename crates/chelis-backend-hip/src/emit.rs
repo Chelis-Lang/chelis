@@ -658,7 +658,7 @@ impl HipEmitter {
                     ));
                     self.indent += 1;
                     self.line(&format!(
-                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %d\\n\", inputs[{slot}]->shape[{axis}]);"
+                        "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` axis {axis} expected {expected}, got %lld\\n\", (long long)inputs[{slot}]->shape[{axis}]);"
                     ));
                     self.line("abort();");
                     self.indent -= 1;
@@ -674,7 +674,7 @@ impl HipEmitter {
             let binding_name_fmt =
                 chelis_ir::span_sanitize::sanitize_for_format_string(&binding.name);
             self.line(&format!(
-                "int {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
+                "int64_t {} = inputs[{canonical_slot}]->shape[{canonical_axis}];",
                 binding.name
             ));
             for occurrence in &binding.others {
@@ -687,7 +687,7 @@ impl HipEmitter {
                 ));
                 self.indent += 1;
                 self.line(&format!(
-                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%d but {binding_name_fmt}=%d\\n\", inputs[{slot}]->shape[{occ_axis}], {});",
+                    "fprintf(stderr, \"{func_name_fmt}: symbolic dim `{binding_name_fmt}` mismatch: {occ_label_fmt}[{occ_axis}]=%lld but {binding_name_fmt}=%lld\\n\", (long long)inputs[{slot}]->shape[{occ_axis}], (long long){});",
                     binding.name
                 ));
                 self.line("abort();");

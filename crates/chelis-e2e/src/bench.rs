@@ -1723,8 +1723,8 @@ int main(void) {{
     float lr = read_f32(f);
     uint64_t x_dim = {x_dim};
     uint64_t y_dim = {y_dim};
-    int x_shape[2] = {{ (int)batch_size, (int)x_dim }};
-    int y_shape[2] = {{ (int)batch_size, (int)y_dim }};
+    int64_t x_shape[2] = {{ (int)batch_size, (int)x_dim }};
+    int64_t y_shape[2] = {{ (int)batch_size, (int)y_dim }};
 {shape_decls}
 
     size_t train_x_len = (size_t)train_batches * batch_size * x_dim;
@@ -1800,15 +1800,15 @@ int main(void) {{
         y_dim = if uses_accuracy { 10 } else { 1 },
         shape_decls = if uses_accuracy {
             r#"
-    int w1_shape[2] = { 784, 128 };
-    int b1_shape[1] = { 128 };
-    int w2_shape[2] = { 128, 10 };
-    int b2_shape[1] = { 10 };
+    int64_t w1_shape[2] = { 784, 128 };
+    int64_t b1_shape[1] = { 128 };
+    int64_t w2_shape[2] = { 128, 10 };
+    int64_t b2_shape[1] = { 10 };
 "#
         } else {
             r#"
-    int w_shape[2] = { (int)features, 1 };
-    int b_shape[1] = { 1 };
+    int64_t w_shape[2] = { (int)features, 1 };
+    int64_t b_shape[1] = { 1 };
 "#
         },
         features_read = if uses_accuracy { "0" } else { "read_u64(f)" },
@@ -1953,7 +1953,7 @@ int main(void) {{
     uint64_t head_dim = read_u64(f);
     uint64_t d_ff = read_u64(f);
     uint64_t iters = read_u64(f);
-    int x_shape[2] = {{ (int)seq_len, (int)d_model }};
+    int64_t x_shape[2] = {{ (int)seq_len, (int)d_model }};
     int head_shape[2] = {{ (int)d_model, (int)head_dim }};
     int proj_shape[2] = {{ (int)head_dim, (int)d_model }};
     int ff1_shape[2] = {{ (int)d_model, (int)d_ff }};

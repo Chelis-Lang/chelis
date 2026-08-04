@@ -488,11 +488,11 @@ impl Emitter {
             let shape_lit = plan
                 .shape
                 .iter()
-                .map(|d| format!("(int){d}"))
+                .map(|d| format!("(int64_t){d}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             self.body.push(format!(
-                "{{ int shape_{idx}[{}] = {{ {shape_lit} }};",
+                "{{ int64_t shape_{idx}[{}] = {{ {shape_lit} }};",
                 plan.shape.len()
             ));
             self.body.push(format!(
@@ -1537,11 +1537,11 @@ impl Emitter {
             let shape_lit = in_plan
                 .shape
                 .iter()
-                .map(|d| format!("(int){d}"))
+                .map(|d| format!("(int64_t){d}"))
                 .collect::<Vec<_>>()
                 .join(", ");
             self.body.push(format!(
-                "{{ int shape_store_{idx}[{}] = {{ {shape_lit} }};",
+                "{{ int64_t shape_store_{idx}[{}] = {{ {shape_lit} }};",
                 in_plan.shape.len()
             ));
             self.body.push(format!(

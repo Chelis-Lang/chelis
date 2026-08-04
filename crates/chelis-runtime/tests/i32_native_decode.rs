@@ -13,7 +13,7 @@ use chelis_runtime::{
     CHELIS_BOOL, CHELIS_F32, CHELIS_I32,
 };
 
-unsafe fn i32_tensor(shape: &[c_int], values: &[i32]) -> *mut chelis_tensor {
+unsafe fn i32_tensor(shape: &[i64], values: &[i32]) -> *mut chelis_tensor {
     unsafe {
         let shape_ptr = if shape.is_empty() {
             ptr::null()

@@ -162,7 +162,7 @@ fn count_gather_out_index_lines(body: &str) -> usize {
 }
 
 fn count_gather_dtype_dispatch(body: &str) -> usize {
-    body.matches("->dtype == CHELIS_I64) ? (int)((const int64_t*)")
+    body.matches("->dtype == CHELIS_I64) ? (int64_t)((const int64_t*)")
         .count()
 }
 

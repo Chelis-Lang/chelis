@@ -138,8 +138,12 @@ const GRANDFATHER_PLAIN_CITATION: &str =
 const GRANDFATHER_SEAM_IDS: &[&str] = &[
     "chelis_runtime.h: chelis_string chelis_string_from_f32 ( float value ) ;",
     "chelis_runtime.h: chelis_string chelis_string_from_f64 ( double value ) ;",
-    "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;",
-    "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int * shape , int dtype , float * data ) ;",
+    // chelis#1112 (maintainer-reviewed identity respelling, 2026-08-04):
+    // the int64 dim-carrier widening relocated these three pre-ratchet
+    // identities in place. Same debts, same seam flags, same cardinality;
+    // they still unwind with chelis#893 and the 0.19 storage break.
+    "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
+    "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int64_t * shape , int dtype , float * data ) ;",
     "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f32 ( float value ) ;",
     "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f64 ( double value ) ;",
     "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
@@ -150,7 +154,7 @@ const GRANDFATHER_SEAM_IDS: &[&str] = &[
     "chelis_runtime.h: int chelis_format_shortest ( double value , int dtype , char * buf , size_t cap ) ;",
     "chelis_runtime.h: typedef struct { _Bool is_some ; double value ; } chelis_option_f64",
     "chelis_runtime.h: typedef struct { chelis_value_tag tag ; union { int64_t i64 ; double f64 ; _Bool boolean ; chelis_string string ; chelis_tensor * tensor ; chelis_list * list ; chelis_tuple * tuple ; chelis_dict * dict ; chelis_adt * adt ; } as ; } chelis_value",
-    "chelis_runtime.h: typedef struct { float * data ; int shape [ 8 ] ; int strides [ 8 ] ; int ndim ; int dtype ; int size ; int owns_data ; } chelis_tensor",
+    "chelis_runtime.h: typedef struct { float * data ; int64_t shape [ 8 ] ; int64_t strides [ 8 ] ; int ndim ; int dtype ; int64_t size ; int owns_data ; } chelis_tensor",
     "chelis_runtime.h: void chelis_bf16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
     "chelis_runtime.h: void chelis_f16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
     "chelis_runtime.h: void chelis_f32_buffer_to_bf16 ( const float * src , uint16_t * dst , int64_t n ) ;",
@@ -356,7 +360,10 @@ const GRANDFATHER_PLAIN_IDS: &[&str] = &[
 /// canonical identities remove that flag. Names, parameter names, and
 /// substring heuristics never exempt a future callable.
 const NON_NUMERIC_INTEGER_PLUMBING_EXPORTS: &[&str] = &[
-    "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int * shape , int dtype ) ;",
+    // chelis#1112 (maintainer-reviewed identity respelling, 2026-08-04, in
+    // lockstep with the seam-set respelling above): still exactly three
+    // entries, same callables, same plumbing roles.
+    "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
     "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
     "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
 ];
@@ -535,6 +542,15 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
         callable: "[compiler-builtin-numeric] cast_trunc(source: f16 | bf16 | f32 | f64, \
                    target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64",
         atom: "[05-OP-6]",
+    },
+    // The runtime extent read: [05-DIM-2] fixes the dtype contract
+    // (int64 out, int32 axis in) and [05-OP-7] is its semantic atom.
+    // The chelis#1112 axis-domain narrowing relocated the callable's
+    // identity, which is what binds this registration.
+    SemanticRegistration {
+        callable: "[header-export] chelis_runtime.h: int64_t chelis_tensor_shape \
+                   ( const chelis_tensor * t , int32_t axis ) ;",
+        atom: "[05-OP-7]",
     },
 ];
 

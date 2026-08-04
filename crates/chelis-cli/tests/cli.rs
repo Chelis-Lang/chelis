@@ -1513,7 +1513,7 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
 #include <stdio.h>
 
 int main(void) {
-    int shape[2] = {2, 3};
+    int64_t shape[2] = {2, 3};
     chelis_tensor *a = chelis_alloc(2, shape, CHELIS_F32);
     float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     for (int i = 0; i < 6; ++i) {
@@ -3183,7 +3183,7 @@ fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
         "expected generic tensor def to remain callable from downstream code:\n{source}"
     );
     assert!(
-        !source.contains("(int[]){ d"),
+        !source.contains("(int64_t[]){ d"),
         "generic tensor helper dims must be rebound to caller-visible symbols before C emission:\n{source}"
     );
 
@@ -3543,9 +3543,9 @@ def apply(
 #include "scatter_runtime_bad.h"
 
 int main(void) {
-    int base_shape[2] = {3, 2};
-    int idx_shape[1] = {2};
-    int updates_shape[2] = {2, 2};
+    int64_t base_shape[2] = {3, 2};
+    int64_t idx_shape[1] = {2};
+    int64_t updates_shape[2] = {2, 2};
 
     chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
     chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
@@ -4979,8 +4979,8 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int features = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t features = inputs[0]->shape[1];"));
 }
 
 #[test]
@@ -5027,14 +5027,14 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let c_source = fs::read_to_string(c_out.join("symbolic_matmul.c")).expect("generated c");
-    assert!(c_source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(c_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(c_source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(c_source.contains("int64_t in_dim = inputs[0]->shape[1];"));
     assert!(c_source.contains("inputs[1]->shape[0] != in_dim"));
 
     let hip_source =
         fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");
-    assert!(hip_source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(hip_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(hip_source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(hip_source.contains("int64_t in_dim = inputs[0]->shape[1];"));
     assert!(hip_source.contains("inputs[1]->shape[0] != in_dim"));
 }
 
@@ -5063,8 +5063,8 @@ fn build_hip_accepts_symbolic_softmax() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_softmax_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t seq = inputs[0]->shape[1];"));
     assert!(source.contains("kernel_maxred_ax1"));
     assert!(source.contains("kernel_sum_ax1"));
 }
@@ -5094,8 +5094,8 @@ fn build_hip_accepts_symbolic_row_sum() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_sum_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t seq = inputs[0]->shape[1];"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5124,7 +5124,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_layer_norm_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5276,7 +5276,7 @@ fn build_c_emits_sparse_gather_loop_for_int32_indices() {
     assert!(c_src.contains("_out_data"));
     assert!(!c_src.contains("chelis_tensor_gather("));
     assert!(
-        !c_src.contains("(int[]){ 64, 1000, 128 }"),
+        !c_src.contains("(int64_t[]){ 64, 1000, 128 }"),
         "C sparse gather must not allocate the dense [N,V,D] one-hot/product shape"
     );
 }
@@ -8466,7 +8466,7 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     // generated allocation; previously the runtime divergence caused
     // the C emit to render the wrong rank.
     assert!(
-        generated.contains("(int[]){ 4, 1 }"),
+        generated.contains("(int64_t[]){ 4, 1 }"),
         "expected generated C to allocate rank-2 [4, 1] for the expand result; got:\n{generated}",
     );
 
@@ -8487,7 +8487,7 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
 /// carries a polymorphic dim (e.g. `tensor[n, f32]`) must declare every
 /// referenced dim in the generated C. Previously a fresh dim variable
 /// (`d36`-style autogenerated name) could leak into a
-/// `chelis_alloc_view(1, (int[]){ d36 }, ...)` call without a
+/// `chelis_alloc_view(1, (int64_t[]){ d36 }, ...)` call without a
 /// corresponding `int d36 = inputs[k]->shape[axis];` declaration, so
 /// the generated C failed to compile with `error: 'd36' undeclared`.
 ///
@@ -8522,12 +8522,12 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
         .success();
 
     let source = fs::read_to_string(out_dir.join("poly_top_dim.c")).expect("generated c");
-    // Every dim that appears in a `(int[]){ <name>` literal must also
-    // appear as an `int <name> = inputs[...]->shape[<axis>];`
+    // Every dim that appears in a `(int64_t[]){ <name>` literal must also
+    // appear as an `int64_t <name> = inputs[...]->shape[<axis>];`
     // declaration. Walk both sets and assert containment.
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in source.lines() {
-        if let Some(after) = line.split("(int[]){ ").nth(1) {
+        if let Some(after) = line.split("(int64_t[]){ ").nth(1) {
             let name: String = after
                 .chars()
                 .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
@@ -8539,8 +8539,8 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     }
     let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in source.lines() {
-        if let Some(idx) = line.find("int ")
-            && let Some(rest) = line.get(idx + 4..)
+        if let Some(idx) = line.find("int64_t ")
+            && let Some(rest) = line.get(idx + 8..)
             && rest.contains(" = inputs[")
         {
             let name: String = rest
@@ -8555,8 +8555,8 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     for name in &used {
         assert!(
             declared.contains(name),
-            "dim `{name}` used in `(int[]){{ {name} }}` but never declared as \
-             `int {name} = inputs[...]->shape[...];` -- Bucket 4c symbolic-dim \
+            "dim `{name}` used in `(int64_t[]){{ {name} }}` but never declared as \
+             `int64_t {name} = inputs[...]->shape[...];` -- Bucket 4c symbolic-dim \
              leakage. Generated source:\n{source}",
         );
     }
@@ -8751,7 +8751,7 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
     // A pure-DAG module emits no `main`, so drive the kernel directly.
     write_file(
         &out_dir.join("driver.c"),
-        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
+        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int64_t shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
     );
 
     let status = gcc_link_sources(&out_dir, &["driver.c", "only_ho.c"], "only_ho_driver");

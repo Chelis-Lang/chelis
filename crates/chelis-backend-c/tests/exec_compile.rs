@@ -1345,7 +1345,7 @@ int main() {{
     chelis_tensor* outputs[1] = {{out_slot}};
 
     test_exp_zero(inputs, 1, outputs, 1);
-    printf("zero-size exp returned, output_size=%d\n", outputs[0] ? outputs[0]->size : -1);
+    printf("zero-size exp returned, output_size=%lld\n", (long long)(outputs[0] ? outputs[0]->size : -1));
     printf("PASS\n");
     return 0;
 }}

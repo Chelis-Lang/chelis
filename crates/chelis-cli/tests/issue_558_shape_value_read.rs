@@ -260,7 +260,7 @@ fn run_driver_for_rows(build_dir: &Path, stem: &str, rows: &[usize]) -> Vec<Vec<
         .iter()
         .map(|r| {
             format!(
-                "    {{ int shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32); \
+                "    {{ int64_t shape[2] = {{{r}, 2}}; chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32); \
                  for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
                  chelis_tensor* g = out(x); \
                  for (int i = 0; i < g->size; i++) printf(\"%.6f\\n\", g->data[i]); \

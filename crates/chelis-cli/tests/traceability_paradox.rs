@@ -27,7 +27,7 @@
 //! ## Cost profile (computed from emitted C, parameterised by `seq`)
 //!
 //! Empirically the helper-side slot footprint is a polynomial in `seq` whose
-//! coefficients are read directly off `chelis_alloc(N, (int[]){...})` calls:
+//! coefficients are read directly off `chelis_alloc(N, (int64_t[]){...})` calls:
 //!
 //! | term | bytes | dominant source |
 //! |---|---|---|
@@ -94,9 +94,9 @@ fn measure_seq_polynomial(c_source: &str) -> (usize, usize, usize, usize) {
             4
         };
 
-        // Find the shape list `(int[]){ ... }`.
-        if let Some(brace_open) = window.find("(int[]){") {
-            let dims_start = brace_open + "(int[]){".len();
+        // Find the shape list `(int64_t[]){ ... }`.
+        if let Some(brace_open) = window.find("(int64_t[]){") {
+            let dims_start = brace_open + "(int64_t[]){".len();
             if let Some(brace_close) = window[dims_start..].find('}') {
                 let dims_text = &window[dims_start..dims_start + brace_close];
                 // Each dim is either a literal int (e.g. 256), a `seq`
@@ -225,11 +225,11 @@ fn transformer_block_traceability_state_is_locked() {
          cost profile and specialization notes in this test."
     );
     for dense_product_shape in [
-        "(int[]){ seq, 256, 64 }",
-        "(int[]){ seq, 64, 256 }",
-        "(int[]){ seq, 256, 1024 }",
-        "(int[]){ seq, 1024, 256 }",
-        "(int[]){ seq, seq, 64 }",
+        "(int64_t[]){ seq, 256, 64 }",
+        "(int64_t[]){ seq, 64, 256 }",
+        "(int64_t[]){ seq, 256, 1024 }",
+        "(int64_t[]){ seq, 1024, 256 }",
+        "(int64_t[]){ seq, seq, 64 }",
     ] {
         assert!(
             !source.contains(dense_product_shape),

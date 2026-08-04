@@ -973,7 +973,7 @@ int main(void) {
         let main_c = r#"
 #include "chelis_runtime.h"
 int main(void) {
-    int shape[2] = {2, 3};
+    int64_t shape[2] = {2, 3};
     chelis_tensor *base = chelis_alloc(2, shape, CHELIS_F32);
     base->data[4] = 7.0f;
     chelis_tensor *view = chelis_alloc_view(2, shape, CHELIS_F32, base->data);
@@ -1258,7 +1258,7 @@ int main() {{
                     "NULL".to_string()
                 } else {
                     lines.push(format!(
-                        "int shape_{case_idx}_{slot}[{ndim}] = {{ {shape_vals} }};"
+                        "int64_t shape_{case_idx}_{slot}[{ndim}] = {{ {shape_vals} }};"
                     ));
                     format!("shape_{case_idx}_{slot}")
                 };
@@ -1997,7 +1997,7 @@ int main(void) {{
         for (slot, label) in result.input_labels.iter().enumerate() {
             match label.as_str() {
                 "values" => input_lines.push(
-                    r#"int shape_values[2] = { 4, 2 };
+                    r#"int64_t shape_values[2] = { 4, 2 };
     chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_F32);
     float values_data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
     for (int i = 0; i < 8; i++) values->data[i] = values_data[i];
@@ -2013,7 +2013,7 @@ int main(void) {{
                 // truncated the float back. Writing the int32 value directly is
                 // what real generated input code and the runtime do.
                 "indices" => input_lines.push(
-                    r#"int shape_indices[1] = { 3 };
+                    r#"int64_t shape_indices[1] = { 3 };
     chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_I32);
     int32_t *indices_i32 = (int32_t*)indices->data;
     indices_i32[0] = 0; indices_i32[1] = 2; indices_i32[2] = 0;
@@ -2021,13 +2021,13 @@ int main(void) {{
                         .replace("SLOT", &slot.to_string()),
                 ),
                 "target" => input_lines.push(
-                    r#"int shape_target[2] = { 4, 2 };
+                    r#"int64_t shape_target[2] = { 4, 2 };
     chelis_tensor *target = chelis_alloc(2, shape_target, CHELIS_F32);
     inputs[SLOT] = target;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
                 "updates" => input_lines.push(
-                    r#"int shape_updates[2] = { 3, 2 };
+                    r#"int64_t shape_updates[2] = { 3, 2 };
     chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_F32);
     float updates_data[6] = { 1, 10, 2, 20, 3, 30 };
     for (int i = 0; i < 6; i++) updates->data[i] = updates_data[i];
@@ -2261,7 +2261,11 @@ int main(void) {{
 
         let result = codegen(&dag, "test_symbolic_batch").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
-        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = inputs[0]->shape[0];")
+        );
         assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
 
         let lines = compile_and_run_input_cases(
@@ -2316,7 +2320,11 @@ int main(void) {{
 
         let result = codegen(&dag, "test_symbolic_matmul").unwrap();
         assert_eq!(result.symbolic_dims, vec!["batch"]);
-        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = inputs[0]->shape[0];")
+        );
 
         let lines = compile_and_run_input_cases(
             &dag,
@@ -2388,13 +2396,17 @@ int main(void) {{
         )
         .unwrap();
         assert!(result.requirements.needs_blas);
-        assert!(result.c_source.contains("int seq = inputs[0]->shape[2];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t seq = inputs[0]->shape[2];")
+        );
         assert!(result.c_source.contains("cblas_sgemm"));
         assert!(result.c_source.contains("_batch_count = (batch * heads);"));
         assert!(
             !result
                 .c_source
-                .contains("(int[]){ batch, heads, seq, 3, 2 }"),
+                .contains("(int64_t[]){ batch, heads, seq, 3, 2 }"),
             "specialized batched BLAS must not allocate the dense product"
         );
 
@@ -2504,7 +2516,11 @@ int main(void) {{
         dag.add_root(xyz);
 
         let result = codegen(&dag, "test_symbolic_occurrences").unwrap();
-        assert!(result.c_source.contains("int batch = inputs[0]->shape[0];"));
+        assert!(
+            result
+                .c_source
+                .contains("int64_t batch = inputs[0]->shape[0];")
+        );
         assert!(result.c_source.contains("inputs[1]->shape[0] != batch"));
         assert!(result.c_source.contains("inputs[2]->shape[0] != batch"));
     }
@@ -2582,7 +2598,7 @@ int main(void) {
 #include "chelis_runtime.h"
 void test_load_copy(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {
-    int shape[1] = {2};
+    int64_t shape[1] = {2};
     chelis_tensor *input = chelis_alloc(1, shape, CHELIS_F32);
     input->data[0] = 3.0f;
     input->data[1] = 4.0f;
@@ -3063,7 +3079,7 @@ int main(void) {
 #include <math.h>
 void test_simd_compile(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
-    int shape[1] = {{ {n} }};
+    int64_t shape[1] = {{ {n} }};
     chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
     chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
     for (int i = 0; i < {n}; i++) {{ ta->data[i] = 0.5f; tb->data[i] = 0.5f; }}
@@ -3176,7 +3192,7 @@ int main(void) {{
 #include <stdio.h>
 void test_oracle(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
-    int shape[1] = {{ {n} }};
+    int64_t shape[1] = {{ {n} }};
     chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
     chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
     {a_init}
@@ -3324,7 +3340,7 @@ int main(void) {{
 #include <stdio.h>
 void test_single_exp_run(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
-    int shape[1] = {{ {n} }};
+    int64_t shape[1] = {{ {n} }};
     chelis_tensor *tx = chelis_alloc(1, shape, CHELIS_F32);
     {x_init}
     chelis_tensor *inputs[1] = {{tx}};

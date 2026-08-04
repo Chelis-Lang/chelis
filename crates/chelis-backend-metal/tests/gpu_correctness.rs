@@ -176,7 +176,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
                     .map(|d| d.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                body.push(format!("    int shape_{slot}[{ndim}] = {{ {dims} }};"));
+                body.push(format!("    int64_t shape_{slot}[{ndim}] = {{ {dims} }};"));
                 body.push(format!(
                     "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_F32);"
                 ));

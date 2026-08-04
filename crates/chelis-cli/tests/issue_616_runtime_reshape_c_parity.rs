@@ -198,7 +198,7 @@ fn issue_616_runtime_reshape_c_binary_handles_multiple_lengths() {
         .iter()
         .map(|n| {
             format!(
-                "    {{ int shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
+                "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
                  for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
                  chelis_tensor* w = out(x); \
                  for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", w->data[i]); \
