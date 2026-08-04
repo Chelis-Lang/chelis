@@ -54,6 +54,83 @@ def nix_raw(*args: str) -> str:
     return completed.stdout.strip()
 
 
+def assert_shared_package_rule_contract(
+    adapter: str,
+    workspace: str,
+    overrides: str,
+    artifacts: str,
+) -> None:
+    adapter_required = (
+        "import ./workspace.nix",
+        "import ./artifacts.nix",
+        "builtins.hasAttr name workspace.cargoGraph.workspaceMembers",
+        "builtins.getAttr name workspace.cargoGraph.workspaceMembers",
+        'throw "the crate2nix graph is missing required workspace member ${name}";',
+        'requireWorkspaceMember "chelis-cli"',
+        'requireWorkspaceMember "chelis-runtime"',
+        'requireWorkspaceMember "chelisup"',
+    )
+    adapter_missing = [item for item in adapter_required if item not in adapter]
+    if adapter_missing:
+        raise AssertionError(
+            f"the root package adapter must use the shared helpers: {adapter_missing!r}"
+        )
+
+    workspace_required = (
+        "import ./crate-overrides.nix",
+        'pkgs.callPackage (crate2nix + "/tools.nix")',
+        "generatedCargoNix",
+        '"chelis-cli/smt"',
+        'CARGO_NET_OFFLINE = "true";',
+        "import generatedCargoNix",
+        "toolchain",
+    )
+    workspace_missing = [item for item in workspace_required if item not in workspace]
+    if workspace_missing:
+        raise AssertionError(
+            f"the shared workspace graph is incomplete: {workspace_missing!r}"
+        )
+    for member in ('"chelis-runtime"', '"chelisup"'):
+        if member in workspace:
+            raise AssertionError(
+                "the shared workspace graph must not select product members"
+            )
+
+    override_required = (
+        "cratePkgs.defaultCrateOverrides // chelisOverrides",
+        '"chelis-cli" = attrs:',
+        '"chelis-compiler-api" = attrs:',
+        '"chelis-cove" = attrs:',
+        '"cvc5-sys" = attrs:',
+        '"tree-sitter-chelis" = attrs:',
+        'CVC5_DIR = "${cvc5.dir}";',
+        "requiredOverrideNames",
+        "missingOverrides",
+        "assert missingOverrides == [ ];",
+    )
+    override_missing = [item for item in override_required if item not in overrides]
+    if override_missing:
+        raise AssertionError(
+            f"the shared crate overrides are incomplete: {override_missing!r}"
+        )
+
+    artifact_required = (
+        "compilerCrate",
+        "runtimeCrate",
+        "chelisupCrate",
+        'pkgs.runCommand "chelis-cli-${version}"',
+        'pkgs.runCommand "chelis-runtime-${version}"',
+        'pkgs.runCommand "chelisup-${version}"',
+        "libexec/chelisup",
+        "nix-gcroots",
+    )
+    artifact_missing = [item for item in artifact_required if item not in artifacts]
+    if artifact_missing:
+        raise AssertionError(
+            f"the shared artifact assembly is incomplete: {artifact_missing!r}"
+        )
+
+
 def assert_automatic_crate2nix_contract(
     flake: str,
     packages: str,
@@ -206,31 +283,96 @@ class NixFlakeContractTests(unittest.TestCase):
         )
         self.assertEqual(crate2nix["original"]["ref"], "0.15.0")
 
+    def test_root_packages_use_the_shared_workspace_and_artifact_rules(self) -> None:
+        adapter = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        workspace = (REPO_ROOT / "nix" / "workspace.nix").read_text(
+            encoding="utf-8"
+        )
+        overrides = (REPO_ROOT / "nix" / "crate-overrides.nix").read_text(
+            encoding="utf-8"
+        )
+        artifacts = (REPO_ROOT / "nix" / "artifacts.nix").read_text(
+            encoding="utf-8"
+        )
+        assert_shared_package_rule_contract(
+            adapter,
+            workspace,
+            overrides,
+            artifacts,
+        )
+
     def test_rust_builds_use_an_automatic_crate2nix_graph(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        workspace = (REPO_ROOT / "nix" / "workspace.nix").read_text(
+            encoding="utf-8"
+        )
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
         assert_automatic_crate2nix_contract(
             flake,
-            packages,
+            workspace,
             source,
             cargo_nix_exists=(REPO_ROOT / "Cargo.nix").exists(),
         )
-        self.assertIn('workspaceMembers."chelis-cli".build', packages)
-        self.assertIn('workspaceMembers."chelis-runtime".build', packages)
-        self.assertIn('workspaceMembers."chelisup".build', packages)
-        self.assertIn('features = [ "smt" ];', packages)
-        self.assertNotIn("buildRustPackage", packages)
+        self.assertNotIn("buildRustPackage", workspace)
+
+    def test_empty_root_workspace_member_fallback_fails_the_package_rule_contract(
+        self,
+    ) -> None:
+        adapter = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        workspace = (REPO_ROOT / "nix" / "workspace.nix").read_text(
+            encoding="utf-8"
+        )
+        overrides = (REPO_ROOT / "nix" / "crate-overrides.nix").read_text(
+            encoding="utf-8"
+        )
+        artifacts = (REPO_ROOT / "nix" / "artifacts.nix").read_text(
+            encoding="utf-8"
+        )
+        mutated = adapter.replace(
+            'throw "the crate2nix graph is missing required workspace member ${name}";',
+            "{ };",
+        )
+        with self.assertRaisesRegex(AssertionError, "root package adapter"):
+            assert_shared_package_rule_contract(
+                mutated,
+                workspace,
+                overrides,
+                artifacts,
+            )
+
+    def test_missing_shared_cvc5_override_fails_the_package_rule_contract(
+        self,
+    ) -> None:
+        adapter = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        workspace = (REPO_ROOT / "nix" / "workspace.nix").read_text(
+            encoding="utf-8"
+        )
+        overrides = (REPO_ROOT / "nix" / "crate-overrides.nix").read_text(
+            encoding="utf-8"
+        )
+        artifacts = (REPO_ROOT / "nix" / "artifacts.nix").read_text(
+            encoding="utf-8"
+        )
+        mutated = overrides.replace('"cvc5-sys" = attrs:', '"cvc5-missing" = attrs:')
+        with self.assertRaisesRegex(AssertionError, "crate overrides"):
+            assert_shared_package_rule_contract(
+                adapter,
+                workspace,
+                mutated,
+                artifacts,
+            )
 
     def test_disabled_ifd_fails_the_automatic_graph_contract(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        workspace = (REPO_ROOT / "nix" / "workspace.nix").read_text(
+            encoding="utf-8"
+        )
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
         mutated = flake.replace("allow-import-from-derivation = true;", "")
         with self.assertRaisesRegex(AssertionError, "enable import from derivation"):
             assert_automatic_crate2nix_contract(
                 mutated,
-                packages,
+                workspace,
                 source,
                 cargo_nix_exists=False,
             )
@@ -266,9 +408,11 @@ class NixFlakeContractTests(unittest.TestCase):
 
     def test_online_generator_fails_the_automatic_graph_contract(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        workspace = (REPO_ROOT / "nix" / "workspace.nix").read_text(
+            encoding="utf-8"
+        )
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        mutated = packages.replace('      CARGO_NET_OFFLINE = "true";\n', "")
+        mutated = workspace.replace('      CARGO_NET_OFFLINE = "true";\n', "")
         with self.assertRaisesRegex(AssertionError, "contract is incomplete"):
             assert_automatic_crate2nix_contract(
                 flake,
@@ -279,24 +423,28 @@ class NixFlakeContractTests(unittest.TestCase):
 
     def test_missing_generator_source_fails_the_automatic_graph_contract(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        workspace = (REPO_ROOT / "nix" / "workspace.nix").read_text(
+            encoding="utf-8"
+        )
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
         mutated = source.replace('    "Cargo.lock"\n', "")
         with self.assertRaisesRegex(AssertionError, "generator source is incomplete"):
             assert_automatic_crate2nix_contract(
                 flake,
-                packages,
+                workspace,
                 mutated,
                 cargo_nix_exists=False,
             )
 
     def test_cvc5_sys_override_uses_the_fixed_native_inputs(self) -> None:
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        self.assertIn('"cvc5-sys" = attrs:', packages)
-        self.assertIn('CVC5_DIR = "${cvc5.dir}";', packages)
-        self.assertIn("pkgs.llvmPackages.libclang", packages)
-        self.assertIn("pkgs.pkg-config", packages)
-        self.assertIn("LIBCLANG_PATH", packages)
+        overrides = (REPO_ROOT / "nix" / "crate-overrides.nix").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"cvc5-sys" = attrs:', overrides)
+        self.assertIn('CVC5_DIR = "${cvc5.dir}";', overrides)
+        self.assertIn("pkgs.llvmPackages.libclang", overrides)
+        self.assertIn("pkgs.pkg-config", overrides)
+        self.assertIn("LIBCLANG_PATH", overrides)
 
     def test_chelisup_rust_crate_does_not_own_nix_gc_roots(self) -> None:
         crate_dir = REPO_ROOT / "crates" / "chelisup"
@@ -307,7 +455,9 @@ class NixFlakeContractTests(unittest.TestCase):
             self.assertNotRegex(source, r"\b[Nn]ix\b|nix-gcroots|nix_gc", str(path))
 
     def test_workspace_source_overrides_preserve_external_compile_assets(self) -> None:
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        overrides = (REPO_ROOT / "nix" / "crate-overrides.nix").read_text(
+            encoding="utf-8"
+        )
         expected_roots = {
             "chelis-cli": "chelis-source/crates/chelis-cli",
             "chelis-compiler-api": "chelis-source/crates/chelis-compiler-api",
@@ -316,9 +466,9 @@ class NixFlakeContractTests(unittest.TestCase):
         }
         for crate, source_root in expected_roots.items():
             with self.subTest(crate=crate):
-                self.assertIn(f'"{crate}" = attrs:', packages)
-                self.assertIn(f'sourceRoot = "{source_root}";', packages)
-        self.assertEqual(packages.count("src = crateSource;"), len(expected_roots))
+                self.assertIn(f'"{crate}" = attrs:', overrides)
+                self.assertIn(f'sourceRoot = "{source_root}";', overrides)
+        self.assertEqual(overrides.count("src = crateSource;"), len(expected_roots))
 
     def test_repository_lint_has_no_generated_graph_exclusion(self) -> None:
         policy = (REPO_ROOT / "chelis-lint.toml").read_text(encoding="utf-8")

@@ -158,7 +158,27 @@ nix run .#chelisup -- --help
 nix flake check --print-build-logs
 ```
 
-Nix is a source-build channel. It does not replace the release store or the version router.
+If you use Devenv, build the packages through its output interface:
+
+```sh
+devenv build outputs.chelis
+devenv build outputs.chelis-runtime
+devenv build outputs.chelisup
+```
+
+Run `devenv build` without an attribute to build all four outputs. The fourth
+output is the `default` alias of `chelis`.
+
+Devenv owns a separate crate2nix workspace graph. It does not evaluate the root
+flake.
+
+Both interfaces share source filters, crate overrides, feature selection, and
+artifact assembly. Dirty worktrees can produce different derivation identities.
+
+Native checks verify the same package layouts and behavior for both interfaces.
+
+Nix is an additive source-build channel. It does not replace the release store
+or the version router.
 
 Before an install, the Nix wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup`.
 

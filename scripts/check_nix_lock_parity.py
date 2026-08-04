@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare shared Nixpkgs and Rust overlay revisions in both lock files."""
+"""Compare shared crate2nix, Nixpkgs, and Rust overlay revisions."""
 
 from __future__ import annotations
 
@@ -82,6 +82,11 @@ def parse_lock(path: Path, node_names: tuple[str, ...]) -> ParsedLock:
 
 def shared_inputs(flake: ParsedLock, devenv: ParsedLock) -> tuple[SharedInput, ...]:
     return (
+        SharedInput(
+            "crate2nix",
+            flake.node("crate2nix"),
+            devenv.node("crate2nix"),
+        ),
         SharedInput("nixpkgs", flake.node("nixpkgs"), devenv.node("nixpkgs-src")),
         SharedInput(
             "rust-overlay",
@@ -92,8 +97,11 @@ def shared_inputs(flake: ParsedLock, devenv: ParsedLock) -> tuple[SharedInput, .
 
 
 def check_parity(flake_path: Path, devenv_path: Path) -> tuple[SharedInput, ...]:
-    flake = parse_lock(flake_path, ("nixpkgs", "rust-overlay"))
-    devenv = parse_lock(devenv_path, ("nixpkgs-src", "rust-overlay"))
+    flake = parse_lock(flake_path, ("crate2nix", "nixpkgs", "rust-overlay"))
+    devenv = parse_lock(
+        devenv_path,
+        ("crate2nix", "nixpkgs-src", "rust-overlay"),
+    )
     return shared_inputs(flake, devenv)
 
 

@@ -15,18 +15,26 @@
         fi
       }
 
-      for command_name in rustc cargo uv cmake git pkg-config; do
+      for command_name in rustc cargo rust-analyzer uv cmake git pkg-config openspec shellcheck; do
         require_command "$command_name"
       done
 
+      openspec_version="$(openspec --version)"
+      if [ "$openspec_version" != "1.6.0" ]; then
+        printf 'unexpected OpenSpec version: %s\n' "$openspec_version" >&2
+        exit 1
+      fi
+
       rustc --version
       cargo --version
+      rust-analyzer --version
       cargo nextest --version
       cargo llvm-cov --version
       uv --version
       cmake --version
       git --version
       pkg-config --version
+      shellcheck --version
     '';
   };
 

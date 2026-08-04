@@ -214,14 +214,19 @@ let
           ${root}/devenv/commands.nix \
           ${root}/devenv/generated-files.nix \
           ${root}/devenv/git-hooks.nix \
+          ${root}/devenv/package-outputs.nix \
+          ${root}/devenv/rust-workspace.nix \
           ${root}/devenv/smoke-tests.nix \
           ${root}/devenv/toolchains.nix \
           ${root}/flake.nix \
+          ${./artifacts.nix} \
           ${./checks.nix} \
           ${./contracts.nix} \
+          ${./crate-overrides.nix} \
           ${./cvc5.nix} \
           ${./packages.nix} \
-          ${./source.nix}
+          ${./source.nix} \
+          ${./workspace.nix}
         touch "$out"
       '';
 

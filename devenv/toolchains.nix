@@ -15,12 +15,41 @@ let
   gxxShim = pkgs.writeShellScriptBin "g++" ''
     exec ${pkgs.stdenv.cc}/bin/c++ -Wno-unused-command-line-argument "$@"
   '';
+
+  openspecPinned = pkgs.openspec.overrideAttrs (
+    finalAttrs: _previousAttrs: {
+      version = "1.6.0";
+
+      src = pkgs.fetchFromGitHub {
+        owner = "Fission-AI";
+        repo = "OpenSpec";
+        tag = "v${finalAttrs.version}";
+        hash = "sha256-lvg10gpx6tB6eSv5iesqhUQqYqkVuU4hpSVfYy/f3bE=";
+      };
+
+      pnpmDeps = pkgs.fetchPnpmDeps {
+        inherit (finalAttrs) pname version src;
+        pnpm = pkgs.pnpm_10;
+        fetcherVersion = 3;
+        hash = "sha256-OUY6G8e6Xqi+0YCcDbpVF06V9pJc68jSSA9rtNg/Vrg=";
+      };
+
+      nativeBuildInputs = [
+        pkgs.nodejs
+        pkgs.pnpmConfigHook
+        pkgs.pnpm_10
+        pkgs.makeWrapper
+        pkgs.installShellFiles
+      ];
+    }
+  );
 in
 {
   languages = {
     rust = {
       enable = true;
       toolchainFile = ../rust-toolchain.toml;
+      lsp.package = pkgs.rust-analyzer;
     };
 
     python = {
@@ -42,7 +71,9 @@ in
       cargo-nextest
       cmake
       git
+      openspecPinned
       pkg-config
+      shellcheck
     ]
     ++ lib.optionals stdenv.isLinux [
       gcc

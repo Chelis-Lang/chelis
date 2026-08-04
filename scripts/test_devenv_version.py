@@ -16,6 +16,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT_HOOKS_MODULE = REPO_ROOT / "devenv/git-hooks.nix"
 SMOKE_TEST_MODULE = REPO_ROOT / "devenv/smoke-tests.nix"
+TOOLCHAIN_MODULE = REPO_ROOT / "devenv/toolchains.nix"
 EXPECTED_URL = "github:cachix/devenv/v2.2?dir=src/modules"
 EXPECTED_REF = "v2.2"
 EXPECTED_REVISION = "ffce215a42d09c6375c3d60dd9c4110438fc4d87"
@@ -31,9 +32,11 @@ EXPECTED_GIT_HOOKS_URL = "github:cachix/git-hooks.nix"
 # compares. The revision values live in devenv.yaml and the lock files,
 # not here; this contract locks the shape (no floating references).
 SHARED_INPUT_URL_PREFIXES = {
+    "crate2nix": "github:nix-community/crate2nix/",
     "nixpkgs": "github:cachix/devenv-nixpkgs/",
     "rust-overlay": "github:oxalica/rust-overlay/",
 }
+EXPECTED_CRATE2NIX_REVISION = "7c33e664668faecf7655fa53861d7a80c9e464a2"
 EXPECTED_ACTIVE_GIT_HOOKS = frozenset({"no-ai-authorship"})
 EXPECTED_DISABLED_GIT_HOOKS = frozenset(
     {
@@ -99,6 +102,29 @@ class SharedInputPin:
     revision: str
 
 
+@dataclass(frozen=True)
+class RustDevelopmentTools:
+    toolchain_file: str
+    lsp_package: str
+
+
+def parse_rust_development_tools(text: str) -> RustDevelopmentTools:
+    block_match = re.search(r"(?ms)^    rust = \{\n(?P<body>.*?)^    \};$", text)
+    if block_match is None:
+        raise ValueError("the Devenv Rust module must define one Rust block")
+    body = block_match.group("body")
+    toolchain_match = re.search(r"(?m)^      toolchainFile = ([^;]+);$", body)
+    lsp_match = re.search(r"(?m)^      lsp\.package = ([^;]+);$", body)
+    if toolchain_match is None or toolchain_match.group(1) != "../rust-toolchain.toml":
+        raise ValueError("the Devenv Rust module must use rust-toolchain.toml")
+    if lsp_match is None or lsp_match.group(1) != "pkgs.rust-analyzer":
+        raise ValueError("the Devenv Rust module must provide rust-analyzer")
+    return RustDevelopmentTools(
+        toolchain_file=toolchain_match.group(1),
+        lsp_package=lsp_match.group(1),
+    )
+
+
 def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
     raw_names = re.findall(r'(?m)^\s{2}tasks\."([^"]+)" = \{$', text)
     names = frozenset(raw_names)
@@ -114,6 +140,27 @@ def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
         raise ValueError("the smoke-test module must not define enterTest")
     if "processes." in text or "services." in text:
         raise ValueError("the Devenv smoke check must not define a service or process")
+
+    toolchain_contract = (
+        "rustc cargo rust-analyzer uv cmake git pkg-config openspec shellcheck",
+        "rust-analyzer --version",
+    )
+    missing_tools = [fragment for fragment in toolchain_contract if fragment not in text]
+    if missing_tools:
+        raise ValueError(
+            f"the toolchain smoke contract is incomplete: {missing_tools!r}"
+        )
+    openspec_contract = (
+        'openspec_version="$(openspec --version)"',
+        'if [ "$openspec_version" != "1.6.0" ]; then',
+    )
+    missing_openspec = [
+        fragment for fragment in openspec_contract if fragment not in text
+    ]
+    if missing_openspec:
+        raise ValueError(
+            f"the OpenSpec smoke contract is incomplete: {missing_openspec!r}"
+        )
     return DevenvTestTasks(names=names)
 
 
@@ -318,6 +365,21 @@ def parse_shared_input_pin(
             f"the {input_name} input must pin a full commit revision, "
             "not a floating reference"
         )
+    if input_name == "crate2nix":
+        lines = yaml_text.splitlines()
+        try:
+            start = lines.index("  crate2nix:")
+        except ValueError as error:
+            raise ValueError("devenv.yaml does not define the crate2nix input") from error
+        block = lines[start : start + 3]
+        if block != [
+            "  crate2nix:",
+            f"    url: {prefix}{revision}",
+            "    flake: false",
+        ]:
+            raise ValueError("the crate2nix input must be a pinned non-flake input")
+        if revision != EXPECTED_CRATE2NIX_REVISION:
+            raise ValueError("the crate2nix input must pin crate2nix 0.15.0")
     try:
         node = lock_data["nodes"][input_name]
         original_revision = node["original"]["rev"]
@@ -326,6 +388,8 @@ def parse_shared_input_pin(
         raise ValueError(
             f"devenv.lock does not contain a complete {input_name} pin"
         ) from error
+    if input_name == "crate2nix" and node.get("flake") is not False:
+        raise ValueError("the locked crate2nix input must remain non-flake")
     if {original_revision, locked_revision} != {revision}:
         raise ValueError(
             f"the locked {input_name} revision must match the configured pin"
@@ -408,6 +472,21 @@ class DevenvVersionTests(unittest.TestCase):
             frozenset(EXPECTED_TEST_TASKS),
         )
 
+    def test_repository_uses_the_devenv_rust_toolchain_options(self) -> None:
+        config = TOOLCHAIN_MODULE.read_text(encoding="utf-8")
+        tools = parse_rust_development_tools(config)
+        self.assertEqual(tools.toolchain_file, "../rust-toolchain.toml")
+        self.assertEqual(tools.lsp_package, "pkgs.rust-analyzer")
+
+    def test_missing_rust_analyzer_package_fails_at_the_parse_boundary(self) -> None:
+        config = TOOLCHAIN_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            "      lsp.package = pkgs.rust-analyzer;\n",
+            "      lsp.enable = false;\n",
+        )
+        with self.assertRaisesRegex(ValueError, "must provide rust-analyzer"):
+            parse_rust_development_tools(mutated)
+
     def test_repository_declares_the_git_hook_policy(self) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
         catalog = parse_git_hook_catalog(config)
@@ -431,20 +510,39 @@ class DevenvVersionTests(unittest.TestCase):
     def test_floating_shared_input_reference_fails_the_pin_contract(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
-        mutated = re.sub(
-            r"(url: github:cachix/devenv-nixpkgs/)[0-9a-f]{40}",
-            r"\1rolling",
-            yaml_text,
-        )
-        with self.assertRaisesRegex(ValueError, "full commit revision"):
-            parse_shared_input_pin(mutated, lock_data, "nixpkgs")
+        fixtures = {
+            "crate2nix": re.sub(
+                r"(url: github:nix-community/crate2nix/)[0-9a-f]{40}",
+                r"\g<1>0.15.0",
+                yaml_text,
+            ),
+            "nixpkgs": re.sub(
+                r"(url: github:cachix/devenv-nixpkgs/)[0-9a-f]{40}",
+                r"\g<1>rolling",
+                yaml_text,
+            ),
+        }
+        for input_name, fixture in fixtures.items():
+            with self.subTest(input=input_name):
+                with self.assertRaisesRegex(ValueError, "full commit revision"):
+                    parse_shared_input_pin(fixture, lock_data, input_name)
+
+    def test_crate2nix_must_remain_a_non_flake_input(self) -> None:
+        yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
+        mutated = yaml_text.replace("    flake: false\n", "    flake: true\n", 1)
+        with self.assertRaisesRegex(ValueError, "non-flake"):
+            parse_shared_input_pin(mutated, lock_data, "crate2nix")
 
     def test_stale_shared_input_lock_fails_the_pin_contract(self) -> None:
         yaml_text = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         lock_data = json.loads((REPO_ROOT / "devenv.lock").read_text(encoding="utf-8"))
-        lock_data["nodes"]["rust-overlay"]["locked"]["rev"] = "0" * 40
-        with self.assertRaisesRegex(ValueError, "must match the configured pin"):
-            parse_shared_input_pin(yaml_text, lock_data, "rust-overlay")
+        for input_name in ("crate2nix", "rust-overlay"):
+            with self.subTest(input=input_name):
+                mutated = json.loads(json.dumps(lock_data))
+                mutated["nodes"][input_name]["locked"]["rev"] = "0" * 40
+                with self.assertRaisesRegex(ValueError, "must match the configured pin"):
+                    parse_shared_input_pin(yaml_text, mutated, input_name)
 
     def test_repository_ignores_generated_git_hook_config(self) -> None:
         ignore_text = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
@@ -513,6 +611,27 @@ class DevenvVersionTests(unittest.TestCase):
     def test_missing_generated_git_hook_ignore_fails_at_parse_boundary(self) -> None:
         with self.assertRaisesRegex(ValueError, "must ignore"):
             parse_generated_git_hook_ignore("/target\n")
+
+    def test_missing_rust_analyzer_smoke_fails_at_the_parse_boundary(self) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(" cargo rust-analyzer uv", " cargo uv")
+        with self.assertRaisesRegex(ValueError, "toolchain smoke contract"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_missing_shellcheck_smoke_fails_at_the_parse_boundary(self) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(" openspec shellcheck", " openspec")
+        with self.assertRaisesRegex(ValueError, "toolchain smoke contract"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_wrong_openspec_smoke_version_fails_at_the_parse_boundary(self) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            'if [ "$openspec_version" != "1.6.0" ]; then',
+            'if [ "$openspec_version" != "1.4.1" ]; then',
+        )
+        with self.assertRaisesRegex(ValueError, "OpenSpec smoke contract"):
+            parse_devenv_test_tasks(mutated)
 
     def test_missing_named_test_task_fails_at_the_parse_boundary(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")

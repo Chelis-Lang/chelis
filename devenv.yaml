@@ -1,5 +1,8 @@
 require_version: true
 inputs:
+  crate2nix:
+    url: github:nix-community/crate2nix/7c33e664668faecf7655fa53861d7a80c9e464a2
+    flake: false
   devenv:
     url: github:cachix/devenv/v2.2?dir=src/modules
   git-hooks:

@@ -7,5 +7,7 @@
     ./devenv/generated-files.nix
     ./devenv/git-hooks.nix
     ./devenv/smoke-tests.nix
+    ./devenv/rust-workspace.nix
+    ./devenv/package-outputs.nix
   ];
 }

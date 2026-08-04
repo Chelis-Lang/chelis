@@ -56,7 +56,7 @@ The rest of this README builds the Chelis compiler from a checkout.
 ### Devenv development shell
 
 Devenv is optional for local work. Native Nix CI requires Devenv. The shell
-supplies pinned Rust, Python, C, and contributor tools.
+supplies pinned Rust, rust-analyzer, Python, C, and contributor tools.
 
 The tracked environment supports `x86_64-linux` and Apple silicon macOS
 (`aarch64-darwin`). Other systems must use the manual setup below.
@@ -157,6 +157,9 @@ devenv shell -- chelis-gate --list
 
 # List orphaned Chelis build processes.
 devenv shell -- chelis-reap-orphans
+
+# Validate the active OpenSpec tree.
+devenv shell -- openspec validate --all --strict --no-interactive
 ```
 
 #### Shell behavior
@@ -164,11 +167,11 @@ devenv shell -- chelis-reap-orphans
 The repository pins the Devenv modules to release `v2.2`. The version of the
 local Devenv CLI must match this module version.
 
-`devenv.nix` imports five local configuration modules. `devenv.yaml` defines
+`devenv.nix` imports seven local configuration modules. `devenv.yaml` defines
 the inputs and CLI options.
 
-`devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
-revisions. Therefore, `devenv update` cannot change them.
+`devenv.yaml` pins the shared `crate2nix`, `nixpkgs`, and `rust-overlay`
+inputs to exact revisions. Therefore, `devenv update` cannot change them.
 `scripts/check_nix_lock_parity.py` keeps these revisions aligned with
 `flake.lock`.
 
@@ -180,11 +183,34 @@ On Linux, the shell supplies GCC, OpenBLAS, and Valgrind from Nixpkgs.
 Devenv creates and activates Python 3.11 at `.devenv/state/venv`. It sets
 `PYO3_PYTHON` to that interpreter.
 
+Devenv supplies OpenSpec 1.6.0 for local structural validation. It supplies
+ShellCheck for native launcher validation.
+
 Devenv does not modify the repository-root `.venv`. The manual setup path below
 owns that environment outside Devenv.
 
 `devenv test` initializes the managed files and Python. It then runs separate
 smoke tasks for the toolchain, Python, C, and C++.
+
+Devenv generates one crate2nix graph for the Cargo workspace. It does not
+evaluate the root flake.
+
+Build one output with its full attribute name:
+
+```sh
+devenv build outputs.chelis
+devenv build outputs.chelis-runtime
+devenv build outputs.chelisup
+```
+
+Run `devenv build` without an attribute to build all outputs, including the
+`default` alias.
+
+The Devenv and flake graphs share source filters, crate overrides, feature
+selection, and artifact assembly. Each interface owns its input graph.
+
+Dirty worktrees can give the interfaces different derivation identities.
+Native package checks verify the same layouts and behavior for both interfaces.
 
 The shell also supplies these platform commands:
 
@@ -214,6 +240,9 @@ read-only. The cache does not contain the custom cvc5 derivation.
 
 Each job stores the prebuilt cvc5 toolchain closure in the GitHub Actions cache.
 The derivation name identifies the cache entry.
+
+Each job builds all four Devenv outputs. It checks package layouts, executable
+behavior, launcher syntax, and SMT support.
 
 The Linux job runs for each code pull request and each push to `main`. The
 shared detector skips documentation-only pull requests and reports success.
@@ -251,6 +280,9 @@ nix build .#chelis          # compiler, runtime library, and five public headers
 nix build .#chelis-runtime  # runtime static library and five public headers
 nix build .#chelisup        # installer command and its internal Nix payload
 ```
+
+The Devenv outputs use a separate workspace graph. Both interfaces use the
+same package rules and native contracts.
 
 Run an application from the repository root:
 

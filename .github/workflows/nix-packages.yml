@@ -102,8 +102,16 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
       - name: Create the project Python environment
         run: uv venv --python 3.11 .venv
+      - name: Run the Devenv input and composition tests
+        run: .venv/bin/python -m unittest scripts.test_devenv_version scripts.test_devenv_composition scripts.test_check_nix_lock_parity
       - name: Run the Devenv shell smoke checks
         run: devenv test --no-tui
+      - name: Build all Devenv package outputs
+        run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup outputs.default > .devenv-package-outputs.json
+      - name: Build the Devenv workspace graph artifact
+        run: devenv build --no-tui chelis.rust.workspaceGraph.generatedCargoNix > .devenv-workspace-graph.json
+      - name: Check the Devenv package outputs
+        run: .venv/bin/python scripts/check_devenv_package_outputs.py .devenv-package-outputs.json .devenv-workspace-graph.json
       - name: Run the Nix flake contract suite
         run: .venv/bin/python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
@@ -158,8 +166,16 @@ jobs:
         uses: astral-sh/setup-uv@v8.1.0
       - name: Create the project Python environment
         run: uv venv --python 3.11 .venv
+      - name: Run the Devenv input and composition tests
+        run: .venv/bin/python -m unittest scripts.test_devenv_version scripts.test_devenv_composition scripts.test_check_nix_lock_parity
       - name: Run the Devenv shell smoke checks
         run: devenv test --no-tui
+      - name: Build all Devenv package outputs
+        run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup outputs.default > .devenv-package-outputs.json
+      - name: Build the Devenv workspace graph artifact
+        run: devenv build --no-tui chelis.rust.workspaceGraph.generatedCargoNix > .devenv-workspace-graph.json
+      - name: Check the Devenv package outputs
+        run: .venv/bin/python scripts/check_devenv_package_outputs.py .devenv-package-outputs.json .devenv-workspace-graph.json
       - name: Run the Nix flake contract suite
         run: .venv/bin/python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set

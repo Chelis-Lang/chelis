@@ -52,6 +52,24 @@ DOCS_ONLY_GATE_IF = (
     "|| needs.changes.outputs.docs_only != 'true') }}"
 )
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+DEVENV_COMPOSITION_TESTS = (
+    "run: .venv/bin/python -m unittest scripts.test_devenv_version "
+    "scripts.test_devenv_composition scripts.test_check_nix_lock_parity"
+)
+DEVENV_OUTPUT_BUILD = (
+    "run: devenv build --no-tui outputs.chelis outputs.chelis-runtime "
+    "outputs.chelisup outputs.default > .devenv-package-outputs.json"
+)
+DEVENV_GRAPH_BUILD = (
+    "run: devenv build --no-tui "
+    "chelis.rust.workspaceGraph.generatedCargoNix "
+    "> .devenv-workspace-graph.json"
+)
+DEVENV_OUTPUT_CHECK = (
+    "run: .venv/bin/python scripts/check_devenv_package_outputs.py "
+    ".devenv-package-outputs.json .devenv-workspace-graph.json"
+)
+DEVENV_PACKAGE_CHECKER = REPO_ROOT / "scripts" / "check_devenv_package_outputs.py"
 
 
 def _nix_supported_systems(contracts: str) -> set[str]:
@@ -100,6 +118,10 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             f"uses: {DEVENV_SETUP_ACTION}",
             f"shell: {PORTABLE_DEVENV_SHELL}",
             "run: devenv test --no-tui",
+            DEVENV_COMPOSITION_TESTS,
+            DEVENV_OUTPUT_BUILD,
+            DEVENV_GRAPH_BUILD,
+            DEVENV_OUTPUT_CHECK,
         )
         for marker in required_markers:
             actual_count = block.count(marker)
@@ -698,6 +720,44 @@ class NixPackagesWorkflowTests(unittest.TestCase):
     def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         _assert_native_devenv_recipe(text)
+
+    def test_missing_devenv_composition_tests_fail_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(DEVENV_COMPOSITION_TESTS, "run: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "test_devenv_composition"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_missing_devenv_package_build_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(DEVENV_OUTPUT_BUILD, "run: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "devenv build"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_missing_devenv_graph_build_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(DEVENV_GRAPH_BUILD, "run: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "workspaceGraph"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_missing_devenv_package_check_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(DEVENV_OUTPUT_CHECK, "run: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "check_devenv_package_outputs"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_devenv_package_checker_covers_native_behavior_and_smt(self):
+        checker = DEVENV_PACKAGE_CHECKER.read_text(encoding="utf-8")
+        required = (
+            "check_inventories",
+            "check_behavior",
+            "Cargo-generated.nix",
+            "verify_release_smt.py",
+            "runtime-consumer.c",
+            "shellcheck",
+            "outputs.default",
+        )
+        for marker in required:
+            self.assertIn(marker, checker)
 
     def test_missing_central_devenv_action_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")

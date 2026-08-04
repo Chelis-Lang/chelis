@@ -4,11 +4,11 @@
       "locked": {
         "owner": "nix-community",
         "repo": "crate2nix",
-        "rev": "3333333333333333333333333333333333333333",
+        "rev": "cccccccccccccccccccccccccccccccccccccccc",
         "type": "github"
       }
     },
-    "nixpkgs-src": {
+    "nixpkgs": {
       "locked": {
         "owner": "NixOS",
         "repo": "nixpkgs",
