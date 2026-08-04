@@ -2719,7 +2719,8 @@ above 2^53 collapsed at every boundary no matter how exactly it had been
 computed - chelis#684, chelis#685, chelis#686. This atom is the
 user-visible statement of what `spec/design/dtype_semantics.md` §C3's
 storage decision delivers: that document owns the mechanism, this atom owns
-the guarantee.)*
+the guarantee. Also not honored on the Metal host/device bool boundary,
+where a value crosses at a quarter of its storage width: chelis#892.)*
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
@@ -2781,6 +2782,38 @@ divergence as conforming only under this atom's conditions.)*
 > ties-to-even at the target width per [04-NUM-2], even when that loses
 > integer exactness. A source cast to `bool` accepts exactly 0 or 1 per
 > [04-NUM-4].
+
+> **[04-NUM-15]** For an elementwise operation that maps a tensor to a
+> tensor and can trap per-element, the trap the operation raises SHALL be
+> the one belonging to the offending element with the LOWEST row-major flat
+> index. This fixes the "documented evaluation order" [04-NUM-12] requires
+> for the elementwise case: an elementwise trapping map's documented order
+> is row-major flat index order, in every lane. When a tensor carries
+> several offending elements whose kinds differ, the lowest-indexed
+> offender therefore determines the kind, and [04-NUM-9]'s rendering
+> identity applies to that trap unchanged. A lane SHALL NOT select the
+> offender by evaluation happenstance - thread scheduling, a whole-buffer
+> pre-pass biased toward one kind, or vectorization order - and SHALL NOT
+> report a different kind from another lane for the same input. This rule
+> does not constrain HOW a lane finds that element: a parallel
+> implementation that reduces per-thread candidates to the global minimum
+> index is conforming, and serialization is not required.
+
+*(Authored 2026-08-04. [04-NUM-12] defined occurrence by "that lane's
+documented evaluation order", but no lane documented an order for an
+elementwise trapping map, so the multi-offender case was unauthored while
+both [04-NUM-9]'s cross-lane rendering identity and [04-NUM-12]'s
+within-lane determinism formally applied to it. Index order is the choice
+consistent with the two existing precedents: [04-NUM-10] already requires a
+device lane to carry "the first failing element index", and
+`spec/05-risc-primitives.md`'s `Scatter` deterministic-order rule already
+uses updates-tensor row-major flat order. The alternative - leaving the
+offender unspecified while guaranteeing the trap - was rejected because the
+kind is part of the rendered line, so an unspecified offender would have
+required weakening [04-NUM-9]'s byte-identity requirement to accommodate an
+implementation. Stated for elementwise trapping maps generally rather than
+for `cast`, so a later trapping map does not reopen the same question. Not
+fully honored on the checked `cast` today: chelis#1152.)*
 
 ---
 
