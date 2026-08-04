@@ -12,13 +12,18 @@
 #include "chelis_runtime_dtype.h"
 #define CHELIS_MAX_DIM 8
 
+/* chelis#1112: the extent domain carries int64_t, matching the language's
+ * int64 extent dtype ([05-DIM-2]) so a value crosses this boundary at its
+ * declared dtype ([04-NUM-11]). `ndim` and `dtype` stay `int`: rank and the
+ * dtype tag are axis-domain quantities bounded by CHELIS_MAX_DIM and the
+ * dtype table, not extents ([05-DIM-1]). */
 typedef struct {
     float *data;
-    int shape[CHELIS_MAX_DIM];
-    int strides[CHELIS_MAX_DIM];
+    int64_t shape[CHELIS_MAX_DIM];
+    int64_t strides[CHELIS_MAX_DIM];
     int ndim;
     int dtype;
-    int size;
+    int64_t size;
     int owns_data;
 } chelis_tensor;
 
@@ -83,8 +88,8 @@ typedef struct {
 extern "C" {
 #endif
 
-chelis_tensor *chelis_alloc(int ndim, const int *shape, int dtype);
-chelis_tensor *chelis_alloc_view(int ndim, const int *shape, int dtype, float *data);
+chelis_tensor *chelis_alloc(int ndim, const int64_t *shape, int dtype);
+chelis_tensor *chelis_alloc_view(int ndim, const int64_t *shape, int dtype, float *data);
 /* Element size in bytes for the given CHELIS_* dtype tag. Mirrors the
  * per-dtype dispatch inside `chelis_alloc` and the GPU-side
  * `chelis_gpu_dtype_size`. Generated C code calls this when sizing
@@ -391,7 +396,12 @@ chelis_tensor *chelis_scalar_tensor_from_f64(double value);
 chelis_tensor *chelis_scalar_tensor_from_f32(float value);
 double chelis_tensor_to_f64(const chelis_tensor *t);
 int64_t chelis_tensor_rank(const chelis_tensor *t);
-int64_t chelis_tensor_shape(const chelis_tensor *t, int64_t axis);
+/* chelis#1112: `axis` is axis-domain and narrows to int32_t ([05-DIM-1]);
+ * the RETURN is an extent and stays int64_t ([05-DIM-2]). An axis outside
+ * `[0, ndim)` is rejected by the runtime, so the narrower parameter cannot
+ * silently accept an out-of-range value that the wider one truncated into
+ * range. */
+int64_t chelis_tensor_shape(const chelis_tensor *t, int32_t axis);
 int64_t chelis_tensor_numel(const chelis_tensor *t);
 
 chelis_string chelis_string_from_cstr(const char *value);
@@ -717,15 +727,20 @@ static inline uint16_t chelis_f32_to_f16(float v) {
     return (uint16_t)(sign | ((uint32_t)exp << 10) | (rounded >> 13));
 }
 
-static inline void chelis_flat_to_indices(int flat, const int *shape, int ndim, int *out) {
+/* chelis#1112: a flat offset and a per-axis index are both bounded by
+ * extents, so they live in the extent domain and carry int64_t. `ndim`
+ * remains the axis-domain loop bound. */
+static inline void chelis_flat_to_indices(int64_t flat, const int64_t *shape, int ndim,
+                                          int64_t *out) {
     for (int d = ndim - 1; d >= 0; d--) {
         out[d] = flat % shape[d];
         flat /= shape[d];
     }
 }
 
-static inline int chelis_indices_to_flat(const int *indices, const int *strides, int ndim) {
-    int flat = 0;
+static inline int64_t chelis_indices_to_flat(const int64_t *indices, const int64_t *strides,
+                                             int ndim) {
+    int64_t flat = 0;
     for (int d = 0; d < ndim; d++) {
         flat += indices[d] * strides[d];
     }
@@ -733,7 +748,7 @@ static inline int chelis_indices_to_flat(const int *indices, const int *strides,
 }
 
 static inline int chelis_is_contiguous(const chelis_tensor *t) {
-    int expected = 1;
+    int64_t expected = 1;
     for (int d = t->ndim - 1; d >= 0; d--) {
         if (t->strides[d] != expected) return 0;
         expected *= t->shape[d];

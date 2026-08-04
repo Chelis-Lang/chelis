@@ -57,7 +57,7 @@ unsafe fn alloc_scalar(dtype: c_int) -> *mut chelis_tensor {
 }
 
 /// Allocate a rank-1 tensor of length `n` and the given dtype.
-unsafe fn alloc_vec(n: c_int, dtype: c_int) -> *mut chelis_tensor {
+unsafe fn alloc_vec(n: i64, dtype: c_int) -> *mut chelis_tensor {
     let shape = [n];
     unsafe { chelis_alloc(1, shape.as_ptr(), dtype) }
 }
@@ -378,7 +378,7 @@ fn data_ptr_match_succeeds() {
 ///     `value as i64`).
 unsafe fn alloc_vec_with_values(dtype: c_int, vals: &[f64]) -> *mut chelis_tensor {
     unsafe {
-        let t = alloc_vec(vals.len() as c_int, dtype);
+        let t = alloc_vec(vals.len() as i64, dtype);
         match dtype {
             CHELIS_F32 => {
                 let p = f32::data_ptr_unchecked(t);
@@ -989,7 +989,7 @@ fn sort_f32_round_trip() {
 
 unsafe fn alloc_2x2(dtype: c_int, a: f64, b: f64, c: f64, d: f64) -> *mut chelis_tensor {
     unsafe {
-        let shape = [2i32, 2i32];
+        let shape = [2i64, 2i64];
         let t = chelis_alloc(2, shape.as_ptr(), dtype);
         let vals = [a, b, c, d];
         match dtype {
@@ -1431,7 +1431,7 @@ fn compose_where_then_trace_f64_accumulates_precision() {
     const A: f64 = 1.0e10_f64;
     const B: f64 = 0.5;
     unsafe {
-        let shape = [2i32, 2i32];
+        let shape = [2i64, 2i64];
         let cond = chelis_alloc(2, shape.as_ptr(), CHELIS_BOOL);
         {
             let p = data_as_f32(cond);
@@ -1474,7 +1474,7 @@ fn compose_where_then_trace_i64_accumulates_precision() {
     const A: i64 = 5_000_000_000_000_i64;
     const B: i64 = 4_000_000_000_000_i64;
     unsafe {
-        let shape = [2i32, 2i32];
+        let shape = [2i64, 2i64];
         let cond = chelis_alloc(2, shape.as_ptr(), CHELIS_BOOL);
         {
             let p = data_as_f32(cond);
@@ -1567,7 +1567,7 @@ fn compose_scatter_then_diagonal_f64_preserves_precision() {
     const A: f64 = 1.234_567_890_123_456_7_f64;
     const D: f64 = -1.732_050_807_568_877_3_f64;
     unsafe {
-        let shape = [2i32, 2i32];
+        let shape = [2i64, 2i64];
         let base = chelis_alloc(2, shape.as_ptr(), CHELIS_F64);
         f64::fill(base, 0.0);
         // Scatter requires same-shape index and updates buffers, so
