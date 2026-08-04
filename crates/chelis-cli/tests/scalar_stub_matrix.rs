@@ -208,7 +208,24 @@ fn f32_scalar_ceil_agrees_across_lanes() {
 
 #[test]
 fn f32_scalar_round_agrees_across_lanes() {
-    assert_scalar_parity("round(cast(1.5, f32))", "f32", "2.0", "2.0", "f32_round");
+    // [05] §2.2 requires roundTiesToEven. Both signs distinguish the
+    // C `rint{,f}` family from `round{,f}`, whose half ties go away from
+    // zero. Cover both scalar host widths because each selects a distinct
+    // libm entry point.
+    for (dtype, input, expected, name) in [
+        ("f32", "2.5", "2.0", "f32_round_positive_even_tie"),
+        ("f32", "-2.5", "-2.0", "f32_round_negative_even_tie"),
+        ("f64", "2.5", "2.0", "f64_round_positive_even_tie"),
+        ("f64", "-2.5", "-2.0", "f64_round_negative_even_tie"),
+    ] {
+        assert_scalar_parity(
+            &format!("round(cast({input}, {dtype}))"),
+            dtype,
+            expected,
+            expected,
+            name,
+        );
+    }
 }
 
 #[test]
@@ -278,7 +295,6 @@ fn f64_scalar_stub_family_agrees_across_lanes() {
     assert_f64_transcendental_parity("atan(cast(1.0, f64))", AgreementOp::Atan, "f64_atan");
     for (expr, eval_expected, c_expected, name) in [
         ("ceil(cast(1.5, f64))", "2.0", "2.0", "f64_ceil"),
-        ("round(cast(1.5, f64))", "2.0", "2.0", "f64_round"),
         ("recip(cast(4.0, f64))", "0.25", "0.25", "f64_recip"),
         (
             "max_elem(cast(1.5, f64), cast(0.25, f64))",

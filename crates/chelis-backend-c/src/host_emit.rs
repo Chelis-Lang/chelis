@@ -3389,7 +3389,11 @@ impl<'a> HostEmitter<'a> {
                     ty,
                 ),
                 CExpressionBuiltin::Round => finalize_scalar_expr(
-                    EmittedExpr::call(float_math_function(ty, "round", "roundf"), [numeric_arg(0)]),
+                    // spec/05 §2.2: `round` is IEEE roundTiesToEven. The C
+                    // `round{,f}` family resolves half ties away from zero;
+                    // `rint{,f}` under the default rounding mode matches the
+                    // evaluator and the typed-DAG C emitter.
+                    EmittedExpr::call(float_math_function(ty, "rint", "rintf"), [numeric_arg(0)]),
                     ty,
                 ),
                 CExpressionBuiltin::Recip => finalize_scalar_expr(
