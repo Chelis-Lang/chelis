@@ -1033,6 +1033,7 @@ pub(super) fn finish_unified_app(
                 let axis1 = match resolve_axis_pair_member(
                     "diagonal",
                     kids.get(2),
+                    &subst.apply(&arg_tys[1]),
                     &diagonal_operand,
                     0,
                     list,
@@ -1044,6 +1045,7 @@ pub(super) fn finish_unified_app(
                 let axis2 = match resolve_axis_pair_member(
                     "diagonal",
                     kids.get(3),
+                    &subst.apply(&arg_tys[2]),
                     &diagonal_operand,
                     1,
                     list,
@@ -1077,6 +1079,7 @@ pub(super) fn finish_unified_app(
                 let axis1 = match resolve_axis_pair_member(
                     "trace",
                     kids.get(2),
+                    &subst.apply(&arg_tys[1]),
                     &trace_operand,
                     0,
                     list,
@@ -1088,6 +1091,7 @@ pub(super) fn finish_unified_app(
                 let axis2 = match resolve_axis_pair_member(
                     "trace",
                     kids.get(3),
+                    &subst.apply(&arg_tys[2]),
                     &trace_operand,
                     1,
                     list,
@@ -1549,20 +1553,11 @@ pub(super) fn finish_unified_app(
                 let tensor_ty = type_for_readonly_check(&arg_tys[0], subst);
                 let axis_ty = subst.apply(&arg_tys[1]);
                 let sizes_ty = subst.apply(&arg_tys[2]);
-                if !matches!(axis_ty, Type::Prim(prec) if prec.is_integer())
-                    && !matches!(axis_ty, Type::Var(_) | Type::Error(_))
-                {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::TypeMismatch,
-                            with_macro_provenance(
-                                &deep::Expr::List(list.clone(), zero_span()),
-                                format!("split expects integer axis, got {axis_ty}"),
-                            ),
-                            vec![],
-                        ),
-                    );
+                // The pre-guard predicate here was `precision.is_integer()`,
+                // the same acceptance hole `concat` carried: it admitted an
+                // int64 axis while `sum` rejected one.
+                if let Err(err) = reject_non_int32_axis("split", &axis_ty, list, errors) {
+                    return err;
                 }
                 match (tensor_ty, sizes_ty) {
                     (Type::Tensor(dims, precision), Type::Adt(name, args))
