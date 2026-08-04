@@ -205,12 +205,30 @@ class RejectionAuthorityBoundaryTests(unittest.TestCase):
         errors = MODULE.validate_source(mutated)
         self.assertTrue(any("macro inventory" in error for error in errors), errors)
 
+    def test_private_descendant_module_cannot_extend_authority_types(self):
+        mutated = self.source.replace(
+            "#[cfg(test)]\nmod tests {",
+            "mod redteam_forge;\n\n#[cfg(test)]\nmod tests {",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("module inventory" in error for error in errors), errors)
+
+    def test_sealed_authority_module_and_reexports_are_exact(self):
+        mutated = self.source.replace(
+            "pub use authority::{",
+            "pub use authority::{RejectionCitation, ",
+            1,
+        )
+        errors = MODULE.validate_source(mutated)
+        self.assertTrue(any("re-export inventory" in error for error in errors), errors)
+
     def test_protected_wrapper_cannot_gain_an_unreviewed_derive(self):
         mutated = self.source.replace(
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n"
-            "pub struct IssueRef(NonZeroU32);",
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, RedteamForge)]\n"
-            "pub struct IssueRef(NonZeroU32);",
+            "    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\n"
+            "    pub struct IssueRef(NonZeroU32);",
+            "    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, RedteamForge)]\n"
+            "    pub struct IssueRef(NonZeroU32);",
             1,
         )
         errors = MODULE.validate_source(mutated)

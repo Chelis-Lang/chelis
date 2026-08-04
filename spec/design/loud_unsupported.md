@@ -326,13 +326,17 @@ REGISTRIES of what actually exists:
   public implementation edge each, taking the raw literal and performing
   validation inside `chelis-types`; downstream crates cannot construct a
   `SpecAtomRef`/`IssueRef` and then compose it with a second generic authority
-  constructor. `scripts/check_rejection_authority_boundary.py` locks the
-  complete public-function inventory of the owning module (free functions as
-  well as methods), rejects extra module/re-export/include edges, rejects
-  direct production calls to the hidden builders, and mutation-tests those
-  bypasses. Construction itself refuses [05-UNS-1..6], so a macro alias or a
-  direct validating-builder call cannot turn the response contract into a
-  semantic authority.
+  constructor. The authority carriers and their private fields live in a
+  sealed child module, so a sibling descendant of `unsupported` cannot use
+  Rust's ancestor-module visibility to add a constructor or trait
+  implementation; the owner exposes only an exact type re-export and the two
+  validating macro helpers. `scripts/check_rejection_authority_boundary.py`
+  locks the complete public-function inventory of the owning module (free
+  functions as well as methods), locks those module and re-export edges,
+  rejects any extra module/re-export/include edge, rejects direct production
+  calls to the hidden builders, and mutation-tests those bypasses. Construction
+  itself refuses [05-UNS-1..6], so a macro alias or a direct validating-builder
+  call cannot turn the response contract into a semantic authority.
 - `SpecAtomRef` validates in two gates: the `[NN-AAA-N]` grammar,
   then MEMBERSHIP in the derived atom registry - a generated artifact
   parsed from the numbered specs' blockquote atoms and locked by a

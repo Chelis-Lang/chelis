@@ -53,6 +53,11 @@ PUBLIC_CONST = re.compile(
     r"^\s*pub(?:\([^)]*\))?\s+const\s+(?!fn\b)([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
+MODULE_ITEM = re.compile(
+    r"\b(?:pub(?:\([^)]*\))?\s+)?mod\s+"
+    r"((?:r#)?[A-Za-z_][A-Za-z0-9_]*)\s*([;{])"
+)
+PUBLIC_USE = re.compile(r"^\s*pub\s+use\s+([^;]+);", re.MULTILINE)
 SENSITIVE_IMPL = re.compile(
     r"\bimpl\b[^\{;]*\b(SpecAtomRef|IssueRef|RejectionAuthority)\b\s*\{"
 )
@@ -125,13 +130,22 @@ PRIVATE_AUTHORITY_TOKEN = re.compile(
 )
 EXPECTED_PRIVATE_AUTHORITY_TOKENS = Counter(
     {
-        "SpecAtomRef": 6,
-        "IssueRef": 6,
-        "RejectionAuthority": 10,
+        "SpecAtomRef": 7,
+        "IssueRef": 7,
+        "RejectionAuthority": 11,
         "RejectionCitation": 12,
-        "AuthorityConstructionError": 16,
-        "__build_deliberate_rejection": 2,
-        "__build_unimplemented_rejection": 2,
+        "AuthorityConstructionError": 17,
+        "__build_deliberate_rejection": 3,
+        "__build_unimplemented_rejection": 3,
+    }
+)
+EXPECTED_MODULE_ITEMS = Counter({("authority", "{"): 1, ("tests", "{"): 1})
+EXPECTED_PUBLIC_USES = Counter(
+    {
+        "authority::{AuthorityConstructionError,IssueRef,RejectionAuthority,"
+        "RejectionAuthorityKind,SpecAtomRef,}": 1,
+        "authority::{__build_deliberate_rejection,"
+        "__build_unimplemented_rejection}": 1,
     }
 )
 EXPECTED_PUBLIC_ITEMS = Counter(
@@ -166,7 +180,7 @@ EXPECTED_MACRO_INVOCATIONS = Counter(
 EXPECTED_ATTRIBUTES = Counter(
     {
         "derive": 10,
-        "doc": 2,
+        "doc": 3,
         "macro_export": 2,
         "test": 2,
         "must_use": 1,
@@ -254,11 +268,29 @@ def validate_source(source: str) -> list[str]:
                     f"appears {actual} time(s), expected {expected}"
                 )
 
-    for fragment in ("pub mod ", "pub use ", "include!("):
+    for fragment in ("pub mod ", "include!("):
         if fragment in source:
             errors.append(
                 f"unsupported.rs exposes an unreviewed module/export edge: {fragment}"
             )
+
+    module_items = Counter(MODULE_ITEM.findall(code))
+    if module_items != EXPECTED_MODULE_ITEMS:
+        errors.append(
+            "unsupported.rs module inventory changed: "
+            f"found {dict(sorted(module_items.items()))}, expected "
+            f"{dict(sorted(EXPECTED_MODULE_ITEMS.items()))}"
+        )
+
+    public_uses = Counter(
+        re.sub(r"\s+", "", item) for item in PUBLIC_USE.findall(code)
+    )
+    if public_uses != EXPECTED_PUBLIC_USES:
+        errors.append(
+            "unsupported.rs re-export inventory changed: "
+            f"found {dict(sorted(public_uses.items()))}, expected "
+            f"{dict(sorted(EXPECTED_PUBLIC_USES.items()))}"
+        )
 
     for type_name, allowed in ALLOWED_PUBLIC_METHODS.items():
         try:
