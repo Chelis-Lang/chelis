@@ -416,7 +416,7 @@ fn issue_319_reshape_precision_poly_verb_lowers() {
     });
     let out = out_tensor(&result);
     assert_eq!(out.shape, vec![6], "issue #319 reshape: flattened shape");
-    // permute([[1i64, 2i64, 3i64],[4i64, 5i64, 6i64]]) = [[1i64, 4i64],[2i64, 5i64],[3i64, 6i64]], flattened row-major.
+    // permute([[1, 2, 3],[4, 5, 6]]) = [[1i64, 4i64],[2i64, 5i64],[3i64, 6i64]], flattened row-major.
     assert_close(
         &out,
         &TensorValue {

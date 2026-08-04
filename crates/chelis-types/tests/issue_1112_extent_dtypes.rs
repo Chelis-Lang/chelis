@@ -201,7 +201,7 @@ fn expand_int32_size_rejected_naming_int64() {
         r#"
 def f(b: tensor[1, 4, f32]) -> tensor[8, 4, f32] = expand(&b, 0, 8)
 "#,
-        "int64",
+        "write Ni64",
         "expand with a bare int32 size",
     );
 }
@@ -309,5 +309,63 @@ def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [4])
 "#,
         "i64",
         "reshape with an unsuffixed int32 shape list",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Axis-domain pins: [05-DIM-1]'s other half. These lock that the int64
+// extent flip did NOT move axis-domain surfaces, and that a future change
+// cannot flip them silently.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn permute_axes_stay_int32() {
+    assert_clean(
+        r#"
+def f(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1, 0)
+"#,
+        "permute with bare int32 axes",
+    );
+    assert_rejected_with(
+        r#"
+def g(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1i64, 0i64)
+"#,
+        "int32 axis indices",
+        "permute with int64 axes",
+    );
+}
+
+/// reduce_window window_shape/strides stay `List[int32]` until chelis#1113
+/// classifies them; [05-DIM-1] scopes to movement and shape arguments.
+#[test]
+fn reduce_window_lists_stay_int32() {
+    assert_clean(
+        r#"
+def f(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2], [2, 2])
+"#,
+        "reduce_window_max with int32 window/strides",
+    );
+    assert_rejected_with(
+        r#"
+def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2i64, 2i64], [2i64, 2i64])
+"#,
+        "List[int32]",
+        "reduce_window_max with int64 window",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// spec/04 §4.7.5: a genuinely mixed shape list is an intra-list error no
+// defaulting rule can resolve.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reshape_mixed_suffix_list_rejected() {
+    assert_rejected_with(
+        r#"
+def f(x: tensor[2, 2, f32]) -> tensor[4, f32] = reshape(&x, [2i64, 2i32])
+"#,
+        "int32",
+        "reshape with a mixed-suffix shape list",
     );
 }
