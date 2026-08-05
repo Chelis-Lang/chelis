@@ -1796,6 +1796,31 @@ fn scalar_constructor_accepts_every_active_numeric_dtype() {
     }
 }
 
+#[test]
+fn integer_spelled_f32_scalar_finalizes_without_f64_intermediate() {
+    let checked = checked_surf(
+        r#"
+def probe() -> f32 = sub(
+  cast(18014399583223809, f32),
+  cast(18014398509481984, f32)
+)
+root = probe()
+"#,
+    );
+    let outcome = evaluate_host_program(&checked, &HashMap::new())
+        .expect("integer-spelled f32 scalar must evaluate");
+    let root = outcome.host_bindings.get("root").expect("root binding");
+    let RuntimeValue::Scalar(payload) = root else {
+        panic!("expected scalar root");
+    };
+    assert_eq!(payload.dtype(), Prim::F32);
+    assert_eq!(
+        (payload.as_f64_lossy() as f32).to_bits(),
+        0x4F00_0000,
+        "single rounding keeps the low-side operand one f32 ulp above the control; double rounding produces zero"
+    );
+}
+
 // ===========================================================================
 // chelis#732 Phase 1: render_value's [05-OBS] behavior at the unit level.
 // The end-to-end exits are locked by the CLI observation harness; these pin

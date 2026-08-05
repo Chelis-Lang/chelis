@@ -213,6 +213,17 @@ fn meta_with_type(ty: deep::Expr) -> deep::Expr {
     meta_with_entries(vec![("type".to_string(), ty)])
 }
 
+fn meta_with_integer_float_type(ty: deep::Expr, style: Option<&str>) -> deep::Expr {
+    let mut entries = vec![
+        ("type".to_string(), ty),
+        ("literal_source".to_string(), sym("integer")),
+    ];
+    if let Some(style) = style {
+        entries.push(("surf_literal_style".to_string(), string(style)));
+    }
+    meta_with_entries(entries)
+}
+
 fn meta_with_entries(entries: Vec<(String, deep::Expr)>) -> deep::Expr {
     deep::Expr::Map(deep::MetaMap { entries }, sp())
 }
@@ -1994,8 +2005,13 @@ fn desugar_literal(lit: &Literal) -> deep::Expr {
         // precision with no inference, no widening, no narrowing. The
         // type metadata is the user-facing contract.
         Literal::TypedInt(n, suffix) => {
-            let ty = node(DeepTag::TPrim, vec![sym(suffix.t_prim_name())]);
-            let meta = if *suffix == LiteralSuffix::I32 {
+            let prim = suffix.t_prim_name();
+            let float_typed = matches!(prim, "f32" | "f64" | "bf16" | "f16");
+            let ty = node(DeepTag::TPrim, vec![sym(prim)]);
+            let meta = if float_typed {
+                let style = (*suffix == LiteralSuffix::F32).then_some("explicit");
+                meta_with_integer_float_type(ty, style)
+            } else if *suffix == LiteralSuffix::I32 {
                 numeric_literal_meta(ty, "explicit")
             } else {
                 meta_with_type(ty)
@@ -2067,9 +2083,16 @@ fn adopted_scalar_literal(lit: &Literal, prec: &str, negate: bool) -> deep::Expr
     match lit {
         Literal::Int(n) => {
             let value = if negate { fold_unary_minus_int(*n) } else { *n };
+            let float_typed = matches!(prec, "f32" | "f64" | "bf16" | "f16");
+            let ty = node(DeepTag::TPrim, vec![sym(prec)]);
+            let meta = if float_typed {
+                meta_with_integer_float_type(ty, Some("unsuffixed"))
+            } else {
+                numeric_literal_meta(ty, "unsuffixed")
+            };
             node_meta(
                 DeepTag::Lit,
-                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec)]), "unsuffixed"),
+                meta,
                 vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
             )
         }
@@ -2168,11 +2191,20 @@ impl DesugarCtx {
         local_fn_params: &[String],
     ) -> deep::Expr {
         match item {
-            Expr::Lit(Literal::Int(n), _) => node_meta(
-                DeepTag::Lit,
-                numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
-                vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
-            ),
+            Expr::Lit(Literal::Int(n), _) => {
+                let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
+                let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
+                let meta = if float_typed {
+                    meta_with_integer_float_type(ty, Some("unsuffixed"))
+                } else {
+                    numeric_literal_meta(ty, "unsuffixed")
+                };
+                node_meta(
+                    DeepTag::Lit,
+                    meta,
+                    vec![deep::Expr::Atom(deep::Atom::Int(*n), sp())],
+                )
+            }
             Expr::Lit(Literal::Float(f), _) => node_meta(
                 DeepTag::Lit,
                 numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
@@ -2186,14 +2218,21 @@ impl DesugarCtx {
             // raw inner literal (`128`, which overflows int8 max).
             // The same applies to negative float literals.
             Expr::Unary(UnaryOp::Neg, inner, _) => match inner.as_ref() {
-                Expr::Lit(Literal::Int(n), _) => node_meta(
-                    DeepTag::Lit,
-                    numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
-                    vec![deep::Expr::Atom(
-                        deep::Atom::Int(fold_unary_minus_int(*n)),
-                        sp(),
-                    )],
-                ),
+                Expr::Lit(Literal::Int(n), _) => {
+                    let value = fold_unary_minus_int(*n);
+                    let float_typed = matches!(prec_name, "f32" | "f64" | "bf16" | "f16");
+                    let ty = node(DeepTag::TPrim, vec![sym(prec_name)]);
+                    let meta = if float_typed {
+                        meta_with_integer_float_type(ty, Some("unsuffixed"))
+                    } else {
+                        numeric_literal_meta(ty, "unsuffixed")
+                    };
+                    node_meta(
+                        DeepTag::Lit,
+                        meta,
+                        vec![deep::Expr::Atom(deep::Atom::Int(value), sp())],
+                    )
+                }
                 Expr::Lit(Literal::Float(f), _) => node_meta(
                     DeepTag::Lit,
                     numeric_literal_meta(node(DeepTag::TPrim, vec![sym(prec_name)]), "unsuffixed"),
@@ -3348,7 +3387,7 @@ mod tests {
         );
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(cast {}\n  (lit {surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 5)\n  (t-prim {} f64))"
+            "(cast {}\n  (lit {literal_source: integer, surf_literal_style: \"unsuffixed\", type: (t-prim {} f64)} 5)\n  (t-prim {} f64))"
         );
     }
 

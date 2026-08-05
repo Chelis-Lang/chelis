@@ -166,6 +166,8 @@ fn implicit_defsig_binders_and_legal_metadata_hole_are_accepted() {
            (t-fn {}
              (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p))
              (t-tensor {} (d-var {} n) (d-rank {} r) (t-var {} p))))
+         (def {} polymorphic
+           (fn {} (params {} value) (var {} value)))
          (def {} inferred (lit {type: (t-var {} _)} 1))",
         "implicit signature binders and metadata inference hole",
     );

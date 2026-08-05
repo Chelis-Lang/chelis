@@ -662,7 +662,12 @@ fn out_of_range_deep_integer_metadata_fails_closed_without_normalizer_panic() {
     assert!(print_canonical(&normalized).contains("-9223372036854775808"));
     let error = resugar_expression(&deep.remove(0))
         .expect_err("out-of-range typed integer must not emit invalid Surf");
-    assert!(error.to_string().contains("compatible"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("canonical atom/primitive pairing"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -731,8 +736,8 @@ fn deep_negative_literals_normalize_to_surfs_unary_minus_shape() {
         "(lit {type: (t-prim {} int8)} -128)",
         "(lit {type: (t-prim {} int64)} -9223372036854775808)",
         "(lit {type: (t-prim {} f32)} -1.5)",
-        "(lit {type: (t-prim {} f64)} 42)",
-        "(lit {type: (t-prim {} f64)} -42)",
+        "(lit {type: (t-prim {} f64), literal_source: integer} 42)",
+        "(lit {type: (t-prim {} f64), literal_source: integer} -42)",
         "(lit {type: (t-prim {} f64)} -0.0)",
         "(lit {type: (t-prim {} int64)} -9223372036854775808)",
         "(cast {} (lit {type: (t-prim {} f32)} -1.5) (t-prim {} f64))",

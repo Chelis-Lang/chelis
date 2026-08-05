@@ -42,8 +42,9 @@ mod builtins;
 mod source_arch;
 
 pub use builtins::{
-    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinDecl, Realizability, ShapeClass,
-    axis_argument_layout, builtin_decl, builtin_env, prelude_adt_defs, realizability, shape_class,
+    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinDecl, BuiltinInferenceRule,
+    InferenceDisposition, Realizability, ShapeClass, axis_argument_layout, builtin_decl,
+    builtin_env, prelude_adt_defs, realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,

@@ -2325,6 +2325,7 @@ pub fn rewrite_entry_decls_with_reef_graph(
     } else {
         format!("{}.__Eval", graph.eval_module_prefix)
     };
+    validate_source_signature_pairs(entry_decls, &eval_module_name)?;
     let eval_module = ModuleSource {
         package_name: graph.graph.root_package.clone(),
         module_name: eval_module_name,
@@ -6871,6 +6872,7 @@ fn load_package_modules(
                     ));
                 }
             };
+            validate_source_signature_pairs(&module_decl.1, &module_decl.0)?;
             validate_module_path(
                 &manifest.package.module_prefix,
                 &module_decl.0,
@@ -7068,6 +7070,33 @@ fn collect_symbol_kinds(decls: &[Decl]) -> BTreeMap<String, SymbolKind> {
         }
     }
     symbols
+}
+
+/// Enforce the authored-source half of the `defsig` pairing contract before
+/// Reef rewrites names or replaces dependency bodies with a trusted shell
+/// interface. A linked shell is allowed to contain signature-only ABI rows;
+/// a live source module or synthetic entry is not.
+fn validate_source_signature_pairs(decls: &[Decl], module: &str) -> Result<(), String> {
+    let definitions = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    for decl in decls {
+        let Decl::Sig { name, .. } = decl else {
+            continue;
+        };
+        if !definitions.contains(name.as_str()) {
+            return Err(format!(
+                "signature `{module}.{name}` has no matching definition in the same source module; \
+                 signatures annotate Chelis definitions and cannot borrow a body from a linked library context"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn module_name_for_input(root: &Path, file: &Path, package_name: &str) -> Result<String, String> {
@@ -8501,6 +8530,9 @@ fn rewrite_let_binding(
     }
 }
 
+// Deliberately separate from `chelis_deep::pattern_binder_names`: Reef is
+// resolving the Surf parser's `Pattern` AST before any Deep pattern exists.
+// Deep consumers must use the shared helper instead of copying its tag walk.
 fn collect_pattern_binders(pattern: &Pattern, locals: &mut HashSet<String>) {
     match pattern {
         Pattern::Var(name, _) => {
@@ -10171,6 +10203,52 @@ path = "./mylib"
         );
 
         (dir, root)
+    }
+
+    #[test]
+    fn live_package_orphan_signature_is_rejected_before_linking() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("orphan-sig");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "orphan-sig"
+version = "0.1.0"
+compiler = "{CURRENT_COMPILER_VERSION}"
+module_prefix = "OrphanSig"
+"#,
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module OrphanSig.Main\nsig missing: int32\n",
+        );
+
+        let error = prepare_reef_graph(&root)
+            .expect_err("an authored package signature needs a same-module definition");
+        assert!(
+            error.contains("missing") && error.contains("same source module"),
+            "unexpected orphan-signature diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn synthetic_entry_signatures_require_same_entry_definitions() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let orphan = chelis_surf::parser::parse_str("sig missing: int32").expect("parse orphan");
+        let error = compile_with_reef_graph(&graph, &orphan)
+            .expect_err("an eval entry signature cannot borrow a library definition");
+        assert!(
+            error.contains("missing") && error.contains("same source module"),
+            "unexpected synthetic-entry diagnostic: {error}"
+        );
+
+        let paired =
+            chelis_surf::parser::parse_str("sig present: int32\ndef present() -> int32 = 1")
+                .expect("parse pair");
+        compile_with_reef_graph(&graph, &paired).expect("paired entry signature must link");
     }
 
     // ---- chelis#157: module-scoped constructor resolution ----

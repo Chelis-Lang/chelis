@@ -507,11 +507,17 @@ fn normalize_roundtrip_expr_with_context(
             let suffix = literal_suffix(node.meta).ok().flatten();
             if let DeepExpr::Atom(Atom::Int(value), span) = value {
                 if suffix.is_some_and(|suffix| suffix.is_float()) {
+                    let suffix = suffix.expect("float suffix was checked");
+                    let mut meta = normalize_roundtrip_meta(node.meta, Some(node.tag), context);
+                    meta.entries.retain(|(key, _)| key != "literal_source");
                     let converted = DeepExpr::Node(
                         Box::new(chelis_deep::node::Node::new(
                             DeepTag::Lit,
-                            normalize_roundtrip_meta(node.meta, Some(node.tag), context),
-                            vec![DeepExpr::Atom(Atom::Float(*value as f64), *span)],
+                            meta,
+                            vec![DeepExpr::Atom(
+                                Atom::Float(round_integer_at_float_width(*value, suffix)),
+                                *span,
+                            )],
                         )),
                         node.span,
                     );
@@ -2395,6 +2401,17 @@ fn resugar_literal_impl(
     }
     let literal = match (&node.children[0], suffix) {
         (DeepExpr::Atom(Atom::Int(value), _), Some(_)) if suppress_suffix => Literal::Int(*value),
+        (DeepExpr::Atom(Atom::Int(value), _), Some(suffix)) if suffix.is_float() => {
+            let rounded = round_integer_at_float_width(*value, suffix);
+            if !rounded.is_finite() {
+                return Err(ResugarError::NonFiniteFloat);
+            }
+            if suffix == LiteralSuffix::F32 && !preserve_default_suffix {
+                Literal::Float(rounded)
+            } else {
+                Literal::TypedFloat(rounded, suffix)
+            }
+        }
         (DeepExpr::Atom(Atom::Int(value), _), Some(LiteralSuffix::I32))
             if preserve_default_suffix =>
         {
@@ -2486,8 +2503,13 @@ fn default_literal_suffix_is_semantic_in_cast(
 }
 
 fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
+    let integer_source = integer_literal_source(node.meta)?;
     let Some(ty) = meta_value(node.meta, "type") else {
-        return Ok(());
+        return if integer_source {
+            Err(invalid_literal_pair())
+        } else {
+            Ok(())
+        };
     };
     let ty_node = node_ref(ty).map_err(|_| ResugarError::InvalidChild {
         tag: node.tag.as_str(),
@@ -2496,34 +2518,99 @@ fn validate_literal_type(node: &NodeRef<'_>) -> Result<(), ResugarError> {
     })?;
     let compatible = match (&node.children[0], ty_node.tag) {
         (DeepExpr::Atom(Atom::Bool(_), _), DeepTag::TPrim) => {
-            primitive_type_name(ty) == Some("bool")
+            !integer_source && primitive_type_name(ty) == Some("bool")
         }
         (DeepExpr::Atom(Atom::Str(_), _), DeepTag::TPrim) => {
-            primitive_type_name(ty) == Some("string")
+            !integer_source && primitive_type_name(ty) == Some("string")
         }
         (DeepExpr::Atom(Atom::Int(value), _), DeepTag::TPrim) => primitive_type_name(ty)
             .is_some_and(|name| match name {
-                "int8" => i8::try_from(*value).is_ok(),
-                "int16" => i16::try_from(*value).is_ok(),
-                "int32" => i32::try_from(*value).is_ok(),
-                "int64" | "f16" | "bf16" | "f32" | "f64" => true,
+                "int8" => !integer_source && i8::try_from(*value).is_ok(),
+                "int16" => !integer_source && i16::try_from(*value).is_ok(),
+                "int32" => !integer_source && i32::try_from(*value).is_ok(),
+                "int64" => !integer_source,
+                "f16" | "bf16" | "f32" | "f64" => integer_source,
                 _ => false,
             }),
         (DeepExpr::Atom(Atom::Float(_), _), DeepTag::TPrim) => primitive_type_name(ty)
-            .is_some_and(|name| matches!(name, "f16" | "bf16" | "f32" | "f64")),
-        (DeepExpr::BareList(items, _), DeepTag::TUnit) => items.is_empty(),
-        (DeepExpr::List(list, _), DeepTag::TUnit) => list.elements.is_empty(),
+            .is_some_and(|name| !integer_source && matches!(name, "f16" | "bf16" | "f32" | "f64")),
+        (DeepExpr::BareList(items, _), DeepTag::TUnit) => !integer_source && items.is_empty(),
+        (DeepExpr::List(list, _), DeepTag::TUnit) => !integer_source && list.elements.is_empty(),
         _ => false,
     };
     if compatible {
         Ok(())
     } else {
-        Err(ResugarError::InvalidChild {
-            tag: node.tag.as_str(),
-            index: 1,
-            expected: "literal `type` metadata compatible with its value",
-        })
+        Err(invalid_literal_pair())
     }
+}
+
+fn integer_literal_source(meta: &MetaMap) -> Result<bool, ResugarError> {
+    let mut values = meta
+        .entries
+        .iter()
+        .filter(|(key, _)| key == "literal_source")
+        .map(|(_, value)| value);
+    let Some(value) = values.next() else {
+        return Ok(false);
+    };
+    if values.next().is_some()
+        || !matches!(value, DeepExpr::Atom(Atom::Name(name), _) if name == "integer")
+    {
+        return Err(invalid_literal_pair());
+    }
+    Ok(true)
+}
+
+fn invalid_literal_pair() -> ResugarError {
+    ResugarError::InvalidChild {
+        tag: DeepTag::Lit.as_str(),
+        index: 1,
+        expected: "the canonical atom/primitive pairing or one exact Int atom marked `literal_source: integer` at a float primitive",
+    }
+}
+
+/// Round an exact Deep Int atom once at its declared IEEE float width.
+///
+/// Going through f64 is not equivalent for integer magnitudes above 2^53:
+/// the intermediate can manufacture a midpoint and make f32/f16/bf16 choose
+/// the wrong adjacent value. The rounded significand is at most 53 bits, so
+/// widening the final target value to f64 for Surf's decimal printer is exact.
+fn round_integer_at_float_width(value: i64, suffix: LiteralSuffix) -> f64 {
+    let (significand_bits, maximum_exponent) = match suffix {
+        LiteralSuffix::F16 => (11, 15),
+        LiteralSuffix::Bf16 => (8, 127),
+        LiteralSuffix::F32 => (24, 127),
+        LiteralSuffix::F64 => (53, 1023),
+        _ => unreachable!("caller requires a float suffix"),
+    };
+    if value == 0 {
+        return 0.0;
+    }
+
+    let magnitude = value.unsigned_abs();
+    let exponent = 63 - magnitude.leading_zeros();
+    let shift = exponent.saturating_sub(significand_bits - 1);
+    let mut rounded = magnitude >> shift;
+    if shift > 0 {
+        let remainder = magnitude & ((1_u64 << shift) - 1);
+        let halfway = 1_u64 << (shift - 1);
+        if remainder > halfway || remainder == halfway && rounded & 1 == 1 {
+            rounded += 1;
+        }
+    }
+
+    let rounded_exponent = exponent + u32::from(rounded == 1_u64 << significand_bits);
+    if rounded_exponent > maximum_exponent {
+        return if value.is_negative() {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+
+    let target = (rounded as f64) * 2_f64.powi(shift as i32);
+    if value.is_negative() { -target } else { target }
 }
 
 fn unary_node(

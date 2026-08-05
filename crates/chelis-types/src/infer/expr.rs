@@ -1037,6 +1037,30 @@ pub(super) fn infer_lit(
             }
         })
     });
+    let mut literal_sources = meta
+        .into_iter()
+        .flat_map(|meta| &meta.entries)
+        .filter(|(key, _)| key == "literal_source")
+        .map(|(_, value)| value);
+    let literal_source = literal_sources.next();
+    let duplicate_literal_source = literal_sources.next().is_some();
+    let integer_source_marker = matches!(
+        literal_source,
+        Some(deep::Expr::Atom(deep::Atom::Name(name), _)) if name == "integer"
+    );
+    if duplicate_literal_source || literal_source.is_some() && !integer_source_marker {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                "literal_source metadata must be the single value `integer`".to_string(),
+                vec![
+                    "The marker exists only for an integer-spelled literal bound directly at a float dtype"
+                        .to_string(),
+                ],
+            ),
+        );
+    }
     if let Some(prim_name) = meta_prim_name
         && let Some(deep::Expr::Atom(deep::Atom::Int(n), _)) = value_atom
     {
@@ -1125,6 +1149,79 @@ pub(super) fn infer_lit(
                 if let Some(owner) = type_metadata_resolution.as_deref_mut() {
                     *owner = Some(OwnedTypeMetadataResolution::Resolved(resolved.clone()));
                 }
+                // chelis#1131 / spec/03 §6.4: `lit` has a closed canonical
+                // atom-to-primitive matrix. The sole cross-family form is an
+                // exact Int payload carrying `literal_source: integer` and a
+                // float target; it preserves one target-width rounding under
+                // [04-NUM-1]/[04-NUM-14]. Enforce the matrix after transparent
+                // aliases resolve so every Deep ingress gets one decision.
+                if let Type::Prim(prim) = &resolved {
+                    let atom_family = value_atom.and_then(|value| match value {
+                        deep::Expr::Atom(deep::Atom::Int(_), _) => Some("integer"),
+                        deep::Expr::Atom(deep::Atom::Float(_), _) => Some("floating-point"),
+                        deep::Expr::Atom(deep::Atom::Bool(_), _) => Some("boolean"),
+                        deep::Expr::Atom(deep::Atom::Str(_), _) => Some("string"),
+                        _ => None,
+                    });
+                    let integer_spelled_float = integer_source_marker
+                        && prim.is_float()
+                        && matches!(value_atom, Some(deep::Expr::Atom(deep::Atom::Int(_), _)));
+                    if integer_source_marker && !integer_spelled_float {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                "literal_source: integer requires an Int atom and a float primitive type"
+                                    .to_string(),
+                                vec![
+                                    "Remove the marker or emit the canonical integer-spelled float literal form from spec/03-deep-syntax.md §6.4"
+                                        .to_string(),
+                                ],
+                            ),
+                        );
+                    }
+                    let canonical_pair = integer_spelled_float
+                        || match value_atom {
+                            Some(deep::Expr::Atom(deep::Atom::Int(_), _)) => prim.is_integer(),
+                            Some(deep::Expr::Atom(deep::Atom::Float(_), _)) => prim.is_float(),
+                            Some(deep::Expr::Atom(deep::Atom::Bool(_), _)) => *prim == Prim::Bool,
+                            Some(deep::Expr::Atom(deep::Atom::Str(_), _)) => *prim == Prim::String,
+                            _ => false,
+                        };
+                    if !canonical_pair {
+                        let family = atom_family.unwrap_or("non-scalar");
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!(
+                                    "{family} atom cannot carry `{resolved}` literal metadata: \
+                                     Deep literals require the canonical atom/primitive pairing \
+                                     (integer→integer, float→float, boolean→bool, \
+                                     string→string), or the explicitly marked integer-spelled \
+                                     float form (spec/03-deep-syntax.md §6.4)"
+                                ),
+                                vec![
+                                    "Emit the atom kind that denotes the declared primitive \
+                                     family; use `cast` for a value conversion rather than \
+                                     contradictory literal metadata"
+                                        .to_string(),
+                                ],
+                            ),
+                        );
+                    }
+                } else if integer_source_marker {
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::TypeMismatch,
+                            "literal_source: integer requires a primitive float type".to_string(),
+                            vec![
+                                "Remove the marker from non-primitive literal metadata".to_string(),
+                            ],
+                        ),
+                    );
+                }
                 // RFC D-CHECK lit-forge gate: `{type: (t-adt ...)}`
                 // metadata on a literal outside the defining module
                 // forges an opaque value. Reachable from BOTH
@@ -1145,6 +1242,20 @@ pub(super) fn infer_lit(
                 return resolved;
             }
         }
+    }
+
+    if integer_source_marker {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                "literal_source: integer requires explicit float type metadata".to_string(),
+                vec![
+                    "Add the producer-selected float primitive type or remove the marker"
+                        .to_string(),
+                ],
+            ),
+        );
     }
 
     // Fall back to value-based defaults

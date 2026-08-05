@@ -414,7 +414,7 @@ Provenance metadata in the `{}` slot traces expanded nodes back to their macro s
 ```text
 (defmacro {} relu (params {} x)
   (app {source: (relu x)} (var {} max_elem) (var {} x)
-    (lit {type: (t-prim {} f32)} 0)))
+    (lit {type: (t-prim {} f32)} 0.0)))
 ```
 
 **Macro definition (Surf):**

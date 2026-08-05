@@ -493,27 +493,28 @@ pub(super) fn param_bound_dvars(decl_ty: &Type) -> HashSet<DimVar> {
 }
 
 pub(super) fn infer_gather_result_type(
+    op: &str,
     tensor_ty: &Type,
     indices_ty: &Type,
     axis: usize,
 ) -> Result<Type, String> {
     let Type::Tensor(tensor_dims, tensor_precision) = tensor_ty else {
-        return Err(format!("gather expects tensor input, got {tensor_ty}"));
+        return Err(format!("{op} expects tensor input, got {tensor_ty}"));
     };
     let Type::Tensor(index_dims, index_precision) = indices_ty else {
         return Err(format!(
-            "gather expects integer tensor indices, got {indices_ty}"
+            "{op} expects integer tensor indices, got {indices_ty}"
         ));
     };
     if !index_precision.is_integer() {
         return Err(format!(
-            "gather expects integer tensor indices, got tensor[..., {}]",
+            "{op} expects integer tensor indices, got tensor[..., {}]",
             index_precision.name()
         ));
     }
     if axis >= tensor_dims.len() {
         return Err(format!(
-            "gather axis {axis} out of bounds for rank {}",
+            "{op} axis {axis} out of bounds for rank {}",
             tensor_dims.len()
         ));
     }
@@ -681,6 +682,7 @@ pub(super) fn collect_all_declarations(
     let bare_items: Vec<&deep::Expr> = items.iter().map(|(_, expr)| *expr).collect();
     report_duplicate_defs(&bare_items, errors);
     report_duplicate_defsigs(&bare_items, errors);
+    report_orphan_defsigs(items, errors);
     report_builtin_shadowing(&bare_items, errors);
     report_builtin_param_call_shadowing(&bare_items, errors);
     let resolution_env = precollect_type_resolution_env(items, adt_reg);
@@ -963,6 +965,62 @@ pub(super) fn report_duplicate_defsigs(items: &[&deep::Expr], errors: &mut Diagn
                 vec![format!(
                     "keep a single `defsig` for `{name}`: Chelis does not dispatch same-name functions by argument type, arity, or rank"
                 )],
+            ));
+        }
+    }
+}
+
+/// Reject a `defsig` that has no same-name `def` in the same check unit and
+/// lexical module. A signature describes a Chelis definition; it is not an
+/// extern/runtime declaration. Letting it create a callable binding by itself
+/// makes `check` accept a symbol that no lowering lane can define (#850).
+pub(super) fn report_orphan_defsigs(
+    items: &[(Option<String>, &deep::Expr)],
+    errors: &mut DiagnosticSink<'_>,
+) {
+    // Linked dependency interfaces intentionally contain signature-only rows:
+    // their bodies live in the supplying package artifact. Reef validates
+    // every authored source module and synthetic entry before installing the
+    // linked-program guard. The exemption therefore requires both that
+    // in-process provenance and the linker's reserved mangled-name format;
+    // neither fact alone can exempt an authored orphan. Raw Deep/Surf units
+    // and persistent checker contexts still take the same-unit check below.
+    let mut defs: HashSet<(Option<&str>, &str)> = HashSet::new();
+    for (module, expr) in items {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        if let Some(name) = kids.first().and_then(symbol_name) {
+            defs.insert((module.as_deref(), name));
+        }
+    }
+
+    for (module, expr) in items {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        if crate::opacity::linked_program() && crate::opacity::is_linker_format_name(name) {
+            continue;
+        }
+        if !defs.contains(&(module.as_deref(), name)) {
+            let qualified = module
+                .as_deref()
+                .map(|module| format!("{module}.{name}"))
+                .unwrap_or_else(|| name.to_string());
+            errors.push(CheckError::new(
+                CheckErrorKind::UnboundVariable,
+                format!(
+                    "defsig `{qualified}` has no matching `def` in the same check unit: \
+                     signatures describe Chelis definitions and do not declare runtime symbols"
+                ),
+                vec![
+                    format!("add `def {name}` beside the signature, or remove the orphan signature"),
+                    "A future external-call surface must use an explicit typed capability; a bare `defsig` is not one"
+                        .to_string(),
+                ],
             ));
         }
     }
