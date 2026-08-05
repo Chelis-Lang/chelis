@@ -107,6 +107,13 @@ thread_local! {
     /// How many distinct specializations each callee has minted.
     static MONO_SPECIALIZATION_COUNTS: RefCell<HashMap<String, usize>> =
         RefCell::new(HashMap::new());
+    /// Emitted symbol -> the canonical signature it was minted for. The
+    /// reverse of `MONO_INTERN`, kept so a hash collision is caught rather
+    /// than emitted: two signatures sharing a symbol would collapse into one
+    /// C definition, and the emitter's duplicate-symbol check cannot see it
+    /// (it compares distinct `HostFunction` names, which would be equal).
+    static MONO_SYMBOL_ORIGINS: RefCell<HashMap<String, String>> =
+        RefCell::new(HashMap::new());
     /// The stack of specializations currently being lowered.
     static MONO_FRAMES: RefCell<Vec<MonoFrame>> = const { RefCell::new(Vec::new()) };
 }
@@ -117,6 +124,7 @@ pub(crate) fn reset_mono_state() {
     MONO_INTERN.with(|intern| intern.borrow_mut().clear());
     MONO_WORKLIST.with(|worklist| worklist.borrow_mut().clear());
     MONO_SPECIALIZATION_COUNTS.with(|counts| counts.borrow_mut().clear());
+    MONO_SYMBOL_ORIGINS.with(|origins| origins.borrow_mut().clear());
     MONO_FRAMES.with(|frames| frames.borrow_mut().clear());
 }
 
@@ -130,6 +138,14 @@ pub(crate) enum MonoRejection {
     /// The instantiation family is unbounded: the recursion mints a new type
     /// at every level. No finite set of monomorphic symbols exists.
     UnboundedInstantiation { chain: Vec<String>, reason: String },
+    /// Two distinct signatures hashed to one emitted symbol. Astronomically
+    /// unlikely at 64 bits, and silently wrong if it ever happened, so it is
+    /// a rejection rather than an assumption.
+    SymbolCollision {
+        symbol: String,
+        signature: String,
+        existing: String,
+    },
 }
 
 impl MonoRejection {
@@ -145,6 +161,16 @@ impl MonoRejection {
                  chain {} mints a new type at every level, so no finite set of \
                  monomorphic symbols exists (chelis#1158; [05-UNS-1])",
                 render_chain(chain)
+            ),
+            Self::SymbolCollision {
+                symbol,
+                signature,
+                existing,
+            } => format!(
+                "generic host call `{callee}` hashed signature `{signature}` onto \
+                 symbol `{symbol}`, which signature `{existing}` already holds; \
+                 emitting both would collapse two specializations into one C \
+                 definition (chelis#1158; [05-UNS-1])"
             ),
         }
     }
@@ -227,7 +253,23 @@ pub(crate) fn intern_specialization(
         });
     }
 
+    // The origin is the callee-qualified label, not the signature alone: two
+    // DIFFERENT callees whose names sanitize to one C identifier (`A.f` and
+    // `A_f`) would otherwise pass this check while sharing a symbol.
     let symbol = mono_symbol(callee, &key);
+    let origin = format!("{callee}{key}");
+    if let Some(existing) = MONO_SYMBOL_ORIGINS.with(|origins| {
+        origins
+            .borrow_mut()
+            .insert(symbol.clone(), origin.clone())
+            .filter(|existing| existing != &origin)
+    }) {
+        return Err(MonoRejection::SymbolCollision {
+            symbol,
+            signature: origin,
+            existing,
+        });
+    }
     MONO_INTERN.with(|intern| {
         intern
             .borrow_mut()

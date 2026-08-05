@@ -25,6 +25,7 @@
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -82,6 +83,22 @@ out = print(both())
 const POLYMORPHIC_RECURSION: &str = "\
 def poly[a](x: a, depth: int64) -> int64 = if lt(depth, cast(1, int64)) then cast(0, int64) else poly((x, x), sub(depth, cast(1, int64)))
 out = print(poly(cast(1.0, f32), cast(3, int64)))
+";
+
+/// The other residue of the narrowed boundary: the entry point instantiates
+/// `loop` at a nullary constructor that nothing constrains, so the call has
+/// no concrete signature to intern. `eval` runs this (its values are not
+/// typed at an ABI); the build lane must not invent one.
+const NON_CONCRETIZABLE_CALL: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def loop[a](box: Box[a]) -> bool =
+  match box with {
+    | Empty => true
+    | Full { value: item } => loop(Empty)
+  }
+out = print(loop(Empty))
 ";
 
 /// The coral#26 front door without vendoring coral: a recursive trie generic
@@ -258,6 +275,36 @@ fn polymorphic_recursion_stays_on_the_unsupported_boundary() {
         .stderr(predicates::str::contains("[05-UNS-1]"))
         .stderr(predicates::str::contains("chelis#1158"))
         .stderr(predicates::str::contains("polymorphic recursion"));
+}
+
+#[test]
+fn non_concretizable_generic_call_reports_the_other_cause() {
+    // The narrowed boundary has exactly two residues, and the message must
+    // say which one fired: a reader who sees "polymorphic recursion" for an
+    // under-constrained call site will go looking for a recursion problem
+    // that is not there.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("non_concretizable.ch");
+    write_file(&path, NON_CONCRETIZABLE_CALL);
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .timeout(Duration::from_secs(120))
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("out").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("[05-UNS-1]"))
+        .stderr(predicates::str::contains("chelis#1158"))
+        .stderr(predicates::str::contains("not fully concrete"))
+        .stderr(predicates::str::contains("still carries a free variable"))
+        .stderr(predicates::str::contains("polymorphic recursion").not());
 }
 
 #[test]
