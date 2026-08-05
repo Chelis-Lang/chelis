@@ -95,6 +95,11 @@ class IsDocsOnlyTests(unittest.TestCase):
     def test_single_code_file_is_not_docs_only(self):
         self.assertFalse(m.is_docs_only(["Cargo.toml"]))
 
+    def test_executable_oracle_doc_forces_full_suite(self):
+        oracle_doc = "spec/design/faithful_observation.md"
+        self.assertFalse(m.is_docs_only([oracle_doc]))
+        self.assertFalse(m.is_docs_only(["README.md", oracle_doc]))
+
 
 class RejectionAuthorityChangeTests(unittest.TestCase):
     def test_manifest_and_validator_changes_require_live_validation(self):

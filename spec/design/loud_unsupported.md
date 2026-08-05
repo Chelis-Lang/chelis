@@ -1469,9 +1469,10 @@ both halves:
 2. **Scheduled full matrix, the drift canary.**
    `loud-unsupported-nightly.yml`: a cron workflow running
    `scripts/loud_unsupported_phase2_oracle.py` in full,
-   `scripts/faithful_observation_phase2_oracle.py` (the sibling
-   authority in the identical position; contents remain [#732]'s, per
-   §I2), and the Phase 4 oracle, with full standing re-validation of
+   `scripts/faithful_observation_phase2_oracle.py` (whose contents remain
+   [#732]'s, per §I2, and whose existing per-PR blocking job is prevention
+   rather than a substitute for this scheduled drift canary), and the Phase 4
+   oracle, with full standing re-validation of
    both the issue manifest and every `Deferred` exclusion's
    `IssueRef` (`Structural` rows carry no issue and are outside the
    liveness sweep by design), plus the [#729] §C6 census-liveness

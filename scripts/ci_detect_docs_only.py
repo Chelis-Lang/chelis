@@ -64,6 +64,15 @@ DOC_EXACT_NAMES: frozenset[str] = frozenset(
 # like `docsignore` does not match.
 DOC_DIR_PREFIXES: tuple[str, ...] = ("docs/", "openspec/changes/")
 
+# Markdown inputs consumed structurally by blocking oracles are executable
+# contracts, not prose-only changes. Editing one must run the heavy suite even
+# when every changed path otherwise matches the documentation allowlist.
+EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
+    {
+        "spec/design/faithful_observation.md",
+    }
+)
+
 # Inputs whose edits could authorize a new [05-UNS-5] issue citation or weaken
 # its checker. The CI workflow itself is included so a would-be bypass to the
 # job is exercised by the job in the same pull request.
@@ -130,7 +139,9 @@ def is_docs_only(paths: list[str]) -> bool:
     cleaned = [p.strip().strip('"') for p in paths if p.strip()]
     if not cleaned:
         return False
-    return all(is_doc_path(p) for p in cleaned)
+    return not any(
+        path in EXECUTABLE_DOC_PATHS for path in cleaned
+    ) and all(is_doc_path(path) for path in cleaned)
 
 
 def rejection_authority_changed(paths: list[str]) -> bool:
