@@ -4,7 +4,9 @@
 //! inner-before-outer registry stacking is the most likely silent-correctness
 //! bug, so these tests must fail loudly if it is mis-implemented.
 
-use chelis_types::{TypeEnv, build_type_env_from_library, check_ir_with_context};
+use chelis_types::{
+    TypeEnv, build_compiled_library_context, build_type_env_from_library, check_ir_with_context,
+};
 
 fn parse(src: &str) -> Vec<chelis_deep::Expr> {
     chelis_deep::parser::parse_str(src).expect("deep parse")
@@ -13,6 +15,27 @@ fn parse(src: &str) -> Vec<chelis_deep::Expr> {
 fn build_ctx(library_src: &str) -> TypeEnv {
     let library = parse(library_src);
     build_type_env_from_library(&library).expect("library checks clean")
+}
+
+#[test]
+fn type_environment_matches_its_checked_library_program() {
+    let library = parse("(def {} one (lit {type: (t-prim {} int32)} 1))");
+    let (type_env, checked) =
+        build_compiled_library_context(&library).expect("the library must type-check");
+
+    assert!(type_env.matches_checked_program(&checked));
+}
+
+#[test]
+fn type_environment_rejects_another_checked_library_program() {
+    let first = parse("(def {} one (lit {type: (t-prim {} int32)} 1))");
+    let second = parse("(def {} two (lit {type: (t-prim {} int32)} 2))");
+    let (type_env, _) =
+        build_compiled_library_context(&first).expect("the first library must type-check");
+    let (_, checked) =
+        build_compiled_library_context(&second).expect("the second library must type-check");
+
+    assert!(!type_env.matches_checked_program(&checked));
 }
 
 // ── ADT exhaustivity probes (must pass before any general stacking work) ──

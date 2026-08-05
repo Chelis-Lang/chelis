@@ -856,6 +856,7 @@ dependencies = [
  "half",
  "quote",
  "serde",
+ "sha2",
  "stacker",
  "syn 2.0.117",
  "thiserror 2.0.18",

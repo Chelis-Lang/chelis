@@ -1,19 +1,51 @@
 use std::collections::BTreeSet;
 
 use chelis_ir::Dag;
-use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary};
-use chelis_types::CheckedProgram;
+use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary as IrLoweredLibrary};
 
 use crate::artifacts::RootBindingMode;
 use crate::roots::root_metadata;
 use crate::{
-    CheckedCompilation, CoreLowerError, ForwardNodeIndex, LoweredCompilation, LoweringMode,
-    NamedRoots, RootCountContext,
+    CheckedCompilation, CheckedLibrary, ContextCheckedCompilation, CoreLowerError,
+    ForwardNodeIndex, LoweredCompilation, LoweringMode, NamedRoots, RootCountContext,
 };
 
+/// An immutable lowered payload bound to a semantically checked library.
+///
+/// Only [`lower_library`] can construct this artifact. Cache adapters can read
+/// its raw carrier, but they cannot replace the carrier or its proof identity.
+#[derive(Debug, Clone)]
+pub struct LoweredLibrary {
+    inner: IrLoweredLibrary,
+}
+
+impl LoweredLibrary {
+    /// Return the immutable library DAG.
+    pub fn dag(&self) -> &Dag {
+        self.inner.dag()
+    }
+
+    /// Return the immutable map of lowering decisions.
+    pub fn lowered_names(&self) -> &std::collections::HashMap<String, bool> {
+        self.inner.lowered_names()
+    }
+
+    /// Return the checked-library identity for this lowered payload.
+    pub fn library_proof_id(&self) -> Option<chelis_types::LibraryProofId> {
+        self.inner.library_proof_id()
+    }
+
+    /// Return the immutable raw carrier for a cache wire adapter.
+    pub fn raw(&self) -> &IrLoweredLibrary {
+        &self.inner
+    }
+}
+
 /// Lower a checked library carrier without target-specific emission.
-pub fn lower_library(program: &CheckedProgram) -> Result<LoweredLibrary, CoreLowerError> {
-    chelis_ir::lower::try_lower_program_to_library(program).map_err(CoreLowerError::Lower)
+pub fn lower_library(library: &CheckedLibrary) -> Result<LoweredLibrary, CoreLowerError> {
+    chelis_ir::lower::try_lower_program_to_library(library.program())
+        .map(|inner| LoweredLibrary { inner })
+        .map_err(CoreLowerError::Lower)
 }
 
 /// Lower an isolated checked compilation.
@@ -21,14 +53,27 @@ pub fn lower_checked(
     checked: CheckedCompilation,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
-    let lower_result = chelis_ir::lower::try_lower_program_to_library(checked.program());
+    let lower_result =
+        chelis_ir::lower::try_lower_program_to_library(checked.program()).map(LoweredProgram::from);
     finish_isolated_lowering(checked, mode, lower_result)
+}
+
+struct LoweredProgram {
+    dag: Dag,
+    rootless_defs: BTreeSet<String>,
+}
+
+impl From<IrLoweredLibrary> for LoweredProgram {
+    fn from(library: IrLoweredLibrary) -> Self {
+        let (dag, rootless_defs) = library.into_dag_and_rootless_defs();
+        Self { dag, rootless_defs }
+    }
 }
 
 fn finish_isolated_lowering(
     checked: CheckedCompilation,
     mode: LoweringMode,
-    lower_result: Result<LoweredLibrary, LowerDiagnostic>,
+    lower_result: Result<LoweredProgram, LowerDiagnostic>,
 ) -> Result<LoweredCompilation, CoreLowerError> {
     let (dag, rootless_defs, root_binding_mode) = match lower_result {
         Ok(library) if mode == LoweringMode::AllowHostBackend && library.dag.roots().is_empty() => {
@@ -68,19 +113,29 @@ fn finish_isolated_lowering(
 
 /// Lower a checked compilation against a reusable library DAG.
 pub fn lower_checked_with_context(
-    mut checked: CheckedCompilation,
+    checked: ContextCheckedCompilation<'_>,
     library: &LoweredLibrary,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, CoreLowerError> {
+    if library.library_proof_id() != checked.library().program().library_proof_id() {
+        return Err(CoreLowerError::Lower(LowerDiagnostic {
+            message: "the lowered library does not match the context-checked program".to_string(),
+            span: None,
+            span_id: None,
+            fatal: true,
+        }));
+    }
+    let mut checked = checked.into_extension();
     let lowered_map = chelis_ir::lower::top_level_lowering_map_with_context(
-        library,
+        library.raw(),
         checked.program.exprs(),
         checked.program.type_env(),
     );
     checked.root_metadata = root_metadata(&checked.program, Some(&lowered_map));
     let tensor_names = checked.root_metadata.tensor_names.clone();
 
-    let lower_result = chelis_ir::lower::try_lower_program_with_context(library, &checked.program);
+    let lower_result =
+        chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program);
     let (mut dag, rootless_defs, accepted_nonfatal_rejection) = match lower_result {
         Ok(composed) => (composed.dag, composed.rootless_defs, false),
         Err(diagnostic)
@@ -88,12 +143,12 @@ pub fn lower_checked_with_context(
                 && !diagnostic.fatal
                 && tensor_names.is_empty() =>
         {
-            (library.dag.clone(), BTreeSet::new(), true)
+            (library.dag().clone(), BTreeSet::new(), true)
         }
         Err(diagnostic) => return Err(CoreLowerError::Lower(diagnostic)),
     };
 
-    let library_root_count = library.dag.roots().len();
+    let library_root_count = library.dag().roots().len();
     let root_start = library_root_count.min(dag.roots().len());
     let new_roots = dag.roots()[root_start..].to_vec();
     dag.set_roots(new_roots);
@@ -163,14 +218,9 @@ mod tests {
             .expect("test Deep must pass semantic checks")
     }
 
-    fn lowered(dag: Dag) -> LoweredLibrary {
-        LoweredLibrary {
+    fn lowered(dag: Dag) -> LoweredProgram {
+        LoweredProgram {
             dag,
-            symbol_table: Default::default(),
-            program_defs: Default::default(),
-            program_types: Default::default(),
-            linearity: Default::default(),
-            lowered_names: Default::default(),
             rootless_defs: BTreeSet::new(),
         }
     }

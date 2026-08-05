@@ -1,8 +1,8 @@
 use chelis_compiler_api::pipeline::{
     IrName, LoweringMode, PipelineGoal, PipelineOutcome, PipelineRejection, PipelineRequest,
     PreparedTypeAnalysis, PreparedTypeAnalysisOutcome, SemanticContext, SemanticRejection,
-    analyze_prepared, complete_checks, lower_checked, lower_library, prepare_source, run_prepared,
-    run_source,
+    analyze_prepared, check_prepared_library, complete_checks, lower_checked, lower_library,
+    prepare_source, run_prepared, run_source,
 };
 use chelis_compiler_api::schema::SourceKind;
 use chelis_types::TypeAnalysisOutcome;
@@ -153,7 +153,11 @@ fn direct_lower_functions_keep_the_lower_cancellation_stage() {
         SemanticContext::Isolated,
     )
     .expect("the fixture must pass semantic checks");
-    let library_program = checked.program().clone();
+    let library = check_prepared_library(
+        prepare_source(SourceKind::Surf, "def library_value -> int32 = 1\n", None)
+            .expect("the library source must prepare"),
+    )
+    .expect("the library fixture must pass semantic checks");
 
     let token = chelis_types::CancelToken::new();
     token.cancel();
@@ -166,8 +170,8 @@ fn direct_lower_functions_keep_the_lower_cancellation_stage() {
         PipelineRejection::Cancelled { stage: "lower" }
     ));
 
-    let library_rejection = lower_library(&library_program)
-        .expect_err("direct library lowering must observe cancellation");
+    let library_rejection =
+        lower_library(&library).expect_err("direct library lowering must observe cancellation");
     assert!(matches!(
         library_rejection,
         PipelineRejection::Cancelled { stage: "lower" }

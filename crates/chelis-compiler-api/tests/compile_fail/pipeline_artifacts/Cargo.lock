@@ -285,6 +285,7 @@ dependencies = [
  "chelis-vocab",
  "half",
  "serde",
+ "sha2",
  "stacker",
  "thiserror",
 ]

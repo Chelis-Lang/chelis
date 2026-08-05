@@ -106,6 +106,9 @@ The Reef exception no longer exists. This inventory does not claim whole-workspa
 | Artifact | Constructor owner | Consumers |
 |---|---|---|
 | `ValidatedModule` | `check_whole_module_edit` | Edit tools and compiler API schema adapters |
+| `CheckedLibrary` | Core library semantic completion or cache parser | Contextual compiler paths and layered checks |
+| `ContextualTypeAnalysis` | Core contextual type check | Contextual semantic completion |
+| `ContextualLibraryTypeAnalysis` | Core library-extension type check | Bound library composition |
 | `AllRootNames` | Core root analysis | Compiler API evaluation and host output adapters |
 | `TensorRootNames` | Core root analysis | Lower policy, CLI root selection, and compiler API evaluation |
 | `NamedRoots` | Core exact name-to-DAG alignment | Compiler API schema adapters, evaluation, and E2E tools |
@@ -356,9 +359,29 @@ The composition hook permitted safe construction with an unchecked library.
 The dependency guard omitted direct build dependencies.
 The documentation guard accepted broader false portability claims.
 
-The core composition hook is now an unsafe adapter boundary.
-Safe dependent code cannot compose unchecked states through this hook.
-The compiler API retains a crate-private wrapper for the layered adapter.
+The first correction made the core composition hook an unsafe adapter boundary.
+That correction blocked accidental safe calls, but it did not encode the library relationship.
+
+The core now uses `CheckedLibrary`, `ContextualTypeAnalysis`, and `ContextCheckedCompilation`.
+Each composable contextual product retains the exact library that produced it.
+Safe composition consumes that bound product and accepts no replacement library.
+Contextual lowering also requires the identity from that library.
+
+`ContextualLibraryTypeAnalysis` also retains the combined type environment from the same type session.
+Its completion function creates the composed `CheckedLibrary` without a caller-supplied environment.
+
+The core no longer exports the unchecked `prepared_analysis_from_checked` adoption helper.
+It also keeps raw contextual analysis and the library binding constructor private.
+Public `complete_checks` accepts only `SemanticContext::Isolated`.
+
+One opaque source identity binds each library type environment to its checked program and lowered library.
+The core exposes the lowered library as an immutable artifact.
+Only `lower_library(&CheckedLibrary)` constructs that artifact.
+The standard-library and compiled-context cache parsers require the identities and the declared-type map to match.
+They rerun semantic checks without another type-inference session.
+They rerun the lower phase and compare each canonical payload with its cache payload.
+The compiler API installs linked-program policy for linked cache payloads before this validation.
+Both pipeline crates forbid unsafe code.
 
 The manifest guard now scans normal and build dependencies. It also scans target-specific tables.
 Its closed direct set rejects unknown build dependencies.

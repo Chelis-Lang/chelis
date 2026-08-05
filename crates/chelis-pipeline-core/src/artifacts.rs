@@ -5,7 +5,7 @@ use chelis_deep::Expr as DeepExpr;
 use chelis_ir::Dag;
 use chelis_ir::dag::NodeId;
 use chelis_ir::lower::LowerDiagnostic;
-use chelis_types::{CheckedProgram, FitnessReport};
+use chelis_types::{CheckedProgram, FitnessReport, InferResult, TypeEnv};
 
 /// A closed policy for nonfatal lowering failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,12 @@ pub enum RootCountContext {
     NewCode,
 }
 
+/// The public context for standalone semantic completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticContext {
+    Isolated,
+}
+
 /// A rejection from the semantic suffix after type analysis accepts.
 #[derive(Debug)]
 pub enum SemanticRejection {
@@ -78,6 +84,43 @@ impl fmt::Display for SemanticRejection {
 }
 
 impl std::error::Error for SemanticRejection {}
+
+/// A rejection from checked-library construction or cache parsing.
+#[derive(Debug)]
+pub enum LibraryRejection {
+    Type {
+        report: InferResult,
+    },
+    ContextMismatch,
+    Effects {
+        errors: Vec<chelis_effects::EffectError>,
+    },
+    Linearity {
+        errors: Vec<chelis_types::errors::CheckError>,
+    },
+}
+
+impl fmt::Display for LibraryRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Type { report } => write_joined_messages(
+                formatter,
+                report.errors.iter().map(|error| error.message.as_str()),
+            ),
+            Self::ContextMismatch => {
+                formatter.write_str("the type environment does not match the checked library")
+            }
+            Self::Effects { errors } => {
+                write_joined_messages(formatter, errors.iter().map(|error| error.message.as_str()))
+            }
+            Self::Linearity { errors } => {
+                write_joined_messages(formatter, errors.iter().map(|error| error.message.as_str()))
+            }
+        }
+    }
+}
+
+impl std::error::Error for LibraryRejection {}
 
 /// A lower-layer failure from core lowering and exact root construction.
 #[derive(Debug)]
@@ -368,11 +411,105 @@ impl PreparedTypeAnalysis {
     }
 }
 
+/// Library type analysis with both products from one inference session.
+#[derive(Debug)]
+pub struct PreparedLibraryAnalysis {
+    pub(crate) type_env: TypeEnv,
+    pub(crate) analysis: PreparedTypeAnalysis,
+}
+
+impl PreparedLibraryAnalysis {
+    pub fn type_env(&self) -> &TypeEnv {
+        &self.type_env
+    }
+
+    pub fn analysis(&self) -> &PreparedTypeAnalysis {
+        &self.analysis
+    }
+}
+
 /// The closed result of type analysis over a prepared program.
 #[derive(Debug)]
 pub enum PreparedTypeAnalysisOutcome {
     Rejected { fitness: FitnessReport },
     Accepted(Box<PreparedTypeAnalysis>),
+}
+
+/// A type environment bound to one semantically accepted library program.
+#[derive(Debug, Clone)]
+pub struct CheckedLibrary {
+    pub(crate) type_env: TypeEnv,
+    pub(crate) program: CheckedProgram,
+}
+
+impl CheckedLibrary {
+    pub fn type_env(&self) -> &TypeEnv {
+        &self.type_env
+    }
+
+    pub fn program(&self) -> &CheckedProgram {
+        &self.program
+    }
+}
+
+/// Contextual type analysis bound to the library that produced it.
+#[derive(Debug)]
+pub struct ContextualTypeAnalysis<'library> {
+    pub(crate) library: &'library CheckedLibrary,
+    pub(crate) analysis: PreparedTypeAnalysis,
+}
+
+impl<'library> ContextualTypeAnalysis<'library> {
+    pub fn library(&self) -> &'library CheckedLibrary {
+        self.library
+    }
+
+    pub fn analysis(&self) -> &PreparedTypeAnalysis {
+        &self.analysis
+    }
+}
+
+/// Library-extension analysis with every product from one contextual session.
+#[derive(Debug)]
+pub struct ContextualLibraryTypeAnalysis<'library> {
+    pub(crate) library: &'library CheckedLibrary,
+    pub(crate) type_env: TypeEnv,
+    pub(crate) analysis: PreparedTypeAnalysis,
+}
+
+impl<'library> ContextualLibraryTypeAnalysis<'library> {
+    pub fn library(&self) -> &'library CheckedLibrary {
+        self.library
+    }
+
+    pub fn type_env(&self) -> &TypeEnv {
+        &self.type_env
+    }
+
+    pub fn analysis(&self) -> &PreparedTypeAnalysis {
+        &self.analysis
+    }
+}
+
+/// Semantic success for an extension checked against one exact library.
+#[derive(Debug)]
+pub struct ContextCheckedCompilation<'library> {
+    pub(crate) library: &'library CheckedLibrary,
+    pub(crate) extension: CheckedCompilation,
+}
+
+impl<'library> ContextCheckedCompilation<'library> {
+    pub fn library(&self) -> &'library CheckedLibrary {
+        self.library
+    }
+
+    pub fn extension(&self) -> &CheckedCompilation {
+        &self.extension
+    }
+
+    pub(crate) fn into_extension(self) -> CheckedCompilation {
+        self.extension
+    }
 }
 
 /// A program that passed type, effect, and linearity checks.
@@ -459,11 +596,4 @@ impl LoweredCompilation {
             forward_node_index: self.forward_node_index,
         }
     }
-}
-
-/// Select isolated checks or checks against an accepted library.
-#[derive(Debug, Clone, Copy)]
-pub enum SemanticContext<'a> {
-    Isolated,
-    Library(&'a CheckedProgram),
 }

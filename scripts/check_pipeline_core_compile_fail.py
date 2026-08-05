@@ -33,6 +33,9 @@ REQUIRED_DIAGNOSTICS = (
     "no method named `checked` found for enum `SemanticRejection`",
     "mismatched types",
     "expected `NamedRoots`, found `ForwardNodeIndex`",
+    "expected `&CheckedLibrary`, found `&CheckedProgram`",
+    "attempted to take value of method `dag` on type `LoweredLibrary`",
+    "attempted to take value of method `library_proof_id` on type `LoweredLibrary`",
 )
 
 

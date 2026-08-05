@@ -109,26 +109,22 @@ pub fn check_layered(
     // Type-check the non-chelis-std decls `_with_context` against the
     // cached chelis-std sub-context. A type error => `Ok(None)` =>
     // monolithic fallback for the byte-identical error report.
-    let analysis = match crate::pipeline::analyze_prepared_with_context(
+    let analysis = match crate::pipeline::analyze_prepared_with_library(
         prepared,
-        &stdlib_ctx.type_env,
-        stdlib_ctx.library_checked.signature_inference(),
+        stdlib_ctx.checked_library(),
     ) {
         Ok(analysis) => analysis,
         Err(_) => return Ok(None),
     };
     let fitness = reconstitute_clean_fitness(
         &stdlib_ctx,
-        analysis.prepared().expanded_deep(),
-        analysis.program(),
+        analysis.analysis().prepared().expanded_deep(),
+        analysis.analysis().program(),
     );
-    let typed_program = analysis.program().clone();
+    let typed_program = analysis.analysis().program().clone();
 
     // Effects + linearity use the canonical context-aware stage order.
-    match crate::pipeline::complete_checks(
-        analysis,
-        crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
-    ) {
+    match crate::pipeline::complete_context_checks(analysis) {
         Ok(_) => Ok(Some(LayeredCheck::Clean {
             fitness,
             typed_program: pick_typed_program(&stdlib_ctx, typed_program),
@@ -159,7 +155,7 @@ fn pick_typed_program(
     non_stdlib_checked: CheckedProgram,
 ) -> CheckedProgram {
     if non_stdlib_checked.exprs().is_empty() {
-        stdlib_ctx.library_checked.clone()
+        stdlib_ctx.library_checked().clone()
     } else {
         non_stdlib_checked
     }
@@ -179,14 +175,14 @@ fn reconstitute_clean_fitness(
     non_stdlib_deep: &[chelis_deep::Expr],
     non_stdlib_checked: &CheckedProgram,
 ) -> FitnessReport {
-    let stdlib_structural = stdlib_ctx.structural_stats;
+    let stdlib_structural = stdlib_ctx.structural_stats();
     let non_stdlib_structural = chelis_types::structural_stats(non_stdlib_deep);
     let structural = StructuralStats {
         total_nodes: stdlib_structural.total_nodes + non_stdlib_structural.total_nodes,
         invalid_nodes: stdlib_structural.invalid_nodes + non_stdlib_structural.invalid_nodes,
     };
 
-    let stdlib_infer = stdlib_ctx.library_checked.infer_stats();
+    let stdlib_infer = stdlib_ctx.library_checked().infer_stats();
     let non_stdlib_infer = non_stdlib_checked.infer_stats();
     let infer = InferStats {
         typed_nodes: stdlib_infer.typed_nodes + non_stdlib_infer.typed_nodes,
@@ -203,7 +199,7 @@ pub fn stdlib_structural_stats(
 ) -> Result<StructuralStats, CompilerError> {
     // RFC v5: chelis-std decls are reef-linker output.
     let _linked = chelis_types::install_linked_program_guard();
-    Ok(load_or_build_stdlib_context(stdlib_decls)?.structural_stats)
+    Ok(load_or_build_stdlib_context(stdlib_decls)?.structural_stats())
 }
 
 /// Run the layered `chelis build` type-check stage.
@@ -241,31 +237,23 @@ pub fn check_layered_for_build(
         Err(_) => return Ok(None),
     };
 
-    let analysis = match crate::pipeline::analyze_prepared_with_context(
+    let analysis = match crate::pipeline::analyze_prepared_with_library(
         prepared,
-        &stdlib_ctx.type_env,
-        stdlib_ctx.library_checked.signature_inference(),
+        stdlib_ctx.checked_library(),
     ) {
         Ok(analysis) => analysis,
         Err(_) => return Ok(None),
     };
 
-    let checked = match crate::pipeline::complete_checks(
-        analysis,
-        crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
-    ) {
+    let checked = match crate::pipeline::complete_context_checks(analysis) {
         Ok(checked) => checked,
         Err(crate::pipeline::SemanticRejection::Effects { .. })
         | Err(crate::pipeline::SemanticRejection::Linearity { .. }) => return Ok(None),
     };
 
-    // Compose the cached chelis-std half with the checked non-chelis-std
-    // half. The result remains a typed pipeline state for the build lower step.
-    // SAFETY: The cache stores a fully checked library. `checked` passed all
-    // semantic checks against that exact library above.
-    Ok(Some(unsafe {
-        crate::pipeline::compose_checked(&stdlib_ctx.library_checked, checked)
-    }))
+    // The contextual product retains the exact checked library, so composition
+    // cannot substitute another library or bypass the semantic checks above.
+    Ok(Some(checked.compose()))
 }
 
 #[cfg(test)]

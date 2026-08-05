@@ -604,6 +604,8 @@ The carrier SHALL own its Deep expressions. A borrowed source buffer or source-s
 ### Requirement: Stable compiler API facade
 Existing `chelis_compiler_api::pipeline` imports SHALL compile without a direct `chelis-pipeline-core` dependency. The facade SHALL re-export moved artifacts and wrap policy functions.
 
+An unchecked proof-adoption helper SHALL NOT qualify for facade compatibility. A contextual analyzer that accepts a raw `TypeEnv` SHALL NOT qualify. A caller-supplied library variant SHALL NOT qualify. The facade SHALL remove these paths instead of preserving forgeable transitions.
+
 `PipelineRequest`, `PipelineGoal`, `PipelineOutcome`, `PreparationError`, and `PipelineRejection` SHALL remain facade-owned public types.
 
 The facade SHALL preserve current cancellation stages and rejection variants. Core artifacts SHALL NOT gain machine-facing wire traits.
@@ -654,6 +656,22 @@ Exact root construction SHALL reject different tensor-name and DAG-root counts. 
 
 `SemanticRejection` SHALL contain only effect or linearity errors. Core lower errors SHALL contain only lower diagnostics or root-count failures.
 
+A checked library SHALL bind its type environment to its semantically accepted program. Both type products SHALL retain one opaque identity derived from the accepted checked source and its base identity. A lowered library SHALL retain that identity. Its payload and identity SHALL be immutable outside the core owner. The core SHALL construct it from a `CheckedLibrary`, not a caller-supplied `CheckedProgram`. A composable contextual analysis SHALL retain the exact checked library that produced it.
+
+A library-extension analysis SHALL retain its combined type environment and its exact base library. Its completion step SHALL produce the composed checked library without a caller-supplied environment.
+
+Contextual composition SHALL consume that bound analysis. It SHALL NOT accept a separate library argument or require an unsafe call.
+
+Contextual lowering SHALL consume the bound semantic product and a core-bound lowered library. It SHALL reject a lowered library with another proof identity.
+
+The core SHALL expose no unchecked constructor that pairs a prepared program, type environment, or checked program with another proof artifact.
+
+Public semantic completion SHALL accept only `SemanticContext::Isolated`. The public context type SHALL expose no library variant. Contextual completion SHALL accept only an analysis bound to a `CheckedLibrary`.
+
+A context-checked extension SHALL NOT become a standalone checked library.
+
+The core and compiler API crates SHALL forbid unsafe code.
+
 #### Scenario: Semantic success creates checked state
 - **WHEN** type, effect, and linearity stages accept owned expanded Deep
 - **THEN** the core returns `CheckedCompilation` with canonical root metadata
@@ -669,6 +687,54 @@ Exact root construction SHALL reject different tensor-name and DAG-root counts. 
 #### Scenario: Rejection exposes success state
 - **WHEN** a compile-fail fixture requests a checked product from a semantic rejection
 - **THEN** Rust rejects the fixture because the rejection has no success accessor
+
+#### Scenario: Contextual success composes its bound library
+- **WHEN** an extension passes type, effect, and linearity checks against a checked library
+- **THEN** its contextual success product composes only with the library that produced that product
+
+#### Scenario: Caller supplies another library during composition
+- **WHEN** dependent code tries to pass another library to contextual composition
+- **THEN** Rust rejects the call because composition accepts no library argument
+
+#### Scenario: Lower checked-program composition receives another library
+- **WHEN** lower-level checked-program composition receives a library with another proof identity
+- **THEN** composition rejects the pair and produces no checked program
+
+#### Scenario: Contextual lowering receives another library
+- **WHEN** contextual lowering receives a lowered library with another proof identity
+- **THEN** lowering returns a fatal lower diagnostic before it uses that library
+
+#### Scenario: Caller changes a lowered library
+- **WHEN** dependent code tries to replace a lowered payload or transplant its proof identity
+- **THEN** Rust rejects the change because the core artifact has no mutable public field
+
+#### Scenario: Contextual extension becomes a library
+- **WHEN** a caller tries to promote a context-checked extension into a standalone checked library
+- **THEN** Rust rejects the call because no public binding constructor exists
+
+#### Scenario: Caller adopts separate type products
+- **WHEN** a caller tries to pair separate prepared, environment, or checked products
+- **THEN** Rust rejects the call because no unchecked adoption function exists
+
+#### Scenario: Cached library fields disagree
+- **WHEN** cache decoding pairs products with different proof identities or declared-type maps
+- **THEN** the cache parser rejects the pair before it creates `CheckedLibrary`
+
+#### Scenario: Cached products retain one accepted source identity
+- **WHEN** cache decoding receives type products with one accepted source identity
+- **THEN** the parser reruns effect and linearity checks without repeating type inference
+
+#### Scenario: Cached lowered library comes from another program
+- **WHEN** cache decoding pairs a checked library with a lowered library that has another proof identity
+- **THEN** the cache parser rejects the pair before any contextual lowering uses it
+
+#### Scenario: Cached lowered payload changes without an identity change
+- **WHEN** cache decoding receives a lowered payload that differs from canonical lowering for the checked library
+- **THEN** the parser rejects the payload after the lower phase and does not repeat type inference
+
+#### Scenario: Unsafe code enters the pipeline crates
+- **WHEN** core or compiler API code declares an unsafe function or block
+- **THEN** the crate-level unsafe-code prohibition rejects the build
 
 ### Requirement: Standard-library blocker inventory
 The change SHALL record why `chelis-pipeline-core` still requires `std`. The inventory SHALL cover direct core use and transitive lower-crate blockers.

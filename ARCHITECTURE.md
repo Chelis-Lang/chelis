@@ -75,8 +75,23 @@ Consumers select one closed goal:
 - `Lower` adds DAG lowering and canonical root metadata.
 
 `CheckedCompilation` exists only after all semantic checks accept the program.
+`CheckedLibrary` binds one type environment to its semantically accepted program.
+A composable contextual analysis retains the exact checked library that produced it.
+A library-extension analysis also retains the combined type environment from its type session.
+Contextual composition consumes the bound product and accepts no replacement library or environment.
+Contextual lowering accepts only a core-bound lowered library. It rejects a library with another proof identity.
+The core exports no function that adopts separate prepared, environment, or checked products.
+Public semantic completion accepts only `SemanticContext::Isolated`.
+Contextual completion requires an analysis that already retains its checked library.
+Library type products share one opaque identity derived from accepted checked source.
+A lowered library retains the same identity in an immutable core artifact.
+Only `lower_library(&CheckedLibrary)` constructs that artifact.
+Cache parsing requires the identities and the declared-type map to match.
+It reruns semantic checks without another type-inference session.
+It reruns the lower phase and compares the canonical payload with the cache payload.
 `LoweredCompilation` contains one checked compilation and its DAG products.
 A rejection does not contain a checked or lowered success product.
+The core and compiler API crates forbid unsafe code.
 
 The CLI retains style policy, Reef preparation, JSON, exit codes, target selection, and backend emission.
 Backend emitters remain final target-specific correctness boundaries.

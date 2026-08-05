@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::context::LibraryProofId;
 
 #[derive(Clone)]
 pub(super) struct DeclaredSigMetadata {
@@ -947,6 +948,10 @@ pub struct CheckedProgram {
     /// same inference-product metric as the monolithic path (chelis#973).
     #[serde(default)]
     infer_stats: InferStats,
+    #[serde(default)]
+    library_proof_id: Option<LibraryProofId>,
+    #[serde(default)]
+    context_library_proof_id: Option<LibraryProofId>,
 }
 
 impl CheckedProgram {
@@ -963,6 +968,8 @@ impl CheckedProgram {
             type_headers: TypeResolutionEnv::default(),
             adt_registry: AdtRegistry::default(),
             infer_stats: InferStats::default(),
+            library_proof_id: None,
+            context_library_proof_id: None,
         }
     }
 
@@ -1015,6 +1022,18 @@ impl CheckedProgram {
         self.infer_stats
     }
 
+    pub(crate) fn bind_library_proof(&mut self, proof_id: LibraryProofId) {
+        self.library_proof_id = Some(proof_id);
+    }
+
+    pub fn library_proof_id(&self) -> Option<LibraryProofId> {
+        self.library_proof_id
+    }
+
+    pub(crate) fn bind_context_library_proof(&mut self, proof_id: Option<LibraryProofId>) {
+        self.context_library_proof_id = proof_id;
+    }
+
     pub fn with_linearity(mut self, linearity: LinearityInfo) -> Self {
         self.linearity = linearity;
         self
@@ -1049,7 +1068,14 @@ impl CheckedProgram {
     /// The monolithic-vs-layered acceptance oracle is what proves this
     /// composition is byte-identical to the monolithic path; a
     /// divergence is a compiler-correctness bug, not a tuning knob.
-    pub fn compose(library: &CheckedProgram, new_code: &CheckedProgram) -> Self {
+    ///
+    /// Returns `None` unless `new_code` retains the exact library proof.
+    pub fn compose(library: &CheckedProgram, new_code: &CheckedProgram) -> Option<Self> {
+        if library.library_proof_id.is_none()
+            || new_code.context_library_proof_id != library.library_proof_id
+        {
+            return None;
+        }
         let mut annotated_exprs =
             Vec::with_capacity(library.annotated_exprs.len() + new_code.annotated_exprs.len());
         annotated_exprs.extend(library.annotated_exprs.iter().cloned());
@@ -1089,7 +1115,7 @@ impl CheckedProgram {
                 .or_insert_with(|| alias.clone());
         }
 
-        Self {
+        Some(Self {
             annotated_exprs,
             type_env,
             linearity,
@@ -1100,7 +1126,9 @@ impl CheckedProgram {
                 typed_nodes: library.infer_stats.typed_nodes + new_code.infer_stats.typed_nodes,
                 total_nodes: library.infer_stats.total_nodes + new_code.infer_stats.total_nodes,
             },
-        }
+            library_proof_id: new_code.library_proof_id,
+            context_library_proof_id: None,
+        })
     }
 }
 
@@ -1131,6 +1159,8 @@ pub(super) fn finalize_checked_program(
         type_headers: type_headers.clone(),
         adt_registry: adt_registry.clone(),
         infer_stats,
+        library_proof_id: None,
+        context_library_proof_id: None,
     };
 
     validate_checked_program_totality(&checked, signature_context, errors);
@@ -1221,6 +1251,8 @@ pub(crate) fn checked_program_with_effect_annotations_in_session(
         type_headers: original.type_headers.clone(),
         adt_registry: original.adt_registry.clone(),
         infer_stats: original.infer_stats,
+        library_proof_id: original.library_proof_id,
+        context_library_proof_id: original.context_library_proof_id,
     };
     validate_checked_program_totality(&checked, original.signature_inference(), errors);
     checked

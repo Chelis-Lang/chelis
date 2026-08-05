@@ -24,6 +24,30 @@
 //! require_serialize::<chelis_compiler_api::pipeline::CheckedCompilation>();
 //! ```
 //!
+//! Checked and lowered libraries are not cache or wire models:
+//!
+//! ```compile_fail
+//! fn require_serialize<T: serde::Serialize>() {}
+//! require_serialize::<chelis_compiler_api::pipeline::CheckedLibrary>();
+//! require_serialize::<chelis_compiler_api::pipeline::LoweredLibrary>();
+//! ```
+//!
+//! The facade exports no unchecked proof-adoption helper:
+//!
+//! ```compile_fail
+//! use chelis_compiler_api::pipeline::prepared_analysis_from_checked;
+//!
+//! let _ = prepared_analysis_from_checked;
+//! ```
+//!
+//! The facade exports no raw library binding constructor:
+//!
+//! ```compile_fail
+//! use chelis_compiler_api::pipeline::bind_checked_library;
+//!
+//! let _ = bind_checked_library;
+//! ```
+//!
 //! Declared roots and the forward node index are different products:
 //!
 //! ```compile_fail
@@ -38,18 +62,21 @@
 use std::fmt;
 
 use chelis_deep::Expr as DeepExpr;
-use chelis_ir::lower::{LowerDiagnostic, LoweredLibrary};
+use chelis_ir::lower::LowerDiagnostic;
 use chelis_pipeline_core::CoreLowerError;
-use chelis_types::{CheckedProgram, FitnessReport, TypeAnalysisOutcome};
+use chelis_types::{FitnessReport, TypeAnalysisOutcome};
 
 use crate::schema::SourceKind;
 
 pub use chelis_pipeline_core::{
-    AllRootNames, CheckedCompilation, ForwardNodeIndex, IrName, LoweredCompilation, LoweredParts,
-    LoweringMode, NamedRoots, PreparedProgram, PreparedTypeAnalysis, PreparedTypeAnalysisOutcome,
+    AllRootNames, CheckedCompilation, CheckedLibrary, ContextCheckedCompilation,
+    ContextualLibraryTypeAnalysis, ContextualTypeAnalysis, ForwardNodeIndex, IrName,
+    LibraryRejection, LoweredCompilation, LoweredLibrary, LoweredParts, LoweringMode, NamedRoots,
+    PreparedLibraryAnalysis, PreparedProgram, PreparedTypeAnalysis, PreparedTypeAnalysisOutcome,
     RootCountContext, RootMetadata, SemanticContext, SemanticRejection, TensorRootNames,
-    analyze_prepared, analyze_prepared_with_context, complete_checks,
-    prepared_analysis_from_checked,
+    analyze_prepared, analyze_prepared_library, analyze_prepared_library_with_base,
+    analyze_prepared_with_library, check_prepared_library, complete_checks,
+    complete_context_checks, complete_context_library_checks, complete_library_checks,
 };
 
 /// The closed set of supported pipeline goals.
@@ -323,9 +350,9 @@ pub fn prepare_deep(exprs: Vec<DeepExpr>, entry: Option<&str>) -> PreparedProgra
 }
 
 /// Lower a checked library carrier without target-specific emission.
-pub fn lower_library(program: &CheckedProgram) -> Result<LoweredLibrary, PipelineRejection> {
+pub fn lower_library(library: &CheckedLibrary) -> Result<LoweredLibrary, PipelineRejection> {
     pipeline_bail_if_cancelled("lower")?;
-    let result = chelis_pipeline_core::lower_library(program);
+    let result = chelis_pipeline_core::lower_library(library);
     pipeline_bail_if_cancelled("lower")?;
     result.map_err(PipelineRejection::from)
 }
@@ -341,9 +368,9 @@ pub fn lower_checked(
     result.map_err(PipelineRejection::from)
 }
 
-/// Lower a checked compilation against a reusable library DAG.
+/// Lower a context-checked compilation against its library DAG.
 pub fn lower_checked_with_context(
-    checked: CheckedCompilation,
+    checked: ContextCheckedCompilation<'_>,
     library: &LoweredLibrary,
     mode: LoweringMode,
 ) -> Result<LoweredCompilation, PipelineRejection> {
@@ -351,20 +378,6 @@ pub fn lower_checked_with_context(
     let result = chelis_pipeline_core::lower_checked_with_context(checked, library, mode);
     pipeline_bail_if_cancelled("lower")?;
     result.map_err(PipelineRejection::from)
-}
-
-/// Compose checked states for required compiler-API adapters.
-///
-/// # Safety
-///
-/// The library must have passed all semantic checks. The extension must have
-/// passed all semantic checks against that exact library.
-pub(crate) unsafe fn compose_checked(
-    library: &CheckedProgram,
-    extension: CheckedCompilation,
-) -> CheckedCompilation {
-    // SAFETY: The caller supplies both invariants from the crate-private adapter.
-    unsafe { chelis_pipeline_core::compose_checked(library, extension) }
 }
 
 fn pipeline_bail_if_cancelled(stage: &'static str) -> Result<(), PipelineRejection> {

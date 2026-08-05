@@ -26,6 +26,9 @@ class PipelineCoreCompileFailTests(unittest.TestCase):
 error[E0599]: no method named `checked` found for enum `SemanticRejection`
 error[E0308]: mismatched types
 expected `NamedRoots`, found `ForwardNodeIndex`
+expected `&CheckedLibrary`, found `&CheckedProgram`
+attempted to take value of method `dag` on type `LoweredLibrary`
+attempted to take value of method `library_proof_id` on type `LoweredLibrary`
 """
 
         def runner(command, **_kwargs):
