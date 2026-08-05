@@ -47,13 +47,13 @@ fn reduced_float_scalar_activations_are_rank_zero_tier2_instances() {
         (
             Prim::F16,
             FloatUnOp::Silu,
-            2.9802322387695313e-7,
+            2.980_232_238_769_531e-7,
             lower_silu as ActivationLowerer,
         ),
         (
             Prim::F16,
             FloatUnOp::Gelu,
-            2.9802322387695313e-7,
+            2.980_232_238_769_531e-7,
             lower_gelu as ActivationLowerer,
         ),
         (

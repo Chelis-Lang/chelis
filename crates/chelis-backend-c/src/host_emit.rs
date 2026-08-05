@@ -724,6 +724,12 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     );
 }
 
+/// Instantiate the scalar host-expression path at each concrete float ABI.
+///
+/// Tensor activations decompose through `chelis_ir::tier2`; scalar calls in a
+/// Surf `def` reach this emitter after host-ABI projection instead. Reduced
+/// floats need distinct per-node finalizers even though both compute as C
+/// `float`, so one generated specialization cannot serve every source dtype.
 fn append_activation_helpers(
     out: &mut Vec<String>,
     suffix: &str,
