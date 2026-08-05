@@ -25,12 +25,19 @@ Follow-up: convert these frozen absolute snapshots to the relative monolithic-vs
 equivalence oracle (which needs no re-freeze on upstream change), or retire them now that
 the one-time migration is verified. Tracked separately.
 
-## Recorded SHA-256 values (post-merge re-freeze)
+## Accepted test is ignored (nondeterministic archive hash)
 
-The accepted capture recorded these SHA-256 values:
+After the merge, `archive_sha256` (and the `shell_sha256` derived from it) turned out
+to be **nondeterministic across runs**: macOS local, macOS CI, and Linux CI each
+produced a different value for the same source under the same `SOURCE_DATE_EPOCH`. No
+fixed value can pass, so `accepted_package_outputs_match_the_pre_migration_baseline` is
+`#[ignore]`d pending chelis#1194 (which also tracks the underlying archive
+nondeterminism). The values below are the last macOS-local capture, kept for reference
+only; `expected_shell.json` and `expected_hashes.txt` are no longer asserted.
 
 - archive: `c440b1362a9a4f2a256ab0e41b2d220d159c16570eaf32eaf9256acd2c0a6f7e`
 - shell: `01310dfed2b16b7d034aa641948aa7b8c1ed354d93e5d9d1df2c28f06f8b2b8f`
 
 The rejected capture recorded the complete type, effect, and linearity error output.
-The files under `rejected/` preserve the exact text and order.
+Those baselines pin source span offsets, which are deterministic, so the rejected test
+stays active. The files under `rejected/` preserve the exact text and order.

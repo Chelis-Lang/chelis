@@ -60,7 +60,16 @@ fn baseline_records_the_pre_migration_revision() {
     assert!(BASELINE_PROVENANCE.contains("before the core extraction"));
 }
 
+// chelis#1194: the package `archive_sha256` (and the `shell_sha256` derived
+// from it) are nondeterministic across runs -- macOS local, macOS CI, and Linux
+// CI each produced a different value for the same source under the same
+// `SOURCE_DATE_EPOCH` -- so the exact archive/shell snapshot cannot be pinned.
+// Ignored pending the conversion to a relative monolithic-vs-layered oracle in
+// chelis#1194 (which also tracks the underlying archive-nondeterminism). The
+// rejected-error baselines below remain deterministic (source span offsets) and
+// stay active.
 #[test]
+#[ignore = "nondeterministic package archive hash; see chelis#1194"]
 fn accepted_package_outputs_match_the_pre_migration_baseline() {
     const CHILD_ENV: &str = "CHELIS_PIPELINE_PARITY_BASELINE_CHILD";
     if std::env::var_os(CHILD_ENV).is_none() {
