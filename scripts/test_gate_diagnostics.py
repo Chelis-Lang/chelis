@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -127,8 +128,7 @@ class GateEnvironmentTests(unittest.TestCase):
     def test_valid_explicit_pyo3_python_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            configured = root / "shared-python"
-            configured.touch()
+            configured = Path(sys.executable)
             environment = gate.gate_environment(
                 {"PYO3_PYTHON": str(configured)},
                 executable=Path("/uv/default-python"),
@@ -141,7 +141,7 @@ class GateEnvironmentTests(unittest.TestCase):
             root = Path(tmp)
             configured = root / "managed/python"
             configured.parent.mkdir()
-            configured.touch()
+            configured.symlink_to(Path(sys.executable))
             environment = gate.gate_environment(
                 {"PYO3_PYTHON": "managed/python"},
                 executable=Path("/uv/default-python"),
@@ -161,10 +161,25 @@ class GateEnvironmentTests(unittest.TestCase):
                     repo_root=root,
                 )
 
+    def test_existing_non_python_pyo3_path_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            configured = root / "not-python"
+            configured.write_text("not a Python interpreter\n")
+            with self.assertRaisesRegex(
+                ValueError,
+                rf"PYO3_PYTHON.*{re.escape(str(configured))}.*"
+                r"usable Python 3\.11",
+            ):
+                gate.gate_environment(
+                    {"PYO3_PYTHON": str(configured)},
+                    executable=Path(sys.executable),
+                    repo_root=root,
+                )
+
     def test_selected_uv_interpreter_is_set_for_children(self):
         with tempfile.TemporaryDirectory() as tmp:
-            executable = Path(tmp) / "uv-python"
-            executable.touch()
+            executable = Path(sys.executable)
             environment = gate.gate_environment(
                 {"PATH": "/usr/bin"},
                 executable=executable,
@@ -183,11 +198,9 @@ class GateEnvironmentTests(unittest.TestCase):
     def test_relative_cargo_target_is_normalized_inside_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            executable = root / "uv-python"
-            executable.touch()
             environment = gate.gate_environment(
                 {"CARGO_TARGET_DIR": "target/agents/test"},
-                executable=executable,
+                executable=Path(sys.executable),
                 repo_root=root,
             )
             self.assertEqual(
@@ -199,15 +212,13 @@ class GateEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "checkout"
             root.mkdir()
-            executable = root / "uv-python"
-            executable.touch()
             with self.assertRaisesRegex(
                 ValueError,
                 r"CARGO_TARGET_DIR.*outside the current worktree",
             ):
                 gate.gate_environment(
                     {"CARGO_TARGET_DIR": str(Path(tmp) / "shared-target")},
-                    executable=executable,
+                    executable=Path(sys.executable),
                     repo_root=root,
                 )
 
@@ -273,6 +284,12 @@ class FailureDiagnosticTests(unittest.TestCase):
             self.assertIn("duration:", diagnostic)
             self.assertIn("PYO3_PYTHON=", diagnostic)
             self.assertIn("rerun:", diagnostic)
+            rerun = next(
+                line
+                for line in diagnostic.splitlines()
+                if line.startswith("gate: rerun:")
+            )
+            self.assertIn("CARGO_HUSKY_DONT_INSTALL_HOOKS=1", rerun)
             self.assertIn(str(logs[0]), diagnostic)
             self.assertIn("final 200 lines", diagnostic)
             self.assertIn("6 earlier lines omitted", diagnostic)
@@ -318,10 +335,17 @@ class FailureDiagnosticTests(unittest.TestCase):
             root = Path(tmp)
             failure_root = root / "target/gate-failures"
             error = io.StringIO()
+            real_popen = gate.subprocess.Popen
+
+            def fail_only_missing_command(command, *args, **kwargs):
+                if command[0] == "missing-command":
+                    raise FileNotFoundError("missing-command")
+                return real_popen(command, *args, **kwargs)
+
             with mock.patch.object(
                 gate.subprocess,
                 "Popen",
-                side_effect=FileNotFoundError("missing-command"),
+                side_effect=fail_only_missing_command,
             ):
                 result = gate.run_commands(
                     [["missing-command"]],

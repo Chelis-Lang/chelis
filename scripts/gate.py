@@ -100,6 +100,10 @@ DIAGNOSTIC_ENVIRONMENT = (
     "RUNNER_ARCH",
     "PATH",
 )
+PYTHON_VERSION_PROBE = (
+    "import sys; "
+    "raise SystemExit(0 if sys.version_info >= (3, 11) else 86)"
+)
 
 # The canonical CI-stage command list. The CI workflow
 # has two developer-gate jobs, `lint-and-unit` and `workspace-tests`; each
@@ -324,6 +328,16 @@ def gate_environment(
                 "`PYO3_PYTHON=\"$(uv python find 3.11)\"`, or unset it so "
                 "gate.py can use its uv-selected interpreter."
             )
+        validation_error = _python_validation_error(candidate)
+        if validation_error is not None:
+            raise ValueError(
+                "PYO3_PYTHON is set, but its configured interpreter at "
+                f"{candidate} is not a usable Python 3.11+ interpreter: "
+                f"{validation_error}. The explicit setting will not be "
+                "replaced. Run `uv python install 3.11`, then set "
+                "`PYO3_PYTHON=\"$(uv python find 3.11)\"`, or unset it so "
+                "gate.py can use its uv-selected interpreter."
+            )
         environment["PYO3_PYTHON"] = str(candidate)
     else:
         if not executable.is_file():
@@ -331,6 +345,14 @@ def gate_environment(
                 "gate.py selected a managed Python interpreter that does "
                 f"not exist at {executable}; run `uv python install 3.11` "
                 "and retry."
+            )
+        validation_error = _python_validation_error(executable)
+        if validation_error is not None:
+            raise ValueError(
+                "gate.py selected an interpreter at "
+                f"{executable} that is not a usable Python 3.11+ "
+                f"interpreter: {validation_error}. Run "
+                "`uv python install 3.11` and retry."
             )
         environment["PYO3_PYTHON"] = str(executable)
 
@@ -354,6 +376,32 @@ def gate_environment(
     # must not mutate shared Git state behind sibling worktrees.
     environment["CARGO_HUSKY_DONT_INSTALL_HOOKS"] = "1"
     return environment
+
+
+def _python_validation_error(candidate: Path) -> str | None:
+    """Return why a path is not an executable Python 3.11+ interpreter."""
+    try:
+        result = subprocess.run(
+            [str(candidate), "-c", PYTHON_VERSION_PROBE],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except OSError as exc:
+        return str(exc)
+    except subprocess.TimeoutExpired:
+        return "the Python version probe timed out after 15 seconds"
+
+    if result.returncode == 0:
+        return None
+    detail = (result.stderr or result.stdout).strip()
+    if detail:
+        return f"the Python version probe exited {result.returncode}: {detail}"
+    return f"the Python version probe exited {result.returncode}"
 
 
 def materialize_command(command: list[str], python: Path) -> list[str]:
@@ -600,7 +648,11 @@ def _rerun_command(
     assignments = [
         f"PYO3_PYTHON={shlex.quote(environment['PYO3_PYTHON'])}"
     ]
-    for name in ("CARGO_TARGET_DIR", "RUSTUP_TOOLCHAIN"):
+    for name in (
+        "CARGO_TARGET_DIR",
+        "CARGO_HUSKY_DONT_INSTALL_HOOKS",
+        "RUSTUP_TOOLCHAIN",
+    ):
         value = environment.get(name)
         if value:
             assignments.append(f"{name}={shlex.quote(value)}")
