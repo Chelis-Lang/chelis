@@ -561,7 +561,7 @@ mod build_layering_tests {
         // (the entry) references it. Flat top-level defs so no cross-module
         // linking is required for the raw (unlinked) test decls.
         let deps = parse("def dep_double(x: int32) -> int32 = add(x, x)\n");
-        let entry = parse("def main_value -> int32 = dep_double(cast(21, int32))\n");
+        let entry = parse("def main_value() ->int32 = dep_double(cast(21, int32))\n");
 
         let layered = three_layer_program(&deps, &entry);
         let monolithic = monolithic_program(&deps, &entry);
@@ -579,8 +579,8 @@ mod build_layering_tests {
     #[test]
     fn entry_change_still_matches_monolithic() {
         let deps = parse("def dep_double(x: int32) -> int32 = add(x, x)\n");
-        let entry_a = parse("def main_value -> int32 = dep_double(cast(21, int32))\n");
-        let entry_b = parse("def main_value -> int32 = dep_double(cast(100, int32))\n");
+        let entry_a = parse("def main_value() ->int32 = dep_double(cast(21, int32))\n");
+        let entry_b = parse("def main_value() ->int32 = dep_double(cast(100, int32))\n");
 
         assert!(checked_semantically_eq(
             &three_layer_program(&deps, &entry_a),
@@ -606,7 +606,7 @@ mod build_layering_tests {
     #[test]
     fn empty_dependency_branch_matches_monolithic() {
         let deps: Vec<chelis_surf::ast::Decl> = Vec::new();
-        let entry = parse("def main_value -> int32 = add(cast(1, int32), cast(2, int32))\n");
+        let entry = parse("def main_value() ->int32 = add(cast(1, int32), cast(2, int32))\n");
         assert!(checked_semantically_eq(
             &three_layer_program(&deps, &entry),
             &monolithic_program(&deps, &entry),
@@ -631,7 +631,7 @@ mod build_layering_tests {
         // with — the exact capture the reviewer's fixture exhibited.
         let entry = parse(
             "macro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\
-             def main_value -> int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+             def main_value() ->int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
         );
 
         let layered = three_layer_program(&deps, &entry);

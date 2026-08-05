@@ -111,7 +111,7 @@ fn stage_dep_fixture(scratch: &Path, dep_body: &str, entry_body: &str) -> PathBu
 fn plain_bodies() -> (&'static str, &'static str) {
     (
         "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
     )
 }
 
@@ -121,7 +121,7 @@ fn plain_bodies() -> (&'static str, &'static str) {
 fn macro_bodies() -> (&'static str, &'static str) {
     (
         "module Azdep.Math\nexport (dep_val)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\ndef main_value -> int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\ndef main_value() ->int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
     )
 }
 
@@ -268,7 +268,7 @@ fn entry_only_edit_reuses_dependency_cache() {
     // key is unchanged: a warm dependency hit.
     fs::write(
         &entry,
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(5, int32), cast(6, int32))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(5, int32), cast(6, int32))\n",
     )
     .expect("rewrite entry");
 
@@ -327,7 +327,7 @@ fn dependency_build_writes_library_cache_artifact() {
 fn plain_bodies_with_unused_dep() -> (&'static str, &'static str) {
     (
         "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef az_unused(x: int32, y: int32) -> int32 = add(add(x, y), y)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
     )
 }
 
@@ -339,7 +339,7 @@ fn plain_bodies_with_unused_dep() -> (&'static str, &'static str) {
 fn macro_bodies_with_unused_dep() -> (&'static str, &'static str) {
     (
         "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\ndef dep_unused(x: int32) -> int32 = dmk(add(x, x))\n",
-        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\ndef main_value -> int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
+        "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\nmacro emk(a) = {\n  v = cast(7, int32)\n  add(v, a)\n}\n\ndef main_value() ->int32 = {\n  v_macro_0 = dep_val(cast(5, int32))\n  emk(v_macro_0)\n}\n",
     )
 }
 
@@ -433,7 +433,7 @@ fn build_capture(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) ->
 fn eval_only_wrapper_bodies() -> (&'static str, &'static str) {
     (
         "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, int32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
     )
 }
 
@@ -473,7 +473,7 @@ fn eval_only_wrapper_build_accept_reject_parity() {
 fn unreachable_type_error_bodies() -> (&'static str, &'static str) {
     (
         "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_broken(x: int32) -> int32 = add(x, cast(1, f64))\n",
-        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
     )
 }
 
@@ -557,12 +557,12 @@ fn differential_cache_parity_sweep() {
         (
             "int32_scalar",
             "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef az_unused(x: int32) -> int32 = add(x, x)\n",
-            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n",
         ),
         (
             "f64_scalar",
             "module Azdep.Math\nexport (az_fadd, az_unused)\n\ndef az_fadd(x: f64, y: f64) -> f64 = add(x, y)\ndef az_unused(x: f64) -> f64 = add(x, x)\n",
-            "module PseudoApp.Main\nimport Azdep.Math (az_fadd)\n\ndef main_value -> f64 = az_fadd(cast(1.0, f64), cast(2.0, f64))\n",
+            "module PseudoApp.Main\nimport Azdep.Math (az_fadd)\n\ndef main_value() ->f64 = az_fadd(cast(1.0, f64), cast(2.0, f64))\n",
         ),
         (
             "tensor_entry",
@@ -572,12 +572,12 @@ fn differential_cache_parity_sweep() {
         (
             "multi_def_entry",
             "module Azdep.Math\nexport (d1, d2, az_unused)\n\ndef d1(x: int32, y: int32) -> int32 = add(x, y)\ndef d2(x: int32) -> int32 = add(x, x)\ndef az_unused(x: int32) -> int32 = add(add(x, x), x)\n",
-            "module PseudoApp.Main\nimport Azdep.Math (d1, d2)\n\ndef h(x: int32) -> int32 = d2(x)\ndef main_value -> int32 = h(d1(cast(1, int32), cast(2, int32)))\n",
+            "module PseudoApp.Main\nimport Azdep.Math (d1, d2)\n\ndef h(x: int32) -> int32 = d2(x)\ndef main_value() ->int32 = h(d1(cast(1, int32), cast(2, int32)))\n",
         ),
         (
             "macro_bearing",
             "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\ndef dep_unused(x: int32) -> int32 = dmk(add(x, x))\n",
-            "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\ndef main_value -> int32 = dep_val(cast(5, int32))\n",
+            "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\ndef main_value() ->int32 = dep_val(cast(5, int32))\n",
         ),
     ];
 
@@ -686,7 +686,7 @@ fn dependency_after_root_engages_cache_and_matches_monolithic() {
         "zzdep", // "zzdep" > "pseudo-app": sorts AFTER the root
         "Zzdep",
         "module Zzdep.Math\nexport (zz_add)\n\ndef zz_add(x: int32, y: int32) -> int32 = add(x, y)\n",
-        "module PseudoApp.Main\nimport Zzdep.Math (zz_add)\n\ndef main_value -> int32 = zz_add(cast(3, int32), cast(4, int32))\n",
+        "module PseudoApp.Main\nimport Zzdep.Math (zz_add)\n\ndef main_value() ->int32 = zz_add(cast(3, int32), cast(4, int32))\n",
     );
     let monolithic = build_c(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
     let _cold = build_c(&entry, &cache_home, &[]);
@@ -739,7 +739,7 @@ fn library_cache_evicts_under_cap_and_protects_stdlib() {
             "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(add(x, y), cast({i}, int32))\n"
         )
     };
-    let entry = "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n";
+    let entry = "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value() ->int32 = az_add(cast(3, int32), cast(4, int32))\n";
     let td = cache_home.join(".cache").join("typecheck");
 
     // First build (default cap): writes chelis-std + one chelis-lib.

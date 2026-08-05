@@ -452,7 +452,7 @@ mod tests {
     /// hashes identically and a different slice hashes differently.
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
         chelis_surf::parser::parse_str(&format!(
-            "module Dep\nexport ({marker}_value)\ndef {marker}_value -> int32 = cast(1, int32)\n"
+            "module Dep\nexport ({marker}_value)\ndef {marker}_value() -> int32 = cast(1, int32)\n"
         ))
         .expect("sample decls must parse")
     }

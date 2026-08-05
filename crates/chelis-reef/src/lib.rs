@@ -8967,7 +8967,7 @@ mod tests {
         write(
             &root.join("src/main.ch"),
             &format!(
-                "module {root_prefix}.Main\nimport {dep_prefix}.Math (dep_add)\n\ndef main_value -> int32 = dep_add(1, 2)\n"
+                "module {root_prefix}.Main\nimport {dep_prefix}.Math (dep_add)\n\ndef main_value() -> int32 = dep_add(1, 2)\n"
             ),
         );
         write(
