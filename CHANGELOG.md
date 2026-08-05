@@ -11,9 +11,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - **Recursive generic functions build (chelis#1158, successor to
   chelis#941).** A type-polymorphic function that participates in a call
   cycle now lowers to bounded, memoized monomorphic C symbols instead of
-  being rejected under `[05-UNS-1]`. This unblocks the entire
-  `Coral.Frame` API in the build lane (Chelis-Lang/coral#26), whose
-  `Coral.Internal.Hamt.from_pairs_rec` is exactly that shape.
+  being rejected under `[05-UNS-1]`. This removes the chelis#941 blocker
+  from `Coral.Internal.Hamt.from_pairs_rec` (Chelis-Lang/coral#26), which
+  is exactly that shape.
 
   A generic call site resolves the call's fully concrete signature,
   interns `(callee, signature) -> symbol`, and emits an ordinary C call;
@@ -24,7 +24,19 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
   Direct recursion, mutual recursion, multi-instantiation, and a
   recursive trie generic instantiated at a `tensor[n, f32]` payload are
-  all covered by build-link-run tests that assert eval/C value parity.
+  all covered by build-link-run tests that assert eval/C value parity,
+  as is the reef multi-module shape (the specialization is minted from
+  the package-internal name, `pkg__<pkg>__<Module>__<def>__mono_<hash>`).
+
+  **This is not by itself the whole of coral#26.** A separate, older
+  limitation still blocks the wider `Coral.Frame` surface: a NON-recursive
+  generic is specialized by value-level inlining, which drops the
+  parameters' checked type annotations, so a generic ADT argument that
+  carries no checked type of its own — a bare `Empty` passed to
+  `hamt_put(node: Hamt[a], …)` — reaches constructor and match
+  instantiation with an unresolved ADT argument. That predates this
+  change (it reproduces identically on 0.18.2) and is unrelated to
+  recursion; it needs its own issue.
 
 ### Changed
 
