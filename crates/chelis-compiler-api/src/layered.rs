@@ -321,18 +321,31 @@ pub fn check_layered_for_build(
     if split > combined_deep.len() {
         // The cached boundary is inconsistent with this expansion (should
         // not happen for a matching key); fall back rather than mis-split.
+        // Same class as the digest bail below: a cache-consistency fall-back on
+        // an otherwise-fine program, silent by default, so surface it under the
+        // profile (chelis#1176 review G2).
+        profile_context_bail("cached dependency expansion boundary is out of range");
         return Ok(None);
     }
-    // Guard against macro cross-talk: the dependency prefix of THIS combined
-    // expansion must be byte-identical to the expansion the cached context
-    // was type-checked from. If a macro name resolves differently when the
-    // entry is present (e.g. the entry redefines a macro a dependency
-    // invokes), the cached context is invalid for this program — fall back.
+    // Defence-in-depth guard: the dependency prefix of THIS combined expansion
+    // must be byte-identical to the expansion the cached context was
+    // type-checked from; if not, the cached context is invalid for this program
+    // and we fall back.
+    //
+    // The modeled cross-talk case — the entry redefining a macro a dependency
+    // invokes — cannot actually arise on the build lane: reef's `rewrite_decl`
+    // module-qualifies every `MacroDef` name (`internal_name(package, module,
+    // name)`), so no two modules can bind the same macro name and the entry
+    // cannot shadow a dependency's macro. No input has been constructed that
+    // trips this digest from `check_layered_for_build`. The guard is kept as
+    // defence-in-depth because `check_layered_for_build` is `pub`: a future
+    // non-linker caller could feed un-mangled decls and reintroduce the hazard
+    // (chelis#1176 review G1).
     if crate::library_cache::expanded_deep_digest(&combined_deep[..split])
         != library_ctx.dependency_deep_digest
     {
         profile_context_bail(
-            "dependency expansion digest changed (entry/dependency macro cross-talk)",
+            "dependency expansion digest changed (cached context invalid for this program)",
         );
         return Ok(None);
     }

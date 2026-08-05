@@ -3028,23 +3028,23 @@ fn cmd_build(
 
     let preserve_host_library_surface =
         if prepared.is_none() && target == BuildTarget::C && pruning_fired {
-        let full_checked = checked_program_with_effects(&full_deep_exprs)
-            .map_err(|e| format!("Check errors: {e}"))?;
-        shared_compiler_gate(
-            chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-                &full_checked,
-                target,
-            ),
-        )?;
-        chelis_ir::host::try_lower_compiled_program(&full_checked)
-            .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
-            .host
-            .as_ref()
-            .map(chelis_ir::host::host_program_requires_host_backend)
-            .unwrap_or(false)
-    } else {
-        false
-    };
+            let full_checked = checked_program_with_effects(&full_deep_exprs)
+                .map_err(|e| format!("Check errors: {e}"))?;
+            shared_compiler_gate(
+                chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
+                    &full_checked,
+                    target,
+                ),
+            )?;
+            chelis_ir::host::try_lower_compiled_program(&full_checked)
+                .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
+                .host
+                .as_ref()
+                .map(chelis_ir::host::host_program_requires_host_backend)
+                .unwrap_or(false)
+        } else {
+            false
+        };
     // Cross-module checks (e.g. the §opaque-encapsulation rule) reject a
     // reference to an unexported producer whose signature mentions an
     // opaque type. That producer is unreachable from the entry point, so
