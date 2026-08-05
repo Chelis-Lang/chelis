@@ -38,6 +38,61 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   matching the existing treatment of `cast`, `grad`, `vmap`, `jit`, `realize`,
   and `copy`.
 
+### Changed
+
+> The entries below were backfilled while preparing 0.18.4. They shipped
+> in 0.18.3 with no changelog entry; the first of them is breaking.
+
+- **BREAKING — `shape()` returns `int64` (chelis#1130, chelis#1112,
+  closes chelis#1120).** The host evaluator's `shape` arm now produces an
+  `int64` payload, matching the dtype the checker and IR lowering already
+  assigned and conforming to [05-DIM-2]. Movement-op bounds move to
+  int64 alongside it ([05-DIM-1]). This reverses 0.18.2's int32 shipment,
+  which the 0.18.2 notes flagged as a known divergence and told users not
+  to migrate onto. **0.18.1 → 0.18.2 → 0.18.3 is therefore an
+  int64 → int32 → int64 round trip**; code written against 0.18.2's int32
+  `shape()` needs updating, and code that skipped 0.18.2 does not.
+
+- **`round` on the scalar C-host lane rounds half to even (chelis#1142,
+  closes chelis#1140).** Scalar `round` lowered to `round`/`roundf`
+  (half away from zero) while the evaluator, the typed-DAG C emitter,
+  and `spec/05-risc-primitives.md` §2.2 all required IEEE
+  roundTiesToEven. It now lowers to `rint`/`rintf`. The pre-fix
+  divergence was real and silent: `round(cast(2.5, f32))` evaluated to
+  `2.0` but compiled to `3.0`.
+
+- **Fail-closed extent truncation and axis dtype acceptance
+  (chelis#1145, part of chelis#1112 and chelis#1113).** The emitted
+  `chelis_host_reshape_tensor` helper read each shape element as int64
+  and stored it into the then-32-bit carrier with only a `dim < 0` guard
+  ahead of the cast. It now traps `dim > 2147483647LL` first. The
+  window was narrow but real — `expected *= dim` accumulated the
+  untruncated extent, so only a zero product could slip through — and
+  reshaping a 0-element tensor to `[2^32, 0]` silently produced
+  `shape=[0, 0]` with exit 0 before the guard. (0.18.4 removes this
+  guard again, having removed the 32-bit carrier it protected.)
+
+- **Complete Phase 3 C dtype parity (chelis#1118)**, and **typed
+  rejection authority with sealed diagnostic-kind production**
+  (chelis#1037, the chelis#730 "loud unsupported" Phase 3 slice).
+
+### Fixed
+
+> Also backfilled while preparing 0.18.4.
+
+- Deep authoring-scope repairs for sequential-`let` and arm-pattern
+  binder scoping (chelis#1136, part of chelis#731).
+- Literal staging stays typed through const lowering (chelis#1123,
+  closes chelis#1116).
+- `def`/`defsig` unification now runs on the IR checker ingress
+  (chelis#1133, closes chelis#1124).
+- Stamped-`Node` child reads route through `stamped_parts` across
+  `infer/` (chelis#1126, closes chelis#1107).
+- The verbatim expected-value leg is guarded with a usage canary
+  (chelis#1115, closes chelis#1104).
+- Scheduler-independent `par` semantics are defined in the spec
+  (chelis#1121).
+
 ## [0.18.2] — 2026-08-03
 
 ### Added
