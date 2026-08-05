@@ -23,7 +23,7 @@ rather than a behavior regression.
 
 Follow-up: convert these frozen absolute snapshots to the relative monolithic-vs-layered
 equivalence oracle (which needs no re-freeze on upstream change), or retire them now that
-the one-time migration is verified. Tracked separately.
+the one-time migration is verified. Tracked by chelis#1198.
 
 ## Accepted test is ignored (nondeterministic archive hash)
 
@@ -31,7 +31,7 @@ After the merge, `archive_sha256` (and the `shell_sha256` derived from it) turne
 to be **nondeterministic across runs**: macOS local, macOS CI, and Linux CI each
 produced a different value for the same source under the same `SOURCE_DATE_EPOCH`. No
 fixed value can pass, so `accepted_package_outputs_match_the_pre_migration_baseline` is
-`#[ignore]`d pending chelis#1194 (which also tracks the underlying archive
+`#[ignore]`d pending chelis#1198 (which also tracks the underlying archive
 nondeterminism). The values below are the last macOS-local capture, kept for reference
 only; `expected_shell.json` and `expected_hashes.txt` are no longer asserted.
 

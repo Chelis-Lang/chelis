@@ -283,6 +283,15 @@ impl TensorRootNames {
 pub struct NamedRoots(pub(crate) BTreeMap<IrName, NodeId>);
 
 impl NamedRoots {
+    /// Pair declared tensor names with DAG roots positionally.
+    ///
+    /// This checks only the counts, not a name-to-root identity, because both
+    /// sequences derive from the same top-level declaration order: the checker
+    /// collects root names in declaration order and the lowerer emits roots in
+    /// that same order. A permutation therefore cannot arise unless one side
+    /// breaks its own derivation, which the DAG carries no per-root provenance
+    /// to detect here. A future change that reorders either side MUST preserve
+    /// this shared-order premise or replace this zip with a structural match.
     pub(crate) fn aligned(
         names: &TensorRootNames,
         roots: &[NodeId],

@@ -1013,8 +1013,13 @@ pub fn compile_reef_context(
         Some(Ok(library)) => library,
         Some(Err(err)) => return Err(err),
         None => {
-            // chelis#930: the layered path folds ANY failure into `None` so
-            // the monolithic path can produce the byte-identical diagnostic.
+            // chelis#930: the layered path folds a semantic rejection (type,
+            // effect, or linearity) or an upstream build failure into `None`
+            // so the monolithic path produces the byte-identical diagnostic.
+            // A `LibraryRejection::ContextMismatch` is the one exception: it
+            // is an internal proof-bind invariant failure, so
+            // `build_checked_library_layered` returns it as `Some(Err(..))`
+            // and it never reaches this fallback (see the carve-out there).
             // An abandoned compile must not take that route: it would rerun
             // the entire library check it just abandoned, so a cancelled
             // library-context build would cost MORE than an uncancelled one.
@@ -1204,8 +1209,17 @@ fn build_checked_library_layered(
     };
     let library = match crate::pipeline::complete_context_library_checks(analysis) {
         Ok(library) => library,
+        // chelis#930: a real semantic rejection folds into `None` so the
+        // monolithic path reproduces the byte-identical diagnostic.
         Err(crate::pipeline::LibraryRejection::Effects { .. })
         | Err(crate::pipeline::LibraryRejection::Linearity { .. }) => return None,
+        // A proof-bind mismatch (`ContextMismatch`) is NOT a user-program
+        // rejection -- it means the freshly composed library and its type
+        // environment disagree on the proof identity, reachable only through
+        // an internal proof-threading bug. Folding it into the monolithic
+        // fallback would yield a correct user result while permanently hiding
+        // the invariant failure, which is the silent-fallback class the core
+        // extraction exists to eliminate. Surface it loudly instead.
         Err(rejection) => return Some(Err(library_rejection_to_compiler_error(rejection))),
     };
 

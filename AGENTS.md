@@ -460,6 +460,9 @@ python3 scripts/gate.py --list
 # cargo test -p chelis-compiler-api --doc  # local + ci
 # cargo test -p chelis-pipeline-core --doc  # local + ci
 # .venv/bin/python scripts/check_checkpoint_compile_fail.py  # local + ci
+# .venv/bin/python scripts/pipeline_core_dependency_guard.py  # local + ci
+# .venv/bin/python scripts/pipeline_core_documentation_guard.py  # local + ci
+# .venv/bin/python scripts/check_pipeline_core_compile_fail.py  # ci-owned
 # cargo nextest run --workspace --profile ci  # ci-owned
 # # --local also runs: cargo nextest run -p <crate> for each crate changed vs origin/main
 ```

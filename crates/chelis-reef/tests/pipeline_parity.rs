@@ -60,31 +60,51 @@ fn baseline_records_the_pre_migration_revision() {
     assert!(BASELINE_PROVENANCE.contains("before the core extraction"));
 }
 
-// chelis#1194: the package `archive_sha256` (and the `shell_sha256` derived
+// chelis#1198: the package `archive_sha256` (and the `shell_sha256` derived
 // from it) are nondeterministic across runs -- macOS local, macOS CI, and Linux
 // CI each produced a different value for the same source under the same
 // `SOURCE_DATE_EPOCH` -- so the exact archive/shell snapshot cannot be pinned.
 // Ignored pending the conversion to a relative monolithic-vs-layered oracle in
-// chelis#1194 (which also tracks the underlying archive-nondeterminism). The
+// chelis#1198 (which also tracks the underlying archive-nondeterminism). The
 // rejected-error baselines below remain deterministic (source span offsets) and
 // stay active.
 #[test]
-#[ignore = "nondeterministic package archive hash; see chelis#1194"]
+#[ignore = "nondeterministic package archive hash; see chelis#1198"]
 fn accepted_package_outputs_match_the_pre_migration_baseline() {
     const CHILD_ENV: &str = "CHELIS_PIPELINE_PARITY_BASELINE_CHILD";
     if std::env::var_os(CHILD_ENV).is_none() {
-        let status = std::process::Command::new(
+        // `--include-ignored` is load-bearing: this leg is `#[ignore]`d for
+        // chelis#1198, so without it `--exact` selects the leg but libtest
+        // skips it, the child reports `0 passed; 1 ignored`, and the process
+        // exits 0 -- a vacuous pass that asserts nothing. The output check
+        // below makes "zero tests ran" a failure regardless of cause, so a
+        // future rename that breaks `--exact` cannot silently re-hollow this.
+        let output = std::process::Command::new(
             std::env::current_exe().expect("the test executable path must exist"),
         )
         .args([
             "--exact",
+            "--include-ignored",
             "accepted_package_outputs_match_the_pre_migration_baseline",
         ])
         .env(CHILD_ENV, "1")
         .env("SOURCE_DATE_EPOCH", "315532800")
-        .status()
+        .output()
         .expect("the deterministic baseline child must start");
-        assert!(status.success(), "the deterministic baseline child failed");
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            report.contains("1 passed") || report.contains("1 failed"),
+            "the deterministic baseline child executed no assertions \
+             (a vacuous pass); child report:\n{report}"
+        );
+        assert!(
+            output.status.success(),
+            "the deterministic baseline child failed; child report:\n{report}"
+        );
         return;
     }
 

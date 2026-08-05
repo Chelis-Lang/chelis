@@ -176,6 +176,13 @@ fn finish_contextual_lowering(
         Err(diagnostic) => return Err(CoreLowerError::Lower(diagnostic)),
     };
 
+    // The composed DAG prepends the library's roots, so new-code roots begin
+    // at `library_root_count`. The `.min` is a defensive slice guard: a healthy
+    // composition always has at least the library's roots, so a composed DAG
+    // with fewer roots than its library indicates an upstream lowering defect.
+    // The clamp keeps that from panicking on the slice; the real mismatch is
+    // then caught by the root-count alignment in `finish_lowering` unless the
+    // new code declares no tensor names.
     let library_root_count = library_dag.roots().len();
     let root_start = library_root_count.min(dag.roots().len());
     let new_roots = dag.roots()[root_start..].to_vec();
