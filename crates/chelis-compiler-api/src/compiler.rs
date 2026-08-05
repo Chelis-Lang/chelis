@@ -1526,16 +1526,6 @@ fn execution_artifact_from_compiled(
         })?;
     let func_name = execution_c_symbol(entry_name);
 
-    // The effect policy is one shared typed gate for every public build
-    // surface. Check both the pure DAG and every host-program tensor helper:
-    // either representation may own the lowered `Dropout` depending on the
-    // surrounding source shape. The emitters remain the independent fail-loud
-    // boundary; this gate only makes their rejection earlier and structured.
-    reject_unsupported_effect_ops(&compiled.dag, build_target)?;
-    if let Some(host_program) = host_compiled.host.as_ref() {
-        apply_effect_gate_to_host_program(host_program, build_target)?;
-    }
-
     // Reject host-runtime-only builtins early for any compiled-backend
     // target so both public compiler APIs preserve the owning builtin's
     // specific diagnostic. The fallible emitter independently rejects an
@@ -1545,38 +1535,6 @@ fn execution_artifact_from_compiled(
     if let Some(host_program) = host_compiled.host.as_ref() {
         reject_host_only_builtins(host_program, build_target)?;
         reject_eval_only_builtins(host_program, build_target)?;
-    }
-
-    // Two C-build-path guards over `reduce_window_*`, applied before
-    // codegen (the C host path below early-returns). The node may live in
-    // the pure-DAG entry or in a host-program tensor-helper DAG depending
-    // on program shape, so check both:
-    //   (a) `reject_symbolic_windowed_reduce` — a runtime-symbolic windowed
-    //       axis cannot be statically allocated; and
-    //   (b) `reject_unsupported_reduce_window_precision` — bf16/f16 windowed
-    //       reductions have no C lowering yet (the emitter is f32-only).
-    // Without either guard the program would surface as an emitter panic
-    // rather than a clean diagnostic. Both are C-specific: the HIP backend
-    // rejects `reduce_window_*` wholesale in `reject_unsupported_hip_ops`
-    // (it never reaches the mis-allocation), so these messages would be
-    // misleading there. See spec/05-risc-primitives.md §2.3.1.
-    if target == CompileTarget::C {
-        let check = |dag: &Dag| -> Result<()> {
-            reject_symbolic_windowed_reduce(dag, BuildTarget::C)?;
-            reject_unsupported_reduce_window_precision(dag, BuildTarget::C)?;
-            Ok(())
-        };
-        check(&compiled.dag)?;
-        if let Some(host_program) = host_compiled.host.as_ref() {
-            for helper in &host_program.global_tensor_helpers {
-                check(&helper.dag)?;
-            }
-            for function in &host_program.functions {
-                for helper in &function.tensor_helpers {
-                    check(&helper.dag)?;
-                }
-            }
-        }
     }
 
     match target {
@@ -1681,6 +1639,7 @@ fn execution_artifact_from_compiled(
                 // Fix 2: the entry-scoped symbol is the fixed, collision-free
                 // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
                 let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
+                reject_unsupported_effect_ops(&entry_dag, BuildTarget::C)?;
                 reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
                 reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
                 reject_unsized_named_dims(&entry_dag, "c")?;
@@ -1744,6 +1703,11 @@ fn execution_artifact_from_compiled(
             if let Some(host_program) = host_compiled.host.as_ref()
                 && (host_only || compiled.dag.roots().is_empty())
             {
+                reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::C)?;
+                reject_unsupported_windowed_reductions_in_host_program(
+                    host_program,
+                    BuildTarget::C,
+                )?;
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
                 let mut artifact = compiled_execution_artifact(
@@ -1758,6 +1722,9 @@ fn execution_artifact_from_compiled(
                 artifact.entry_lane_decline = entry_lane_decline;
                 return Ok(artifact);
             }
+            reject_unsupported_effect_ops(&compiled.dag, BuildTarget::C)?;
+            reject_symbolic_windowed_reduce(&compiled.dag, BuildTarget::C)?;
+            reject_unsupported_reduce_window_precision(&compiled.dag, BuildTarget::C)?;
             reject_unsized_named_dims(&compiled.dag, "c")?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&compiled.dag);
             let fused = chelis_ir::fuse::fuse(&specialized);
@@ -1832,6 +1799,7 @@ fn execution_artifact_from_compiled(
                 && host_requires_host_backend
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
+                reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
@@ -1852,6 +1820,7 @@ fn execution_artifact_from_compiled(
                 compiled.dag.clone()
             };
             hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
+            reject_unsupported_effect_ops(&hip_dag, BuildTarget::Hip)?;
             reject_unsized_named_dims(&hip_dag, "hip")?;
             let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
             reject_unsupported_hip_ops(&specialized)?;
@@ -3449,15 +3418,11 @@ pub fn reject_unsupported_effect_ops(
     for node in dag.nodes() {
         if matches!(&node.op, RiscOp::Dropout { .. }) {
             return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target {}` does not yet codegen `dropout`; lowered node {} requires it. Evaluate it under `with seed(...)` instead",
-                    target.as_str(),
-                    node.id.0,
-                ),
+                format!("compiled `dropout` op at lowered node {}", node.id.0),
                 target.as_str(),
                 chelis_types::unimplemented_rejection!(
-                    729,
-                    "the compiled-backend dropout capability cell has no kernel; the seeded evaluator lane remains available"
+                    1192,
+                    "compiled `dropout` kernels are not implemented; run this program with `chelis eval`"
                 ),
             ));
         }
@@ -3465,22 +3430,40 @@ pub fn reject_unsupported_effect_ops(
     Ok(())
 }
 
-/// Apply the shared effect gate to every tensor-helper DAG owned by a host
-/// program. Keeping this traversal beside the policy prevents CLI and
-/// compiler-api from acquiring different notions of which helper DAGs count.
-pub fn apply_effect_gate_to_host_program(
+fn for_each_host_helper_dag(
     program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
+    mut visit: impl FnMut(&Dag) -> std::result::Result<(), CompilerError>,
 ) -> std::result::Result<(), CompilerError> {
     for helper in &program.global_tensor_helpers {
-        reject_unsupported_effect_ops(&helper.dag, target)?;
+        visit(&helper.dag)?;
     }
     for function in &program.functions {
         for helper in &function.tensor_helpers {
-            reject_unsupported_effect_ops(&helper.dag, target)?;
+            visit(&helper.dag)?;
         }
     }
     Ok(())
+}
+
+/// Reject unsupported effects in every tensor-helper DAG emitted with a host
+/// program. The shared traversal keeps all callers aligned on helper scope.
+pub fn reject_unsupported_effect_ops_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, |dag| reject_unsupported_effect_ops(dag, target))
+}
+
+/// Apply both C windowed-reduction gates to every tensor-helper DAG emitted
+/// with a host program.
+pub fn reject_unsupported_windowed_reductions_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, |dag| {
+        reject_symbolic_windowed_reduce(dag, target)?;
+        reject_unsupported_reduce_window_precision(dag, target)
+    })
 }
 
 /// Metal-specific early capability policy. The IR verifier and backend
@@ -3501,13 +3484,13 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
         if node_valued {
             return Err(unsupported_gate_error(
                 format!(
-                    "`chelis build --target metal` does not support a runtime (node-valued) movement bound or reshape target extent; lowered node {} requires it. Use `--target c`.",
+                    "runtime (node-valued) movement bound or reshape target extent at lowered node {}",
                     node.id.0
                 ),
                 "metal",
                 chelis_types::deliberate_rejection!(
                     "[05-MOV-1]",
-                    "runtime movement bounds and reshape targets are defined on eval and C; use the C target"
+                    "runtime movement bounds and reshape targets are defined on eval and C; use `--target c`"
                 ),
             ));
         }
@@ -3523,34 +3506,126 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
             | chelis_types::types::Prim::Bool => {}
             chelis_types::types::Prim::F64 => {
                 return Err(unsupported_gate_error(
-                    format!(
-                        "`chelis build --target metal` rejects f64 (node {}): Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads. See spec/04-type-system.md §1.1.3.",
-                        node.id.0
-                    ),
+                    format!("f64 value at lowered node {}", node.id.0),
                     "metal",
                     chelis_types::deliberate_rejection!(
                         "[04-TGT-1]",
-                        "Metal hardware has no f64 execution lane; use the C or HIP target"
+                        "Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads"
                     ),
                 ));
             }
             other => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target metal` DAG path does not support tensor precision `{}` (node {}). The Metal backend admits the active dtype set per spec/04-type-system.md §1.1.3 except f64; supported: f32/f16/bf16/int8/int16/int32/int64/bool.",
+                        "tensor precision `{}` at lowered node {}",
                         other.name(),
                         node.id.0
                     ),
                     "metal",
                     chelis_types::unimplemented_rejection!(
                         729,
-                        "the Metal target dtype capability cell is not implemented"
+                        "the Metal target dtype capability cell is not implemented; supported: f32/f16/bf16/int8/int16/int32/int64/bool (spec/04-type-system.md §1.1.3)"
                     ),
                 ));
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod metal_runtime_dim_reject_tests {
+    use super::reject_unsupported_metal_ops;
+    use chelis_ir::dag::{Dag, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+    use chelis_types::types::Prim;
+
+    fn ty(dims: &[usize], precision: Prim) -> TensorType {
+        TensorType {
+            dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+            precision,
+        }
+    }
+
+    fn dag_with_scalar() -> (Dag, NodeId, NodeId) {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let m = dag.add_node(
+            RiscOp::Load { name: "m".into() },
+            vec![],
+            ty(&[], Prim::Int32),
+            None,
+        );
+        (dag, x, m)
+    }
+
+    #[test]
+    fn metal_seam_rejects_node_valued_shrink_bound() {
+        let (mut dag, x, m) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
+            },
+            vec![x, m],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal seam must reject a node-valued shrink bound");
+        let message = &error.errors[0].message;
+        assert!(message.contains("--target c"), "{message}");
+        assert!(message.contains("deliberate [05-MOV-1]"), "{message}");
+    }
+
+    #[test]
+    fn metal_seam_rejects_node_valued_reshape_target() {
+        let (mut dag, x, m) = dag_with_scalar();
+        dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Node(1)],
+            },
+            vec![x, m],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal seam must reject a node-valued reshape target");
+        let message = &error.errors[0].message;
+        assert!(message.contains("--target c"), "{message}");
+        assert!(message.contains("deliberate [05-MOV-1]"), "{message}");
+    }
+
+    #[test]
+    fn metal_seam_accepts_literal_movement_and_reshape() {
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[4], Prim::F32),
+            None,
+        );
+        let shrunk = dag.add_node(
+            RiscOp::Shrink {
+                bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],
+            },
+            vec![x],
+            ty(&[2], Prim::F32),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Reshape {
+                new_shape: vec![RtDim::Lit(2), RtDim::Lit(1)],
+            },
+            vec![shrunk],
+            ty(&[2, 1], Prim::F32),
+            None,
+        );
+        reject_unsupported_metal_ops(&dag).expect("literal bounds must pass the Metal seam");
+    }
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
@@ -3647,62 +3722,56 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                 ));
             }
-            // chelis#616: node-valued (runtime) movement bounds are C-only.
+            // [05-MOV-1]: node-valued (runtime) movement bounds are C-only.
             RiscOp::Shrink { bounds } if bounds.iter().any(pair_has_node_bound) => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                         `shrink` bound; lowered node {} requires it. The C backend is canonical \
-                         for runtime movement bounds (chelis#616); use `--target c`.",
+                        "runtime (node-valued) `shrink` bound at lowered node {}",
                         node.id.0
                     ),
                     "hip",
                     chelis_types::deliberate_rejection!(
                         "[05-MOV-1]",
-                        "runtime movement bounds are defined on eval and C; use the C target"
+                        "runtime movement bounds are defined on eval and C; use `--target c`"
                     ),
                 ));
             }
             RiscOp::Pad { padding, .. } if padding.iter().any(pair_has_node_bound) => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                         `pad` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
+                        "runtime (node-valued) `pad` bound at lowered node {}",
                         node.id.0
                     ),
                     "hip",
                     chelis_types::deliberate_rejection!(
                         "[05-MOV-1]",
-                        "runtime movement bounds are defined on eval and C; use the C target"
+                        "runtime movement bounds are defined on eval and C; use `--target c`"
                     ),
                 ));
             }
             RiscOp::Stride { strides } if strides.iter().any(|s| s.node_input().is_some()) => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                         `stride` step; lowered node {} requires it. Use `--target c` (chelis#616).",
+                        "runtime (node-valued) `stride` step at lowered node {}",
                         node.id.0
                     ),
                     "hip",
                     chelis_types::deliberate_rejection!(
                         "[05-MOV-1]",
-                        "runtime movement bounds are defined on eval and C; use the C target"
+                        "runtime movement bounds are defined on eval and C; use `--target c`"
                     ),
                 ));
             }
             RiscOp::Reshape { new_shape } if new_shape.iter().any(|d| d.node_input().is_some()) => {
                 return Err(unsupported_gate_error(
                     format!(
-                        "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                         `reshape` target extent; lowered node {} requires it. \
-                         Use `--target c` (chelis#616).",
+                        "runtime (node-valued) `reshape` target extent at lowered node {}",
                         node.id.0
                     ),
                     "hip",
                     chelis_types::deliberate_rejection!(
                         "[05-MOV-1]",
-                        "runtime reshape targets are defined on eval and C; use the C target"
+                        "runtime reshape targets are defined on eval and C; use `--target c`"
                     ),
                 ));
             }
@@ -3884,22 +3953,27 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             | chelis_types::types::Prim::Int64 => {}
             chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
                 if !narrow_float_admissible.contains(&node.id) {
-                    return Err(unsupported_gate_error(
-                        format!(
-                            "`chelis build --target hip` admits `{}` only on tensor load/store \
-                             nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an \
-                             f32 accumulator, WS-A3). Node {} carries op {:?} which has no \
-                             bf16/f16 kernel template yet (chelis-backend-hip \
-                             emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1.",
-                            node.output_type.precision.name(),
-                            node.id.0,
-                            node.op
-                        ),
-                        "hip",
+                    let authority = if node.output_type.precision == chelis_types::types::Prim::F16
+                    {
                         chelis_types::unimplemented_rejection!(
                             729,
-                            "the HIP narrow-float compute cell has no typed kernel template"
+                            "`f16` is implemented only for HIP tensor load/store and `BlasMatmul` operands; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                        )
+                    } else {
+                        chelis_types::unimplemented_rejection!(
+                            729,
+                            "`bf16` is implemented only for HIP tensor load/store and `BlasMatmul` operands; this operation needs a typed bf16/f16 kernel (spec/04-type-system.md §5.7.1)"
+                        )
+                    };
+                    return Err(unsupported_gate_error(
+                        format!(
+                            "narrow-float compute at lowered node {} (`{:?}` with `{}`)",
+                            node.id.0,
+                            node.op,
+                            node.output_type.precision.name(),
                         ),
+                        "hip",
+                        authority,
                     ));
                 }
             }

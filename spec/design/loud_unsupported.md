@@ -17,9 +17,12 @@ functions and `impl` methods across both crate source trees) in
 the closed `BuildTarget` enum, so an unknown target cannot silently skip a
 gate. The final gate-contract slice moved the Metal and effect policies to
 compiler-api as typed shared definitions, applied the effect policy to host
-tensor-helper DAGs as well as pure DAGs, and replaced the stale closed-#616
-Metal movement citation with the deciding [05-MOV-1] atom. Census rows 17-18
-and row 26 are converted. The authoritative Phase 3 runner now exists, but
+tensor-helper DAGs as well as pure DAGs, and scoped pure-DAG rejection to the
+entry actually emitted. It prevents a host tensor-helper `dropout` from
+reaching the C emitter's panic boundary, cites the compiled-kernel owner
+[#1192], and replaces stale closed-#616 Metal/HIP diagnostic prose with the
+deciding [05-MOV-1] atom. Census rows 17-18 and row 26 are converted. The
+authoritative Phase 3 runner now exists, but
 its final root-realizability leg deliberately remains red until independently
 owned [#912] removes the ignored/stubbed integration cases. Phase 3 is
 therefore not complete. Phase 3 was amended 2026-07-30 to absorb
@@ -324,7 +327,10 @@ authority. The windowed-reduction dtype gap cites its implementation owner
 [#1058], compiled tensor/list `to_string` cites [#1059], and host-runtime-only
 builders cite the deliberate [05-HOST-1] contract; remediation instances
 [#705], [#725], [#734], and [#959] are not capability owners.
-The remaining Phase 3 work is the independently owned [#912]
+Compiled `dropout` rejection cites its actual kernel owner [#1192]; the shared
+host-helper traversal closes the former C-emitter panic path, while
+entry-scoped pure-DAG compilation ignores unsupported effects in siblings it
+does not emit. The remaining Phase 3 work is the independently owned [#912]
 root-realizability interlock. The Metal/effect gate migration and the full
 phase runner are implemented, but those focused slices do not claim Phase 3
 completion while the runner's final leg is red.
@@ -2277,5 +2283,6 @@ and never depends on predicting a path.
 [#1144]: https://github.com/Chelis-Lang/chelis/pull/1144
 [#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
+[#1192]: https://github.com/Chelis-Lang/chelis/issues/1192
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912

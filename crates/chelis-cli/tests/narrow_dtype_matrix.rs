@@ -356,7 +356,9 @@ fn hip_rejects_f16_bf16_compute_ops_cleanly() {
         let (ok, stderr, _) = build_target(&program, &format!("hip_{ty}_add"), "hip");
         assert!(!ok, "HIP must reject {ty} compute ops today");
         assert!(
-            stderr.contains("admits") && stderr.contains("only on tensor load/store"),
+            stderr.contains("narrow-float compute")
+                && stderr.contains(&format!("`{ty}`"))
+                && stderr.contains("unimplemented chelis#729"),
             "the rejection must be the specific narrow-float diagnostic, got: {stderr}"
         );
     }

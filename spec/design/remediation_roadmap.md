@@ -185,8 +185,11 @@ operand compute before emission. The source manifest is intentionally scoped
 to syntactic `reject_*` definitions; it does not claim to detect a semantic
 reimplementation hidden under an unrelated name. The final gate-contract
 slice moves Metal/effect policy into those same typed compiler-api
-definitions, including host tensor-helper DAGs, and corrects Metal's stale
-closed-#616 citation to [05-MOV-1]. The single Phase 3 runner is
+definitions, including one shared traversal for host tensor-helper DAGs, and
+scopes pure-DAG effect rejection to the entry actually emitted. It closes the
+former host-helper `dropout` emitter panic, cites the compiled-kernel owner
+[#1192], removes the no-op CLI reject hook, and corrects stale closed-#616
+Metal/HIP diagnostic prose to [05-MOV-1]. The single Phase 3 runner is
 `scripts/loud_unsupported_phase3_oracle.py`; it remains red only at the
 independently owned [#912] root-realizability leg, so Phase 3 is not complete.
 [#730] Phase 4 (ratchet totality, added
@@ -880,3 +883,4 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#1170]: https://github.com/Chelis-Lang/chelis/issues/1170
+[#1192]: https://github.com/Chelis-Lang/chelis/issues/1192

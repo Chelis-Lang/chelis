@@ -8,7 +8,7 @@ use std::fs;
 
 use assert_cmd::Command;
 use chelis_compiler_api::{
-    compiler::{BuildTarget, compile},
+    compiler::{BuildTarget, compile, compile_for_execution},
     schema::{CompileRequest, CompileTarget, SourceKind},
 };
 use tempfile::tempdir;
@@ -205,7 +205,13 @@ fn compiled_dropout_rejection_agrees_across_public_build_paths() {
         let diagnostic = &error.errors[0];
         assert_eq!(diagnostic.kind().as_str(), "unsupported_feature");
         assert!(diagnostic.message.contains("early capability gate"));
-        assert!(diagnostic.message.contains("unimplemented chelis#729"));
+        assert!(diagnostic.message.contains("unimplemented chelis#1192"));
+        assert!(
+            diagnostic
+                .message
+                .contains("run this program with `chelis eval`")
+        );
+        assert!(!diagnostic.message.contains("with seed(...)` instead"));
     }
 
     for target in ["c", "hip", "metal"] {
@@ -213,8 +219,42 @@ fn compiled_dropout_rejection_agrees_across_public_build_paths() {
             .failure()
             .stderr(predicates::str::contains("unsupported:"))
             .stderr(predicates::str::contains("early capability gate"))
-            .stderr(predicates::str::contains("unimplemented chelis#729"));
+            .stderr(predicates::str::contains("unimplemented chelis#1192"))
+            .stderr(predicates::str::contains(
+                "run this program with `chelis eval`",
+            ));
     }
+}
+
+/// Entry-scoped compilation emits only the selected DAG. An unsupported
+/// effect in an un-emitted sibling must not block the clean entry, while
+/// selecting that sibling still reaches the same typed rejection.
+#[test]
+fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
+    let source = "def clean(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
+                  def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n";
+
+    compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("clean".to_string()),
+    })
+    .expect("an un-emitted dropout sibling must not block the selected clean entry");
+
+    let error = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("noisy".to_string()),
+    })
+    .expect_err("selecting the dropout entry must retain the typed rejection");
+    assert!(
+        error.errors[0]
+            .message
+            .contains("unimplemented chelis#1192")
+    );
 }
 
 /// The Deep ingestion branch used to carry its own call sites to the
@@ -223,12 +263,12 @@ fn compiled_dropout_rejection_agrees_across_public_build_paths() {
 #[test]
 fn deep_dropout_uses_the_shared_typed_effect_gate() {
     let source = include_str!("fixtures/phase3_seeded_dropout.dp");
-    for target in ["c", "metal"] {
+    for target in ["c", "hip", "metal"] {
         build_deep(source, &format!("deep_dropout_{target}"), target)
             .failure()
             .stderr(predicates::str::contains("unsupported:"))
             .stderr(predicates::str::contains("early capability gate"))
-            .stderr(predicates::str::contains("unimplemented chelis#729"));
+            .stderr(predicates::str::contains("unimplemented chelis#1192"));
     }
 }
 
@@ -245,5 +285,5 @@ fn host_tensor_helper_dropout_uses_the_shared_typed_effect_gate() {
         .failure()
         .stderr(predicates::str::contains("unsupported:"))
         .stderr(predicates::str::contains("early capability gate"))
-        .stderr(predicates::str::contains("unimplemented chelis#729"));
+        .stderr(predicates::str::contains("unimplemented chelis#1192"));
 }
