@@ -276,8 +276,7 @@ fn lowering_the_same_program_twice_is_byte_identical() {
     let first = std::fs::read(first_out.join(format!("{stem}.c"))).expect("first emitted C");
     let second = std::fs::read(second_out.join(format!("{stem}.c"))).expect("second emitted C");
     assert_eq!(
-        first,
-        second,
+        first, second,
         "repeated lowering of the same program must be byte-identical"
     );
 }

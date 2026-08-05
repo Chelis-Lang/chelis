@@ -13,6 +13,12 @@ use chelis_types::{BUILTIN_NAMES, CheckedProgram};
 use chelis_vocab::EffectKind;
 
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
+use crate::host_mono::{
+    MonoRejection, PendingSpecialization, apply_type_var_bindings, collect_free_type_vars,
+    collect_type_var_bindings, enclosing_binding, encode_host_type, intern_specialization,
+    pop_mono_frame, pop_pending_specialization, push_mono_frame, render_host_type_term,
+    reset_mono_state, substitute_type_vars_in_deep,
+};
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeTerm, HostTensorTypeTerm,
     HostTypeDecodeError, HostTypeTerm, decode_host_type,
@@ -61,6 +67,13 @@ impl HostLoweringCacheGuard {
     fn begin() -> Self {
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
+        // chelis#1158: the monomorphization interner is per-program state,
+        // not a cross-program cache. Clearing it on the same boundary as the
+        // caches above keeps one process able to lower many programs without
+        // a symbol from an earlier program surviving into a later one — and
+        // clearing it again on drop keeps a `raise_fatal_lowering_diagnostic`
+        // unwind from leaving a pushed specialization frame behind.
+        reset_mono_state();
         HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(true));
         Self
     }
@@ -71,6 +84,7 @@ impl Drop for HostLoweringCacheGuard {
         HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(false));
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
+        reset_mono_state();
     }
 }
 
@@ -1834,6 +1848,36 @@ fn lower_host_program(
             });
             global_scope.insert(name.to_string(), ty);
         }
+    }
+    // chelis#1158: drain the monomorphization worklist. Every call site above
+    // that reached a recursive generic interned a `(callee, concrete
+    // signature)` pair and emitted a plain C call to its symbol; this loop
+    // supplies the definitions those calls name. Lowering a specialization
+    // body may intern further pairs — that is the mechanism, not a hazard:
+    // the interner's memo is what bounds the loop, so a mutual-recursion
+    // cycle resolves to an already-interned symbol with no SCC analysis, and
+    // the per-callee and signature-size caps in `host_mono` keep genuinely
+    // unbounded instantiation families fail-loud instead of divergent.
+    //
+    // Emission order is the worklist's FIFO order, which is first-seen order
+    // over a deterministic traversal — not a hash-map iteration — so the
+    // emitted `.c` is reproducible (chelis#1002). Ordering against callers
+    // does not matter: `emit_host_abi_program` prototypes every function
+    // before it emits any body.
+    while let Some(pending) = pop_pending_specialization() {
+        let function = lower_mono_specialization(&pending, program)?;
+        global_scope.insert(
+            function.name.clone(),
+            HostTypeTerm::Fn(
+                function
+                    .params
+                    .iter()
+                    .map(|param| param.ty.clone())
+                    .collect(),
+                Box::new(function.ret_ty.clone()),
+            ),
+        );
+        host.functions.push(function);
     }
     loop {
         let mut changed = false;
@@ -6984,19 +7028,25 @@ fn lower_app_host_expr(
         }
         return lowered;
     }
-    // chelis#941: a recursive ordinary-generic function has no standalone C
-    // symbol, and eager inlining would expand without a bound. Until checked
-    // type-application monomorphs are memoized as real symbols, reject a
-    // surviving call here rather than emitting a reference to the omitted
-    // generic definition.
+    // chelis#1158 (successor to chelis#941): a generic callee that reached
+    // this point declined every specialization path above — it is recursive,
+    // so `inline_top_level_host_call` refused re-entry, and eager expansion
+    // would not terminate anyway. Outline it instead of inlining it: resolve
+    // this call's fully concrete signature, intern
+    // `(callee, signature) -> symbol`, and emit an ordinary C call.
+    // `lower_host_program` drains the interner afterwards and emits one
+    // standalone definition per interned pair, so the symbol referenced here
+    // is never the omitted generic definition.
     if top_level_fn_is_type_polymorphic(program, &name) {
-        return Err(host_expr_lowering_error(
+        return lower_monomorphized_generic_call(
             &app_expr,
-            format!(
-                "recursive generic host call `{name}` requires bounded monomorphized symbols \
-                 (chelis#941; [05-UNS-1])"
-            ),
-        ));
+            &name,
+            &kids[1..],
+            program,
+            scope,
+            tensor_helpers,
+            &explicit_ty,
+        );
     }
     let args = kids[1..]
         .iter()
@@ -7116,6 +7166,346 @@ fn beta_reduce_inline_host_call(expr: &Expr) -> Option<Expr> {
         &substitutions,
         &HashSet::new(),
     )))
+}
+
+/// Lower a call to a type-polymorphic callee as a call to its monomorphic
+/// specialization (chelis#1158).
+///
+/// The call's arguments are lowered against the *interned* parameter types
+/// rather than their own checked metadata. That is what gives an argument
+/// with no checked type of its own — chelis#941's `loop(Empty)`, where the
+/// nullary constructor carries none — a concrete type to construct at.
+fn lower_monomorphized_generic_call(
+    app_expr: &Expr,
+    name: &str,
+    args: &[Expr],
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected_ty: &HostTypeTerm,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let (param_tys, ret_ty) =
+        resolve_concrete_call_signature(name, args, program, scope, expected_ty)
+            .map_err(|rejection| host_expr_lowering_error(app_expr, rejection.describe(name)))?;
+    let symbol = intern_specialization(name, &param_tys, &ret_ty)
+        .map_err(|rejection| host_expr_lowering_error(app_expr, rejection.describe(name)))?;
+    let lowered_args = args
+        .iter()
+        .zip(param_tys.iter())
+        .map(|(arg, ty)| {
+            let lowered =
+                lower_host_expr_with_expected(arg, program, scope, tensor_helpers, Some(ty))?;
+            Ok(force_host_expr_type(lowered, ty.clone()))
+        })
+        .collect::<Result<Vec<_>, crate::lower::LowerDiagnostic>>()?;
+    Ok(HostExpr::new(HostExprKind::Call {
+        function: symbol,
+        args: lowered_args,
+        arg_tys: param_tys,
+        ty: ret_ty,
+    }))
+}
+
+/// Resolve the fully concrete signature this call site instantiates.
+///
+/// Bindings are matched out of the *concrete* side only, in two rounds:
+/// the arguments' own checked types first (most specific), then the checked
+/// application's result type. Whatever remains free is looked up in the
+/// enclosing specialization's environment, which only ever answers for a
+/// self-recursive call — see `host_mono::enclosing_binding` for why that is
+/// the checker's own solution rather than a default.
+///
+/// Representation-erased ADT arguments are canonicalized exactly as the
+/// chelis#940 constructor path does before the concreteness test, so a
+/// dimension parameter that has no stored ABI field (`Frame[n]` reaching
+/// `tensor[n, _]`) does not read as an unresolved value parameter.
+fn resolve_concrete_call_signature(
+    name: &str,
+    args: &[Expr],
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+    expected_ty: &HostTypeTerm,
+) -> Result<(Vec<HostTypeTerm>, HostTypeTerm), MonoRejection> {
+    let Some((declared_params, declared_ret)) = lookup_declared_fn_type(program, name) else {
+        return Err(MonoRejection::NotConcrete {
+            detail: "the callee has no declared signature to instantiate".to_string(),
+        });
+    };
+    if declared_params.len() != args.len() {
+        return Err(MonoRejection::NotConcrete {
+            detail: format!(
+                "the call supplies {} argument(s) against a {}-parameter signature",
+                args.len(),
+                declared_params.len()
+            ),
+        });
+    }
+    // Canonicalize the concrete side FIRST. A representation-erased ADT
+    // argument (chelis#940: `Column[n]` whose `n` reaches only a tensor
+    // dimension) survives the checker as an unresolved type argument even
+    // when the tensor it feeds has a concrete shape, so an uncanonicalized
+    // `Hamt[Column[n]]` would read as "not concrete" and reject a call site
+    // the constructor path is perfectly able to instantiate.
+    let definitions = adt_constructor_definitions(program);
+    let mut bindings: HashMap<String, HostTypeTerm> = HashMap::new();
+    let arg_tys = args
+        .iter()
+        .map(|arg| {
+            canonicalize_representation_erased_adt_args(
+                mono_argument_type(arg, program, scope),
+                &definitions,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (declared, arg_ty) in declared_params.iter().zip(&arg_tys) {
+        collect_type_var_bindings(declared, arg_ty, &mut bindings);
+    }
+    collect_type_var_bindings(
+        &declared_ret,
+        &canonicalize_representation_erased_adt_args(expected_ty.clone(), &definitions),
+        &mut bindings,
+    );
+
+    let instantiate = |bindings: &HashMap<String, HostTypeTerm>| {
+        (
+            declared_params
+                .iter()
+                .map(|ty| apply_type_var_bindings(ty, bindings))
+                .collect::<Vec<_>>(),
+            apply_type_var_bindings(&declared_ret, bindings),
+        )
+    };
+    let (mut params, mut ret) = instantiate(&bindings);
+    // Last resort: the enclosing specialization's own bindings. This only
+    // answers for a self-recursive call, and only when every argument that
+    // failed to type is a bare name reference — chelis#941's `loop(Empty)`,
+    // where the nullary constructor carries no checked type and nothing else
+    // in scope could have constrained it, so the enclosing rigid variable IS
+    // the checker's solution. An argument with structure the checker did not
+    // annotate (`(x, x)` in a polymorphically-recursive call) must NOT be
+    // defaulted this way: assuming the enclosing instantiation there would
+    // silently retype a tuple as its own element type instead of minting the
+    // new instantiation the program actually asks for.
+    if (params.iter().any(HostTypeTerm::is_unresolved) || ret.is_unresolved())
+        && args
+            .iter()
+            .zip(&arg_tys)
+            .all(|(arg, ty)| !ty.is_unresolved() || expr_is_bare_var(arg))
+    {
+        let mut free = HashSet::new();
+        for ty in params.iter().chain(std::iter::once(&ret)) {
+            collect_free_type_vars(ty, &mut free);
+        }
+        let mut recovered = false;
+        for variable in free {
+            if let Some(binding) = enclosing_binding(name, &variable) {
+                bindings.insert(variable, binding);
+                recovered = true;
+            }
+        }
+        if recovered {
+            (params, ret) = instantiate(&bindings);
+        }
+    }
+
+    let params = params
+        .into_iter()
+        .map(|ty| canonicalize_representation_erased_adt_args(ty, &definitions))
+        .collect::<Vec<_>>();
+    let ret = canonicalize_representation_erased_adt_args(ret, &definitions);
+    if let Some(unresolved) = params
+        .iter()
+        .chain(std::iter::once(&ret))
+        .find(|ty| ty.is_unresolved())
+    {
+        return Err(MonoRejection::NotConcrete {
+            detail: format!(
+                "the call site's type arguments are not fully concrete (`{}` still \
+                 carries a free variable), so there is no signature to intern",
+                render_host_type_term(unresolved)
+            ),
+        });
+    }
+    Ok((params, ret))
+}
+
+/// Emit one interned `(callee, signature)` pair as a standalone host function
+/// (chelis#1158, Phase 3).
+///
+/// The specialization is produced by lowering a *concrete clone* of the
+/// generic body: every `(t-var {} X)` in the body's checked metadata is
+/// rewritten to the interned term first, so the ordinary lowering pipeline
+/// receives a monomorphic program and needs no parallel binding channel. The
+/// alternative — threading a type environment through `lower_host_expr`'s
+/// typing context — would put a second source of type truth next to the
+/// checked metadata in every expression form.
+fn lower_mono_specialization(
+    pending: &PendingSpecialization,
+    program: &CheckedProgram,
+) -> Result<HostFunction, crate::lower::LowerDiagnostic> {
+    let defs = collect_program_defs(program.exprs());
+    let Some(body) = lookup_program_def(&defs, &pending.callee) else {
+        return Err(crate::lower::LowerDiagnostic::new(
+            format!(
+                "monomorphized generic `{}` has no top-level definition to \
+                 specialize (chelis#1158; [05-UNS-1])",
+                pending.callee
+            ),
+            None,
+            None,
+        ));
+    };
+    let body = body.clone();
+
+    // One checked generic body spells the SAME type variable three ways, and
+    // all three occur inside it:
+    //   * the authored parameter annotation keeps the source name — `(box
+    //     {type: (t-adt {} Box (t-var {} a))})`;
+    //   * the def/fn node's own checked `type` metadata, and every node
+    //     annotation derived from it, uses the checker's inference identity
+    //     for this def (`t371`);
+    //   * `checked_authored_function_signature` re-normalizes the authored
+    //     signature under its own numbering (`t0`).
+    // Binding only one spelling leaves the other two generic after
+    // substitution, so collect from all three against the interned terms.
+    let mut bindings: HashMap<String, HostTypeTerm> = HashMap::new();
+    if let Some((declared_params, declared_ret)) = lookup_declared_fn_type(program, &pending.callee)
+    {
+        for (declared, concrete) in declared_params.iter().zip(&pending.params) {
+            collect_type_var_bindings(declared, concrete, &mut bindings);
+        }
+        collect_type_var_bindings(&declared_ret, &pending.ret, &mut bindings);
+    }
+    if let Some((checked_params, checked_ret)) = expr_fn_type(&body) {
+        for (checked, concrete) in checked_params.iter().zip(&pending.params) {
+            collect_type_var_bindings(checked, concrete, &mut bindings);
+        }
+        collect_type_var_bindings(&checked_ret, &pending.ret, &mut bindings);
+    }
+    for (param, concrete) in mono_param_binders(&body).iter().zip(&pending.params) {
+        if let Some(declared) =
+            param_type_expr(param).map(|expr| decode_host_type_or_raise(expr, &HashMap::new()))
+        {
+            collect_type_var_bindings(&declared, concrete, &mut bindings);
+        }
+    }
+
+    let deep_bindings = bindings
+        .iter()
+        .filter_map(|(variable, term)| encode_host_type(term).map(|expr| (variable.clone(), expr)))
+        .collect::<HashMap<_, _>>();
+    let specialized_body = substitute_type_vars_in_deep(&body, &deep_bindings);
+    let concrete_signature =
+        HostTypeTerm::Fn(pending.params.clone(), Box::new(pending.ret.clone()));
+    let Some(signature_expr) = encode_host_type(&concrete_signature) else {
+        return Err(crate::lower::LowerDiagnostic::new(
+            format!(
+                "monomorphized generic `{}` interned a signature with no Deep \
+                 spelling (chelis#1158; [05-UNS-1])",
+                pending.callee
+            ),
+            None,
+            None,
+        ));
+    };
+
+    push_mono_frame(&pending.callee, bindings, pending.chain.clone());
+    let lowered = lower_host_function(
+        &pending.symbol,
+        &specialized_body,
+        Some(&signature_expr),
+        program,
+    );
+    pop_mono_frame();
+    match lowered? {
+        Some(function) => Ok(function),
+        None => Err(crate::lower::LowerDiagnostic::new(
+            format!(
+                "monomorphized generic `{}` has no lowerable function body \
+                 (chelis#1158; [05-UNS-1])",
+                pending.callee
+            ),
+            None,
+            None,
+        )),
+    }
+}
+
+/// The host type of one call argument, for signature resolution.
+///
+/// `expr_host_type` reads the checker's node annotation, and the checker does
+/// not annotate every construct: a `(tuple {span: …} …)` argument carries no
+/// `type` entry at all. Recovering that structurally — from the element types
+/// the checker DID record — is what keeps a polymorphically-recursive
+/// `poly((x, x), …)` visible as a genuinely new instantiation instead of
+/// collapsing onto the enclosing one.
+fn mono_argument_type(
+    arg: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+) -> HostTypeTerm {
+    let annotated = expr_host_type(arg, program, scope);
+    if !annotated.is_unresolved() {
+        return annotated;
+    }
+    if let Some((DeepTag::Tuple, _, items)) = stamped_parts(arg) {
+        let item_tys = items
+            .iter()
+            .map(|item| mono_argument_type(item, program, scope))
+            .collect::<Vec<_>>();
+        if !item_tys.is_empty() && item_tys.iter().all(|ty| !ty.is_unresolved()) {
+            return HostTypeTerm::Tuple(item_tys);
+        }
+    }
+    annotated
+}
+
+/// Whether `expr` is a bare `(var {} name)` reference — the only shape whose
+/// missing type may be defaulted to the enclosing instantiation.
+fn expr_is_bare_var(expr: &Expr) -> bool {
+    match expr {
+        Expr::MetaExpr(meta, _) => expr_is_bare_var(&meta.expr),
+        _ => expr.tag() == Some(DeepTag::Var),
+    }
+}
+
+/// The `(params ...)` binders of a `(fn ...)` def body, or empty.
+fn mono_param_binders(body: &Expr) -> Vec<Expr> {
+    let Some((DeepTag::Fn, _, kids)) = stamped_parts(body) else {
+        return Vec::new();
+    };
+    let Some(Some((DeepTag::Params, _, params))) = kids.first().map(stamped_parts) else {
+        return Vec::new();
+    };
+    params.to_vec()
+}
+
+/// The raw `type` metadata expression on a parameter binder.
+///
+/// Unlike `param_host_type` this keeps generic annotations: the whole point
+/// is to read `(box {type: (t-adt {} Box (t-var {} a))})` and learn that the
+/// source spelling of the first type parameter is `a`.
+fn param_type_expr(expr: &Expr) -> Option<&Expr> {
+    let meta = match expr {
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        Expr::Node(node, _) => node.meta(),
+        Expr::MetaExpr(meta, _) => {
+            return meta
+                .entries
+                .iter()
+                .find(|(key, _)| key == "type")
+                .map(|(_, value)| value)
+                .or_else(|| param_type_expr(&meta.expr));
+        }
+        _ => return None,
+    };
+    meta.entries
+        .iter()
+        .find(|(key, _)| key == "type")
+        .map(|(_, value)| value)
 }
 
 fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<Expr> {
