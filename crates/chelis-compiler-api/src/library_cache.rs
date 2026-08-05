@@ -79,8 +79,9 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 
 /// Internal struct-format version. Bumped when [`LibraryContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
-/// Mixed into the content-addressed key.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 1;
+/// Mixed into the content-addressed key. V2 captures chelis#942's serialized
+/// deferred-reshape relations inside `TypeEnv`.
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 2;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -446,6 +447,11 @@ pub fn expanded_deep_digest(exprs: &[chelis_deep::ast::Expr]) -> [u8; 32] {
 mod tests {
     use super::*;
     use crate::stdlib_cache::build_stdlib_context;
+
+    #[test]
+    fn cache_format_version_tracks_deferred_reshape_relations() {
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 2);
+    }
 
     /// A minimal well-formed dependency `Decl` slice. The exact shape is
     /// irrelevant to the key tests; what matters is that the same slice
