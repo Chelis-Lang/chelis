@@ -941,6 +941,56 @@ class KnownRedCellRunTests(unittest.TestCase):
             self.stdout = stdout
             self.stderr = ""
 
+    def test_empty_ledger_has_an_empty_real_run_set(self) -> None:
+        with mock.patch.object(
+            oracle, "classify_red_run", wraps=oracle.classify_red_run
+        ) as classifier:
+            self.assertEqual(oracle.known_red_run_violations((), ()), [])
+        classifier.assert_not_called()
+
+    def test_nonempty_ledger_cannot_omit_its_real_run(self) -> None:
+        violations = oracle.known_red_run_violations((FIXTURE_CELL,), ())
+        self.assertTrue(
+            any(
+                "did not execute its declared run set" in violation
+                for violation in violations
+            ),
+            violations,
+        )
+
+    def test_default_ledger_is_resolved_at_call_time(self) -> None:
+        runner = mock.Mock(
+            return_value=self._Completed(
+                101,
+                f"running 1 test\n{FIXTURE_CELL.fragment}\nFAILED",
+            )
+        )
+        with mock.patch.object(
+            oracle, "KNOWN_RED_CELLS", (FIXTURE_CELL,)
+        ):
+            oracle.run_known_red_cells({}, runner=runner)
+        runner.assert_called_once()
+
+    def test_classifier_is_a_unit_tested_helper_not_a_manifest_instrument(
+        self,
+    ) -> None:
+        previous_invoked = set(oracle.INVOKED_INSTRUMENTS)
+        try:
+            oracle.INVOKED_INSTRUMENTS.discard("classify_red_run")
+            self.assertIsNone(
+                oracle.classify_red_run(
+                    FIXTURE_CELL,
+                    101,
+                    f"running 1 test\n{FIXTURE_CELL.fragment}\nFAILED",
+                )
+            )
+            self.assertNotIn(
+                "classify_red_run", oracle.INVOKED_INSTRUMENTS
+            )
+        finally:
+            oracle.INVOKED_INSTRUMENTS.clear()
+            oracle.INVOKED_INSTRUMENTS.update(previous_invoked)
+
     def test_all_cells_red_on_their_fragments_passes(self) -> None:
         def runner(_command, **_kwargs):
             name = _command[-1]
@@ -963,6 +1013,42 @@ class KnownRedCellRunTests(unittest.TestCase):
 
         with self.assertRaisesRegex(oracle.OracleFailure, "NOT on its declared"):
             oracle.run_known_red_cells({}, runner=runner, cells=(FIXTURE_CELL,))
+
+    def test_shipped_empty_ledger_top_level_path_passes(self) -> None:
+        """The phase oracle remains executable after the final red cell retires.
+
+        Run the shipped top-level path with its real structural, exclusion, and
+        known-red receipt plumbing. Only the expensive Cargo suites are replaced,
+        and their fake records the same success receipts as ``run_green_suites``.
+        This is the transition chelis#1118 made when it emptied the ledger.
+        """
+
+        previous_invoked = set(oracle.INVOKED_INSTRUMENTS)
+        previous_consumed = set(oracle.CONSUMED_INSTRUMENTS)
+
+        def record_green_suites(_env) -> None:
+            for label, _command in oracle.GREEN_SUITES:
+                receipt = f"suite:{label}"
+                oracle.INVOKED_INSTRUMENTS.add(receipt)
+                oracle.CONSUMED_INSTRUMENTS.add(receipt)
+
+        try:
+            oracle.INVOKED_INSTRUMENTS.clear()
+            oracle.CONSUMED_INSTRUMENTS.clear()
+            with (
+                mock.patch.object(oracle, "KNOWN_RED_CELLS", ()),
+                mock.patch.object(
+                    oracle,
+                    "run_green_suites",
+                    side_effect=record_green_suites,
+                ),
+            ):
+                self.assertEqual(oracle.main(), 0)
+        finally:
+            oracle.INVOKED_INSTRUMENTS.clear()
+            oracle.INVOKED_INSTRUMENTS.update(previous_invoked)
+            oracle.CONSUMED_INSTRUMENTS.clear()
+            oracle.CONSUMED_INSTRUMENTS.update(previous_consumed)
 
 
 class RuleManifestTests(unittest.TestCase):
@@ -1033,11 +1119,12 @@ class RuleManifestTests(unittest.TestCase):
             if not entry.startswith("review-rule")
         }
         self.assertEqual(oracle.instrument_invocation_violations(invoked), [])
-        invoked.discard("classify_red_run")
+        invoked.discard("known_red_run_violations")
         violations = oracle.instrument_invocation_violations(invoked)
         self.assertTrue(
             any(
-                "classify_red_run" in v and "runtime invocation receipt" in v
+                "known_red_run_violations" in v
+                and "runtime invocation receipt" in v
                 for v in violations
             ),
             violations,

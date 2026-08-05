@@ -1,6 +1,11 @@
 # Faithful Observation: one dtype-true formatter for every exit, both lanes
 
-**Status:** Phases 0-2 LANDED; Phase 3 is DELIVERED in this revision.
+**Status:** Phases 0-3 LANDED. Phase 2 completion was revalidated on
+2026-08-05 after repairing the oracle's empty-ledger receipt boundary; Phase 3
+landed through PRs #1099, #1115, and #1118 and shipped in v0.18.3. The phase
+implementation is complete, but tracking issue [#732] remains open while
+[#997] is a direct §C1.6/§B2.4 contract violation. [#1059] is separate support
+capability work and is not evidence that an existing exit is unfaithful.
 Phase 0 (the round-trip harness and the
 exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 (the formatter, eval adoption, and the eval-side §B2.1 migration) landed
@@ -45,12 +50,11 @@ into an f64 tensor preserves the same stored value as the host path. The
 landed, and deliberately so: an f64 value field would have reintroduced the
 above-2^53 integer loss that [#856]'s exact i64 lane exists to prevent.
 Integer leaves therefore stay on the exact lane and only float leaves are
-finalized. Phase 3
-authors the [05-OBS-3] table, moves both value harnesses and the rejected-cell
-corpus onto `chelis_types::agreement`, and supplies one executable acceptance
-oracle. Its implementation is complete here; merge/CI acceptance is recorded
-on the carrying PR rather than claimed by this source revision. Tracking
-issue: [#732].
+finalized. Phase 3 authors the [05-OBS-3] table, moves both value harnesses and
+the rejected-cell corpus onto `chelis_types::agreement`, and supplies one
+executable acceptance oracle. Both phase oracles pass on the 2026-08-05
+revision; their exact commands and continuous-execution boundaries are stated
+in their phase sections below. Tracking issue: [#732].
 **Owning specs:** `spec/05-risc-primitives.md` (its §8 carries this
 plan's ratified contract as current blockquote authorities [05-OBS-1..6]; the
 per-op tolerance table is authored in the same section by Phase 3, while
@@ -730,24 +734,43 @@ observation harness, this plan's own instrument. Phase 4 capability cells and
 the staged manual Decimal fixtures remain outside this oracle; no Phase 3
 value cell is hidden behind `#[ignore]`.
 
-**Continuous execution:** THIS Phase 2 command is a MANUAL gate, and the split
-matters. `scripts/faithful_observation_phase2_oracle.py` is invoked by no CI
-workflow, by `scripts/gate.py`, and by no other oracle: re-measured 2026-08-04,
-`dtype_phase3_oracle.py`'s legs are `dtype_phase2_oracle.py`,
-`faithful_observation_phase3_oracle.py`, and the compiled-C cargo suites, and
-none of them reaches this script. The ledger equality, `FORMAT_CLASS_TABLE`,
-doc-citation parity, `B2_RULE_INSTRUMENTS` manifest, and runtime
-consumed-result receipts therefore run only when this command is invoked by
-hand. The **Phase 3** oracle is the opposite case and runs continuously: it is
-a nested leg of `.venv/bin/python scripts/dtype_phase3_oracle.py`, which the
-Linux `Dtype Phase 0-3 Oracle` job runs on every non-docs-only PR (that job and
-macOS Smoke both skip when `changes.outputs.docs_only` is true), and
+**Continuous execution:** the authoritative Phase 2 command runs in the
+dedicated `Faithful Observation Phase 2 Oracle` CI job on every push and every
+PR that does not change only non-executable prose. This document is a
+structural input to the oracle, so `scripts/ci_detect_docs_only.py` explicitly
+classifies it as executable: a Markdown-only edit here runs the full matrix,
+while unrelated documentation-only changes retain the normal skip. The oracle
+is a separate blocking leg rather than an extra step hidden in the workspace
+or dtype job; the stable `Integration Tests (Linux)` context fails closed
+unless the workspace, dtype, and faithful-observation legs all succeed.
+`scripts/test_gate.py` locks the job boundary, workspace cache target,
+docs-only fail-safe, command, toolchain, managed Python, and aggregation edge.
+The Phase 2 corpus's constituent Rust cells also run under workspace nextest,
+but that supporting coverage does not replace this oracle's ledger equality,
+`FORMAT_CLASS_TABLE`, doc-citation parity, `B2_RULE_INSTRUMENTS` manifest, or
+runtime consumed-result receipts.
+
+The empty-ledger state is an executable state, not a reason to fabricate a
+classifier call. `known_red_run_violations` compares the declared ledger with
+the complete set of real executions and accepts exactly empty/empty;
+`run_known_red_cells` currently constructs one tuple per declared cell before
+that comparison, so equality is a guard against future filtering, reordering,
+short-circuiting, or alternate callers. At empty/empty, the operative
+assertion is that this complete-run-set boundary executed and its result
+reached the verdict sink. A top-level regression runs that zero-cell path and
+requires all structural and receipt checks to finish with
+`PHASE 2 ORACLE: PASS` while replacing only the expensive Cargo suites with
+equivalent success receipts. It overrides the ledger dynamically, so the
+zero-cell regression remains executable if a future real red cell is declared.
+
+The **Phase 3** oracle remains continuous as a nested leg of
+`.venv/bin/python scripts/dtype_phase3_oracle.py`, which the Linux
+`Dtype Phase 0-3 Oracle` job runs on every non-docs-only PR;
 `scripts/test_nextest_profile_partition.py` fails if the nesting is removed.
-The Phase 2 corpus's constituent Rust cells also run under macOS Smoke's
-`cargo nextest run --workspace` on those same PRs, so a red CELL is caught
-continuously while a narrowed corpus or a tampered instrument is not. Wiring
-this Phase 2 command into the same nesting is open work; this plan owns its
-contents and pass criteria either way.
+This dedicated Phase 2 leg retires one inventory row from [#1089]. It does not
+claim the broader [#990] package: that issue still owns the cross-authority
+change filter, scheduled full matrix, shared liveness validator, and reporting
+job.
 
 **Delivered** (2026-07-24), with five recorded notes (note 5 added
 2026-07-28, with the oracle it describes). (1) The
@@ -974,6 +997,59 @@ and every remaining value divergence is a failure rather than tolerance.
   `rust-format-narrowing`, `rust-debug-numeric-format`). No delivery
   overlap.
 
+## I2. Child ownership and class closure
+
+Phase completion and class closure are related but not identical. A phase may
+remain delivered after its acceptance oracle is green while the tracker stays
+open for a newly admitted direct contract violation. [#732] therefore remains
+open while [#997] violates §C1.6/§B2.4. A separately requested capability such
+as [#1059] does not retroactively make the current loud rejection or the
+delivered formatter unfaithful; it has its own support acceptance.
+
+`classify_red_run` is deliberately a non-instrumented helper: the script unit
+suite executes its green, gone-green, wrong-reason, and zero-test branches.
+The runtime manifest owns the complete-run-set boundary instead, because an
+empty ledger has no honest classifier invocation to require.
+
+Every direct child of [#732] has one implementation owner in this design:
+
+| child | design owner and disposition |
+|---|---|
+| [#716] | §C3.2-§C3.5 and Phase 2: typed f16/bf16 decode, print, and `to_list`; closed on the original un-ignored assertions |
+| [#723] | §C1.1, §C2.3, §C3.2, and Phase 2: exact int64 rendering without a double funnel; closed on the original un-ignored assertion |
+| [#748] | §C1.2-§C1.3 and §C3.3: shortest-round-trip grammar replaced both lossy C format branches; closed |
+| [#749] | §C1.5, §B2.4, and §C3.4: the nested renderer is a consumer of the canonical formatter, not a second dtype switch; closed |
+| [#775] | §C1.5 / [05-OBS-4]: scalar roots and rank-0 tensors use the bare form in both lanes; closed after re-verification on 2026-08-04 |
+| [#1078] | §B2.3 and the Phase 2 known-red ledger: repaired cells leave the ledger and the ordinary corpus atomically; closed |
+| [#1104] | Phase 3's definition-digest and shared-helper canaries: mutating a shared comparator helper must make the oracle red; closed |
+| [#997] | §C1.6 and §B2.4, through the structural `FO-DIAG` package below; open and blocks class closure |
+| [#1059] | §C3's canonical formatter is the implementation dependency, but support for C-host tensor/list `to_string` is a separate capability package; open and does not weaken or reopen the existing loud-rejection contract |
+
+### FO-DIAG: structural retirement of [#997]
+
+[#997] is not a list of independent string patches. It is one migration onto a
+single diagnostic-rendering boundary:
+
+1. Put the crate-private diagnostic renderer beside the existing canonical
+   `render_value` implementation. Diagnostics pass typed runtime/JSON/CSV
+   values through that boundary; callers do not choose `Debug`, decimal
+   precision, truncation, or container grammar locally.
+2. Migrate every product row attributed to [#997] in one change set. The
+   current tripwire annotations account for 36 tokens: eval +7, JSON +18, CSV
+   +10, and the shared runtime helper +1; the JSON count explicitly includes
+   one cfg-test assertion. Recount from the executable tripwire rather than
+   copying this prose into a second baseline.
+3. Add positive and negative parity at the boundary: exact int64 above 2^53,
+   own-width floats, bools, nested/malformed JSON and CSV payloads, and
+   nonnumeric controls. A mutation that restores a derived-`Debug` numeric
+   payload must fail `rust-debug-numeric-format`.
+4. Shrink the exact permitted rows in the same change. Moving the token to a
+   helper outside `OBSERVATION_EXIT_SURFACES`, or adding a one-off formatter,
+   is not a fix; the scope ratchet grows with any new diagnostic surface.
+5. Acceptance is the focused compiler-api diagnostic suite plus the
+   authoritative Phase 2 oracle. Both must be green before [#997] closes and
+   before [#732] can close.
+
 ## Issue map
 
 | phase | goes green / becomes unwritable |
@@ -1036,6 +1112,11 @@ guaranteed to be a real value bug wearing its own name.
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
 [#856]: https://github.com/Chelis-Lang/chelis/issues/856
+[#990]: https://github.com/Chelis-Lang/chelis/issues/990
+[#997]: https://github.com/Chelis-Lang/chelis/issues/997
+[#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
+[#1089]: https://github.com/Chelis-Lang/chelis/issues/1089
+[#1104]: https://github.com/Chelis-Lang/chelis/issues/1104
 [#897]: https://github.com/Chelis-Lang/chelis/issues/897
 [#1043]: https://github.com/Chelis-Lang/chelis/pull/1043
 [#1078]: https://github.com/Chelis-Lang/chelis/issues/1078

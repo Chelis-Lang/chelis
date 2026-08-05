@@ -742,7 +742,53 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: .venv/bin/python scripts/dtype_phase3_oracle.py
 
-  # Keep the existing required status context while making both expensive
+  # Keep the #732 Phase 2 acceptance contract executable as its own blocking
+  # leg. This is deliberately not appended to the dtype job: each phase oracle
+  # has an independently visible result and failure boundary.
+  faithful-observation-phase2-oracle:
+    name: Faithful Observation Phase 2 Oracle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install C dependencies
+        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Create uv-managed venv + wire libpython rpath
+        run: python3 scripts/ci_setup_uv_python.py
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          # Restore the workspace cache but leave the single writer in the
+          # workspace-tests job, avoiding another multi-GB cache entry.
+          save-if: false
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Faithful observation Phase 2 oracle
+        run: .venv/bin/python scripts/faithful_observation_phase2_oracle.py
+
+  # Keep the existing required status context while making the three expensive
   # legs parallel. `!cancelled()` lets this job inspect dependency failures
   # while still suppressing work after cancellation.
   integration:
@@ -750,13 +796,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, workspace-tests, dtype-phase3-oracle]
+    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Require both integration legs
-        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }}
+      - name: Require all integration legs
+        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
