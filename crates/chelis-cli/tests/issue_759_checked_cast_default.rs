@@ -26,7 +26,7 @@
 #![allow(clippy::uninlined_format_args)]
 
 use assert_cmd::Command;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 
 #[path = "common/mod.rs"]
 mod common;
@@ -339,9 +339,7 @@ fn c_toolchain_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Build + link + run a program through the C lane; return
-/// `(stdout, stderr, ok)`.
-fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), String> {
+fn c_lane_build(program: &str, name: &str) -> Result<(TempDir, std::path::PathBuf), String> {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{name}.ch"));
     let out_dir = dir.path().join(format!("{name}-out"));
@@ -366,7 +364,15 @@ fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), Strin
     if !status.success() {
         return Err(format!("link failed: {status}"));
     }
-    let run = std::process::Command::new(out_dir.join(name))
+    let binary = out_dir.join(name);
+    Ok((dir, binary))
+}
+
+/// Build + link + run a program through the C lane; return
+/// `(stdout, stderr, ok)`.
+fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), String> {
+    let (_dir, binary) = c_lane_build(program, name)?;
+    let run = std::process::Command::new(binary)
         .output()
         .expect("compiled binary should run");
     Ok((
@@ -374,6 +380,188 @@ fn c_lane_run(program: &str, name: &str) -> Result<(String, String, bool), Strin
         String::from_utf8_lossy(&run.stderr).into_owned(),
         run.status.success(),
     ))
+}
+
+fn assert_c_trap_at_thread_counts(program: &str, expected: &str, name: &str) {
+    let (_dir, binary) = c_lane_build(program, name).expect("C lane build");
+    for threads in [1, 2, 4, 8] {
+        let run = std::process::Command::new(&binary)
+            .env("OMP_NUM_THREADS", threads.to_string())
+            .output()
+            .expect("compiled binary should run");
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            !run.status.success() && stderr.contains(expected),
+            "{name} with OMP_NUM_THREADS={threads} must select `{expected}`; \
+             status={} stdout={stdout} stderr={stderr}",
+            run.status
+        );
+    }
+}
+
+const ACTIVE_CAST_PRIMS: [&str; 9] = [
+    "f64", "f32", "f16", "bf16", "int8", "int16", "int32", "int64", "bool",
+];
+
+fn safe_scalar_at(source: &str) -> String {
+    match source {
+        "f64" | "f32" | "f16" | "bf16" => format!("cast(1.0, {source})"),
+        "int8" | "int16" | "int32" | "int64" => format!("cast(1, {source})"),
+        "bool" => "true".to_string(),
+        other => panic!("matrix contains an unknown source dtype {other}"),
+    }
+}
+
+fn checked_cast_product_program() -> String {
+    let mut definitions = String::new();
+    let mut outputs = String::new();
+    for source in ACTIVE_CAST_PRIMS {
+        for target in ACTIVE_CAST_PRIMS {
+            let scalar = format!("checked_scalar_{source}_to_{target}");
+            let tensor_dag = format!("checked_tensor_dag_{source}_to_{target}");
+            let tensor_host = format!("checked_tensor_host_{source}_to_{target}");
+            let source_value = safe_scalar_at(source);
+            definitions.push_str(&format!(
+                "def {scalar}(x: {source}) -> {target} = cast(x, {target})\n"
+            ));
+            definitions.push_str(&format!(
+                "def {tensor_dag}(x: tensor[1, {source}]) -> tensor[1, {target}] = \
+                 cast(x, {target})\n"
+            ));
+            definitions.push_str(&format!(
+                "def {tensor_host}() -> tensor[1, {target}] = \
+                 cast(to_tensor([{source_value}]), {target})\n"
+            ));
+            outputs.push_str(&format!("out_{scalar} = {scalar}({source_value})\n"));
+            outputs.push_str(&format!(
+                "out_{tensor_dag} = {tensor_dag}(reshape(to_tensor([{source_value}]), \
+                 [cast(1, int64)]))\n"
+            ));
+            outputs.push_str(&format!("out_{tensor_host} = {tensor_host}()\n"));
+        }
+    }
+    format!("{definitions}{outputs}")
+}
+
+fn assert_checked_cast_product_observations(stdout: &str, lane: &str) {
+    let lines = stdout.lines().collect::<std::collections::HashSet<_>>();
+    for source in ACTIVE_CAST_PRIMS {
+        for target in ACTIVE_CAST_PRIMS {
+            let scalar_value = match target {
+                "f64" | "f32" | "f16" | "bf16" => "1.0",
+                "int8" | "int16" | "int32" | "int64" => "1",
+                "bool" => "true",
+                other => panic!("matrix contains an unknown target dtype {other}"),
+            };
+            let tensor_value = format!("tensor(shape=[1], data=[{scalar_value}])");
+            for (surface, expected) in [
+                ("scalar", scalar_value.to_string()),
+                ("tensor_dag", tensor_value.clone()),
+                ("tensor_host", tensor_value.clone()),
+            ] {
+                let root = format!("out_checked_{surface}_{source}_to_{target} = {expected}");
+                assert!(
+                    lines.contains(root.as_str()),
+                    "{lane} product is missing exact observation `{root}`; matching root line: {:?}",
+                    stdout.lines().find(|line| line
+                        .contains(&format!("out_checked_{surface}_{source}_to_{target}")))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn generated_checked_cast_product_is_positive_on_every_active_pair_and_surface() {
+    let program = checked_cast_product_program();
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("checked_cast_product.ch");
+    write_file(&path, &program);
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("checked-cast product eval should run");
+    assert!(
+        eval.status.success(),
+        "the generated scalar/tensor eval product must succeed; stderr={} ",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+    let eval_stdout = String::from_utf8_lossy(&eval.stdout);
+    assert_eq!(
+        eval_stdout.lines().count(),
+        ACTIVE_CAST_PRIMS.len() * ACTIVE_CAST_PRIMS.len() * 3,
+        "every generated eval cell must reach root observation"
+    );
+    assert_checked_cast_product_observations(&eval_stdout, "eval");
+
+    let (stdout, stderr, ok) = c_lane_run(&program, "checked_cast_product").expect("C product");
+    assert!(ok, "the generated C product must succeed; stderr={stderr}");
+    assert_eq!(
+        stdout.lines().count(),
+        ACTIVE_CAST_PRIMS.len() * ACTIVE_CAST_PRIMS.len() * 3,
+        "every generated C DAG/host cell must reach root observation"
+    );
+    assert_checked_cast_product_observations(&stdout, "compiled C");
+}
+
+#[test]
+fn compiled_checked_casts_round_directly_at_reduced_float_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+
+    let cases = [
+        ("f64_bf16", "f64", "bf16", "1.0039062500000002f64", "1.01"),
+        ("f64_f16", "f64", "f16", "52847.99970178839f64", "52830.0"),
+        (
+            "int64_bf16",
+            "int64",
+            "bf16",
+            "4629700416936869889i64",
+            "4.65e18",
+        ),
+    ];
+    let mut definitions = String::new();
+    let mut outputs = String::new();
+    let mut expected = Vec::new();
+    for (label, source, target, value, rendered) in cases {
+        definitions.push_str(&format!(
+            "def {label}_scalar(x: {source}) -> {target} = cast(x, {target})\n\
+             def {label}_tensor_dag(x: tensor[1, {source}]) -> tensor[1, {target}] = \
+             cast(x, {target})\n\
+             def {label}_tensor_host() -> tensor[1, {target}] = \
+             cast(to_tensor([{value}]), {target})\n"
+        ));
+        outputs.push_str(&format!(
+            "out_{label}_scalar = {label}_scalar({value})\n\
+             out_{label}_tensor_dag = {label}_tensor_dag(\
+             reshape(to_tensor([{value}]), [cast(1, int64)]))\n\
+             out_{label}_tensor_host = {label}_tensor_host()\n"
+        ));
+        expected.extend([
+            format!("out_{label}_scalar = {rendered}"),
+            format!("out_{label}_tensor_dag = tensor(shape=[1], data=[{rendered}])"),
+            format!("out_{label}_tensor_host = tensor(shape=[1], data=[{rendered}])"),
+        ]);
+    }
+
+    let program = format!("{definitions}{outputs}");
+    let (stdout, stderr, ok) =
+        c_lane_run(&program, "checked_cast_direct_rounding").expect("compiled rounding probe");
+    assert!(
+        ok,
+        "direct target-width rounding probe must compile and run; stderr={stderr}"
+    );
+    let observed = stdout.lines().collect::<std::collections::HashSet<_>>();
+    for line in expected {
+        assert!(
+            observed.contains(line.as_str()),
+            "compiled checked-cast output is missing `{line}`; matching output:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -420,4 +608,70 @@ fn c_tensor_int_narrowing_out_of_range_traps_overflow() {
         "compiled int32->int8 out-of-range cast must trap (chelis#729 Phase 3); \
          got ok={ok} stdout={stdout} stderr={stderr}"
     );
+}
+
+#[test]
+fn mixed_offenders_select_the_lowest_flat_index_in_eval() {
+    assert_cast_traps(
+        "cast(to_tensor([300.0, sqrt(-1.0)]), int8)",
+        "overflow",
+        "int8",
+        "eval_overflow_before_domain",
+    );
+    assert_cast_traps(
+        "cast(to_tensor([sqrt(-1.0), 300.0]), int8)",
+        "domain",
+        "int8",
+        "eval_domain_before_overflow",
+    );
+}
+
+#[test]
+fn c_dag_mixed_offenders_select_the_lowest_flat_index_at_multiple_thread_counts() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for (values, expected, name) in [
+        (
+            "300.0, sqrt(-1.0)",
+            "numeric trap: overflow in cast at int8",
+            "c_dag_overflow_before_domain",
+        ),
+        (
+            "sqrt(-1.0), 300.0",
+            "numeric trap: domain in cast at int8",
+            "c_dag_domain_before_overflow",
+        ),
+    ] {
+        let program = format!(
+            "def f(x: tensor[2, f32]) -> tensor[2, int8] = cast(x, int8)\n\
+             out = print(f(reshape(to_tensor([{values}]), [cast(2, int64)])))\n"
+        );
+        assert_c_trap_at_thread_counts(&program, expected, name);
+    }
+}
+
+#[test]
+fn c_host_mixed_offenders_convert_instead_of_reinterpreting_and_select_lowest_index() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+    for (values, expected, name) in [
+        (
+            "300.0, sqrt(-1.0)",
+            "numeric trap: overflow in cast at int8",
+            "c_host_overflow_before_domain",
+        ),
+        (
+            "sqrt(-1.0), 300.0",
+            "numeric trap: domain in cast at int8",
+            "c_host_domain_before_overflow",
+        ),
+    ] {
+        let program = format!(
+            "def f() -> tensor[2, int8] = cast(to_tensor([{values}]), int8)\n\
+             out = print(f())\n"
+        );
+        assert_c_trap_at_thread_counts(&program, expected, name);
+    }
 }

@@ -511,7 +511,10 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
   ([05-OP-6]) is the named float-to-integer rung: it truncates toward zero,
   traps `Overflow` out of range, and traps `Domain` on `NaN`/`±inf`. Every
   other source/target pair is a type error on `cast_trunc`. The saturating
-  and rounding rungs are future work under chelis#759.
+  and rounding rungs are future work under chelis#759. For a tensor checked
+  cast with several offending elements, the lowest row-major flat index
+  determines the reported trap kind ([04-NUM-15]), independent of compiled-C
+  thread scheduling.
 - **Named dimensions match by name**; symbolic dims (`batch`, `seq`) for runtime-varying
   axes, concrete dims for fixed architecture. Wildcard `*` for length-poly elements.
 - **No broadcasting, ever** — operands' dims must match; use `expand`/`reshape`

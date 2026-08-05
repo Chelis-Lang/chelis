@@ -1639,6 +1639,27 @@ domain-first pre-pass, and make the C winner schedule-dependent; each is red.
 Phase 4 generates this same product permanently from Tables A/B rather than
 retaining a cast-specific hand list.
 
+**Implementation receipt.** The interim construction is
+`chelis_types::CheckedCastPlan`, whose exhaustive active-`Prim` product feeds
+sealed scalar/tensor evaluation and the shared C conversion-expression
+projection used by both emitters. Tensor evaluation reduces explicit
+`IndexedTrapCandidate` values. The C DAG emitter performs an OpenMP
+`min(flat_index)` reduction without calling an aborting helper in a worker,
+then reclassifies the selected element after the parallel region; C host
+tensor emission uses the same plan in row-major order and has no identity
+fallback. C DAG identity casts materialize logical row-major order from the
+source strides rather than copying a view's backing order.
+`issue_759_checked_cast_default.rs` generates the complete 9 x 9 x
+three-surface positive matrix for eval and compiled C, locks direct
+f64/int64-to-f16/bf16 rounding with midpoint witnesses on scalar, DAG tensor,
+and host tensor surfaces, and runs both mixed-offender permutations at
+`OMP_NUM_THREADS=1,2,4,8`. The plan-level negative matrix covers every
+applicable fractional, non-finite, overflow, and strict-bool case. A
+compile-run `permute -> same-type cast` regression guards logical
+materialization. This maintenance item remains part of the inherited
+`.venv/bin/python scripts/dtype_phase3_oracle.py`; Phase 4 still replaces the
+interim generator with Tables A/B.
+
 ## Phase 4 - the capability table becomes the permanent guard
 
 The table's SCHEMA is owned by `spec/design/capability_table.md` (the two

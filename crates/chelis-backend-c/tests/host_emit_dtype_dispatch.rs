@@ -118,6 +118,86 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
     }
 }
 
+fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
+    let source_ty = vec_ty(2, source);
+    let target_ty = vec_ty(2, target);
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "cast".to_string(),
+        args: vec![HostExpr::new(HostExprKind::Var(
+            "input".to_string(),
+            HostType::Tensor(source_ty.clone()),
+        ))],
+        ty: HostType::Tensor(target_ty.clone()),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "input".to_string(),
+                ty: HostType::Tensor(source_ty),
+            }],
+            ret_ty: HostType::Tensor(target_ty),
+            body,
+            tensor_helpers: Vec::new(),
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+#[test]
+fn checked_tensor_cast_host_emission_covers_the_active_product_without_fallback_identity() {
+    let active = [
+        Prim::F64,
+        Prim::F32,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::Bool,
+    ];
+
+    for source in active {
+        for target in active {
+            let program = make_checked_tensor_cast_program(source, target);
+            let generated = emit_host_program(
+                &program,
+                &format!("checked_cast_{}_to_{}", source.name(), target.name()),
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "active checked-cast pair {} -> {} must emit: {error}",
+                    source.name(),
+                    target.name()
+                )
+            });
+            let marker = format!(
+                "/* checked cast plan: {} -> {} */",
+                source.name(),
+                target.name()
+            );
+            assert!(
+                generated.contains(&marker),
+                "host emission must consume the exact plan for {} -> {}; generated:\n{generated}",
+                source.name(),
+                target.name()
+            );
+            assert_eq!(
+                generated.contains("/* checked cast identity */"),
+                source == target,
+                "host identity is legal exactly on the equal-Prim diagonal: {} -> {}; generated:\n{generated}",
+                source.name(),
+                target.name()
+            );
+        }
+    }
+}
+
 fn generated_dtype_arm<'a>(source: &'a str, dtype_macro: &str) -> &'a str {
     let marker = format!("case {dtype_macro}: {{");
     let (_, rest) = source

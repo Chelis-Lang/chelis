@@ -22,11 +22,11 @@ use crate::dag::{
     RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::dtype_semantics::{
-    ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, RawScalar, RawTensor,
-    ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
-    finalize_tensor, float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
-    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
-    tensor_from_scalars, uniform_sample,
+    ArgReduceOp, CheckedCastPlan, CompareOp, FloatBinOp, FloatUnOp, IndexedTrapCandidate, IntBinOp,
+    IntUnOp, RawTensor, ReduceWindowGradOp, TensorReduceOp, TensorStorage,
+    arg_reduce_tensor_groups, compare_tensors, finalize_tensor, float_tensor_binop,
+    float_tensor_unop, int_tensor_binop, int_tensor_unop, integer_is_exactly_representable,
+    reduce_tensor_groups, reduce_window_grad_tensor_groups, tensor_from_scalars, uniform_sample,
 };
 use chelis_types::types::Prim;
 
@@ -301,40 +301,41 @@ fn finalize_wide_int(
     Ok(TensorValue::from_storage(shape, storage))
 }
 
-/// Tensor `cast`: per-dtype, exact where the family is exact. Integer
-/// sources read their exact i64 wide (so int64 identity and int-to-float
-/// casts do not collapse through f64 storage), float sources their exact
-/// f64 image; the per-direction rules are [`cast_wide_element`]'s.
+/// Tensor `cast`: consume the shared source/target plan once, apply it to
+/// sealed elements, and reduce every trap candidate by row-major flat index.
+/// There is no whole-buffer domain pre-pass and no second finalization pass.
 fn cast_value(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorValue, String> {
-    if src == dst && input.prim() == dst {
+    if input.prim() != src {
+        return Err(format!(
+            "checked cast source contract mismatch: declared {}, stored {}",
+            src.name(),
+            input.prim().name()
+        ));
+    }
+    let plan = CheckedCastPlan::new(src, dst).map_err(|error| error.to_string())?;
+    if plan.kind() == chelis_types::CheckedCastKind::Identity {
         return Ok(input.clone());
     }
-    // The CHECKED default ladder (`chelis_types::cast_raw`), per element
-    // from the EXACT storage reading: integer/bool sources through i64,
-    // float sources through their exact f64 image. An out-of-range or
-    // out-of-domain element traps loudly instead of saturating/wrapping.
-    let raws: Vec<RawScalar> = match input.storage().to_raw() {
-        RawTensor::Int(v) => v.into_iter().map(RawScalar::Int).collect(),
-        RawTensor::Float(v) => v.into_iter().map(RawScalar::Float).collect(),
-    };
-    let mut cast_values = Vec::with_capacity(raws.len());
-    for raw in raws {
-        cast_values
-            .push(chelis_types::cast_raw("cast", raw, dst).map_err(|trap| trap.to_string())?);
+
+    let mut cast_values = Vec::with_capacity(input.storage().len());
+    let mut selected_trap: Option<IndexedTrapCandidate> = None;
+    for flat_index in 0..input.storage().len() {
+        match plan.cast_scalar("cast", input.storage().scalar_at(flat_index)) {
+            Ok(value) => cast_values.push(value),
+            Err(trap) => {
+                let candidate = IndexedTrapCandidate { flat_index, trap };
+                selected_trap = Some(match selected_trap {
+                    Some(selected) => selected.earlier(candidate),
+                    None => candidate,
+                });
+            }
+        }
     }
-    if dst.is_float() {
-        let out: Vec<f64> = cast_values.iter().map(|v| v.as_f64_lossy()).collect();
-        finalize_wide("cast", dst, input.shape.clone(), out)
-    } else {
-        let out: Vec<i64> = cast_values
-            .iter()
-            .map(|v| {
-                v.as_i64_exact()
-                    .expect("integer/bool cast results carry exact integers")
-            })
-            .collect();
-        finalize_wide_int("cast", dst, input.shape.clone(), out)
+    if let Some(candidate) = selected_trap {
+        return Err(candidate.trap.to_string());
     }
+    let storage = tensor_from_scalars(dst, &cast_values);
+    Ok(TensorValue::from_storage(input.shape.clone(), storage))
 }
 
 /// Public entry point for the [05-OP-6] tensor rung, mirroring
@@ -4112,6 +4113,21 @@ mod tests {
         let storage = finalize_tensor("phase2-reduction-test", prim, values)
             .expect("test values are in range");
         TensorValue::from_storage(vec![len], storage)
+    }
+
+    #[test]
+    fn checked_cast_selects_the_lowest_flat_index_across_trap_kinds() {
+        let overflow_first = exact_tensor(Prim::F32, RawTensor::Float(vec![300.0, f64::NAN]));
+        assert_eq!(
+            cast_tensor(&overflow_first, Prim::F32, Prim::Int8).unwrap_err(),
+            "numeric trap: overflow in cast at int8"
+        );
+
+        let domain_first = exact_tensor(Prim::F32, RawTensor::Float(vec![f64::NAN, 300.0]));
+        assert_eq!(
+            cast_tensor(&domain_first, Prim::F32, Prim::Int8).unwrap_err(),
+            "numeric trap: domain in cast at int8"
+        );
     }
 
     #[test]

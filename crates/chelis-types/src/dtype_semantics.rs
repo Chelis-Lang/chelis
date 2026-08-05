@@ -106,6 +106,25 @@ impl std::fmt::Display for NumericTrap {
 
 impl std::error::Error for NumericTrap {}
 
+/// One elementwise trap paired with the row-major flat index that produced
+/// it ([04-NUM-15]). Parallel lanes reduce this value by `flat_index`; a
+/// sequential lane may use the same reduction without changing semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexedTrapCandidate {
+    pub flat_index: usize,
+    pub trap: NumericTrap,
+}
+
+impl IndexedTrapCandidate {
+    pub fn earlier(self, other: Self) -> Self {
+        if self.flat_index <= other.flat_index {
+            self
+        } else {
+            other
+        }
+    }
+}
+
 /// What kernels produce: the wide intermediate of section C1 (f64 for the
 /// float family, i64 for the integer family and bool).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -119,6 +138,185 @@ pub enum RawScalar {
 pub enum RawTensor {
     Int(Vec<i64>),
     Float(Vec<f64>),
+}
+
+/// Closed semantic action for one checked `cast` source/target pair.
+///
+/// This is the executable projection of [04-NUM-14].  Backends may choose a
+/// representation-specific implementation of the action, but they do not
+/// maintain a separate roster of legal pairs and they may select
+/// [`Self::Identity`] only on the exact same-`Prim` diagonal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedCastKind {
+    Identity,
+    ExactToInteger,
+    FloatToInteger,
+    ExactToFloat,
+    FloatToFloat,
+    ExactToBool,
+    FloatToBool,
+}
+
+/// Construction failure for a checked-cast plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedCastPlanError {
+    UnsupportedSource(Prim),
+    UnsupportedTarget(Prim),
+}
+
+impl std::fmt::Display for CheckedCastPlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSource(prim) => write!(
+                f,
+                "checked cast source `{}` is not an active scalar dtype",
+                prim.name()
+            ),
+            Self::UnsupportedTarget(prim) => write!(
+                f,
+                "checked cast target `{}` is not an active scalar dtype",
+                prim.name()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CheckedCastPlanError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckedCastFamily {
+    Float,
+    SignedInteger,
+    Bool,
+}
+
+/// Exhaustive conversion plan for one active checked-cast pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckedCastPlan {
+    source: Prim,
+    target: Prim,
+    kind: CheckedCastKind,
+}
+
+impl CheckedCastPlan {
+    pub fn new(source: Prim, target: Prim) -> Result<Self, CheckedCastPlanError> {
+        let source_family = match source {
+            Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 => CheckedCastFamily::Float,
+            Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
+                CheckedCastFamily::SignedInteger
+            }
+            Prim::Bool => CheckedCastFamily::Bool,
+            Prim::F8e4m3 | Prim::String => {
+                return Err(CheckedCastPlanError::UnsupportedSource(source));
+            }
+        };
+        let target_family = match target {
+            Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16 => CheckedCastFamily::Float,
+            Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 => {
+                CheckedCastFamily::SignedInteger
+            }
+            Prim::Bool => CheckedCastFamily::Bool,
+            Prim::F8e4m3 | Prim::String => {
+                return Err(CheckedCastPlanError::UnsupportedTarget(target));
+            }
+        };
+
+        let kind = if source == target {
+            CheckedCastKind::Identity
+        } else {
+            match (source_family, target_family) {
+                (CheckedCastFamily::Float, CheckedCastFamily::Float) => {
+                    CheckedCastKind::FloatToFloat
+                }
+                (CheckedCastFamily::Float, CheckedCastFamily::SignedInteger) => {
+                    CheckedCastKind::FloatToInteger
+                }
+                (CheckedCastFamily::Float, CheckedCastFamily::Bool) => CheckedCastKind::FloatToBool,
+                (CheckedCastFamily::SignedInteger, CheckedCastFamily::Float)
+                | (CheckedCastFamily::Bool, CheckedCastFamily::Float) => {
+                    CheckedCastKind::ExactToFloat
+                }
+                (CheckedCastFamily::SignedInteger, CheckedCastFamily::SignedInteger)
+                | (CheckedCastFamily::Bool, CheckedCastFamily::SignedInteger) => {
+                    CheckedCastKind::ExactToInteger
+                }
+                (CheckedCastFamily::SignedInteger, CheckedCastFamily::Bool) => {
+                    CheckedCastKind::ExactToBool
+                }
+                (CheckedCastFamily::Bool, CheckedCastFamily::Bool) => {
+                    unreachable!("bool -> bool is the exact identity pair")
+                }
+            }
+        };
+
+        Ok(Self {
+            source,
+            target,
+            kind,
+        })
+    }
+
+    pub fn source(self) -> Prim {
+        self.source
+    }
+
+    pub fn target(self) -> Prim {
+        self.target
+    }
+
+    pub fn kind(self) -> CheckedCastKind {
+        self.kind
+    }
+
+    /// Apply this plan to a sealed scalar. A source mismatch is an internal
+    /// caller violation: the plan and the value are produced from the same
+    /// checked type edge and must never disagree.
+    pub fn cast_scalar(
+        self,
+        op: &'static str,
+        value: ScalarValue,
+    ) -> Result<ScalarValue, NumericTrap> {
+        assert_eq!(
+            value.prim(),
+            self.source,
+            "checked-cast plan source does not match the sealed scalar"
+        );
+        if self.kind == CheckedCastKind::Identity {
+            return Ok(value);
+        }
+        let raw = match value.as_i64_exact() {
+            Some(i) => RawScalar::Int(i),
+            None => RawScalar::Float(value.as_f64_lossy()),
+        };
+        finalize_scalar(op, self.target, raw)
+    }
+
+    fn cast_raw(self, op: &'static str, raw: RawScalar) -> Result<ScalarValue, NumericTrap> {
+        let family_matches = match (self.source, raw) {
+            (
+                Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64 | Prim::Bool,
+                RawScalar::Int(_),
+            ) => true,
+            (Prim::F64 | Prim::F32 | Prim::F16 | Prim::Bf16, RawScalar::Float(_)) => true,
+            (
+                Prim::Int8
+                | Prim::Int16
+                | Prim::Int32
+                | Prim::Int64
+                | Prim::Bool
+                | Prim::F64
+                | Prim::F32
+                | Prim::F16
+                | Prim::Bf16,
+                _,
+            ) => false,
+            (Prim::F8e4m3 | Prim::String, _) => {
+                unreachable!("unsupported source cannot construct a checked-cast plan")
+            }
+        };
+        assert!(family_matches, "checked-cast raw source family mismatch");
+        finalize_scalar(op, self.target, raw)
+    }
 }
 
 /// Sealed per-dtype scalar bits. Private on purpose: the variant IS the
@@ -2477,26 +2675,18 @@ pub fn uniform_sample(
 ///   found no dependence on the old nonzero-to-1 encoding).
 ///
 /// The named lossy/wrapping cast forms remain chelis#759's future
-/// surface; this function is the checked DEFAULT. The compiled C lane
-/// stays documented-divergent until chelis#729 Phase 3.
+/// surface; this function is the checked DEFAULT. Untyped literal staging
+/// has no declared source width, so it selects the representative active
+/// dtype for the raw family and then consumes the same exhaustive plan as
+/// sealed values and backend emitters.
 pub fn cast_raw(op: &'static str, raw: RawScalar, dst: Prim) -> Result<ScalarValue, NumericTrap> {
-    match dst {
-        Prim::F64
-        | Prim::F32
-        | Prim::F16
-        | Prim::Bf16
-        | Prim::Int8
-        | Prim::Int16
-        | Prim::Int32
-        | Prim::Int64
-        | Prim::Bool => finalize_scalar(op, dst, raw),
-        Prim::F8e4m3 => panic!(
-            "cast_raw: f8e4m3 is not in the active dtype set \
-             (spec/04-type-system.md section 1.1.1); the checker rejects it, \
-             so no cast can target it (op {op})"
-        ),
-        Prim::String => panic!("cast_raw: string is not a numeric dtype (op {op})"),
-    }
+    let source = match raw {
+        RawScalar::Int(_) => Prim::Int64,
+        RawScalar::Float(_) => Prim::F64,
+    };
+    CheckedCastPlan::new(source, dst)
+        .unwrap_or_else(|error| panic!("cast_raw: {error} (op {op})"))
+        .cast_raw(op, raw)
 }
 
 /// [`cast_raw`] over a sealed scalar: the source family picks its exact
@@ -2507,14 +2697,9 @@ pub fn cast_scalar(
     value: ScalarValue,
     dst: Prim,
 ) -> Result<ScalarValue, NumericTrap> {
-    if value.prim() == dst {
-        return Ok(value);
-    }
-    let raw = match value.as_i64_exact() {
-        Some(i) => RawScalar::Int(i),
-        None => RawScalar::Float(value.as_f64_lossy()),
-    };
-    cast_raw(op, raw, dst)
+    CheckedCastPlan::new(value.prim(), dst)
+        .unwrap_or_else(|error| panic!("cast_scalar: {error} (op {op})"))
+        .cast_scalar(op, value)
 }
 
 /// The NAMED truncating cast of [05-OP-6] (the chelis#759 ladder's
@@ -4328,6 +4513,186 @@ mod tests {
     // ---- the checked cast ladder (chelis#759 one rule per direction;
     // executed at the chelis#729 rework). Positive AND negative parity
     // per direction, per the repo contract. ----
+
+    #[test]
+    fn checked_cast_plan_covers_the_active_prim_product_without_false_identity() {
+        let active = [
+            Prim::F64,
+            Prim::F32,
+            Prim::F16,
+            Prim::Bf16,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ];
+
+        for source in active {
+            for target in active {
+                let plan = CheckedCastPlan::new(source, target)
+                    .expect("every active checked-cast pair has a plan");
+                assert_eq!(plan.source(), source);
+                assert_eq!(plan.target(), target);
+                assert_eq!(
+                    plan.kind() == CheckedCastKind::Identity,
+                    source == target,
+                    "identity is legal exactly on the equal-Prim diagonal: {} -> {}",
+                    source.name(),
+                    target.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_cast_plan_rejects_deferred_and_non_numeric_prims_on_each_axis() {
+        for unsupported in [Prim::F8e4m3, Prim::String] {
+            assert_eq!(
+                CheckedCastPlan::new(unsupported, Prim::F32),
+                Err(CheckedCastPlanError::UnsupportedSource(unsupported))
+            );
+            assert_eq!(
+                CheckedCastPlan::new(Prim::F32, unsupported),
+                Err(CheckedCastPlanError::UnsupportedTarget(unsupported))
+            );
+        }
+    }
+
+    #[test]
+    fn checked_cast_plan_applies_the_source_family_instead_of_only_the_target() {
+        let float_to_int = CheckedCastPlan::new(Prim::F32, Prim::Int8).unwrap();
+        assert_eq!(float_to_int.kind(), CheckedCastKind::FloatToInteger);
+        let err = float_to_int
+            .cast_scalar("cast", scalar_from_f64("test", Prim::F32, 3.5).unwrap())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            NumericTrap::Domain {
+                op: "cast",
+                prim: Prim::Int8
+            }
+        );
+
+        let int_to_float = CheckedCastPlan::new(Prim::Int64, Prim::Bf16).unwrap();
+        assert_eq!(int_to_float.kind(), CheckedCastKind::ExactToFloat);
+        let source = scalar_from_i64("test", Prim::Int64, 4_629_700_416_936_869_889).unwrap();
+        assert_eq!(
+            int_to_float.cast_scalar("cast", source).unwrap(),
+            cast_scalar("cast", source, Prim::Bf16).unwrap()
+        );
+    }
+
+    #[test]
+    fn checked_cast_plan_negative_matrix_covers_every_applicable_trap_class() {
+        let floats = [Prim::F64, Prim::F32, Prim::F16, Prim::Bf16];
+        let integers = [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64];
+
+        for source in floats {
+            let fractional = scalar_from_f64("test", source, 1.5).unwrap();
+            let non_finite = scalar_from_f64("test", source, f64::NAN).unwrap();
+            for target in integers {
+                let plan = CheckedCastPlan::new(source, target).unwrap();
+                assert_eq!(
+                    plan.cast_scalar("cast", fractional),
+                    Err(NumericTrap::Domain {
+                        op: "cast",
+                        prim: target
+                    }),
+                    "fractional {} -> {}",
+                    source.name(),
+                    target.name()
+                );
+                assert_eq!(
+                    plan.cast_scalar("cast", non_finite),
+                    Err(NumericTrap::Domain {
+                        op: "cast",
+                        prim: target
+                    }),
+                    "non-finite {} -> {}",
+                    source.name(),
+                    target.name()
+                );
+            }
+        }
+
+        for (source, finite_max) in [
+            (Prim::F64, f64::MAX),
+            (Prim::F32, f64::from(f32::MAX)),
+            (Prim::F16, f64::from(half::f16::MAX)),
+            (Prim::Bf16, f64::from(half::bf16::MAX)),
+        ] {
+            let value = scalar_from_f64("test", source, finite_max).unwrap();
+            for target in integers {
+                let target_max = target.integer_range().unwrap().1 as f64;
+                if finite_max > target_max {
+                    assert_eq!(
+                        CheckedCastPlan::new(source, target)
+                            .unwrap()
+                            .cast_scalar("cast", value),
+                        Err(NumericTrap::Overflow {
+                            op: "cast",
+                            prim: target
+                        }),
+                        "finite overflow {} -> {}",
+                        source.name(),
+                        target.name()
+                    );
+                }
+            }
+        }
+
+        for source in integers {
+            let source_max = source.integer_range().unwrap().1;
+            let value = scalar_from_i64("test", source, source_max).unwrap();
+            for target in integers {
+                let target_max = target.integer_range().unwrap().1;
+                if source_max > target_max {
+                    assert_eq!(
+                        CheckedCastPlan::new(source, target)
+                            .unwrap()
+                            .cast_scalar("cast", value),
+                        Err(NumericTrap::Overflow {
+                            op: "cast",
+                            prim: target
+                        }),
+                        "narrowing {} -> {}",
+                        source.name(),
+                        target.name()
+                    );
+                }
+            }
+        }
+
+        for source in integers {
+            let invalid = scalar_from_i64("test", source, 2).unwrap();
+            assert_eq!(
+                CheckedCastPlan::new(source, Prim::Bool)
+                    .unwrap()
+                    .cast_scalar("cast", invalid),
+                Err(NumericTrap::Domain {
+                    op: "cast",
+                    prim: Prim::Bool
+                }),
+                "strict bool membership from {}",
+                source.name()
+            );
+        }
+        for source in floats {
+            let invalid = scalar_from_f64("test", source, 0.5).unwrap();
+            assert_eq!(
+                CheckedCastPlan::new(source, Prim::Bool)
+                    .unwrap()
+                    .cast_scalar("cast", invalid),
+                Err(NumericTrap::Domain {
+                    op: "cast",
+                    prim: Prim::Bool
+                }),
+                "strict bool membership from {}",
+                source.name()
+            );
+        }
+    }
 
     #[test]
     fn cast_raw_to_float_finalizes_at_target_width() {
