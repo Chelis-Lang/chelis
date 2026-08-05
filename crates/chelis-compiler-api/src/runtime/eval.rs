@@ -930,8 +930,10 @@ impl<'a> EvalContext<'a> {
             (RuntimeValue::Bool(value), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() =>
             {
-                let raw = chelis_types::RawScalar::Int(if value { 1 } else { 0 });
-                let cast = chelis_types::cast_raw("cast", raw, dst_dtype)
+                let source =
+                    chelis_types::scalar_from_i64("cast", Prim::Bool, if value { 1 } else { 0 })
+                        .expect("bool payload is always in the bool value set");
+                let cast = chelis_types::cast_scalar("cast", source, dst_dtype)
                     .map_err(|trap| trap.to_string())?;
                 Ok(RuntimeValue::from_scalar_value(cast))
             }

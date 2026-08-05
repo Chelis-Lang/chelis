@@ -53,7 +53,8 @@ pub use cancel::{
 pub use chelis_vocab::EffectKind;
 pub use context::TypeEnv;
 pub use dtype_semantics::{
-    ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NUMERIC_TRAP_DIV_ZERO_KIND,
+    ArgReduceOp, CheckedCastKind, CheckedCastPlan, CheckedCastPlanError, CompareOp, FloatBinOp,
+    FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NUMERIC_TRAP_DIV_ZERO_KIND,
     NUMERIC_TRAP_DOMAIN_KIND, NUMERIC_TRAP_DTYPE_SEPARATOR, NUMERIC_TRAP_OPERATION_SEPARATOR,
     NUMERIC_TRAP_OVERFLOW_KIND, NUMERIC_TRAP_PREFIX, NumericFamily, NumericKernelError,
     NumericTrap, RawScalar, RawTensor, ReduceWindowGradOp, ScalarValue, StorageView,

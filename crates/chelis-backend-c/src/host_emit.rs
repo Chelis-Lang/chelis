@@ -168,9 +168,9 @@ use crate::host_abi::{
     HostAbiType, HostAbiType as HostType, project_program,
 };
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
-use chelis_types::NumericTrap;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
 use std::collections::{HashMap, HashSet};
 
 /// The set of parameter indices a user function's result may alias
@@ -427,7 +427,7 @@ pub(crate) fn emit_host_abi_program(
     let mut helper_requirements = HelperRequirements::default();
     append_tensor_reshape_helper(&mut body);
     body.push(String::new());
-    append_host_scalar_conversion_helpers(&mut body);
+    append_scalar_conversion_helpers(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
     body.push(String::new());
@@ -752,7 +752,9 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
 /// signed-integer significand directly to the destination's IEEE layout.
 /// They stay TU-local so the published runtime ABI does not gain an untagged
 /// numeric callable (dtype_semantics.md section C6).
-fn append_host_scalar_conversion_helpers(out: &mut Vec<String>) {
+pub(crate) fn append_checked_cast_conversion_helpers(out: &mut Vec<String>) {
+    out.push("#ifndef CHELIS_PRIVATE_SCALAR_CONVERSION_HELPERS".to_string());
+    out.push("#define CHELIS_PRIVATE_SCALAR_CONVERSION_HELPERS".to_string());
     out.extend(
         [
             "static uint64_t chelis_host_round_shift_even_u64(uint64_t value, int shift) {",
@@ -833,7 +835,19 @@ fn append_host_scalar_conversion_helpers(out: &mut Vec<String>) {
             "static uint16_t chelis_host_f64_to_bf16(double value) { return chelis_host_f64_to_ieee16(value, 8, 7, 127); }",
             "static uint16_t chelis_host_i64_to_f16(int64_t value) { return chelis_host_i64_to_ieee16(value, 5, 10, 15); }",
             "static uint16_t chelis_host_i64_to_bf16(int64_t value) { return chelis_host_i64_to_ieee16(value, 8, 7, 127); }",
-            "",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    out.push("#endif".to_string());
+}
+
+fn append_scalar_conversion_helpers(out: &mut Vec<String>) {
+    append_checked_cast_conversion_helpers(out);
+    out.push("#ifndef CHELIS_PRIVATE_SCALAR_TENSOR_HELPERS".to_string());
+    out.push("#define CHELIS_PRIVATE_SCALAR_TENSOR_HELPERS".to_string());
+    out.extend(
+        [
             "static chelis_tensor *chelis_host_scalar_tensor_from_f16(uint16_t value) {",
             "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_F16);",
             "    *((uint16_t *)tensor->data) = value;",
@@ -849,6 +863,239 @@ fn append_host_scalar_conversion_helpers(out: &mut Vec<String>) {
         .into_iter()
         .map(str::to_string),
     );
+    out.push("#endif".to_string());
+}
+
+/// C expression for an already-planned checked scalar conversion.
+///
+/// The host scalar emitter, host tensor emitter, and DAG emitter all consume
+/// this projection so reduced-float direct rounding and trap helpers cannot
+/// drift between C surfaces. Trapping callers may use the condition helpers
+/// below to classify in parallel, then evaluate this expression only for
+/// valid elements or for the selected lowest-index candidate.
+pub(crate) fn checked_cast_c_expr(plan: CheckedCastPlan, value: &str) -> String {
+    let target = plan.target();
+    match plan.kind() {
+        CheckedCastKind::Identity => value.to_string(),
+        CheckedCastKind::ExactToInteger => {
+            let overflow = NumericTrap::Overflow {
+                op: "cast",
+                prim: target,
+            }
+            .to_string();
+            format!(
+                "({})chelis_checked_int_cast((int64_t)({value}), {}, {overflow:?})",
+                cast_prim_c_type(target),
+                cast_integer_width(target)
+            )
+        }
+        CheckedCastKind::FloatToInteger => {
+            let domain = NumericTrap::Domain {
+                op: "cast",
+                prim: target,
+            }
+            .to_string();
+            let overflow = NumericTrap::Overflow {
+                op: "cast",
+                prim: target,
+            }
+            .to_string();
+            format!(
+                "({})chelis_checked_float_to_int({}, {}, {domain:?}, {overflow:?})",
+                cast_prim_c_type(target),
+                cast_float_as_double(plan.source(), value),
+                cast_integer_width(target)
+            )
+        }
+        CheckedCastKind::ExactToFloat => match target {
+            Prim::F64 => format!("(double)((int64_t)({value}))"),
+            Prim::F32 => format!("(float)((int64_t)({value}))"),
+            Prim::F16 => format!("chelis_host_i64_to_f16((int64_t)({value}))"),
+            Prim::Bf16 => format!("chelis_host_i64_to_bf16((int64_t)({value}))"),
+            Prim::F8e4m3
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64
+            | Prim::Bool
+            | Prim::String => unreachable!("ExactToFloat plan has a float target"),
+        },
+        CheckedCastKind::FloatToFloat => match target {
+            Prim::F64 => cast_float_as_double(plan.source(), value),
+            Prim::F32 => format!("(float)({})", cast_float_as_double(plan.source(), value)),
+            Prim::F16 => format!(
+                "chelis_host_f64_to_f16({})",
+                cast_float_as_double(plan.source(), value)
+            ),
+            Prim::Bf16 => format!(
+                "chelis_host_f64_to_bf16({})",
+                cast_float_as_double(plan.source(), value)
+            ),
+            Prim::F8e4m3
+            | Prim::Int8
+            | Prim::Int16
+            | Prim::Int32
+            | Prim::Int64
+            | Prim::Bool
+            | Prim::String => unreachable!("FloatToFloat plan has a float target"),
+        },
+        CheckedCastKind::ExactToBool => {
+            let domain = NumericTrap::Domain {
+                op: "cast",
+                prim: Prim::Bool,
+            }
+            .to_string();
+            format!("chelis_checked_bool_from_int((int64_t)({value}), {domain:?})")
+        }
+        CheckedCastKind::FloatToBool => {
+            let domain = NumericTrap::Domain {
+                op: "cast",
+                prim: Prim::Bool,
+            }
+            .to_string();
+            format!(
+                "chelis_checked_bool_from_float({}, {domain:?})",
+                cast_float_as_double(plan.source(), value)
+            )
+        }
+    }
+}
+
+/// Non-trapping store expression after the caller has classified the element
+/// with both condition helpers. This keeps aborting runtime helpers out of an
+/// OpenMP worker while preserving the same representation conversion.
+pub(crate) fn checked_cast_valid_c_expr(plan: CheckedCastPlan, value: &str) -> String {
+    match plan.kind() {
+        CheckedCastKind::ExactToInteger => {
+            format!("({})((int64_t)({value}))", cast_prim_c_type(plan.target()))
+        }
+        CheckedCastKind::FloatToInteger => format!(
+            "({})((int64_t)({}))",
+            cast_prim_c_type(plan.target()),
+            cast_float_as_double(plan.source(), value)
+        ),
+        CheckedCastKind::ExactToBool => format!("((int64_t)({value}) == 1)"),
+        CheckedCastKind::FloatToBool => {
+            format!("({} == 1.0)", cast_float_as_double(plan.source(), value))
+        }
+        CheckedCastKind::Identity
+        | CheckedCastKind::ExactToFloat
+        | CheckedCastKind::FloatToFloat => checked_cast_c_expr(plan, value),
+    }
+}
+
+pub(crate) fn checked_cast_domain_condition(plan: CheckedCastPlan, value: &str) -> Option<String> {
+    match plan.kind() {
+        CheckedCastKind::FloatToInteger => {
+            let value = cast_float_as_double(plan.source(), value);
+            Some(format!("(!isfinite({value}) || trunc({value}) != {value})"))
+        }
+        CheckedCastKind::ExactToBool => Some(format!(
+            "((int64_t)({value}) != 0 && (int64_t)({value}) != 1)"
+        )),
+        CheckedCastKind::FloatToBool => {
+            let value = cast_float_as_double(plan.source(), value);
+            Some(format!(
+                "(!isfinite({value}) || ({value} != 0.0 && {value} != 1.0))"
+            ))
+        }
+        CheckedCastKind::Identity
+        | CheckedCastKind::ExactToInteger
+        | CheckedCastKind::ExactToFloat
+        | CheckedCastKind::FloatToFloat => None,
+    }
+}
+
+pub(crate) fn checked_cast_overflow_condition(
+    plan: CheckedCastPlan,
+    value: &str,
+) -> Option<String> {
+    match plan.kind() {
+        CheckedCastKind::ExactToInteger => {
+            let (minimum, maximum) = cast_integer_bounds(plan.target());
+            Some(format!(
+                "((int64_t)({value}) < {minimum} || (int64_t)({value}) > {maximum})"
+            ))
+        }
+        CheckedCastKind::FloatToInteger => {
+            let value = cast_float_as_double(plan.source(), value);
+            let condition = if plan.target() == Prim::Int64 {
+                format!("({value} < -9223372036854775808.0 || {value} >= 9223372036854775808.0)")
+            } else {
+                let (minimum, maximum) = cast_integer_bounds(plan.target());
+                format!("({value} < (double){minimum} || {value} > (double){maximum})")
+            };
+            Some(condition)
+        }
+        CheckedCastKind::Identity
+        | CheckedCastKind::ExactToFloat
+        | CheckedCastKind::FloatToFloat
+        | CheckedCastKind::ExactToBool
+        | CheckedCastKind::FloatToBool => None,
+    }
+}
+
+fn cast_float_as_double(source: Prim, value: &str) -> String {
+    match source {
+        Prim::F64 | Prim::F32 => format!("(double)({value})"),
+        Prim::F16 => format!("(double)chelis_f16_to_f32({value})"),
+        Prim::Bf16 => format!("(double)chelis_bf16_to_f32({value})"),
+        Prim::F8e4m3
+        | Prim::Int8
+        | Prim::Int16
+        | Prim::Int32
+        | Prim::Int64
+        | Prim::Bool
+        | Prim::String => unreachable!("float checked-cast action has a float source"),
+    }
+}
+
+fn cast_integer_width(target: Prim) -> i64 {
+    match target {
+        Prim::Int8 => 8,
+        Prim::Int16 => 16,
+        Prim::Int32 => 32,
+        Prim::Int64 => 64,
+        Prim::F32
+        | Prim::F64
+        | Prim::F16
+        | Prim::Bf16
+        | Prim::F8e4m3
+        | Prim::Bool
+        | Prim::String => unreachable!("integer checked-cast action has an integer target"),
+    }
+}
+
+fn cast_integer_bounds(target: Prim) -> (&'static str, &'static str) {
+    match target {
+        Prim::Int8 => ("INT8_MIN", "INT8_MAX"),
+        Prim::Int16 => ("INT16_MIN", "INT16_MAX"),
+        Prim::Int32 => ("INT32_MIN", "INT32_MAX"),
+        Prim::Int64 => ("INT64_MIN", "INT64_MAX"),
+        Prim::F32
+        | Prim::F64
+        | Prim::F16
+        | Prim::Bf16
+        | Prim::F8e4m3
+        | Prim::Bool
+        | Prim::String => unreachable!("integer checked-cast action has an integer target"),
+    }
+}
+
+fn cast_prim_c_type(prim: Prim) -> &'static str {
+    match prim {
+        Prim::F64 => "double",
+        Prim::F32 => "float",
+        Prim::F16 | Prim::Bf16 => "uint16_t",
+        Prim::Int8 => "int8_t",
+        Prim::Int16 => "int16_t",
+        Prim::Int32 => "int32_t",
+        Prim::Int64 => "int64_t",
+        Prim::Bool => "bool",
+        Prim::F8e4m3 | Prim::String => {
+            unreachable!("unsupported Prim cannot enter checked C cast emission")
+        }
+    }
 }
 
 /// One emitted `case` of the per-dtype element printer, or `None` for a
@@ -2269,7 +2516,20 @@ impl<'a> HostEmitter<'a> {
                 _ => None,
             };
             if let Some(assignment) = assignment {
+                let target_prim = checked_cast_abi_scalar_prim(ty)?;
+                let plan = CheckedCastPlan::new(Prim::F64, target_prim)
+                    .map_err(|error| checked_cast_plan_error(error.to_string()))?;
                 self.emit_span_comments(arg);
+                self.lines.push(format!(
+                    "{}/* checked cast plan: {} -> {} */",
+                    self.indent,
+                    plan.source().name(),
+                    plan.target().name()
+                ));
+                if plan.kind() == CheckedCastKind::Identity {
+                    self.lines
+                        .push(format!("{}/* checked cast identity */", self.indent));
+                }
                 self.lines
                     .push(format!("{}{target} = {assignment};", self.indent));
                 return Ok(());
@@ -2287,6 +2547,40 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        if name == "cast" {
+            let (source_prim, source_surface) = checked_cast_abi_axis(&arg_vars[0].1)?;
+            let (target_prim, target_surface) = checked_cast_abi_axis(ty)?;
+            if source_surface != target_surface {
+                return Err(checked_cast_plan_error(format!(
+                    "checked cast resolved across surfaces: {:?} -> {:?}",
+                    arg_vars[0].1, ty
+                )));
+            }
+            let plan = CheckedCastPlan::new(source_prim, target_prim)
+                .map_err(|error| checked_cast_plan_error(error.to_string()))?;
+            self.lines.push(format!(
+                "{}/* checked cast plan: {} -> {} */",
+                self.indent,
+                source_prim.name(),
+                target_prim.name()
+            ));
+            match source_surface {
+                CheckedCastSurface::Scalar => {
+                    if plan.kind() == CheckedCastKind::Identity {
+                        self.lines
+                            .push(format!("{}/* checked cast identity */", self.indent));
+                    }
+                    let expr = checked_cast_c_expr(plan, &arg_vars[0].0);
+                    self.lines
+                        .push(format!("{}{target} = {expr};", self.indent));
+                }
+                CheckedCastSurface::Tensor => {
+                    self.assign_checked_tensor_cast(target, &arg_vars[0].0, plan);
+                }
+            }
+            return Ok(());
         }
 
         if let HostType::Tensor(_) = ty {
@@ -2450,136 +2744,6 @@ impl<'a> HostEmitter<'a> {
             }
             "None" => {
                 self.assign_option_none(target, ty)?;
-                return Ok(());
-            }
-            "cast" => {
-                let expr = match (&arg_vars[0].1, ty) {
-                    (source, target) if is_integer_abi(source) && is_integer_abi(target) => {
-                        let message = NumericTrap::Overflow {
-                            op: "cast",
-                            prim: integer_abi_prim(target)?,
-                        }
-                        .to_string();
-                        format!(
-                            "({})chelis_checked_int_cast((int64_t){}, {}, {message:?})",
-                            c_type(target)?,
-                            arg_vars[0].0,
-                            integer_abi_width(target)?
-                        )
-                    }
-                    (source, HostType::Float64) if is_integer_abi(source) => {
-                        format!("(double){}", arg_vars[0].0)
-                    }
-                    (source, HostType::Float32) if is_integer_abi(source) => {
-                        format!("(float){}", arg_vars[0].0)
-                    }
-                    (source, HostType::Float16) if is_integer_abi(source) => {
-                        format!("chelis_host_i64_to_f16((int64_t){})", arg_vars[0].0)
-                    }
-                    (source, HostType::BFloat16) if is_integer_abi(source) => {
-                        format!("chelis_host_i64_to_bf16((int64_t){})", arg_vars[0].0)
-                    }
-                    (HostType::Bool, HostType::Float64) => {
-                        format!("({0} ? 1.0 : 0.0)", arg_vars[0].0)
-                    }
-                    (HostType::Bool, HostType::Float32) => {
-                        format!("({0} ? 1.0f : 0.0f)", arg_vars[0].0)
-                    }
-                    (HostType::Bool, HostType::Float16) => {
-                        format!("chelis_host_i64_to_f16((int64_t){})", arg_vars[0].0)
-                    }
-                    (HostType::Bool, HostType::BFloat16) => {
-                        format!("chelis_host_i64_to_bf16((int64_t){})", arg_vars[0].0)
-                    }
-                    (source, target) if is_float_abi(source) && is_integer_abi(target) => {
-                        let prim = integer_abi_prim(target)?;
-                        let domain = NumericTrap::Domain { op: "cast", prim }.to_string();
-                        let overflow = NumericTrap::Overflow { op: "cast", prim }.to_string();
-                        format!(
-                            "({})chelis_checked_float_to_int({}, {}, {domain:?}, {overflow:?})",
-                            c_type(target)?,
-                            scalar_float_as_double(&arg_vars[0].0, source),
-                            integer_abi_width(target)?
-                        )
-                    }
-                    // WS-4: float entry params can now be `Float32`, so the
-                    // int<->float casts must cover both float widths. The C
-                    // numeric cast handles the narrowing/widening to the
-                    // declared destination type.
-                    (HostType::Int64, HostType::Float64) => {
-                        format!("(double){0}", arg_vars[0].0)
-                    }
-                    (HostType::Int64, HostType::Float32) => {
-                        format!("(float){0}", arg_vars[0].0)
-                    }
-                    (HostType::Float64 | HostType::Float32, HostType::Int64) => {
-                        format!("(int64_t){0}", arg_vars[0].0)
-                    }
-                    (HostType::Float64, HostType::Float32) => {
-                        format!("(float){0}", arg_vars[0].0)
-                    }
-                    (HostType::Float32, HostType::Float64) => {
-                        format!("(double){0}", arg_vars[0].0)
-                    }
-                    (HostType::Float64, HostType::Float16) => {
-                        format!("chelis_host_f64_to_f16({0})", arg_vars[0].0)
-                    }
-                    (HostType::Float64, HostType::BFloat16) => {
-                        format!("chelis_host_f64_to_bf16({0})", arg_vars[0].0)
-                    }
-                    (HostType::Float32, HostType::Float16) => {
-                        format!("chelis_f32_to_f16({0})", arg_vars[0].0)
-                    }
-                    (HostType::Float32, HostType::BFloat16) => {
-                        format!("chelis_f32_to_bf16({0})", arg_vars[0].0)
-                    }
-                    (HostType::Float16, HostType::Float32) => {
-                        format!("chelis_f16_to_f32({0})", arg_vars[0].0)
-                    }
-                    (HostType::BFloat16, HostType::Float32) => {
-                        format!("chelis_bf16_to_f32({0})", arg_vars[0].0)
-                    }
-                    (HostType::Float16, HostType::Float64) => {
-                        format!("(double)chelis_f16_to_f32({0})", arg_vars[0].0)
-                    }
-                    (HostType::BFloat16, HostType::Float64) => {
-                        format!("(double)chelis_bf16_to_f32({0})", arg_vars[0].0)
-                    }
-                    (HostType::Float16, HostType::BFloat16) => {
-                        format!("chelis_f32_to_bf16(chelis_f16_to_f32({0}))", arg_vars[0].0)
-                    }
-                    (HostType::BFloat16, HostType::Float16) => {
-                        format!("chelis_f32_to_f16(chelis_bf16_to_f32({0}))", arg_vars[0].0)
-                    }
-                    (HostType::Bool, target) if is_integer_abi(target) => {
-                        format!("({}){}", c_type(target)?, arg_vars[0].0)
-                    }
-                    (source, HostType::Bool) if is_integer_abi(source) => {
-                        let message = NumericTrap::Domain {
-                            op: "cast",
-                            prim: Prim::Bool,
-                        }
-                        .to_string();
-                        format!(
-                            "chelis_checked_bool_from_int((int64_t){}, {message:?})",
-                            arg_vars[0].0
-                        )
-                    }
-                    (source, HostType::Bool) if is_float_abi(source) => {
-                        let message = NumericTrap::Domain {
-                            op: "cast",
-                            prim: Prim::Bool,
-                        }
-                        .to_string();
-                        format!(
-                            "chelis_checked_bool_from_float({}, {message:?})",
-                            scalar_float_as_double(&arg_vars[0].0, source)
-                        )
-                    }
-                    _ => arg_vars[0].0.clone(),
-                };
-                self.lines
-                    .push(format!("{}{target} = {};", self.indent, expr));
                 return Ok(());
             }
             // [05-OP-6]. Unlike `cast`, this arm has NO identity
@@ -3595,6 +3759,75 @@ impl<'a> HostEmitter<'a> {
     //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32 and
     //     the current Bool payload. I32, F64, and I64 abort rather than
     //     convert through binary32 and lose precision.
+    fn assign_checked_tensor_cast(&mut self, target: &str, input: &str, plan: CheckedCastPlan) {
+        if plan.kind() == CheckedCastKind::Identity {
+            self.lines
+                .push(format!("{}/* checked cast identity */", self.indent));
+            self.lines.push(format!(
+                "{}{target} = chelis_contiguous({input});",
+                self.indent
+            ));
+            return;
+        }
+
+        let source_prim = plan.source();
+        let target_prim = plan.target();
+        let source_type = sparse_elem_type(source_prim);
+        let target_type = sparse_elem_type(target_prim);
+        let source_data = format!("{target}_cast_source");
+        let target_data = format!("{target}_cast_target");
+        let flat_index = format!("{target}_cast_i");
+        let indices = format!("{target}_cast_indices");
+        let source_index = format!("{target}_cast_source_i");
+        self.lines.push(format!(
+            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {});",
+            self.indent,
+            sparse_dtype_macro(target_prim)
+        ));
+        self.lines.push(format!(
+            "{}if ({input}->dtype != {}) {{",
+            self.indent,
+            sparse_dtype_macro(source_prim)
+        ));
+        self.lines.push(format!(
+            "{}    fprintf(stderr, \"checked cast source dtype contract mismatch\\n\");",
+            self.indent
+        ));
+        self.lines.push(format!("{}    abort();", self.indent));
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!(
+            "{}const {source_type} *{source_data} = (const {source_type} *){input}->data;",
+            self.indent,
+        ));
+        self.lines.push(format!(
+            "{}{target_type} *{target_data} = ({target_type} *){target}->data;",
+            self.indent,
+        ));
+        self.lines.push(format!(
+            "{}for (int64_t {flat_index} = 0; {flat_index} < {target}->size; {flat_index}++) {{",
+            self.indent,
+        ));
+        self.lines.push(format!(
+            "{}    int64_t {indices}[CHELIS_MAX_DIM];",
+            self.indent,
+        ));
+        self.lines.push(format!(
+            "{}    chelis_flat_to_indices({flat_index}, {target}->shape, {target}->ndim, {indices});",
+            self.indent,
+        ));
+        self.lines.push(format!(
+            "{}    int64_t {source_index} = chelis_indices_to_flat({indices}, {input}->strides, {input}->ndim);",
+            self.indent,
+        ));
+        let source_value = format!("{source_data}[{source_index}]");
+        let expression = checked_cast_c_expr(plan, &source_value);
+        self.lines.push(format!(
+            "{}    {target_data}[{flat_index}] = {expression};",
+            self.indent,
+        ));
+        self.lines.push(format!("{}}}", self.indent));
+    }
+
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
         self.lines.push(format!(
             "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
@@ -6393,6 +6626,64 @@ fn expected_builtin_arg_ty(name: &str, ty: &HostType, index: usize) -> Option<Ho
         ("append", HostType::List(inner), 1) => Some((**inner).clone()),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckedCastSurface {
+    Scalar,
+    Tensor,
+}
+
+fn checked_cast_abi_scalar_prim(ty: &HostType) -> Result<Prim, Unsupported> {
+    let (prim, surface) = checked_cast_abi_axis(ty)?;
+    if surface != CheckedCastSurface::Scalar {
+        return Err(checked_cast_plan_error(format!(
+            "checked scalar cast resolved to non-scalar ABI type {ty:?}"
+        )));
+    }
+    Ok(prim)
+}
+
+/// Resolve an already-projected host ABI edge onto the closed checked-cast
+/// axes. This match is exhaustive: container/function additions cannot
+/// silently inherit numeric identity.
+fn checked_cast_abi_axis(ty: &HostType) -> Result<(Prim, CheckedCastSurface), Unsupported> {
+    match ty {
+        HostType::Int8 => Ok((Prim::Int8, CheckedCastSurface::Scalar)),
+        HostType::Int16 => Ok((Prim::Int16, CheckedCastSurface::Scalar)),
+        HostType::Int32 => Ok((Prim::Int32, CheckedCastSurface::Scalar)),
+        HostType::Int64 => Ok((Prim::Int64, CheckedCastSurface::Scalar)),
+        HostType::Float16 => Ok((Prim::F16, CheckedCastSurface::Scalar)),
+        HostType::BFloat16 => Ok((Prim::Bf16, CheckedCastSurface::Scalar)),
+        HostType::Float32 => Ok((Prim::F32, CheckedCastSurface::Scalar)),
+        HostType::Float64 => Ok((Prim::F64, CheckedCastSurface::Scalar)),
+        HostType::Bool => Ok((Prim::Bool, CheckedCastSurface::Scalar)),
+        HostType::Tensor(tensor) => Ok((tensor.precision, CheckedCastSurface::Tensor)),
+        HostType::String
+        | HostType::Callback(_, _)
+        | HostType::Adt(_, _)
+        | HostType::List(_)
+        | HostType::Dict(_, _)
+        | HostType::Tuple(_)
+        | HostType::Option(_)
+        | HostType::MappedFile
+        | HostType::Unit => Err(checked_cast_plan_error(format!(
+            "checked numeric cast resolved to non-numeric ABI type {ty:?}"
+        ))),
+    }
+}
+
+fn checked_cast_plan_error(detail: String) -> Unsupported {
+    Unsupported::new(
+        UnsupportedKind::HostAbi(detail),
+        "C host checked-cast emission",
+        Stage::Codegen("c"),
+        chelis_types::deliberate_rejection!(
+            "[04-NUM-14]",
+            "checked cast requires an active numeric or bool source/target pair on one surface; \
+             no identity fallback is permitted"
+        ),
+    )
 }
 
 fn callback_params(callback: &HostCallback) -> &[HostParam] {

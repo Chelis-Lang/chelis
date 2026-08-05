@@ -6,7 +6,7 @@ use chelis_ir::dag::{
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
-use chelis_types::{ElementRef, NumericTrap, ScalarValue};
+use chelis_types::{CheckedCastKind, CheckedCastPlan, ElementRef, NumericTrap, ScalarValue};
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
@@ -193,6 +193,30 @@ impl CEmitter {
         e.line("#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) (seed)");
         e.line("#endif");
         e.line("");
+        let needs_checked_cast_conversion_helpers = dag.nodes().iter().any(|node| {
+            let RiscOp::Cast { new_precision } = &node.op else {
+                return false;
+            };
+            let Some(source) = node.inputs.first().and_then(|input| dag.get(*input)) else {
+                return false;
+            };
+            let Ok(plan) = CheckedCastPlan::new(source.output_type.precision, *new_precision)
+            else {
+                return false;
+            };
+            plan.kind() != CheckedCastKind::Identity
+                && matches!(plan.target(), Prim::F16 | Prim::Bf16)
+        });
+        if needs_checked_cast_conversion_helpers {
+            let mut scalar_conversion_helpers = Vec::new();
+            crate::host_emit::append_checked_cast_conversion_helpers(
+                &mut scalar_conversion_helpers,
+            );
+            for helper_line in scalar_conversion_helpers {
+                e.line(&helper_line);
+            }
+            e.line("");
+        }
 
         let linkage = if options.static_entry { "static " } else { "" };
         // Producer-supplied `func_name` (typically the source filename's
@@ -879,24 +903,41 @@ impl CEmitter {
                 ),
             }
 
-            if let RiscOp::Cast { new_precision } | RiscOp::CastTrunc { new_precision } = node.op
-                && !matches!(
-                    new_precision,
-                    Prim::F32
-                        | Prim::F64
-                        | Prim::Bf16
-                        | Prim::F16
-                        | Prim::Int8
-                        | Prim::Int16
-                        | Prim::Int32
-                        | Prim::Int64
-                )
-            {
-                panic!(
-                    "C backend does not yet support casts to {}, found at node {}",
-                    new_precision.name(),
-                    node.id.0
-                );
+            match node.op {
+                RiscOp::Cast { new_precision }
+                    if !matches!(
+                        new_precision,
+                        Prim::F32
+                            | Prim::F64
+                            | Prim::Bf16
+                            | Prim::F16
+                            | Prim::Int8
+                            | Prim::Int16
+                            | Prim::Int32
+                            | Prim::Int64
+                            | Prim::Bool
+                    ) =>
+                {
+                    panic!(
+                        "C backend does not yet support checked casts to {}, found at node {}",
+                        new_precision.name(),
+                        node.id.0
+                    );
+                }
+                RiscOp::CastTrunc { new_precision }
+                    if !matches!(
+                        new_precision,
+                        Prim::Int8 | Prim::Int16 | Prim::Int32 | Prim::Int64
+                    ) =>
+                {
+                    panic!(
+                        "C backend does not support cast_trunc to {}, found at node {}",
+                        new_precision.name(),
+                        node.id.0
+                    );
+                }
+                RiscOp::Cast { .. } | RiscOp::CastTrunc { .. } => {}
+                _ => {}
             }
 
             // F1 (WS-A0 RT-1 fixup, tactical) — partially lifted by
@@ -6244,23 +6285,10 @@ impl CEmitter {
     // `convert_scalar_data`); this site mirrors those semantics in emitted
     // C.
     //
-    // Validated precision set (see `validate_supported_precisions`):
-    //   F32 | F64 | Bf16 | F16 | Int8 | Int16 | Int32 | Int64. `Bool` is
-    // not a valid cast target and panics upstream.
-    //
-    // RT-Cleanup BLOCKER fix (WS-Cleanup-Fixups): casts that touch the
-    // reduced floats (`Bf16` / `F16`) MUST route through the runtime
-    // conversion helpers (`chelis_bf16_to_f32` / `chelis_f32_to_bf16` /
-    // `chelis_f16_to_f32` / `chelis_f32_to_f16`). The previous emit used
-    // the C language cast `(uint16_t)v` on a float, which integer-
-    // truncates the float value (so `(uint16_t)1.5f == 1`) and writes
-    // bit pattern `0x0001` instead of `bf16(1.5)=0x3FC0` /
-    // `f16(1.5)=0x3E00`. Symmetric corruption on the widening direction
-    // (the cast `(float)(uint16_t)0x3FC0 == 16320.0f`, not `1.5f`).
-    // Cross-narrow-float casts (`Bf16 <-> F16`) chain through `f32` as
-    // the canonical intermediate so each leg uses the spec-correct
-    // conversion. Pairs not involving `Bf16` / `F16` keep the existing
-    // C primitive cast semantics.
+    // The checked path consumes `CheckedCastPlan` for the full active
+    // numeric/bool product. Reduced-float storage is decoded explicitly, and
+    // f64/integer sources round directly into f16/bf16 without an intermediate
+    // f32 rounding. Only the exact same-Prim diagonal can reach `memcpy`.
     /// Emit a cast-ladder node. `trunc` selects the [05-OP-6] rung:
     /// the float-to-integer leg truncates toward zero before its range
     /// check instead of rejecting a fractional value.
@@ -6275,10 +6303,26 @@ impl CEmitter {
         let src_et = Self::elem_type(src_ty);
         let dst_et = Self::elem_type(ty);
         self.emit_slot_wrapper(id, ty);
-        if src_prec == dst_prec {
+        let checked_plan = if trunc {
+            None
+        } else {
+            Some(
+                CheckedCastPlan::new(src_prec, dst_prec)
+                    .expect("validated C DAG casts use active source and target dtypes"),
+            )
+        };
+        if let Some(plan) = checked_plan {
+            self.line(&format!(
+                "/* checked cast plan: {} -> {} */",
+                plan.source().name(),
+                plan.target().name()
+            ));
+        }
+        if checked_plan.is_some_and(|plan| plan.kind() == CheckedCastKind::Identity) {
             // Same-dtype cast: copy directly using the per-dtype size.
             // Models a same-dtype cast as a structural identity copy
             // matching the runtime's per-dtype storage layout.
+            self.line("/* checked cast identity */");
             self.line(&format!(
                 "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof({dst_et}));"
             ));
@@ -6291,21 +6335,32 @@ impl CEmitter {
         // `chelis_flat_to_indices` + `chelis_indices_to_flat` dance
         // used by `emit_realize` and friends.
         //
-        // The [05-OP-6] rung runs this loop SERIALLY. A buffer can carry
-        // more than one kind of offender (an out-of-range element and a
-        // non-finite one), and each traps a different kind; under
-        // `omp parallel for` whichever thread reaches `chelis_numeric_trap`
-        // first decides, so the reported kind became thread-race
-        // dependent -- observed on Linux CI at two elements. [05-OP-6]
-        // declares the eval and compiled lanes identical, and the
-        // evaluator is an in-order first-offender walk, so a
-        // deterministic serial loop is the contract; parallel throughput
-        // does not outrank it on a guarded per-element conversion.
-        //
-        // The checked `cast` keeps its pragma: the same divergence class
-        // exists there and is filed separately, and widening this change
-        // to touch it is out of scope for chelis#759.
-        if !trunc {
+        // `cast_trunc` remains serial. Checked cast keeps valid-element
+        // conversion parallel, but no worker calls an aborting helper:
+        // workers reduce candidate indices and the selected lowest index is
+        // reclassified after the region ([04-NUM-15]).
+        let trap_conditions = checked_plan.map(|plan| {
+            let probe = format!("(({src_et}*)t{a}->data)[idx]");
+            let mut conditions = Vec::new();
+            if let Some(condition) = crate::host_emit::checked_cast_domain_condition(plan, &probe) {
+                conditions.push(condition);
+            }
+            if let Some(condition) = crate::host_emit::checked_cast_overflow_condition(plan, &probe)
+            {
+                conditions.push(condition);
+            }
+            conditions
+        });
+        let trapping = trap_conditions
+            .as_ref()
+            .is_some_and(|conditions| !conditions.is_empty());
+        let first_trap_index = format!("chelis_first_trap_index_{id}");
+        if trapping {
+            self.line(&format!("int64_t {first_trap_index} = INT64_MAX;"));
+            self.line(&format!(
+                "#pragma omp parallel for reduction(min:{first_trap_index})"
+            ));
+        } else if checked_plan.is_some() {
             self.line("#pragma omp parallel for");
         }
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
@@ -6320,77 +6375,78 @@ impl CEmitter {
         let src_elem = format!("(({src_et}*)t{a}->data)[idx]");
         let dst_elem = format!("(({dst_et}*)t{id}->data)[i]");
         let src_reduced = Self::is_reduced_float_prec(src_prec);
-        let dst_reduced = Self::is_reduced_float_prec(dst_prec);
-        let assignment = if src_prec.is_integer() && dst_prec.is_integer() {
-            let overflow = NumericTrap::Overflow {
-                op: "cast",
-                prim: dst_prec,
-            }
-            .to_string();
-            format!(
-                "{dst_elem} = ({dst_et})chelis_checked_int_cast((int64_t)({src_elem}), {}, {overflow:?});",
-                Self::integer_width(dst_prec)
-            )
-        } else if src_prec.is_float() && dst_prec.is_integer() {
+        let assignment = if trunc {
+            assert!(
+                src_prec.is_float() && dst_prec.is_integer(),
+                "[05-OP-6] C emission is float-to-integer only"
+            );
             let source_value = if src_reduced {
                 format!("{}({src_elem})", Self::reduced_to_f32_fn(src_prec))
             } else {
                 src_elem.clone()
             };
-            // Both messages are generated from the same `NumericTrap`
-            // the evaluator raises, so the two lanes are byte-identical
-            // by construction rather than by matching literals.
-            let op = if trunc { "cast_trunc" } else { "cast" };
-            let domain = NumericTrap::Domain { op, prim: dst_prec }.to_string();
-            let overflow = NumericTrap::Overflow { op, prim: dst_prec }.to_string();
-            let helper = if trunc {
-                "chelis_trunc_float_to_int"
-            } else {
-                "chelis_checked_float_to_int"
-            };
+            let domain = NumericTrap::Domain {
+                op: "cast_trunc",
+                prim: dst_prec,
+            }
+            .to_string();
+            let overflow = NumericTrap::Overflow {
+                op: "cast_trunc",
+                prim: dst_prec,
+            }
+            .to_string();
             format!(
-                "{dst_elem} = ({dst_et}){helper}((double)({source_value}), {}, {domain:?}, {overflow:?});",
+                "{dst_elem} = ({dst_et})chelis_trunc_float_to_int((double)({source_value}), {}, {domain:?}, {overflow:?});",
                 Self::integer_width(dst_prec)
             )
-        } else if src_reduced && dst_reduced {
-            // bf16 <-> f16: chain `src -> f32 -> dst` so each leg uses
-            // the spec-correct rounding helpers; the intermediate `f32`
-            // is exact for both bf16 and f16 (both fit in the f32
-            // exponent and mantissa range).
-            let load = Self::reduced_to_f32_fn(src_prec);
-            let store = Self::f32_to_reduced_fn(dst_prec);
-            format!("{dst_elem} = {store}({load}({src_elem}));")
-        } else if src_reduced {
-            // bf16/f16 -> {f32, f64, intN}: decode to f32 first, then
-            // let the C primitive cast handle the rest. The C cast
-            // `(double)f32`, `(int32_t)f32`, etc. matches the
-            // evaluator's `convert_scalar_data` semantics.
-            let load = Self::reduced_to_f32_fn(src_prec);
-            if dst_prec == Prim::F32 {
-                format!("{dst_elem} = {load}({src_elem});")
-            } else {
-                format!("{dst_elem} = ({dst_et}){load}({src_elem});")
-            }
-        } else if dst_reduced {
-            // {f32, f64, intN} -> bf16/f16: convert to f32 first (the
-            // C cast `(float)x` rounds f64/int to f32 per canonical
-            // semantics), then encode via the rounding helper.
-            let store = Self::f32_to_reduced_fn(dst_prec);
-            if src_prec == Prim::F32 {
-                format!("{dst_elem} = {store}({src_elem});")
-            } else {
-                format!("{dst_elem} = {store}((float){src_elem});")
-            }
         } else {
-            // Neither side is a reduced float: the C primitive cast
-            // (`(double)f32`, `(int64_t)f32`, `(int32_t)i64`, ...) is
-            // the spec-correct conversion and matches the runtime
-            // evaluator's `convert_scalar_data`.
-            format!("{dst_elem} = ({dst_et}){src_elem};")
+            let plan = checked_plan.expect("non-truncating cast carries a checked plan");
+            let expression = if trapping {
+                crate::host_emit::checked_cast_valid_c_expr(plan, &src_elem)
+            } else {
+                crate::host_emit::checked_cast_c_expr(plan, &src_elem)
+            };
+            format!("{dst_elem} = {};", expression)
         };
-        self.line(&assignment);
+        if trapping {
+            let invalid = trap_conditions
+                .as_ref()
+                .expect("trapping checked cast carries conditions")
+                .join(" || ");
+            self.line(&format!("if ({invalid}) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "if (i < {first_trap_index}) {first_trap_index} = i;"
+            ));
+            self.indent -= 1;
+            self.line("} else {");
+            self.indent += 1;
+            self.line(&assignment);
+            self.indent -= 1;
+            self.line("}");
+        } else {
+            self.line(&assignment);
+        }
         self.indent -= 1;
         self.line("}");
+        if trapping {
+            let plan = checked_plan.expect("trapping conversion carries a plan");
+            self.line(&format!("if ({first_trap_index} != INT64_MAX) {{"));
+            self.indent += 1;
+            self.line("int64_t indices[CHELIS_MAX_DIM];");
+            self.line(&format!(
+                "chelis_flat_to_indices({first_trap_index}, t{id}->shape, t{id}->ndim, indices);"
+            ));
+            self.line(&format!(
+                "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            ));
+            let selected_src = format!("(({src_et}*)t{a}->data)[idx]");
+            let selected = crate::host_emit::checked_cast_c_expr(plan, &selected_src);
+            self.line(&format!("(void)({selected});"));
+            self.line("abort(); /* the selected checked helper always traps */");
+            self.indent -= 1;
+            self.line("}");
+        }
     }
 
     /// True for the reduced-precision float dtypes whose host storage is
@@ -6930,7 +6986,7 @@ mod tests {
     /// unreliable local guard, so the invariant is pinned on the emitted
     /// source instead.
     #[test]
-    fn cast_trunc_conversion_loop_is_serial_while_checked_cast_stays_parallel() {
+    fn checked_cast_parallel_loop_reduces_the_lowest_trap_index_while_cast_trunc_is_serial() {
         fn emit(op: RiscOp, precision: Prim) -> String {
             let mut dag = Dag::new();
             let a = dag.add_node(
@@ -6965,9 +7021,6 @@ mod tests {
              lanes identical); got:\n{trunc}"
         );
 
-        // Control: the checked rung is deliberately untouched. Its
-        // same-class divergence is pre-existing and filed separately;
-        // this assertion keeps the scope of the chelis#759 change honest.
         let checked = emit(
             RiscOp::Cast {
                 new_precision: Prim::Int32,
@@ -6976,16 +7029,79 @@ mod tests {
         );
         assert!(
             checked.contains("#pragma omp parallel for"),
-            "the checked `cast` keeps its pragma; narrowing it is out of scope \
-             for chelis#759; got:\n{checked}"
+            "checked cast keeps correct-element conversion parallel; got:\n{checked}"
         );
+        assert!(
+            checked.contains("reduction(min:chelis_first_trap_index_"),
+            "parallel checked cast must reduce worker-local candidates by flat index; got:\n{checked}"
+        );
+        assert!(
+            checked.contains("if (chelis_first_trap_index_") && checked.contains("!= INT64_MAX)"),
+            "the selected candidate must be rendered only after the parallel loop; got:\n{checked}"
+        );
+        assert!(
+            !checked.contains("chelis_checked_float_to_int((double)")
+                || checked
+                    .find("chelis_checked_float_to_int((double)")
+                    .unwrap()
+                    > checked.find("!= INT64_MAX)").unwrap(),
+            "an aborting trap helper must not race inside the parallel loop; got:\n{checked}"
+        );
+    }
+
+    #[test]
+    fn checked_cast_emitter_has_no_nonidentity_memcpy_in_the_active_prim_product() {
+        let active = [
+            Prim::F64,
+            Prim::F32,
+            Prim::F16,
+            Prim::Bf16,
+            Prim::Int8,
+            Prim::Int16,
+            Prim::Int32,
+            Prim::Int64,
+            Prim::Bool,
+        ];
+
+        for source in active {
+            for target in active {
+                let mut dag = Dag::new();
+                let source_ty = tensor_ty(&[2], source);
+                let input = dag.add_node(
+                    RiscOp::Load {
+                        name: "input".into(),
+                    },
+                    vec![],
+                    source_ty,
+                    None,
+                );
+                let output = dag.add_node(
+                    RiscOp::Cast {
+                        new_precision: target,
+                    },
+                    vec![input],
+                    tensor_ty(&[2], target),
+                    None,
+                );
+                dag.add_root(output);
+                let c = CEmitter::emit_dag(&dag, "checked_cast_product").unwrap();
+                let has_identity_copy = c.contains("memcpy(t1->data, t0->data");
+                assert_eq!(
+                    has_identity_copy,
+                    source == target,
+                    "identity copy is legal exactly on the equal-Prim diagonal: {} -> {}; generated:\n{c}",
+                    source.name(),
+                    target.name()
+                );
+            }
+        }
     }
 
     #[test]
     fn cast_emits_elementwise_conversion_loop() {
         // CBackend-CastMemcpy fix: cast no longer emits a bit-preserving
         // `memcpy`. The new shape is a strided element-wise loop with a
-        // C-level primitive cast `(dst_et)src` performing the conversion.
+        // typed source read and C-level target conversion.
         // See `docs/investigations/cbackend_cast_memcpy_diagnosis.md`.
         let mut dag = Dag::new();
         let a = dag.add_node(
@@ -7012,8 +7128,8 @@ mod tests {
             "cast must emit a strided element-wise loop, not memcpy; got:\n{c}"
         );
         assert!(
-            c.contains("(double)((float*)"),
-            "cast must emit a C-level primitive cast (dst_et)(src_et*)src; got:\n{c}"
+            c.contains("((double*)t1->data)[i] = (double)(((float*)t0->data)[idx]);"),
+            "cast must read at the source width and convert into the target width; got:\n{c}"
         );
         assert!(
             !c.contains("memcpy(t1->data, t0->data"),
