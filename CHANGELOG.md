@@ -6,6 +6,48 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Recursive generic functions build (chelis#1158, successor to
+  chelis#941).** A type-polymorphic function that participates in a call
+  cycle now lowers to bounded, memoized monomorphic C symbols instead of
+  being rejected under `[05-UNS-1]`. This unblocks the entire
+  `Coral.Frame` API in the build lane (Chelis-Lang/coral#26), whose
+  `Coral.Internal.Hamt.from_pairs_rec` is exactly that shape.
+
+  A generic call site resolves the call's fully concrete signature,
+  interns `(callee, signature) -> symbol`, and emits an ordinary C call;
+  host lowering then drains the interner and emits one standalone
+  definition per interned pair. Termination is by memoization, so mutual
+  recursion needs no cycle analysis, and a generic used at several
+  payload types gets one symbol per type.
+
+  Direct recursion, mutual recursion, multi-instantiation, and a
+  recursive trie generic instantiated at a `tensor[n, f32]` payload are
+  all covered by build-link-run tests that assert eval/C value parity.
+
+### Changed
+
+- **BREAKING (emitted C): a previously-inlined generic call site may now
+  emit a call plus a standalone specialization.** Programs that already
+  built are unaffected in behaviour, but the emitted symbol inventory and
+  binary layout change. Downstream consumers rebuilding against 0.18.5
+  should expect new `<callee>__mono_<hash>` symbols in the generated
+  translation unit. The suffix is a stable FNV-1a hash of the canonical
+  signature, so repeated lowering of the same program stays
+  byte-identical (chelis#1002).
+
+- **The `[05-UNS-1]` recursive-generic boundary narrows to polymorphic
+  recursion and non-concretizable call sites (chelis#1158).** The
+  diagnostic now distinguishes the two causes. A call whose type
+  arguments do not resolve to a concrete signature reports which term
+  still carries a free variable. Polymorphic recursion — a cycle that
+  mints a new instantiation at every level, as in `f[a]` calling
+  `f[(a, a)]` — reports the instantiation chain and which of the two
+  bounds it exceeded: 64 distinct specializations per callee, or 512
+  type nodes in one signature. Both remain fail-loud and prompt; neither
+  hangs.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C

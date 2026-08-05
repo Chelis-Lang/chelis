@@ -946,11 +946,38 @@ checked constructor-field types rather than by source spelling
 ([chelis#940](https://github.com/Chelis-Lang/chelis/issues/940)); parameters
 that reach only tensor dimensions stay on the existing rank-specialization
 path, while stored value parameters remain ordinary type polymorphism.
-Invoked recursive ordinary-generic functions remain a loud unsupported
-boundary until the compiler has memoized monomorphized symbols
-([chelis#941](https://github.com/Chelis-Lang/chelis/issues/941)); lowering must
-not emit a reference to an omitted generic symbol or expand recursive source
-without a bound.
+Invoked recursive ordinary-generic functions are **outlined**, not inlined
+([chelis#1158](https://github.com/Chelis-Lang/chelis/issues/1158), successor to
+[chelis#941](https://github.com/Chelis-Lang/chelis/issues/941)). A generic call
+site resolves the call's fully concrete signature, interns
+`(callee, canonical signature) -> mangled symbol`, and emits an ordinary call;
+host lowering drains the interner and emits one standalone definition per
+interned pair. The two prohibitions that made this a boundary still bind:
+lowering emits no reference to an omitted generic symbol, because every symbol
+it names is one the drain defines, and it expands no recursive source without a
+bound, because the interner's memo is what terminates the worklist rather than
+a depth budget. Only fully concrete signatures are interned; a call site
+carrying a free type, precision, or rank variable falls through to the existing
+inline and rejection paths unchanged.
+
+Two residues keep the `[05-UNS-1]` brand, and the diagnostic distinguishes
+them. A call site whose type arguments do not resolve to a concrete signature
+names the term that still carries a free variable — this is the ordinary
+chelis#730 unresolved-term shape reached through a generic call rather than a
+new class. Polymorphic recursion — a cycle that mints a NEW instantiation at
+every level, as in `f[a]` calling `f[(a, a)]` — has no finite family of
+monomorphic symbols at all, so it is rejected under two named bounds: a
+per-callee specialization cap and a per-signature type-node cap. Both are
+required, not one: the multiplicative shape reaches the count cap only after
+constructing a signature larger than memory, so the size cap is what makes the
+rejection prompt. The diagnostic prints the instantiation chain rather than
+only the bound, because a rejection an author cannot localize is a boundary
+that fails loudly at the compiler and silently at the desk. Neither residue may
+be converted into a default instantiation: an unannotated argument is typed
+from its own structure where the checker recorded enough to do so, and only a
+bare name reference in a self-recursive call may take the enclosing
+instantiation, which is the checker's own solution for it rather than a
+substituted value.
 
 For `fold`, the checked callback's first parameter is the authoritative
 accumulator type. Host lowering materializes that type onto an unresolved
