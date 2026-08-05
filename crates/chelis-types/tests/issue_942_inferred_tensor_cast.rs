@@ -165,6 +165,45 @@ flat = flatten_expanded(to_tensor([1.0f32, 2.0f32]))
 }
 
 #[test]
+fn reshape_shape_read_selects_inserted_expand_axis() {
+    let decls = parse_surf(
+        r#"
+def f(bias: tensor[2, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  reshape(expanded, [shape(expanded, 1), 3i64])
+}
+"#,
+    )
+    .expect("surf parse should succeed");
+    let deep = desugar_program(&decls);
+    let checked = check_typed_program(&deep).expect("the insertion case should typecheck");
+    let rendered = chelis_deep::printer::print_canonical(checked.annotated_exprs());
+    assert!(
+        rendered.contains("(t-tensor {} (d-lit {} 3) (d-lit {} 2) (t-prim {} f32))"),
+        "the inserted-axis read must select tensor[3, 2, f32]:\n{rendered}"
+    );
+}
+
+#[test]
+fn reshape_rejects_axis_outside_every_deferred_expand_candidate() {
+    let errors = typecheck(
+        r#"
+def f(bias: tensor[2, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  reshape(expanded, [shape(expanded, 2)])
+}
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "axis two exists in neither legal expand shape:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
 fn reshape_rejects_a_concrete_precision_incompatible_with_expand() {
     let errors = typecheck(
         r#"

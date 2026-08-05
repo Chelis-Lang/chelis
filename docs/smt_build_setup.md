@@ -49,8 +49,10 @@ Carcara dependency enables only Rug's integer and rational support, so this
 gate needs GMP but not MPFR or MPC. Install `libgmp-dev` on Debian/Ubuntu or
 `brew install gmp` on macOS.
 
-Run the complete suite serially. The parallel process reproducibly segfaults,
-while the same unit, integration, and doctest set passes with one test thread:
+Run the complete suite serially. A nightly parallel process exited with
+SIGSEGV after tests, while the same unit, integration, and doctest set passed
+with one test thread. Serialization contains that nondeterministic failure
+without narrowing the corpus; it does not establish the upstream root cause:
 
 ```bash
 cargo test -p chelis-prove --features carcara -- --test-threads=1

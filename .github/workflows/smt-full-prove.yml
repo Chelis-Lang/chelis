@@ -128,9 +128,9 @@ jobs:
         run: cargo test -p chelis-prove --features smt
 
       - name: Run carcara-gated chelis-prove tests
-        # The full Carcara-feature process reproducibly SIGSEGVs under
-        # libtest's default parallelism; the same complete suite is green
-        # serially. Keep serialization local to this optional audit lane.
+        # The nightly parallel process exited with SIGSEGV after tests; the
+        # same complete suite passed serially. Retain the full corpus while
+        # containing that nondeterministic failure in this optional lane.
         run: cargo test -p chelis-prove --features carcara -- --test-threads=1
 
       - name: Run z3-gated chelis-prove tests

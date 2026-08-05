@@ -270,17 +270,17 @@ impl Subst {
 
     /// Materialize a positional-expand result consumed by `reshape`.
     /// Reshape does not preserve rank or individual dimensions, but it does
-    /// preserve element count. A fully static target therefore selects the
-    /// legal expand candidate with the same product; a dynamic target leaves
-    /// selection to the context-free default and the runtime numel guard.
-    pub fn materialize_deferred_expand_for_numel(
+    /// preserve element count. Derive the target separately for every legal
+    /// expand candidate because `shape(expanded, axis)` may itself distinguish
+    /// replacement from insertion or reject an out-of-bounds candidate.
+    pub fn materialize_deferred_expand_for_numel<F>(
         &mut self,
         v: TypeVar,
-        target_dims: &[Dim],
-    ) -> Result<Option<Type>, TypeError> {
-        let Some(target_numel) = self.static_dim_product(target_dims) else {
-            return self.materialize_deferred_expand_default(v);
-        };
+        mut target_dims_for_candidate: F,
+    ) -> Result<Option<Type>, TypeError>
+    where
+        F: FnMut(&[Dim]) -> Result<Vec<Dim>, TypeError>,
+    {
         let constraints = self
             .deferred_expand_constraints
             .lock()
@@ -292,23 +292,29 @@ impl Subst {
         };
 
         let mut first_rejection = None;
-        let mut has_possible_numel = false;
         for candidate in constraints[0].candidate_types()? {
             let Type::Tensor(candidate_dims, _) = &candidate else {
                 unreachable!("deferred expand candidates are tensors");
             };
-            if self
-                .static_dim_product(candidate_dims)
-                .is_some_and(|candidate_numel| candidate_numel != target_numel)
-            {
-                continue;
-            }
-            has_possible_numel = true;
+            let compatible = target_dims_for_candidate(candidate_dims).and_then(|target_dims| {
+                if let (Some(target_numel), Some(candidate_numel)) = (
+                    self.static_dim_product(&target_dims),
+                    self.static_dim_product(candidate_dims),
+                ) && candidate_numel != target_numel
+                {
+                    return Err(TypeError {
+                        kind: TypeErrorKind::DimensionMismatch,
+                        message: format!(
+                            "reshape target has {target_numel} elements, which matches no legal expand output shape"
+                        ),
+                    });
+                }
 
-            let mut trial = self.clone();
-            let compatible = constraints.iter().try_for_each(|constraint| {
-                let canonical = constraint.canonical_for_output(&candidate)?;
-                unify(&canonical, &candidate, &mut trial)
+                let mut trial = self.clone();
+                constraints.iter().try_for_each(|constraint| {
+                    let canonical = constraint.canonical_for_output(&candidate)?;
+                    unify(&canonical, &candidate, &mut trial)
+                })
             });
             match compatible {
                 Ok(()) => {
@@ -320,16 +326,7 @@ impl Subst {
                 }
             }
         }
-
-        if !has_possible_numel {
-            return Err(TypeError {
-                kind: TypeErrorKind::DimensionMismatch,
-                message: format!(
-                    "reshape target has {target_numel} elements, which matches no legal expand output shape"
-                ),
-            });
-        }
-        Err(first_rejection.expect("a possible deferred expand candidate was rejected"))
+        Err(first_rejection.expect("every deferred expand candidate was rejected"))
     }
 
     fn static_dim_product(&self, dims: &[Dim]) -> Option<i64> {
@@ -2097,7 +2094,7 @@ mod tests {
         );
 
         let selected = s
-            .materialize_deferred_expand_for_numel(result, &[Dim::Lit(6)])
+            .materialize_deferred_expand_for_numel(result, |_| Ok(vec![Dim::Lit(6)]))
             .expect("a six-element reshape target must select insertion")
             .expect("the result carries a deferred expand constraint");
         assert_eq!(
@@ -2125,7 +2122,7 @@ mod tests {
         );
 
         let error = s
-            .materialize_deferred_expand_for_numel(result, &[Dim::Lit(5)])
+            .materialize_deferred_expand_for_numel(result, |_| Ok(vec![Dim::Lit(5)]))
             .expect_err("five elements match neither tensor[3] nor tensor[3, 2]");
         assert!(matches!(error.kind, TypeErrorKind::DimensionMismatch));
         assert!(

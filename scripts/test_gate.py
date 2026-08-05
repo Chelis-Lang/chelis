@@ -25,6 +25,7 @@ Four things are locked here:
 import importlib.util
 import io
 import re
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -57,6 +58,9 @@ DOCS_ONLY_GATE_IF = (
     "|| needs.changes.outputs.docs_only != 'true') }}"
 )
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+CARCARA_FULL_SUITE_COMMAND = (
+    "cargo test -p chelis-prove --features carcara -- --test-threads=1"
+)
 
 
 def _nix_supported_systems(contracts: str) -> set[str]:
@@ -93,6 +97,34 @@ def _workflow_job_blocks(workflow: str) -> dict[str, str]:
         end = headers[index + 1].start() if index + 1 < len(headers) else len(workflow)
         blocks[header.group("name")] = workflow[header.start() : end]
     return blocks
+
+
+def _assert_carcara_full_suite_command(workflow: str) -> None:
+    block = _workflow_job_blocks(workflow).get("full-smt-prove")
+    if block is None:
+        raise AssertionError("missing full-smt-prove job")
+    run_commands = re.findall(r"(?m)^\s+run:\s*(\S.*)$", block)
+    count = run_commands.count(CARCARA_FULL_SUITE_COMMAND)
+    if count != 1:
+        raise AssertionError(
+            "full-smt-prove must execute the complete serialized Carcara suite "
+            f"exactly once; found {count}"
+        )
+
+
+def _assert_carcara_feature_tree_is_gmp_only(feature_tree: str) -> None:
+    forbidden = (
+        'gmp-mpfr-sys feature "mpfr"',
+        'gmp-mpfr-sys feature "mpc"',
+        'rug feature "float"',
+        'rug feature "complex"',
+    )
+    active = [feature for feature in forbidden if feature in feature_tree]
+    if active:
+        raise AssertionError(
+            "Carcara feature graph must stay GMP-only; activated "
+            + ", ".join(active)
+        )
 
 
 def _assert_native_devenv_recipe(workflow: str) -> None:
@@ -1038,7 +1070,6 @@ class SmtCiSplitTests(unittest.TestCase):
             "workflow_dispatch:",
             "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
-            "cargo test -p chelis-prove --features carcara -- --test-threads=1",
             "cargo test -p chelis-prove --features z3",
             'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
             "cargo test -p chelis-prove --features clarabel",
@@ -1056,6 +1087,7 @@ class SmtCiSplitTests(unittest.TestCase):
                 text,
                 f"SMT full workflow missing expected full-prove surface: {needle}",
             )
+        _assert_carcara_full_suite_command(text)
         # Negative lock: the heavy corpus must NOT run on PRs. The report job's
         # `github.event_name != 'pull_request'` guard uses a quote, not a colon,
         # so this only trips on a reintroduced `pull_request:` trigger key.
@@ -1064,11 +1096,14 @@ class SmtCiSplitTests(unittest.TestCase):
             text,
             "SMT full-prove must stay nightly/dispatch-only (no pull_request trigger)",
         )
-        self.assertNotRegex(
-            text,
-            r"(?m)^\s*run: cargo test -p chelis-prove --features carcara\s*$",
-            "the full Carcara suite must stay serial after its parallel SIGSEGV",
+        filtered = text.replace(
+            f"run: {CARCARA_FULL_SUITE_COMMAND}",
+            f"# {CARCARA_FULL_SUITE_COMMAND}\n"
+            "        run: cargo test -p chelis-prove --features carcara "
+            "run_carcara_check -- --test-threads=1",
         )
+        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+            _assert_carcara_full_suite_command(filtered)
 
     def test_carcara_dependency_stays_gmp_only(self):
         text = CHELIS_PROVE_TOML.read_text()
@@ -1082,6 +1117,30 @@ class SmtCiSplitTests(unittest.TestCase):
         self.assertNotIn(", features =", dependency)
         self.assertNotIn("gmp-mpfr-sys/mpfr", text)
         self.assertNotIn("gmp-mpfr-sys/mpc", text)
+        result = subprocess.run(
+            [
+                "cargo",
+                "tree",
+                "-p",
+                "chelis-prove",
+                "--features",
+                "carcara",
+                "-e",
+                "features",
+                "--prefix",
+                "none",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        _assert_carcara_feature_tree_is_gmp_only(result.stdout)
+        with self.assertRaisesRegex(AssertionError, "must stay GMP-only"):
+            _assert_carcara_feature_tree_is_gmp_only(
+                result.stdout + '\ngmp-mpfr-sys feature "mpfr"\nrug feature "float"'
+            )
 
     def test_full_smt_workflow_shares_smoke_cache_key(self):
         smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))

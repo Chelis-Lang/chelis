@@ -434,9 +434,15 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
-                let provisional_dims =
-                    reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
-                match subst.materialize_deferred_expand_for_numel(input_var, &provisional_dims) {
+                let shape_subst = subst.clone();
+                match subst.materialize_deferred_expand_for_numel(input_var, |input_dims| {
+                    reshape_output_dims_for_candidate(
+                        shape_expr,
+                        input_var_name.as_deref(),
+                        input_dims,
+                        &shape_subst,
+                    )
+                }) {
                     Ok(Some(Type::Tensor(input_dims, precision))) => {
                         let dims = reshape_output_dims(
                             shape_expr,
@@ -1560,6 +1566,41 @@ pub(super) fn reshape_output_dims(
     elements
         .into_iter()
         .map(|elem| reshape_output_dim(elem, input_var_name, input_dims, subst))
+        .collect()
+}
+
+/// Derive reshape dims against one deferred-expand candidate. A shape read
+/// from the reshape input is shape-bearing context, so an axis outside this
+/// candidate rejects it while another legal candidate may still satisfy it.
+fn reshape_output_dims_for_candidate(
+    shape_expr: &deep::Expr,
+    input_var_name: Option<&str>,
+    input_dims: &[Dim],
+    subst: &Subst,
+) -> Result<Vec<Dim>, TypeError> {
+    let elements = match collect_shape_list_elements(shape_expr) {
+        Some(elems) => elems,
+        None => {
+            let rank = list_literal_len(shape_expr).unwrap_or(1);
+            return Ok(vec![Dim::Wildcard; rank]);
+        }
+    };
+    elements
+        .into_iter()
+        .map(|elem| {
+            if let Some(axis) = extract_shape_axis_of(elem, input_var_name)
+                && axis >= input_dims.len()
+            {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!(
+                        "shape axis {axis} is out of bounds for rank {} tensor",
+                        input_dims.len()
+                    ),
+                });
+            }
+            Ok(reshape_output_dim(elem, input_var_name, input_dims, subst))
+        })
         .collect()
 }
 
