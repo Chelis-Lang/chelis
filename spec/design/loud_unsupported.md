@@ -642,7 +642,7 @@ controls while leaving genuinely unsupported siblings branded. Appended rows:
 | 20 | `host.rs` handle-effect arm (host-lane sibling of row 9) | drops handler, lowers body for non-`random` kinds | [#709]-adjacent (P1 discovery, B2.5) | CONVERTED with row 9 in the same change set (test `unknown_effect_kind_is_rejected`) |
 | 21 | `lower.rs` `expand` positional-axis `unwrap_or(0)` | axis 0 | flagged by [#782] | CONVERTED: fatal raise (section C1.4; a computed axis previously expanded axis 0 silently) |
 | 22 | `lower.rs` `tuple-get` index `unwrap_or(0)` | field 0 | flagged by [#782] | CONVERTED: raise (section C1.4; compile-time index by construction) |
-| 23 | `lower.rs` conv2d present-but-non-literal stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | P1 discovery (the [#776] shape); FILED as [#795] | flagged and left per B2.5 (absent-arg defaults are the documented optional-arg semantics; the present-but-non-literal case needs its own probe + issue); baselined in the tripwire's numeric-unwrap class. **SCHEDULING (recorded 2026-08-04):** the §C1.4 raise-or-prove disposition converts to a live `Result` raise as a STANDALONE change on the Phase 1 pattern - split the fused `unwrap_or`, keep the documented default for the ABSENT argument, and raise the branded §C2 diagnostic for the PRESENT-but-unresolvable one (the `resolve_static_f64_arg` / `extract_literal_axis_list` shapes already in `lower.rs`). Explicitly NOT gated on Phase 3 or Phase 4: nothing in the conversion needs the gate inventory or the ratchet-totality work, and the probe [#795] asks for is the conversion's own liveness evidence rather than a prerequisite phase. The tripwire's `unwrap-or-numeric-literal` count for `lower.rs` shrinks by the two conv2d sites in that same PR, per B1 (removals only with the site's fix) |
+| 23 | `lower.rs` conv2d present-but-non-literal stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | P1 discovery (the [#776] shape); FILED as [#795] | flagged and left per B2.5 (absent-arg defaults are the documented optional-arg semantics; the present-but-non-literal case needs its own probe + issue); baselined in the tripwire's numeric-unwrap class. **MIGRATION DISPOSITION (recorded 2026-08-04):** this is a true Phase 1 migration miss, not a new mechanism. The shared optional-static-argument resolver distinguishes `Absent`, `Resolved(T)`, and `PresentButUnresolvable(Unsupported)`; callers apply their documented default only to `Absent`, propagate the branded §C2 diagnostic for `PresentButUnresolvable`, and consume `Resolved(T)`. The conversion audits every optional compile-time argument in `lower.rs`, not only conv2d, and routes each through that resolver or records a typed, tested reason it cannot. [#795]'s liveness probe and absent/present negative parity land with the migration. The tripwire's `unwrap-or-numeric-literal` count shrinks by the two conv2d sites and by every equivalent site the audit migrates, per B1; a replacement local `match` or `unwrap_or` is red. This work does not wait for Phase 3 or Phase 4 because it is completion of the already-frozen Phase 1 construction path |
 | 24 | `emit.rs` `emit_fused_elem` and `emit_fused_reduce` non-f32 arms | `panic!` (row-two: panic, not substitution) | [#919] (P1 discovery, B2.5); [#951] owns the surviving `emit_fused_reduce` half | CONVERTED in [#932]: both arms now return a section C2 `Unsupported` instead of panicking (tests `f64_activations_compute_in_double_not_float`, `f64_exp_returns_full_double_precision`, and both `*_is_a_diagnostic_not_a_panic`). `emit_fused_elem` is additionally **widened** to f64, so its arm now fires only for the reduced-float and integer dtypes ([#691] - whose direct DAG integer path is repaired by [#729] Phase 3; PR #1164 rehomed the emitter citations off that issue as authority and it CLOSED 2026-08-04, so this arm's remaining scope is the reduced-float and integer dtypes on its own terms rather than under a live [#691] rejection); `emit_fused_reduce` stays a rejection ([#951]) - a shipped divergence from `spec/04-type-system.md` §1.1.3's admitted f64 cell, recorded here so [#729] Phase 4 inherits a known hole rather than discovering one |
 
 **2026-07-30 ratchet-review appends (rows 24-27).** Filed per B2.5 from
@@ -666,29 +666,26 @@ baseline, not a finding.
 
 **2026-08-04 disposition-sweep appends (rows 28-30).** Filed per B2.5
 from the 2026-08-04 cross-plan disposition pass over the open [#730]
-surface. Each row lands censused-not-fixed and carries a STANDALONE
-disposition rather than a phase slot, which is the point of recording
-them here: this class's recurrence guard IS the census plus the
-ratchets, so a site found between phases enters the census instead of
-taking a side patch. They are therefore absent from the Issue map
-below, which allocates issues to phases and would misdescribe these
-three. None of the three carries a tripwire baseline edit, and the
-reason is that none is owed rather than that this document cannot make
-one: no spelling below matches a declared §C4.5 token class. A
-`return Some(...)` fuse, an identity match arm, an OpenMP pragma, and
-an eval pre-pass are no class's token, and `chelis-prove` is outside
-every `UnwrapOr*` and `ElemKind` scope (it sits inside the global
-string/format scopes, which row 28 does not touch). So until §C7.4's
-binder lands, each row here is its own recurrence record - recorded
-pending, with nothing held back on the code side. Rows 29 and 30 have
-no probe-corpus record yet: a §C7.4 obligation named here rather than
-left for the binder to discover.
+surface. Each row lands censused-not-fixed and is claimed by either a
+named class-maintenance work item below or the dtype plan's checked-cast
+work item. A row found between phases therefore extends a construction
+chokepoint and its oracle; it never receives a site-local side patch merely
+because the phase that introduced the mechanism has exited. The Issue map
+records these maintenance items explicitly.
+
+None of the three carries a lexical-tripwire baseline edit because no
+spelling below matches a declared §C4.5 token class. That lexical limit is
+not permission to make the row its own guard. The maintenance oracles below
+bind the semantic families that lexical counting cannot recognize: recursive
+type traversal, host cast planning, and indexed trap selection. Rows 29 and
+30 also enter the probe corpus with their implementation changes rather than
+waiting for §C7.4 to discover them.
 
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
-| 28 | `chelis-prove/src/obligations.rs` `type_from_deep_depth`'s depth-32 fuse (`if depth > 32 { return Some(Type::Unit) }`, `:230-232` re-measured 2026-08-04 - [#872] filed it at `:238-241`, so the fuse expression is the durable anchor) | `Type::Unit` returned as a SUCCESS: the consumer `type_contains_depth` ends in `_ => false`, so the stand-in reads as "this type does not contain the opaque type" and a producer nested deeper than 32 generates NO proof obligation | [#872] | live-suspect (source-confirmed on `origin/main` @ `2b80b474`, not execution; no upstream depth bound was located in `DeepTypeResolver` or the parser, so the site is neither raised nor proven dead); §C1.4 raise-or-prove applies regardless. Exactly the §C1 rule 1 shape - a stand-in verdict where the answer is unavailable - with §C1 rule 5's honesty invariant as the consequence in the prove lane: `chelis prove` reports success over an obligation it never formed. The channel is already present and used immediately after the fuse's closing brace (`tag(ty)?`, `:233`), so this is a chosen substitution rather than a missing failure path. Disposition: the Phase 1 pattern applied STANDALONE - the fuse returns `None` and `collect_obligations` reports a branded §C2 rejection through its existing `col.errors` path - explicitly not gated on Phase 3 or Phase 4, and not waiting for a phase to adopt it. The five sibling placeholders in the same function are separately dispositioned in [#872] as §C1.4 canary-and-comment debt and are NOT part of this row |
-| 29 | `chelis-backend-c/src/host_emit.rs` checked-`cast` host arm identity fallthrough (`_ => arg_vars[0].0.clone()` closing the `cast` match, `:2566` re-measured 2026-08-04 - [#1150] filed it at `:2572`, so the arm expression is the durable anchor) | no conversion at all on a host-built tensor: the f32 buffer is reinterpreted at the target dtype, with no `chelis_checked_float_to_int` call, no cast loop, no `Overflow` trap for an out-of-range element and no `Domain` trap for a non-finite one | [#1150] | live (read-confirmed on the generated C during the PR [#1144] fold; PRE-EXISTING, not introduced there). Silently violates [04-NUM-11] and [04-NUM-14]. The head-of-document recurrence signature with its time direction reversed, which is why it is not counted as a fifth sighting there: the correct mechanism now sits one level out, as a sibling arm of the OUTER builtin-name match (the `"cast_trunc"` arm at `:2576`, under its [05-OP-6] comment at `:2572`) rather than inside this inner `(source, target)` one - `cast_trunc` carries no identity fallthrough and rejects with its [05-OP-6] diagnostic, pinned by PR [#1144] so the NEW op could not inherit the hole - but it was built after this site rather than beside it, so what went uncalled here is a back-application, not an existing neighbor. Disposition: PARITY COVERAGE FIRST - the checked `cast` acquires the cross-lane locks `cast_trunc` already carries before the site itself moves. B2.3 and B2.4 require both lanes and a supported-neighbor control to land WITH the conversion; this row takes that one step earlier on purpose, because a fix here changes which programs compile and a lock set written after the fact records the new behavior instead of measuring the change. Then the §C1 choice at the site: emit the guarded conversion or reject loudly, never reinterpret. The support half (which shapes earn the conversion) crosses [#729]'s cast surface |
-| 30 | checked-`cast` multi-offender trap identity, two sites: the eval whole-buffer int-width pre-pass (the `int_wide` collection short-circuits on domain BEFORE the per-width range loop runs) and the `#pragma omp parallel for` on the emitted conversion loop (`chelis-backend-c/src/emit.rs`) | (trap-kind skew, not a substituted value - the rows 17/18/26 shape) for a tensor carrying BOTH an out-of-range and a non-finite element: which trap kind fires is thread-scheduling-dependent under OpenMP, and eval is domain-biased rather than first-offender-in-order | [#1152] | live (execution-observed as the PR [#1144] Linux CI failure, where `cast_trunc`'s mixed-offender case exposed the class; macOS clang ignores the pragma, which is why local runs look deterministic - PRE-EXISTING for the checked `cast`, unobserved because untested). The disposition SPLITS, and the split is the whole content of this row: the OpenMP half needs no decision at all, because [04-NUM-12] already requires that the same program, inputs, and lane always produce the same trap, so the parallel emitted loop violates a ratified atom outright and PR [#1144]'s serial loop for `cast_trunc` applies unchanged. The KIND half WAS spec-decision-first and the decision has now landed: [04-NUM-15] (PR #1169) documents the elementwise trapping map's order as row-major flat index in every lane, so the lowest-indexed offender is authoritative. Both lanes now converge on a ratified rule rather than on each other - eval drops the domain-biased pre-pass, the C lane selects by lowest index, and neither is required to serialize (the atom admits a per-thread-candidate minimum-index reduction). This plan owns the failure CHANNEL and never which trap a multi-offender buffer earns - the eval half touches [#729]'s kernel surface and the pre-pass shape shared by `finalize_tensor` consumers. `cast_trunc`'s equivalent is pinned by `mixed_offender_tensors_agree_on_the_trap_kind_across_lanes` (PR [#1144]); the checked `cast` needs its own lock in the same change as the fix |
+| 28 | `chelis-prove/src/obligations.rs` `type_from_deep_depth`'s depth-32 fuse (`if depth > 32 { return Some(Type::Unit) }`, `:230-232` re-measured 2026-08-04 - [#872] filed it at `:238-241`, so the fuse expression is the durable anchor) | `Type::Unit` returned as a SUCCESS: the consumer `type_contains_depth` ends in `_ => false`, so the stand-in reads as "this type does not contain the opaque type" and a producer nested deeper than 32 generates NO proof obligation | [#872] | live-suspect (source-confirmed on `origin/main` @ `2b80b474`, not execution; no upstream depth bound was located in `DeepTypeResolver` or the parser, so the site is neither raised nor proven dead). This row is one half of maintenance item LU2: the same region also has `type_contains_depth`'s depth-16 `false` fuse. Both are deleted in favor of the same cycle-aware worklist and explicit exhaustion error; converting only this `Some(Type::Unit)` site would leave the adjacent false-negative mechanism intact. The five sibling semantic placeholders named in [#872] remain separate §C1.4 canary-and-comment debt because they are not traversal-exhaustion fuses |
+| 29 | `chelis-backend-c/src/host_emit.rs` checked-`cast` host arm identity fallthrough (`_ => arg_vars[0].0.clone()` closing the `cast` match, `:2566` re-measured 2026-08-04 - [#1150] filed it at `:2572`, so the arm expression is the durable anchor) | no conversion at all on a host-built tensor: the f32 buffer is reinterpreted at the target dtype, with no `chelis_checked_float_to_int` call, no cast loop, no `Overflow` trap for an out-of-range element and no `Domain` trap for a non-finite one | [#1150] | live (read-confirmed on the generated C during the PR [#1144] fold; PRE-EXISTING, not introduced there). Silently violates [04-NUM-11] and [04-NUM-14]. Maintenance item LU6 owns the failure-channel half: every checked host cast is produced from an exhaustive `(source Prim, target Prim)` plan whose only identity cells are exact same-type pairs; every other pair emits the checked conversion selected by [#729]'s semantics or a cited typed rejection. The dtype plan's checked-cast work item owns those conversion semantics and the full source x target x surface x backend conformance product. A local replacement for this wildcard is insufficient because it leaves the next source/target pair outside the plan |
+| 30 | checked-`cast` multi-offender trap identity, two sites: the eval whole-buffer int-width pre-pass (the `int_wide` collection short-circuits on domain BEFORE the per-width range loop runs) and the `#pragma omp parallel for` on the emitted conversion loop (`chelis-backend-c/src/emit.rs`) | (trap-kind skew, not a substituted value - the rows 17/18/26 shape) for a tensor carrying BOTH an out-of-range and a non-finite element: which trap kind fires is thread-scheduling-dependent under OpenMP, and eval is domain-biased rather than first-offender-in-order | [#1152] | live (execution-observed as the PR [#1144] Linux CI failure, where `cast_trunc`'s mixed-offender case exposed the class; macOS clang ignores the pragma, which is why local runs look deterministic - PRE-EXISTING for the checked `cast`, unobserved because untested). [04-NUM-12] and [04-NUM-15] fully decide this behavior, so this is numeric implementation work rather than an unsupported-channel patch. The [#729] checked-cast item owns a shared `IndexedTrapCandidate { flat_index, trap }` reduction in eval and compiled lanes; the lowest flat index wins independently of scheduling. This plan owns only rendering a candidate or implementation rejection through §C2. No separate [#730] implementation is permitted, and [#1152] is tracked under [#729] with an `Also part of #730` provenance note |
 
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
@@ -1954,6 +1951,89 @@ existing per-PR `unittest discover` CI step automatically, which
 keeps the oracle's anchors continuously verified between scheduled
 runs.
 
+## C8. Class-maintenance work items
+
+These items extend the class after the numbered phases established its typed
+failure channel and construction rules. They are not a fifth phase, do not
+reopen a freeze point, and do not permit a local patch. Each item names the
+smallest reusable mechanism whose oracle makes the reported instance and its
+same-region siblings unrepresentable.
+
+### LU1 - one supervised external-process degradation path ([#870])
+
+All Beacon child-process waiting, timeout notification, signal/self-pipe
+handling, and teardown route through one private supervisor that returns a
+closed `Completed | TimedOut | Degraded(Unsupported)` outcome. A denied OS
+mechanism, including the reported `sendto` denial, becomes `Degraded` and is
+rendered through §C2; no signal handler, destructor, or callback may panic or
+abort. Direct `wait-timeout` use outside the supervisor is a structural test
+failure. The oracle runs both current prover launch paths with each supervisor
+mechanism denied in turn, asserts a branded nonzero result and no abort, and
+includes a normally completed child plus an actual timeout as positive
+controls. Catching `sendto` at the reported site does not satisfy this item.
+
+### LU2 - total proof-type traversal ([#872])
+
+Projection and containment over proof types share one iterative, cycle-aware
+worklist keyed by the traversed node identity. A genuine cycle terminates by
+visited-set convergence; an implementation resource limit returns a branded
+exhaustion error and never a semantic type or boolean. This deletes both
+same-region depth fuses: `type_from_deep_depth`'s depth-32 `Type::Unit` and
+`type_contains_depth`'s depth-16 `false`. The oracle drives acyclic types
+through and beyond both former limits, a cyclic type, and a planted low
+resource budget; it asserts the complete obligation set or the explicit
+exhaustion error, never a smaller successful proof problem.
+
+### LU3 - canonical iterative compiler list spines ([#906])
+
+Compiler-authored traversal of canonical `Cons`/`Nil` data uses one iterative
+spine iterator/folder shared by literal baking and every equivalent evaluator,
+lowering, and observation walk. It reports an improper tail through the typed
+channel instead of recursing or fabricating `Nil`. The oracle exercises flat
+lists below, at, and well beyond the reported 2k-5k range, plus an improper
+tail, and forbids a second recursive canonical-spine walker by structural
+inventory. This item does not own user-authored recursive programs ([#257]) or
+general lowering/cost-model recursion ([#409]); those are different recursion
+classes with different oracles.
+
+### LU4 - compositional host-ABI capability ([#955])
+
+Host lowering resolves a checked host-type term by recursively composing the
+closed constructor dispositions in `capability_table.md`; it does not match a
+hand-picked inventory of concrete nestings. If `List<T>`, `Option<T>`, and the
+inner `T` are represented for a backend, `List<Option<T>>` and
+`Option<List<T>>` are represented by construction. If any constructor cell is
+unimplemented or rejected, the composed result carries that exact typed
+authority. The oracle covers every constructor pair in both nesting orders,
+positive and negative, and a newly added constructor makes the disposition
+match non-exhaustive. A special arm for the reported `Option`/`List` shape is
+not a fix.
+
+### LU5 - derived compiled-stdlib acceptance corpus ([#955])
+
+The build-lane stdlib corpus is derived from the exported stdlib manifest,
+not maintained as a sample list. Every exported module contributes at least
+one minimal importing program that reaches build/link/run when its Table-B
+cells are implemented, or asserts its exact typed capability rejection when
+they are not. The derivation fails if an exported module has neither result.
+The oracle mutates the manifest with a synthetic export and proves that the
+missing compiled cell is red, then runs the standing corpus. Eval-only stdlib
+self-tests and one hand-picked `Std.Io` build are supporting evidence, not
+this acceptance surface.
+
+### LU6 - exhaustive checked host-cast planning ([#1150])
+
+Host `cast` emission consumes one exhaustive plan over
+`(source Prim, target Prim)`. Only exact same-type pairs select identity;
+every other pair selects the checked conversion defined by [04-NUM-14] and
+the dtype plan or returns a cited `Unsupported`. The emitted code cannot copy
+the source expression through a wildcard. The oracle is generated from the
+full source x target x scalar/tensor x eval/c-host parameter product in
+`capability_table.md`, with in-range and trapping parity for each applicable
+cell and a mutation that replaces one non-identity plan with identity. Trap
+selection for multi-offender tensors belongs to [#729]'s indexed-trap item,
+not a second mechanism here.
+
 ---
 
 # Part IV - bookkeeping
@@ -2005,6 +2085,20 @@ boundary, pinned:
   `Unimplemented` is Table A/B's decision; when Table B lands, its
   cells populate the enum through the same boundary the pre-table
   adapter uses today. This plan never authors a capability decision.
+- **Finite parameter products prevent dtype-valued omissions.** The
+  capability schema expands `cast` over source dtype x target dtype x surface
+  x backend. LU6 consumes that closed product to plan host emission; [#729]
+  owns the conversion and trap semantics. Adding one source or target dtype
+  makes both the plan and conformance derivation incomplete at build time.
+- **Host containers compose from constructor dispositions.** LU4 consumes the
+  companion host-ABI constructor table recursively. This plan owns the typed
+  rejection path and forbids default host representations; [#729]'s table
+  owns each backend disposition. A concrete nesting never becomes a new
+  policy site.
+- **[#1152] is numeric semantics with a shared failure value, not a second
+  unsupported mechanism.** [#729] owns `IndexedTrapCandidate` construction
+  and lowest-index selection in every lane. This plan owns only the §C2
+  rendering of a selected trap or capability rejection.
 - **[#912] consumes this failure channel; it does not fork it.** Root identity,
   manifest order, and artifact routing remain [#912]'s decisions. A root-level
   `HostReason` is diagnostic context. The deciding atom/issue enters through
@@ -2050,6 +2144,7 @@ Same discipline as §I1; edits are bidirectional per B2.6.
 | 2 | the future supply of the class (bottom vocabularies + Result decoding + exhaustive consumers + structured emission) |
 | 3 | [#697], [#698], [#705]'s gate half, [#959] (kind/brand skew); gate rot and kind mislabeling as classes |
 | 4 | [#957] (the panic family, incl. [#919]'s pair), [#958], [#960]'s decode-on-entry half; ratchet-coverage drift as a class - a new product root, vocabulary consumer, or enumerable panic/default spelling outside the classified universe is a red test, and the non-enumerable panic routes are named §C7.2 limits owned by the behavior instruments, not silently out of scope |
+| maintenance | [#795] completes the optional-static-argument migration; LU1 [#870], LU2 [#872], LU3 [#906], LU4/LU5 [#955], and LU6 [#1150] extend the class mechanisms without reopening a phase; [#1152] is transferred to [#729]'s checked-cast work item with this plan retaining diagnostic provenance only |
 
 ## Settled ownership and remaining phase decisions
 
@@ -2081,7 +2176,9 @@ discovery unconditionally on every PR with the mutation authority
 change-gated pre-merge and nightly otherwise, so the proof never goes stale
 and never depends on predicting a path.
 
+[#257]: https://github.com/Chelis-Lang/chelis/issues/257
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
+[#409]: https://github.com/Chelis-Lang/chelis/issues/409
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
 [#687]: https://github.com/Chelis-Lang/chelis/issues/687
@@ -2125,6 +2222,7 @@ and never depends on predicting a path.
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815
 [#822]: https://github.com/Chelis-Lang/chelis/pull/822
+[#870]: https://github.com/Chelis-Lang/chelis/issues/870
 [#871]: https://github.com/Chelis-Lang/chelis/pull/871
 [#872]: https://github.com/Chelis-Lang/chelis/issues/872
 [#875]: https://github.com/Chelis-Lang/chelis/issues/875
@@ -2133,11 +2231,13 @@ and never depends on predicting a path.
 [#891]: https://github.com/Chelis-Lang/chelis/pull/891
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
 [#900]: https://github.com/Chelis-Lang/chelis/issues/900
+[#906]: https://github.com/Chelis-Lang/chelis/issues/906
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
 [#919]: https://github.com/Chelis-Lang/chelis/issues/919
 [#932]: https://github.com/Chelis-Lang/chelis/pull/932
 [#935]: https://github.com/Chelis-Lang/chelis/issues/935
 [#951]: https://github.com/Chelis-Lang/chelis/issues/951
+[#955]: https://github.com/Chelis-Lang/chelis/issues/955
 [#957]: https://github.com/Chelis-Lang/chelis/issues/957
 [#958]: https://github.com/Chelis-Lang/chelis/issues/958
 [#959]: https://github.com/Chelis-Lang/chelis/issues/959
