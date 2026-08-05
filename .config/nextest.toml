@@ -19,6 +19,10 @@
 # contention-independent unit/integration coverage they sit on top of stays
 # on the per-PR gate.
 #
+# Every profile disables fail-fast so one failure cannot hide later failures.
+# Gate commands also pass `--no-fail-fast` explicitly; the profile setting
+# extends the same diagnostic behavior to direct and non-gate CI invocations.
+#
 # `production_stdlib_typechecks` (one `chelis check` per stdlib file) was in
 # the heavy set before the cross-process typecheck cache landed. With the
 # cache, those checks are warm-cache fast and back on the per-PR gate.
@@ -32,6 +36,7 @@
 #   - real chelis build + gcc + run / reef build / reef install
 
 [profile.default]
+fail-fast = false
 default-filter = '''
     not (
         binary_id(/^chelis-cli::stdlib_typecheck_cache_oracle$/)
@@ -46,6 +51,7 @@ default-filter = '''
 '''
 
 [profile.ci]
+fail-fast = false
 # Keep the local fast-suite scope, then delegate every complete test binary
 # named by a required Phase 0-3 oracle `--test` argument. Selector-based `-E`
 # legs remain in both jobs, including expressions with whole-binary arms. The
@@ -98,6 +104,7 @@ default-filter = '''
 path = "junit.xml"
 
 [profile.nightly]
+fail-fast = false
 # The `Heavy E2E` workflow runs `cargo nextest run --profile nightly`. This
 # default-filter is exactly the heavy set the `default` profile excludes.
 # The `ci` profile additionally delegates binaries named by oracle `--test`

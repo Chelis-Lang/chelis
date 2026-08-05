@@ -1,7 +1,8 @@
 """Unit tests for `gate.py`.
 
-Run via: `python3 -m unittest scripts.test_gate` from repo root,
-or `python3 scripts/test_gate.py`.
+Run via:
+`uv run --managed-python --python 3.11 --no-project python -m unittest
+scripts.test_gate` from the repo root.
 
 Four things are locked here:
 
@@ -348,7 +349,11 @@ class StageUnionTests(unittest.TestCase):
         self.assertIn(gate.NEXTEST_WORKSPACE, gate.full_command_list())
         self.assertNotIn(gate.NEXTEST_WORKSPACE_CI, gate.full_command_list())
         self.assertNotIn("--profile", gate.NEXTEST_WORKSPACE)
-        self.assertEqual(gate.NEXTEST_WORKSPACE_CI[-2:], ["--profile", "ci"])
+        self.assertIn("--no-fail-fast", gate.NEXTEST_WORKSPACE)
+        self.assertEqual(
+            gate.NEXTEST_WORKSPACE_CI[-3:],
+            ["--profile", "ci", "--no-fail-fast"],
+        )
 
     def test_stage_order_covers_every_stage(self):
         self.assertEqual(
@@ -427,7 +432,7 @@ class ListOutputTests(unittest.TestCase):
         ]
         for command in (
             "cargo test -p chelis-compiler-api --doc",
-            ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
+            "<managed-python> scripts/check_checkpoint_compile_fail.py",
         ):
             self.assertIn(command, rendered)
 
@@ -435,7 +440,7 @@ class ListOutputTests(unittest.TestCase):
         rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
         for command in (
             "cargo test -p chelis-compiler-api --doc",
-            ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
+            "<managed-python> scripts/check_checkpoint_compile_fail.py",
         ):
             self.assertIn(command, rendered)
 
@@ -1385,7 +1390,7 @@ class TomllibImportGuardTests(unittest.TestCase):
             ns["workspace_member_packages"]()
         self.assertEqual(cm.exception.code, 1)
         self.assertIn("Python 3.11+", err.getvalue())
-        self.assertIn(".venv/bin/python", err.getvalue())
+        self.assertIn("route through uv", err.getvalue())
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 """Unit tests for `gate.py --local` and the `--list` annotations (chelis#360).
 
-Run via: `python3 -m unittest scripts.test_gate_local` from repo root,
-or `python3 scripts/test_gate_local.py`.
+Run via:
+`uv run --managed-python --python 3.11 --no-project python -m unittest
+scripts.test_gate_local` from the repo root.
 
 What is locked here:
 
@@ -200,7 +201,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "lint --check .",
                 "cargo test -p chelis-types --doc",
                 "cargo test -p chelis-compiler-api --doc",
-                ".venv/bin/python scripts/check_checkpoint_compile_fail.py",
+                "<managed-python> scripts/check_checkpoint_compile_fail.py",
             ],
         )
 
@@ -211,8 +212,22 @@ class LocalCommandListTests(unittest.TestCase):
         self.assertEqual(
             commands[len(gate.LOCAL_STATIC_COMMANDS):],
             [
-                ["cargo", "nextest", "run", "-p", "chelis-cli"],
-                ["cargo", "nextest", "run", "-p", "chelis-surf"],
+                [
+                    "cargo",
+                    "nextest",
+                    "run",
+                    "-p",
+                    "chelis-cli",
+                    "--no-fail-fast",
+                ],
+                [
+                    "cargo",
+                    "nextest",
+                    "run",
+                    "-p",
+                    "chelis-surf",
+                    "--no-fail-fast",
+                ],
             ],
         )
 
@@ -223,6 +238,7 @@ class LocalCommandListTests(unittest.TestCase):
         ]
         self.assertNotIn(gate.render(gate.BUILD_WORKSPACE), rendered)
         self.assertNotIn(gate.render(gate.NEXTEST_WORKSPACE), rendered)
+        self.assertTrue(rendered[-1].endswith("--no-fail-fast"))
 
 
 class ListAnnotationTests(unittest.TestCase):
@@ -306,7 +322,7 @@ class LocalMainTests(unittest.TestCase):
                 return status_output
             raise AssertionError(f"unexpected git invocation: {args}")
 
-        def fake_run_commands(commands):
+        def fake_run_commands(commands, **_kwargs):
             recorded.extend(commands)
             return run_rc
 

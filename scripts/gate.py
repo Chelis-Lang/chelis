@@ -16,7 +16,7 @@ macOS-smoke, LOC-report, no-AI-authorship, and docs CI jobs are
 deliberately out of scope; `scripts/test_gate.py` excludes those jobs
 by name so the exclusion is visible and reviewable.
 
-Usage:
+Usage (an unmanaged launcher is automatically re-executed through uv):
     python3 scripts/gate.py            # run every gate command
     python3 scripts/gate.py lint-and-unit   # run the lint-and-unit subset
     python3 scripts/gate.py integration     # run the integration subset
@@ -25,7 +25,7 @@ Usage:
     python3 scripts/gate.py --local    # run the developer pre-push subset
 
 Local/CI stage split (chelis#360): the full developer gate runs
-`cargo nextest run --workspace` with the default profile, while the CI
+`cargo nextest run --workspace --no-fail-fast` with the default profile, while the CI
 integration stage uses the `ci` profile and delegates its two census binaries
 to the required dtype oracle. The workspace execution stays out of `--local` --
 macOS Smoke is the authoritative
@@ -33,32 +33,73 @@ workspace oracle, and on the macOS workstation the mass first-exec
 burst it triggers can wedge assessment entirely (see
 docs/local_macos_environment.md). `--local` is the pre-push
 checkpoint: workspace clippy (compile-only, no mass exec), fmt,
-`chelis lint`, plus `cargo nextest run -p <crate>` for each crate
+`chelis lint`, plus `cargo nextest run -p <crate> --no-fail-fast` for each crate
 changed vs `origin/main` (committed diff plus uncommitted work). The
 derived crate list is always printed so nothing is silently skipped.
 
-The script is safe to run from any cwd: it `chdir`s to the repo root
-(resolved relative to the script's own location) before running any
-command.
+The script is safe to run from any cwd: child commands use the repo root
+(resolved relative to the script's own location) as their working directory.
+Every child inherits one validated `PYO3_PYTHON`. Combined stdout/stderr is
+streamed live; a failed command's complete transcript and a 200-line replay
+are written under `target/gate-failures/`. Cargo output is pinned to this
+worktree, and nextest continues after failures to expose the complete set.
 """
 from __future__ import annotations
 
 import argparse
+from collections import deque
+from datetime import datetime, timezone
 import os
+import platform
+import re
+import shlex
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 # NB: `tomllib` is intentionally NOT imported at module top. It is stdlib
-# only from Python 3.11, and on macOS the system `python3` is 3.9, so a
-# top-level import crashed EVERY gate.py invocation — including `--list`
-# and the per-stage CI forms that never touch TOML — under the system
-# interpreter (chelis#366). Only the `--local` changed-crate derivation
-# parses Cargo.toml, so the import is deferred into
-# `workspace_member_packages()` and guarded with a one-line guidance
-# message instead of a raw traceback.
+# only from Python 3.11. The gate bootstrap now re-executes an unmanaged
+# launcher through uv before `main`, but tests and module consumers can import
+# this file without taking that path. Keep the import deferred so those uses
+# still receive focused guidance instead of a raw traceback (chelis#366).
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+MANAGED_PYTHON = "<managed-python>"
+FAILURE_TAIL_LINES = 200
+DIAGNOSTIC_ENVIRONMENT = (
+    "PYO3_PYTHON",
+    "VIRTUAL_ENV",
+    "DEVENV_STATE",
+    "CARGO_TARGET_DIR",
+    "CARGO_HUSKY_DONT_INSTALL_HOOKS",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTFLAGS",
+    "CARGO_BUILD_JOBS",
+    "CC",
+    "CXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPATH",
+    "LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "UV_RUN_RECURSION_DEPTH",
+    "UV_PYTHON_INSTALL_DIR",
+    "UV_CACHE_DIR",
+    "UV_PROJECT_ENVIRONMENT",
+    "CI",
+    "GITHUB_ACTIONS",
+    "RUNNER_OS",
+    "RUNNER_ARCH",
+    "PATH",
+)
 
 # The canonical CI-stage command list. The CI workflow
 # has two developer-gate jobs, `lint-and-unit` and `workspace-tests`; each
@@ -93,10 +134,16 @@ CHELIS_LINT_CHECK: list[str] = [
 # profile writes JUnit XML and delegates two census binaries to the parallel
 # dtype oracle.
 NEXTEST_WORKSPACE: list[str] = [
-    "cargo", "nextest", "run", "--workspace",
+    "cargo", "nextest", "run", "--workspace", "--no-fail-fast",
 ]
 NEXTEST_WORKSPACE_CI: list[str] = [
-    "cargo", "nextest", "run", "--workspace", "--profile", "ci",
+    "cargo",
+    "nextest",
+    "run",
+    "--workspace",
+    "--profile",
+    "ci",
+    "--no-fail-fast",
 ]
 # chelis#875: `cargo nextest` does not execute doctests. Each crate with
 # a compile-fail contract needs an explicit rustdoc command. The current
@@ -116,10 +163,10 @@ DOCTEST_COMPILER_API: list[str] = [
     "--doc",
 ]
 # This script verifies the exact compiler diagnostic from the standalone
-# raw-offset fixture. Its Python unit tests use fake runners and do not
-# execute the fixture.
+# raw-offset fixture. The marker is replaced with the same validated managed
+# interpreter exported to child commands as PYO3_PYTHON.
 CHECKPOINT_COMPILE_FAIL: list[str] = [
-    ".venv/bin/python",
+    MANAGED_PYTHON,
     "scripts/check_checkpoint_compile_fail.py",
 ]
 
@@ -144,7 +191,7 @@ STAGE_ORDER: list[str] = ["lint-and-unit", "integration"]
 # excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
 # first-exec burst) and NEXTEST_WORKSPACE (CI-owned; macOS Smoke is the
 # authoritative workspace oracle). `--local` appends a dynamic
-# `cargo nextest run -p <crate>` stage per changed crate; see
+# `cargo nextest run -p <crate> --no-fail-fast` stage per changed crate; see
 # `local_command_list`.
 LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CLIPPY_WORKSPACE,
@@ -159,9 +206,159 @@ LOCAL_ANNOTATION = "local + ci"
 CI_OWNED_ANNOTATION = "ci-owned"
 FULL_GATE_SPLIT_ANNOTATION = "full gate; CI coverage split"
 LOCAL_DYNAMIC_NOTE = (
-    "# --local also runs: cargo nextest run -p <crate> "
+    "# --local also runs: cargo nextest run -p <crate> --no-fail-fast "
     "for each crate changed vs origin/main"
 )
+
+
+def is_managed_runtime(
+    environ: dict[str, str],
+    executable: Path,
+    prefix: Path,
+    base_prefix: Path,
+) -> bool:
+    """Return whether the current interpreter is managed by uv or Devenv."""
+    if environ.get("UV_RUN_RECURSION_DEPTH"):
+        return True
+
+    devenv_state = environ.get("DEVENV_STATE")
+    if devenv_state:
+        devenv_prefix = Path(devenv_state) / "venv"
+        if prefix == devenv_prefix or executable.parent.parent == devenv_prefix:
+            return True
+
+    if prefix != base_prefix:
+        try:
+            config = (prefix / "pyvenv.cfg").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        except OSError:
+            return False
+        if any(line.strip().startswith("uv =") for line in config.splitlines()):
+            return True
+    return False
+
+
+def ensure_managed_runtime(
+    argv: list[str],
+    *,
+    environ: dict[str, str] | None = None,
+    executable: Path | None = None,
+    prefix: Path | None = None,
+    base_prefix: Path | None = None,
+    find_uv=shutil.which,
+    execvpe=os.execvpe,
+    error_stream=None,
+) -> int | None:
+    """Re-exec an unmanaged gate launch through uv.
+
+    Returns ``None`` when the current runtime is already managed. A successful
+    re-exec never returns. Missing uv returns 127 after actionable setup
+    guidance.
+    """
+    environment = dict(os.environ if environ is None else environ)
+    current_executable = Path(sys.executable) if executable is None else executable
+    current_prefix = Path(sys.prefix) if prefix is None else prefix
+    current_base = Path(sys.base_prefix) if base_prefix is None else base_prefix
+    error = sys.stderr if error_stream is None else error_stream
+
+    if is_managed_runtime(
+        environment,
+        current_executable,
+        current_prefix,
+        current_base,
+    ):
+        return None
+
+    uv = find_uv("uv")
+    if uv is None:
+        print(
+            "gate: uv is required to select the repository-managed Python "
+            "3.11 runtime, but `uv` was not found on PATH.",
+            file=error,
+        )
+        print(
+            "Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh",
+            file=error,
+        )
+        print(
+            "Then verify and provision Python: `uv --version` and "
+            "`uv python install 3.11`.",
+            file=error,
+        )
+        return 127
+
+    command = [
+        uv,
+        "run",
+        "--managed-python",
+        "--python",
+        "3.11",
+        "--no-project",
+        "python",
+        str(Path(__file__).resolve()),
+        *argv,
+    ]
+    execvpe(uv, command, environment)
+    raise RuntimeError("uv re-exec unexpectedly returned")
+
+
+def gate_environment(
+    environ: dict[str, str],
+    *,
+    executable: Path,
+    repo_root: Path = REPO_ROOT,
+) -> dict[str, str]:
+    """Build the environment shared by every gate child command."""
+    environment = dict(environ)
+    configured = environment.get("PYO3_PYTHON")
+    if configured:
+        candidate = Path(configured)
+        if not candidate.is_absolute():
+            candidate = repo_root / candidate
+        if not candidate.is_file():
+            raise ValueError(
+                "PYO3_PYTHON is set, but its configured interpreter does "
+                f"not exist at {candidate}. The explicit setting will not "
+                "be replaced. Run `uv python install 3.11`, then set "
+                "`PYO3_PYTHON=\"$(uv python find 3.11)\"`, or unset it so "
+                "gate.py can use its uv-selected interpreter."
+            )
+        environment["PYO3_PYTHON"] = str(candidate)
+    else:
+        if not executable.is_file():
+            raise ValueError(
+                "gate.py selected a managed Python interpreter that does "
+                f"not exist at {executable}; run `uv python install 3.11` "
+                "and retry."
+            )
+        environment["PYO3_PYTHON"] = str(executable)
+
+    root = repo_root.resolve()
+    configured_target = environment.get("CARGO_TARGET_DIR", "target")
+    target = Path(configured_target)
+    if not target.is_absolute():
+        target = root / target
+    target = target.resolve()
+    if target == root or not target.is_relative_to(root):
+        raise ValueError(
+            "CARGO_TARGET_DIR resolves outside the current worktree "
+            f"({target}); unset it to use {root / 'target'} or choose a "
+            "directory inside this worktree so concurrent agents cannot "
+            "share Cargo build state."
+        )
+    environment["CARGO_TARGET_DIR"] = str(target)
+
+    # cargo-husky's build script can write into the clone's shared .git
+    # directory. The checked-in hook remains directly runnable; gate builds
+    # must not mutate shared Git state behind sibling worktrees.
+    environment["CARGO_HUSKY_DONT_INSTALL_HOOKS"] = "1"
+    return environment
+
+
+def materialize_command(command: list[str], python: Path) -> list[str]:
+    """Replace the canonical managed-Python marker for execution."""
+    return [str(python) if part == MANAGED_PYTHON else part for part in command]
 
 
 def full_command_list() -> list[list[str]]:
@@ -202,8 +399,9 @@ def workspace_member_packages(repo_root: Path = REPO_ROOT) -> dict[str, str]:
         # macOS system `python3` is 3.9. Surface that as guidance, not a
         # raw traceback (chelis#366).
         print(
-            "gate.py --local needs Python 3.11+ (tomllib); run via "
-            ".venv/bin/python per AGENTS.md",
+            "gate.py --local needs Python 3.11+ (tomllib); invoke "
+            "`python3 scripts/gate.py --local` so gate.py can route "
+            "through uv per AGENTS.md",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -267,10 +465,12 @@ def changed_crates(
 
 def local_command_list(crates: list[str]) -> list[list[str]]:
     """The `--local` pre-push command list: the static subset plus one
-    `cargo nextest run -p <crate>` per changed crate."""
+    `cargo nextest run -p <crate> --no-fail-fast` per changed crate."""
     commands = list(LOCAL_STATIC_COMMANDS)
     for crate in crates:
-        commands.append(["cargo", "nextest", "run", "-p", crate])
+        commands.append(
+            ["cargo", "nextest", "run", "-p", crate, "--no-fail-fast"]
+        )
     return commands
 
 
@@ -320,7 +520,7 @@ def run_local() -> int:
             "is CI-owned and was NOT run.",
             flush=True,
         )
-    return run_commands(local_command_list(crates))
+    return run_commands(local_command_list(crates), stage_label="local")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -365,20 +565,233 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-def run_commands(commands: list[list[str]]) -> int:
-    """Run each command from the repo root, stopping at the first
-    failure. Returns the exit code of the first failing command, or 0
-    if every command succeeded."""
-    for command in commands:
-        print(f"+ {render(command)}", flush=True)
-        result = subprocess.run(command, cwd=REPO_ROOT, check=False)
-        if result.returncode != 0:
-            print(
-                f"gate: command failed with exit {result.returncode}: "
-                f"{render(command)}",
-                file=sys.stderr,
-            )
-            return result.returncode
+def describe_returncode(returncode: int) -> str:
+    if returncode >= 0:
+        return f"exit code: {returncode}"
+    number = -returncode
+    try:
+        name = signal.Signals(number).name
+    except ValueError:
+        name = "UNKNOWN"
+    return f"signal: {name} ({number})"
+
+
+def _failure_log_path(
+    failure_root: Path,
+    stage_label: str,
+    command: list[str],
+    index: int,
+) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    stage = re.sub(r"[^A-Za-z0-9_.-]+", "-", stage_label).strip("-")
+    executable = re.sub(
+        r"[^A-Za-z0-9_.-]+", "-", Path(command[0]).name
+    ).strip("-")
+    return failure_root / (
+        f"{timestamp}-{os.getpid()}-{index:02d}-{stage}-{executable}.log"
+    )
+
+
+def _rerun_command(
+    command: list[str],
+    environment: dict[str, str],
+    repo_root: Path,
+) -> str:
+    assignments = [
+        f"PYO3_PYTHON={shlex.quote(environment['PYO3_PYTHON'])}"
+    ]
+    for name in ("CARGO_TARGET_DIR", "RUSTUP_TOOLCHAIN"):
+        value = environment.get(name)
+        if value:
+            assignments.append(f"{name}={shlex.quote(value)}")
+    return (
+        f"cd {shlex.quote(str(repo_root))} && env "
+        + " ".join(assignments)
+        + " "
+        + shlex.join(command)
+    )
+
+
+def _print_failure_diagnostics(
+    *,
+    command: list[str],
+    returncode: int,
+    launch_error: OSError | None,
+    duration: float,
+    stage_label: str,
+    index: int,
+    total: int,
+    repo_root: Path,
+    failure_log: Path,
+    environment: dict[str, str],
+    tail: deque[str],
+    line_count: int,
+    error_stream,
+) -> None:
+    print(
+        f"\ngate: {stage_label} command {index}/{total} failed",
+        file=error_stream,
+    )
+    if launch_error is None:
+        print(f"gate: {describe_returncode(returncode)}", file=error_stream)
+    else:
+        print(f"gate: launch error: {launch_error}", file=error_stream)
+        print("gate: exit code: 127", file=error_stream)
+    print(f"gate: duration: {duration:.3f}s", file=error_stream)
+    print(f"gate: cwd: {repo_root}", file=error_stream)
+    print(f"gate: command: {shlex.join(command)}", file=error_stream)
+    print(
+        f"gate: host: {platform.platform()} ({platform.machine()})",
+        file=error_stream,
+    )
+    print(
+        "gate: runner Python: "
+        f"{sys.version.splitlines()[0]} at {sys.executable}",
+        file=error_stream,
+    )
+    uv = shutil.which("uv", path=environment.get("PATH"))
+    print(f"gate: uv: {uv or '<not found>'}", file=error_stream)
+    print("gate: relevant environment:", file=error_stream)
+    for name in DIAGNOSTIC_ENVIRONMENT:
+        value = environment.get(name)
+        rendered = shlex.quote(value) if value is not None else "<unset>"
+        print(f"  {name}={rendered}", file=error_stream)
+    print(f"gate: complete transcript: {failure_log}", file=error_stream)
+    print(
+        f"gate: rerun: {_rerun_command(command, environment, repo_root)}",
+        file=error_stream,
+    )
+
+    omitted = max(0, line_count - len(tail))
+    print(
+        f"gate: final {len(tail)} lines of failed-command output "
+        f"({omitted} earlier lines omitted):",
+        file=error_stream,
+    )
+    for line in tail:
+        error_stream.write(line)
+    if tail and not tail[-1].endswith("\n"):
+        error_stream.write("\n")
+    error_stream.flush()
+
+
+def run_commands(
+    commands: list[list[str]],
+    *,
+    stage_label: str = "gate",
+    repo_root: Path = REPO_ROOT,
+    failure_root: Path | None = None,
+    environ: dict[str, str] | None = None,
+    executable: Path | None = None,
+    output_stream=None,
+    error_stream=None,
+) -> int:
+    """Run commands serially with live output and retained failure evidence."""
+    output = sys.stdout if output_stream is None else output_stream
+    error = sys.stderr if error_stream is None else error_stream
+    current_executable = (
+        Path(sys.executable) if executable is None else executable
+    )
+    try:
+        environment = gate_environment(
+            dict(os.environ if environ is None else environ),
+            executable=current_executable,
+            repo_root=repo_root,
+        )
+    except ValueError as exc:
+        print(f"gate: Python setup failed: {exc}", file=error)
+        return 2
+
+    persistent_root = (
+        repo_root / "target/gate-failures"
+        if failure_root is None
+        else failure_root
+    )
+    selected_python = Path(environment["PYO3_PYTHON"])
+    total = len(commands)
+    for index, template in enumerate(commands, start=1):
+        command = materialize_command(template, selected_python)
+        print(
+            f"+ [{stage_label} {index}/{total}] {shlex.join(command)}",
+            file=output,
+            flush=True,
+        )
+        tail: deque[str] = deque(maxlen=FAILURE_TAIL_LINES)
+        line_count = 0
+        launch_error = None
+        started = time.monotonic()
+        temporary_path: Path | None = None
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            errors="replace",
+            prefix="chelis-gate-",
+            suffix=".log",
+            delete=False,
+        ) as transcript:
+            temporary_path = Path(transcript.name)
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=repo_root,
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+            except OSError as exc:
+                launch_error = exc
+                returncode = 127
+                line = f"launch error for {shlex.join(command)}: {exc}\n"
+                transcript.write(line)
+                transcript.flush()
+                tail.append(line)
+                line_count = 1
+            else:
+                assert process.stdout is not None
+                with process.stdout:
+                    for line in process.stdout:
+                        transcript.write(line)
+                        transcript.flush()
+                        output.write(line)
+                        output.flush()
+                        tail.append(line)
+                        line_count += 1
+                returncode = process.wait()
+
+        duration = time.monotonic() - started
+        assert temporary_path is not None
+        if returncode == 0:
+            temporary_path.unlink(missing_ok=True)
+            continue
+
+        persistent_root.mkdir(parents=True, exist_ok=True)
+        failure_log = _failure_log_path(
+            persistent_root,
+            stage_label,
+            command,
+            index,
+        )
+        shutil.move(str(temporary_path), str(failure_log))
+        _print_failure_diagnostics(
+            command=command,
+            returncode=returncode,
+            launch_error=launch_error,
+            duration=duration,
+            stage_label=stage_label,
+            index=index,
+            total=total,
+            repo_root=repo_root,
+            failure_log=failure_log,
+            environment=environment,
+            tail=tail,
+            line_count=line_count,
+            error_stream=error,
+        )
+        return returncode if returncode >= 0 else 128 - returncode
     return 0
 
 
@@ -393,10 +806,15 @@ def main(argv: list[str]) -> int:
         return run_local()
     if args.stage is not None:
         commands = STAGES[args.stage]
+        stage_label = args.stage
     else:
         commands = full_command_list()
-    return run_commands(commands)
+        stage_label = "full"
+    return run_commands(commands, stage_label=stage_label)
 
 
 if __name__ == "__main__":
+    managed_runtime_status = ensure_managed_runtime(sys.argv[1:])
+    if managed_runtime_status is not None:
+        sys.exit(managed_runtime_status)
     sys.exit(main(sys.argv[1:]))

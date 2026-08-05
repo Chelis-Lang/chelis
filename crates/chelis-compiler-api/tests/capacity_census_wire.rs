@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde::Deserialize;
+
+#[path = "../../../tests/support/managed_python.rs"]
+mod managed_python;
+
 const PERMANENT_WIRE_DISPOSITION: &str = "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -465,7 +469,8 @@ fn workspace_root() -> PathBuf {
 
 fn run_typed_enumerator() -> Output {
     let root = workspace_root();
-    Command::new(root.join(".venv/bin/python"))
+    let python = managed_python::managed_python(&root).unwrap_or_else(|error| panic!("{error}"));
+    Command::new(python)
         .arg(root.join("scripts/capacity_census_typed.py"))
         // No `--target-dir`: the enumerator owns that choice so the wire and
         // PyO3 binding censuses cannot drift onto separate cargo target
@@ -591,7 +596,8 @@ fn a_typed_permanent_disposition_cannot_move_between_families() {
 #[test]
 fn adding_or_removing_a_public_serialized_f64_field_changes_the_census() {
     let root = workspace_root();
-    let output = Command::new(root.join(".venv/bin/python"))
+    let python = managed_python::managed_python(&root).unwrap_or_else(|error| panic!("{error}"));
+    let output = Command::new(python)
         .arg(root.join("scripts/test_capacity_census_typed.py"))
         .arg("WireEnumerator")
         .current_dir(&root)
