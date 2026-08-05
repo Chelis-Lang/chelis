@@ -238,31 +238,27 @@ fn assert_scalar_op_not_stubbed(op: &str, name: &str) {
         return;
     }
     let program = format!("def f(x: f32) -> f32 = {op}(x)\nout = f(3.5)\n");
-    match build_and_run_c(&program, name) {
-        // A clean build error is an acceptable outcome: unimplemented should
-        // fail loudly. Silent success returning 0 is the bug.
-        Err(_) => {}
-        Ok((emitted, stdout)) => {
-            assert!(
-                !emitted.contains(STUB_MARKER),
-                "scalar `{op}` emitted `/* unsupported builtin {op} */ 0` and \
-                 the build SUCCEEDED, so the compiled program silently returns \
-                 zero. The scalar helper may already exist in host_emit.rs and \
-                 simply not be wired into the dispatch. chelis#704"
-            );
-            let rendered = stdout
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("out = "))
-                .unwrap_or_else(|| panic!("scalar `{op}` printed no `out =` record: {stdout}"));
-            let value = rendered.parse::<f64>().unwrap_or_else(|error| {
-                panic!("scalar `{op}` printed a non-numeric result `{rendered}`: {error}")
-            });
-            assert_ne!(
-                value, 0.0,
-                "scalar `{op}(3.5)` returned 0. chelis#704. Got: {stdout}"
-            );
-        }
-    }
+    let (emitted, stdout) = build_and_run_c(&program, name).unwrap_or_else(|error| {
+        panic!(
+            "scalar `{op}` is a supported float operation and must compile; \
+             a clean unsupported error is no longer an acceptable outcome: {error}"
+        )
+    });
+    assert!(
+        !emitted.contains(STUB_MARKER),
+        "scalar `{op}` emitted `/* unsupported builtin {op} */ 0`. chelis#704"
+    );
+    let rendered = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("out = "))
+        .unwrap_or_else(|| panic!("scalar `{op}` printed no `out =` record: {stdout}"));
+    let value = rendered.parse::<f64>().unwrap_or_else(|error| {
+        panic!("scalar `{op}` printed a non-numeric result `{rendered}`: {error}")
+    });
+    assert_ne!(
+        value, 0.0,
+        "scalar `{op}(3.5)` returned 0. chelis#704. Got: {stdout}"
+    );
 }
 
 macro_rules! scalar_stub_test {
@@ -531,11 +527,6 @@ fn assert_checker_and_eval_agree_on_scalar(op: &str) {
 macro_rules! scalar_lane_agreement_test {
     ($fn_name:ident, $op:literal) => {
         #[test]
-        #[ignore = "chelis#712: the checker reports score 1 for this scalar \
-                    activation and the evaluator rejects it with `expected tensor \
-                    arg at index 0`. This test asserts the lanes agree and fails \
-                    until the contract is settled. Run with `cargo test -p \
-                    chelis-cli --test issue_703_silent_placeholders -- --ignored`."]
         fn $fn_name() {
             assert_checker_and_eval_agree_on_scalar($op);
         }
@@ -556,9 +547,6 @@ scalar_lane_agreement_test!(scalar_gelu_checker_and_eval_agree, "gelu");
 /// the precedent: same TENSOR_OPS terms, both compile correctly on scalars, and
 /// eval accepts them (locked by `scalar_sqrt_and_exp_are_correct` above).
 #[test]
-#[ignore = "chelis#712: tanh's scalar form compiles CORRECTLY in the C lane and \
-            eval still rejects it, so eval is the odd lane out. Run with `cargo \
-            test -p chelis-cli --test issue_703_silent_placeholders -- --ignored`."]
 fn scalar_tanh_checker_and_eval_agree_even_though_c_is_correct() {
     if c_toolchain_available() {
         let (emitted, stdout) =

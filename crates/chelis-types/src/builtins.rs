@@ -271,7 +271,12 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "exp",
     "log",
     "sin",
+    "tan",
+    "atan",
     "sqrt",
+    "floor",
+    "ceil",
+    "round",
     "uniform_like",
     "cmplt",
     "sub",
@@ -589,18 +594,14 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "tan",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "atan",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -616,27 +617,21 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "floor",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "ceil",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "round",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,

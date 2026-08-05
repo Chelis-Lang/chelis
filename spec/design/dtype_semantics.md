@@ -1543,9 +1543,14 @@ exclusions, host lowering finalizes suffixed literal leaves before widening
 Phase 3 red/ignored state on their original assertions. The same exact narrow
 scalar storage returns f16/bf16 `to_string` to the own-width observation
 corpus ([#734]) through private generated helpers, without adding a public
-numeric ABI channel. The integer
-floor/ceil/round capability decisions remain explicitly in Phase 4, and this
-revision does not widen the HIP/Metal scope.
+numeric ABI channel. Post-phase maintenance makes the decided scalar rows for
+[#704], [#712], and [#715] behavior-preserving before table generation:
+float activations and scalar transcendental/rounding operations execute in
+eval and C at every active float width, scalar integer `floor`/`ceil`/`round`
+are exact identities at every signed width, and scalar `max_elem`/`min_elem`
+execute at every admitted numeric width. The permanent Table-A/Table-B cells,
+generated dispatch, and generated conformance product remain Phase 4 work;
+this maintenance does not widen the HIP/Metal scope.
 
 **You deliver:**
 
@@ -1576,9 +1581,9 @@ revision does not widen the HIP/Metal scope.
 bytes. This is [#728]'s acceptance and the precondition Phase 4's generated
 conformance matrix asserts against.
 
-**Explicitly not yours:** which cells EXIST (capability decisions like
-[#724]/[#726] arrive in Phase 4; until then those cells stay ignored with
-their issue numbers); HIP/Metal kernel work (none needed).
+**Explicitly not yours:** the permanent generated inventory of which cells
+exist (Phase 4 mechanizes the already-decided interim rows); HIP/Metal kernel
+work (none needed).
 
 **Oracle:** `.venv/bin/python scripts/dtype_phase3_oracle.py` is this phase's
 single authoritative command. Acceptance is exit 0 with the final line
@@ -1678,9 +1683,9 @@ phase's work-list.
    with the never-authored cells decided on the record: integer `mean`
    ([#724] - reject, widen, or authored floor-mean), bool arithmetic
    ([#726] - proposal default: reject, diagnostics pointing at explicit
-   casts), scalar floor/ceil/round on ints ([#715]'s three-lane row - the
-   checker's existing stance says integer-valid; make eval and C honor
-   it or change the stance, once, here).
+   casts), scalar floor/ceil/round on ints ([#715]'s three-lane row - all
+   interim lanes already honor the decided integer identity rule; encode that
+   row rather than reopening or rediscovering it here).
 2. Checker acceptance derived from the table (delete the hand-mirrored
    lists, e.g. `TRANSCENDENTAL_FLOAT_ONLY_OPS` becomes a table view).
 3. Backend dispatch skeletons macro-generated from the table: a

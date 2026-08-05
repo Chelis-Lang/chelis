@@ -1018,7 +1018,8 @@ fn f32_to_f16_bits(v: f32) -> u16 {
             return sign;
         }
         let m = (mant | 0x0080_0000) >> (1 - exp);
-        let rounded = m + 0x0000_1000;
+        let lsb = (m >> 13) & 1;
+        let rounded = m + 0x0000_0FFF + lsb;
         return sign | (rounded >> 13) as u16;
     }
     let lsb = (mant >> 13) & 1;
@@ -4162,6 +4163,23 @@ mod tests {
             assert_eq!(chelis_tensor_shape(tensor, 1), 3);
             assert_eq!(chelis_tensor_numel(tensor), 6);
             chelis_free(tensor);
+        }
+    }
+
+    #[test]
+    fn f32_to_f16_subnormal_ties_round_to_even() {
+        let step = 2.0_f32.powi(-24);
+        for (value, expected) in [
+            (2.5 * step, 0x0002),
+            (3.5 * step, 0x0004),
+            (-2.5 * step, 0x8002),
+            (-3.5 * step, 0x8004),
+        ] {
+            assert_eq!(
+                f32_to_f16_bits(value),
+                expected,
+                "f16 subnormal midpoint {value} must select the even mantissa"
+            );
         }
     }
 
