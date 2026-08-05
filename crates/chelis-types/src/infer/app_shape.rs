@@ -404,18 +404,20 @@ pub(super) fn infer_reshape_app(
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
-                if let (Some(input_numel), Some(target_numel)) = (
-                    subst.static_dim_product(&input_dims),
-                    subst.static_dim_product(&dims),
-                ) && input_numel != target_numel
-                {
+                if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
+                    let input_numel = subst.static_dim_product(&input_dims);
+                    let target_numel = subst.static_dim_product(&dims);
                     return report(
                         errors,
                         CheckError::new(
                             CheckErrorKind::DimensionMismatch,
-                            format!(
-                                "reshape target has {target_numel} elements but input tensor has {input_numel}"
-                            ),
+                            match (target_numel, input_numel) {
+                                (Some(target), Some(input)) => format!(
+                                    "reshape target has {target} elements but input tensor has {input}"
+                                ),
+                                _ => "reshape target element count does not match input tensor"
+                                    .to_string(),
+                            },
                             vec![],
                         ),
                     );
@@ -451,14 +453,19 @@ pub(super) fn infer_reshape_app(
                     );
                 }
                 let shape_subst = subst.clone();
-                match subst.resolve_deferred_expand_for_reshape(input_var, |input_dims| {
-                    reshape_output_dims_for_candidate(
-                        shape_expr,
-                        input_var_name.as_deref(),
-                        input_dims,
-                        &shape_subst,
-                    )
-                }) {
+                let output_var = vg.fresh_tvar();
+                match subst.resolve_deferred_expand_for_reshape(
+                    input_var,
+                    output_var,
+                    |input_dims| {
+                        reshape_output_dims_for_candidate(
+                            shape_expr,
+                            input_var_name.as_deref(),
+                            input_dims,
+                            &shape_subst,
+                        )
+                    },
+                ) {
                     Ok(Some(output)) => return output,
                     Ok(None) => {}
                     Err(error) => return report(errors, error.into()),

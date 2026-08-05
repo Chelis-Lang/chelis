@@ -106,6 +106,50 @@ fn serialized_library_context_preserves_later_expand_shape_selection() {
 }
 
 #[test]
+fn serialized_context_preserves_candidate_dependent_reshape_relation() {
+    let library_decls = parse_surf(
+        "bias = to_tensor([[[0.5f32], [1.5f32]]])\n\
+         expanded = expand(bias, 0, 3i64)\n\
+         reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])",
+    )
+    .expect("library surf parse should succeed");
+    let library = desugar_program(&library_decls);
+    let context = build_type_env_from_library(&library).expect("library context should build");
+    let bytes = bincode::serialize(&context).expect("type context should serialize");
+    let restored: TypeEnv = bincode::deserialize(&bytes).expect("type context should deserialize");
+
+    let consistent_decls = parse_surf(
+        "def require_inserted(x: tensor[3, 1, 2, 1, f32]) -> tensor[3, 1, 2, 1, f32] = x\n\
+         def require_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x\n\
+         selected = require_reshape(reshaped)\n\
+         inserted = require_inserted(expanded)",
+    )
+    .expect("consistent consumer surf parse should succeed");
+    let consistent = desugar_program(&consistent_decls);
+    check_ir_with_context(&restored, &consistent)
+        .expect("the serialized relation must permit one consistent candidate pair");
+
+    let contradictory_decls = parse_surf(
+        "def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x\n\
+         def require_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x\n\
+         selected = require_reshape(reshaped)\n\
+         replaced = require_replaced(expanded)",
+    )
+    .expect("contradictory consumer surf parse should succeed");
+    let contradictory = desugar_program(&contradictory_decls);
+    let errors = check_ir_with_context(&restored, &contradictory)
+        .expect_err("the serialized relation must reject a contradictory candidate pair");
+    assert!(
+        errors
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "the contradiction must fail as a dimension mismatch:\n{}",
+        summary(&errors.errors)
+    );
+}
+
+#[test]
 fn cast_accepts_unannotated_positional_expand_result() {
     let errors = typecheck(
         r#"
@@ -329,6 +373,180 @@ def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
     assert!(
         rendered.contains("(t-tensor {} (d-name {} *) (t-prim {} f32))"),
         "a reshape with unknown numel must retain its wildcard result after replacement:\n{rendered}"
+    );
+}
+
+#[test]
+fn candidate_dependent_reshape_output_selects_expand_insertion() {
+    let errors = typecheck(
+        r#"
+def require_inserted(x: tensor[3, 1, 2, 1, f32]) -> tensor[3, 1, 2, 1, f32] = x
+def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
+def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  selected = require_inserted_reshape(reshaped)
+  inserted = require_inserted(expanded)
+  selected
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "the reshape output must select the matching expand insertion candidate:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn candidate_dependent_reshape_output_rejects_contradictory_expand_replacement() {
+    let errors = typecheck(
+        r#"
+def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
+def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
+def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  selected = require_inserted_reshape(reshaped)
+  replaced = require_replaced(expanded)
+  selected
+}
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "an insertion-shaped reshape output must reject replacement of the same expand:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn wildcard_reshape_consumer_does_not_erase_later_insertion_selection() {
+    let errors = typecheck(
+        r#"
+def accept_partial(x: tensor[*, *, 3, f32]) -> tensor[*, *, 3, f32] = x
+def require_inserted(x: tensor[3, 1, 2, 1, f32]) -> tensor[3, 1, 2, 1, f32] = x
+def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
+def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  partial = accept_partial(reshaped)
+  selected = require_inserted_reshape(reshaped)
+  inserted = require_inserted(expanded)
+  selected
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "a partial consumer must retain the relation for later insertion selection:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn wildcard_reshape_consumer_does_not_hide_later_shape_contradiction() {
+    let errors = typecheck(
+        r#"
+def accept_partial(x: tensor[*, *, 3, f32]) -> tensor[*, *, 3, f32] = x
+def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
+def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
+def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  partial = accept_partial(reshaped)
+  selected = require_inserted_reshape(reshaped)
+  replaced = require_replaced(expanded)
+  selected
+}
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "a partial consumer must not hide a later insertion/replacement contradiction:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn expand_replacement_selects_candidate_dependent_reshape_output() {
+    let errors = typecheck(
+        r#"
+def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
+def require_replaced_reshape(x: tensor[2, 1, 3, f32]) -> tensor[2, 1, 3, f32] = x
+def f(bias: tensor[1, 2, 1, f32]) -> tensor[2, 1, 3, f32] = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  replaced = require_replaced(expanded)
+  selected = require_replaced_reshape(reshaped)
+  selected
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "expand replacement must refine the dependent reshape output:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn expand_replacement_rejects_contradictory_candidate_dependent_reshape_output() {
+    let errors = typecheck(
+        r#"
+def require_replaced(x: tensor[3, 2, 1, f32]) -> tensor[3, 2, 1, f32] = x
+def require_inserted_reshape(x: tensor[1, 2, 3, f32]) -> tensor[1, 2, 3, f32] = x
+def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  replaced = require_replaced(expanded)
+  selected = require_inserted_reshape(reshaped)
+  selected
+}
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "expand replacement must reject the insertion-specific reshape output:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn reshape_accepts_equal_static_products_beyond_i64() {
+    let errors = typecheck(
+        r#"
+def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, 2, f32] =
+  reshape(x, [9223372036854775807i64, 2i64])
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "equal static products must compare exactly even when they exceed i64:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn reshape_rejects_unequal_static_products_beyond_i64() {
+    let errors = typecheck(
+        r#"
+def f(x: tensor[9223372036854775807, 2, f32]) -> tensor[9223372036854775807, f32] =
+  reshape(x, [9223372036854775807i64])
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "overflow must not turn a known static element-count mismatch into unknown:\n{}",
+        summary(&errors)
     );
 }
 

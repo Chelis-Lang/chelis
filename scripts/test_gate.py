@@ -25,6 +25,7 @@ Four things are locked here:
 import importlib.util
 import io
 import re
+import shlex
 import subprocess
 import sys
 import unittest
@@ -104,11 +105,23 @@ def _assert_carcara_full_suite_command(workflow: str) -> None:
     if block is None:
         raise AssertionError("missing full-smt-prove job")
     run_commands = re.findall(r"(?m)^\s+run:\s*(\S.*)$", block)
-    count = run_commands.count(CARCARA_FULL_SUITE_COMMAND)
-    if count != 1:
+
+    def enables_carcara(command: str) -> bool:
+        words = shlex.split(command)
+        for index, word in enumerate(words):
+            if word == "--features" and index + 1 < len(words):
+                if "carcara" in words[index + 1].split():
+                    return True
+            if word.startswith("--features="):
+                if "carcara" in word.partition("=")[2].split():
+                    return True
+        return False
+
+    carcara_commands = [command for command in run_commands if enables_carcara(command)]
+    if carcara_commands != [CARCARA_FULL_SUITE_COMMAND]:
         raise AssertionError(
             "full-smt-prove must execute the complete serialized Carcara suite "
-            f"exactly once; found {count}"
+            f"exactly once; found {carcara_commands}"
         )
 
 
@@ -1104,6 +1117,15 @@ class SmtCiSplitTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
             _assert_carcara_full_suite_command(filtered)
+
+        duplicated = text.replace(
+            f"run: {CARCARA_FULL_SUITE_COMMAND}",
+            f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+            "      - name: Accidental parallel Carcara rerun\n"
+            "        run: cargo test -p chelis-prove --features carcara",
+        )
+        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+            _assert_carcara_full_suite_command(duplicated)
 
     def test_carcara_dependency_stays_gmp_only(self):
         text = CHELIS_PROVE_TOML.read_text()
