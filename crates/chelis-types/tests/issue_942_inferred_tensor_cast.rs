@@ -519,6 +519,137 @@ def f(bias: tensor[1, 2, 1, f32]) -> tensor[1, 2, 3, f32] = {
 }
 
 #[test]
+fn chained_reshape_preserves_deferred_candidate_relation() {
+    let errors = typecheck(
+        r#"
+def f(bias: tensor[1, 2, 1, f32]) -> tensor[6, f32] = {
+  expanded = expand(bias, 0, 3i64)
+  first = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  reshape(first, [6i64])
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "a second reshape must preserve and resolve the first reshape's deferred relation:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn chained_reshape_rejects_incompatible_static_numel() {
+    let errors = typecheck(
+        r#"
+def f(bias: tensor[1, 2, 1, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  first = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  reshape(first, [5i64])
+}
+"#,
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
+        "a chained reshape with the wrong element count must fail:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn reshape_rejects_negative_static_extents_even_when_signed_product_matches() {
+    let errors = typecheck(
+        r#"
+def f(x: tensor[6, f32]) = reshape(x, [-2i64, -3i64])
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.message.contains("non-negative")
+        }),
+        "negative reshape extents must fail before signed-product comparison:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn reshape_rejects_extreme_negative_extent_even_when_zero_masks_product() {
+    let errors = typecheck(
+        r#"
+def f(x: tensor[0, f32]) =
+  reshape(x, [-9223372036854775808i64, 0i64])
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.message.contains("non-negative")
+        }),
+        "zero product must not hide an invalid negative reshape extent:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn scalar_reshape_rejects_negative_static_extent() {
+    let errors = typecheck(
+        r#"
+def f(x: f32) = reshape(x, [-1i64])
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.message.contains("non-negative")
+        }),
+        "scalar reshape must reject a negative target extent:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn deferred_expand_reshape_rejects_negative_static_extents() {
+    let errors = typecheck(
+        r#"
+def f(bias: tensor[1, 2, 1, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  reshape(expanded, [-2i64, -3i64])
+}
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.message.contains("non-negative")
+        }),
+        "a deferred expand relation must not admit a signed-product reshape:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn chained_deferred_reshape_rejects_negative_static_extents() {
+    let errors = typecheck(
+        r#"
+def f(bias: tensor[1, 2, 1, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  first = reshape(expanded, [shape(expanded, 1), shape(expanded, 2), 3i64])
+  reshape(first, [-2i64, -3i64])
+}
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error.message.contains("non-negative")
+        }),
+        "a chained deferred reshape must reject negative target extents:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
 fn reshape_accepts_equal_static_products_beyond_i64() {
     let errors = typecheck(
         r#"

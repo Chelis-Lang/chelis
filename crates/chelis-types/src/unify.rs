@@ -412,6 +412,112 @@ impl Subst {
         }
     }
 
+    /// Compose a `reshape` over the output of an earlier unresolved
+    /// `reshape`, retaining the original expand candidate that owns each
+    /// intermediate shape.
+    pub fn resolve_deferred_reshape_for_reshape<F>(
+        &mut self,
+        input_output_var: TypeVar,
+        output_var: TypeVar,
+        mut target_dims_for_candidate: F,
+    ) -> Result<Option<Type>, TypeError>
+    where
+        F: FnMut(&[Dim]) -> Result<Vec<Dim>, TypeError>,
+    {
+        let constraints = self
+            .deferred_reshape_constraints
+            .lock()
+            .expect("subst.deferred_reshape_constraints poisoned")
+            .get(&input_output_var)
+            .cloned();
+        let Some(constraints) = constraints else {
+            return Ok(None);
+        };
+
+        let mut pending = Vec::new();
+        let mut selected = Vec::new();
+        for constraint in constraints {
+            let (compatible, mut first_rejection) =
+                self.deferred_reshape_candidates(&constraint, None);
+            let mut derived = Vec::new();
+            for candidate in compatible {
+                let Type::Tensor(input_dims, precision) = &candidate.output else {
+                    unreachable!("deferred reshape candidates are tensors");
+                };
+                let precision = precision.clone();
+                let target_dims = match target_dims_for_candidate(input_dims) {
+                    Ok(target_dims) => target_dims,
+                    Err(error) => {
+                        first_rejection.get_or_insert(error);
+                        continue;
+                    }
+                };
+                if self.static_dim_products_match(input_dims, &target_dims) == Some(false) {
+                    first_rejection.get_or_insert_with(|| TypeError {
+                        kind: TypeErrorKind::DimensionMismatch,
+                        message: "reshape target element count matches no legal deferred reshape \
+                                  input shape"
+                            .to_string(),
+                    });
+                    continue;
+                }
+                derived.push((candidate, Type::Tensor(target_dims, precision)));
+            }
+
+            match derived.as_slice() {
+                [] => {
+                    return Err(first_rejection.unwrap_or_else(|| TypeError {
+                        kind: TypeErrorKind::DimensionMismatch,
+                        message: "reshape target matches no legal deferred input shape".to_string(),
+                    }));
+                }
+                [(candidate, output)] => {
+                    selected.push((
+                        constraint.input_var,
+                        candidate.input.clone(),
+                        candidate.output.clone(),
+                        output.clone(),
+                    ));
+                }
+                _ => {
+                    pending.push(DeferredReshapeConstraint {
+                        input_var: constraint.input_var,
+                        candidates: derived
+                            .into_iter()
+                            .map(|(candidate, output)| DeferredReshapeCandidate {
+                                input: candidate.input,
+                                output,
+                            })
+                            .collect(),
+                        output_requirements: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        // Install pending relations before singleton selection so a concrete
+        // result also constrains every relation attached to the new output.
+        // Work on a clone so any rejected candidate leaves the original
+        // substitution and its serialized obligations unchanged.
+        let mut trial = self.clone();
+        if !pending.is_empty() {
+            trial
+                .deferred_reshape_constraints
+                .lock()
+                .expect("subst.deferred_reshape_constraints poisoned")
+                .entry(output_var)
+                .or_default()
+                .extend(pending);
+        }
+        for (root_var, root_input, intermediate, output) in selected {
+            unify(&Type::Var(input_output_var), &intermediate, &mut trial)?;
+            unify(&Type::Var(root_var), &root_input, &mut trial)?;
+            unify(&Type::Var(output_var), &output, &mut trial)?;
+        }
+        *self = trial;
+        Ok(Some(self.apply(&Type::Var(output_var))))
+    }
+
     pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i128> {
         dims.iter().try_fold(1_i128, |product, dim| {
             let Dim::Lit(value) = self.apply_dim(dim) else {
@@ -540,6 +646,20 @@ impl Subst {
     /// fits, retain the requirement without binding the result to a wildcard
     /// summary that could erase the dependency.
     fn constrain_deferred_reshape_output(
+        &mut self,
+        output_var: TypeVar,
+        requirement: &Type,
+    ) -> Result<bool, TypeError> {
+        let mut trial = self.clone();
+        let constrained =
+            trial.constrain_deferred_reshape_output_in_place(output_var, requirement)?;
+        if constrained {
+            *self = trial;
+        }
+        Ok(constrained)
+    }
+
+    fn constrain_deferred_reshape_output_in_place(
         &mut self,
         output_var: TypeVar,
         requirement: &Type,
@@ -2516,6 +2636,44 @@ mod tests {
             unreachable!();
         };
         assert!(s.has_deferred_shape_constraint(output_var));
+    }
+
+    #[test]
+    fn rejected_deferred_reshape_requirement_preserves_relation() {
+        let mut g = var_gen();
+        let input = g.fresh_tvar();
+        let output = g.fresh_tvar();
+        let mut s = Subst::new();
+        s.record_deferred_expand_constraint(
+            input,
+            DeferredExpandConstraint {
+                input_dims: vec![Dim::Lit(1), Dim::Lit(2), Dim::Lit(1)],
+                input_prec: tprec(Prim::F32),
+                axis: 0,
+                size: Dim::Lit(3),
+            },
+        );
+        let output = s
+            .resolve_deferred_expand_for_reshape(input, output, |candidate_dims| {
+                Ok(vec![
+                    candidate_dims[1].clone(),
+                    candidate_dims[2].clone(),
+                    Dim::Lit(3),
+                ])
+            })
+            .expect("both expand candidates have legal reshape outputs")
+            .expect("the input carries a deferred expand relation");
+        let Type::Var(output_var) = output else {
+            panic!("ambiguous reshape output must remain deferred");
+        };
+
+        let incompatible = Type::Tensor(vec![Dim::Lit(5)], TensorPrec::Concrete(Prim::F32));
+        unify(&Type::Var(output_var), &incompatible, &mut s)
+            .expect_err("five elements match neither deferred reshape candidate");
+        assert!(
+            s.has_deferred_shape_constraint(output_var),
+            "a rejected consumer must not erase the deferred relation"
+        );
     }
 
     #[test]

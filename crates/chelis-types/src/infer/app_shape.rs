@@ -372,6 +372,9 @@ pub(super) fn infer_reshape_app(
                     );
                 }
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
+                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
+                    return report(errors, error.into());
+                }
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
             }
 
@@ -404,6 +407,9 @@ pub(super) fn infer_reshape_app(
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
+                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
+                    return report(errors, error.into());
+                }
                 if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
                     let input_numel = subst.static_dim_product(&input_dims);
                     let target_numel = subst.static_dim_product(&dims);
@@ -464,6 +470,30 @@ pub(super) fn infer_reshape_app(
                             input_dims,
                             &shape_subst,
                         )
+                        .and_then(|dims| {
+                            validate_reshape_target_dims(&dims, &shape_subst)?;
+                            Ok(dims)
+                        })
+                    },
+                ) {
+                    Ok(Some(output)) => return output,
+                    Ok(None) => {}
+                    Err(error) => return report(errors, error.into()),
+                }
+                match subst.resolve_deferred_reshape_for_reshape(
+                    input_var,
+                    output_var,
+                    |input_dims| {
+                        reshape_output_dims_for_candidate(
+                            shape_expr,
+                            input_var_name.as_deref(),
+                            input_dims,
+                            &shape_subst,
+                        )
+                        .and_then(|dims| {
+                            validate_reshape_target_dims(&dims, &shape_subst)?;
+                            Ok(dims)
+                        })
                     },
                 ) {
                     Ok(Some(output)) => return output,
@@ -1607,6 +1637,19 @@ fn reshape_output_dims_for_candidate(
             Ok(reshape_output_dim(elem, input_var_name, input_dims, subst))
         })
         .collect()
+}
+
+fn validate_reshape_target_dims(dims: &[Dim], subst: &Subst) -> Result<(), TypeError> {
+    if let Some(value) = dims.iter().find_map(|dim| match subst.apply_dim(dim) {
+        Dim::Lit(value) if value < 0 => Some(value),
+        _ => None,
+    }) {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: format!("reshape target extents must be non-negative, got {value}"),
+        });
+    }
+    Ok(())
 }
 
 /// Recognize a single dim-list element from a reshape shape list.

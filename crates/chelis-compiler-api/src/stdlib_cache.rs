@@ -64,7 +64,8 @@ use crate::compiler::CompilerError;
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
 /// Mixed into the content-addressed key. V4 also captures chelis#942's
 /// serialized positional-expand obligations inside `TypeEnv`.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 4;
+/// V5 captures the deferred-reshape relations added to the same substitution.
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 5;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -360,6 +361,11 @@ pub fn build_stdlib_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_format_version_tracks_deferred_reshape_relations() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 5);
+    }
 
     /// A minimal well-formed `Decl` slice for key-stability tests. The
     /// exact shape is irrelevant; what matters is that the same slice

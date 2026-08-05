@@ -713,13 +713,16 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// binary would replay the old decl order to a post-#1182 binary at the same
 /// compiler version -- the same stale-order hazard the
 /// `PREPARED_GRAPH_CACHE_VERSION` bump closes for the graph cache.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V8\n";
+/// V9: chelis#942 added serialized deferred-reshape relations to `Subst`.
+/// V8 files do not carry those obligations and could accept an incompatible
+/// downstream shape after a cache hit.
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V9\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 8;
+const CACHE_FORMAT_VERSION: u32 = 9;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1209,6 +1212,12 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn cache_format_version_tracks_deferred_reshape_relations() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V9\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 9);
+    }
 
     /// Mirrors the chelis-reef `shared_graph_fixture` shape: a root
     /// package with one `Path` dep called `mylib`. The path-dep is
