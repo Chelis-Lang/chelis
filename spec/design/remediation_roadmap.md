@@ -177,8 +177,9 @@ corrected 2026-07-30. As of 2026-08-04 the focused typed-authority and sealed
 diagnostic-kind slices are implemented, followed by the first gate-contract
 slice: one typed compiler-api policy now serves both public build paths, the
 stale C precision preflights are gone, shared gates accept only the closed
-`BuildTarget` vocabulary, and the exact syntactic `reject_*` manifest is
-recursively executable across both crate source trees. The HIP contract keeps
+`BuildTarget` vocabulary, and the exact syntactic `reject_*` manifest walks
+free functions and `impl` methods across both crate source trees. The HIP
+contract keeps
 direct-load f16/bf16 `BlasMatmul` admitted but rejects real narrow-float
 operand compute before emission. The source manifest is intentionally scoped
 to syntactic `reject_*` definitions; it does not claim to detect a semantic

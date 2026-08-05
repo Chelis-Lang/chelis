@@ -2,9 +2,9 @@
 //!
 //! The inventory is intentionally syntactic and exact. Every `reject_*`
 //! function anywhere in either public build crate's Rust source tree,
-//! including nested modules and nested item definitions, must update this
-//! reviewed manifest. A name in both crates is always a failure because it
-//! creates two editable policies. This test does not claim to recognize a
+//! including nested modules, nested free functions, and `impl` methods, must
+//! update this reviewed manifest. A name in both crates is always a failure
+//! because it creates two editable policies. This test does not claim to recognize a
 //! semantic reimplementation hidden under an unrelated name; that remains an
 //! architectural-review concern rather than a property an AST name census can
 //! prove.
@@ -37,6 +37,15 @@ impl<'ast> Visit<'ast> for RejectFunctionVisitor {
                 .insert((name, matches!(function.vis, Visibility::Public(_))));
         }
         visit::visit_item_fn(self, function);
+    }
+
+    fn visit_impl_item_fn(&mut self, function: &'ast syn::ImplItemFn) {
+        let name = function.sig.ident.to_string();
+        if name.starts_with("reject_") {
+            self.functions
+                .insert((name, matches!(function.vis, Visibility::Public(_))));
+        }
+        visit::visit_impl_item_fn(self, function);
     }
 }
 
@@ -107,6 +116,31 @@ mod nested {
         reject_functions(&source),
         BTreeSet::from([("reject_shadow_policy".to_string(), true)]),
         "nested gate definitions are part of the recurrence surface"
+    );
+}
+
+#[test]
+fn reject_inventory_discovers_impl_method_definitions() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source = directory.path().join("impl_method.rs");
+    fs::write(
+        &source,
+        r#"
+struct ReviewProbeGates;
+
+impl ReviewProbeGates {
+    pub fn reject_shadow_policy() -> Result<(), ()> {
+        Ok(())
+    }
+}
+"#,
+    )
+    .expect("write impl-method source");
+
+    assert_eq!(
+        reject_functions(&source),
+        BTreeSet::from([("reject_shadow_policy".to_string(), true)]),
+        "moving a gate into an impl block must not escape the inventory"
     );
 }
 

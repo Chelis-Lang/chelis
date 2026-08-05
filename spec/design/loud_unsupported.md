@@ -11,8 +11,8 @@ and sealed diagnostic-kind (§C2.2) slices landed on main in PR [#1037]
 (merged 2026-08-04). The first gate-contract slice then made the typed
 compiler-api definitions the single policy consumed by both public build
 paths, removed the stale C precision preflights, and froze the exact
-syntactic `reject_*` inventory (source path, name, and visibility across both
-crate source trees) in
+syntactic `reject_*` inventory (source path, name, and visibility for free
+functions and `impl` methods across both crate source trees) in
 `crates/chelis-compiler-api/tests/phase3_gate_inventory.rs`. Shared gates take
 the closed `BuildTarget` enum, so an unknown target cannot silently skip a
 gate. Census rows
@@ -1744,7 +1744,8 @@ gate definitions; its obsolete C precision pair is deleted; all shared gate
 target arguments use the closed `BuildTarget` enum; direct-load f16/bf16
 `BlasMatmul` remains admitted while actual narrow-float operand compute is
 rejected; and the exact syntactic `reject_*` inventories (path, name, and
-visibility across every Rust file and nested item in both crate source trees)
+visibility across every Rust file, nested free function, and `impl` method in
+both crate source trees)
 are locked by a parsed-source tripwire. The tripwire does not claim semantic
 uniqueness for unrelated function names.
 The remaining row-26 work is the CLI-local Metal/effect diagnostic migration
