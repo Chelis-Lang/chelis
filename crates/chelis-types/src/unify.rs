@@ -268,13 +268,14 @@ impl Subst {
         Err(first_rejection.expect("deferred expand constraint set has at least one candidate"))
     }
 
-    /// Materialize a positional-expand result consumed by `reshape`.
+    /// Resolve a positional-expand result consumed by `reshape`.
     /// Reshape does not preserve rank or individual dimensions, but it does
     /// preserve element count. Derive the target separately for every legal
     /// expand candidate because `shape(expanded, axis)` may itself distinguish
     /// replacement from insertion or reject an out-of-bounds candidate. If
-    /// more than one candidate survives, leave the expand unresolved.
-    pub fn materialize_deferred_expand_for_numel<F>(
+    /// more than one candidate survives, leave the expand unresolved and
+    /// return a distinct reshape output containing only common target dims.
+    pub fn resolve_deferred_expand_for_reshape<F>(
         &mut self,
         v: TypeVar,
         mut target_dims_for_candidate: F,
@@ -298,42 +299,67 @@ impl Subst {
             let Type::Tensor(candidate_dims, _) = &candidate else {
                 unreachable!("deferred expand candidates are tensors");
             };
-            let compatible = target_dims_for_candidate(candidate_dims).and_then(|target_dims| {
-                if let (Some(target_numel), Some(candidate_numel)) = (
-                    self.static_dim_product(&target_dims),
-                    self.static_dim_product(candidate_dims),
-                ) && candidate_numel != target_numel
-                {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::DimensionMismatch,
-                        message: format!(
-                            "reshape target has {target_numel} elements, which matches no legal expand output shape"
-                        ),
-                    });
-                }
-
-                let mut trial = self.clone();
-                constraints.iter().try_for_each(|constraint| {
-                    let canonical = constraint.canonical_for_output(&candidate)?;
-                    unify(&canonical, &candidate, &mut trial)
-                })
-            });
-            match compatible {
-                Ok(()) => {
-                    compatible_candidates.push(candidate);
-                }
+            let target_dims = match target_dims_for_candidate(candidate_dims) {
+                Ok(target_dims) => target_dims,
                 Err(error) => {
                     first_rejection.get_or_insert(error);
+                    continue;
                 }
+            };
+            if let (Some(target_numel), Some(candidate_numel)) = (
+                self.static_dim_product(&target_dims),
+                self.static_dim_product(candidate_dims),
+            ) && candidate_numel != target_numel
+            {
+                first_rejection.get_or_insert_with(|| TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!(
+                        "reshape target has {target_numel} elements, which matches no legal expand output shape"
+                    ),
+                });
+                continue;
             }
+
+            let mut trial = self.clone();
+            let compatible = constraints.iter().try_for_each(|constraint| {
+                let canonical = constraint.canonical_for_output(&candidate)?;
+                unify(&canonical, &candidate, &mut trial)
+            });
+            if let Err(error) = compatible {
+                first_rejection.get_or_insert(error);
+                continue;
+            }
+            compatible_candidates.push((candidate, target_dims));
         }
         match compatible_candidates.as_slice() {
-            [candidate] => {
+            [(candidate, target_dims)] => {
+                let Type::Tensor(_, precision) = candidate else {
+                    unreachable!("deferred expand candidates are tensors");
+                };
                 unify(&Type::Var(v), candidate, self)?;
-                Ok(Some(self.apply(candidate)))
+                Ok(Some(self.apply(&Type::Tensor(
+                    target_dims.clone(),
+                    precision.clone(),
+                ))))
             }
             [] => Err(first_rejection.expect("every deferred expand candidate was rejected")),
-            _ => Ok(None),
+            candidates => {
+                let mut output_dims = candidates[0].1.clone();
+                for (_, candidate_dims) in &candidates[1..] {
+                    debug_assert_eq!(output_dims.len(), candidate_dims.len());
+                    for (output_dim, candidate_dim) in output_dims.iter_mut().zip(candidate_dims) {
+                        if output_dim != candidate_dim {
+                            *output_dim = Dim::Wildcard;
+                        }
+                    }
+                }
+                let Type::Tensor(_, precision) = &candidates[0].0 else {
+                    unreachable!("deferred expand candidates are tensors");
+                };
+                Ok(Some(
+                    self.apply(&Type::Tensor(output_dims, precision.clone())),
+                ))
+            }
         }
     }
 
@@ -2101,12 +2127,16 @@ mod tests {
             },
         );
 
-        let selected = s
-            .materialize_deferred_expand_for_numel(result, |_| Ok(vec![Dim::Lit(6)]))
+        let output = s
+            .resolve_deferred_expand_for_reshape(result, |_| Ok(vec![Dim::Lit(6)]))
             .expect("a six-element reshape target must select insertion")
             .expect("the result carries a deferred expand constraint");
         assert_eq!(
-            selected,
+            output,
+            Type::Tensor(vec![Dim::Lit(6)], TensorPrec::Concrete(Prim::F32))
+        );
+        assert_eq!(
+            s.apply(&Type::Var(result)),
             Type::Tensor(
                 vec![Dim::Lit(3), Dim::Lit(2)],
                 TensorPrec::Concrete(Prim::F32)
@@ -2130,7 +2160,7 @@ mod tests {
         );
 
         let error = s
-            .materialize_deferred_expand_for_numel(result, |_| Ok(vec![Dim::Lit(5)]))
+            .resolve_deferred_expand_for_reshape(result, |_| Ok(vec![Dim::Lit(5)]))
             .expect_err("five elements match neither tensor[3] nor tensor[3, 2]");
         assert!(matches!(error.kind, TypeErrorKind::DimensionMismatch));
         assert!(
@@ -2155,10 +2185,45 @@ mod tests {
             },
         );
 
-        let selected = s
-            .materialize_deferred_expand_for_numel(result, |_| Ok(vec![Dim::Wildcard]))
-            .expect("an unknown reshape target is compatible with either expand shape");
-        assert_eq!(selected, None);
+        let output = s
+            .resolve_deferred_expand_for_reshape(result, |_| Ok(vec![Dim::Wildcard]))
+            .expect("an unknown reshape target is compatible with either expand shape")
+            .expect("the reshape still has its own output type");
+        assert_eq!(
+            output,
+            Type::Tensor(vec![Dim::Wildcard], TensorPrec::Concrete(Prim::F32))
+        );
+        assert!(s.has_deferred_expand_constraint(result));
+    }
+
+    #[test]
+    fn reshape_ambiguous_candidates_preserve_common_target_dims() {
+        let mut g = var_gen();
+        let result = g.fresh_tvar();
+        let mut s = Subst::new();
+        s.record_deferred_expand_constraint(
+            result,
+            DeferredExpandConstraint {
+                input_dims: vec![Dim::Lit(2), Dim::Lit(4)],
+                input_prec: tprec(Prim::F32),
+                axis: 0,
+                size: Dim::Lit(3),
+            },
+        );
+
+        let output = s
+            .resolve_deferred_expand_for_reshape(result, |candidate_dims| {
+                Ok(vec![candidate_dims[0].clone(), Dim::Wildcard])
+            })
+            .expect("both expand candidates remain possible")
+            .expect("the reshape still has its own output type");
+        assert_eq!(
+            output,
+            Type::Tensor(
+                vec![Dim::Lit(3), Dim::Wildcard],
+                TensorPrec::Concrete(Prim::F32)
+            )
+        );
         assert!(s.has_deferred_expand_constraint(result));
     }
 

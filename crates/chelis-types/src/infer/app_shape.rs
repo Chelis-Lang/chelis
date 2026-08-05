@@ -451,7 +451,7 @@ pub(super) fn infer_reshape_app(
                     );
                 }
                 let shape_subst = subst.clone();
-                match subst.materialize_deferred_expand_for_numel(input_var, |input_dims| {
+                match subst.resolve_deferred_expand_for_reshape(input_var, |input_dims| {
                     reshape_output_dims_for_candidate(
                         shape_expr,
                         input_var_name.as_deref(),
@@ -459,25 +459,7 @@ pub(super) fn infer_reshape_app(
                         &shape_subst,
                     )
                 }) {
-                    Ok(Some(Type::Tensor(input_dims, precision))) => {
-                        let dims = reshape_output_dims(
-                            shape_expr,
-                            input_var_name.as_deref(),
-                            &input_dims,
-                            subst,
-                        );
-                        return Type::Tensor(dims, precision);
-                    }
-                    Ok(Some(other)) => {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                format!("reshape expects tensor input, got {other}"),
-                                vec![],
-                            ),
-                        );
-                    }
+                    Ok(Some(output)) => return output,
                     Ok(None) => {}
                     Err(error) => return report(errors, error.into()),
                 }

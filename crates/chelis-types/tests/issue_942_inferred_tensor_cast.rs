@@ -23,6 +23,13 @@ fn typecheck(source: &str) -> Vec<CheckError> {
     }
 }
 
+fn checked_render(source: &str) -> String {
+    let decls = parse_surf(source).expect("surf parse should succeed");
+    let deep = desugar_program(&decls);
+    let checked = check_typed_program(&deep).expect("program should typecheck");
+    chelis_deep::printer::print_canonical(checked.annotated_exprs())
+}
+
 fn summary(errors: &[CheckError]) -> String {
     errors
         .iter()
@@ -251,39 +258,77 @@ def f(bias: tensor[2, f32]) = {
 
 #[test]
 fn ambiguous_reshape_before_consumer_leaves_deferred_expand_unresolved() {
-    let errors = typecheck(
+    let rendered = checked_render(
         r#"
 def require_inserted(x: tensor[3, 2, f32]) -> tensor[3, 2, f32] = x
 def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
   expanded = expand(bias, 0, 3i64)
   reshaped = reshape(expanded, [shape(shape_source, 0)])
-  require_inserted(expanded)
+  inserted = require_inserted(expanded)
+  reshaped
 }
 "#,
     );
     assert!(
-        errors.is_empty(),
-        "a reshape with unknown numel must not preempt a later shape-bearing consumer:\n{}",
-        summary(&errors)
+        rendered.contains("(t-tensor {} (d-name {} *) (t-prim {} f32))"),
+        "a reshape with unknown numel must retain its wildcard result before insertion:\n{rendered}"
     );
 }
 
 #[test]
 fn ambiguous_reshape_after_consumer_preserves_selected_deferred_expand() {
-    let errors = typecheck(
+    let rendered = checked_render(
         r#"
 def require_inserted(x: tensor[3, 2, f32]) -> tensor[3, 2, f32] = x
 def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
   expanded = expand(bias, 0, 3i64)
   inserted = require_inserted(expanded)
-  reshape(expanded, [shape(shape_source, 0)])
+  reshaped = reshape(expanded, [shape(shape_source, 0)])
+  reshaped
 }
 "#,
     );
     assert!(
-        errors.is_empty(),
-        "an ambiguous reshape must accept an expand shape fixed by an earlier consumer:\n{}",
-        summary(&errors)
+        rendered.contains("(t-tensor {} (d-name {} *) (t-prim {} f32))"),
+        "a reshape with unknown numel must retain its wildcard result after insertion:\n{rendered}"
+    );
+}
+
+#[test]
+fn ambiguous_reshape_before_replacement_keeps_wildcard_result() {
+    let rendered = checked_render(
+        r#"
+def require_replaced(x: tensor[3, f32]) -> tensor[3, f32] = x
+def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(shape_source, 0)])
+  replaced = require_replaced(expanded)
+  reshaped
+}
+"#,
+    );
+    assert!(
+        rendered.contains("(t-tensor {} (d-name {} *) (t-prim {} f32))"),
+        "a reshape with unknown numel must retain its wildcard result before replacement:\n{rendered}"
+    );
+}
+
+#[test]
+fn ambiguous_reshape_after_replacement_keeps_wildcard_result() {
+    let rendered = checked_render(
+        r#"
+def require_replaced(x: tensor[3, f32]) -> tensor[3, f32] = x
+def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  replaced = require_replaced(expanded)
+  reshaped = reshape(expanded, [shape(shape_source, 0)])
+  reshaped
+}
+"#,
+    );
+    assert!(
+        rendered.contains("(t-tensor {} (d-name {} *) (t-prim {} f32))"),
+        "a reshape with unknown numel must retain its wildcard result after replacement:\n{rendered}"
     );
 }
 
