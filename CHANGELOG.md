@@ -222,12 +222,14 @@ authored edits.
 
   Two consequences for anyone with an existing build tree:
 
-  - **On-disk caches from 0.18.3 are invalidated by design.**
-    `PREPARED_GRAPH_CACHE_VERSION` advances 1 → 2 and the
-    `CompiledContext` `.ctx` format advances 6 → 7 (magic
-    `CHELIS_CTX_V6` → `CHELIS_CTX_V7`). Both bumps are load-bearing: a
-    warm project must not replay a stale pre-0.18.4 declaration order to
-    a 0.18.4 binary at the same compiler version. The first build after
+  - **On-disk caches from 0.18.3 are invalidated by design.** Across
+    this release the `CompiledContext` `.ctx` format advances 6 → 8
+    (magic `CHELIS_CTX_V6` → `CHELIS_CTX_V8`), the last of those steps
+    being this change, and `PREPARED_GRAPH_CACHE_VERSION` advances
+    1 → 2. The bumps are load-bearing: a warm project must not replay a
+    stale pre-0.18.4 declaration order to a 0.18.4 binary at the same
+    compiler version, which would otherwise let one binary emit
+    different C depending on cache state. The first build after
     upgrading is cold; no action is needed.
   - **Emitted C for a multi-package reef build is reordered.** Root
     package modules now sort last among the non-stdlib declarations so
