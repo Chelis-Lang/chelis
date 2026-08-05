@@ -1933,6 +1933,53 @@ int main(void) {{
     }
 
     #[test]
+    fn checked_cast_identity_materializes_a_noncontiguous_source() {
+        if !gcc_available() {
+            return;
+        }
+
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load {
+                name: "input".into(),
+            },
+            vec![],
+            mat_f32(2, 3),
+            None,
+        );
+        let permuted = dag.add_node(
+            RiscOp::Permute { axes: vec![1, 0] },
+            vec![input],
+            mat_f32(3, 2),
+            None,
+        );
+        let cast = dag.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::F32,
+            },
+            vec![permuted],
+            mat_f32(3, 2),
+            None,
+        );
+        dag.add_root(cast);
+
+        let output = compile_and_run_input_cases(
+            &dag,
+            "checked_cast_identity_noncontiguous",
+            CodegenOptions::default(),
+            &[vec![TestInput::new(
+                "input",
+                &[2, 3],
+                &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            )]],
+        );
+        assert_eq!(
+            output,
+            ["1.000000 4.000000 2.000000 5.000000 3.000000 6.000000"]
+        );
+    }
+
+    #[test]
     fn numerical_sparse_gather_and_scatter_add_with_duplicate_indices() {
         if !gcc_available() {
             return;

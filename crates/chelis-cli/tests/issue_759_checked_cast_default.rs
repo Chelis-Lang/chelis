@@ -508,6 +508,63 @@ fn generated_checked_cast_product_is_positive_on_every_active_pair_and_surface()
 }
 
 #[test]
+fn compiled_checked_casts_round_directly_at_reduced_float_width() {
+    if !c_toolchain_available() {
+        panic!("needs a host C toolchain");
+    }
+
+    let cases = [
+        ("f64_bf16", "f64", "bf16", "1.0039062500000002f64", "1.01"),
+        ("f64_f16", "f64", "f16", "52847.99970178839f64", "52830.0"),
+        (
+            "int64_bf16",
+            "int64",
+            "bf16",
+            "4629700416936869889i64",
+            "4.65e18",
+        ),
+    ];
+    let mut definitions = String::new();
+    let mut outputs = String::new();
+    let mut expected = Vec::new();
+    for (label, source, target, value, rendered) in cases {
+        definitions.push_str(&format!(
+            "def {label}_scalar(x: {source}) -> {target} = cast(x, {target})\n\
+             def {label}_tensor_dag(x: tensor[1, {source}]) -> tensor[1, {target}] = \
+             cast(x, {target})\n\
+             def {label}_tensor_host() -> tensor[1, {target}] = \
+             cast(to_tensor([{value}]), {target})\n"
+        ));
+        outputs.push_str(&format!(
+            "out_{label}_scalar = {label}_scalar({value})\n\
+             out_{label}_tensor_dag = {label}_tensor_dag(\
+             reshape(to_tensor([{value}]), [cast(1, int64)]))\n\
+             out_{label}_tensor_host = {label}_tensor_host()\n"
+        ));
+        expected.extend([
+            format!("out_{label}_scalar = {rendered}"),
+            format!("out_{label}_tensor_dag = tensor(shape=[1], data=[{rendered}])"),
+            format!("out_{label}_tensor_host = tensor(shape=[1], data=[{rendered}])"),
+        ]);
+    }
+
+    let program = format!("{definitions}{outputs}");
+    let (stdout, stderr, ok) =
+        c_lane_run(&program, "checked_cast_direct_rounding").expect("compiled rounding probe");
+    assert!(
+        ok,
+        "direct target-width rounding probe must compile and run; stderr={stderr}"
+    );
+    let observed = stdout.lines().collect::<std::collections::HashSet<_>>();
+    for line in expected {
+        assert!(
+            observed.contains(line.as_str()),
+            "compiled checked-cast output is missing `{line}`; matching output:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn c_tensor_float_to_int_out_of_range_traps_overflow() {
     if !c_toolchain_available() {
         panic!("needs a host C toolchain");

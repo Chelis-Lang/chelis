@@ -6288,7 +6288,8 @@ impl CEmitter {
     // The checked path consumes `CheckedCastPlan` for the full active
     // numeric/bool product. Reduced-float storage is decoded explicitly, and
     // f64/integer sources round directly into f16/bf16 without an intermediate
-    // f32 rounding. Only the exact same-Prim diagonal can reach `memcpy`.
+    // f32 rounding. Every pair, including the exact same-Prim diagonal,
+    // materializes logical element order from the source strides.
     /// Emit a cast-ladder node. `trunc` selects the [05-OP-6] rung:
     /// the float-to-integer leg truncates toward zero before its range
     /// check instead of rejecting a fractional value.
@@ -6319,16 +6320,9 @@ impl CEmitter {
             ));
         }
         if checked_plan.is_some_and(|plan| plan.kind() == CheckedCastKind::Identity) {
-            // Same-dtype cast: copy directly using the per-dtype size.
-            // Models a same-dtype cast as a structural identity copy
-            // matching the runtime's per-dtype storage layout.
             self.line("/* checked cast identity */");
-            self.line(&format!(
-                "memcpy(t{id}->data, t{a}->data, t{id}->size * sizeof({dst_et}));"
-            ));
-            return;
         }
-        // Cross-dtype value-converting cast. Strided element-wise loop:
+        // Strided element-wise materialization:
         // the output is freshly allocated and contiguous, so the
         // destination index is the flat loop index. The source may be
         // non-contiguous; resolve its element via the standard
@@ -7050,7 +7044,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_cast_emitter_has_no_nonidentity_memcpy_in_the_active_prim_product() {
+    fn checked_cast_emitter_materializes_every_active_pair_in_logical_order() {
         let active = [
             Prim::F64,
             Prim::F32,
@@ -7085,11 +7079,24 @@ mod tests {
                 );
                 dag.add_root(output);
                 let c = CEmitter::emit_dag(&dag, "checked_cast_product").unwrap();
-                let has_identity_copy = c.contains("memcpy(t1->data, t0->data");
                 assert_eq!(
-                    has_identity_copy,
+                    c.contains("/* checked cast identity */"),
                     source == target,
-                    "identity copy is legal exactly on the equal-Prim diagonal: {} -> {}; generated:\n{c}",
+                    "identity plan is legal exactly on the equal-Prim diagonal: {} -> {}; generated:\n{c}",
+                    source.name(),
+                    target.name()
+                );
+                assert!(
+                    c.contains(
+                        "int64_t idx = chelis_indices_to_flat(indices, t0->strides, t0->ndim);"
+                    ),
+                    "every checked-cast pair must read source elements in logical order: {} -> {}; generated:\n{c}",
+                    source.name(),
+                    target.name()
+                );
+                assert!(
+                    !c.contains("memcpy(t1->data, t0->data"),
+                    "same-type casts cannot copy backing order from a noncontiguous source: {} -> {}; generated:\n{c}",
                     source.name(),
                     target.name()
                 );
