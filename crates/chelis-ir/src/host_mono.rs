@@ -157,7 +157,7 @@ impl MonoRejection {
             ),
             Self::UnboundedInstantiation { chain, reason } => format!(
                 "generic host call `{callee}` requires unbounded monomorphization \
-                 ({reason}); this is polymorphic recursion — the instantiation \
+                 ({reason}); this is polymorphic recursion: the instantiation \
                  chain {} mints a new type at every level, so no finite set of \
                  monomorphic symbols exists (chelis#1158; [05-UNS-1])",
                 render_chain(chain)
