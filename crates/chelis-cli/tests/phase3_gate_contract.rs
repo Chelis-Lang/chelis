@@ -31,6 +31,25 @@ fn build(source: &str, stem: &str, target: &str) -> assert_cmd::assert::Assert {
     command.assert()
 }
 
+fn build_deep(source: &str, stem: &str, target: &str) -> assert_cmd::assert::Assert {
+    let dir = tempdir().expect("tempdir");
+    let source_path = dir.path().join(format!("{stem}.dp"));
+    let output_path = dir.path().join("out");
+    fs::write(&source_path, source).expect("write Deep source");
+
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command.env("CHELIS_STYLE_GATE_DISABLE", "1").args([
+        "build",
+        source_path.to_str().expect("utf-8 source path"),
+        "--deep",
+        "--target",
+        target,
+        "--output",
+        output_path.to_str().expect("utf-8 output path"),
+    ]);
+    command.assert()
+}
+
 /// Shared gate APIs accept only the closed build-target vocabulary. A caller
 /// cannot smuggle an unknown spelling through a stringly fallback that turns
 /// the gate into a silent no-op.
@@ -165,4 +184,66 @@ fn hip_narrow_blas_matmul_stays_admitted_across_build_paths() {
         .unwrap_or_else(|error| panic!("compiler API rejected {precision} BLAS matmul: {error:?}"));
         build(&source, &format!("hip_{precision}_blas_matmul"), "hip").success();
     }
+}
+
+/// The seeded evaluator implementation does not imply compiled support.
+/// Every public compiled entry must consume the same typed effect policy,
+/// carrying the closed kind and a real implementation owner.
+#[test]
+fn compiled_dropout_rejection_agrees_across_public_build_paths() {
+    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n";
+
+    for target in [CompileTarget::C, CompileTarget::Hip] {
+        let error = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target,
+            entry_name: Some("noisy".to_string()),
+        })
+        .expect_err("compiled dropout must be rejected by the shared effect gate");
+        let diagnostic = &error.errors[0];
+        assert_eq!(diagnostic.kind().as_str(), "unsupported_feature");
+        assert!(diagnostic.message.contains("early capability gate"));
+        assert!(diagnostic.message.contains("unimplemented chelis#729"));
+    }
+
+    for target in ["c", "hip", "metal"] {
+        build(source, &format!("dropout_{target}"), target)
+            .failure()
+            .stderr(predicates::str::contains("unsupported:"))
+            .stderr(predicates::str::contains("early capability gate"))
+            .stderr(predicates::str::contains("unimplemented chelis#729"));
+    }
+}
+
+/// The Deep ingestion branch used to carry its own call sites to the
+/// CLI-local policy. It must now reach the same typed compiler-api gate as
+/// Surf rather than preserving a second stringly rejection path.
+#[test]
+fn deep_dropout_uses_the_shared_typed_effect_gate() {
+    let source = include_str!("fixtures/phase3_seeded_dropout.dp");
+    for target in ["c", "metal"] {
+        build_deep(source, &format!("deep_dropout_{target}"), target)
+            .failure()
+            .stderr(predicates::str::contains("unsupported:"))
+            .stderr(predicates::str::contains("early capability gate"))
+            .stderr(predicates::str::contains("unimplemented chelis#729"));
+    }
+}
+
+/// A host-lane cohabitant changes where the tensor def is stored, not the
+/// target policy. The shared effect gate must inspect host tensor-helper DAGs
+/// so this shape cannot fall through to an emitter panic.
+#[test]
+fn host_tensor_helper_dropout_uses_the_shared_typed_effect_gate() {
+    let source = "def label() -> string = \"host\"\n\
+                  def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n";
+
+    build(source, "host_helper_dropout", "c")
+        .failure()
+        .stderr(predicates::str::contains("unsupported:"))
+        .stderr(predicates::str::contains("early capability gate"))
+        .stderr(predicates::str::contains("unimplemented chelis#729"));
 }

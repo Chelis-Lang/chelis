@@ -172,23 +172,11 @@ fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
     let cli = reject_functions_under(&root.join("crates/chelis-cli/src"));
     let compiler = reject_functions_under(&root.join("crates/chelis-compiler-api/src"));
 
-    let expected_cli = BTreeSet::from([
-        (
-            "main.rs".to_string(),
-            "reject_unsupported_effect_ops".to_string(),
-            false,
-        ),
-        (
-            "main.rs".to_string(),
-            "reject_unsupported_metal_ops".to_string(),
-            false,
-        ),
-        (
-            "main.rs".to_string(),
-            "reject_with_seed_for_build_target".to_string(),
-            false,
-        ),
-    ]);
+    let expected_cli = BTreeSet::from([(
+        "main.rs".to_string(),
+        "reject_with_seed_for_build_target".to_string(),
+        false,
+    )]);
     let expected_compiler = BTreeSet::from([
         (
             "compiler.rs".to_string(),
@@ -218,6 +206,16 @@ fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
         (
             "compiler.rs".to_string(),
             "reject_unsupported_hip_ops".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
+            "reject_unsupported_effect_ops".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
+            "reject_unsupported_metal_ops".to_string(),
             true,
         ),
         (

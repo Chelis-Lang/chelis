@@ -1526,6 +1526,16 @@ fn execution_artifact_from_compiled(
         })?;
     let func_name = execution_c_symbol(entry_name);
 
+    // The effect policy is one shared typed gate for every public build
+    // surface. Check both the pure DAG and every host-program tensor helper:
+    // either representation may own the lowered `Dropout` depending on the
+    // surrounding source shape. The emitters remain the independent fail-loud
+    // boundary; this gate only makes their rejection earlier and structured.
+    reject_unsupported_effect_ops(&compiled.dag, build_target)?;
+    if let Some(host_program) = host_compiled.host.as_ref() {
+        apply_effect_gate_to_host_program(host_program, build_target)?;
+    }
+
     // Reject host-runtime-only builtins early for any compiled-backend
     // target so both public compiler APIs preserve the owning builtin's
     // specific diagnostic. The fallible emitter independently rejects an
@@ -3426,6 +3436,121 @@ pub fn reject_host_only_builtins(
 /// chelis#616: whether a movement `(start, end)` bound pair is node-valued.
 fn pair_has_node_bound(pair: &(RtDim, RtDim)) -> bool {
     pair.0.node_input().is_some() || pair.1.node_input().is_some()
+}
+
+/// Reject effectful DAG operations whose seeded evaluator semantics do not
+/// yet have a compiled-backend implementation. This is the single policy
+/// consumed by compiler-api and CLI build entry points; the backend emitters
+/// retain independent fail-loud defenses per [05-UNS-4].
+pub fn reject_unsupported_effect_ops(
+    dag: &Dag,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    for node in dag.nodes() {
+        if matches!(&node.op, RiscOp::Dropout { .. }) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target {}` does not yet codegen `dropout`; lowered node {} requires it. Evaluate it under `with seed(...)` instead",
+                    target.as_str(),
+                    node.id.0,
+                ),
+                target.as_str(),
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "the compiled-backend dropout capability cell has no kernel; the seeded evaluator lane remains available"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Apply the shared effect gate to every tensor-helper DAG owned by a host
+/// program. Keeping this traversal beside the policy prevents CLI and
+/// compiler-api from acquiring different notions of which helper DAGs count.
+pub fn apply_effect_gate_to_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: BuildTarget,
+) -> std::result::Result<(), CompilerError> {
+    for helper in &program.global_tensor_helpers {
+        reject_unsupported_effect_ops(&helper.dag, target)?;
+    }
+    for function in &program.functions {
+        for helper in &function.tensor_helpers {
+            reject_unsupported_effect_ops(&helper.dag, target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Metal-specific early capability policy. The IR verifier and backend
+/// emitter independently enforce the same target boundary; this shared gate
+/// provides the typed public diagnostic without allowing CLI/compiler-api
+/// copies to drift.
+pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    for node in dag.nodes() {
+        let node_valued = match &node.op {
+            RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
+            RiscOp::Pad { padding, .. } => padding.iter().any(pair_has_node_bound),
+            RiscOp::Stride { strides } => {
+                strides.iter().any(|stride| stride.node_input().is_some())
+            }
+            RiscOp::Reshape { new_shape } => new_shape.iter().any(|dim| dim.node_input().is_some()),
+            _ => false,
+        };
+        if node_valued {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target metal` does not support a runtime (node-valued) movement bound or reshape target extent; lowered node {} requires it. Use `--target c`.",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::deliberate_rejection!(
+                    "[05-MOV-1]",
+                    "runtime movement bounds and reshape targets are defined on eval and C; use the C target"
+                ),
+            ));
+        }
+
+        match node.output_type.precision {
+            chelis_types::types::Prim::F32
+            | chelis_types::types::Prim::F16
+            | chelis_types::types::Prim::Bf16
+            | chelis_types::types::Prim::Int8
+            | chelis_types::types::Prim::Int16
+            | chelis_types::types::Prim::Int32
+            | chelis_types::types::Prim::Int64
+            | chelis_types::types::Prim::Bool => {}
+            chelis_types::types::Prim::F64 => {
+                return Err(unsupported_gate_error(
+                    format!(
+                        "`chelis build --target metal` rejects f64 (node {}): Apple Silicon GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads. See spec/04-type-system.md §1.1.3.",
+                        node.id.0
+                    ),
+                    "metal",
+                    chelis_types::deliberate_rejection!(
+                        "[04-TGT-1]",
+                        "Metal hardware has no f64 execution lane; use the C or HIP target"
+                    ),
+                ));
+            }
+            other => {
+                return Err(unsupported_gate_error(
+                    format!(
+                        "`chelis build --target metal` DAG path does not support tensor precision `{}` (node {}). The Metal backend admits the active dtype set per spec/04-type-system.md §1.1.3 except f64; supported: f32/f16/bf16/int8/int16/int32/int64/bool.",
+                        other.name(),
+                        node.id.0
+                    ),
+                    "metal",
+                    chelis_types::unimplemented_rejection!(
+                        729,
+                        "the Metal target dtype capability cell is not implemented"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {

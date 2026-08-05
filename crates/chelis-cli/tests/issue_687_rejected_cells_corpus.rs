@@ -194,7 +194,20 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "metal",
         "error: unsupported: `chelis build --target metal` rejects f64 (node 0): Apple Silicon \
          GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads. See \
-         spec/04-type-system.md §1.1.3.\n",
+         spec/04-type-system.md §1.1.3. on `chelis build --target metal` early capability gate \
+         (codegen:metal); deliberate [04-TGT-1]: Metal hardware has no f64 execution lane; use \
+         the C or HIP target\n",
+    ),
+    (
+        "c_seeded_dropout",
+        "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+         with seed(42i64) { dropout(x, 0.5) }\n",
+        "c",
+        "error: unsupported: `chelis build --target c` does not yet codegen `dropout`; lowered \
+         node 1 requires it. Evaluate it under `with seed(...)` instead on `chelis build \
+         --target c` early capability gate (codegen:c); unimplemented chelis#729: the \
+         compiled-backend dropout capability cell has no kernel; the seeded evaluator lane \
+         remains available\n",
     ),
     // -- chelis#730 Phase 1 rows: the converted census sites, each pinned
     // to the branded section C2 rendering. --------------------------------
