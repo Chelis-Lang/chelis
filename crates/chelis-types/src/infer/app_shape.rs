@@ -372,6 +372,9 @@ pub(super) fn infer_reshape_app(
                     );
                 }
                 let dims = reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
+                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
+                    return report(errors, error.into());
+                }
                 return Type::Tensor(dims, TensorPrec::Concrete(precision));
             }
 
@@ -404,12 +407,33 @@ pub(super) fn infer_reshape_app(
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
+                if let Err(error) = validate_reshape_target_dims(&dims, subst) {
+                    return report(errors, error.into());
+                }
+                if subst.static_dim_products_match(&input_dims, &dims) == Some(false) {
+                    let input_numel = subst.static_dim_product(&input_dims);
+                    let target_numel = subst.static_dim_product(&dims);
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            match (target_numel, input_numel) {
+                                (Some(target), Some(input)) => format!(
+                                    "reshape target has {target} elements but input tensor has {input}"
+                                ),
+                                _ => "reshape target element count does not match input tensor"
+                                    .to_string(),
+                            },
+                            vec![],
+                        ),
+                    );
+                }
                 return Type::Tensor(dims, precision);
             }
 
             Type::Tensor(vec![Dim::Wildcard], precision)
         }
-        Type::Var(_) | Type::Error(_) => {
+        Type::Var(input_var) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
@@ -434,9 +458,52 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
+                let shape_subst = subst.clone();
+                let output_var = vg.fresh_tvar();
+                match subst.resolve_deferred_expand_for_reshape(
+                    input_var,
+                    output_var,
+                    |input_dims| {
+                        reshape_output_dims_for_candidate(
+                            shape_expr,
+                            input_var_name.as_deref(),
+                            input_dims,
+                            &shape_subst,
+                        )
+                        .and_then(|dims| {
+                            validate_reshape_target_dims(&dims, &shape_subst)?;
+                            Ok(dims)
+                        })
+                    },
+                ) {
+                    Ok(Some(output)) => return output,
+                    Ok(None) => {}
+                    Err(error) => return report(errors, error.into()),
+                }
+                match subst.resolve_deferred_reshape_for_reshape(
+                    input_var,
+                    output_var,
+                    |input_dims| {
+                        reshape_output_dims_for_candidate(
+                            shape_expr,
+                            input_var_name.as_deref(),
+                            input_dims,
+                            &shape_subst,
+                        )
+                        .and_then(|dims| {
+                            validate_reshape_target_dims(&dims, &shape_subst)?;
+                            Ok(dims)
+                        })
+                    },
+                ) {
+                    Ok(Some(output)) => return output,
+                    Ok(None) => {}
+                    Err(error) => return report(errors, error.into()),
+                }
             }
             input_ty
         }
+        Type::Error(_) => input_ty,
         _ => report(
             errors,
             CheckError::new(
@@ -1535,6 +1602,54 @@ pub(super) fn reshape_output_dims(
         .into_iter()
         .map(|elem| reshape_output_dim(elem, input_var_name, input_dims, subst))
         .collect()
+}
+
+/// Derive reshape dims against one deferred-expand candidate. A shape read
+/// from the reshape input is shape-bearing context, so an axis outside this
+/// candidate rejects it while another legal candidate may still satisfy it.
+fn reshape_output_dims_for_candidate(
+    shape_expr: &deep::Expr,
+    input_var_name: Option<&str>,
+    input_dims: &[Dim],
+    subst: &Subst,
+) -> Result<Vec<Dim>, TypeError> {
+    let elements = match collect_shape_list_elements(shape_expr) {
+        Some(elems) => elems,
+        None => {
+            let rank = list_literal_len(shape_expr).unwrap_or(1);
+            return Ok(vec![Dim::Wildcard; rank]);
+        }
+    };
+    elements
+        .into_iter()
+        .map(|elem| {
+            if let Some(axis) = extract_shape_axis_of(elem, input_var_name)
+                && axis >= input_dims.len()
+            {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!(
+                        "shape axis {axis} is out of bounds for rank {} tensor",
+                        input_dims.len()
+                    ),
+                });
+            }
+            Ok(reshape_output_dim(elem, input_var_name, input_dims, subst))
+        })
+        .collect()
+}
+
+fn validate_reshape_target_dims(dims: &[Dim], subst: &Subst) -> Result<(), TypeError> {
+    if let Some(value) = dims.iter().find_map(|dim| match subst.apply_dim(dim) {
+        Dim::Lit(value) if value < 0 => Some(value),
+        _ => None,
+    }) {
+        return Err(TypeError {
+            kind: TypeErrorKind::DimensionMismatch,
+            message: format!("reshape target extents must be non-negative, got {value}"),
+        });
+    }
+    Ok(())
 }
 
 /// Recognize a single dim-list element from a reshape shape list.

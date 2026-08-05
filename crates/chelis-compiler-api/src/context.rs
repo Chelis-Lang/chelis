@@ -1298,6 +1298,12 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
+    #[test]
+    fn cache_format_version_tracks_deferred_reshape_relations() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V9\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 9);
+    }
+
     /// Mirrors the chelis-reef `shared_graph_fixture` shape: a root
     /// package with one `Path` dep called `mylib`. The path-dep is
     /// load-bearing for tests #2 and #3 — they exercise the cross-

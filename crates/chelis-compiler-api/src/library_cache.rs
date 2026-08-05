@@ -505,6 +505,11 @@ mod tests {
     use super::*;
     use crate::stdlib_cache::build_stdlib_context;
 
+    #[test]
+    fn cache_format_version_tracks_deferred_reshape_relations() {
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 2);
+    }
+
     /// A minimal well-formed dependency `Decl` slice. The exact shape is
     /// irrelevant to the key tests; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.

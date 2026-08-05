@@ -465,6 +465,11 @@ fn library_rejection_to_compiler_error(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cache_format_version_tracks_deferred_reshape_relations() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 5);
+    }
+
     /// A minimal well-formed `Decl` slice for key-stability tests. The
     /// exact shape is irrelevant; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.

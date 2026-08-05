@@ -25,6 +25,8 @@ Four things are locked here:
 import importlib.util
 import io
 import re
+import shlex
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -45,6 +47,7 @@ gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
+CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = (
     "Chelis-Lang/ci/actions/setup-devenv@"
@@ -56,6 +59,9 @@ DOCS_ONLY_GATE_IF = (
     "|| needs.changes.outputs.docs_only != 'true') }}"
 )
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+CARCARA_FULL_SUITE_COMMAND = (
+    "cargo test -p chelis-prove --features carcara -- --test-threads=1"
+)
 
 
 def _nix_supported_systems(contracts: str) -> set[str]:
@@ -92,6 +98,139 @@ def _workflow_job_blocks(workflow: str) -> dict[str, str]:
         end = headers[index + 1].start() if index + 1 < len(headers) else len(workflow)
         blocks[header.group("name")] = workflow[header.start() : end]
     return blocks
+
+
+def _assert_carcara_full_suite_command(workflow: str) -> None:
+    block = _workflow_job_blocks(workflow).get("full-smt-prove")
+    if block is None:
+        raise AssertionError("missing full-smt-prove job")
+
+    def run_steps() -> list[tuple[str, bool]]:
+        lines = block.splitlines()
+        steps_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if line.strip() == "steps:"
+            ),
+            None,
+        )
+        if steps_index is None:
+            return []
+        steps_indent = len(lines[steps_index]) - len(lines[steps_index].lstrip())
+        runs: list[tuple[str, bool]] = []
+        current: dict[str, str] | None = None
+        step_indent = steps_indent + 2
+
+        def finish_step() -> None:
+            if current is not None and "run" in current:
+                runs.append((current["run"].strip(), "if" in current))
+
+        index = steps_index + 1
+        while index < len(lines):
+            line = lines[index]
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            if stripped and not stripped.startswith("#") and indent <= steps_indent:
+                break
+            if indent == step_indent and stripped.startswith("- "):
+                finish_step()
+                current = {}
+                property_text = stripped[2:]
+                property_indent = step_indent
+            elif current is not None and indent == step_indent + 2:
+                property_text = stripped
+                property_indent = step_indent + 2
+            else:
+                index += 1
+                continue
+
+            match = re.match(r"(?P<key>run|if):(?:\s*(?P<value>.*))?$", property_text)
+            if match is None:
+                index += 1
+                continue
+            key = match.group("key")
+            value = match.group("value") or ""
+            if key == "run" and re.fullmatch(r"[|>][+-]?", value):
+                block_lines: list[str] = []
+                index += 1
+                while index < len(lines):
+                    block_line = lines[index]
+                    block_stripped = block_line.strip()
+                    block_indent = len(block_line) - len(block_line.lstrip())
+                    if block_stripped and block_indent <= property_indent:
+                        break
+                    block_lines.append(block_line[property_indent + 2 :])
+                    index += 1
+                current[key] = "\n".join(block_lines)
+                continue
+            current[key] = value
+            index += 1
+        finish_step()
+        return runs
+
+    def enables_carcara(command: str) -> bool:
+        try:
+            words = shlex.split(command, comments=True)
+        except ValueError:
+            return "features" in command or "-F" in command
+        if "cargo" not in words:
+            return False
+
+        def feature_value_may_enable(value: str) -> bool:
+            if "$" in value or "`" in value:
+                return True
+            return "carcara" in re.split(r"[\s,]+", value)
+
+        for index, word in enumerate(words):
+            if word == "--all-features":
+                return True
+            if word in ("--features", "-F"):
+                if index + 1 >= len(words):
+                    return True
+                if feature_value_may_enable(words[index + 1]):
+                    return True
+            elif word.startswith("--features="):
+                if feature_value_may_enable(word.partition("=")[2]):
+                    return True
+            elif word.startswith("-F") and word != "-F":
+                if feature_value_may_enable(word[2:]):
+                    return True
+        return False
+
+    steps = run_steps()
+    carcara_steps = [
+        (command, conditional)
+        for command, conditional in steps
+        if enables_carcara(command)
+    ]
+    canonical_words = shlex.split(CARCARA_FULL_SUITE_COMMAND)
+    canonical_steps = [
+        command
+        for command, conditional in carcara_steps
+        if not conditional
+        and shlex.split(command, comments=True) == canonical_words
+    ]
+    if len(carcara_steps) != 1 or canonical_steps != [CARCARA_FULL_SUITE_COMMAND]:
+        raise AssertionError(
+            "full-smt-prove must execute the complete serialized Carcara suite "
+            f"exactly once in an unconditional step; found {carcara_steps}"
+        )
+
+
+def _assert_carcara_feature_tree_is_gmp_only(feature_tree: str) -> None:
+    forbidden = (
+        'gmp-mpfr-sys feature "mpfr"',
+        'gmp-mpfr-sys feature "mpc"',
+        'rug feature "float"',
+        'rug feature "complex"',
+    )
+    active = [feature for feature in forbidden if feature in feature_tree]
+    if active:
+        raise AssertionError(
+            "Carcara feature graph must stay GMP-only; activated "
+            + ", ".join(active)
+        )
 
 
 def _assert_native_devenv_recipe(workflow: str) -> None:
@@ -1067,7 +1206,6 @@ class SmtCiSplitTests(unittest.TestCase):
             "workflow_dispatch:",
             "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
-            "cargo test -p chelis-prove --features carcara",
             "cargo test -p chelis-prove --features z3",
             'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
             "cargo test -p chelis-prove --features clarabel",
@@ -1085,6 +1223,7 @@ class SmtCiSplitTests(unittest.TestCase):
                 text,
                 f"SMT full workflow missing expected full-prove surface: {needle}",
             )
+        _assert_carcara_full_suite_command(text)
         # Negative lock: the heavy corpus must NOT run on PRs. The report job's
         # `github.event_name != 'pull_request'` guard uses a quote, not a colon,
         # so this only trips on a reintroduced `pull_request:` trigger key.
@@ -1093,6 +1232,110 @@ class SmtCiSplitTests(unittest.TestCase):
             text,
             "SMT full-prove must stay nightly/dispatch-only (no pull_request trigger)",
         )
+        filtered = text.replace(
+            f"run: {CARCARA_FULL_SUITE_COMMAND}",
+            f"# {CARCARA_FULL_SUITE_COMMAND}\n"
+            "        run: cargo test -p chelis-prove --features carcara "
+            "run_carcara_check -- --test-threads=1",
+        )
+        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+            _assert_carcara_full_suite_command(filtered)
+
+        duplicated = text.replace(
+            f"run: {CARCARA_FULL_SUITE_COMMAND}",
+            f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+            "      - name: Accidental parallel Carcara rerun\n"
+            "        run: cargo test -p chelis-prove --features carcara",
+        )
+        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+            _assert_carcara_full_suite_command(duplicated)
+
+        for alternate in (
+            "cargo test -p chelis-prove --features carcara,smt",
+            "cargo test -p chelis-prove --features=carcara,smt",
+            "cargo test -p chelis-prove -F carcara",
+            "cargo test -p chelis-prove -Fcarcara",
+            'cargo test -p chelis-prove --features "$FEATURES"',
+            "cargo test -p chelis-prove --all-features",
+        ):
+            with self.subTest(alternate=alternate):
+                mutated = text.replace(
+                    f"run: {CARCARA_FULL_SUITE_COMMAND}",
+                    f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+                    "      - name: Alternate Carcara rerun\n"
+                    f"        run: {alternate}",
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "complete serialized Carcara suite"
+                ):
+                    _assert_carcara_full_suite_command(mutated)
+
+        multiline = text.replace(
+            f"run: {CARCARA_FULL_SUITE_COMMAND}",
+            f"run: {CARCARA_FULL_SUITE_COMMAND}\n"
+            "      - name: Multiline Carcara rerun\n"
+            "        run: |\n"
+            "          cargo test -p chelis-prove --features carcara\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+            _assert_carcara_full_suite_command(multiline)
+
+        disabled = text.replace(
+            f"run: {CARCARA_FULL_SUITE_COMMAND}",
+            "if: false\n"
+            f"        run: {CARCARA_FULL_SUITE_COMMAND}\n"
+            "      - name: Filtered multiline Carcara run\n"
+            "        run: |\n"
+            "          cargo test -p chelis-prove --features carcara "
+            "run_carcara_check -- --test-threads=1\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+            _assert_carcara_full_suite_command(disabled)
+
+        conditional = text.replace(
+            f"run: {CARCARA_FULL_SUITE_COMMAND}",
+            "if: ${{ always() }}\n"
+            f"        run: {CARCARA_FULL_SUITE_COMMAND}",
+        )
+        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+            _assert_carcara_full_suite_command(conditional)
+
+    def test_carcara_dependency_stays_gmp_only(self):
+        text = CHELIS_PROVE_TOML.read_text()
+        dependency = next(
+            line
+            for line in text.splitlines()
+            if line.startswith("gmp-mpfr-sys = ")
+        )
+        self.assertIn("default-features = false", dependency)
+        self.assertIn("optional = true", dependency)
+        self.assertNotIn(", features =", dependency)
+        self.assertNotIn("gmp-mpfr-sys/mpfr", text)
+        self.assertNotIn("gmp-mpfr-sys/mpc", text)
+        result = subprocess.run(
+            [
+                "cargo",
+                "tree",
+                "-p",
+                "chelis-prove",
+                "--features",
+                "carcara",
+                "-e",
+                "features",
+                "--prefix",
+                "none",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        _assert_carcara_feature_tree_is_gmp_only(result.stdout)
+        with self.assertRaisesRegex(AssertionError, "must stay GMP-only"):
+            _assert_carcara_feature_tree_is_gmp_only(
+                result.stdout + '\ngmp-mpfr-sys feature "mpfr"\nrug feature "float"'
+            )
 
     def test_full_smt_workflow_shares_smoke_cache_key(self):
         smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))
