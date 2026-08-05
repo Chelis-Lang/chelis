@@ -210,8 +210,10 @@ fn assert_build_lane_matches_eval(source: &str, stem: &str, expected: &str) {
 }
 
 /// Every distinct monomorphized symbol for `callee` that appears in the
-/// emitted C. The emitter prefixes host function names with the program
-/// name, so this matches the mangled suffix rather than the whole symbol.
+/// emitted C. Scans for the `<callee>__mono_` marker and takes the run of
+/// identifier characters that follows, so a second specialization at a
+/// different payload type is a second set member rather than a second
+/// occurrence of the same one.
 fn mono_symbols(c_source: &str, callee: &str) -> BTreeSet<String> {
     let marker = format!("{callee}__mono_");
     let mut out = BTreeSet::new();

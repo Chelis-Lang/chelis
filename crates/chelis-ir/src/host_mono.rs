@@ -985,6 +985,60 @@ mod tests {
     }
 
     #[test]
+    fn per_callee_specialization_cap_is_reachable_and_fail_loud() {
+        // The count cap is the bound the `(a, a)` doubling shape never
+        // reaches (the signature-size cap fires first), so it needs its own
+        // coverage or it is a bound nothing proves.
+        reset_mono_state();
+        for index in 0..MONO_SPECIALIZATION_CAP {
+            let params = vec![HostTypeTerm::Adt(
+                format!("Payload{index}"),
+                vec![scalar(Prim::F32)],
+            )];
+            intern_specialization("widget", &params, &scalar(Prim::Bool))
+                .unwrap_or_else(|_| panic!("specialization {index} is under the cap"));
+        }
+        // A repeat of an already-interned signature is a memo hit and must
+        // not consume cap budget.
+        let repeat = vec![HostTypeTerm::Adt(
+            "Payload0".into(),
+            vec![scalar(Prim::F32)],
+        )];
+        intern_specialization("widget", &repeat, &scalar(Prim::Bool))
+            .expect("memo hit does not mint");
+
+        let over = vec![HostTypeTerm::Adt(
+            "Overflow".into(),
+            vec![scalar(Prim::F32)],
+        )];
+        let rejection = intern_specialization("widget", &over, &scalar(Prim::Bool))
+            .expect_err("one past the cap must reject");
+        let rendered = rejection.describe("widget");
+        assert!(rendered.contains("per-callee cap"), "{rendered}");
+        assert!(rendered.contains("[05-UNS-1]"), "{rendered}");
+        assert!(rendered.contains("polymorphic recursion"), "{rendered}");
+        reset_mono_state();
+    }
+
+    #[test]
+    fn two_callees_sanitizing_to_one_identifier_collide_loudly() {
+        // `A.f` and `A_f` both sanitize to `A_f`, so at one signature they
+        // mint the same symbol. Emitting both would collapse two
+        // specializations into one C definition, and the emitter's
+        // duplicate-symbol check cannot see it.
+        reset_mono_state();
+        let params = [scalar(Prim::F32)];
+        let ret = scalar(Prim::Bool);
+        let first = intern_specialization("A.f", &params, &ret).expect("first callee interns");
+        let rejection =
+            intern_specialization("A_f", &params, &ret).expect_err("colliding callee rejects");
+        let rendered = rejection.describe("A_f");
+        assert!(rendered.contains(&first), "{rendered}");
+        assert!(rendered.contains("[05-UNS-1]"), "{rendered}");
+        reset_mono_state();
+    }
+
+    #[test]
     fn encode_decode_round_trips_every_concrete_shape() {
         let cases = vec![
             scalar(Prim::F32),
