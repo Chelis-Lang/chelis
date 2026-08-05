@@ -2986,6 +2986,11 @@ fn cmd_build(
     let full_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_deep_exprs);
     let pruned_deep_exprs =
         prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
+    // Whether build-time pruning dropped any decls. The single predicate the
+    // layered-cache and cross-module-check decisions below all key off, rather
+    // than re-deriving it from `.len()` comparisons across differently-sourced
+    // decl lists (chelis#1176 review).
+    let pruning_fired = pruned_deep_exprs.len() != full_deep_exprs.len();
 
     // Layered build check: when the input resolves inside a reef package and
     // the typecheck cache is enabled, reuse the cached chelis-std + dependency
@@ -3021,10 +3026,8 @@ fn cmd_build(
             _ => None,
         };
 
-    let preserve_host_library_surface = if prepared.is_none()
-        && target == BuildTarget::C
-        && pruned_deep_exprs.len() != full_deep_exprs.len()
-    {
+    let preserve_host_library_surface =
+        if prepared.is_none() && target == BuildTarget::C && pruning_fired {
         let full_checked = checked_program_with_effects(&full_deep_exprs)
             .map_err(|e| format!("Check errors: {e}"))?;
         shared_compiler_gate(
@@ -3055,10 +3058,7 @@ fn cmd_build(
     // redundant monolithic re-inference (chelis#1168) — the whole point of the
     // cache; only run it on the layered fallback path (`None`), where the
     // full-program error report must stay byte-identical.
-    if prepared.is_some()
-        && pruned_deep_exprs.len() != full_deep_exprs.len()
-        && layered_full_checked.is_none()
-    {
+    if prepared.is_some() && pruning_fired && layered_full_checked.is_none() {
         checked_program_with_effects(&full_deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
     }
     let deep_exprs = if preserve_host_library_surface {
@@ -3067,9 +3067,19 @@ fn cmd_build(
         pruned_deep_exprs
     };
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
-    // Use the layered whole-program `CheckedProgram` when it is available
-    // (no-pruning case) and the deep-exprs being lowered are the full
-    // program; otherwise check monolithically.
+    // Use the layered whole-program `CheckedProgram` as the lowering target
+    // only when `deep_exprs` IS that same whole program — neither the eval-only
+    // drop nor build pruning removed anything. The length compare against the
+    // layered program's own expr count is the exact test, and it is
+    // deliberately NOT `!pruning_fired`: `deep_exprs` also reflects
+    // `drop_unreachable_eval_only_defs` (the layered check runs on the PRE-drop
+    // decls), so when the drop shrank the program but pruning did not fire, the
+    // layered program still carries the dropped eval-only defs and must not be
+    // the codegen target. When either shrank it, re-check the actual (pruned,
+    // post-drop) lowering target monolithically. The lengths are ordered
+    // `pruned <= full(post-drop) <= layered(pre-drop)` by construction, so a
+    // single equality is SUFFICIENT: it forces all three equal, and the guard
+    // can never select a length-coincident-but-different program.
     let checked_compilation = match layered_full_checked {
         Some(checked) if deep_exprs.len() == checked.program().exprs().len() => checked,
         _ => checked_compilation_with_effects(&deep_exprs)
@@ -9401,68 +9411,69 @@ const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTIN
 /// raises, and one the layered cache path (which sees the intact pre-drop
 /// decls) does not, so build accept/reject would flip on cache state.
 ///
-/// Divergence note (chelis#334, widened to the transitive case): because these
-/// unreachable defs are removed before the build's type check, `chelis build`
-/// alone does NOT surface a real error (e.g. a type error or non-termination)
-/// that lives inside an unreachable, eval-only-tainted def — such a def can
-/// never reach a compiled artifact. `chelis check` remains the gate for those.
+/// Divergence note (tracked in chelis#1184; the direct case originated with the
+/// closed chelis#334): because these unreachable defs are removed before the
+/// build's type check, `chelis build` alone does NOT surface a real error (e.g.
+/// a type error or non-termination) that lives inside an unreachable,
+/// eval-only-tainted def — such a def can never reach a compiled artifact, and
+/// the transitive closure widens this to arbitrary depth. `chelis check`
+/// remains the gate for those.
 fn drop_unreachable_eval_only_defs(
     exprs: Vec<DeepExpr>,
     entry_exprs: &[DeepExpr],
 ) -> Vec<DeepExpr> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     let reachable = prune_build_program_to_reachable_defs(&exprs, entry_exprs)
         .iter()
         .filter_map(|expr| deep_named_decl_name(expr).map(str::to_string))
         .collect::<HashSet<_>>();
 
-    // Reference graph over the UNREACHABLE named defs only: (name, referenced
-    // var names). Reachable defs are never dropped (a reachable eval-only use is
-    // preserved for the build gate), and reachability is transitive, so a
-    // dropped (unreachable) def can only ever be referenced by another
-    // unreachable def — the closure below stays within this set.
-    let unreachable_defs: Vec<(String, Vec<String>)> = exprs
-        .iter()
-        .filter_map(|expr| {
-            let name = deep_named_decl_name(expr)?;
-            if reachable.contains(name) {
-                return None;
-            }
-            let refs = deep_referenced_vars(expr)
-                .into_iter()
-                .map(str::to_string)
-                .collect();
-            Some((name.to_string(), refs))
-        })
-        .collect();
-
-    // Seed: unreachable defs whose body directly uses an eval-only builtin.
-    let mut drop_names: HashSet<String> = unreachable_defs
-        .iter()
-        .filter(|(_, refs)| {
-            refs.iter()
-                .any(|var| EVAL_ONLY_HOST_BUILTINS.contains(&var.as_str()))
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-
-    // Transitive closure: also drop any unreachable def that references a
-    // dropped name, to a fixpoint (see the doc comment). Monotone over a finite
-    // set, so it terminates.
-    loop {
-        let newly: Vec<String> = unreachable_defs
-            .iter()
-            .filter(|(name, refs)| {
-                !drop_names.contains(name) && refs.iter().any(|var| drop_names.contains(var))
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
-        if newly.is_empty() {
-            break;
+    // Reverse index over the UNREACHABLE named defs, borrowing from `exprs` (no
+    // per-def String clones): referenced-name -> the unreachable defs that
+    // reference it, plus the seed worklist of unreachable defs that directly use
+    // an eval-only builtin. Reachable defs are never dropped (a reachable
+    // eval-only use is preserved for the build gate), and reachability is
+    // transitive, so a dropped (unreachable) def is only ever referenced by
+    // another unreachable def — the closure stays within this set.
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut worklist: Vec<&str> = Vec::new();
+    for expr in &exprs {
+        let Some(name) = deep_named_decl_name(expr) else {
+            continue;
+        };
+        if reachable.contains(name) {
+            continue;
         }
-        drop_names.extend(newly);
+        let mut direct_eval_only = false;
+        for var in deep_referenced_vars(expr) {
+            if EVAL_ONLY_HOST_BUILTINS.contains(&var) {
+                direct_eval_only = true;
+            }
+            dependents.entry(var).or_default().push(name);
+        }
+        if direct_eval_only {
+            worklist.push(name);
+        }
     }
+
+    // Transitive closure via the reverse index (O(edges), single pass per node):
+    // a dropped name pulls in every unreachable def that references it. Dropping
+    // only the DIRECT eval-only users would leave an unreachable wrapper with a
+    // dangling reference to a dropped def (see the doc comment).
+    let mut drop_borrowed: HashSet<&str> = HashSet::new();
+    while let Some(name) = worklist.pop() {
+        if !drop_borrowed.insert(name) {
+            continue;
+        }
+        if let Some(refs) = dependents.get(name) {
+            worklist.extend(refs.iter().copied());
+        }
+    }
+
+    // Materialize the (typically small) dropped set as owned strings so the
+    // borrows into `exprs` end before the move below.
+    let drop_names: HashSet<String> = drop_borrowed.into_iter().map(String::from).collect();
 
     exprs
         .into_iter()

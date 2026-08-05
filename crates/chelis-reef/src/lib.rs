@@ -535,6 +535,14 @@ impl PreparedProgram {
     /// perturbing the composed program's declaration order), at the cost
     /// of not caching post-root dependencies.
     ///
+    /// Note the "dependency prefix" is not only path-dependency *packages*: for
+    /// a single-package project it is the user's OWN non-entry sibling modules,
+    /// and the split point is decided by module-name sort order relative to the
+    /// entry module — there need be no `[dependencies]` table at all. One
+    /// consequence worth stating outright: renaming the entry module can move it
+    /// before its siblings in that order and thereby silently disable the whole
+    /// Layer-2 cache for the package (see chelis#1182 for the ordering fix).
+    ///
     /// The entry module's declarations are a contiguous run inside
     /// `non_stdlib_decls` (they come from one linked module), and
     /// `entry_decls` is a byte-identical re-link of that same module, so
@@ -569,6 +577,13 @@ impl PreparedProgram {
     /// The offset of the entry module's first declaration within
     /// `non_stdlib_decls`, or `None` when `entry_decls` is empty or does
     /// not occur as a contiguous sub-slice.
+    ///
+    /// This is an O(n·k) structural scan (`Decl` `PartialEq` over each start
+    /// position, n = `non_stdlib_decls`, k = `entry_decls`). It is cheap in
+    /// practice only because a first-element mismatch short-circuits nearly
+    /// every start position — a property of the data, not the algorithm. Do not
+    /// "optimize" it into a hash index without measuring first: the naive scan
+    /// is fine precisely because entry-module first decls rarely collide.
     fn entry_module_offset_in_non_stdlib(&self) -> Option<usize> {
         let entry = &self.entry_decls;
         let haystack = &self.non_stdlib_decls;

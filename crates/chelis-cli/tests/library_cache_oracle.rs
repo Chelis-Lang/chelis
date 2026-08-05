@@ -502,3 +502,187 @@ fn unreachable_dep_type_error_rejected_in_both_cache_regimes() {
         "the rejection stderr must be byte-identical across cache regimes"
     );
 }
+
+// ── Differential cache-parity sweep (chelis#1176) ───────────────────
+//
+// The removed monolithic full-program check only ran on reef packages, so the
+// property "layered-clean ⟹ monolithic-clean" (and byte-identical emitted C)
+// must hold across many entry shapes. A sweep over the loose `examples/` corpus
+// would NOT exercise this: those files are not in a reef package, so the layered
+// cache never engages and `CHELIS_STDLIB_CACHE_DISABLE` is a no-op. Instead this
+// sweeps varied shapes staged as reef packages (dep sorts before the root, an
+// unused dep def forces pruning), asserting the monolithic and cache-warm builds
+// AGREE on accept/reject + stderr, and emit byte-identical C when both succeed.
+
+/// `(success, stderr, Some((main.c, main.h) bytes) on success)`.
+type BuildProbe = (bool, String, Option<(Vec<u8>, Vec<u8>)>);
+
+/// Build `entry` and capture its outcome for cross-cache-regime comparison.
+fn build_probe(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) -> BuildProbe {
+    let out = tempdir().expect("out dir");
+    let mut cmd = Command::cargo_bin("chelis").expect("chelis binary");
+    cmd.env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", cache_home);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.arg("build").arg(entry).arg("-o").arg(out.path());
+    let output = cmd.output().expect("run chelis build");
+    let ok = output.status.success();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // The emitted C is `<file-stem>.c` (+ `.h`); the runtime files are `.h`/`.a`.
+    // Find the single `.c` so this works for any entry stem, not just `main.ch`.
+    let files = ok
+        .then(|| {
+            let c_path = fs::read_dir(out.path())
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| p.extension().and_then(|e| e.to_str()) == Some("c"))?;
+            let c = fs::read(&c_path).ok()?;
+            let h = fs::read(c_path.with_extension("h")).ok()?;
+            Some((c, h))
+        })
+        .flatten();
+    (ok, stderr, files)
+}
+
+#[test]
+fn differential_cache_parity_sweep() {
+    // (label, dependency module body, entry module body). Each dependency has an
+    // UNUSED def so pruning fires. Shapes: int32 scalar, f64 scalar, tensor
+    // entry, multi-def entry, macro-bearing, plus the two accept/reject-parity
+    // witnesses.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "int32_scalar",
+            "module Azdep.Math\nexport (az_add, az_unused)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef az_unused(x: int32) -> int32 = add(x, x)\n",
+            "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n",
+        ),
+        (
+            "f64_scalar",
+            "module Azdep.Math\nexport (az_fadd, az_unused)\n\ndef az_fadd(x: f64, y: f64) -> f64 = add(x, y)\ndef az_unused(x: f64) -> f64 = add(x, x)\n",
+            "module PseudoApp.Main\nimport Azdep.Math (az_fadd)\n\ndef main_value -> f64 = az_fadd(cast(1.0, f64), cast(2.0, f64))\n",
+        ),
+        (
+            "tensor_entry",
+            "module Azdep.Math\nexport (az_vadd, az_unused)\n\ndef az_vadd(v: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] = add(v, w)\ndef az_unused(v: tensor[3, f32]) -> tensor[3, f32] = add(v, v)\n",
+            "module PseudoApp.Main\nimport Azdep.Math (az_vadd)\n\ndef main(v: tensor[3, f32], w: tensor[3, f32]) -> tensor[3, f32] = az_vadd(v, w)\n",
+        ),
+        (
+            "multi_def_entry",
+            "module Azdep.Math\nexport (d1, d2, az_unused)\n\ndef d1(x: int32, y: int32) -> int32 = add(x, y)\ndef d2(x: int32) -> int32 = add(x, x)\ndef az_unused(x: int32) -> int32 = add(add(x, x), x)\n",
+            "module PseudoApp.Main\nimport Azdep.Math (d1, d2)\n\ndef h(x: int32) -> int32 = d2(x)\ndef main_value -> int32 = h(d1(cast(1, int32), cast(2, int32)))\n",
+        ),
+        (
+            "macro_bearing",
+            "module Azdep.Math\nexport (dep_val, dep_unused)\n\nmacro dmk(a) = {\n  q = a\n  add(q, q)\n}\n\ndef dep_val(x: int32) -> int32 = dmk(x)\ndef dep_unused(x: int32) -> int32 = dmk(add(x, x))\n",
+            "module PseudoApp.Main\nimport Azdep.Math (dep_val)\n\ndef main_value -> int32 = dep_val(cast(5, int32))\n",
+        ),
+    ];
+
+    for (label, dep, entry_body) in cases {
+        let (scratch, cache_home) = fresh_cache_home();
+        let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
+
+        let (mono_ok, mono_err, mono_c) =
+            build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+        let _ = build_probe(&entry, &cache_home, &[]); // cold: warm the cache
+        let (warm_ok, warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
+
+        assert_eq!(
+            mono_ok, warm_ok,
+            "[{label}] build accept/reject must not flip on cache state\n \
+             monolithic: ok={mono_ok} stderr={mono_err:?}\n \
+             cache-warm: ok={warm_ok} stderr={warm_err:?}"
+        );
+        assert_eq!(
+            mono_err, warm_err,
+            "[{label}] build stderr must be byte-identical across cache regimes"
+        );
+        if mono_ok {
+            assert_eq!(
+                mono_c, warm_c,
+                "[{label}] emitted C must be byte-identical across cache regimes"
+            );
+        }
+    }
+}
+
+#[test]
+fn chelis_std_declares_no_macros() {
+    // The layered split expands chelis-std SEPARATELY from `deps ++ entry`
+    // (`check_layered_for_build`), relying on chelis-std minting no macros --
+    // else the separate expansion would restart the per-`expand_program`
+    // hygiene counter and rename non-stdlib binders, silently changing emitted
+    // C. The dep/entry seam is digest-guarded against exactly this; the
+    // stdlib/non-stdlib seam is not, so it rests on this invariant. Lock it
+    // (chelis#1176 review).
+    let (scratch, _cache_home) = fresh_cache_home();
+    let (dep, entry_body) = plain_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dep, entry_body);
+    let prepared = chelis_reef::prepare_program_for_file(&entry)
+        .expect("prepare_program_for_file")
+        .expect("entry resolves inside a reef package");
+    let macro_count = prepared
+        .stdlib_decls
+        .iter()
+        .filter(|d| matches!(d, chelis_surf::ast::Decl::MacroDef { .. }))
+        .count();
+    assert_eq!(
+        macro_count, 0,
+        "chelis-std must declare no macros: the layered build cache expands it \
+         separately from deps++entry, so a chelis-std macro would desync the \
+         hygiene counter and rename non-stdlib binders (chelis#1176)"
+    );
+}
+
+#[test]
+fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
+    // The other oracles use no-chelis-std fixtures. This one imports chelis-std,
+    // so the build pulls in Std.Process (eval-only, entry-unreachable) and
+    // `drop_unreachable_eval_only_defs` actually fires against REAL chelis-std --
+    // the motivating path (chelis#1176 review, F4). Reuses the committed
+    // `pseudo_nautilus` fixture (an erf approximation over chelis-std scalars).
+    let scratch = tempdir().expect("scratch");
+    let pkg = scratch.path().join("pseudo-nautilus");
+    write(
+        &pkg.join("reef.toml"),
+        include_str!("fixtures/pseudo_nautilus/reef.toml"),
+    );
+    write(
+        &pkg.join("src/special.ch"),
+        include_str!("fixtures/pseudo_nautilus/src/special.ch"),
+    );
+    let entry = pkg.join("src/special.ch");
+    let (_guard, cache_home) = fresh_cache_home();
+
+    // Settle reef.lock (the first build resolves + writes it, which fixes the
+    // chelis-std set folded into the key) so the compared builds are stable.
+    let _ = build_probe(&entry, &cache_home, &[]);
+
+    let (mono_ok, _mono_err, mono_c) =
+        build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let (warm_ok, _warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
+
+    assert!(
+        mono_ok && warm_ok,
+        "a chelis-std-importing package must build in both cache regimes"
+    );
+    // Confirm the stdlib layer engaged (i.e. real chelis-std was linked and the
+    // eval-only drop path ran over it, not the no-chelis-std shortcut).
+    let std_artifacts = fs::read_dir(cache_home.join(".cache").join("typecheck"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("chelis-std-"))
+        .count();
+    assert!(
+        std_artifacts > 0,
+        "the chelis-std sub-context must have been cached (the drop ran over real chelis-std)"
+    );
+    assert_eq!(
+        mono_c, warm_c,
+        "chelis-std-importing build C must be byte-identical, monolithic vs cache-warm"
+    );
+}

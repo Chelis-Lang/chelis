@@ -48,6 +48,18 @@
 //! and, per the acceptance oracle, as the monolithic path. The cache is a
 //! pure speedup; it never changes an output or a diagnostic.
 //!
+//! ## Unbounded growth (chelis#1183)
+//!
+//! Unlike Layer 1 — whose cardinality is bounded by toolchain identity
+//! (`chelis-std-<ver>-<hash>.tc`, one per stdlib build) — Layer 2's key is a
+//! hash of USER source, and for a single-package project the "dependency
+//! prefix" is the developer's own non-entry modules. So every save of a
+//! sibling module mints a new multi-MiB `chelis-lib-*.tc`, and nothing reclaims
+//! it (the only `remove_file` in the cache path is tempfile cleanup). The cache
+//! lives at `$CHELIS_REEF_HOME/.cache/typecheck` (or the XDG fallback
+//! `~/.cache/chelis/typecheck`) and is **unbounded in user edits** until
+//! chelis#1183 (a size/age bound or a `chelis cache clear`) lands.
+//!
 //! ## Disable seam
 //!
 //! [`crate::stdlib_cache::cache_disabled`] (`CHELIS_STDLIB_CACHE_DISABLE=1`)
@@ -146,10 +158,14 @@ pub fn library_cache_key(
     hasher.update(b"stdlib_key");
     hasher.update(stdlib_key);
     // The dependency decls actually being checked. `bincode` is a
-    // deterministic encoding, so this is a stable content hash; a
-    // `serialize` failure is impossible for a well-formed `Decl` slice,
-    // but fall back to a fixed tag rather than panic so a cache-key
-    // computation never aborts a compile.
+    // deterministic encoding, so this is a stable content hash. A `serialize`
+    // failure is unreachable for a well-formed `Decl` slice (bincode of `Decl`
+    // never fails today), so rather than panic we fold a fixed tag. NOTE this
+    // is fail-OPEN: two distinct unserializable decl sets would fold the same
+    // tag and collide onto one cache key (a false hit, not a miss). Unreachable
+    // for `Decl`; if a future decl type gains a fallible `serialize` this must
+    // instead make the caller skip the cache (return `None` / fail closed).
+    // chelis#1176 review (F2).
     match bincode::serialize(dependency_decls) {
         Ok(decl_bytes) => {
             hasher.update(b"decls");
@@ -163,26 +179,16 @@ pub fn library_cache_key(
     hasher.finalize().into()
 }
 
-/// Lower-case hex of the first `n` bytes of `data`. Local impl to avoid a
-/// cross-module `pub(crate)` on the stdlib cache's copy.
-fn hex_prefix(data: &[u8], n: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let n = n.min(data.len());
-    let mut out = String::with_capacity(n * 2);
-    for &b in &data[..n] {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
-}
-
 /// The on-disk path for a dependency sub-context cache entry.
 ///
 /// The `chelis-lib-` prefix keeps it in the same `typecheck` cache
 /// directory as the stdlib cache's `chelis-std-` entries without ever
 /// colliding on a file name.
 fn library_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
-    cache_dir.join(format!("chelis-lib-{}.tc", hex_prefix(&key, 8)))
+    cache_dir.join(format!(
+        "chelis-lib-{}.tc",
+        crate::stdlib_cache::hex_prefix(&key, 8)
+    ))
 }
 
 /// Load the dependency sub-context from disk if a fresh entry exists, else
@@ -333,10 +339,15 @@ pub fn expanded_deep_digest(exprs: &[chelis_deep::ast::Expr]) -> [u8; 32] {
             hasher.update((bytes.len() as u64).to_le_bytes());
             hasher.update(&bytes);
         }
-        // A serialize failure is impossible for well-formed Deep, but fall
-        // back to a fixed tag so the digest computation never aborts a
-        // compile. The comparison then only matches another unserializable
-        // slice, which the caller treats as a fall-back (never a false hit).
+        // A serialize failure is unreachable for well-formed Deep (bincode of
+        // `Expr` never fails today), so we fold a fixed tag rather than panic.
+        // NOTE this is fail-OPEN: two distinct unserializable slices fold the
+        // same tag, so the digest guard in `layered.rs` would compare EQUAL and
+        // ACCEPT the cached context — a false hit, not the "fall-back" an
+        // earlier version of this comment wrongly claimed. Unreachable for
+        // `Expr`; if a future node type gains a fallible `serialize` this must
+        // signal failure so the guard falls back to monolithic (fail closed).
+        // chelis#1176 review (F2).
         Err(_) => hasher.update(b"expanded-deep-unserializable"),
     }
     hasher.finalize().into()

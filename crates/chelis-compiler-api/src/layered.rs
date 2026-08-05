@@ -41,6 +41,18 @@ use chelis_types::{CheckedProgram, FitnessReport, InferStats, StructuralStats};
 use crate::compiler::CompilerError;
 use crate::stdlib_cache::{StdLibContext, load_or_build_stdlib_context};
 
+/// Emit a one-line reason when the layered build cache bails to the monolithic
+/// path, under `CHELIS_PROFILE_COMPILE_CONTEXT=1`. Some bail conditions are
+/// silent by default and leave an otherwise-VALID build permanently slower
+/// (a dependency prefix that does not check standalone, or a macro cross-talk
+/// digest mismatch), so this makes "why did my build get slow" diagnosable
+/// (chelis#1176 review F3).
+fn profile_context_bail(reason: &str) {
+    if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT").map(|v| v == "1") == Some(true) {
+        eprintln!("chelis: build-lane library cache bailed to monolithic ({reason})");
+    }
+}
+
 /// The layered-check result for a clean or semantically rejected program.
 ///
 /// One result cannot contain both effect and linearity errors:
@@ -277,7 +289,15 @@ pub fn check_layered_for_build(
         dependency_decls,
     )? {
         Some(ctx) => ctx,
-        None => return Ok(None),
+        None => {
+            // The dependency prefix did not check standalone (e.g. a non-entry
+            // module references the entry module's own defs). The cache cannot
+            // engage; the caller re-checks monolithically. This is silent by
+            // default and leaves a valid build permanently slower, so surface
+            // the reason under the compile-context profile.
+            profile_context_bail("dependency prefix did not check standalone");
+            return Ok(None);
+        }
     };
 
     // CRITICAL (chelis#1168 macro hygiene): macro expansion is stateful —
@@ -311,6 +331,9 @@ pub fn check_layered_for_build(
     if crate::library_cache::expanded_deep_digest(&combined_deep[..split])
         != library_ctx.dependency_deep_digest
     {
+        profile_context_bail(
+            "dependency expansion digest changed (entry/dependency macro cross-talk)",
+        );
         return Ok(None);
     }
 

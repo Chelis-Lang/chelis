@@ -1196,6 +1196,16 @@ family, whose members have no tensor-lane composition equivalent.
 > value. The diagnostic SHALL direct the caller to the host evaluator
 > (`chelis eval` / `chelis test`).
 
+Reachability scope (chelis#334; transitively widened by chelis#1176, tracked
+in chelis#1184): the rejection above applies to a **reachable** eval-only use.
+An entry-**unreachable** def that uses an eval-only builtin — and, since
+chelis#1176, any entry-unreachable def that transitively references such a
+dropped def — is removed from the build's lowering target before the type check
+(`drop_unreachable_eval_only_defs`), so it can never reach a compiled artifact
+and does not trip this rejection. A consequence is that `chelis build` alone does
+not surface a real error (a type error, non-termination) that lives inside such
+a dropped def; `chelis check` remains the gate for those.
+
 #### Decimal rounding atom
 
 Transitional blockquote authority per `spec/design/spec_provenance.md`

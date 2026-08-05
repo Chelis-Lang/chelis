@@ -172,7 +172,7 @@ pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
 }
 
 /// Lower-case hex of the first `n` bytes of `data`.
-fn hex_prefix(data: &[u8], n: usize) -> String {
+pub(crate) fn hex_prefix(data: &[u8], n: usize) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let n = n.min(data.len());
     let mut out = String::with_capacity(n * 2);
