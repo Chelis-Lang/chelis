@@ -28,9 +28,7 @@ pub(super) fn infer_fn(
 
     for (pname, ty_ann) in &params {
         let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
-        if ty_ann.is_none() {
-            product.note_unannotated_lambda_param(&ty);
-        }
+        product.note_shape_lambda_param(&ty);
         fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a parameter is a fresh runtime binding with no
         // size provenance. Clear any entry inherited (through the derived
@@ -131,6 +129,7 @@ pub(super) fn infer_def_body_with_sig(
         // the declared sig type. The post-body unify still validates each
         // path in the standard way.
         let ty = ty_ann.clone().unwrap_or_else(|| decl_arg.clone());
+        product.note_shape_lambda_param(&ty);
         fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a fresh parameter has no size provenance; clear any
         // entry inherited from an outer name it shadows (BLOCKER C).

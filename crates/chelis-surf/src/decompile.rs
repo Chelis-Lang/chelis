@@ -148,24 +148,84 @@ mod tests {
     }
 
     #[test]
-    fn integer_spelled_float_preserves_suffix_and_exact_payload() {
-        let surf = parse_str(
-            "def exact() -> f32 = 18014399583223809f32\n\
-             def contextual() -> tensor[2, bf16] = [18084767253659649, 3]\n",
+    fn integer_spelled_float_rounds_directly_at_the_declared_width() {
+        for (deep_source, expected, double_rounded) in [
+            (
+                "(lit {type: (t-prim {} f32), literal_source: integer, \
+                 surf_literal_style: \"explicit\"} 18014399583223809)",
+                "1.801440065696563e16f32",
+                Some("1.8014398509481984e16f32"),
+            ),
+            (
+                "(lit {type: (t-prim {} bf16), literal_source: integer, \
+                 surf_literal_style: \"explicit\"} 18084767253659649)",
+                "1.815513599783731e16bf16",
+                Some("1.8014398509481984e16bf16"),
+            ),
+            (
+                "(lit {type: (t-prim {} bf16), literal_source: integer, \
+                 surf_literal_style: \"explicit\"} -18084767253659649)",
+                "-1.815513599783731e16bf16",
+                Some("-1.8014398509481984e16bf16"),
+            ),
+            (
+                "(lit {type: (t-prim {} f16), literal_source: integer, \
+                 surf_literal_style: \"explicit\"} 65519)",
+                "65504.0f16",
+                None,
+            ),
+            (
+                "(lit {type: (t-prim {} f64), literal_source: integer, \
+                 surf_literal_style: \"explicit\"} 18014399583223809)",
+                "1.801439958322381e16f64",
+                None,
+            ),
+        ] {
+            let deep = chelis_deep::parser::parse_str(deep_source).expect("Deep literal parses");
+            let rendered = try_decompile_program(&deep).expect("typed literal resugars");
+
+            assert!(
+                rendered.contains(expected),
+                "integer payload did not round once at its declared width:\n{rendered}"
+            );
+            if let Some(double_rounded) = double_rounded {
+                assert!(
+                    !rendered.contains(double_rounded),
+                    "integer payload was rounded through f64:\n{rendered}"
+                );
+            }
+            parse_str(&rendered).expect("resugared Surf reparses");
+        }
+    }
+
+    #[test]
+    fn integer_spelled_float_rejects_a_non_finite_target_image() {
+        let deep = chelis_deep::parser::parse_str(
+            "(lit {type: (t-prim {} f16), literal_source: integer} 65520)",
         )
-        .expect("Surf parses");
-        let deep = desugar_program(&surf);
+        .expect("Deep literal parses");
 
-        let rendered = try_decompile_program(&deep).expect("typed literals resugar");
+        assert_eq!(
+            try_decompile_program(&deep).expect_err("f16 overflow has no Surf literal"),
+            ResugarError::NonFiniteFloat,
+        );
+    }
 
-        assert!(
-            rendered.contains("18014399583223809f32"),
-            "explicit suffix or exact payload was lost:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("18084767253659649bf16"),
-            "context-selected suffix or exact payload was lost:\n{rendered}"
-        );
-        parse_str(&rendered).expect("resugared Surf reparses");
+    #[test]
+    fn integer_float_provenance_fails_closed_at_the_resugar_boundary() {
+        for malformed in [
+            "(lit {type: (t-prim {} f32)} 7)",
+            "(lit {type: (t-prim {} f32), literal_source: integer} 7.0)",
+            "(lit {type: (t-prim {} int32), literal_source: integer} 7)",
+            "(lit {type: (t-prim {} f32), literal_source: float} 7)",
+            "(lit {type: (t-prim {} f32), literal_source: integer, \
+             literal_source: integer} 7)",
+        ] {
+            let deep = chelis_deep::parser::parse_str(malformed).expect("Deep fixture parses");
+            assert!(
+                try_decompile_program(&deep).is_err(),
+                "malformed literal provenance resugared cleanly: {malformed}"
+            );
+        }
     }
 }

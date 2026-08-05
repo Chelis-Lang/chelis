@@ -755,17 +755,23 @@ Standard Algorithm W with extensions for tensor types. The flow:
 3. **Generalization:** At `let` boundaries, generalize unconstrained type variables to produce polymorphic types.
 4. **Annotation checking:** Where the programmer/agent provided `type` metadata, check that the inferred type is compatible with the annotation.
 
-> **[04-INF-1]** An unannotated lambda whose body reaches a semantic typing
-> rule while an operand's outer type constructor is still unknown SHALL retain
-> that rule as an obligation and SHALL remain monomorphic until an application
-> binds the operand. The first such application binds the lambda and replays
-> the same semantic rule; every later use has that same instantiation. If no
-> application or annotation resolves the obligation by the enclosing
-> declaration boundary, the declaration is a type error. Ordinary lambdas
-> with no deferred semantic obligation generalize normally. A symbolic tensor
-> is not an unknown constructor: declared dimension and precision variables
-> remain polymorphic, independently declared rigid dimensions remain distinct,
-> and they unify only when an ordinary body constraint requires equality.
+> **[04-INF-1]** A lambda whose body reaches a semantic typing rule while an
+> operand's outer type constructor is still unknown SHALL retain that rule as
+> an obligation and SHALL remain monomorphic until an application binds the
+> operand. The trigger is semantic: an absent annotation, a synthesized
+> wildcard signature slot, an authored bare type variable, and a variable
+> derived from such a parameter by projection all remain unknown constructors.
+> The first application within the enclosing declaration binds the lambda and
+> replays the same semantic rule; every later use has that same instantiation.
+> If no application or outer-constructor parameter annotation resolves the
+> obligation by that declaration's own boundary, the declaration is a type
+> error; later top-level declarations are not binding sites for it, and a
+> result annotation alone does not resolve an unknown parameter constructor.
+> Ordinary lambdas with no deferred semantic obligation generalize normally.
+> A symbolic tensor is not an unknown constructor: declared dimension and
+> precision variables remain polymorphic, independently declared rigid
+> dimensions remain distinct, and they unify only when an ordinary body
+> constraint requires equality.
 
 The replay requirement applies to every operation whose result or admission
 depends on the resolved operand shape, not to a hand-maintained exception for

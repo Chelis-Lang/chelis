@@ -102,15 +102,14 @@ pub(super) fn check_scatter_elements(
             ),
         );
     }
-    if data_prec != update_prec {
+    if let Err(error) = unify_tensor_prec(&data_prec, &update_prec, subst) {
         return report(
             errors,
             CheckError::new(
                 CheckErrorKind::PrecisionMismatch,
                 format!(
-                    "scatter_elements updates precision must match data precision; got {} and {}",
-                    update_prec.name(),
-                    data_prec.name()
+                    "scatter_elements updates precision must match data precision: {}",
+                    error.message
                 ),
                 vec![],
             ),
@@ -169,7 +168,7 @@ pub(super) fn check_scatter_elements(
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "scatter_elements cannot prove indices extent {index_dim:?} fits data extent {data_dim:?} on non-axis dimension {dim_index}; add a concrete shape annotation"
+                            "scatter_elements cannot prove that the symbolic indices extent fits the symbolic data extent on non-axis dimension {dim_index}; add a concrete shape annotation"
                         ),
                         vec![],
                     ),
@@ -177,5 +176,5 @@ pub(super) fn check_scatter_elements(
             }
         }
     }
-    data_ty
+    subst.apply(&data_ty)
 }

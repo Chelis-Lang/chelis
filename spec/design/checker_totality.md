@@ -842,24 +842,29 @@ and eval-root expansion; the conv2d ICE was that value arriving as plausible
 metadata rather than as a diagnostic.
 
 **Decision (2026-08-04).** `spec/04-type-system.md` [04-INF-1] is the
-controlling rule. A shape-constrained unannotated lambda retains an obligation
-over the exact inference variables seen by the ordinary operation checker,
-stays monomorphic, and binds at its first application. That application
-replays the same checker function. A still-unbound obligation at the enclosing
-declaration boundary is a type error requiring an annotation. An ordinary
-lambda with no such obligation still generalizes. Readiness is deliberately
-about an unknown outer type constructor (`Type::Var`), not every free
-variable: a declared tensor with symbolic dimensions or precision is already
-shape-checkable and remains polymorphic.
+controlling rule. A shape-constrained lambda with an unknown parameter
+constructor retains an obligation over the exact inference variables seen by
+the ordinary operation checker, stays monomorphic, and binds at its first
+application within the enclosing declaration. That application replays the
+same checker function. A still-unbound obligation at that declaration's own
+boundary is a type error requiring an outer-constructor parameter annotation;
+a result annotation and a later top-level caller are not binding sites. An
+ordinary lambda with no such obligation still generalizes. Readiness is
+deliberately about an unknown outer type constructor (`Type::Var`), including
+a wildcard/bare-variable signature slot and a projection-derived descendant,
+not every free variable: a declared tensor with symbolic dimensions or
+precision is already shape-checkable and remains polymorphic.
 
 The implementation ledger is owned by `InferenceProduct`, not by `matmul`.
 It covers the eleven existing shape-computed overrides (`matmul`; the seven
 reductions; `expand`; `layer_norm`; `conv2d`) plus PP2's
 `scatter_elements`, and stores the ordinary rule plus its original argument
-expressions and types. Construction records the inference variables created
-for unannotated lambda parameters, so an unrelated unresolved value that is
-already governed by the wildcard/contextual-inference rules is not mistaken
-for a lambda awaiting its first application. This is the single replay path
+expressions and types. Construction records unresolved type variables owned by
+lambda parameters regardless of whether the surface omitted an annotation or
+a signature supplied an informationless hole. Ownership follows the resolved
+parameter structure, so tuple/record/function projections cannot sever it,
+while an unrelated unresolved value governed by contextual inference is not
+mistaken for a lambda awaiting its first application. This is the single replay path
 for the class. `let` consults that ledger before generalization, applications
 replay newly ready rows, and both program drivers reject residual rows before
 successful finalization. The `ShapeComputed` disposition is also a fail-loud
@@ -989,16 +994,19 @@ call. A rejection that names the wrong op is loud but not actionable.
 default. A declaration is either `Checked(ShapeComputed|Specialized)` or
 `GenericAccepted { reason }`. The checked route sets are bidirectionally
 pinned: every checked declaration must name an exact route, and every route
-must be owned by the exact checked declaration. Runtime dispatch repeats the
-fail-loud check before accepting an application. `scatter_elements` is a
+must be owned by the exact checked declaration. Runtime dispatch additionally
+requires an execution witness set inside the actual semantic checker family;
+a checked application that falls through because an arm was removed is an
+internal error rather than a generic-signature acceptance. `scatter_elements` is a
 shape-computed route in its own `app_scatter` module and checks all four operands,
 rank, indices dtype, update shape/precision, axis dtype/bounds, and non-axis
 extent containment. The shared gather/scatter helper now receives the actual
 operation name, removing the misleading `gather` diagnostic.
 
 **Oracle:** the required `BuiltinDecl.inference` field is compile-fail tested,
-and the route tripwire must turn red when a checked declaration's exact route
-is deleted. On 2026-08-04, deleting `scatter_elements` from
+the route tripwire must turn red when a checked declaration's exact route is
+deleted, and the runtime observation guard must reject a checked application
+that reaches no real semantic family. On 2026-08-04, deleting `scatter_elements` from
 `SHAPE_COMPUTED_INFERENCE_BUILTINS` and running
 `cargo nextest run -p chelis-types
 every_checked_builtin_has_an_exact_inference_route` failed with
@@ -1006,7 +1014,8 @@ every_checked_builtin_has_an_exact_inference_route` failed with
 restoring the route made the same command green. The four [#1147] programs
 reject with the diagnostics their `scatter` equivalents produce, each joining
 the §C4.4 fitness-honesty corpus; a well-typed `scatter_elements` call is the
-positive control.
+positive control. The synthetic `probe_unarmed_op` unit control pins the
+fail-loud observation diagnostic independently of the two route manifests.
 
 ### Adjacent ledger rows delivered with the class change
 
@@ -1033,7 +1042,8 @@ positive control.
   resolution. Deep and Surf producers use the one typed exception for an
   integer-spelled float: an exact Int payload plus `literal_source: integer`.
   That form preserves [04-NUM-14]'s direct target-width rounding instead of
-  manufacturing a double-rounding route through f64. The full positive,
+  manufacturing a double-rounding route through f64 in both the tensor/DAG
+  and scalar host-eval constructors. The full positive,
   malformed-marker, cross-family, and producer paths are regression-tested;
   the former score-1 input is also in §C4.4.
 
@@ -1079,7 +1089,7 @@ positive control.
 | 2 | typecheck-cache deserialization as a witness mint (accepted, or cache entries re-validated?) | Phase 2 | §C3 note + the cache module doc |
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | DECIDED 2026-07-23: deferred; REVERSED 2026-07-24 by the decode-once rework directive - printers, desugar, and every other producer/consumer migrated; no string-keyed tag idiom survives outside the parse/serialize boundary | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
-| 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | DECIDED 2026-08-04: shape-constrained unannotated lambdas are monomorphic bind-on-first-use, replay the ordinary semantic rule, and reject unresolved at the declaration boundary; symbolic declared tensors remain polymorphic and rigid dimensions remain distinct absent a real equality constraint | [04-INF-1] + PP1 |
+| 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | DECIDED 2026-08-04: shape-constrained lambdas with an unknown outer parameter constructor are monomorphic bind-on-first-use within their enclosing declaration, replay the ordinary semantic rule, and reject unresolved at that declaration's own boundary; a result annotation or later top-level caller does not bind them; symbolic declared tensors remain polymorphic and rigid dimensions remain distinct absent a real equality constraint | [04-INF-1] + PP1 |
 
 ## Contract summary
 

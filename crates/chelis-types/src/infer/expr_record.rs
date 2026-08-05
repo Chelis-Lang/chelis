@@ -142,7 +142,12 @@ pub(super) fn infer_tuple_get(
         // preserves the prior permissiveness for genuinely-unresolved
         // targets while the `Tuple` arm now carries the real element
         // type for concrete tuples.
-        Type::Var(_) => vg.fresh_type(),
+        Type::Var(_) => {
+            let projected = vg.fresh_type();
+            product.derive_shape_lambda_type(&tuple_ty, &projected, subst);
+            product.defer_tuple_projection(tuple_ty, index, projected.clone());
+            projected
+        }
         _ => report(
             errors,
             CheckError::new(

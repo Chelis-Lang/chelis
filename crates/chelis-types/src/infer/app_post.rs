@@ -20,6 +20,8 @@ pub(super) fn finish_unified_app(
     expected_result: Option<&Type>,
 ) -> Type {
     let mut result_ty = subst.apply(&ret_tv);
+    let checked_rule = checked_inference_rule(func_name.as_deref());
+    let mut checked_route_observed = false;
 
     // [04-TENSOR-EXPAND]: an expected tensor fixes whether positional expand
     // replaces an existing axis (same rank) or inserts one (rank + 1).
@@ -35,35 +37,26 @@ pub(super) fn finish_unified_app(
         result_ty = subst.apply(&result_ty);
     }
 
-    if let Some(fname) = func_name.as_deref()
-        && let Some(decl) = builtins::builtin_decl(fname)
-        && let builtins::InferenceDisposition::Checked(rule) = decl.inference
-        && !builtins::has_registered_inference_route(fname, rule)
-    {
-        return report(
-            errors,
-            CheckError::new(
-                CheckErrorKind::Other,
-                format!(
-                    "internal: builtin `{fname}` declares checked inference `{rule:?}` but has no registered dispatcher route"
-                ),
-                vec![
-                    "Add the semantic inference route in the same change as the builtin declaration, or explicitly declare GenericAccepted with a reviewed reason"
-                        .to_string(),
-                ],
-            ),
-        );
+    if let Some(rejected) = reject_unregistered_checked_route(func_name.as_deref(), errors) {
+        return rejected;
     }
 
-    if let Some(rejected) =
-        validate_numeric_and_reduction_arguments(list, kids, &func_name, &arg_tys, subst, errors)
-    {
+    if let Some(rejected) = validate_numeric_and_reduction_arguments(
+        list,
+        kids,
+        &func_name,
+        &arg_tys,
+        subst,
+        errors,
+        &mut checked_route_observed,
+    ) {
         return rejected;
     }
 
     if let Some(ref fname) = func_name
         && fname == "uniform_like"
     {
+        checked_route_observed = true;
         if let Some(first_arg) = arg_tys.first() {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
@@ -150,6 +143,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && fname == "dropout"
     {
+        checked_route_observed = true;
         if let Some(first_arg) = arg_tys.first() {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
@@ -194,6 +188,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && fname == "conv2d"
     {
+        checked_route_observed = true;
         for (index, arg_ty) in arg_tys.iter().enumerate() {
             let resolved = type_for_readonly_check(arg_ty, subst);
             if index < 2 {
@@ -354,6 +349,7 @@ pub(super) fn finish_unified_app(
             .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
     });
     if shape_override_operand_error {
+        checked_route_observed = true;
         // Cascade: a shape-computed builtin operand already typed as
         // `Type::Error`; propagate its witness rather than mint a fresh
         // error (chelis#731 §C3). The `.any(... Error ...)` guard above
@@ -372,6 +368,7 @@ pub(super) fn finish_unified_app(
         let mut retained_shape_obligation = false;
         match fname.as_str() {
             "matmul" => {
+                checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Matmul,
@@ -385,6 +382,7 @@ pub(super) fn finish_unified_app(
             }
             "sum" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
             | "argmin_reduce" | "mean" => {
+                checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Reduction {
@@ -406,6 +404,7 @@ pub(super) fn finish_unified_app(
                 );
             }
             "expand" => {
+                checked_route_observed = true;
                 // chelis#339: the axis slot is a dim NAME (the
                 // named-axis insert form) only when it is not bound in
                 // the value environment — a bound `int32` var is the
@@ -448,6 +447,7 @@ pub(super) fn finish_unified_app(
                 );
             }
             "layer_norm" => {
+                checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::LayerNorm,
@@ -460,6 +460,7 @@ pub(super) fn finish_unified_app(
                 result_ty = check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
             }
             "conv2d" => {
+                checked_route_observed = true;
                 if owes_shape_replay {
                     product.defer_shape_check(
                         DeferredShapeRule::Conv2d,
@@ -473,6 +474,7 @@ pub(super) fn finish_unified_app(
                     check_conv2d_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
             }
             "scatter_elements" if owes_shape_replay => {
+                checked_route_observed = true;
                 product.defer_shape_check(
                     DeferredShapeRule::ScatterElements { list: list.clone() },
                     kids[1..].to_vec(),
@@ -512,6 +514,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && LOGICAL_OPS.contains(&fname.as_str())
     {
+        checked_route_observed = true;
         for arg_ty in &arg_tys {
             let resolved = type_for_readonly_check(arg_ty, subst);
             match &resolved {
@@ -563,6 +566,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
     {
+        checked_route_observed = true;
         // Prefer any tensor-shaped arg as the dim source.
         let tensor_dims = arg_tys.iter().find_map(|t| match subst.apply(t) {
             Type::Tensor(dims, _) => Some(dims),
@@ -2976,6 +2980,15 @@ pub(super) fn finish_unified_app(
             }
             _ => {}
         }
+    }
+
+    if let Some(rule) = checked_rule
+        && !checked_route_observed
+    {
+        return report(
+            errors,
+            unobserved_checked_route_diagnostic(func_name.as_deref().unwrap_or("<unknown>"), rule),
+        );
     }
 
     product.replay_ready_shape_checks(vg, subst, errors);

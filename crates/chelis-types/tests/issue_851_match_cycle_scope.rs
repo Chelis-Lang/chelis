@@ -23,10 +23,8 @@ fn arm_binder_does_not_create_a_top_level_cycle() {
         r#"
 type Box =
   | Wrap(string)
-def unwrap(b: Box) -> string = {
-  match b with {
-    | Wrap(text) => text
-  }
+def unwrap(b: Box) -> string = match b with {
+  | Wrap(text) => text
 }
 text = unwrap(Wrap("hi"))
 "#,
@@ -40,11 +38,9 @@ fn nested_pattern_binders_scope_guard_and_body() {
         r#"
 type PairBox =
   | PairBox(string, string)
-def choose(b: PairBox) -> string = {
-  match b with {
-    | PairBox(left, right) if string_contains(left, right) => left
-    | PairBox(left, right) => string_concat(left, right)
-  }
+def choose(b: PairBox) -> string = match b with {
+  | PairBox(left, right) if string_contains(left, right) => left
+  | PairBox(left, right) => string_concat(left, right)
 }
 left = choose(PairBox("a", "b"))
 right = "outside"

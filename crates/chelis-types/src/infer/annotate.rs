@@ -527,7 +527,9 @@ fn type_is_safe_annotation_stamp(ty: &Type) -> bool {
         Type::Ref(inner) => type_is_safe_annotation_stamp(inner),
         Type::Tensor(dims, precision) => {
             matches!(precision, TensorPrec::Concrete(_))
-                && dims.iter().all(|dim| !matches!(dim, Dim::Wildcard))
+                && dims
+                    .iter()
+                    .all(|dim| matches!(dim, Dim::Name(_) | Dim::Lit(_)))
         }
         Type::Adt(_, args) | Type::Tuple(args) => args.iter().all(type_is_safe_annotation_stamp),
         Type::Var(_) | Type::Error(_) => false,
@@ -607,5 +609,52 @@ pub(super) fn should_attach_type_metadata(tag: DeepTag) -> bool {
         | DeepTag::Quote
         | DeepTag::Unquote
         | DeepTag::Splice => true,
+    }
+}
+
+#[cfg(test)]
+mod monotone_writeback_tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_dimension_variable_cannot_replace_concrete_metadata() {
+        let concrete = Type::Tensor(
+            vec![Dim::Lit(4), Dim::Lit(4)],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let original = type_to_deep_expr(&concrete);
+        let mut entries = vec![("type".to_string(), original.clone())];
+
+        write_type_metadata_monotone(
+            &mut entries,
+            Type::Tensor(
+                vec![Dim::Var(DimVar(9001)), Dim::Lit(4)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+            type_to_deep_expr,
+        );
+
+        assert_eq!(
+            entries,
+            vec![("type".to_string(), original)],
+            "an unresolved dimension is less informative than an existing concrete shape"
+        );
+    }
+
+    #[test]
+    fn unresolved_dimension_can_be_written_when_no_annotation_exists() {
+        let candidate = Type::Tensor(
+            vec![Dim::Var(DimVar(9002)), Dim::Lit(4)],
+            TensorPrec::Concrete(Prim::F32),
+        );
+        let mut entries = Vec::new();
+
+        write_type_metadata_monotone(&mut entries, candidate, type_to_deep_expr);
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "symbolic inferred metadata still has an owner"
+        );
     }
 }

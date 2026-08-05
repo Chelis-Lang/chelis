@@ -291,6 +291,11 @@ fn malformed_dp_forms_score_below_one() {
             wrap("(lit {type: (t-prim {} f32)} 18014399583223809)"),
             ".dp",
         ),
+        (
+            "dp_nested_typed_literal",
+            wrap("(lit {} (lit {type: (t-prim {} f32)} 7.5))"),
+            ".dp",
+        ),
         // chelis#731 red team: a handle-effect with a THIRD child (spec/03 gives
         // it exactly two); the extra child is an unvisited subtree ([04-TOT-3]).
         (

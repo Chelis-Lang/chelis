@@ -43,7 +43,7 @@ fn deep_to_dag(source: &str) -> Result<Dag, String> {
 fn int_leaf_in_f32_tensor_literal_single_rounds() {
     let source = r#"
 def main() -> tensor[2, f32] =
-  to_tensor([18014399583223809f32, 3f32])
+  [18014399583223809, 3]
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
     let bits = dag
@@ -71,7 +71,7 @@ def main() -> tensor[2, f32] =
 fn int_leaf_in_bf16_tensor_literal_single_rounds() {
     let source = r#"
 def main() -> tensor[2, bf16] =
-  to_tensor([18084767253659649bf16, 3bf16])
+  [18084767253659649, 3]
 "#;
     let dag = surf_to_dag(source).expect("pipeline succeeds");
     let stored = dag

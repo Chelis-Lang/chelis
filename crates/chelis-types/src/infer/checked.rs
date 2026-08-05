@@ -284,7 +284,8 @@ pub(super) struct InferenceProduct {
     pub(super) owner_types: HashMap<usize, FinalOwnerType>,
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
-    unannotated_lambda_tvars: HashSet<TypeVar>,
+    shape_lambda_tvars: HashSet<TypeVar>,
+    deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
     deferred_shape_checks: Vec<DeferredShapeCheck>,
 }
@@ -314,6 +315,15 @@ pub(super) struct DeferredShapeCheck {
     arg_exprs: Vec<deep::Expr>,
     arg_tys: Vec<Type>,
     result_ty: Type,
+}
+
+#[derive(Clone)]
+enum DeferredTypeDerivation {
+    TupleProjection {
+        source: Type,
+        index: usize,
+        projected: Type,
+    },
 }
 
 pub(super) struct TypeStampEpoch {
@@ -374,24 +384,99 @@ impl InferenceProduct {
         self.next_deferred_shape_id
     }
 
-    pub(super) fn note_unannotated_lambda_param(&mut self, ty: &Type) {
-        if let Type::Var(tv) = ty {
-            self.unannotated_lambda_tvars.insert(*tv);
-        }
+    pub(super) fn note_shape_lambda_param(&mut self, ty: &Type) {
+        // Record semantic unknown-constructor ownership, not the surface fact
+        // that an annotation node was absent. A synthesized `(t-var _ )`, an
+        // authored bare type variable, and a variable later exposed by tuple/
+        // record projection all remain owned by this lambda parameter. A
+        // declared tensor with only symbolic dims/precision has a known outer
+        // constructor and therefore never reaches the Type::Var readiness arm.
+        self.shape_lambda_tvars.extend(crate::env::free_tvars(ty));
     }
 
-    /// True only when the unresolved outer constructor descends from an
-    /// unannotated lambda parameter. Other unresolved values retain their
-    /// existing wildcard/contextual-inference contract; [04-INF-1] does not
-    /// turn every `Type::Var` in a declaration into a lambda obligation.
+    /// True only when the unresolved outer constructor descends from a lambda
+    /// parameter whose constructor was not fixed by its annotation. Ownership
+    /// is transitive through unification: if an origin variable has become a
+    /// tuple/record/function shape containing `current`, a projection-derived
+    /// `current` still belongs to the same parameter. Other unresolved values
+    /// retain their existing wildcard/contextual-inference contract.
     pub(super) fn shape_operand_awaits_lambda_binding(&self, ty: &Type, subst: &Subst) -> bool {
         let applied = subst.apply(ty);
         match applied {
-            Type::Var(current) => self.unannotated_lambda_tvars.iter().any(|origin| {
-                matches!(subst.apply(&Type::Var(*origin)), Type::Var(resolved) if resolved == current)
+            Type::Var(current) => self.shape_lambda_tvars.iter().any(|origin| {
+                crate::env::free_tvars(&subst.apply(&Type::Var(*origin))).contains(&current)
             }),
             Type::Ref(inner) => self.shape_operand_awaits_lambda_binding(&inner, subst),
             _ => false,
+        }
+    }
+
+    /// Preserve parameter ownership across an inference operation that
+    /// deliberately produces a fresh type without unifying it back into the
+    /// source type. Tuple projection is the current such operation: an open
+    /// tuple has no row/arity type to bind, but its projected element still
+    /// semantically descends from the parameter.
+    pub(super) fn derive_shape_lambda_type(
+        &mut self,
+        source: &Type,
+        derived: &Type,
+        subst: &Subst,
+    ) {
+        if self.shape_operand_awaits_lambda_binding(source, subst) {
+            self.note_shape_lambda_param(derived);
+        }
+    }
+
+    pub(super) fn defer_tuple_projection(&mut self, source: Type, index: usize, projected: Type) {
+        self.deferred_type_derivations
+            .push(DeferredTypeDerivation::TupleProjection {
+                source,
+                index,
+                projected,
+            });
+    }
+
+    fn resolve_deferred_type_derivations(
+        &mut self,
+        subst: &mut Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        let derivations = std::mem::take(&mut self.deferred_type_derivations);
+        for derivation in derivations {
+            match derivation {
+                DeferredTypeDerivation::TupleProjection {
+                    source,
+                    index,
+                    projected,
+                } => match subst.apply(&source) {
+                    Type::Var(_) => self.deferred_type_derivations.push(
+                        DeferredTypeDerivation::TupleProjection {
+                            source,
+                            index,
+                            projected,
+                        },
+                    ),
+                    Type::Tuple(elements) if index < elements.len() => {
+                        if let Err(error) = unify(&projected, &elements[index], subst) {
+                            errors.push(error.into());
+                        }
+                    }
+                    Type::Tuple(elements) => errors.push(CheckError::new(
+                        CheckErrorKind::TupleIndexOutOfBounds,
+                        format!(
+                            "tuple index {index} out of bounds for tuple of size {}",
+                            elements.len()
+                        ),
+                        vec![],
+                    )),
+                    Type::Error(_) => {}
+                    other => errors.push(CheckError::new(
+                        CheckErrorKind::TypeMismatch,
+                        format!("expected tuple type, got {other}"),
+                        vec![],
+                    )),
+                },
+            }
         }
     }
 
@@ -428,6 +513,7 @@ impl InferenceProduct {
         subst: &mut Subst,
         errors: &mut DiagnosticSink<'_>,
     ) {
+        self.resolve_deferred_type_derivations(subst, errors);
         let checks = std::mem::take(&mut self.deferred_shape_checks);
         for check in checks {
             if check
@@ -515,10 +601,11 @@ impl InferenceProduct {
                 CheckErrorKind::TypeMismatch,
                 format!(
                     "unresolved `{operation}` shape obligation at declaration boundary: \
-                     add a parameter or result type annotation so the checker can decide it"
+                     add an outer-constructor parameter annotation or apply the lambda before \
+                     the declaration boundary"
                 ),
                 vec![
-                    "Shape-constrained unannotated lambdas bind monomorphically on first use; an unapplied lambda has no binding site"
+                    "A result annotation does not determine an unresolved parameter constructor; top-level declarations do not borrow binding sites from later declarations"
                         .to_string(),
                 ],
             ));

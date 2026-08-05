@@ -375,9 +375,13 @@ impl<'a> EvalContext<'a> {
         let meta_dtype = get_meta(list).and_then(lit_meta_prim);
         match value {
             Expr::Atom(Atom::Int(value), _) => match meta_dtype {
-                Some(dtype) if dtype.is_integer() => RuntimeValue::scalar_like_int(dtype, *value),
-                Some(dtype) if dtype.is_float() => {
-                    RuntimeValue::scalar_like_float(dtype, *value as f64)
+                Some(dtype) if dtype.is_integer() || dtype.is_float() => {
+                    // Keep the exact i64 payload until the sealed dtype
+                    // constructor finalizes it at the declared width. An
+                    // `as f64` step here double-rounds integer-spelled f32,
+                    // f16, and bf16 literals above 2^53 and disagrees with
+                    // both IR lowering and generated C ([04-LIT-1]).
+                    RuntimeValue::scalar_like_int(dtype, *value)
                 }
                 _ => Ok(RuntimeValue::int_lit(*value)),
             },

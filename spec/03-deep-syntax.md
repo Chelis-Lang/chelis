@@ -195,7 +195,7 @@ handling.
 **Provenance metadata.** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
 originated from.
-Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0))`.
+Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0.0))`.
 Provenance is informational — it does not affect parsing, type checking, or evaluation.
 The node is a standard `app` node; the `source` key is ignored by all compiler passes
 except error reporting.
@@ -735,7 +735,10 @@ keeps the exact integer available for the one target-width rounding required
 by [04-NUM-1] and [04-NUM-14], instead of first rounding through f64. An
 unmarked Int atom under a float primitive remains contradictory. An explicit
 `cast` is the only form that converts an already-typed literal value between
-primitive families.
+primitive families. `literal_source` is producer-asserted provenance, not a
+lexer authenticity proof: hand-written Deep MAY author the canonical marker,
+and the checker validates its closed atom/primitive/uniqueness contract before
+any consumer may rely on it.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
 `int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an

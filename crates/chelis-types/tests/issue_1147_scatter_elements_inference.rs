@@ -88,3 +88,39 @@ def apply(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor
         "updates",
     );
 }
+
+#[test]
+fn symbolic_containment_diagnostic_does_not_leak_rust_dimension_internals() {
+    let errors = diagnostics(
+        r#"
+def apply[n, k](data: tensor[n, 3, f32], indices: tensor[k, 3, int32], updates: tensor[k, 3, f32]) -> tensor[n, 3, f32] =
+  scatter_elements(data, indices, updates, 1)
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| error.contains(
+            "scatter_elements cannot prove that the symbolic indices extent fits the symbolic data extent on non-axis dimension 0"
+        )),
+        "expected a stable symbolic-containment diagnostic; got {errors:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|error| !error.contains("DimVar(") && !error.contains("Var(DimVar")),
+        "user-facing diagnostics may not expose Rust dimension internals: {errors:#?}"
+    );
+}
+
+#[test]
+fn precision_variable_is_unified_by_the_same_rule_as_other_tensor_ops() {
+    let errors = diagnostics(
+        r#"
+def apply[p](data: tensor[2, 3, p], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, p] =
+  scatter_elements(data, indices, updates, 1)
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "a precision variable must unify with the updates precision instead of being compared by representation: {errors:#?}"
+    );
+}

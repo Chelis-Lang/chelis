@@ -10245,8 +10245,9 @@ module_prefix = "OrphanSig"
             "unexpected synthetic-entry diagnostic: {error}"
         );
 
-        let paired = chelis_surf::parser::parse_str("sig present: int32\ndef present: int32 = 1")
-            .expect("parse pair");
+        let paired =
+            chelis_surf::parser::parse_str("sig present: int32\ndef present() -> int32 = 1")
+                .expect("parse pair");
         compile_with_reef_graph(&graph, &paired).expect("paired entry signature must link");
     }
 

@@ -32,30 +32,56 @@ fn find_matmul_type(expr: &Expr) -> Option<Expr> {
     children.iter().find_map(find_matmul_type)
 }
 
+fn tagged_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
+    match expr {
+        Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        Expr::List(list, _) => Some((list.tag()?, list.elements.get(2..)?)),
+        _ => None,
+    }
+}
+
+fn concrete_tensor_metadata(expr: &Expr) -> Option<(Vec<i64>, String)> {
+    let (tag, children) = tagged_children(expr)?;
+    if tag != DeepTag::TTensor || children.len() < 2 {
+        return None;
+    }
+    let mut dims = Vec::new();
+    for dim in &children[..children.len() - 1] {
+        let (dim_tag, dim_children) = tagged_children(dim)?;
+        if dim_tag != DeepTag::DLit {
+            return None;
+        }
+        let Expr::Atom(Atom::Int(value), _) = dim_children.first()? else {
+            return None;
+        };
+        dims.push(*value);
+    }
+    let (prim_tag, prim_children) = tagged_children(children.last()?)?;
+    if prim_tag != DeepTag::TPrim {
+        return None;
+    }
+    let Expr::Atom(Atom::Name(prim), _) = prim_children.first()? else {
+        return None;
+    };
+    Some((dims, prim.clone()))
+}
+
 #[test]
-fn unresolved_owner_never_clobbers_a_concrete_annotation() {
+fn resolved_owner_preserves_equivalent_concrete_annotation() {
     let source = r#"
 (def {} f
-  (fn {} (params {} a (good {type: (t-tensor {} (d-lit {} 4) (d-lit {} 4) (t-prim {} f32))}))
+  (fn {} (params {}
+      (a {type: (t-tensor {} (d-lit {} 4) (d-lit {} 4) (t-prim {} f32))})
+      (good {type: (t-tensor {} (d-lit {} 4) (d-lit {} 4) (t-prim {} f32))}))
     (app {type: (t-tensor {} (d-lit {} 4) (d-lit {} 4) (t-prim {} f32))}
       (var {} matmul) (var {} a) (var {} good))))
 "#;
     let exprs = parse_and_stamp(source).expect("fixture must parse and stamp");
-    let original = find_matmul_type(&exprs[0]).expect("fixture carries matmul metadata");
-    match check_ir_program(&exprs) {
-        Err(result) => assert!(
-            result.errors.iter().any(|error| {
-                error.message.contains("unresolved") || error.message.contains("annotation")
-            }),
-            "loud failure must name the unresolved annotation obligation: {:?}",
-            result.errors
-        ),
-        Ok(checked) => {
-            let stamped = find_matmul_type(&checked.exprs()[0]).expect("checked matmul metadata");
-            assert_eq!(
-                stamped, original,
-                "an unresolved owner type may not replace concrete source metadata"
-            );
-        }
-    }
+    let checked = check_ir_program(&exprs).expect("fully resolved fixture must check");
+    let stamped = find_matmul_type(&checked.exprs()[0]).expect("checked matmul metadata");
+    assert_eq!(
+        concrete_tensor_metadata(&stamped),
+        Some((vec![4, 4], "f32".to_string())),
+        "writeback must preserve the concrete source shape and precision"
+    );
 }

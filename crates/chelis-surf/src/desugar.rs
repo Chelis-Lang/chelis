@@ -219,10 +219,7 @@ fn meta_with_integer_float_type(ty: deep::Expr, style: Option<&str>) -> deep::Ex
         ("literal_source".to_string(), sym("integer")),
     ];
     if let Some(style) = style {
-        entries.push((
-            "surf_literal_style".to_string(),
-            string(style),
-        ));
+        entries.push(("surf_literal_style".to_string(), string(style)));
     }
     meta_with_entries(entries)
 }

@@ -77,7 +77,7 @@ fn integer_spelled_float_suffix_is_marked_by_both_producers() {
     );
 
     let declarations = chelis_surf::parser::parse_str(
-        "def scalar() -> f32 = 7f32\n\
+        "def scalar() -> f32 = cast(7, f32)\n\
          def vector() -> tensor[2, f32] = [1, 2]",
     )
     .expect("Surf producer fixture must parse");

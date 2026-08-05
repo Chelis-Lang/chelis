@@ -235,6 +235,7 @@ impl<'a> RawParser<'a> {
         }
 
         let mut elements = Vec::new();
+        let mut third_child_was_typed_literal_token = false;
         loop {
             let tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
@@ -243,9 +244,21 @@ impl<'a> RawParser<'a> {
                 let end_span = tok.span;
                 self.advance();
                 let full_span = start_span.merge(end_span);
-                return Ok(normalize_typed_literal_wrapper(elements, full_span));
+                return Ok(normalize_typed_literal_wrapper(
+                    elements,
+                    full_span,
+                    third_child_was_typed_literal_token,
+                ));
             }
+            let is_typed_literal_token = matches!(
+                &tok.kind,
+                TokenKind::TypedInt(..) | TokenKind::TypedFloat(..)
+            );
+            let child_index = elements.len();
             elements.push(self.parse_expr()?);
+            if child_index == 2 && is_typed_literal_token {
+                third_child_was_typed_literal_token = true;
+            }
         }
     }
 
@@ -440,12 +453,19 @@ fn raw_typed_literal_lit_expr(
     )
 }
 
-/// A suffixed token already expands to a complete typed `lit`. When it appears
-/// in the producer-friendly spelling `(lit {} 7f32)`, avoid leaving that
-/// expansion nested as the outer literal's value. The empty outer metadata is
-/// deliberate: a producer that supplies metadata must emit the canonical form
-/// and resolve any competing `type` entry itself.
-fn normalize_typed_literal_wrapper(elements: Vec<RawExpr>, span: crate::Span) -> RawExpr {
+/// A suffixed TOKEN already expands to a complete typed `lit`. When that token
+/// appears in the producer-friendly spelling `(lit {} 7f32)`, avoid leaving
+/// the expansion nested as the outer literal's value. The token-origin bit is
+/// essential: after parsing, a hand-authored nested `(lit {} (lit ...))` has
+/// the same tree shape and must remain malformed input for the checker.
+fn normalize_typed_literal_wrapper(
+    elements: Vec<RawExpr>,
+    span: crate::Span,
+    third_child_was_typed_literal_token: bool,
+) -> RawExpr {
+    if !third_child_was_typed_literal_token {
+        return RawExpr::List(elements, span);
+    }
     let expanded = match elements.as_slice() {
         [
             RawExpr::Atom(RawAtom::Symbol(outer_tag), _),
@@ -665,6 +685,22 @@ mod tests {
                 }));
             }
             other => panic!("expected lit Node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hand_authored_nested_typed_lit_is_not_token_normalized() {
+        let exprs = p("(lit {} (lit {type: (t-prim {} f32)} 7.5))");
+        match &exprs[0] {
+            Expr::Node(outer, _) => {
+                assert_eq!(outer.tag(), crate::tag::DeepTag::Lit);
+                assert_eq!(outer.child_count(), 1);
+                assert!(
+                    matches!(&outer.children_slice()[0], Expr::Node(inner, _) if inner.tag() == crate::tag::DeepTag::Lit),
+                    "a hand-authored nested lit must remain malformed input for the checker"
+                );
+            }
+            other => panic!("expected outer lit Node, got {other:?}"),
         }
     }
 
