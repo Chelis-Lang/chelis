@@ -571,6 +571,7 @@ class ListOutputTests(unittest.TestCase):
         ]
         for command in (
             "cargo test -p chelis-compiler-api --doc",
+            "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
         ):
             self.assertIn(command, rendered)
@@ -579,9 +580,38 @@ class ListOutputTests(unittest.TestCase):
         rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
         for command in (
             "cargo test -p chelis-compiler-api --doc",
+            "cargo test -p chelis-pipeline-core --doc",
             "<managed-python> scripts/check_checkpoint_compile_fail.py",
         ):
             self.assertIn(command, rendered)
+
+    def test_pipeline_core_boundary_guards_are_in_the_lint_and_unit_stage(self):
+        # The dependency guard, documentation guard, and pipeline-artifact
+        # compile-fail fixture must run in the per-PR gate (hosted CI runs
+        # `gate.py lint-and-unit`), not only in the manual oracle.
+        rendered = [
+            gate.render(command) for command in gate.STAGES["lint-and-unit"]
+        ]
+        for command in (
+            "<managed-python> scripts/pipeline_core_dependency_guard.py",
+            "<managed-python> scripts/pipeline_core_documentation_guard.py",
+            "<managed-python> scripts/check_pipeline_core_compile_fail.py",
+        ):
+            self.assertIn(command, rendered)
+
+    def test_cheap_pipeline_core_guards_are_in_the_local_subset(self):
+        # The two cheap guards (cargo metadata + pure Python) run pre-push; the
+        # out-of-workspace compile-fail build stays CI/full-gate only.
+        rendered = [gate.render(command) for command in gate.LOCAL_STATIC_COMMANDS]
+        for command in (
+            "<managed-python> scripts/pipeline_core_dependency_guard.py",
+            "<managed-python> scripts/pipeline_core_documentation_guard.py",
+        ):
+            self.assertIn(command, rendered)
+        self.assertNotIn(
+            "<managed-python> scripts/check_pipeline_core_compile_fail.py",
+            rendered,
+        )
 
     def test_list_uses_nextest_not_cargo_test(self):
         # Regression guard: the historical `AGENTS.md` gate said

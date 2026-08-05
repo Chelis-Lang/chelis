@@ -50,8 +50,14 @@
 //! additionally routes the whole typecheck path through the monolithic
 //! checker when this is set, so it is the acceptance oracle's
 //! monolithic-vs-layered test seam. It is never set in production CI.
+//!
+//! ## Deserialization boundary
+//!
+//! Decode validates the checked library without another type-inference session.
+//! It reruns the remaining semantic checks and the lower phase. The canonical
+//! lower result must match the cache payload before contextual code can use it.
 
-use chelis_ir::lower::LoweredLibrary;
+use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
 use chelis_types::{CheckedProgram, StructuralStats, TypeEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -59,12 +65,15 @@ use std::path::{Path, PathBuf};
 
 use crate::cache_envelope;
 use crate::compiler::CompilerError;
+use crate::schema::{Diagnostic, GeneralKind};
 
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
-/// Mixed into the content-addressed key. V4 also captures chelis#942's
-/// serialized positional-expand obligations inside `TypeEnv`.
-/// V5 captures the deferred-reshape relations added to the same substitution.
+/// Mixed into the content-addressed key. V5 unifies two independent V4
+/// bumps: the pipeline-core `CheckedLibrary`/proof-identity products
+/// (branch) and chelis#942's serialized positional-expand obligations
+/// inside `TypeEnv` (main). Bincode is positional, so a V4 entry from
+/// either side is a clean miss.
 const STDLIB_CACHE_FORMAT_VERSION: u32 = 5;
 
 /// The typechecked + lowered chelis-std library sub-context.
@@ -72,20 +81,14 @@ const STDLIB_CACHE_FORMAT_VERSION: u32 = 5;
 /// Built once by [`build_stdlib_context`] from the bundled chelis-std
 /// linked decls, cached under [`stdlib_cache_key`]. Mirrors the three
 /// pipeline-stage fields `CompiledContext` carries — `type_env`,
-/// `library_checked`, `library_dag` — but for chelis-std alone, plus the
+/// `CheckedLibrary`, `library_dag` — but for chelis-std alone, plus the
 /// structural stats needed to reconstitute a whole-program fitness
 /// report without re-walking the library decls.
 ///
 /// Cheap to clone: the heavy state is `Arc`-shared inside `TypeEnv`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct StdLibContext {
-    /// IR type-checker snapshot over chelis-std — the base scope for
-    /// Layer 2's `check_ir_with_context` / the `_with_base` library
-    /// build.
-    pub type_env: TypeEnv,
-    /// chelis-std IR + effects + linearity result. Feeds the
-    /// `_with_context` variants of effects and linearity.
-    pub library_checked: CheckedProgram,
+    library: crate::pipeline::CheckedLibrary,
     /// Lowered chelis-std DAG carrier. Feeds `lower_program_with_context`
     /// on the `chelis build` path.
     ///
@@ -96,13 +99,98 @@ pub struct StdLibContext {
     /// field; `build` falls back to the monolithic lowering path when it
     /// is `None`, so a non-lowerable stdlib never blocks a build, it just
     /// does not get the cache speedup on the lowering stage.
-    pub library_dag: Option<LoweredLibrary>,
+    library_dag: Option<crate::pipeline::LoweredLibrary>,
     /// Total structural AST node count + Deep-validator-flagged node count
     /// over the chelis-std library decls. The in-context fitness report uses
     /// these for the `structure` component; its `typed_nodes` / `total_nodes`
-    /// come from `library_checked`'s serialized inference counters
-    /// (chelis#973).
-    pub structural_stats: StructuralStats,
+    /// come from the library program's serialized inference counters.
+    structural_stats: StructuralStats,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StdLibContextWire {
+    type_env: TypeEnv,
+    library_checked: CheckedProgram,
+    library_dag: Option<IrLoweredLibrary>,
+    structural_stats: StructuralStats,
+}
+
+impl StdLibContext {
+    pub fn checked_library(&self) -> &crate::pipeline::CheckedLibrary {
+        &self.library
+    }
+
+    pub fn type_env(&self) -> &TypeEnv {
+        self.library.type_env()
+    }
+
+    pub fn library_checked(&self) -> &CheckedProgram {
+        self.library.program()
+    }
+
+    pub fn library_dag(&self) -> Option<&crate::pipeline::LoweredLibrary> {
+        self.library_dag.as_ref()
+    }
+
+    pub fn structural_stats(&self) -> StructuralStats {
+        self.structural_stats
+    }
+}
+
+impl Serialize for StdLibContext {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        StdLibContextWire {
+            type_env: self.type_env().clone(),
+            library_checked: self.library_checked().clone(),
+            library_dag: self
+                .library_dag
+                .as_ref()
+                .map(|library| library.raw().clone()),
+            structural_stats: self.structural_stats,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StdLibContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = StdLibContextWire::deserialize(deserializer)?;
+        let _linked = chelis_types::install_linked_program_guard();
+        let library =
+            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
+                .map_err(serde::de::Error::custom)?;
+        let library_dag = match wire.library_dag {
+            Some(cached) => {
+                if cached.library_proof_id() != library.program().library_proof_id() {
+                    return Err(serde::de::Error::custom(
+                        "the lowered library does not match the checked library",
+                    ));
+                }
+                let expected =
+                    crate::pipeline::lower_library(&library).map_err(serde::de::Error::custom)?;
+                if !cache_envelope::lowered_library_payload_matches(&cached, expected.raw())
+                    .map_err(serde::de::Error::custom)?
+                {
+                    return Err(serde::de::Error::custom(
+                        "the lowered library payload does not match the checked library",
+                    ));
+                }
+                Some(expected)
+            }
+            None => None,
+        };
+        Ok(Self {
+            library,
+            library_dag,
+            structural_stats: wire.structural_stats,
+        })
+    }
 }
 
 /// The 32-byte content-addressed cache key for a chelis-std sub-context.
@@ -305,10 +393,9 @@ pub fn load_or_build_stdlib_context(
 /// Pipeline (mirrors `compile_reef_context`'s library half, but for
 /// chelis-std alone and stacked on the empty base):
 /// 1. Surf-desugar + macro-expand the linked chelis-std decls into Deep.
-/// 2. `build_compiled_library_context` -> `(TypeEnv, CheckedProgram)`.
-/// 3. effects + linearity over the library `CheckedProgram`.
-/// 4. `lower_program_to_library` -> `LoweredLibrary`.
-/// 5. structural stats over the desugared library decls.
+/// 2. `check_prepared_library` -> `CheckedLibrary`.
+/// 3. `lower_program_to_library` -> `LoweredLibrary`.
+/// 4. Structural stats over the desugared library declarations.
 pub fn build_stdlib_context(
     stdlib_decls: &[chelis_surf::ast::Decl],
 ) -> Result<StdLibContext, CompilerError> {
@@ -323,24 +410,8 @@ pub fn build_stdlib_context(
     })?;
     let structural_stats = chelis_types::structural_stats(prepared.expanded_deep());
 
-    let (type_env, checked) = chelis_types::build_compiled_library_context(
-        prepared.expanded_deep(),
-    )
-    .map_err(|report| CompilerError {
-        stage: "check".to_string(),
-        errors: report
-            .errors
-            .iter()
-            .map(crate::compiler::check_error_diagnostic)
-            .collect(),
-    })?;
-    let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, checked);
-    let checked =
-        crate::pipeline::complete_checks(analysis, crate::pipeline::SemanticContext::Isolated)
-            .map_err(|rejection| {
-                crate::compiler::pipeline_rejection_to_compiler_error(rejection.into())
-            })?;
-    let (_, _, library_checked, _) = checked.into_parts();
+    let library = crate::pipeline::check_prepared_library(prepared)
+        .map_err(library_rejection_to_compiler_error)?;
 
     // Lower chelis-std as a standalone library, best-effort. A lowering
     // diagnostic here is NOT fatal: `check` does not use `library_dag`,
@@ -348,14 +419,46 @@ pub fn build_stdlib_context(
     // `None`. Some chelis-std defs are only lowerable once a concrete
     // caller pins a symbolic axis; the unpruned whole-library lower can
     // legitimately hit that.
-    let library_dag = crate::pipeline::lower_library(&library_checked).ok();
+    let library_dag = crate::pipeline::lower_library(&library).ok();
 
     Ok(StdLibContext {
-        type_env,
-        library_checked,
+        library,
         library_dag,
         structural_stats,
     })
+}
+
+fn library_rejection_to_compiler_error(
+    rejection: crate::pipeline::LibraryRejection,
+) -> CompilerError {
+    match rejection {
+        crate::pipeline::LibraryRejection::Type { report } => CompilerError {
+            stage: "check".to_string(),
+            errors: report
+                .errors
+                .iter()
+                .map(crate::compiler::check_error_diagnostic)
+                .collect(),
+        },
+        crate::pipeline::LibraryRejection::ContextMismatch => CompilerError {
+            stage: "check".to_string(),
+            errors: vec![Diagnostic::general(
+                GeneralKind::Other,
+                "the library type environment does not match its checked program".to_string(),
+                1.0,
+            )],
+        },
+        crate::pipeline::LibraryRejection::Effects { errors } => {
+            crate::compiler::pipeline_rejection_to_compiler_error(
+                crate::pipeline::PipelineRejection::Effects { errors },
+            )
+        }
+        crate::pipeline::LibraryRejection::Linearity { errors } => {
+            crate::compiler::pipeline_rejection_to_compiler_error(
+                crate::pipeline::PipelineRejection::Linearity { errors },
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +583,88 @@ mod tests {
             recompute_with_compiler_version("0.0.0-some-other-compiler-build"),
             "a different compiler version must produce a different stdlib cache key"
         );
+    }
+
+    #[test]
+    fn cache_decode_restores_a_checked_library_proof() {
+        let context = build_stdlib_context(&sample_decls("cache_proof"))
+            .expect("the sample library must build");
+        let bytes = bincode::serialize(&context).expect("the cache context must encode");
+        let restored: StdLibContext =
+            bincode::deserialize(&bytes).expect("the cache context must decode");
+
+        assert_eq!(
+            restored.checked_library().program().exprs(),
+            context.checked_library().program().exprs()
+        );
+    }
+
+    #[test]
+    fn cache_decode_rejects_a_foreign_type_environment() {
+        let context = build_stdlib_context(&sample_decls("cache_mismatch"))
+            .expect("the sample library must build");
+        let wire = StdLibContextWire {
+            type_env: TypeEnv::empty(),
+            library_checked: context.library_checked().clone(),
+            library_dag: context.library_dag().map(|library| library.raw().clone()),
+            structural_stats: context.structural_stats(),
+        };
+        let bytes = bincode::serialize(&wire).expect("the invalid cache wire must encode");
+        let error = bincode::deserialize::<StdLibContext>(&bytes)
+            .expect_err("the cache parser must reject mismatched library fields");
+
+        assert!(error.to_string().contains("type environment"));
+    }
+
+    #[test]
+    fn cache_decode_rejects_a_foreign_lowered_library() {
+        let first = build_stdlib_context(&sample_decls("cache_dag_first"))
+            .expect("the first sample library must build");
+        let second = build_stdlib_context(&sample_decls("cache_dag_second"))
+            .expect("the second sample library must build");
+        let wire = StdLibContextWire {
+            type_env: first.type_env().clone(),
+            library_checked: first.library_checked().clone(),
+            library_dag: second.library_dag().map(|library| library.raw().clone()),
+            structural_stats: first.structural_stats(),
+        };
+        let bytes = bincode::serialize(&wire).expect("the invalid cache wire must encode");
+        let error = bincode::deserialize::<StdLibContext>(&bytes)
+            .expect_err("the cache parser must reject a foreign lowered library");
+
+        assert!(error.to_string().contains("lowered library"));
+    }
+
+    #[test]
+    fn cache_decode_rejects_a_changed_lowered_payload_with_the_same_identity() {
+        let context = build_stdlib_context(&sample_decls("cache_dag_payload"))
+            .expect("the sample library must build");
+        let mut lowered_value = serde_json::to_value(
+            context
+                .library_dag()
+                .expect("the sample library must lower")
+                .raw(),
+        )
+        .expect("lowered library must encode");
+        lowered_value["rootless_defs"] = serde_json::json!(["forged_rootless_def"]);
+        let changed_lowering: IrLoweredLibrary =
+            serde_json::from_value(lowered_value).expect("changed lowering must decode");
+        assert_eq!(
+            changed_lowering.library_proof_id(),
+            context.library_checked().library_proof_id(),
+            "the negative control must retain the checked-library identity",
+        );
+        let wire = StdLibContextWire {
+            type_env: context.type_env().clone(),
+            library_checked: context.library_checked().clone(),
+            library_dag: Some(changed_lowering),
+            structural_stats: context.structural_stats(),
+        };
+        let bytes = bincode::serialize(&wire).expect("the invalid cache wire must encode");
+        let error = bincode::deserialize::<StdLibContext>(&bytes)
+            .expect_err("the cache parser must reject a changed lowered payload");
+
+        assert!(error.to_string().contains("lowered library payload"));
     }
 
     #[test]

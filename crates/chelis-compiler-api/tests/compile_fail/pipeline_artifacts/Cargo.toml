@@ -1,0 +1,10 @@
+[package]
+name = "pipeline-artifacts-compile-fail"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+chelis-compiler-api = { path = "../../.." }

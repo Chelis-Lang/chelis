@@ -20,10 +20,10 @@
 //!   the running binary; a mismatch is a clean miss (`Ok(None)`), never a
 //!   stale hit. A belt-and-braces inner-vs-envelope check rejects a
 //!   tampered identity as `CacheError::IdentityMismatch`.
-//! - The cache format version and magic bumped to 5 (the W1 opaque-types
-//!   registry change added `AdtDef::opaque`/`defining_module` and
-//!   `TypeEnvInner::opacity`); a stale V4-shaped
-//!   file is rejected, never decoded.
+//! - The cache format version and magic are now 8. The current format
+//!   merges the branch library proof identities with the chelis#878 typed
+//!   `Pad::fill` and chelis#942 positional-expand changes. A stale V7-shaped
+//!   file from either predecessor is rejected, never decoded.
 //! - `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a binary
 //!   built from different compiler source does not stale-hit an older
 //!   binary's `StdLibContext`.
@@ -38,8 +38,8 @@
 //! canonicalization equivalence (a wrong-canonicalization regression
 //! would be a NEW collision class), the `IdentityMismatch`
 //! envelope-vs-inner tamper guard, fingerprint sensitivity to every
-//! identity component, the format-version-4 magic rejection of a forged
-//! V4 file, and adversarial corruption shapes against the recompute
+//! identity component, the format-version-8 magic rejection of a forged
+//! V7 file, and adversarial corruption shapes against the recompute
 //! fall-through.
 //!
 //! Kept on the per-PR `ci` profile: every test is cache-key / identity /
@@ -479,18 +479,21 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 }
 
 // ---------------------------------------------------------------------
-// Current format bump: `Subst` now serializes deferred-reshape relations,
-// so a stale V8-shaped file must be rejected, never decoded.
+// Format-version-9 bump. Both predecessors independently used V8 for their
+// own shape: the branch V8 sealed the pipeline-core library proof IDs, and
+// the main V8 carried the chelis#878 typed `RiscOp::Pad::fill`, chelis#942
+// positional-expand constraints, and the chelis#1182 root-module decl order
+// (released in 0.18.4). The unified format takes V9; a V8- or V7-shaped file
+// from either predecessor must be rejected, never decoded.
 // ---------------------------------------------------------------------
 
 #[test]
 fn a_forged_stale_magic_file_is_rejected_not_decoded() {
-    // The current magic is `CHELIS_CTX_V9\n` (chelis#942 deferred-reshape
-    // relation bump, on top of chelis#1182's V8). A leftover file written by
-    // a pre-bump binary carries `CHELIS_CTX_V8\n`. Forge one by taking a real
-    // V9 file and rewriting the magic's version digit. load_if_fresh must
-    // reject it (the magic no longer matches), never attempt to decode the
-    // stale-shaped envelope.
+    // The current magic is `CHELIS_CTX_V9\n`. A leftover file from either
+    // predecessor carries a `CHELIS_CTX_V8\n` (or older) magic. Forge one by
+    // taking a real V9 file and rewriting the magic's version digit.
+    // load_if_fresh must reject it (the magic no longer matches), never
+    // attempt to decode the stale-shaped envelope.
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-stale-magic", TRIVIAL_MAIN);
     assert!(
         bytes.starts_with(b"CHELIS_CTX_V9\n"),
@@ -622,8 +625,9 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     let real = stdlib_cache_key(&decls);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 5 (the
-    // chelis#942 deferred-reshape bincode bump); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 5 (the merged
+    // bump unifying the branch proof-identity products and chelis#942's
+    // positional-expand obligations); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {

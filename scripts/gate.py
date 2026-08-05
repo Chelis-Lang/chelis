@@ -166,12 +166,38 @@ DOCTEST_COMPILER_API: list[str] = [
     "chelis-compiler-api",
     "--doc",
 ]
+DOCTEST_PIPELINE_CORE: list[str] = [
+    "cargo",
+    "test",
+    "-p",
+    "chelis-pipeline-core",
+    "--doc",
+]
 # This script verifies the exact compiler diagnostic from the standalone
 # raw-offset fixture. The marker is replaced with the same validated managed
 # interpreter exported to child commands as PYO3_PYTHON.
 CHECKPOINT_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_checkpoint_compile_fail.py",
+]
+# The pipeline-core boundary guards. Before this, they ran only in the manual
+# `compiler_pipeline_oracle.py`, so a forbidden dependency, a false no_std
+# claim, or a broken facade compile-fail boundary passed hosted CI green. The
+# dependency guard (one `cargo metadata`) and the documentation guard (pure
+# Python) are cheap enough for the local pre-push subset; the pipeline-artifact
+# compile-fail fixture builds an out-of-workspace crate, so it stays in the
+# per-PR gate stage (CI + full gate) alongside the checkpoint fixture.
+PIPELINE_CORE_DEPENDENCY_GUARD: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/pipeline_core_dependency_guard.py",
+]
+PIPELINE_CORE_DOCUMENTATION_GUARD: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/pipeline_core_documentation_guard.py",
+]
+PIPELINE_CORE_COMPILE_FAIL: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/check_pipeline_core_compile_fail.py",
 ]
 
 STAGES: dict[str, list[list[str]]] = {
@@ -182,7 +208,11 @@ STAGES: dict[str, list[list[str]]] = {
         CHELIS_LINT_CHECK,
         DOCTEST_TYPES,
         DOCTEST_COMPILER_API,
+        DOCTEST_PIPELINE_CORE,
         CHECKPOINT_COMPILE_FAIL,
+        PIPELINE_CORE_DEPENDENCY_GUARD,
+        PIPELINE_CORE_DOCUMENTATION_GUARD,
+        PIPELINE_CORE_COMPILE_FAIL,
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
@@ -203,7 +233,10 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CHELIS_LINT_CHECK,
     DOCTEST_TYPES,
     DOCTEST_COMPILER_API,
+    DOCTEST_PIPELINE_CORE,
     CHECKPOINT_COMPILE_FAIL,
+    PIPELINE_CORE_DEPENDENCY_GUARD,
+    PIPELINE_CORE_DOCUMENTATION_GUARD,
 ]
 
 LOCAL_ANNOTATION = "local + ci"

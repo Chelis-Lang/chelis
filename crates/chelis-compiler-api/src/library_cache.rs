@@ -18,15 +18,15 @@
 //! ```
 //!
 //! A [`LibraryContext`] carries exactly what analyzing the entry against
-//! the composed library requires: the composed [`TypeEnv`] (so
-//! `(var ...)` references resolve into both chelis-std and the dependency
-//! packages) and the composed library [`CheckedProgram`] (the outer
-//! `SemanticContext::Library` for the entry's effect / linearity pass, and
-//! the left operand of the final [`compose_checked`]). It mirrors
-//! [`crate::context::build_library_triple_layered`], which already stacks
-//! the same `build_compiled_library_context_with_base` + compose seam for
-//! the whole-package `CompiledContext`; this module lifts it into the
-//! `chelis build` front-end and content-addresses it on disk.
+//! the composed library requires: a proof-bound composed
+//! [`crate::pipeline::CheckedLibrary`] over `chelis-std ++ dependencies`.
+//! Its `TypeEnv` resolves `(var ...)` references into both chelis-std and
+//! the dependency packages, and its checked library program is the exact
+//! proof the entry's contextual completion composes onto. It mirrors
+//! [`crate::context::build_checked_library_layered`], which stacks the same
+//! proof-bound base + extension seam for the whole-package
+//! `CompiledContext`; this module lifts it into the `chelis build`
+//! front-end and content-addresses it on disk.
 //!
 //! ## Why the content-addressed key is honest
 //!
@@ -41,9 +41,10 @@
 //!
 //! On a hit the loaded [`LibraryContext`] is the same artifact a cold
 //! build produces: the dependency decls are content-addressed, the
-//! chelis-std base is itself a byte-identical cached artifact, and both
-//! `build_compiled_library_context_with_base` and `CheckedProgram::compose`
-//! are deterministic. So the entry checked against a warm-loaded context
+//! chelis-std base is itself a byte-identical cached artifact, and the
+//! proof-bound library extension over that base is deterministic. Decode
+//! reruns the effect and linearity checks to rebind the proof, never
+//! trusting the wire bytes. So the entry checked against a warm-loaded context
 //! composes to the same whole-program `CheckedProgram` as the cold path —
 //! and, per the acceptance oracle, as the monolithic path. The cache is a
 //! pure speedup; it never changes an output or a diagnostic.
@@ -79,8 +80,13 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 
 /// Internal struct-format version. Bumped when [`LibraryContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
-/// Mixed into the content-addressed key. V2 captures chelis#942's serialized
-/// deferred-reshape relations inside `TypeEnv`.
+/// Mixed into the content-addressed key.
+///
+/// V2: the sub-context now stores a proof-bound `CheckedLibrary`, and decode
+/// reruns effect/linearity checks to rebind the proof (mirroring the stdlib
+/// and compiled-context caches). The wire `CheckedProgram` also grew the
+/// library-proof-identity fields. A V1 `chelis-lib-*.tc` written by a
+/// pre-extraction binary at the same compiler version is a clean miss.
 const LIBRARY_CACHE_FORMAT_VERSION: u32 = 2;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
@@ -94,19 +100,15 @@ const LIBRARY_CACHE_FORMAT_VERSION: u32 = 2;
 /// reads a fitness report off this sub-context.
 ///
 /// Cheap to clone: the heavy state is `Arc`-shared inside `TypeEnv`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LibraryContext {
-    /// IR type-checker snapshot over `chelis-std ++ dependencies` — the
-    /// union scope for analyzing the entry via
-    /// `analyze_prepared_with_context`. Dependency-declared types win on
-    /// shadow over chelis-std, exactly as the monolithic whole-library
-    /// build produces.
-    pub type_env: TypeEnv,
-    /// Composed `chelis-std ++ dependencies` IR + effects + linearity
-    /// result. Feeds `SemanticContext::Library(..)` for the entry's
-    /// effect / linearity pass and is the left operand of the final
-    /// `compose_checked` that produces the whole-program checked state.
-    pub library_checked: CheckedProgram,
+    /// Proof-bound composed `chelis-std ++ dependencies` library: the union
+    /// `TypeEnv` scope for analyzing the entry via
+    /// `analyze_prepared_with_library`, and the checked library program the
+    /// entry's contextual completion composes onto. Dependency-declared
+    /// types win on shadow over chelis-std, exactly as the monolithic
+    /// whole-library build produces.
+    library: crate::pipeline::CheckedLibrary,
     /// Number of expanded Deep exprs the dependency decls contribute.
     ///
     /// The build-lane caller must expand `dependencies ++ entry` as ONE
@@ -126,6 +128,69 @@ pub struct LibraryContext {
     /// program and the caller must fall back to the monolithic path. This
     /// keeps the split byte-identical even in that pathological case.
     pub dependency_deep_digest: [u8; 32],
+}
+
+impl LibraryContext {
+    /// The proof-bound composed `chelis-std ++ dependencies` library.
+    pub fn checked_library(&self) -> &crate::pipeline::CheckedLibrary {
+        &self.library
+    }
+
+    /// The union `chelis-std ++ dependencies` type environment.
+    pub fn type_env(&self) -> &TypeEnv {
+        self.library.type_env()
+    }
+
+    /// The composed `chelis-std ++ dependencies` checked library program.
+    pub fn library_checked(&self) -> &CheckedProgram {
+        self.library.program()
+    }
+}
+
+/// Serde carrier for the cache envelope. Decode revalidates the proof: it
+/// checks the type-environment relationship and reruns effect and linearity
+/// before it rebinds the `CheckedLibrary`, mirroring the stdlib and
+/// compiled-context cache parsers. A forged or mismatched entry is rejected,
+/// never trusted.
+#[derive(Serialize, Deserialize)]
+struct LibraryContextWire {
+    type_env: TypeEnv,
+    library_checked: CheckedProgram,
+    dependency_expanded_len: usize,
+    dependency_deep_digest: [u8; 32],
+}
+
+impl Serialize for LibraryContext {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        LibraryContextWire {
+            type_env: self.library.type_env().clone(),
+            library_checked: self.library.program().clone(),
+            dependency_expanded_len: self.dependency_expanded_len,
+            dependency_deep_digest: self.dependency_deep_digest,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LibraryContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = LibraryContextWire::deserialize(deserializer)?;
+        let _linked = chelis_types::install_linked_program_guard();
+        let library =
+            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
+                .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            library,
+            dependency_expanded_len: wire.dependency_expanded_len,
+            dependency_deep_digest: wire.dependency_deep_digest,
+        })
+    }
 }
 
 /// The 32-byte content-addressed cache key for a dependency sub-context.
@@ -345,21 +410,22 @@ fn evict_typecheck_cache(cache_dir: &Path, just_written: &Path) {
 /// Build a [`LibraryContext`] by stacking the dependency decls on the
 /// cached chelis-std sub-context.
 ///
-/// Pipeline (mirrors [`crate::context::build_library_triple_layered`], but
+/// Pipeline (mirrors [`crate::context::build_checked_library_layered`], but
 /// packaged for the `chelis build` front-end):
 /// 1. Surf-desugar + macro-expand the linked dependency decls into Deep.
-/// 2. `build_compiled_library_context_with_base(stdlib.type_env, deps)` ->
-///    the composed `(TypeEnv, dependency CheckedProgram)`. The `TypeEnv`
-///    is the union chelis-std ++ dependency scope.
-/// 3. effects + linearity over the dependency decls against
-///    `SemanticContext::Library(stdlib.library_checked)`.
-/// 4. `CheckedProgram::compose(stdlib.library_checked, deps_checked)` ->
-///    the composed library `CheckedProgram`.
+/// 2. `analyze_prepared_library_with_base(deps, stdlib.checked_library())` ->
+///    the dependency type analysis bound to the exact chelis-std proof, over
+///    the union chelis-std ++ dependency scope.
+/// 3. `complete_context_library_checks` runs effects + linearity over the
+///    dependency decls against the bound chelis-std library and composes
+///    `chelis-std ++ dependencies` into one proof-bound `CheckedLibrary`.
 ///
-/// Returns `Ok(None)` on ANY dependency rejection (macro, type, effect, or
-/// linearity), matching the `Ok(None)` monolithic-fallback contract: the
-/// monolithic path then produces the byte-identical diagnostic. Only a
-/// clean compose yields `Ok(Some(..))`.
+/// Returns `Ok(None)` on a dependency macro, type, effect, or linearity
+/// rejection, matching the `Ok(None)` monolithic-fallback contract: the
+/// monolithic path then produces the byte-identical diagnostic. A
+/// proof-bind mismatch (`ContextMismatch`) is an internal invariant failure
+/// and surfaces as an `Err`, never a silent fallback. Only a clean compose
+/// yields `Ok(Some(..))`.
 pub fn build_library_context(
     stdlib_ctx: &StdLibContext,
     dependency_decls: &[chelis_surf::ast::Decl],
@@ -380,38 +446,29 @@ pub fn build_library_context(
     let dependency_expanded_len = prepared.expanded_deep().len();
     let dependency_deep_digest = expanded_deep_digest(prepared.expanded_deep());
 
-    // Type-check + annotate the dependency decls stacked on the cached
-    // chelis-std sub-context. Returns the union `TypeEnv` and the
-    // dependency-only checked type product.
-    let (type_env, dependency_type_product) =
-        match chelis_types::build_compiled_library_context_with_base(
-            &stdlib_ctx.type_env,
-            prepared.expanded_deep(),
-        ) {
-            Ok(pair) => pair,
-            Err(_) => return Ok(None),
-        };
-
-    let analysis =
-        crate::pipeline::prepared_analysis_from_checked(prepared, dependency_type_product);
-    let dependency_checked = match crate::pipeline::complete_checks(
-        analysis,
-        crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
+    // Type-check + annotate the dependency decls against the exact checked
+    // chelis-std proof; the analysis retains that proof for the semantic
+    // suffix.
+    let analysis = match crate::pipeline::analyze_prepared_library_with_base(
+        prepared,
+        stdlib_ctx.checked_library(),
     ) {
-        Ok(checked) => checked,
-        Err(crate::pipeline::SemanticRejection::Effects { .. })
-        | Err(crate::pipeline::SemanticRejection::Linearity { .. }) => return Ok(None),
+        Ok(analysis) => analysis,
+        Err(_) => return Ok(None),
+    };
+    let library = match crate::pipeline::complete_context_library_checks(analysis) {
+        Ok(library) => library,
+        Err(crate::pipeline::LibraryRejection::Effects { .. })
+        | Err(crate::pipeline::LibraryRejection::Linearity { .. }) => return Ok(None),
+        Err(rejection) => {
+            return Err(crate::context::library_rejection_to_compiler_error(
+                rejection,
+            ));
+        }
     };
 
-    // Compose the cached chelis-std half with the freshly-checked
-    // dependency half into the one composed library `CheckedProgram` the
-    // entry analysis stacks on.
-    let library_checked =
-        CheckedProgram::compose(&stdlib_ctx.library_checked, dependency_checked.program());
-
     Ok(Some(LibraryContext {
-        type_env,
-        library_checked,
+        library,
         dependency_expanded_len,
         dependency_deep_digest,
     }))
@@ -556,8 +613,8 @@ mod tests {
     /// substantive typed content (annotated exprs + type env as a set)
     /// rather than raw bytes.
     fn library_checked_semantically_eq(a: &LibraryContext, b: &LibraryContext) -> bool {
-        a.library_checked.annotated_exprs() == b.library_checked.annotated_exprs()
-            && a.library_checked.type_env() == b.library_checked.type_env()
+        a.library_checked().annotated_exprs() == b.library_checked().annotated_exprs()
+            && a.library_checked().type_env() == b.library_checked().type_env()
     }
 
     #[test]

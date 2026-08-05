@@ -547,8 +547,8 @@ use chelis_deep::{DeepTag, Span, decode_effect_kind};
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{
     BUILTIN_NAMES, CheckedProgram, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp,
-    LinearityInfo, ScalarValue, cast_scalar, compare_scalars, float_binop, float_unop, int_binop,
-    int_unop, scalar_from_i64, types::Prim,
+    LibraryProofId, LinearityInfo, ScalarValue, cast_scalar, compare_scalars, float_binop,
+    float_unop, int_binop, int_unop, scalar_from_i64, types::Prim,
 };
 use chelis_vocab::EffectKind;
 
@@ -568,54 +568,100 @@ pub fn try_lower_program(program: &CheckedProgram) -> Result<Dag, LowerDiagnosti
     try_lower_program_to_library(program).map(|library| library.dag)
 }
 
-/// Phase F carrier: a lowered library DAG plus the metadata needed to
-/// compose against new code via [`lower_program_with_context`].
+/// Phase F carrier for a lowered library and its composition metadata.
 ///
-/// Fields are exposed so the compiled-artifact cache can persist the
-/// library state out-of-band, but consumers should treat them as opaque —
-/// the contract is that the carrier was produced by
-/// [`lower_program_to_library`] on a checked library, and that
-/// [`lower_program_with_context`] is the only blessed way to consume it.
+/// The private fields keep the payload and its proof identity immutable.
+/// Read-only accessors support cache adapters and contextual lowering.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoweredLibrary {
     /// The library DAG, post-DCE. Node IDs in this DAG are the canonical
     /// library IDs that new-code lowering will reference (after a clone).
-    pub dag: Dag,
+    dag: Dag,
     /// Map from a library top-level def's name (e.g. `lib_const`,
     /// `lib_double.0`) to the NodeId in `dag` that holds its value. New
     /// code that references the name resolves through this table rather
     /// than emitting a fresh `Load`.
-    pub symbol_table: HashMap<String, NodeId>,
+    symbol_table: HashMap<String, NodeId>,
     /// Library top-level def bodies, keyed by name. New-code lowering needs
     /// these to inline calls to library functions (matching the monolithic
     /// behaviour of `lower_program(library + new)`).
-    pub program_defs: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
     /// Library declared types, keyed by name. Used to resolve unbound
     /// `(var libname)` Load types when the new-code expression's metadata
     /// is `default_type`.
-    pub program_types: HashMap<String, TensorType>,
+    program_types: HashMap<String, TensorType>,
     /// Library linearity metadata. Forwarded so cross-DAG reuse hints can
     /// be re-applied if needed.
-    pub linearity: LinearityInfo,
+    linearity: LinearityInfo,
     /// Per-library-def "is it lowered?" decision, mirroring the result
     /// of `top_level_lowering_map(library_exprs, library_type_env)`. New-
     /// code lowering decisions need this so a new-code def whose body
     /// calls a library function gets the same lowered/host classification
     /// as it would in monolithic mode (where the same library def lives
     /// in `top_level_defs` and is consulted directly).
-    pub lowered_names: HashMap<String, bool>,
+    lowered_names: HashMap<String, bool>,
     /// chelis#1095: def names whose lowered value held no tensor node, so
     /// they contributed no DAG root. Consumers subtract these from the
     /// declared root names before aligning against [`Self::dag`]'s roots.
     /// `serde(default)` so a cached pre-#1095 carrier still deserializes.
     #[serde(default)]
-    pub rootless_defs: BTreeSet<String>,
+    rootless_defs: BTreeSet<String>,
+    /// Library proof identity copied from the checked program.
+    #[serde(default)]
+    library_proof_id: Option<LibraryProofId>,
 }
 
-/// Lower a checked program to the [`LoweredLibrary`] carrier. The bare
-/// `dag` field of the result is identical to `lower_program(program)` —
-/// the only difference is that `symbol_table`, `program_defs`,
-/// `program_types`, and `linearity` are also exposed.
+impl LoweredLibrary {
+    /// Return the immutable library DAG.
+    pub fn dag(&self) -> &Dag {
+        &self.dag
+    }
+
+    /// Return the immutable symbol table.
+    pub fn symbol_table(&self) -> &HashMap<String, NodeId> {
+        &self.symbol_table
+    }
+
+    /// Return the immutable program definitions.
+    pub fn program_defs(&self) -> &HashMap<String, Expr> {
+        &self.program_defs
+    }
+
+    /// Return the immutable program types.
+    pub fn program_types(&self) -> &HashMap<String, TensorType> {
+        &self.program_types
+    }
+
+    /// Return the immutable linearity metadata.
+    pub fn linearity(&self) -> &LinearityInfo {
+        &self.linearity
+    }
+
+    /// Return the immutable map of lowering decisions.
+    pub fn lowered_names(&self) -> &HashMap<String, bool> {
+        &self.lowered_names
+    }
+
+    /// Return the immutable set of definitions without DAG roots.
+    pub fn rootless_defs(&self) -> &BTreeSet<String> {
+        &self.rootless_defs
+    }
+
+    /// Return the checked-library identity for this lowered payload.
+    pub fn library_proof_id(&self) -> Option<LibraryProofId> {
+        self.library_proof_id
+    }
+
+    /// Consume the carrier and return the final DAG and rootless definitions.
+    pub fn into_dag_and_rootless_defs(self) -> (Dag, BTreeSet<String>) {
+        (self.dag, self.rootless_defs)
+    }
+}
+
+/// Lower a checked program to the [`LoweredLibrary`] carrier.
+///
+/// The carrier DAG is identical to `lower_program(program)`. The carrier also
+/// keeps the private metadata that contextual lowering requires.
 pub fn lower_program_to_library(program: &CheckedProgram) -> LoweredLibrary {
     try_lower_program_to_library(program).unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
 }
@@ -801,6 +847,7 @@ fn lower_program_to_library_inner(program: &CheckedProgram) -> LoweredLibrary {
         linearity: program.linearity().clone(),
         lowered_names,
         rootless_defs: ctx.rootless_defs,
+        library_proof_id: program.library_proof_id(),
     }
 }
 
@@ -4384,7 +4431,7 @@ struct LowerCtx {
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: HashSet<String>,
     /// chelis#1095: top-level def names whose lowered value held no tensor
-    /// node, so they contributed no DAG root. `chelis-compiler-api`
+    /// node, so they contributed no DAG root. `chelis-pipeline-core`
     /// subtracts these from the declared root names before aligning them
     /// against `dag.roots()`.
     rootless_defs: BTreeSet<String>,
@@ -4995,7 +5042,7 @@ impl LowerCtx {
             }
             // chelis#1095: record the defs whose lowered value holds no
             // tensor node at all, so `add_named_roots` below contributes
-            // nothing. The declared-root accounting in chelis-compiler-api
+            // nothing. The declared-root accounting in chelis-pipeline-core
             // subtracts exactly these names; recording the OUTCOME rather
             // than predicting it from the signature is what keeps the two
             // sides in agreement. A predicate over the declared type
