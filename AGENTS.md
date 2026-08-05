@@ -659,6 +659,58 @@ When writing or rewriting Surf in this repository:
 - functions carrying the `Test` effect are named `test_*` or `example_*`
   (`surf-test-name-prefix`, §10.1)
 
+### Canonical Surf v0.19 (chelis#1031, shipped 0.18.4)
+
+**The grammar changed, and the style gate enforces it.** `chelis fmt
+--check` runs ahead of `build`, `check`, `validate`, and `eval --file`,
+so Surf that was canonical under 0.18.3 can now fail before the
+front-end pipeline runs. The authority is `spec/02-surf-syntax.md` §0.1
+(canonical forms and the bidirectional contract); §P10-P12 define the
+wider set of input spellings the parser still *accepts* but the
+formatter rewrites.
+
+Read that section before authoring Surf or debugging a parse error that
+"should" work. The forms that most often bite:
+
+- **A nullary definition needs `()`: `def name() -> T`, not `def name ->
+  T`.** This is the highest-frequency breakage — it turned every fixture
+  in chelis#1176 into a hard parse error (`expected function parameter
+  list `()`, found Arrow`) on rebase. Expect it on any branch predating
+  #1031.
+- Applying a returned value needs explicit grouping: `(f(x))(y)`.
+  Ungrouped `f(x)(y)` is rejected — Chelis has flat multi-argument
+  application and no implicit currying. Juxtaposition stays rejected.
+- Zero-arity decoration is dropped in *types*, kept in *expressions*:
+  `Ctor()` is a Deep `app`, bare `Ctor` is a Deep `var`, and a zero-field
+  record keeps `{}` to distinguish `record`/`pat-record`. `! {}` is a
+  declared-pure upper bound, semantically distinct from an omitted
+  effect clause.
+- The unit value is `()`, the unit type is `unit`, and a singleton tuple
+  is `(x,)` — that comma is semantic, not cosmetic.
+- Effects carry exact casing: `Diff`, `Random`, `Accum`, `IO`, `Test`,
+  `Resource(...)`.
+- Non-primary transform arguments are named: `grad(f, wrt=x)`,
+  `vmap(f, axis=n)`; axis zero is bare `vmap(f)`.
+- Canonical output omits trailing separators and prints the canonical
+  literal spelling (shortest round-trippable float, no digit separators
+  or redundant zeroes).
+
+**Migrating an existing tree:** `chelis migrate surf --from 0.18 --check
+<paths>...` reports, `--inplace` rewrites as a preflighted batch
+transaction (whole batch validated before any write; atomic replacement
+with rollback; symlinks and multiply-hard-linked files rejected).
+`--from 0.18` is the only accepted value. Identifiers that became
+reserved words are **not** guessed — the migrator stops and names the
+byte offset, and the rename is yours to author. Semantic boundaries are
+not migrated for you: suffix adoption, overflow, non-finite values,
+literal patterns, raw controls, invalid escapes, and structurally
+ambiguous legacy forms still reject.
+
+Do not reach for `--allow-style-violations` or
+`CHELIS_STYLE_GATE_DISABLE=1` to get past a v0.19 failure. Those exist
+for emergency local builds and the ad-hoc integration corpus
+respectively; migrate the source instead.
+
 ## Chelis-Specific Rules
 
 ### Deep AST
@@ -668,6 +720,17 @@ When writing or rewriting Surf in this repository:
 - 62-tag closed vocabulary; see `spec/03-deep-syntax.md`
 - Function application is `app`, names are `var`, literals are `lit`
 - RISC primitives are built-in functions, not tags
+- **Decompilation routes through a typed Deep-to-Surf resugaring
+  boundary** (chelis#1031) with a total disposition for every public
+  Deep tag, printed by the shared Surf printer. It fails closed on
+  malformed Deep, invalid surface identifiers, unknown `surf_*`
+  metadata, incompatible literal metadata, and non-finite constructed
+  values — a resugaring failure is a real defect, not output to work
+  around. Canonical Deep and canonical Surf are two representations of
+  one public language, bound by the three executable laws in
+  `spec/02-surf-syntax.md` §0.1 (`desugar(resugar(·))`, formatter
+  idempotence, and the semantic retraction). If you change either
+  printer or the desugarer, those laws are the oracle.
 
 ### Type System
 
