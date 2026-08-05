@@ -302,7 +302,7 @@ fn reshape_in_rank_poly_body_rejected() {
 fn vmap_transform_in_rank_poly_body_rejected() {
     let json = check_json(
         "def inner(x: &tensor[a, b, f32]) -> tensor[b, a, f32] = permute(x, 1, 0)\n\
-         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner, axis=0)\n",
+         def evil(x: &tensor[..r, f32]) -> tensor[..r, f32] = x |> vmap(inner)\n",
     );
     assert_rank_rejected(&json, "vmap transform in ..r body");
 }

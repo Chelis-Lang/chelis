@@ -1,13 +1,12 @@
 module Std.Io.Csv
 export (read_csv, try_read_csv, to_csv, try_to_csv, write_csv, try_write_csv)
 import Std.Text (join)
-def read_csv(path: string) -> List[Dict[string, string]] = {
+def read_csv(path: string) -> List[Dict[string, string]] =
   match try_read_csv(path) with {
     | Some(rows) => rows
     | None => fail(string_concat("read_csv failed for ", path))
   }
-}
-def try_read_csv(path: string) -> Option[List[Dict[string, string]]] = {
+def try_read_csv(path: string) -> Option[List[Dict[string, string]]] =
   if not(file_exists(path)) then None else {
     raw_lines = read_lines(path)
     lines = filter(fn (line: string) -> gt(string_len(line), cast(0, int64)), raw_lines)
@@ -16,54 +15,47 @@ def try_read_csv(path: string) -> Option[List[Dict[string, string]]] = {
       | None => None
     }
   }
-}
-def to_csv(rows: List[Dict[string, string]]) -> string = {
+def to_csv(rows: List[Dict[string, string]]) -> string =
   match try_to_csv(rows) with {
     | Some(text) => text
     | None => fail(string_concat("to_csv failed at row ", string_concat(to_string(first_invalid_row(rows)), ": every row must have exactly the header row's keys, and no field or header may contain CR or LF")))
   }
-}
-def try_to_csv(rows: List[Dict[string, string]]) -> Option[string] = {
+def try_to_csv(rows: List[Dict[string, string]]) -> Option[string] =
   if eq(len(rows), cast(0, int64)) then Some("") else {
     headers = dict_keys(index(rows, cast(0, int64)))
     if and(fields_ok(headers), rows_ok(headers, rows)) then Some(render_all(headers, rows)) else None
   }
-}
-def write_csv(path: string, rows: List[Dict[string, string]]) -> unit = {
+def write_csv(path: string, rows: List[Dict[string, string]]) -> unit =
   match try_to_csv(rows) with {
     | Some(text) => write_file(path, text)
     | None => fail(string_concat("write_csv failed for ", string_concat(path, string_concat(" at row ", string_concat(to_string(first_invalid_row(rows)), ": every row must have exactly the header row's keys, and no field or header may contain CR or LF")))))
   }
-}
-def try_write_csv(path: string, rows: List[Dict[string, string]]) -> Option[unit] = {
+def try_write_csv(path: string, rows: List[Dict[string, string]]) -> Option[unit] =
   match try_to_csv(rows) with {
     | Some(text) => Some(write_file(path, text))
     | None => None
   }
-}
 def rows_ok(headers: List[string], rows: List[Dict[string, string]]) -> bool = fold(fn (acc: bool, row: Dict[string, string]) -> and(acc, row_ok(headers, row)), true, rows)
-def row_ok(headers: List[string], row: Dict[string, string]) -> bool = {
+def row_ok(headers: List[string], row: Dict[string, string]) -> bool =
   if neq(len(row), len(headers)) then false else fold(fn (acc: bool, h: string) -> and(acc, match dict_get(row, h) with {
     | Some(v) => field_ok(v)
     | None => false
   }), true, headers)
-}
 def field_ok(text: string) -> bool = not(or(string_contains(text, "\n"), string_contains(text, "\r")))
 def fields_ok(values: List[string]) -> bool = fold(fn (acc: bool, v: string) -> and(acc, field_ok(v)), true, values)
 def render_all(headers: List[string], rows: List[Dict[string, string]]) -> string = string_concat(render_line(map(fn (h: string) -> render_field(h), headers)), string_concat("\n", string_concat(join(map(fn (row: Dict[string, string]) -> render_row(headers, row), rows), "\n"), "\n")))
-def render_row(headers: List[string], row: Dict[string, string]) -> string = {
+def render_row(headers: List[string], row: Dict[string, string]) -> string =
   render_line(map(fn (h: string) -> render_field(match dict_get(row, h) with {
     | Some(v) => v
     | None => ""
   }), headers))
-}
 def render_line(fields: List[string]) -> string = {
   line = join(fields, ",")
   if eq(string_len(line), cast(0, int64)) then "\"\"" else line
 }
-def render_field(text: string) -> string = { if or(string_contains(text, ","), string_contains(text, "\"")) then string_concat("\"", string_concat(double_quotes(text), "\"")) else text }
-def double_quotes(text: string) -> string = { if not(string_contains(text, "\"")) then text else fold(fn (acc: string, idx: int64) -> string_concat(acc, if eq(string_slice(text, idx, cast(1, int64)), "\"") then "\"\"" else string_slice(text, idx, cast(1, int64))), "", range(cast(0, int64), string_len(text))) }
-def first_invalid_row(rows: List[Dict[string, string]]) -> int64 = {
+def render_field(text: string) -> string = if or(string_contains(text, ","), string_contains(text, "\"")) then string_concat("\"", string_concat(double_quotes(text), "\"")) else text
+def double_quotes(text: string) -> string = if not(string_contains(text, "\"")) then text else fold(fn (acc: string, idx: int64) -> string_concat(acc, if eq(string_slice(text, idx, cast(1, int64)), "\"") then "\"\"" else string_slice(text, idx, cast(1, int64))), "", range(cast(0, int64), string_len(text)))
+def first_invalid_row(rows: List[Dict[string, string]]) -> int64 =
   if eq(len(rows), cast(0, int64)) then cast(-1, int64) else {
     headers = dict_keys(index(rows, cast(0, int64)))
     if not(fields_ok(headers)) then cast(0, int64) else {
@@ -71,8 +63,7 @@ def first_invalid_row(rows: List[Dict[string, string]]) -> int64 = {
       scan.1
     }
   }
-}
-def parse_rows(headers: List[string], lines: List[string], rows: List[Dict[string, string]]) -> Option[List[Dict[string, string]]] = {
+def parse_rows(headers: List[string], lines: List[string], rows: List[Dict[string, string]]) -> Option[List[Dict[string, string]]] =
   if eq(len(lines), cast(0, int64)) then Some(rows) else {
     line = index(lines, cast(0, int64))
     match parse_line(line) with {
@@ -80,9 +71,8 @@ def parse_rows(headers: List[string], lines: List[string], rows: List[Dict[strin
       | None => None
     }
   }
-}
 def parse_line(line: string) -> Option[List[string]] = parse_line_chars(line, cast(0, int64), false, "", [])
-def parse_line_chars(line: string, idx: int64, in_quotes: bool, current: string, fields: List[string]) -> Option[List[string]] = {
+def parse_line_chars(line: string, idx: int64, in_quotes: bool, current: string, fields: List[string]) -> Option[List[string]] =
   if gte(idx, string_len(line)) then if in_quotes then None else Some(append(fields, current)) else {
     ch = string_slice(line, idx, cast(1, int64))
     if eq(ch, "\"") then if in_quotes then {
@@ -90,4 +80,3 @@ def parse_line_chars(line: string, idx: int64, in_quotes: bool, current: string,
       if and(lt(next, string_len(line)), eq(string_slice(line, next, cast(1, int64)), "\"")) then parse_line_chars(line, add(idx, cast(2, int64)), true, string_concat(current, "\""), fields) else parse_line_chars(line, add(idx, cast(1, int64)), false, current, fields)
     } else parse_line_chars(line, add(idx, cast(1, int64)), true, current, fields) else if and(eq(ch, ","), not(in_quotes)) then parse_line_chars(line, add(idx, cast(1, int64)), false, "", append(fields, current)) else parse_line_chars(line, add(idx, cast(1, int64)), in_quotes, string_concat(current, ch), fields)
   }
-}

@@ -251,7 +251,7 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
 ///
 /// - **Fn-wrapped form** `(def {} <name> (fn {} (params {}) <inner>))`. The
 ///   Surf desugarer wraps *every* def body in a `fn`, so both
-///   `def eps() -> f32 = 0.001` and `def eps = 0.001` desugar to this shape
+///   `def eps() -> f32 = 0.001` and `def eps() = 0.001` desugar to this shape
 ///   with empty params. The constant's value is the evaluation of `<inner>`,
 ///   so the UNWRAPPED inner body is registered.
 /// - **Bare value-binding form** `(def {} <name> <value>)` where `<value>`
@@ -332,7 +332,7 @@ pub(crate) fn collect_zero_arg_constants(exprs: &[Expr]) -> HashMap<String, Expr
 /// (review-3): a literal, an application of an admitted arithmetic /
 /// intrinsic / comparison / boolean op over constant-foldable arguments, or
 /// a `(var name)` reference to another constant in `candidates`. `visiting`
-/// guards against cyclic constant references (e.g. `def a = b; def b = a`),
+/// guards against cyclic constant references (e.g. `def a() = b; def b() = a`),
 /// which are not foldable.
 fn is_constant_foldable(
     expr: &Expr,

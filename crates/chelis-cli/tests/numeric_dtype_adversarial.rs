@@ -155,7 +155,7 @@ fn rt4_f1_f64_literal_storage_must_be_f64() {
     write_file(
         &src,
         r#"x: tensor[3, f64] = [1.1, 2.2, 3.3]
-y: tensor[3, f64] = [1.0e-9, 1.0e9, 0.1]
+y: tensor[3, f64] = [1e-9, 1000000000.0, 0.1]
 "#,
     );
     let build = run_build_in(dir.path(), &src, Some(&out_dir));

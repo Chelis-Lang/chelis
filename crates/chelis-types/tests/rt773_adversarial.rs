@@ -181,7 +181,7 @@ type P =
   | P { v: tensor[2, f32] }
 type V =
   | V { v: tensor[2, f32] }
-def take_four(a: P, b: P, c: P, d: V) -> f32 = { cast(0.0, f32) }
+def take_four(a: P, b: P, c: P, d: V) -> f32 = cast(0.0, f32)
 ";
 
 #[test]

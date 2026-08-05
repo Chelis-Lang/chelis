@@ -125,7 +125,7 @@ def prob_value(p: Probability) -> f32 = p.value
 def internal_make(x: f32) -> Probability = Probability { value: x }
 def internal_consume(p: Probability) -> f32 = p.value
 def with_t(f: Probability -> f32) -> f32 = f(probability(0.5))
-def helper -> WrapRec = WrapRec { prob: probability(0.5), score: 1.0 }
+def helper() -> WrapRec = WrapRec { prob: probability(0.5), score: 1.0 }
 half = probability(0.5)
 ";
 
@@ -145,7 +145,7 @@ export (initial)
 type Flag =
   | Ready
   | Blocked { reason: f32 }
-def initial -> Flag = Ready
+def initial() -> Flag = Ready
 ";
 
 const PROB_PRODUCERS: &str = "probability: (f32) -> Probability";
@@ -686,7 +686,7 @@ fn sixth_rejection_function_typed_param_domain() {
     // must not be callable from outside; it hands caller-supplied
     // code unobligated values.
     let outside = "module Agent.Strategy
-def sneak -> f32 = with_t(prob_value)
+def sneak() -> f32 = with_t(prob_value)
 ";
     let exprs = deep_of_surf(&[PROB_SIXTH_MODULE, outside]);
     assert_single_violation(

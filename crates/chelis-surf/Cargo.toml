@@ -13,6 +13,7 @@ chelis-vocab.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 miette.workspace = true
+ryu.workspace = true
 
 [dev-dependencies]
 proptest = "1"

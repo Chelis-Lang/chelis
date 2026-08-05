@@ -62,10 +62,10 @@ grad(f, wrt=(param1, param2))
 Parameters not in `wrt` are treated as constants (they receive no gradient). This is useful when a function has both parameters (to be optimized) and data (fixed inputs):
 
 ```
-def loss(w: tensor[D, P], x: tensor[D2, P], y: tensor[P]): tensor[P] = ...
+def loss(w: tensor[D, P], x: tensor[D2, P], y: tensor[P]) -> tensor[P] = ...
 
 -- Differentiate only w.r.t. weights:
-let dw = grad(loss, wrt=(w))(w, x, y)
+dw = grad(loss, wrt=w)(w, x, y)
 ```
 
 When `wrt` is specified, the gradient result contains entries only for the listed
@@ -323,7 +323,7 @@ def jac_row[n](
   theta: tensor[n, f32], x: f32, y: f32
 ) -> tensor[n, f32] = {
   target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)
-  grad(target, wrt=(theta_local))(theta)
+  grad(target, wrt=theta_local)(theta)
 }
 ```
 
@@ -502,10 +502,10 @@ integer axis position. The implementation canonicalizes nonzero axes to axis 0 w
 
 ### 3.2 Semantics
 
-Conceptually, `vmap(f, axis=0)` is equivalent to:
+Conceptually, the default-axis form `vmap(f)` is equivalent to:
 
 ```
-vmap(f, axis=0)(x) = stack([f(x[i]) for i in batch_dimension])
+vmap(f)(x) = stack([f(x[i]) for i in batch_dimension])
 ```
 
 But it is **not** implemented as a loop. Instead, it is a DAG rewrite that lifts every operation to operate over the additional batch dimension.
@@ -542,7 +542,7 @@ If `f` takes multiple arguments, each tensor argument gains the batch dimension:
 ```
       G |- f : (tensor[D1, P], tensor[D2, P]) -> tensor[D3, P]
       ---------------------------------------------------
-      G |- vmap(f, axis=0) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
+      G |- vmap(f) : (tensor[{batch} + D1, P], tensor[{batch} + D2, P])
                              -> tensor[{batch} + D3, P]
 ```
 
@@ -775,7 +775,7 @@ Fusion is the primary optimization for GPU backends, where memory bandwidth is t
 |-----------|---------|-------|-------|
 | `grad(f)` | Reverse-mode AD | 0 | Core operation |
 | `grad(grad(f))` | Second derivatives | 0 | Nested AD |
-| `grad(f, wrt=(w))` | Gradient w.r.t. specific params | 0 | Selective differentiation |
+| `grad(f, wrt=w)` | Gradient w.r.t. specific param | 0 | Selective differentiation |
 | `vmap(f, axis=a)` | Vectorize over integer axis `a` | 2 | Batch dimension inserted at `a` |
 | `jit(f)` | Compile and cache | 2 | Shape-specialized |
 | `jit(grad(f))` | Compile gradient function | 2 | Most common pattern |

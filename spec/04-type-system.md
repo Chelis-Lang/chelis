@@ -903,7 +903,7 @@ Functions can be generic over dimensions using dimension variables:
 
 ```scheme
 ;; In Surf:
-;; def transpose[a, b](x: tensor[a, b, f32]): tensor[b, a, f32]
+;; def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32]
 
 (defsig {} transpose
   (t-fn {}
@@ -931,7 +931,7 @@ distinct from call-site instantiation: it is only at the call site that a
 dim variable is genuinely bound to a concrete dimension.
 
 ```scheme
-;; def f[n, m](x: tensor[n, f32], y: tensor[m, f32]): tensor[n, f32] = y
+;; def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = y
 ;; TYPE ERROR: the body returns tensor[m, f32] but the declared return is
 ;; tensor[n, f32]; n and m are distinct rigid dim parameters.
 ```
@@ -966,16 +966,16 @@ dimension to the caller-visible input world. Both of the following are
   a distinct param-position declared dim parameter.
 
 ```scheme
-;; def f[k](a: tensor[2, f32]): tensor[k, f32] = a
+;; def f[k](a: tensor[2, f32]) -> tensor[k, f32] = a
 ;; TYPE ERROR: the body pins the return-only dim parameter k to the
 ;; parameter's concrete Lit(2); the signature promised an output
 ;; dimension the body does not derive from the inputs.
 
-;; def f[n, m](x: tensor[n, f32]): tensor[m, f32] = x
+;; def f[n, m](x: tensor[n, f32]) -> tensor[m, f32] = x
 ;; TYPE ERROR: the return-only dim parameter m collapses with the
 ;; param-position dim parameter n.
 
-;; def make(): tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
+;; def make() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
 ;; OK: output-inferred. The body produces a body-internal tensor[3, f32]
 ;; and the scheme resolves n := 3; no input dimension is involved.
 ```
@@ -1790,10 +1790,10 @@ narrowing. The closed suffix set is:
 | `i32` | `(t-prim {} int32)` | `42i32` |
 | `i64` | `(t-prim {} int64)` | `42i64` |
 
-Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) attach to either an integer
-or a float literal token (`42f32` and `1.0f32` are both well-formed and bind
-at f32). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`) attach to integer
-literal tokens only; `1.0i8` is a parse error.
+Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) bind the decoded float at
+that type. Canonical Surf requires the canonical float body (`42.0f32`, not
+the v0.18 alias `42f32`). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`)
+attach to integer literal tokens only; `1.0i8` is a parse error.
 
 Suffix lexing rule: a suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
@@ -1801,15 +1801,13 @@ comment, or other character. `1.0 f32` (with whitespace) is two tokens (a
 float followed by an identifier) and binds at the literal default per §5.3,
 which is then subject to the surrounding-position rules in the type checker.
 
-Hex-literal interaction (parser-implementation note): the lexer's hex-literal
-rule consumes `[0-9a-fA-F_]*` after `0x`. Because `f` is a hex digit, a hex
-integer literal cannot directly carry a float-typed suffix (`0xFFf32` is not
-"hex 0xFF then suffix f32"; it is "hex 0xFFf then int 32" under maximal-munch
-hex lexing, which is rejected as malformed). Hex integer literals MAY carry
-integer-typed suffixes only (`0xFFi8`, `0xFFi32`, etc.); float-typed suffixes
-on hex literals are a parse error with a diagnostic suggesting an explicit
-`cast`. Decimal float literals carry float suffixes without ambiguity
-(`1.0f32`, `1.0e3f32`).
+The normal Surf parser accepts value-preserving hexadecimal/binary integer
+spellings, digit separators strictly between digits, and equivalent finite
+exponent spellings. Integer radix forms may carry an integer suffix; they may
+not carry a float suffix. These lexical choices do not change the exact suffix
+binding rule, and the canonical printer emits the decoded decimal token.
+Canonical decimal float literals carry float suffixes without ambiguity
+(`1.0f32`, `1000.0f32`).
 
 Deferred suffixes:
 

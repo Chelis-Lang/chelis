@@ -170,6 +170,7 @@ pub enum Expr {
     Apply(Box<Expr>, Vec<Expr>, Span), // f(x, y) or f x
     List(Vec<Expr>, Span),
     Record(String, Vec<(String, Expr)>, Span),
+    RecordUpdate(Box<Expr>, Vec<(String, Expr)>, Span),
     Access(Box<Expr>, String, Span),
     TupleGet(Box<Expr>, i64, Span),
     Binary(BinOp, Box<Expr>, Box<Expr>, Span),
@@ -189,6 +190,10 @@ pub enum Expr {
     WithSeed(Box<Expr>, Box<Expr>, Span),
     WithDevice(Box<Expr>, Box<Expr>, Span),
     Par(Vec<Expr>, Span),                    // par { e1; e2; ... }
+    Do(Vec<Expr>, Span),                     // do { e1; e2; ... }
+    Quote(Box<Expr>, Span),                  // quote(e)
+    Unquote(Box<Expr>, Span),                // unquote(e)
+    Splice(Box<Expr>, Span),                 // splice(e)
     Annotate(Box<Expr>, TypeExpr, Span),     // expr : Type
     Block(Vec<LetBinding>, Box<Expr>, Span), // { x = ...; expr }
 }

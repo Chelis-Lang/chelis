@@ -69,7 +69,7 @@ fn issue_197_argmax_in_grad_path_emits_ad_error_not_supported() {
         &path,
         "def loss(theta: tensor[2, 3, f32]) -> f32 =\n\
            tensor_to_scalar(sum(cast(argmax_reduce(copy(theta), 0), f32), 0))\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          out = grad_loss(to_tensor([[1.0, 2.0, 3.0], [0.5, 4.0, 1.0]]))\n",
     );
     let output = run_build(&path);
@@ -100,7 +100,7 @@ fn issue_197_argmin_in_grad_path_emits_ad_error_not_supported() {
         &path,
         "def loss(theta: tensor[2, 3, f32]) -> f32 =\n\
            tensor_to_scalar(sum(cast(argmin_reduce(copy(theta), 0), f32), 0))\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          out = grad_loss(to_tensor([[1.0, 2.0, 3.0], [0.5, 4.0, 1.0]]))\n",
     );
     let output = run_build(&path);
@@ -134,7 +134,7 @@ fn issue_197_floor_in_grad_path_emits_ad_error_not_supported() {
         &path,
         "def loss(theta: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(floor(copy(theta)), 0))\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          out = grad_loss(to_tensor([1.5, 2.5]))\n",
     );
     let output = run_build(&path);
@@ -168,7 +168,7 @@ fn issue_197_ceil_in_grad_path_emits_ad_error_not_supported() {
         &path,
         "def loss(theta: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(ceil(copy(theta)), 0))\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          out = grad_loss(to_tensor([1.5, 2.5]))\n",
     );
     let output = run_build(&path);
@@ -203,7 +203,7 @@ fn round_in_grad_path_emits_ad_error_not_supported() {
         &path,
         "def loss(theta: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(round(copy(theta)), 0))\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          out = grad_loss(to_tensor([1.5, 2.5]))\n",
     );
     let output = run_build(&path);
@@ -237,7 +237,7 @@ fn issue_197_differentiable_body_still_builds_after_checked_routing() {
         &path,
         "def loss(theta: tensor[2, f32]) -> f32 =\n\
            tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0))\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          out = grad_loss(to_tensor([1.0, 2.0]))\n",
     );
     let output = run_build(&path);

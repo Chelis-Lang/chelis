@@ -29,7 +29,7 @@ use tempfile::tempdir;
 fn write_fixture(root: &std::path::Path) {
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::create_dir_all(root.join("docs")).expect("mkdir docs");
-    fs::write(root.join("src/example.ch"), "def main -> i32 = 0\n").expect("write surf");
+    fs::write(root.join("src/example.ch"), "def main() -> i32 = 0\n").expect("write surf");
     fs::write(root.join("docs/0_leading_digit.md"), "# placeholder doc\n").expect("write doc");
 }
 
@@ -108,11 +108,9 @@ fn lint_cli_dot_prefix_explicit_path_already_fires_rule() {
 
 /// Build a fixture that exercises exception-list matching. The shared
 /// `style_gate::exceptions()` registry contains an entry for
-/// `crates/chelis-surf/tests/fixtures/*.ch` with rule
-/// `surf-def-arrow-form` (the Surf parser test corpus deliberately
-/// exercises legacy colon-form return syntax). The fixture mirrors that
-/// path layout so the exception applies, and writes a single file using
-/// the colon form to trigger the rule.
+/// `crates/chelisup/bootstrap/chelisup.sh` with rule
+/// `no-shell-scripts`. The fixture mirrors that path so the repository's
+/// sole published-bootstrap exception applies.
 fn write_exception_fixture(root: &std::path::Path) {
     // `detect_lint_workspace_root` probes the Cargo workspace root via
     // `cargo locate-project --workspace`. A synthesized tree that
@@ -126,13 +124,9 @@ fn write_exception_fixture(root: &std::path::Path) {
         "[workspace]\nmembers = []\nresolver = \"2\"\n",
     )
     .expect("write workspace marker");
-    let dir = root.join("crates/chelis-surf/tests/fixtures");
+    let dir = root.join("crates/chelisup/bootstrap");
     fs::create_dir_all(&dir).expect("mkdir fixture dir");
-    fs::write(
-        dir.join("block_binding_expr.ch"),
-        "def f(x: f32): f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n",
-    )
-    .expect("write fixture");
+    fs::write(dir.join("chelisup.sh"), "#!/bin/sh\necho bootstrap\n").expect("write fixture");
 }
 
 /// Pin the exception-matching invariant: workspace-rooted exception
@@ -143,13 +137,13 @@ fn write_exception_fixture(root: &std::path::Path) {
 /// against the walk-target root, not the workspace root. When the
 /// walk-target is a sub-directory (e.g., `crates`), the relative path
 /// loses its `crates/` segment, so a workspace-rooted exception pattern
-/// like `crates/chelis-surf/tests/fixtures/*.ch` never matches and the
+/// like `crates/chelisup/bootstrap/chelisup.sh` never matches and the
 /// violation fires as a false positive. CI invokes `chelis lint
 /// --check .` so the gate isn't broken, but developers linting
 /// sub-trees see spurious errors.
 ///
 /// Both invocations must produce identical stdout and exit code, with
-/// zero `surf-def-arrow-form` violations because the exception applies.
+/// zero `no-shell-scripts` violations because the exception applies.
 #[test]
 fn lint_cli_exception_pattern_matches_under_subtree_and_cwd_walks() {
     let dir = tempdir().expect("tempdir");
@@ -159,9 +153,9 @@ fn lint_cli_exception_pattern_matches_under_subtree_and_cwd_walks() {
     let (code_cwd, out_cwd) = run_lint(root, &["."]);
     let (code_explicit, out_explicit) = run_lint(root, &["crates"]);
 
-    // Neither invocation should report `surf-def-arrow-form` on the
+    // Neither invocation should report `no-shell-scripts` on the
     // fixture: the workspace-rooted exception is in effect for both.
-    let needle = "surf-def-arrow-form";
+    let needle = "no-shell-scripts";
     assert!(
         !out_cwd.contains(needle),
         "CWD walk must apply workspace-rooted exception; stdout was:\n{out_cwd}"
@@ -202,7 +196,7 @@ fn lint_cli_exception_pattern_matches_under_multi_subtree_walk() {
 
     let (code, out) = run_lint(root, &["crates", "docs", "examples", "packages"]);
     assert!(
-        !out.contains("surf-def-arrow-form"),
+        !out.contains("no-shell-scripts"),
         "multi-subtree walk must apply workspace-rooted exception; stdout was:\n{out}"
     );
     assert_eq!(

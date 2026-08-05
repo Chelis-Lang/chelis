@@ -62,7 +62,7 @@ fn assert_linearity_clean(source: &str) {
 fn aliasing_consume_control_passes() {
     assert_linearity_clean(
         r#"
-def f(w: tensor[4, f32]): tensor[4, f32] =
+def f(w: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = w
     realize(y)
@@ -83,7 +83,7 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 fn structural_consume_control_errors() {
     let errors = linearity_errors(
         r#"
-def f(w: tensor[4, f32]): tensor[4, f32] =
+def f(w: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(w)
     add(w, y)
@@ -111,7 +111,7 @@ def f(w: tensor[4, f32]): tensor[4, f32] =
 fn tuple_destructure_double_realize_errors() {
     let errors = linearity_errors(
         r#"
-def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
+def f(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
   {
     (a, b) = pair
     r1: tensor[4, f32] = realize(a)
@@ -137,10 +137,28 @@ def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
 fn tuple_destructure_single_consume_each_passes() {
     assert_linearity_clean(
         r#"
-def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
+def f(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
   {
     (a, b) = pair
     add(realize(a), realize(b))
+  }
+"#,
+    );
+}
+
+/// A destructuring marker governs the bindings it introduces, not the
+/// expression evaluated to produce the first temporary. In particular, a
+/// wildcard discard after an earlier use of an ordinary parameter must retain
+/// the normal implicit-copy behavior for that parameter.
+#[test]
+fn destructuring_scope_starts_after_the_root_binding_value() {
+    assert_linearity_clean(
+        r#"
+def f(x: tensor[4, f32]) -> unit =
+  {
+    y: tensor[4, f32] = realize(x)
+    _ = drop(x)
+    ()
   }
 "#,
     );

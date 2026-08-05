@@ -604,7 +604,7 @@ out = f(1.0)\n";
 fn issue_352_vmap_over_capturing_def_gap() {
     let source = "w = to_tensor([10.0, 20.0])\n\
 def dot_w(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
-def fv(xs: tensor[3, 2, f32]) -> tensor[3, f32] = xs |> vmap(dot_w, axis=0)\n\
+def fv(xs: tensor[3, 2, f32]) -> tensor[3, f32] = xs |> vmap(dot_w)\n\
 out = fv(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
 
     let build = chelis_build_c(source, "vmapcap");
@@ -675,7 +675,7 @@ fn issue_377_vmap_of_grad_over_capturing_def_fails_clean() {
     let source = "w = to_tensor([10.0, 20.0])\n\
 def f(x: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(mul(x, w), 0))\n\
 def gradf(x: tensor[2, f32]) -> tensor[2, f32] = grad(f)(x)\n\
-def batched(xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = xs |> vmap(gradf, axis=0)\n\
+def batched(xs: tensor[3, 2, f32]) -> tensor[3, 2, f32] = xs |> vmap(gradf)\n\
 out = batched(to_tensor([[1.0, 1.0], [2.0, 2.0], [0.0, 1.0]]))\n";
 
     let dir = tempdir().expect("tempdir");

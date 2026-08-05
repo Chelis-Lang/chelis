@@ -314,12 +314,12 @@ fn issue524_absent_vmap_axis_defaults_to_zero_and_lowers() {
     assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
 }
 
-/// CONTROL (explicit constant axis via Surf): the surf surface form
-/// `vmap(process, axis=0)` lowers cleanly.
+/// CONTROL (explicit nonzero constant axis via Surf): the canonical named
+/// `axis=1` form lowers cleanly.
 #[test]
-fn issue524_explicit_constant_vmap_axis_via_surf_lowers() {
+fn issue524_explicit_nonzero_constant_vmap_axis_via_surf_lowers() {
     let src = "def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)\n\
-         def batch_process(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs |> vmap(process, axis=0)\n";
+         def batch_process(xs: tensor[features, batch, f32]) -> tensor[features, batch, f32] = xs |> vmap(process, axis=1)\n";
     let dag = lower_surf_program(src).expect("an explicit constant vmap axis must lower");
     assert!(!dag.nodes().is_empty(), "lowered DAG must be non-empty");
 }

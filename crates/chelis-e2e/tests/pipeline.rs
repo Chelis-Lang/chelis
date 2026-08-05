@@ -8,7 +8,7 @@ fn has_any_root(result: &chelis_e2e::pipeline::PipelineResult, names: &[&str]) -
 
 #[test]
 fn pipeline_smoke_test_relu() {
-    let src = "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)";
+    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let result = compile_surf(src);
     assert!(result.is_ok(), "pipeline failed: {:?}", result.err());
     let dag = result.unwrap().dag;
@@ -91,7 +91,7 @@ fn pipeline_transformer_model_lowers() {
 #[test]
 fn pipeline_tier2_relu_decomposes() {
     // Verify relu desugars through the pipeline and lowers to MaxElem + Const
-    let src = "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)";
+    let src = "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)";
     let result = compile_surf(src).unwrap();
     let dag = result.dag;
 
@@ -110,7 +110,7 @@ fn pipeline_tier2_relu_decomposes() {
 fn pipeline_macro_composition_lowers() {
     let src = r#"
 macro residual_relu(x) = add(copy(x), relu(x))
-def f(x: tensor[n, f32]): tensor[n, f32] = residual_relu(x)
+def f(x: tensor[n, f32]) -> tensor[n, f32] = residual_relu(x)
 "#;
     let result = compile_surf(src).expect("macro program should compile");
     assert!(
@@ -134,8 +134,8 @@ fn pipeline_vmap_example_lowers() {
 #[test]
 fn pipeline_vmap_explicit_axis_lowers() {
     let src = r#"
-def process(x: tensor[features, f32]): tensor[features, f32] = relu(x)
-def batch_process(xs: tensor[features, batch, f32]): tensor[features, batch, f32] = vmap(process, axis=1)(xs)
+def process(x: tensor[features, f32]) -> tensor[features, f32] = relu(x)
+def batch_process(xs: tensor[features, batch, f32]) -> tensor[features, batch, f32] = vmap(process, axis=1)(xs)
 "#;
     let result = compile_surf(src).expect("axis=1 vmap example should compile");
     assert!(
@@ -212,17 +212,17 @@ def pair(x: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (copy(x), x)
 fn pipeline_preserves_rejection_stage_messages() {
     let fixtures = [
         ("def broken(\n", "Surf parse error:"),
-        ("def broken -> int32 = missing\n", "Type errors:"),
+        ("def broken() -> int32 = missing\n", "Type errors:"),
         (
             "def noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
             "Random",
         ),
         (
-            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
+            "def broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n",
             "consumed",
         ),
         (
-            "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=(theta))\nout = grad_loss(to_tensor([1.5, 2.5]))\n",
+            "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=theta)\nout = grad_loss(to_tensor([1.5, 2.5]))\n",
             "grad",
         ),
     ];

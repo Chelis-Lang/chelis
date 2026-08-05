@@ -291,7 +291,7 @@ fn blocked_bare_file_diagnostic_mismatch_is_drifted_and_preserved() {
         .stdout(predicate::eq(
             "DRIFTED            tests/probe.ch\n\
              \x20   expected diagnostic substring: \"some other diagnostic\"\n\
-             \x20   got: compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`\n\n\
+             \x20   got: compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> ()`\n\n\
              0 ok, 1 failing (blocked mode)\n",
         ));
 }
@@ -320,7 +320,7 @@ fn blocked_bare_file_mismatch_ndjson_preserves_actual_diagnostic() {
     assert_eq!(
         record["got"],
         serde_json::json!([
-            "compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> unit`"
+            "compile: unbound variable: missing_file_level_symbol; def 'helper' body doesn't match declared signature: body has type `() -> <error>`, declared type is `() -> ()`"
         ])
     );
 }

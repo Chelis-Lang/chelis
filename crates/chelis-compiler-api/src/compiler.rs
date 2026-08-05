@@ -2341,7 +2341,7 @@ fn eval_compiled(
         .filter_map(|(index, name)| {
             // Host value bindings and tensor-lane roots first; then fall
             // back to a host-lane *zero-argument fn* root's applied value
-            // (arrow-form `def name -> T = body`), which is a display root
+            // (arrow-form `def name() -> T = body`), which is a display root
             // but not a value binding, so it never lands in
             // `host_bindings` (chelis blocker2).
             let value = lookup_runtime_value_for_root(
@@ -2459,7 +2459,9 @@ pub fn validate(request: ValidateRequest) -> Result<ValidateResult> {
 
 pub fn decompile(request: DecompileRequest) -> Result<DecompileResult> {
     let exprs = parse_deep(&request.source)?;
-    let surf_text = chelis_surf::decompile::decompile_program(&exprs);
+    let surf_text = chelis_surf::decompile::try_decompile_program(&exprs).map_err(|error| {
+        stage_error("decompile", error.to_string(), GeneralKind::ValidationError)
+    })?;
     Ok(DecompileResult {
         surf_text: canonicalize_decompiled_surf(&surf_text)?,
     })
@@ -3784,7 +3786,12 @@ fn parse_error_span_surf(source: &str, err: &chelis_surf::parser::ParseError) ->
         chelis_surf::parser::ParseError::Expected { offset, .. }
         | chelis_surf::parser::ParseError::ReservedWordBinding { offset, .. }
         | chelis_surf::parser::ParseError::NonAssocChain { offset }
-        | chelis_surf::parser::ParseError::BareStatementInBlock { offset } => *offset,
+        | chelis_surf::parser::ParseError::BareStatementInBlock { offset }
+        | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
+            offset, ..
+        } => *offset,
     };
     Some(Span { offset, len: 0 })
 }
@@ -4056,6 +4063,17 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
                 .collect(),
             span: span(*s),
         },
+        Expr::RecordUpdate(base, fields, s) => WireSurfExpr::RecordUpdate {
+            base: Box::new(wire_expr(base)),
+            fields: fields
+                .iter()
+                .map(|(field, value)| WireRecordExprField {
+                    name: field.clone(),
+                    value: wire_expr(value),
+                })
+                .collect(),
+            span: span(*s),
+        },
         Expr::Access(inner, field, s) => WireSurfExpr::Access {
             expr: Box::new(wire_expr(inner)),
             field: field.clone(),
@@ -4146,6 +4164,22 @@ fn wire_expr(expr: &Expr) -> WireSurfExpr {
         },
         Expr::Par(exprs, s) => WireSurfExpr::Par {
             exprs: exprs.iter().map(wire_expr).collect(),
+            span: span(*s),
+        },
+        Expr::Do(exprs, s) => WireSurfExpr::Do {
+            exprs: exprs.iter().map(wire_expr).collect(),
+            span: span(*s),
+        },
+        Expr::Quote(expr, s) => WireSurfExpr::Quote {
+            expr: Box::new(wire_expr(expr)),
+            span: span(*s),
+        },
+        Expr::Unquote(expr, s) => WireSurfExpr::Unquote {
+            expr: Box::new(wire_expr(expr)),
+            span: span(*s),
+        },
+        Expr::Splice(expr, s) => WireSurfExpr::Splice {
+            expr: Box::new(wire_expr(expr)),
             span: span(*s),
         },
         Expr::Annotate(inner, ty, s) => WireSurfExpr::Annotate {
@@ -4633,6 +4667,21 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn decompile_maps_resugaring_rejection_to_the_validation_kind() {
+        let error = decompile(DecompileRequest {
+            source: "(future-form {} value)".to_string(),
+        })
+        .expect_err("an unknown Deep form must fail closed during resugaring");
+
+        assert_eq!(error.stage, "decompile");
+        assert_eq!(error.errors.len(), 1);
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::ValidationError
+        );
+    }
+
+    #[test]
     fn typed_deep_node_wire_bridge_preserves_the_complete_node_shape() {
         let exprs =
             chelis_deep::parse_and_stamp_file("(def {source: \"test\"} root (var {} value))")
@@ -4731,7 +4780,7 @@ mod tests {
         .expect("write app reef.lock");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
         )
         .expect("write app main");
         fs::write(
@@ -5282,9 +5331,9 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
 
     #[test]
     fn compile_source_arrow_form_def_appears_in_all_root_names() {
-        // Issue #947: arrow-form `def n -> T = body` must appear in
+        // Issue #947: arrow-form `def n() -> T = body` must appear in
         // all_root_names so eval_compiled can surface it.
-        let source = "def n -> int32 = add(cast(20, int32), cast(22, int32))\n";
+        let source = "def n() -> int32 = add(cast(20, int32), cast(22, int32))\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         assert!(
             compiled
@@ -5890,7 +5939,7 @@ dims = (rank(x), shape(x, 1), numel(x))
             source_kind: SourceKind::Surf,
             source: r#"
 parsed = match to_int(" 42 ") with {
-  | Some n => n
+  | Some(n) => n
   | None => cast(0, int64)
 }
 

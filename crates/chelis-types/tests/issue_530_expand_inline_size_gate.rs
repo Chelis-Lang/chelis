@@ -107,12 +107,10 @@ fn issue530_arith_over_tuple_get_size_rejected() {
 #[test]
 fn issue530_inline_match_size_rejected() {
     assert_form3_reject_message(
-        "def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = {\n\
-         \x20 expand(b, 0, match k with {\n\
+        "def g[a, n](b: tensor[n, f32], k: int64) -> tensor[a, n, f32] = expand(b, 0, match k with {\n\
          \x20   | 0 => 1i64\n\
          \x20   | _ => 2i64\n\
-         \x20 })\n\
-         }\n",
+         \x20 })\n",
         "inline match size",
     );
 }

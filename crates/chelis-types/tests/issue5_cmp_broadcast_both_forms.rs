@@ -21,8 +21,8 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
 #[test]
 fn issue5_both_forms_in_same_module_typecheck_clean() {
     let src = r#"
-def above -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
-def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
+def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
+def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -40,7 +40,7 @@ def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
 #[test]
 fn issue5_scalar_first_alone_typechecks_clean() {
     let src = r#"
-def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
+def below() -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
@@ -58,7 +58,7 @@ def below -> tensor[3, bool] = gt(1.5, to_tensor([1.0, 2.0, 3.0]))
 #[test]
 fn issue5_tensor_first_alone_typechecks_clean() {
     let src = r#"
-def above -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
+def above() -> tensor[3, bool] = gt(to_tensor([1.0, 2.0, 3.0]), 1.5)
 "#;
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);

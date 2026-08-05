@@ -10,6 +10,8 @@ const WIDTH: usize = 80;
 pub enum FormatError {
     Lex(LexError),
     Parse(ParseError),
+    AmbiguousComment { offset: usize },
+    ManualReservedIdentifier { keyword: String, offset: usize },
 }
 
 impl std::fmt::Display for FormatError {
@@ -17,6 +19,14 @@ impl std::fmt::Display for FormatError {
         match self {
             FormatError::Lex(e) => write!(f, "{e}"),
             FormatError::Parse(e) => write!(f, "{e}"),
+            FormatError::AmbiguousComment { offset } => write!(
+                f,
+                "comment at byte {offset} is inside a declaration; move it to a declaration boundary before migrating"
+            ),
+            FormatError::ManualReservedIdentifier { keyword, offset } => write!(
+                f,
+                "identifier `{keyword}` is reserved in canonical Surf; rename it manually before migrating (byte {offset})"
+            ),
         }
     }
 }
@@ -47,7 +57,7 @@ pub fn format_program(decls: &[Decl]) -> String {
     }
 }
 
-/// Canonically format Surf `source`, preserving its comments.
+/// Canonically format parser-accepted Surf `source`, preserving its comments.
 ///
 /// [`format_program`] works purely from the parsed AST, which carries
 /// no comments — it is the right entry point for synthesized decls
@@ -63,18 +73,112 @@ pub fn format_program(decls: &[Decl]) -> String {
 /// placement is not yet position-exact, but no comment is lost.
 pub fn format_source(source: &str) -> Result<String, FormatError> {
     let (tokens, comments) = lexer::lex_with_comments(source)?;
-    let decls = parser::parse(&tokens)?;
+    let decls = parser::parse_canonical_source_tokens(source, &tokens)?;
+    Ok(format_decls_with_comments(&decls, &comments))
+}
+
+/// Migrate the isolated v0.18 compatibility grammar to canonical Surf v0.19.
+///
+/// Harmless aliases are also accepted by the normal parser. This explicit
+/// entry point is reserved for genuinely legacy or incompatible grammar and
+/// renders through the same canonical AST printer used everywhere else.
+pub fn migrate_source_v018(source: &str) -> Result<String, FormatError> {
+    let (tokens, comments) = lexer::lex_with_comments(source).map_err(|error| match error {
+        LexError::ReservedForFuture { keyword, offset } => {
+            FormatError::ManualReservedIdentifier { keyword, offset }
+        }
+        error => FormatError::Lex(error),
+    })?;
+    let decls =
+        parser::parse_legacy_v018_source_tokens(source, &tokens).map_err(|error| match &error {
+            ParseError::Expected { found, offset, .. }
+                if matches!(found.as_str(), "Do" | "Quote" | "Unquote" | "Splice") =>
+            {
+                FormatError::ManualReservedIdentifier {
+                    keyword: found.to_ascii_lowercase(),
+                    offset: *offset,
+                }
+            }
+            _ => FormatError::Parse(error),
+        })?;
+    if let Some(offset) = first_ambiguous_comment_offset(&decls, &comments) {
+        return Err(FormatError::AmbiguousComment { offset });
+    }
+    Ok(format_decls_with_comments(&decls, &comments))
+}
+
+fn first_ambiguous_comment_offset(decls: &[Decl], comments: &[Comment]) -> Option<usize> {
+    for decl in decls {
+        if let Decl::Module { decls, .. } = decl {
+            if let Some(offset) = first_ambiguous_comment_offset(decls, comments) {
+                return Some(offset);
+            }
+            continue;
+        }
+        let span = decl.span();
+        for comment in comments
+            .iter()
+            .filter(|comment| comment.span.offset > span.offset && comment.span.offset < span.end())
+        {
+            let block = match decl {
+                Decl::FunDef {
+                    body: Expr::Block(bindings, body, block_span),
+                    ..
+                }
+                | Decl::LetDef {
+                    value: Expr::Block(bindings, body, block_span),
+                    ..
+                } => Some((bindings.as_slice(), body.as_ref(), *block_span)),
+                _ => None,
+            };
+            if block.is_some_and(|(bindings, body, block_span)| {
+                comment_is_at_preservable_block_boundary(
+                    bindings,
+                    body,
+                    block_span,
+                    comment.span.offset,
+                )
+            }) {
+                continue;
+            }
+            return Some(comment.span.offset);
+        }
+    }
+    None
+}
+
+fn comment_is_at_preservable_block_boundary(
+    bindings: &[LetBinding],
+    body: &Expr,
+    block_span: chelis_deep::Span,
+    offset: usize,
+) -> bool {
+    if offset <= block_span.offset || offset >= block_span.end() {
+        return false;
+    }
+    for binding in bindings {
+        let item_start = let_pattern_span(&binding.pattern).offset;
+        let value_end = expression_span(&binding.value).end();
+        if offset > item_start && offset < value_end {
+            return false;
+        }
+    }
+    let body_span = expression_span(body);
+    !(offset > body_span.offset && offset < body_span.end())
+}
+
+fn format_decls_with_comments(decls: &[Decl], comments: &[Comment]) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut next = 0usize;
-    emit_decls_with_comments(&decls, &comments, &mut next, &mut lines);
+    emit_decls_with_comments(decls, comments, &mut next, &mut lines);
     // Any comments after the last declaration.
     for comment in &comments[next..] {
         lines.push(comment.text.clone());
     }
     if lines.is_empty() {
-        Ok(String::new())
+        String::new()
     } else {
-        Ok(format!("{}\n", lines.join("\n")))
+        format!("{}\n", lines.join("\n"))
     }
 }
 
@@ -111,7 +215,7 @@ pub fn format_proposition(params: &[Param], preconditions: &[Expr], body: &Expr)
         .join(", ");
     let preconds = preconditions
         .iter()
-        .map(format_expr)
+        .map(format_property_precondition)
         .collect::<Vec<_>>()
         .join(", ");
     format!("forall({params}) where {preconds}: {}", format_expr(body))
@@ -166,18 +270,110 @@ fn emit_decls_with_comments(
                 }
             }
             _ => {
-                // A comment whose offset falls within this declaration's
-                // own span (e.g. inside a function body) is emitted just
-                // before the declaration so it is never lost.
                 let decl_end = decl.span().end();
+                let internal_start = *next;
                 while *next < comments.len() && comments[*next].span.offset < decl_end {
-                    lines.push(comments[*next].text.clone());
                     *next += 1;
                 }
-                lines.push(format_decl(decl));
+                lines.push(format_decl_with_internal_comments(
+                    decl,
+                    &comments[internal_start..*next],
+                ));
             }
         }
     }
+}
+
+fn format_decl_with_internal_comments(decl: &Decl, comments: &[Comment]) -> String {
+    if comments.is_empty() {
+        return format_decl(decl);
+    }
+    match decl {
+        Decl::FunDef {
+            name,
+            dim_params,
+            params,
+            ret_ty,
+            effects,
+            body: Expr::Block(bindings, body, _),
+            ..
+        } => {
+            let dims = if dim_params.is_empty() {
+                String::new()
+            } else {
+                format!("[{}]", dim_params.join(", "))
+            };
+            let params = params
+                .iter()
+                .map(format_param)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ret = ret_ty
+                .as_ref()
+                .map(|ty| format!(" -> {}", format_type(ty)))
+                .unwrap_or_default();
+            let effects = format_effects(effects.as_deref());
+            format!(
+                "def {name}{dims}({params}){ret}{effects} = {}",
+                format_block_with_comments(bindings, body, comments)
+            )
+        }
+        Decl::LetDef {
+            name,
+            ty,
+            value: Expr::Block(bindings, body, _),
+            ..
+        } => {
+            let head = ty
+                .as_ref()
+                .map(|ty| format!("{name}: {}", format_type(ty)))
+                .unwrap_or_else(|| name.clone());
+            format!(
+                "{head} = {}",
+                format_block_with_comments(bindings, body, comments)
+            )
+        }
+        _ => {
+            let mut rendered = comments
+                .iter()
+                .map(|comment| comment.text.clone())
+                .collect::<Vec<_>>();
+            rendered.push(format_decl(decl));
+            rendered.join("\n")
+        }
+    }
+}
+
+fn format_block_with_comments(
+    bindings: &[LetBinding],
+    body: &Expr,
+    comments: &[Comment],
+) -> String {
+    let mut lines = Vec::new();
+    let mut next_comment = 0usize;
+    for binding in bindings {
+        let boundary = let_pattern_span(&binding.pattern).offset;
+        while next_comment < comments.len() && comments[next_comment].span.offset < boundary {
+            lines.push(format!("  {}", comments[next_comment].text));
+            next_comment += 1;
+        }
+        for line in format_binding_line(binding).lines() {
+            lines.push(format!("  {line}"));
+        }
+    }
+    let body_boundary = expression_span(body).offset;
+    while next_comment < comments.len() && comments[next_comment].span.offset < body_boundary {
+        lines.push(format!("  {}", comments[next_comment].text));
+        next_comment += 1;
+    }
+    for line in format_expr(body).lines() {
+        lines.push(format!("  {line}"));
+    }
+    while next_comment < comments.len() {
+        lines.push(format!("  {}", comments[next_comment].text));
+        next_comment += 1;
+    }
+    format!("{{\n{}\n}}", lines.join("\n"))
 }
 
 fn format_decl(decl: &Decl) -> String {
@@ -270,8 +466,15 @@ fn format_decl(decl: &Decl) -> String {
                 .map(|ty| format!(" -> {}", format_type(ty)))
                 .unwrap_or_default();
             let effects = format_effects(effects.as_deref());
-            let body = format_function_body(body);
-            format!("def {name}{dims}({params}){ret}{effects} = {body}")
+            let head = format!("def {name}{dims}({params}){ret}{effects}");
+            let rendered = format_expr(body);
+            let is_material_block =
+                matches!(body, Expr::Block(bindings, _, _) if !bindings.is_empty());
+            if rendered.contains('\n') && !is_material_block {
+                format!("{head} =\n{}", indent_lines(&rendered, 2))
+            } else {
+                format!("{head} = {rendered}")
+            }
         }
         Decl::Property {
             name,
@@ -321,14 +524,38 @@ fn format_property(
         out.push_str(
             &preconditions
                 .iter()
-                .map(format_expr)
+                .map(format_property_precondition)
                 .collect::<Vec<_>>()
                 .join(", "),
         );
     }
     out.push_str(":\n  ");
     out.push_str(&format_expr(body).replace('\n', "\n  "));
-    for option in options {
+    for option in options
+        .iter()
+        .filter(|option| matches!(option, PropertyOption::Tolerance(..)))
+    {
+        out.push('\n');
+        out.push_str(&format_property_option(option));
+    }
+    for option in options
+        .iter()
+        .filter(|option| matches!(option, PropertyOption::Seed(..)))
+    {
+        out.push('\n');
+        out.push_str(&format_property_option(option));
+    }
+    for option in options
+        .iter()
+        .filter(|option| matches!(option, PropertyOption::Samples(..)))
+    {
+        out.push('\n');
+        out.push_str(&format_property_option(option));
+    }
+    for option in options
+        .iter()
+        .filter(|option| matches!(option, PropertyOption::Contract(..)))
+    {
         out.push('\n');
         out.push_str(&format_property_option(option));
     }
@@ -342,7 +569,9 @@ fn format_property_option(option: &PropertyOption) -> String {
         }
         PropertyOption::Seed(value, _) => format!("  with seed = {}", format_expr(value)),
         PropertyOption::Samples(value, _) => format!("  with samples = {}", format_expr(value)),
-        PropertyOption::Contract(id, _) => format!("  with contract = {id:?}"),
+        PropertyOption::Contract(id, _) => {
+            format!("  with contract = {}", canonical_string(id))
+        }
     }
 }
 
@@ -410,12 +639,13 @@ fn format_effect(effect: &EffectExpr) -> String {
         EffectExpr::Accum(_) => "Accum".to_string(),
         EffectExpr::Io(_) => "IO".to_string(),
         EffectExpr::Test(_) => "Test".to_string(),
-        EffectExpr::Resource(device, _) => format!("Resource(\"{device}\")"),
+        EffectExpr::Resource(device, _) => format!("Resource({})", canonical_string(device)),
     }
 }
 
 fn format_type(ty: &TypeExpr) -> String {
     match ty {
+        TypeExpr::Named(name, _) if name == "unit" => "unit".to_string(),
         TypeExpr::Named(name, _) => name.clone(),
         TypeExpr::RankSpread(name, _) => format!("..{name}"),
         TypeExpr::Tensor(parts, precision, _) => {
@@ -447,10 +677,15 @@ fn format_type(ty: &TypeExpr) -> String {
             )
         }
         TypeExpr::Tuple(parts, _) => {
-            format!(
-                "({})",
-                parts.iter().map(format_type).collect::<Vec<_>>().join(", ")
-            )
+            if parts.is_empty() {
+                return "unit".to_string();
+            }
+            let body = parts.iter().map(format_type).collect::<Vec<_>>().join(", ");
+            if parts.len() == 1 {
+                format!("({body},)")
+            } else {
+                format!("({body})")
+            }
         }
         TypeExpr::Infer(_) => "_".to_string(),
     }
@@ -469,33 +704,30 @@ fn format_type_arg(ty: &TypeExpr) -> String {
     }
 }
 
-fn format_function_body(expr: &Expr) -> String {
-    if matches!(expr, Expr::Block(_, _, _)) {
-        format_expr(expr)
-    } else {
-        let rendered = format_expr(expr);
-        if rendered.contains('\n') {
-            format!("{{\n{}\n}}", indent_lines(&rendered, 2))
-        } else {
-            rendered
-        }
-    }
-}
-
 fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::Lit(lit, _) => format_lit(lit),
         Expr::Var(name, _) | Expr::Constructor(name, _) => name.clone(),
-        Expr::Apply(func, args, _) => format!("{}({})", format_expr(func), format_args(args)),
+        Expr::Apply(func, args, _) => format_apply(func, args),
         Expr::List(items, _) => format!(
             "[{}]",
             items.iter().map(format_expr).collect::<Vec<_>>().join(", ")
         ),
+        Expr::Record(name, fields, _) if fields.is_empty() => format!("{name} {{}}"),
         Expr::Record(name, fields, _) => format!(
             "{name} {{ {} }}",
             fields
                 .iter()
-                .map(|(field, expr)| format!("{field}: {}", format_expr(expr)))
+                .map(format_record_field)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Expr::RecordUpdate(base, fields, _) => format!(
+            "{} with {{ {} }}",
+            wrap_simple(base),
+            fields
+                .iter()
+                .map(format_record_field)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -516,6 +748,13 @@ fn format_expr(expr: &Expr) -> String {
                 format_binop(*op),
                 wrap_operand(right)
             )
+        }
+        // The Surf parser stores the otherwise-unrepresentable positive
+        // magnitude 2^63 as a signed-minimum payload under a unary-minus
+        // node. The literal already formats with the required leading `-`;
+        // do not manufacture a second minus for that internal sentinel.
+        Expr::Unary(UnaryOp::Neg, expr, _) if is_i64_min_magnitude_sentinel(expr) => {
+            format_expr(expr)
         }
         Expr::Unary(op, expr, _) => format!("{}{}", format_unary(*op), wrap_simple(expr)),
         Expr::Pipe(seed, stages, _) => format_pipe_expr(seed, stages),
@@ -539,10 +778,12 @@ fn format_expr(expr: &Expr) -> String {
             format_expr(body)
         ),
         Expr::Tuple(parts, _) => {
-            format!(
-                "({})",
-                parts.iter().map(format_expr).collect::<Vec<_>>().join(", ")
-            )
+            let body = parts.iter().map(format_expr).collect::<Vec<_>>().join(", ");
+            if parts.len() == 1 {
+                format!("({body},)")
+            } else {
+                format!("({body})")
+            }
         }
         Expr::Cast(expr, ty, mode, _) => {
             format!("{}({}, {})", mode.keyword(), format_expr(expr), ty)
@@ -555,6 +796,7 @@ fn format_expr(expr: &Expr) -> String {
             Some(names) => format!("grad({}, wrt=({}))", format_expr(expr), names.join(", ")),
         },
         Expr::Vmap(expr, axis, _) => match axis {
+            Some(0) => format!("vmap({})", format_expr(expr)),
             Some(axis) => format!("vmap({}, axis={axis})", format_expr(expr)),
             None => format!("vmap({})", format_expr(expr)),
         },
@@ -580,42 +822,111 @@ fn format_expr(expr: &Expr) -> String {
                 exprs.iter().map(format_expr).collect::<Vec<_>>().join("; ")
             )
         }
+        Expr::Do(exprs, _) => format!(
+            "do {{ {} }}",
+            exprs.iter().map(format_expr).collect::<Vec<_>>().join("; ")
+        ),
+        Expr::Quote(expr, _) => format!("quote({})", format_expr(expr)),
+        Expr::Unquote(expr, _) => format!("unquote({})", format_expr(expr)),
+        Expr::Splice(expr, _) => format!("splice({})", format_expr(expr)),
         Expr::Annotate(expr, ty, _) => format!("({} : {})", format_expr(expr), format_type(ty)),
+        Expr::Block(bindings, body, _) if bindings.is_empty() => format_expr(body),
         Expr::Block(bindings, body, _) => format_block(bindings, body),
+    }
+}
+
+/// Format an expression in a property's comma/colon-delimited `where` list.
+///
+/// Binary expressions normally carry an outer grouping pair so they remain
+/// unambiguous in arbitrary expression positions. The property delimiters
+/// already bound the complete precondition, so that pair is redundant and is
+/// not part of canonical Surf.
+fn format_property_precondition(expr: &Expr) -> String {
+    match expr {
+        Expr::Binary(..) => {
+            let rendered = format_expr(expr);
+            rendered[1..rendered.len() - 1].to_string()
+        }
+        _ => format_expr(expr),
+    }
+}
+
+fn format_record_field((field, expr): &(String, Expr)) -> String {
+    if matches!(expr, Expr::Var(name, _) if name == field) {
+        field.clone()
+    } else {
+        format!("{field}: {}", format_expr(expr))
     }
 }
 
 fn format_lit(lit: &Literal) -> String {
     match lit {
         Literal::Int(value) => value.to_string(),
-        Literal::Float(value) => {
-            let text = value.to_string();
-            if text.contains('.') {
-                text
-            } else {
-                format!("{text}.0")
-            }
-        }
+        Literal::Float(value) => canonical_float(*value),
         // Typed-suffix literals (spec/02-surf-syntax.md §P10a): the
         // canonical formatter preserves the suffix on the literal token
         // since dropping it would change the program's typing.
+        Literal::TypedInt(value, suffix) if suffix.is_float() => {
+            format!("{}{}", canonical_float(*value as f64), suffix.as_str())
+        }
         Literal::TypedInt(value, suffix) => format!("{value}{}", suffix.as_str()),
         Literal::TypedFloat(value, suffix) => {
-            let text = value.to_string();
-            let body = if text.contains('.') || text.contains('e') || text.contains('E') {
-                text
-            } else {
-                format!("{text}.0")
-            };
-            format!("{body}{}", suffix.as_str())
+            format!("{}{}", canonical_float(*value), suffix.as_str())
         }
-        Literal::Str(value) => format!("{value:?}"),
+        Literal::Str(value) => canonical_string(value),
         Literal::Bool(value) => value.to_string(),
     }
 }
 
-fn format_args(args: &[Expr]) -> String {
-    args.iter().map(format_expr).collect::<Vec<_>>().join(", ")
+fn is_i64_min_magnitude_sentinel(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Lit(Literal::Int(i64::MIN), _)
+            | Expr::Lit(Literal::TypedInt(i64::MIN, LiteralSuffix::I64), _)
+    )
+}
+
+/// Render the unique Surf spelling for a string value.
+///
+/// Printable Unicode stays literal. The six P11 named escapes take
+/// precedence; the remaining C0/C1 controls use minimal lowercase `\\u{h}`.
+pub(crate) fn canonical_string(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut rendered = String::with_capacity(value.len() + 2);
+    rendered.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => rendered.push_str("\\\""),
+            '\\' => rendered.push_str("\\\\"),
+            '\n' => rendered.push_str("\\n"),
+            '\t' => rendered.push_str("\\t"),
+            '\r' => rendered.push_str("\\r"),
+            '\0' => rendered.push_str("\\0"),
+            control if control.is_control() => {
+                write!(rendered, "\\u{{{:x}}}", control as u32)
+                    .expect("writing to a String cannot fail");
+            }
+            printable => rendered.push(printable),
+        }
+    }
+    rendered.push('"');
+    rendered
+}
+
+/// Print the shortest decimal spelling that round-trips to `value`.
+///
+/// `Display for f64` deliberately expands very small and very large values;
+/// Ryu supplies the scientific spelling required by Surf's shortest-source
+/// contract. Integer-looking finite values retain `.0` so they lex as floats.
+pub(crate) fn canonical_float(value: f64) -> String {
+    let mut buffer = ryu::Buffer::new();
+    let text = buffer.format_finite(value);
+    if text.contains('.') || text.contains('e') {
+        text.to_string()
+    } else {
+        format!("{text}.0")
+    }
 }
 
 fn format_arm(arm: &MatchArm) -> String {
@@ -645,19 +956,30 @@ fn format_pattern(pattern: &Pattern) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Pattern::Tuple(parts, _) => format!(
-            "({})",
-            parts
+        Pattern::Tuple(parts, _) => {
+            let body = parts
                 .iter()
                 .map(format_pattern)
                 .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .join(", ");
+            if parts.len() == 1 {
+                format!("({body},)")
+            } else {
+                format!("({body})")
+            }
+        }
+        Pattern::Record(name, fields, _) if fields.is_empty() => format!("{name} {{}}"),
         Pattern::Record(name, fields, _) => format!(
             "{name} {{ {} }}",
             fields
                 .iter()
-                .map(|(field, pattern)| format!("{field}: {}", format_pattern(pattern)))
+                .map(|(field, pattern)| {
+                    if matches!(pattern, Pattern::Var(name, _) if name == field) {
+                        field.clone()
+                    } else {
+                        format!("{field}: {}", format_pattern(pattern))
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -669,14 +991,18 @@ fn format_let_pattern(pattern: &LetPattern) -> String {
     match pattern {
         LetPattern::Var(name, _) => name.clone(),
         LetPattern::Wildcard(_) => "_".to_string(),
-        LetPattern::Tuple(parts, _) => format!(
-            "({})",
-            parts
+        LetPattern::Tuple(parts, _) => {
+            let body = parts
                 .iter()
                 .map(format_let_pattern)
                 .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .join(", ");
+            if parts.len() == 1 {
+                format!("({body},)")
+            } else {
+                format!("({body})")
+            }
+        }
     }
 }
 
@@ -698,8 +1024,58 @@ fn format_binding_assignment(head: &str, value: &Expr) -> String {
 
 fn format_handler_body(expr: &Expr) -> String {
     match expr {
+        Expr::Block(bindings, body, _) if bindings.is_empty() => {
+            format!("{{ {} }}", format_expr(body))
+        }
         Expr::Block(_, _, _) => format_expr(expr),
-        _ => format!("{{\n  {}\n}}", format_expr(expr)),
+        _ => {
+            let rendered = format_expr(expr);
+            if rendered.contains('\n') {
+                format!("{{\n{}\n}}", indent_lines(&rendered, 2))
+            } else {
+                format!("{{ {rendered} }}")
+            }
+        }
+    }
+}
+
+fn format_apply(function: &Expr, arguments: &[Expr]) -> String {
+    format!(
+        "{}({})",
+        format_call_callee(function),
+        arguments
+            .iter()
+            .map(format_expr)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn format_call_callee(function: &Expr) -> String {
+    match function {
+        // Ungrouped `f(x)(y)` is intentionally not canonical. Grouping the
+        // first call makes call-result application explicit and preserves a
+        // nested Deep `app` rather than flattening it to `f(x, y)`.
+        Expr::Apply(..)
+        // Prefix and keyword-led forms otherwise absorb the following call
+        // into their body or tail: `if c then f else g(x)`,
+        // `fn (x) -> x(y)`, `-f(y)`, and so on.
+        | Expr::Unary(..)
+        | Expr::Pipe(..)
+        | Expr::If(..)
+        | Expr::Match(..)
+        | Expr::Lambda(..)
+        | Expr::RecordUpdate(..)
+        | Expr::WithSeed(..)
+        | Expr::WithDevice(..)
+        | Expr::Par(..)
+        | Expr::Do(..)
+        | Expr::Block(..)
+        | Expr::Borrow(..) => format!("({})", format_expr(function)),
+        // Binary expressions and ascriptions already print with grouping;
+        // atoms and the remaining postfix/keyword-call forms are
+        // self-delimiting.
+        _ => format_expr(function),
     }
 }
 
@@ -778,6 +1154,9 @@ fn compact_bare_unary_builtin_stage(stage: &Expr) -> Option<String> {
         Expr::Copy(inner, _) if matches!(inner.as_ref(), Expr::Var(v, _) if v == name) => {
             Some("copy".to_string())
         }
+        Expr::Cast(inner, precision, mode, _) if matches!(inner.as_ref(), Expr::Var(v, _) if v == name) => {
+            Some(format!("{}({precision})", mode.keyword()))
+        }
         _ => None,
     }
 }
@@ -822,6 +1201,49 @@ fn format_pipe_layout(binding_head: Option<&str>, seed: String, stages: Vec<Stri
             lines.extend(stages.iter().map(|stage| format!("|> {stage}")));
             lines.join("\n")
         }
+    }
+}
+
+fn let_pattern_span(pattern: &LetPattern) -> chelis_deep::Span {
+    match pattern {
+        LetPattern::Var(_, span) | LetPattern::Wildcard(span) | LetPattern::Tuple(_, span) => *span,
+    }
+}
+
+fn expression_span(expr: &Expr) -> chelis_deep::Span {
+    match expr {
+        Expr::Lit(_, span)
+        | Expr::Var(_, span)
+        | Expr::Constructor(_, span)
+        | Expr::Apply(_, _, span)
+        | Expr::List(_, span)
+        | Expr::Record(_, _, span)
+        | Expr::RecordUpdate(_, _, span)
+        | Expr::Access(_, _, span)
+        | Expr::TupleGet(_, _, span)
+        | Expr::Binary(_, _, _, span)
+        | Expr::Unary(_, _, span)
+        | Expr::Pipe(_, _, span)
+        | Expr::If(_, _, _, span)
+        | Expr::Match(_, _, span)
+        | Expr::Lambda(_, _, span)
+        | Expr::Tuple(_, span)
+        | Expr::Cast(_, _, _, span)
+        | Expr::Grad(_, _, span)
+        | Expr::Vmap(_, _, span)
+        | Expr::Jit(_, span)
+        | Expr::Realize(_, span)
+        | Expr::Copy(_, span)
+        | Expr::Borrow(_, span)
+        | Expr::WithSeed(_, _, span)
+        | Expr::WithDevice(_, _, span)
+        | Expr::Par(_, span)
+        | Expr::Do(_, span)
+        | Expr::Quote(_, span)
+        | Expr::Unquote(_, span)
+        | Expr::Splice(_, span)
+        | Expr::Annotate(_, _, span)
+        | Expr::Block(_, _, span) => *span,
     }
 }
 
@@ -1025,7 +1447,7 @@ mod tests {
                 "(((x |> neg) + 1.0) >= x)",
             ),
             (
-                "@property p forall(x: f32):\n  { y = x; y } + 1.0 >= x\n",
+                "@property p forall(x: f32):\n  {\n    y = x\n    y\n  } + 1.0 >= x\n",
                 "((({\n  y = x\n  y\n}) + 1.0) >= x)",
             ),
         ] {
@@ -1054,7 +1476,7 @@ mod tests {
             property_parts("@property g forall(x: f32) where x > 0.0:\n  x <= x\n");
         assert_eq!(
             format_proposition(&params, &pre, &body),
-            "forall(x: f32) where (x > 0.0): (x <= x)"
+            "forall(x: f32) where x > 0.0: (x <= x)"
         );
         let (uparams, upre, ubody) = property_parts("@property u forall(x: f32):\n  x <= x\n");
         assert!(upre.is_empty());
@@ -1080,9 +1502,9 @@ mod tests {
 
     #[test]
     fn explicit_empty_effect_row_is_preserved() {
-        // Regression: `! {}` is a meaningful annotation (declared-pure) and must survive
-        // a format round-trip. Erasing it silently downgrades the effect contract and
-        // lets assertions leak into declared-pure functions.
+        // `! {}` is a meaningful annotation (declared-pure) and must survive
+        // a format round-trip. Erasing it silently downgrades the effect contract
+        // and lets assertions leak into declared-pure functions.
         let source = "def f() -> unit ! {} = ()\n";
         let program = crate::parser::parse_str(source).expect("parse");
         let rendered = format_program(&program);

@@ -123,6 +123,50 @@ fn check_passes_with_allow_style_violations() {
         .stderr(predicates::str::contains("--allow-style-violations"));
 }
 
+/// Style checking may canonicalize a separate representation for comparison,
+/// but semantic diagnostics must still refer to the bytes the author supplied.
+#[test]
+fn check_bypass_reports_offsets_in_the_authored_noncanonical_source() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("authored_offsets.ch");
+    let source = concat!(
+        "def broken(\n",
+        "  x: int32,\n",
+        ") -> int32 =\n",
+        "  missing(x,)\n",
+    );
+    fs::write(&path, source).unwrap();
+
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", path.to_str().unwrap(), "--allow-style-violations"])
+        .output()
+        .expect("run check");
+    assert!(!output.status.success(), "unbound name must fail checking");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--allow-style-violations"),
+        "the test must exercise the noncanonical-source bypass"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("check emits a JSON report");
+    let diagnostic = report["errors"]
+        .as_array()
+        .expect("errors array")
+        .iter()
+        .find(|error| {
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("missing"))
+        })
+        .expect("unbound-name diagnostic");
+    assert_eq!(
+        diagnostic["span_offset"].as_u64(),
+        Some(source.find("missing").expect("fixture contains missing") as u64),
+        "the diagnostic offset must address the authored source, not canonical formatter output"
+    );
+}
+
 /// `chelis build` rejects a non-canonical Surf source before it hits
 /// the front-end pipeline.
 #[test]

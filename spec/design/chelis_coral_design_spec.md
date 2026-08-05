@@ -294,15 +294,15 @@ First `w-1` elements are NaN (insufficient history). This is the standard pandas
 ```chelis
 -- CSV
 def read_csv(path: String) -> Frame ! { IO }
-def write_csv(df: Frame, path: String) -> () ! { IO }
+def write_csv(df: Frame, path: String) -> unit ! { IO }
 
 -- JSON
 def read_json(path: String) -> Frame ! { IO }
-def write_json(df: Frame, path: String) -> () ! { IO }
+def write_json(df: Frame, path: String) -> unit ! { IO }
 
 -- Parquet (requires runtime addition)
 def read_parquet(path: String) -> Frame ! { IO }
-def write_parquet(df: Frame, path: String) -> () ! { IO }
+def write_parquet(df: Frame, path: String) -> unit ! { IO }
 ```
 
 **CSV/JSON:** Wrap `Std.Io.Csv` and `Std.Io.Json`. Auto-detect column types: attempt numeric parse on each column, fall back to string. The wrapping layer builds a `Frame` from the parsed columns.

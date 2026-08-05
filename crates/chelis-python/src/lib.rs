@@ -3700,7 +3700,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         .expect("write app reef.lock");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
         )
         .expect("write app main");
         fs::write(
@@ -3853,7 +3853,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             &source_path,
             "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
              def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = \
-             xs |> vmap(process, axis=0)\n",
+             xs |> vmap(process)\n",
         )
         .expect("write source");
         let result = run_compile_and_load_job(CompileAndLoadJob {

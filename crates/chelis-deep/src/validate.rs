@@ -248,13 +248,15 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
                 validate_expr(child, warnings);
             }
         }
-        Expr::MetaExpr(meta, _) => {
+        Expr::MetaExpr(meta, span) => {
+            validate_surf_metadata_entries(&meta.entries, span.offset, warnings);
             validate_expr(&meta.expr, warnings);
             for (_, v) in &meta.entries {
                 validate_expr(v, warnings);
             }
         }
-        Expr::Map(map, _) => {
+        Expr::Map(map, span) => {
+            validate_surf_metadata_namespace(map, span.offset, warnings);
             for (_, v) in &map.entries {
                 validate_expr(v, warnings);
             }
@@ -265,6 +267,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
         // still need to validate semantic metadata shapes (e.g., invariant
         // on deftype) and recurse into children for validation.
         Expr::Node(node, span) => {
+            validate_surf_metadata_namespace(node.meta(), span.offset, warnings);
             validate_node_tag_shape(node.tag(), node, span.offset, warnings);
             // Recurse into children
             for child in node.children_slice() {
@@ -281,6 +284,7 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             }
         }
         Expr::UnknownForm(data) => {
+            validate_surf_metadata_namespace(&data.meta, data.span.offset, warnings);
             warnings.push(ValidationWarning {
                 kind: WarningKind::UnknownTag,
                 offset: data.span.offset,
@@ -296,6 +300,41 @@ fn validate_expr(expr: &Expr, warnings: &mut Vec<ValidationWarning>) {
             for child in &data.children {
                 validate_expr(child, warnings);
             }
+        }
+    }
+}
+
+fn validate_surf_metadata_namespace(
+    meta: &crate::ast::MetaMap,
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    validate_surf_metadata_entries(&meta.entries, offset, warnings);
+}
+
+fn validate_surf_metadata_entries(
+    entries: &[(String, Expr)],
+    offset: usize,
+    warnings: &mut Vec<ValidationWarning>,
+) {
+    for (key, _) in entries {
+        if key.starts_with("surf_")
+            && !matches!(
+                key.as_str(),
+                "surf_path"
+                    | "surf_dim_group_size"
+                    | "surf_pipe_stage"
+                    | "surf_literal_style"
+                    | "surf_binding_type"
+            )
+        {
+            warnings.push(ValidationWarning {
+                kind: WarningKind::Structural,
+                offset,
+                message: format!(
+                    "unknown key `{key}` in the closed Deep `surf_*` metadata namespace"
+                ),
+            });
         }
     }
 }

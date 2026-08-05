@@ -1,5 +1,5 @@
 == annotated deep ==
-(module {}
+(module {surf_path: "Parity.ShapeOps"}
   parity.shapeops
   (defsig {}
     project
@@ -96,7 +96,7 @@
         (app {span: "surf:336..353", type: (t-adt {} List (t-prim {} int64))}
           (var {} Cons)
           (cast {span: "surf:337..352", type: (t-prim {} int64)}
-            (lit {span: "surf:342..344", type: (t-prim {} int64)} 24)
+            (lit {span: "surf:342..344", surf_literal_style: "unsuffixed", type: (t-prim {} int64)} 24)
             (t-prim {} int64))
           (var {} Nil)))))
   (defsig {}

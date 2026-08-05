@@ -155,11 +155,11 @@ fn phase1f_surf_examples_and_specs_agree_with_parser() {
 
     surf_inputs.push((
         "spec-surf-fixture".to_string(),
-        "module Foo.Bar\nimport Baz(..)\ndef id(x: f32): f32 = x\n".to_string(),
+        "module Foo.Bar\nimport Baz(..)\ndef id(x: f32) -> f32 = x\n".to_string(),
     ));
     surf_inputs.push((
-        "spec-semicolon-block-fixture".to_string(),
-        "def f(axis) = { y = axis; y }\ndef g() = par { a; b }\n".to_string(),
+        "spec-canonical-block-fixture".to_string(),
+        "def f(axis) = {\n  y = axis\n  y\n}\ndef g() = par { a; b }\n".to_string(),
     ));
     surf_inputs.push((
         "spec-script-fixture".to_string(),

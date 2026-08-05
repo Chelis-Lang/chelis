@@ -122,8 +122,8 @@ Same logical 8×16 @ 16×4 matmul, four code paths:
 |---|:---:|---|---|
 | `f(a, b) = matmul(a, b)` | ✅ | 128 | ~100% (sgemm) |
 | `f(a, b) = { ae=expand(a,...); be=expand(b,...); sum(mul(ae,be), 1) }` | ✅ | 128 | same |
-| `def my_mm = matmul; def f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
-| `def my_mm = expand+mul+sum; def f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
+| `my_mm = matmul; f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
+| `my_mm = expand+mul+sum; f = my_mm` | ✅ | 128 | same C BLAS path for simple wrappers |
 
 M1 makes inline BLAS-hit matmul result-only in memory. The current branch also
 closes the first Gap 5 executable slice for simple C user-`def` wrappers:

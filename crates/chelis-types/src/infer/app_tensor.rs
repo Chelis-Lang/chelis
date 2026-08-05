@@ -1303,7 +1303,7 @@ pub(super) fn extract_int_literal(expr: &deep::Expr) -> Option<i64> {
         }),
         DeepTag::App => match (kids.first(), kids.get(1)) {
             (Some(func), Some(arg)) if is_builtin_var(func, "neg") => {
-                extract_int_for_dim(arg).map(|value| -value)
+                extract_int_for_dim(arg).and_then(i64::checked_neg)
             }
             _ => None,
         },

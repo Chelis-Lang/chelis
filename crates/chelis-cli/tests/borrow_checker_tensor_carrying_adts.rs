@@ -81,9 +81,7 @@ fn borrow_tensor_carrying_record_adt_is_accepted() {
            | BatchNormParams { gamma: tensor[n, f32], beta: tensor[n, f32] }\n\
          sig borrow_params: &BatchNormParams[n] -> bool\n\
          def borrow_params(p) = true\n\
-         def consume_params[n](p: BatchNormParams[n]) -> bool = {\n\
-           borrow_params(&p)\n\
-         }\n",
+         def consume_params[n](p: BatchNormParams[n]) -> bool = borrow_params(&p)\n",
     );
     fmt_inplace(&fixture);
 
@@ -110,9 +108,7 @@ fn borrow_tensorless_adt_is_still_rejected() {
            | Counter { value: int64 }\n\
          sig borrow_counter: &Counter -> bool\n\
          def borrow_counter(c) = true\n\
-         def consume_counter(c: Counter) -> bool = {\n\
-           borrow_counter(&c)\n\
-         }\n",
+         def consume_counter(c: Counter) -> bool = borrow_counter(&c)\n",
     );
     fmt_inplace(&fixture);
 
@@ -144,9 +140,7 @@ fn borrow_parametric_adt_at_tensor_arg_is_accepted() {
            | Wrapper { value: a }\n\
          sig borrow_wrapper: &Wrapper[tensor[4, f32]] -> bool\n\
          def borrow_wrapper(w) = true\n\
-         def consume_wrapper(w: Wrapper[tensor[4, f32]]) -> bool = {\n\
-           borrow_wrapper(&w)\n\
-         }\n",
+         def consume_wrapper(w: Wrapper[tensor[4, f32]]) -> bool = borrow_wrapper(&w)\n",
     );
     fmt_inplace(&fixture);
 
@@ -183,14 +177,12 @@ fn destructured_generic_adt_field_borrow_is_accepted() {
         "module DestructuredShape\n\
          type FooState[a] =\n\
            | FooState { x: a, y: a }\n\
-         def use_foo[n](state: FooState[tensor[n, f32]]) -> tensor[n, f32] = {\n\
-           match state with {\n\
-             | FooState { x: x, y: y } => {\n\
+         def use_foo[n](state: FooState[tensor[n, f32]]) -> tensor[n, f32] = match state with {\n\
+             | FooState { x, y } => {\n\
                x_copy = copy(&x)\n\
                _ = y\n\
                x_copy\n\
              }\n\
-           }\n\
          }\n",
     );
     fmt_inplace(&fixture);
@@ -222,12 +214,8 @@ fn destructured_generic_adt_field_borrow_with_nested_adt() {
            | Outer { inner: Inner[a] }\n\
          sig borrow_inner: &Inner[tensor[n, f32]] -> bool\n\
          def borrow_inner(i) = true\n\
-         def use_outer[n](o: Outer[tensor[n, f32]]) -> bool = {\n\
-           match o with {\n\
-             | Outer { inner: inner } => {\n\
-               borrow_inner(&inner)\n\
-             }\n\
-           }\n\
+         def use_outer[n](o: Outer[tensor[n, f32]]) -> bool = match o with {\n\
+           | Outer { inner } => borrow_inner(&inner)\n\
          }\n",
     );
     fmt_inplace(&fixture);
@@ -260,13 +248,11 @@ fn destructured_generic_adt_nontensor_field_borrow_is_rejected() {
         "module DestructuredNontensorShape\n\
          type FooState[a] =\n\
            | FooState { x: a, y: a }\n\
-         def use_foo(state: FooState[int64]) -> int64 = {\n\
-           match state with {\n\
-             | FooState { x: x, y: y } => {\n\
+         def use_foo(state: FooState[int64]) -> int64 = match state with {\n\
+             | FooState { x, y } => {\n\
                _ = copy(&x)\n\
                y\n\
              }\n\
-           }\n\
          }\n",
     );
     fmt_inplace(&fixture);
@@ -308,9 +294,7 @@ fn borrow_nested_tensor_carrying_adt_is_accepted() {
            | Outer { inner: Inner[n] }\n\
          sig borrow_outer: &Outer[n] -> bool\n\
          def borrow_outer(o) = true\n\
-         def consume_outer[n](o: Outer[n]) -> bool = {\n\
-           borrow_outer(&o)\n\
-         }\n",
+         def consume_outer[n](o: Outer[n]) -> bool = borrow_outer(&o)\n",
     );
     fmt_inplace(&fixture);
 

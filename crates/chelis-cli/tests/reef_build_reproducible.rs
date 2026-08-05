@@ -41,17 +41,17 @@ additional_sources = ["properties"]
     // packaging contract, not an accident of creation order or WalkDir.
     fs::write(
         root.join("src/nested/zeta.ch"),
-        "module Repro.Nested.Zeta\n\ndef zeta -> int32 = 2\n",
+        "module Repro.Nested.Zeta\n\ndef zeta() -> int32 = 2\n",
     )
     .expect("write zeta");
     fs::write(
         root.join("src/main.ch"),
-        "module Repro.Main\n\ndef main -> int32 = 1\n",
+        "module Repro.Main\n\ndef main() -> int32 = 1\n",
     )
     .expect("write main");
     fs::write(
         root.join("properties/alpha.ch"),
-        "module Repro.Properties.Alpha\n\ndef alpha -> bool = true\n",
+        "module Repro.Properties.Alpha\n\ndef alpha() -> bool = true\n",
     )
     .expect("write alpha");
     let long_stem = Path::new(LONG_SOURCE_FILE)
@@ -63,7 +63,7 @@ additional_sources = ["properties"]
         root.join(LONG_SOURCE_FILE),
         format!(
             "module Repro.Properties.{long_module_component}\n\n\
-             def long_name -> int32 = 3\n"
+             def long_name() -> int32 = 3\n"
         ),
     )
     .expect("write long-name source");
