@@ -56,7 +56,7 @@ def make_x() -> tensor[1, 1, 4, 4, f32] = to_tensor([[[
     [cast(13.0, f32), cast(14.0, f32), cast(15.0, f32), cast(16.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] =
-    reduce_window_max(&x, [2, 2], [1, 1])
+    reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
@@ -77,7 +77,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_min(&x, [2, 2], [1, 1])
+    reduce_window_min(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
@@ -97,7 +97,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_sum(&x, [2, 2], [1, 1])
+    reduce_window_sum(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
@@ -115,7 +115,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_mean(&x, [2, 2], [1, 1])
+    reduce_window_mean(&x, [2i64, 2i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let result = eval_surf(src);
@@ -134,7 +134,7 @@ def make_x() -> tensor[1, 1, 2, 2, f32] = to_tensor([[[
     [cast(3.0, f32), cast(4.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 2, 2, f32]) -> tensor[1, 1, 1, 1, f32] =
-    reduce_window_max(&x, [3, 3], [1, 1])
+    reduce_window_max(&x, [3i64, 3i64], [1i64, 1i64])
 out = run(make_x())
 "#;
     let outcome = eval(EvalRequest {
@@ -157,7 +157,7 @@ def make_x() -> tensor[1, 1, 3, 3, f32] = to_tensor([[[
     [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]
 ]]])
 def run(x: tensor[1, 1, 3, 3, f32]) -> tensor[1, 1, 2, 2, f32] =
-    reduce_window_max(&x, [2, 2], [1, 0])
+    reduce_window_max(&x, [2i64, 2i64], [1i64, 0i64])
 out = run(make_x())
 "#;
     let outcome = eval(EvalRequest {
@@ -173,7 +173,7 @@ out = run(make_x())
 
 #[test]
 fn issue254_reduce_window_rejects_string_input() {
-    let src = r#"out = reduce_window_max("not a tensor", [2, 2], [1, 1])"#;
+    let src = r#"out = reduce_window_max("not a tensor", [2i64, 2i64], [1i64, 1i64])"#;
     let outcome = eval(EvalRequest {
         source_kind: SourceKind::Surf,
         source: src.to_string(),

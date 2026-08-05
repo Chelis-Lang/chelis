@@ -1397,8 +1397,6 @@ dimension that is only known at run time. The relevant built-ins are:
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
   `shape_list`, a `List<int64>`.
 
-*(Not fully implemented; chelis#1112.)*
-
 This section pins which call shapes preserve symbolic dims in the type
 checker's output and which fall back to `(d-name {} *)` (see §4.5). The
 canonical examples live in
@@ -1446,6 +1444,20 @@ type error (`DimensionMismatch`).
    call: the typer defers the output rank slot to whatever the
    declared signature's return-type or the surrounding call context
    imposes via standard unification.
+
+For a positional three-argument call, a declared result tensor or the first
+shape-bearing consumer fixes which of the two shapes applies: a same-rank
+result replaces the extent at `axis`, while a result of rank `rank(x) + 1`
+inserts the new extent at `axis`. The result remains one monomorphic value
+while that choice is deferred; separate uses cannot choose different shapes
+for the same binding. If a shape-neutral consumer such as `cast` requires the
+tensor type before any shape-bearing context fixes it, an axis within the
+input rank selects the established same-rank replacement form. `axis ==
+rank(x)` has no replacement form and therefore selects trailing insertion.
+The same default is materialized when no consumer in the complete program
+fixes the shape. A reusable library context carries the unresolved choice to
+its downstream program rather than deciding it early. An axis greater than
+`rank(x)` is a type error.
 
 **Sourceless-size rejection (source-tracking).** A runtime `size`
 that is neither form (1) nor a form-(2)/form-(3) shape source has no

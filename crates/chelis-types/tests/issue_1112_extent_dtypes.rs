@@ -335,22 +335,22 @@ def g(x: tensor[2, 4, f32]) -> tensor[4, 2, f32] = permute(&x, 1i64, 0i64)
     );
 }
 
-/// reduce_window window_shape/strides stay `List[int32]` until chelis#1113
-/// classifies them; [05-DIM-1] scopes to movement and shape arguments.
+/// [05-DIM-3]: reduce_window window_shape/strides are extent-domain
+/// `List[int64]`; the old `List[int32]` spelling is rejected.
 #[test]
-fn reduce_window_lists_stay_int32() {
+fn reduce_window_lists_are_int64() {
     assert_clean(
         r#"
-def f(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2], [2, 2])
+def f(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2i64, 2i64], [2i64, 2i64])
 "#,
-        "reduce_window_max with int32 window/strides",
+        "reduce_window_max with int64 window/strides",
     );
     assert_rejected_with(
         r#"
-def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2i64, 2i64], [2i64, 2i64])
+def g(x: tensor[4, 4, f32]) -> tensor[2, 2, f32] = reduce_window_max(&x, [2, 2], [2, 2])
 "#,
-        "List[int32]",
-        "reduce_window_max with int64 window",
+        "List[int64]",
+        "reduce_window_max with int32 window",
     );
 }
 

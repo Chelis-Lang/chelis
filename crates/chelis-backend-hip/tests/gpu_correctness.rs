@@ -746,6 +746,81 @@ int main(void) {{
         .collect()
 }
 
+/// f64 sibling of [`compile_and_run_output_f32_bits`]. The output buffer is
+/// read through its declared storage width so an f32-widening regression
+/// cannot hide behind a lossy harness cast.
+fn compile_and_run_output_f64_bits(dag: &Dag, func_name: &str) -> Vec<u64> {
+    require_hipcc();
+    let result = codegen_hip(dag, func_name).unwrap();
+    assert_eq!(result.output_labels.len(), 1);
+    assert!(result.input_labels.is_empty());
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+    let main_cpp = format!(
+        r#"#include "chelis_runtime.h"
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+int main(void) {{
+    chelis_tensor *outputs[1] = {{0}};
+    {func_name}(nullptr, 0, outputs, 1);
+    double *data = (double *)outputs[0]->data;
+    for (int i = 0; i < outputs[0]->size; i++) {{
+        if (i > 0) printf(" ");
+        uint64_t bits;
+        memcpy(&bits, &data[i], sizeof(bits));
+        printf("0x%016llx", (unsigned long long)bits);
+    }}
+    printf("\n");
+    chelis_free(outputs[0]);
+    return 0;
+}}
+"#
+    );
+    write_temp_file(tmp.path(), "main.cpp", &main_cpp);
+
+    let bin_path = tmp.path().join("gpu_correctness_f64_bits_bin");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed:\nstderr: {}\nsource:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source
+    );
+
+    let run = Command::new(&bin_path).output().expect("run gpu binary");
+    assert_gpu_binary_success(&run, &result.link_flags);
+    String::from_utf8(run.stdout)
+        .expect("utf8 stdout")
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|token| u64::from_str_radix(token.trim_start_matches("0x"), 16).unwrap())
+        .collect()
+}
+
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
@@ -780,6 +855,40 @@ fn uniform_like_fma_gpu_bit_exact_matches_eval_and_c() {
         actual, expected,
         "HIP uniform_like FMA output must be bit-exact with eval/C"
     );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn issue_937_uniform_like_f64_gpu_bit_exact_matches_shared_sampler() {
+    let mut dag = Dag::new();
+    let template = dag.add_node(
+        RiscOp::synth_const(vec_f64(8).precision, 0.0),
+        vec![],
+        vec_f64(8),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::UniformLike {
+            low: 2.0,
+            high: 5.0,
+            seed: 42,
+        },
+        vec![template],
+        vec_f64(8),
+        None,
+    );
+    dag.add_root(out);
+
+    let actual = compile_and_run_output_f64_bits(&dag, "uniform_like_f64");
+    let expected = (0..8)
+        .map(|index| {
+            chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, 42, index)
+                .unwrap()
+                .as_f64_lossy()
+                .to_bits()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
 }
 
 // ===========================================================================
@@ -3064,10 +3173,7 @@ fn g16_pad_1d_zero_fill_matches_eval() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
         vec![x],
         vec_f32(6),
         None,
@@ -3086,10 +3192,10 @@ fn g16_pad_1d_nonzero_fill_matches_eval() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(2), RtDim::Lit(1))],
-            fill: -7.5,
-        },
+        RiscOp::pad(
+            vec![(RtDim::Lit(2), RtDim::Lit(1))],
+            chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -3113,15 +3219,15 @@ fn g16_pad_2d_asymmetric_matches_eval() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::Pad {
+        RiscOp::zero_pad(
+            Prim::F32,
             // before/after per axis: row axis (1,0), col axis (0,2) →
             // output is 3x5.
-            padding: vec![
+            vec![
                 (RtDim::Lit(1), RtDim::Lit(0)),
                 (RtDim::Lit(0), RtDim::Lit(2)),
             ],
-            fill: 0.0,
-        },
+        ),
         vec![x],
         mat_f32(3, 5),
         None,
@@ -3154,10 +3260,10 @@ fn g16_pad_over_strided_source_matches_eval() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-            fill: 9.0,
-        },
+        RiscOp::pad(
+            vec![(RtDim::Lit(1), RtDim::Lit(1))],
+            chelis_types::scalar_from_f64("pad", Prim::F32, 9.0).unwrap(),
+        ),
         vec![s],
         vec_f32(5),
         None,
@@ -3235,10 +3341,7 @@ fn g16_pad_then_shrink_roundtrip_matches_eval() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(2), RtDim::Lit(2))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(2), RtDim::Lit(2))]),
         vec![x],
         vec_f32(8),
         None,

@@ -5033,7 +5033,7 @@ mod tests {
         // correctly; only the ahead-of-time build path is restricted.
         let source = r#"
 padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)
-windowed = reduce_window_max(padded, [2], [1])
+windowed = reduce_window_max(padded, [2i64], [1i64])
 "#;
         let err = compile(CompileRequest {
             source_kind: SourceKind::Surf,

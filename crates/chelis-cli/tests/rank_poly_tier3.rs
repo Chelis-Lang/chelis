@@ -412,7 +412,8 @@ fn named_expand_concrete_rank_clean() {
 /// NEGATIVE: insertion strictly inside an opaque spread has no anchor. The
 /// computed output row places the new axis only at an end or at an anchor,
 /// so a declared result demanding `[..lo, c, ..hi]` from `[..rest]` fails
-/// row unification and is rejected (spec §4.5.3).
+/// row unification and is rejected as outside the decidable fragment
+/// (spec §4.5.3).
 #[test]
 fn named_expand_inside_opaque_spread_rejected() {
     let json = check_json(
@@ -420,7 +421,7 @@ fn named_expand_inside_opaque_spread_rejected() {
     );
     assert_rejected_with(
         &json,
-        "doesn't match declared signature",
+        "outside the decidable fragment",
         "insertion strictly inside an opaque spread",
     );
 }

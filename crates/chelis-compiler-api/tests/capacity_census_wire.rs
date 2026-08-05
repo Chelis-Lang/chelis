@@ -351,11 +351,6 @@ const FROZEN_WIRE_ROWS: &[FrozenSurfaceRow] = &[
     },
     FrozenSurfaceRow {
         kind: "wire-schema-numeric-field",
-        id: "chelis_compiler_api::schema::WireRiscOp::Pad.fill: f64",
-        flags: &["float-carrier"],
-    },
-    FrozenSurfaceRow {
-        kind: "wire-schema-numeric-field",
         id: "chelis_compiler_api::schema::WireRiscOp::Permute.axes: Vec<usize>",
         flags: &["numeric-field"],
     },

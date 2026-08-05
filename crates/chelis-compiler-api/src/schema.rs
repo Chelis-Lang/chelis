@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
+use chelis_types::types::Prim;
 use chelis_types::unsupported::Unsupported;
+use chelis_types::{ScalarValue, scalar_from_f64};
 use chelis_vocab::DiagnosticKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1716,7 +1718,9 @@ pub struct WireRecordPatternField {
 ///   and decoding finalizes through the dtype_semantics module
 ///   (finalize-on-decode; corrupt reduced-float images are a loud
 ///   decode error).
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 4;
+/// - `5`: chelis#878 — `WireRiscOp::Pad::fill` changed from a bare f64
+///   capacity seam to the sealed dtype-tagged scalar payload.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 5;
 
 /// Backwards-compat default for [`WireDag::schema_version`]. KEPT at
 /// the chelis#729 rework (which deleted the sibling default on
@@ -1829,11 +1833,91 @@ impl WireDag {
     /// caller can tell a malformed payload from a version-incompatible
     /// one.
     pub fn from_validated_json(json: &str) -> Result<Self, WireDagDecodeError> {
-        let dag: WireDag = serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
+        let mut value: serde_json::Value =
+            serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
+        if !value.is_object() {
+            return serde_json::from_value(value).map_err(WireDagDecodeError::Parse);
+        }
+        let found_version = match value.get("schema_version") {
+            Some(version) => {
+                serde_json::from_value::<u32>(version.clone()).map_err(WireDagDecodeError::Parse)?
+            }
+            None => 1,
+        };
+        if found_version > WIRE_DAG_SCHEMA_VERSION {
+            return Err(WireDagDecodeError::Schema(
+                WireDagSchemaError::UnknownSchemaVersion {
+                    found: found_version,
+                    supported: WIRE_DAG_SCHEMA_VERSION,
+                },
+            ));
+        }
+        if found_version < 5 {
+            migrate_legacy_pad_fills(&mut value)?;
+            value
+                .as_object_mut()
+                .expect("WireDag root was checked above")
+                .insert(
+                    "schema_version".to_string(),
+                    serde_json::Value::from(WIRE_DAG_SCHEMA_VERSION),
+                );
+        }
+        let dag: WireDag = serde_json::from_value(value).map_err(WireDagDecodeError::Parse)?;
         dag.validate_schema_version()
             .map_err(WireDagDecodeError::Schema)?;
         Ok(dag)
     }
+}
+
+/// v1-v4 encoded `Pad.fill` as an untyped JSON number. Recover the only
+/// sound tag available on that surface: the owning node output precision.
+/// v5 never takes this path, so a raw number in a current payload remains a
+/// loud serde error rather than an alternate spelling of the new contract.
+fn migrate_legacy_pad_fills(value: &mut serde_json::Value) -> Result<(), WireDagDecodeError> {
+    let Some(nodes) = value
+        .get_mut("nodes")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    for node in nodes {
+        let is_pad = node.pointer("/op/kind").and_then(serde_json::Value::as_str) == Some("pad");
+        if !is_pad {
+            continue;
+        }
+        let Some(fill) = node.pointer("/op/fill") else {
+            continue;
+        };
+        let image = fill.as_f64().ok_or_else(|| {
+            WireDagDecodeError::Migration(
+                "legacy Pad.fill must use the v1-v4 numeric spelling".to_string(),
+            )
+        })?;
+        let precision = node
+            .pointer("/output_type/precision")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                WireDagDecodeError::Migration(
+                    "legacy Pad.fill migration requires output_type.precision".to_string(),
+                )
+            })?;
+        let prim = Prim::parse_name(precision).ok_or_else(|| {
+            WireDagDecodeError::Migration(format!(
+                "legacy Pad.fill migration cannot resolve output precision `{precision}`"
+            ))
+        })?;
+        let fill = scalar_from_f64("wire_pad_v4_migration", prim, image).map_err(|error| {
+            WireDagDecodeError::Migration(format!(
+                "legacy Pad.fill {image} is invalid for output precision `{precision}`: {error}"
+            ))
+        })?;
+        node["op"]["fill"] = serde_json::to_value(fill).map_err(|error| {
+            WireDagDecodeError::Migration(format!(
+                "legacy Pad.fill migration could not encode typed fill: {error}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 /// Combined failure type for [`WireDag::from_validated_json`]: either the
@@ -1846,6 +1930,9 @@ pub enum WireDagDecodeError {
     Parse(serde_json::Error),
     /// The payload parsed but its schema version is unsupported.
     Schema(WireDagSchemaError),
+    /// A recognized older payload could not be upgraded without inventing
+    /// dtype semantics.
+    Migration(String),
 }
 
 impl std::fmt::Display for WireDagDecodeError {
@@ -1853,6 +1940,7 @@ impl std::fmt::Display for WireDagDecodeError {
         match self {
             WireDagDecodeError::Parse(e) => write!(f, "WireDag JSON parse error: {e}"),
             WireDagDecodeError::Schema(e) => write!(f, "{e}"),
+            WireDagDecodeError::Migration(e) => write!(f, "WireDag migration error: {e}"),
         }
     }
 }
@@ -1862,6 +1950,7 @@ impl std::error::Error for WireDagDecodeError {
         match self {
             WireDagDecodeError::Parse(e) => Some(e),
             WireDagDecodeError::Schema(e) => Some(e),
+            WireDagDecodeError::Migration(_) => None,
         }
     }
 }
@@ -2043,7 +2132,7 @@ pub enum WireRiscOp {
     },
     Pad {
         padding: Vec<(WireRtDim, WireRtDim)>,
-        fill: f64,
+        fill: ScalarValue,
     },
     Shrink {
         bounds: Vec<(WireRtDim, WireRtDim)>,
@@ -2234,6 +2323,160 @@ mod tests {
                  Schema error, got {other:?}"
             ),
         }
+    }
+
+    #[test]
+    fn wire_dag_v4_pad_fill_migrates_from_output_precision() {
+        let legacy = r#"{
+            "schema_version": 4,
+            "nodes": [{
+                "id": 0,
+                "op": {"kind": "pad", "padding": [], "fill": 1.5},
+                "inputs": [],
+                "output_type": {"dims": [], "precision": "f32"}
+            }],
+            "roots": [0]
+        }"#;
+        let dag = WireDag::from_validated_json(legacy).expect("v4 Pad migrates");
+        assert_eq!(dag.schema_version, WIRE_DAG_SCHEMA_VERSION);
+        match &dag.nodes[0].op {
+            WireRiscOp::Pad { fill, .. } => {
+                assert_eq!(fill.prim(), Prim::F32);
+                assert_eq!(fill.as_f64_lossy(), 1.5);
+            }
+            other => panic!("expected migrated Pad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_dag_v5_rejects_raw_pad_fill() {
+        let current_with_legacy_fill = r#"{
+            "schema_version": 5,
+            "nodes": [{
+                "id": 0,
+                "op": {"kind": "pad", "padding": [], "fill": 1.5},
+                "inputs": [],
+                "output_type": {"dims": [], "precision": "f32"}
+            }],
+            "roots": [0]
+        }"#;
+        assert!(
+            matches!(
+                WireDag::from_validated_json(current_with_legacy_fill),
+                Err(WireDagDecodeError::Parse(_))
+            ),
+            "v5 must not retain a raw-number alternate Pad.fill spelling"
+        );
+    }
+
+    #[test]
+    fn wire_dag_legacy_versions_reject_typed_pad_fill_spelling() {
+        let typed_fill = serde_json::to_value(
+            chelis_types::scalar_from_f64("wire_pad_test", Prim::F32, 1.5)
+                .expect("finite f32 fill"),
+        )
+        .expect("serialize typed fill");
+        let legacy = serde_json::json!({
+            "schema_version": 4,
+            "nodes": [{
+                "id": 0,
+                "op": {"kind": "pad", "padding": [], "fill": typed_fill},
+                "inputs": [],
+                "output_type": {"dims": [], "precision": "f32"}
+            }],
+            "roots": [0]
+        });
+        assert!(matches!(
+            WireDag::from_validated_json(&legacy.to_string()),
+            Err(WireDagDecodeError::Migration(message))
+                if message.contains("v1-v4 numeric spelling")
+        ));
+    }
+
+    #[test]
+    fn wire_dag_non_object_roots_reject_without_panicking() {
+        for malformed in ["[]", "null", "42", r#""wire""#] {
+            assert!(
+                matches!(
+                    WireDag::from_validated_json(malformed),
+                    Err(WireDagDecodeError::Parse(_))
+                ),
+                "non-object root {malformed} must be a parse error"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_dag_rejects_malformed_schema_versions_before_migration() {
+        for version in [r#""4""#, "-1", "4294967296"] {
+            let json = format!(
+                r#"{{
+                    "schema_version": {version},
+                    "nodes": [],
+                    "roots": []
+                }}"#
+            );
+            assert!(
+                matches!(
+                    WireDag::from_validated_json(&json),
+                    Err(WireDagDecodeError::Parse(_))
+                ),
+                "malformed schema version {version} must not be treated as an absent v1 field"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_dag_v5_pad_fill_round_trips_exact_int64() {
+        let exact = 9_007_199_254_740_993i64;
+        let dag = WireDag {
+            schema_version: WIRE_DAG_SCHEMA_VERSION,
+            nodes: vec![WireDagNode {
+                id: 0,
+                op: WireRiscOp::Pad {
+                    padding: vec![],
+                    fill: chelis_types::scalar_from_i64("wire_pad_test", Prim::Int64, exact)
+                        .expect("exact int64 fill"),
+                },
+                inputs: vec![],
+                output_type: WireTensorType {
+                    dims: vec![],
+                    precision: "int64".to_string(),
+                },
+            }],
+            roots: vec![0],
+        };
+        let json = serde_json::to_string(&dag).expect("serialize typed Pad");
+        let decoded = WireDag::from_validated_json(&json).expect("decode typed Pad");
+        match &decoded.nodes[0].op {
+            WireRiscOp::Pad { fill, .. } => {
+                assert_eq!(fill.prim(), Prim::Int64);
+                assert_eq!(fill.as_i64_exact(), Some(exact));
+            }
+            other => panic!("expected Pad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_dag_v4_pad_migration_rejects_missing_precision() {
+        let legacy = r#"{
+            "schema_version": 4,
+            "nodes": [{
+                "id": 0,
+                "op": {"kind": "pad", "padding": [], "fill": 1.5},
+                "inputs": [],
+                "output_type": {"dims": []}
+            }],
+            "roots": [0]
+        }"#;
+        assert!(
+            matches!(
+                WireDag::from_validated_json(legacy),
+                Err(WireDagDecodeError::Migration(message))
+                    if message.contains("output_type.precision")
+            ),
+            "legacy migration must fail rather than invent a fill dtype"
+        );
     }
 
     #[test]

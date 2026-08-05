@@ -1066,15 +1066,15 @@ pub fn lower_conv2d(
     };
     let padded = add_synth(
         dag,
-        RiscOp::Pad {
-            padding: vec![
+        RiscOp::zero_pad(
+            input_ty.precision,
+            vec![
                 (RtDim::Lit(0), RtDim::Lit(0)),
                 (RtDim::Lit(0), RtDim::Lit(0)),
                 (RtDim::Lit(padding), RtDim::Lit(padding)),
                 (RtDim::Lit(padding), RtDim::Lit(padding)),
             ],
-            fill: 0.0,
-        },
+        ),
         vec![input],
         padded_ty.clone(),
         parent_span,

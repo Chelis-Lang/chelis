@@ -537,6 +537,37 @@ pub(super) fn reject_non_int32_axis(
     }
 }
 
+/// Enforce every axis slot registered for `op` against already-inferred
+/// argument types. The registration is the class mechanism for [05-DIM-3]:
+/// fixed and variadic axis layouts share one dtype gate, while each
+/// operation keeps its own value/rank checks.
+pub(super) fn enforce_registered_axis_dtypes(
+    op: &str,
+    arg_tys: &[Type],
+    list: &deep::List,
+    errors: &mut DiagnosticSink<'_>,
+) -> Result<(), Type> {
+    let Some(layout) = builtins::axis_argument_layout(op) else {
+        return Ok(());
+    };
+    match layout {
+        builtins::AxisArgumentLayout::NoAxes => {}
+        builtins::AxisArgumentLayout::Fixed(slots) => {
+            for &slot in slots {
+                if let Some(axis_ty) = arg_tys.get(slot) {
+                    reject_non_int32_axis(op, axis_ty, list, errors)?;
+                }
+            }
+        }
+        builtins::AxisArgumentLayout::VariadicFrom(first) => {
+            for axis_ty in arg_tys.iter().skip(first) {
+                reject_non_int32_axis(op, axis_ty, list, errors)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve one member of a two-axis builtin (`trace`, `diagonal`)
 /// against the operand `tensor_ty`. Like [`resolve_builtin_axis`], a
 /// negative literal indexes from the end; a still-out-of-range axis

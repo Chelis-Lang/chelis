@@ -10,7 +10,7 @@ use chelis_types::{
     compare_tensor_scalar, compare_tensors, float_binop, float_scalar_tensor_binop,
     float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
     int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
-    reduce_tensor_groups, scalar_from_i64, types::Prim,
+    reduce_tensor_groups, scalar_from_i64, tensor_from_scalars, types::Prim, uniform_sample,
 };
 
 use super::transforms::*;
@@ -3014,6 +3014,7 @@ pub(super) fn builtin_name(expr: &Expr) -> Option<&str> {
     BUILTIN_NAMES.contains(&name).then_some(name)
 }
 
+#[cfg(test)]
 fn dropout_sample(seed: u64, index: u64) -> f64 {
     let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     x ^= x >> 30;
@@ -3030,36 +3031,24 @@ pub(super) fn uniform_like_value(
     high: f64,
     seed: u64,
 ) -> RuntimeTensorValue {
-    // chelis#770: evaluate the affine `low + (high - low) * unit` in f32,
-    // conforming to the C f32 sampler `chelis_uniform_sample_f32`
-    // (chelis-backend-c/src/emit.rs and host_emit.rs:
-    // `return low + (high - low) * (float)unit;` with f32 `low`/`high`).
-    // Under the default toolchain (`-march=native`, `-ffp-contract=fast`) the
-    // C compiler contracts that `low + span * unit` into a single-rounding
-    // fused multiply-add, so `span_f.mul_add(unit_f, low_f)` (also one
-    // rounding) matches it bit-for-bit; a plain `low_f + span_f * unit_f`
-    // (two roundings) drifts 1 ULP on some elements. `dropout_sample` stays
-    // f64 (no C oracle; drives dropout thresholds); the f32 casts are local.
-    let low_f = low as f32;
-    let high_f = high as f32;
-    let span_f = high_f - low_f;
-    let data = (0..template.value.len())
-        .map(|index| span_f.mul_add(dropout_sample(seed, index as u64) as f32, low_f) as f64)
+    let low = low as f32;
+    let high = high as f32;
+    let values = (0..template.value.len())
+        .map(|index| {
+            uniform_sample(template.precision, low, high, seed, index as u64)
+                .expect("uniform_like checker admits only active float dtypes")
+        })
         .collect::<Vec<_>>();
-    RuntimeTensorValue::from_wide(
-        "uniform_like",
-        template.precision,
+    RuntimeTensorValue::new(IrTensorValue::from_storage(
         template.value.shape.clone(),
-        data,
-    )
-    .expect("f32-image samples finalize at any float dtype")
+        tensor_from_scalars(template.precision, &values),
+    ))
 }
 
 #[cfg(test)]
 mod uniform_like_affine_tests {
-    //! chelis#770: `uniform_like_value` evaluates the affine in f32,
-    //! op-for-op with the C `chelis_uniform_sample_f32` sampler, so the host
-    //! evaluator and the compiled C lane agree at f32. These pin the exact
+    //! chelis#770/#937: `uniform_like_value` routes through the shared
+    //! per-dtype sampler used by the IR evaluator. These pin the exact
     //! widened-f32 output at seed=42 / shape=[8] and the 1-ULP gap the old
     //! f64 affine left at elem[4] of [2,5), plus a negative range (unit-level
     //! only: the C cross-lane path can't be driven with a bare negative
@@ -3069,6 +3058,11 @@ mod uniform_like_affine_tests {
     fn template_f32(n: usize) -> RuntimeTensorValue {
         RuntimeTensorValue::from_wide("test", Prim::F32, vec![n], vec![0.0; n])
             .expect("zero template finalizes at f32")
+    }
+
+    fn template_f64(n: usize) -> RuntimeTensorValue {
+        RuntimeTensorValue::from_wide("test", Prim::F64, vec![n], vec![0.0; n])
+            .expect("zero template finalizes at f64")
     }
 
     #[test]
@@ -3121,6 +3115,21 @@ mod uniform_like_affine_tests {
             out.value.to_f64_lossy_vec()[3].to_bits(),
             (f32::from_bits(0xc010167a) as f64).to_bits(),
             "elem[3] must be the C f32 sampler value for [-3,-1) (0xc010167a)",
+        );
+    }
+
+    #[test]
+    fn affine_uses_f64_storage_and_f64_arithmetic_for_f64_template() {
+        let out = uniform_like_value(&template_f64(8), 2.0, 5.0, 42);
+        assert_eq!(out.precision, Prim::F64);
+        let expected = uniform_sample(Prim::F64, 2.0, 5.0, 42, 4)
+            .expect("f64 sample")
+            .as_f64_lossy();
+        assert_eq!(out.value.element_f64_lossy(4).to_bits(), expected.to_bits());
+        assert_ne!(
+            out.value.element_f64_lossy(4).to_bits(),
+            (expected as f32 as f64).to_bits(),
+            "f64 samples must not be widened f32 values"
         );
     }
 }

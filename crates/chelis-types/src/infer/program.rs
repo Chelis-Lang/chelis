@@ -150,6 +150,16 @@ pub(super) fn infer_program_with_product_in_session(
     }
     crate::opacity::set_current_item(None, None);
 
+    // [04-TENSOR-EXPAND]: later roots get the first opportunity to select a
+    // positional expand's legal output shape. At the whole-program freeze
+    // point, materialize the documented context-free default for every
+    // still-unconstrained result, then refresh stamps written by earlier
+    // roots so no unresolved type escapes into checked annotations.
+    if let Err(error) = subst.materialize_deferred_expand_defaults() {
+        errors.push(error.into());
+    }
+    product.resolve_owner_types(&subst);
+
     // Third pass: reject tensor types whose element precision isn't supported
     // by the Phase 0f backend (f16/bf16/f8e4m3). These would silently get
     // downcast to f32 by the current build targets, violating the "no implicit
@@ -709,7 +719,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     // Library is already validated; only run validate / inference on
     // new exprs. Inference's canonical collector binds the new-code's
     // own declared types (library schemes are already in state.env).
-    let product = infer_ir_program_with_state(
+    let mut product = infer_ir_program_with_state(
         new_exprs,
         &mut state,
         &combined_ir,
@@ -723,6 +733,15 @@ pub(crate) fn check_ir_with_signature_context_in_session(
     if cancellation_gate(errors) {
         return Err(stats);
     }
+    // A reusable library context deliberately carries unresolved positional
+    // expand obligations into this cloned state. New code gets the first
+    // opportunity to select a legal shape; only now, when producing the final
+    // CheckedProgram, do otherwise-unselected results take the documented
+    // context-free default.
+    if let Err(error) = state.subst.materialize_deferred_expand_defaults() {
+        errors.push(error.into());
+    }
+    product.resolve_owner_types(&state.subst);
     // Run cycle / shape / precision validators on new_exprs only. The
     // combined IR env is supplied so `(var libfoo)` references
     // resolve to the library's declared type during shape validation.

@@ -212,9 +212,9 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "c_nonliteral_window",
-        "def f(x: tensor[6, f32], w: int32, s: int32) -> tensor[5, f32] = \
+        "def f(x: tensor[6, f32], w: int64, s: int64) -> tensor[5, f32] = \
          reduce_window_max(x, [w], [s])\n\
-         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2, 1)\n",
+         out = f(to_tensor([1.0, 5.0, 2.0, 8.0, 3.0, 9.0]), 2i64, 1i64)\n",
         "c",
         "error: Lowering error: unsupported: a non-literal window list for `reduce_window_max` \
          on the compiled-backend lowering of `reduce_window_*` (lowering); unimplemented \

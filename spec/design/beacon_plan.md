@@ -67,10 +67,12 @@ What Beacon is not, in the same present tense:
   path registers Beacon as an engine; every dispatch to date originated in a
   test fixture. Chelis-side production wiring is roadmap item 1.1.
   Separately, Beacon parses WireDag schema versions 1, 2, and 3
-  (`src/wire.rs`), matching the version chelis main currently stamps, and
-  exposes the `--schema-versions` startup negotiation probe; that closes
-  the beacon side of roadmap item 0.1, whose remaining half is the
-  chelis-side launcher wiring plus the cross-repo negotiation gate.
+  (`src/wire.rs`) and exposes the `--schema-versions` startup negotiation
+  probe. Chelis WireDag v5 carries the typed `Pad.fill` migration from
+  chelis#878, so the advertised sets no longer overlap at the current
+  producer version. That is an expected loud mismatch until Beacon adopts
+  v5; it makes the chelis-side launcher negotiation and cross-repo gate in
+  chelis#708 mandatory before production dispatch, not optional polish.
 
 ## 2. Scope and interfaces
 
@@ -259,9 +261,9 @@ everything else untrusted with no proof qualifier). Chelis-side, the
 registration function exists but has no production caller, there is no
 range-goal syntax, and `chelis prove --capabilities` currently overstates
 availability — those are roadmap items 1.1, 1.2, and 0.2 respectively, all
-chelis-side. The near-term dependency is roadmap 0.1: WireDag v3 acceptance
-and version negotiation, without which the next chelis release breaks every
-dispatch.
+chelis-side. The near-term dependency is roadmap 0.1: current WireDag v5
+acceptance and version negotiation, without which the next chelis release
+breaks every dispatch.
 
 ## 4. Validation and the division of labor with the external engine
 
@@ -368,8 +370,8 @@ the ±300 range policy (roadmap 2.9).
 contract, `protocol --json`, proof bundles). Open, chelis-side: production
 registration and the documented end-to-end manual gate (roadmap 1.1),
 range-goal syntax (roadmap 1.2), capabilities honesty (roadmap 0.2). Open,
-both sides: WireDag v3 acceptance, version negotiation, and the CI tripwire
-(roadmap 0.1). The gradient-graph path for verified Greeks has chelis-side
+both sides: current WireDag v5 acceptance, version negotiation, and the CI
+tripwire (roadmap 0.1; chelis#708). The gradient-graph path for verified Greeks has chelis-side
 plumbing (WI-10 fan-out) and no production caller.
 
 **WI-B9 Standalone and neural-network path — re-scoped.** Beacon has no

@@ -42,8 +42,8 @@ mod builtins;
 mod source_arch;
 
 pub use builtins::{
-    BUILTIN_NAMES, BUILTINS, BuiltinDecl, Realizability, ShapeClass, builtin_decl, builtin_env,
-    prelude_adt_defs, realizability, shape_class,
+    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinDecl, Realizability, ShapeClass,
+    axis_argument_layout, builtin_decl, builtin_env, prelude_adt_defs, realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
@@ -63,6 +63,7 @@ pub use dtype_semantics::{
     float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop, int_scalar_tensor_binop,
     int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop, reduce_tensor_groups,
     reduce_window_grad_tensor_groups, scalar_from_f64, scalar_from_i64, tensor_from_scalars,
+    uniform_sample,
 };
 pub use fitness::{
     FitnessReport, StructuralStats, TypeAnalysisOutcome, analyze_ir_program,

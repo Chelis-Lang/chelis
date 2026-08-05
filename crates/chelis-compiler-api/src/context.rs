@@ -703,16 +703,17 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
-/// V6: the chelis#729 rework changed `RiscOp::Const`/`ConstTensor`
-/// payloads to the sealed dtype-tagged types (chelis#856), altering the
-/// bincode shape of every cached lowered DAG; V5 files are stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V6\n";
+/// V7: chelis#878 changed `RiscOp::Pad::fill` to the sealed dtype-tagged
+/// scalar, and chelis#942 made deferred positional-expand constraints part of
+/// the serialized checker context. Both alter cached bincode shapes; V6 files
+/// are stale.
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V7\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 6;
+const CACHE_FORMAT_VERSION: u32 = 7;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///

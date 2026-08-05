@@ -249,7 +249,7 @@ impl Env {
         Scheme {
             tvars: ty_tvars
                 .into_iter()
-                .filter(|v| !env_tvars.contains(v))
+                .filter(|v| !env_tvars.contains(v) && !subst.has_deferred_expand_constraint(*v))
                 .collect(),
             dvars: ty_dvars
                 .into_iter()

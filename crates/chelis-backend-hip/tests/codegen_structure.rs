@@ -1978,10 +1978,7 @@ fn s8a_pad_emits_kernel_and_launch_not_view() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
         vec![x],
         vec_f32(6),
         None,
@@ -2045,10 +2042,7 @@ fn s8a_pad_f64_uses_dtype_suffix() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(Prim::F64, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
         vec![x],
         TensorType {
             dims: vec![DimInfo::Lit(6)],

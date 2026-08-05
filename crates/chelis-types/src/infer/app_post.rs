@@ -17,8 +17,23 @@ pub(super) fn finish_unified_app(
     subst: &mut Subst,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    expected_result: Option<&Type>,
 ) -> Type {
     let mut result_ty = subst.apply(&ret_tv);
+
+    // [04-TENSOR-EXPAND]: an expected tensor fixes whether positional expand
+    // replaces an existing axis (same rank) or inserts one (rank + 1).
+    // Without expected context, `check_expand_signature` records a deferred
+    // two-shape obligation that ordinary consumers can resolve. Seed only the
+    // direct expand body; other operations retain ordinary bottom-up inference.
+    if func_name.as_deref() == Some("expand")
+        && let Some(expected) = expected_result
+    {
+        if let Err(error) = unify(&result_ty, expected, subst) {
+            return report(errors, error.into());
+        }
+        result_ty = subst.apply(&result_ty);
+    }
 
     if let Some(rejected) =
         validate_numeric_and_reduction_arguments(list, kids, &func_name, &arg_tys, subst, errors)
@@ -1445,31 +1460,19 @@ pub(super) fn finish_unified_app(
                 }
                 let lhs = subst.apply(&arg_tys[0]);
                 let rhs = subst.apply(&arg_tys[1]);
+                let lhs_is_list =
+                    matches!(&lhs, Type::Adt(name, args) if name == "List" && args.len() == 1);
+                let rhs_is_list =
+                    matches!(&rhs, Type::Adt(name, args) if name == "List" && args.len() == 1);
+                if lhs_is_list
+                    && !rhs_is_list
+                    && let Err(err) = reject_non_int32_axis("concat", &rhs, list, errors)
+                {
+                    return err;
+                }
                 match (lhs, rhs) {
-                    // chelis#1113 fail-closed guard: an axis names a rank
-                    // position and is int32 in every enforced surface; a
-                    // non-int32 integer axis was silently accepted here
-                    // while `sum` rejected one.
-                    (Type::Adt(lhs_name, lhs_args), Type::Prim(precision))
-                        if lhs_name == "List"
-                            && lhs_args.len() == 1
-                            && precision.is_integer()
-                            && precision != Prim::Int32 =>
-                    {
-                        return report(
-                            errors,
-                            CheckError::new(
-                                CheckErrorKind::TypeMismatch,
-                                with_macro_provenance(
-                                    &deep::Expr::List(list.clone(), zero_span()),
-                                    format!("concat expects int32 axis, got {}", precision.name()),
-                                ),
-                                vec![],
-                            ),
-                        );
-                    }
-                    (Type::Adt(lhs_name, lhs_args), Type::Prim(precision))
-                        if lhs_name == "List" && lhs_args.len() == 1 && precision.is_integer() =>
+                    (Type::Adt(lhs_name, lhs_args), Type::Prim(Prim::Int32))
+                        if lhs_name == "List" && lhs_args.len() == 1 =>
                     {
                         // chelis#631/#594 (spec §4.5.4): the concat
                         // axis value and the statically-visible

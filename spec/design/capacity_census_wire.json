@@ -466,13 +466,6 @@
     },
     {
       "flags": [
-        "float-carrier"
-      ],
-      "id": "chelis_compiler_api::schema::WireRiscOp::Pad.fill: f64",
-      "kind": "wire-schema-numeric-field"
-    },
-    {
-      "flags": [
         "numeric-field"
       ],
       "id": "chelis_compiler_api::schema::WireRiscOp::Permute.axes: Vec<usize>",

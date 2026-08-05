@@ -3966,7 +3966,7 @@ fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
     write_file(
         &path,
         "padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)\n\
-         windowed = reduce_window_max(padded, [2], [1])\n",
+         windowed = reduce_window_max(padded, [2i64], [1i64])\n",
     );
     let out_dir = dir.path().join("rw-build");
 
@@ -4003,7 +4003,7 @@ fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
     write_file(
         &path,
         "def pool_bf16(x: tensor[1, 1, 4, 4, bf16]) -> tensor[1, 1, 3, 3, bf16] = \
-         reduce_window_max(&x, [2, 2], [1, 1])\n",
+         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
     );
     let out_dir = dir.path().join("rw-bf16-build");
 
@@ -4037,7 +4037,7 @@ fn build_hip_rejects_reduce_window_with_clean_diagnostic() {
     write_file(
         &path,
         "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
-         reduce_window_max(&x, [2, 2], [1, 1])\n",
+         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
     );
     let out_dir = dir.path().join("rw-hip-build");
 

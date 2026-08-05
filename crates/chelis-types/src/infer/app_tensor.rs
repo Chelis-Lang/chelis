@@ -915,6 +915,23 @@ pub(super) fn check_expand_signature(
             );
         }
     };
+    // Both positional forms share the inclusive insertion bound. Diagnose
+    // values beyond it before consulting an expected result: expected-result
+    // propagation may carry an independently wrong rank, but it must not mask
+    // the more local invalid-axis reason (chelis#579/#942).
+    if axis > input_dims.len() {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::DimensionMismatch,
+                format!(
+                    "expand insert axis {axis} is out of bounds for rank {} tensor",
+                    input_dims.len()
+                ),
+                vec![],
+            ),
+        );
+    }
     let size = match arg_exprs.get(2).and_then(extract_int_for_dim) {
         Some(size) if size > 0 => Dim::Lit(size),
         Some(size) => {
@@ -976,19 +993,6 @@ pub(super) fn check_expand_signature(
                 );
             }
             if out_dims.len() == input_dims.len() + 1 {
-                if axis > input_dims.len() {
-                    return report(
-                        errors,
-                        CheckError::new(
-                            CheckErrorKind::DimensionMismatch,
-                            format!(
-                                "expand insert axis {axis} is out of bounds for rank {} tensor",
-                                input_dims.len()
-                            ),
-                            vec![],
-                        ),
-                    );
-                }
                 let mut expected = input_dims.clone();
                 expected.insert(axis, size.clone());
                 Type::Tensor(expected, input_prec)
@@ -1025,7 +1029,25 @@ pub(super) fn check_expand_signature(
                 );
             }
         }
-        Type::Var(_) | Type::Error(_) => return subst.apply(result_ty),
+        Type::Var(result_var) => {
+            // [04-TENSOR-EXPAND]: retain both legal shapes until ordinary
+            // unification supplies a tensor result. The obligation is tied to
+            // this monomorphic result variable, so a later consumer can select
+            // insertion or replacement and the unifier checks the selected
+            // shape. A shape-neutral consumer such as `cast` materializes the
+            // documented context-free default (chelis#942).
+            subst.record_deferred_expand_constraint(
+                result_var,
+                crate::unify::DeferredExpandConstraint {
+                    input_dims,
+                    input_prec,
+                    axis,
+                    size,
+                },
+            );
+            Type::Var(result_var)
+        }
+        Type::Error(witness) => return propagate(&witness),
         other => {
             return report(
                 errors,

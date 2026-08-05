@@ -54,6 +54,16 @@ __device__ float chelis_uniform_sample_f32(unsigned long long seed, unsigned lon
     double unit = (double)(x >> 11) / (double)(1ULL << 53);
     return fmaf(high - low, (float)unit, low);
 }
+__device__ double chelis_uniform_sample_f64(unsigned long long seed, unsigned long long index, double low, double high) {
+    unsigned long long x = seed ^ (index * 0x9E3779B97F4A7C15ULL);
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ULL;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBULL;
+    x ^= x >> 31;
+    double unit = (double)(x >> 11) / (double)(1ULL << 53);
+    return fma(high - low, unit, low);
+}
 ";
 
 /// Maximum tensor dimensions (must match CHELIS_MAX_DIM in runtime).
@@ -550,22 +560,23 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Generate kernel source for uniform_like random fill. The PRNG itself
-/// always runs in f32 — the f64 variant simply widens at the final store
-/// because `chelis_uniform_sample_f32` is the only PRNG the runtime ships
-/// today and the spec does not pin a higher-precision tensor random
-/// surface.
+/// Generate kernel source for uniform_like random fill. [05-OP-8] binds
+/// each output width to its own affine: f32 uses fmaf and f64 uses fma.
 pub fn uniform_like(kernel_name: &str, kind: ElemKind) -> String {
     let ty = kind.c_type();
+    let sampler = match kind {
+        ElemKind::F32 => "chelis_uniform_sample_f32",
+        ElemKind::F64 => "chelis_uniform_sample_f64",
+    };
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
-    float low, float high, unsigned long long seed,
+    {ty} low, {ty} high, unsigned long long seed,
     {ty} *out, {out_shape}, int out_ndim, int out_size) {{
 {build_out_sh}
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= out_size) return;
-  out[i] = ({ty})chelis_uniform_sample_f32(seed, (unsigned long long)i, low, high);
+  out[i] = {sampler}(seed, (unsigned long long)i, low, high);
 }}
 ",
         out_shape = shape_params("out"),
