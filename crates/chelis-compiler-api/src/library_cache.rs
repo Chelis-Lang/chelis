@@ -461,7 +461,9 @@ pub fn build_library_context(
         Err(crate::pipeline::LibraryRejection::Effects { .. })
         | Err(crate::pipeline::LibraryRejection::Linearity { .. }) => return Ok(None),
         Err(rejection) => {
-            return Err(crate::context::library_rejection_to_compiler_error(rejection));
+            return Err(crate::context::library_rejection_to_compiler_error(
+                rejection,
+            ));
         }
     };
 
