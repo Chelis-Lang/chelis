@@ -35,6 +35,26 @@ pub(super) fn finish_unified_app(
         result_ty = subst.apply(&result_ty);
     }
 
+    if let Some(fname) = func_name.as_deref()
+        && let Some(decl) = builtins::builtin_decl(fname)
+        && let builtins::InferenceDisposition::Checked(rule) = decl.inference
+        && !builtins::has_registered_inference_route(fname, rule)
+    {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::Other,
+                format!(
+                    "internal: builtin `{fname}` declares checked inference `{rule:?}` but has no registered dispatcher route"
+                ),
+                vec![
+                    "Add the semantic inference route in the same change as the builtin declaration, or explicitly declare GenericAccepted with a reviewed reason"
+                        .to_string(),
+                ],
+            ),
+        );
+    }
+
     if let Some(rejected) =
         validate_numeric_and_reduction_arguments(list, kids, &func_name, &arg_tys, subst, errors)
     {
@@ -328,6 +348,7 @@ pub(super) fn finish_unified_app(
                 | "expand"
                 | "layer_norm"
                 | "conv2d"
+                | "scatter_elements"
         ) && arg_tys
             .iter()
             .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
@@ -345,12 +366,36 @@ pub(super) fn finish_unified_app(
             })
             .unwrap_or(result_ty);
     } else if let Some(ref fname) = func_name {
+        let owes_shape_replay = arg_tys
+            .iter()
+            .any(|ty| product.shape_operand_awaits_lambda_binding(ty, subst));
+        let mut retained_shape_obligation = false;
         match fname.as_str() {
             "matmul" => {
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Matmul,
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
             }
             "sum" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
             | "argmin_reduce" | "mean" => {
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Reduction {
+                            name: fname.clone(),
+                        },
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_reduction_signature(
                     fname,
                     &kids[1..],
@@ -378,6 +423,19 @@ pub(super) fn finish_unified_app(
                     .get(3)
                     .map(|arg| classify_expand_size(arg, env))
                     .unwrap_or(SizeClass::Unknown);
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Expand {
+                            axis_is_dim_name,
+                            size_class,
+                            env: env.clone(),
+                        },
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_expand_signature(
                     &kids[1..],
                     &arg_tys,
@@ -390,13 +448,63 @@ pub(super) fn finish_unified_app(
                 );
             }
             "layer_norm" => {
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::LayerNorm,
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
             }
             "conv2d" => {
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Conv2d,
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty =
                     check_conv2d_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
             }
+            "scatter_elements" if owes_shape_replay => {
+                product.defer_shape_check(
+                    DeferredShapeRule::ScatterElements { list: list.clone() },
+                    kids[1..].to_vec(),
+                    arg_tys.clone(),
+                    result_ty.clone(),
+                );
+                retained_shape_obligation = true;
+            }
             _ => {}
+        }
+        if owes_shape_replay
+            && !retained_shape_obligation
+            && builtins::builtin_decl(fname).is_some_and(|decl| {
+                decl.inference
+                    == builtins::InferenceDisposition::Checked(
+                        builtins::BuiltinInferenceRule::ShapeComputed,
+                    )
+            })
+        {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::Other,
+                    format!(
+                        "internal: shape-computed builtin `{fname}` reached an unbound operand without retaining its semantic obligation"
+                    ),
+                    vec![
+                        "Add the builtin's ordinary checker rule to the deferred shape ledger in the same change as its ShapeComputed disposition"
+                            .to_string(),
+                    ],
+                ),
+            );
         }
     }
 
@@ -931,7 +1039,7 @@ pub(super) fn finish_unified_app(
                     Ok(axis) => axis,
                     Err(err) => return err,
                 };
-                match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
+                match infer_gather_result_type("gather", &tensor_ty, &indices_ty, axis) {
                     Ok(ty) => return ty,
                     Err(message) => {
                         return report(
@@ -1261,7 +1369,7 @@ pub(super) fn finish_unified_app(
                         );
                     }
                 }
-                match infer_gather_result_type(&base_ty, &indices_ty, axis) {
+                match infer_gather_result_type("scatter", &base_ty, &indices_ty, axis) {
                     Ok(expected_updates) => {
                         if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
                             return report(errors, te.into());
@@ -1306,7 +1414,7 @@ pub(super) fn finish_unified_app(
                     Ok(axis) => axis,
                     Err(err) => return err,
                 };
-                match infer_gather_result_type(&base_ty, &indices_ty, axis) {
+                match infer_gather_result_type("scatter_replace", &base_ty, &indices_ty, axis) {
                     Ok(expected_updates) => {
                         if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
                             return report(errors, te.into());
@@ -1327,6 +1435,9 @@ pub(super) fn finish_unified_app(
                         );
                     }
                 }
+            }
+            "scatter_elements" => {
+                return check_scatter_elements(list, kids, &arg_tys, result_ty, subst, errors);
             }
             "len" => {
                 if let Some(first_arg) = arg_tys.first() {
@@ -2867,5 +2978,6 @@ pub(super) fn finish_unified_app(
         }
     }
 
-    result_ty
+    product.replay_ready_shape_checks(vg, subst, errors);
+    subst.apply(&result_ty)
 }

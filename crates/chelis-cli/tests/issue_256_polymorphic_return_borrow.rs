@@ -100,7 +100,8 @@ fn fmt_inplace(path: &Path) {
 }
 
 /// Issue #256 reproducer (post-fix expected behavior). The body's
-/// pool helper has no return-type annotation; its body uses
+/// pool helper has no return-type annotation; its input annotation keeps this
+/// #256 fixture outside [04-INF-1]'s unannotated-shape-lambda class. Its body uses
 /// `reshape(...)` whose output type can't be derived from runtime
 /// list args, so the helper's return ends up as an unresolved
 /// `Type::Var`. The chain `pool(x) → relu → &borrow → consume_t` then
@@ -114,7 +115,7 @@ fn polymorphic_return_borrow_chain_is_accepted_post_fix() {
     write_file(
         &fixture,
         "module Issue256PolyReturnChain\n\
-         def pool_no_sig(x) = {\n\
+         def pool_no_sig(x: tensor[2, 4, 4, 4, f32]) = {\n\
            six = reshape(x, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(2, int64), cast(2, int64)])\n\
            perm = permute(six, cast(0, int32), cast(1, int32), cast(2, int32), cast(4, int32), cast(3, int32), cast(5, int32))\n\
            five = reshape(perm, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(4, int64)])\n\
@@ -151,7 +152,7 @@ fn id4_roundtrip_workaround_still_works() {
     write_file(
         &fixture,
         "module Issue256Id4Workaround\n\
-         def pool_no_sig(x) = {\n\
+         def pool_no_sig(x: tensor[2, 4, 4, 4, f32]) = {\n\
            six = reshape(x, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(2, int64), cast(2, int64)])\n\
            perm = permute(six, cast(0, int32), cast(1, int32), cast(2, int32), cast(4, int32), cast(3, int32), cast(5, int32))\n\
            five = reshape(perm, [cast(2, int64), cast(4, int64), cast(2, int64), cast(2, int64), cast(4, int64)])\n\

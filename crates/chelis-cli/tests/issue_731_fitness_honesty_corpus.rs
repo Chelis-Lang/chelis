@@ -41,6 +41,11 @@
 //! components are all vacuously 1.0 -- went uncovered while `chelis check`
 //! scored those programs a dishonest 1.0. Covered by the §C4.4 honesty cap in
 //! `chelis_types::fitness`.
+//!
+//! Membership (post-Phase-3): chelis#780's deferred shape obligation,
+//! chelis#850's unbacked `defsig`, chelis#1131's contradictory literal atom,
+//! and chelis#1147's four `scatter_elements` admission holes. Each class also
+//! has a well-typed score-1 control below.
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -183,6 +188,33 @@ fn surf_known_bad_programs_score_below_one() {
             "def f() -> f32 = cast(1.0, madeup)\nout = print(f())\n".to_string(),
             ".ch",
         ),
+        (
+            "deferred_matmul_shape_mismatch",
+            "def driver(good: tensor[4, 4, f32]) -> tensor[9, 9, f32] = {\n  \
+             f = fn (a) -> matmul(a, good)\n  f(good)\n}\n"
+                .to_string(),
+            ".ch",
+        ),
+        (
+            "scatter_elements_string_axis",
+            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, \"bad\")\n".to_string(),
+            ".ch",
+        ),
+        (
+            "scatter_elements_oob_axis",
+            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 99)\n".to_string(),
+            ".ch",
+        ),
+        (
+            "scatter_elements_float_indices",
+            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, f32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 1)\n".to_string(),
+            ".ch",
+        ),
+        (
+            "scatter_elements_string_data",
+            "def f(indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) = scatter_elements(\"bad\", indices, updates, 0)\n".to_string(),
+            ".ch",
+        ),
     ];
     assert_below_one(&cases);
 }
@@ -252,6 +284,11 @@ fn malformed_dp_forms_score_below_one() {
                 "(handle-effect {effect: random} (lit {type: (t-prim {} int64)} -1) \
                  (lit {type: (t-prim {} f32)} 2.5))",
             ),
+            ".dp",
+        ),
+        (
+            "dp_integer_atom_with_float_primitive",
+            wrap("(lit {type: (t-prim {} f32)} 18014399583223809)"),
             ".dp",
         ),
         // chelis#731 red team: a handle-effect with a THIRD child (spec/03 gives
@@ -398,8 +435,43 @@ fn declaration_only_known_bad_programs_score_below_one() {
             "type Foo = f32\ntype Foo = int32\n".to_string(),
             ".ch",
         ),
+        (
+            "orphan_defsig",
+            "(defsig {} missing (t-fn {} (t-prim {} string)))".to_string(),
+            ".dp",
+        ),
     ];
     assert_below_one(&cases);
+}
+
+#[test]
+fn post_phase_checker_controls_still_score_one() {
+    let cases = [
+        (
+            "paired_defsig",
+            "(defsig {} present (t-fn {} (t-prim {} string))) \
+             (def {} present (fn {} (params {}) (lit {type: (t-prim {} string)} \"ok\")))",
+            ".dp",
+        ),
+        (
+            "consistent_deferred_matmul",
+            "def driver(good: tensor[4, 4, f32]) -> tensor[4, 4, f32] = {\n  \
+             f = fn (a) -> matmul(a, good)\n  f(good)\n}\n",
+            ".ch",
+        ),
+        (
+            "valid_scatter_elements",
+            "def f(data: tensor[2, 3, f32], indices: tensor[2, 2, int32], updates: tensor[2, 2, f32]) -> tensor[2, 3, f32] = scatter_elements(data, indices, updates, 1)\n",
+            ".ch",
+        ),
+    ];
+    for (name, program, extension) in cases {
+        let score = check_score(program, extension);
+        assert!(
+            (score - 1.0).abs() < f64::EPSILON,
+            "{name} must remain a score-1 control, got {score}"
+        );
+    }
 }
 
 /// Membership (chelis#858): a top-level UNTAGGED Deep list. Before the

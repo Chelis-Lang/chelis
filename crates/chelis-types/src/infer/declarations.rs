@@ -1902,6 +1902,34 @@ pub(super) fn collect_eager_refs(
                     bound.remove(&name);
                 }
             }
+            Some(DeepTag::Match) => {
+                let kids = children(list);
+                // The scrutinee is evaluated in the enclosing scope. Pattern
+                // binders exist only inside their own arm's guard and body.
+                if let Some(scrutinee) = kids.first() {
+                    collect_eager_refs(scrutinee, bound, refs, applied);
+                }
+                for arm in kids.iter().skip(1) {
+                    let Some((DeepTag::Arm, _, arm_kids)) = stamped_parts(arm) else {
+                        collect_eager_refs(arm, bound, refs, applied);
+                        continue;
+                    };
+                    let mut added = Vec::new();
+                    if let Some(pattern) = arm_kids.first() {
+                        for name in chelis_deep::pattern_binder_names(pattern) {
+                            if bound.insert(name.clone()) {
+                                added.push(name);
+                            }
+                        }
+                    }
+                    for scoped in arm_kids.iter().skip(1) {
+                        collect_eager_refs(scoped, bound, refs, applied);
+                    }
+                    for name in added {
+                        bound.remove(&name);
+                    }
+                }
+            }
             _ => {
                 for elem in &list.elements {
                     collect_eager_refs(elem, bound, refs, applied);

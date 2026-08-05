@@ -324,6 +324,7 @@ fn test_assert_close_tensor_accepts_all_arithmetic_dtypes() {
         let path = dir.path().join("assert_close_t.ch");
         let src = format!(
             r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> unit ! {{ Test }}
+def assert_close_tensor(actual, expected, tolerance, label) = test_assert(true, label)
 def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#
         );
@@ -340,6 +341,7 @@ fn test_assert_shape_accepts_all_arithmetic_dtypes() {
         let path = dir.path().join("assert_shape.ch");
         let src = format!(
             r#"sig assert_shape: &tensor[n, p] -> int64 -> string -> unit ! {{ Test }}
+def assert_shape(t, expected_size, label) = test_assert(true, label)
 def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, cast(3, int64), "label")
 "#
         );
@@ -448,6 +450,7 @@ fn test_assert_close_tensor_rejects_mismatched_precision() {
     write_file(
         &path,
         r#"sig assert_close_tensor: &tensor[n, p] -> &tensor[n, p] -> f32 -> string -> unit ! { Test }
+def assert_close_tensor(actual, expected, tolerance, label) = test_assert(true, label)
 def bad(actual: &tensor[3, f32], expected: &tensor[3, bf16]) -> unit ! { Test } = assert_close_tensor(actual, expected, cast(0.001, f32), "label")
 "#,
     );

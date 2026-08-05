@@ -28,6 +28,9 @@ pub(super) fn infer_fn(
 
     for (pname, ty_ann) in &params {
         let ty = ty_ann.clone().unwrap_or_else(|| vg.fresh_type());
+        if ty_ann.is_none() {
+            product.note_unannotated_lambda_param(&ty);
+        }
         fn_env.bind(pname.clone(), Scheme::mono(ty.clone()));
         // chelis#397/#469: a parameter is a fresh runtime binding with no
         // size provenance. Clear any entry inherited (through the derived
@@ -275,6 +278,7 @@ pub(super) fn infer_let(
         while i + 1 < bind_children.len() {
             if let Some(name) = symbol_name(&bind_children[i]) {
                 let rhs_expr = &bind_children[i + 1];
+                let shape_checkpoint = product.deferred_shape_checkpoint();
                 let mut rhs_type_metadata_resolution = None;
                 let expr_ty = infer_expr_with_type_metadata_ownership(
                     rhs_expr,
@@ -356,7 +360,14 @@ pub(super) fn infer_let(
                     expr_ty
                 };
 
-                let scheme = let_env.generalize(&final_ty, subst);
+                let scheme = if product.has_pending_shape_check_since(shape_checkpoint) {
+                    // Bind-on-first-use (PP1): semantic shape obligations
+                    // retain the exact inference variables captured by this
+                    // lambda until its first application supplies types.
+                    Scheme::mono(subst.apply(&final_ty))
+                } else {
+                    let_env.generalize(&final_ty, subst)
+                };
                 // chelis#397/#469: record the size provenance of this binding
                 // BEFORE binding it (so `classify_expand_size` resolves it
                 // against the binding's RHS, not its own name) so a later

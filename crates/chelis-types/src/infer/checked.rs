@@ -284,6 +284,36 @@ pub(super) struct InferenceProduct {
     pub(super) owner_types: HashMap<usize, FinalOwnerType>,
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
+    unannotated_lambda_tvars: HashSet<TypeVar>,
+    next_deferred_shape_id: u64,
+    deferred_shape_checks: Vec<DeferredShapeCheck>,
+}
+
+#[derive(Clone)]
+pub(super) enum DeferredShapeRule {
+    Matmul,
+    Reduction {
+        name: String,
+    },
+    Expand {
+        axis_is_dim_name: bool,
+        size_class: SizeClass,
+        env: Env,
+    },
+    LayerNorm,
+    Conv2d,
+    ScatterElements {
+        list: deep::List,
+    },
+}
+
+#[derive(Clone)]
+pub(super) struct DeferredShapeCheck {
+    id: u64,
+    rule: DeferredShapeRule,
+    arg_exprs: Vec<deep::Expr>,
+    arg_tys: Vec<Type>,
+    result_ty: Type,
 }
 
 pub(super) struct TypeStampEpoch {
@@ -338,6 +368,161 @@ impl InferenceProduct {
         };
         register_annotation_owners(root, &mut epoch);
         self.active_epoch = Some(epoch);
+    }
+
+    pub(super) fn deferred_shape_checkpoint(&self) -> u64 {
+        self.next_deferred_shape_id
+    }
+
+    pub(super) fn note_unannotated_lambda_param(&mut self, ty: &Type) {
+        if let Type::Var(tv) = ty {
+            self.unannotated_lambda_tvars.insert(*tv);
+        }
+    }
+
+    /// True only when the unresolved outer constructor descends from an
+    /// unannotated lambda parameter. Other unresolved values retain their
+    /// existing wildcard/contextual-inference contract; [04-INF-1] does not
+    /// turn every `Type::Var` in a declaration into a lambda obligation.
+    pub(super) fn shape_operand_awaits_lambda_binding(&self, ty: &Type, subst: &Subst) -> bool {
+        let applied = subst.apply(ty);
+        match applied {
+            Type::Var(current) => self.unannotated_lambda_tvars.iter().any(|origin| {
+                matches!(subst.apply(&Type::Var(*origin)), Type::Var(resolved) if resolved == current)
+            }),
+            Type::Ref(inner) => self.shape_operand_awaits_lambda_binding(&inner, subst),
+            _ => false,
+        }
+    }
+
+    pub(super) fn has_pending_shape_check_since(&self, checkpoint: u64) -> bool {
+        self.deferred_shape_checks
+            .iter()
+            .any(|check| check.id >= checkpoint)
+    }
+
+    pub(super) fn defer_shape_check(
+        &mut self,
+        rule: DeferredShapeRule,
+        arg_exprs: Vec<deep::Expr>,
+        arg_tys: Vec<Type>,
+        result_ty: Type,
+    ) {
+        let id = self.next_deferred_shape_id;
+        self.next_deferred_shape_id += 1;
+        self.deferred_shape_checks.push(DeferredShapeCheck {
+            id,
+            rule,
+            arg_exprs,
+            arg_tys,
+            result_ty,
+        });
+    }
+
+    /// Replay shape checks whose previously-free input types have now been
+    /// bound by an application. The same checker functions own both the
+    /// immediate and deferred paths, so their semantics cannot drift.
+    pub(super) fn replay_ready_shape_checks(
+        &mut self,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        let checks = std::mem::take(&mut self.deferred_shape_checks);
+        for check in checks {
+            if check
+                .arg_tys
+                .iter()
+                .any(|ty| shape_operand_awaits_binding(ty, subst))
+            {
+                self.deferred_shape_checks.push(check);
+                continue;
+            }
+
+            let resolved = match &check.rule {
+                DeferredShapeRule::Matmul => {
+                    check_matmul_signature(&check.arg_tys, &check.result_ty, subst, errors)
+                }
+                DeferredShapeRule::Reduction { name } => check_reduction_signature(
+                    name,
+                    &check.arg_exprs,
+                    &check.arg_tys,
+                    &check.result_ty,
+                    subst,
+                    errors,
+                ),
+                DeferredShapeRule::Expand {
+                    axis_is_dim_name,
+                    size_class,
+                    env,
+                } => check_expand_signature(
+                    &check.arg_exprs,
+                    &check.arg_tys,
+                    &check.result_ty,
+                    *axis_is_dim_name,
+                    *size_class,
+                    env,
+                    subst,
+                    errors,
+                ),
+                DeferredShapeRule::LayerNorm => {
+                    check_layer_norm_signature(&check.arg_tys, &check.result_ty, vg, subst, errors)
+                }
+                DeferredShapeRule::Conv2d => check_conv2d_signature(
+                    &check.arg_exprs,
+                    &check.arg_tys,
+                    &check.result_ty,
+                    vg,
+                    subst,
+                    errors,
+                ),
+                DeferredShapeRule::ScatterElements { list } => {
+                    let kids = children(list);
+                    check_scatter_elements(
+                        list,
+                        kids,
+                        &check.arg_tys,
+                        check.result_ty.clone(),
+                        subst,
+                        errors,
+                    )
+                }
+            };
+            let _ = resolved;
+        }
+    }
+
+    /// Acceptance boundary for bind-on-first-use shape lambdas. A remaining
+    /// obligation means no application supplied enough type information; the
+    /// source must state the intended parameter/result shape explicitly.
+    pub(super) fn finish_deferred_shape_checks(
+        &mut self,
+        vg: &mut VarGen,
+        subst: &mut Subst,
+        errors: &mut DiagnosticSink<'_>,
+    ) {
+        self.replay_ready_shape_checks(vg, subst, errors);
+        for check in self.deferred_shape_checks.drain(..) {
+            let operation = match check.rule {
+                DeferredShapeRule::Matmul => "matmul".to_string(),
+                DeferredShapeRule::Reduction { name } => name,
+                DeferredShapeRule::Expand { .. } => "expand".to_string(),
+                DeferredShapeRule::LayerNorm => "layer_norm".to_string(),
+                DeferredShapeRule::Conv2d => "conv2d".to_string(),
+                DeferredShapeRule::ScatterElements { .. } => "scatter_elements".to_string(),
+            };
+            errors.push(CheckError::new(
+                CheckErrorKind::TypeMismatch,
+                format!(
+                    "unresolved `{operation}` shape obligation at declaration boundary: \
+                     add a parameter or result type annotation so the checker can decide it"
+                ),
+                vec![
+                    "Shape-constrained unannotated lambdas bind monomorphically on first use; an unapplied lambda has no binding site"
+                        .to_string(),
+                ],
+            ));
+        }
     }
 
     pub(super) fn record_canonical(&mut self, expr: &deep::Expr, ty: Type) {
@@ -539,6 +724,18 @@ impl InferenceProduct {
             return None;
         }
         Some(canonical)
+    }
+}
+
+/// A semantic shape rule can decide symbolic tensor dimensions and precision
+/// variables. It must wait only while an operand's *type constructor* is still
+/// unknown; treating every free variable as pending would reject legitimate
+/// rank/dtype-polymorphic signatures at their declaration boundary.
+pub(super) fn shape_operand_awaits_binding(ty: &Type, subst: &Subst) -> bool {
+    match subst.apply(ty) {
+        Type::Var(_) => true,
+        Type::Ref(inner) => shape_operand_awaits_binding(&inner, subst),
+        _ => false,
     }
 }
 

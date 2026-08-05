@@ -454,15 +454,8 @@ pub(super) fn annotated_meta_map_with_override(
         None
     };
 
-    if let Some(ty) = ty_for_meta
-        && !matches!(ty, Type::Error(_))
-    {
-        let ty_expr = type_to_legacy_deep_expr(&ty);
-        if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
-            *existing = ty_expr;
-        } else {
-            entries.push(("type".to_string(), ty_expr));
-        }
+    if let Some(ty) = ty_for_meta {
+        write_type_metadata_monotone(&mut entries, ty, type_to_legacy_deep_expr);
     }
 
     deep::Expr::Map(deep::MetaMap { entries }, meta_span)
@@ -488,18 +481,57 @@ pub(super) fn annotated_node_meta_with_override(
         _ => None,
     };
 
-    if let Some(ty) = ty_for_meta
-        && !matches!(ty, Type::Error(_))
-    {
-        let ty_expr = type_to_deep_expr(&ty);
-        if let Some((_, existing)) = entries.iter_mut().find(|(key, _)| key == "type") {
-            *existing = ty_expr;
-        } else {
-            entries.push(("type".to_string(), ty_expr));
-        }
+    if let Some(ty) = ty_for_meta {
+        write_type_metadata_monotone(&mut entries, ty, type_to_deep_expr);
     }
 
     deep::MetaMap { entries }
+}
+
+/// Write checker-owned metadata only when doing so preserves or increases
+/// information (#783). An unresolved, error, or partially resolved candidate
+/// never replaces existing metadata; a safe resolved candidate may refresh it.
+fn write_type_metadata_monotone(
+    entries: &mut Vec<(String, deep::Expr)>,
+    ty: Type,
+    encode: fn(&Type) -> deep::Expr,
+) {
+    let existing = entries.iter().position(|(key, _)| key == "type");
+    let safe = type_is_safe_annotation_stamp(&ty);
+    match existing {
+        // An unresolved/error/partial candidate is strictly less informative
+        // than authored concrete metadata. Preserve the existing expression
+        // byte-for-byte instead of recreating #783's silent degradation.
+        Some(_) if !safe => {}
+        Some(index) => {
+            // A resolved owner may refine a generated wildcard or refresh
+            // stale derived metadata. Both remain ordinary checker writeback.
+            entries[index].1 = encode(&ty);
+        }
+        None if !matches!(ty, Type::Error(_)) => {
+            // Generalized functions and symbolic results legitimately carry
+            // variables when there was no more-informative annotation to
+            // protect. That is not a degradation.
+            entries.push(("type".to_string(), encode(&ty)));
+        }
+        None => {}
+    }
+}
+
+fn type_is_safe_annotation_stamp(ty: &Type) -> bool {
+    match ty {
+        Type::Prim(_) | Type::Unit => true,
+        Type::Fn(args, ret) => {
+            args.iter().all(type_is_safe_annotation_stamp) && type_is_safe_annotation_stamp(ret)
+        }
+        Type::Ref(inner) => type_is_safe_annotation_stamp(inner),
+        Type::Tensor(dims, precision) => {
+            matches!(precision, TensorPrec::Concrete(_))
+                && dims.iter().all(|dim| !matches!(dim, Dim::Wildcard))
+        }
+        Type::Adt(_, args) | Type::Tuple(args) => args.iter().all(type_is_safe_annotation_stamp),
+        Type::Var(_) | Type::Error(_) => false,
+    }
 }
 
 pub(super) fn should_attach_type_metadata(tag: DeepTag) -> bool {

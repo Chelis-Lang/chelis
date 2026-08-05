@@ -146,4 +146,26 @@ mod tests {
 
         assert!(error.to_string().contains("unknown form `future-form`"));
     }
+
+    #[test]
+    fn integer_spelled_float_preserves_suffix_and_exact_payload() {
+        let surf = parse_str(
+            "def exact() -> f32 = 18014399583223809f32\n\
+             def contextual() -> tensor[2, bf16] = [18084767253659649, 3]\n",
+        )
+        .expect("Surf parses");
+        let deep = desugar_program(&surf);
+
+        let rendered = try_decompile_program(&deep).expect("typed literals resugar");
+
+        assert!(
+            rendered.contains("18014399583223809f32"),
+            "explicit suffix or exact payload was lost:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("18084767253659649bf16"),
+            "context-selected suffix or exact payload was lost:\n{rendered}"
+        );
+        parse_str(&rendered).expect("resugared Surf reparses");
+    }
 }

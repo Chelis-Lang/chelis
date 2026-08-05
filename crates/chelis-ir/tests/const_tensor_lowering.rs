@@ -36,26 +36,16 @@ fn deep_to_dag(source: &str) -> Result<Dag, String> {
     try_lower_program(&checked).map_err(|diag| format!("lowering failed: {diag:?}"))
 }
 
-/// chelis#1123 red-team ask 2: the end-to-end guard for single rounding -
-/// the module-level pins in chelis-types cannot observe this crate's
-/// lowering path (mutation-verified blind). The witness stages an INTEGER
-/// atom under f32 lit metadata, a shape Surf cannot produce and the
-/// validator currently accepts (chelis#1131). EXPIRY: when chelis#1131
-/// closes that shape at the validator, this input becomes invalid -
-/// convert this test to a rejection lock in the same change set rather
-/// than deleting it.
+/// chelis#1123/#1131: the end-to-end guard for single rounding. Surf retains
+/// an integer-spelled float literal as an exact Int payload with explicit
+/// source provenance, and lowering finalizes it directly at f32 width.
 #[test]
 fn int_leaf_in_f32_tensor_literal_single_rounds() {
     let source = r#"
-(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} f32))))
-
-(def {} main (fn {} (params {})
-  (app {} (var {} to_tensor)
-    (app {} (var {} Cons)
-      (lit {type: (t-prim {} f32)} 18014399583223809)
-      (app {} (var {} Cons) (lit {type: (t-prim {} f32)} 3) (var {} Nil))))))
+def main() -> tensor[2, f32] =
+  to_tensor([18014399583223809f32, 3f32])
 "#;
-    let dag = deep_to_dag(source).expect("pipeline succeeds");
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
     let bits = dag
         .nodes()
         .iter()
@@ -74,22 +64,16 @@ fn int_leaf_in_f32_tensor_literal_single_rounds() {
     );
 }
 
-/// bf16 sibling of the single-rounding witness (same chelis#1131 EXPIRY
-/// note). Guards relatively: the DAG payload must equal the sealed
+/// bf16 sibling of the single-rounding witness. Guards relatively: the DAG payload must equal the sealed
 /// module's single-rounded image, whose absolute value the chelis-types
 /// pins lock; under the double-rounding mutation the two diverge.
 #[test]
 fn int_leaf_in_bf16_tensor_literal_single_rounds() {
     let source = r#"
-(defsig {} main (t-fn {} (t-tensor {} (d-lit {} 2) (t-prim {} bf16))))
-
-(def {} main (fn {} (params {})
-  (app {} (var {} to_tensor)
-    (app {} (var {} Cons)
-      (lit {type: (t-prim {} bf16)} 18084767253659649)
-      (app {} (var {} Cons) (lit {type: (t-prim {} bf16)} 3) (var {} Nil))))))
+def main() -> tensor[2, bf16] =
+  to_tensor([18084767253659649bf16, 3bf16])
 "#;
-    let dag = deep_to_dag(source).expect("pipeline succeeds");
+    let dag = surf_to_dag(source).expect("pipeline succeeds");
     let stored = dag
         .nodes()
         .iter()
