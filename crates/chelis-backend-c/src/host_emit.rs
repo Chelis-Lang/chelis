@@ -69,6 +69,10 @@ enum CExpressionBuiltin {
     Tan,
     Atan,
     Tanh,
+    Relu,
+    Sigmoid,
+    Silu,
+    Gelu,
     Floor,
     Ceil,
     Round,
@@ -133,6 +137,10 @@ impl CExpressionBuiltin {
             "tan" => Self::Tan,
             "atan" => Self::Atan,
             "tanh" => Self::Tanh,
+            "relu" => Self::Relu,
+            "sigmoid" => Self::Sigmoid,
+            "silu" => Self::Silu,
+            "gelu" => Self::Gelu,
             "floor" => Self::Floor,
             "ceil" => Self::Ceil,
             "round" => Self::Round,
@@ -741,6 +749,24 @@ fn append_tensor_math_helpers(out: &mut Vec<String>) {
     out.push("    float k = 0.044715f;".to_string());
     out.push("    float inner = c * (x + k * x * x * x);".to_string());
     out.push("    return 0.5f * x * (1.0f + tanhf(inner));".to_string());
+    out.push("}".to_string());
+    out.push("static inline double chelis_host_relu_f64(double x) {".to_string());
+    out.push("    return x > 0.0 ? x : 0.0;".to_string());
+    out.push("}".to_string());
+    out.push("static inline double chelis_host_sigmoid_f64(double x) {".to_string());
+    out.push("    return 1.0 / (1.0 + exp(-x));".to_string());
+    out.push("}".to_string());
+    out.push("static inline double chelis_host_tanh_f64(double x) {".to_string());
+    out.push("    return tanh(x);".to_string());
+    out.push("}".to_string());
+    out.push("static inline double chelis_host_silu_f64(double x) {".to_string());
+    out.push("    return x * chelis_host_sigmoid_f64(x);".to_string());
+    out.push("}".to_string());
+    out.push("static inline double chelis_host_gelu_f64(double x) {".to_string());
+    out.push("    double c = 0.7978845608028654;".to_string());
+    out.push("    double k = 0.044715;".to_string());
+    out.push("    double inner = c * (x + k * x * x * x);".to_string());
+    out.push("    return 0.5 * x * (1.0 + tanh(inner));".to_string());
     out.push("}".to_string());
 }
 
@@ -3598,6 +3624,51 @@ impl<'a> HostEmitter<'a> {
                 ),
                 CExpressionBuiltin::Tanh => finalize_scalar_expr(
                     EmittedExpr::call(float_math_function(ty, "tanh", "tanhf"), [numeric_arg(0)]),
+                    ty,
+                ),
+                CExpressionBuiltin::Relu
+                | CExpressionBuiltin::Sigmoid
+                | CExpressionBuiltin::Silu
+                | CExpressionBuiltin::Gelu
+                    if !is_float_abi(ty) =>
+                {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "float activation `{name}` resolved to non-float result type `{ty:?}`"
+                        ),
+                        "C host scalar activation emission",
+                    ));
+                }
+                CExpressionBuiltin::Relu => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_host_relu_f64", "chelis_host_relu_f32"),
+                        [numeric_arg(0)],
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::Sigmoid => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(
+                            ty,
+                            "chelis_host_sigmoid_f64",
+                            "chelis_host_sigmoid_f32",
+                        ),
+                        [numeric_arg(0)],
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::Silu => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_host_silu_f64", "chelis_host_silu_f32"),
+                        [numeric_arg(0)],
+                    ),
+                    ty,
+                ),
+                CExpressionBuiltin::Gelu => finalize_scalar_expr(
+                    EmittedExpr::call(
+                        float_math_function(ty, "chelis_host_gelu_f64", "chelis_host_gelu_f32"),
+                        [numeric_arg(0)],
+                    ),
                     ty,
                 ),
                 CExpressionBuiltin::Floor
@@ -6936,6 +7007,33 @@ mod expression_dispatch_tests {
             error.what,
             UnsupportedKind::Builtin("future_unimplemented_builtin".into())
         );
+    }
+
+    #[test]
+    fn scalar_activation_names_have_closed_expression_identities_and_both_width_helpers() {
+        for (name, expected) in [
+            ("relu", CExpressionBuiltin::Relu),
+            ("sigmoid", CExpressionBuiltin::Sigmoid),
+            ("tanh", CExpressionBuiltin::Tanh),
+            ("silu", CExpressionBuiltin::Silu),
+            ("gelu", CExpressionBuiltin::Gelu),
+        ] {
+            assert_eq!(CExpressionBuiltin::decode(name), Ok(expected));
+        }
+
+        let mut helpers = Vec::new();
+        append_tensor_math_helpers(&mut helpers);
+        let emitted = helpers.join("\n");
+        for op in ["relu", "sigmoid", "tanh", "silu", "gelu"] {
+            assert!(
+                emitted.contains(&format!("chelis_host_{op}_f32")),
+                "missing f32 helper for {op}:\n{emitted}"
+            );
+            assert!(
+                emitted.contains(&format!("chelis_host_{op}_f64")),
+                "missing f64 helper for {op}:\n{emitted}"
+            );
+        }
     }
 
     /// chelis#1112: the emitted reshape helper stores the extent it read,

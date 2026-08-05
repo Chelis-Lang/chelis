@@ -462,6 +462,9 @@ impl IntBinOp {
 pub enum IntUnOp {
     Neg,
     Abs,
+    Floor,
+    Ceil,
+    Round,
 }
 
 impl IntUnOp {
@@ -469,6 +472,9 @@ impl IntUnOp {
         match self {
             Self::Neg => "neg",
             Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
         }
     }
 }
@@ -866,6 +872,7 @@ macro_rules! int_unop_at_width {
         let value = match $op {
             IntUnOp::Neg => $value.checked_neg(),
             IntUnOp::Abs => $value.checked_abs(),
+            IntUnOp::Floor | IntUnOp::Ceil | IntUnOp::Round => Some($value),
         }
         .ok_or(NumericTrap::Overflow {
             op: $op.name(),
@@ -1633,6 +1640,7 @@ macro_rules! int_tensor_unop_at_width {
                 .copied()
                 .map(|value| value.checked_abs().ok_or_else(overflow))
                 .collect(),
+            IntUnOp::Floor | IntUnOp::Ceil | IntUnOp::Round => Ok($values.to_vec()),
         };
         Ok(TensorStorage {
             buf: Buf::$variant(values?),
@@ -4123,6 +4131,35 @@ mod tests {
                 int_unop(IntUnOp::Abs, in_range).unwrap().as_i64_exact(),
                 Some(-(min + 1))
             );
+        }
+    }
+
+    #[test]
+    fn integer_floor_ceil_round_are_storage_exact_identities() {
+        for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let (lo, hi) = prim.integer_range().expect("integer range");
+            for op in [IntUnOp::Floor, IntUnOp::Ceil, IntUnOp::Round] {
+                for value in [lo, -1, 0, 1, hi] {
+                    let scalar = scalar_from_i64("test", prim, value).unwrap();
+                    assert_eq!(
+                        int_unop(op, scalar).unwrap(),
+                        scalar,
+                        "{} must preserve {} at {}",
+                        op.name(),
+                        value,
+                        prim.name()
+                    );
+                }
+                let storage =
+                    finalize_tensor("test", prim, RawTensor::Int(vec![lo, -1, 0, 1, hi])).unwrap();
+                assert_eq!(
+                    int_tensor_unop(op, &storage).unwrap(),
+                    storage,
+                    "{} tensor kernel must be identity at {}",
+                    op.name(),
+                    prim.name()
+                );
+            }
         }
     }
 

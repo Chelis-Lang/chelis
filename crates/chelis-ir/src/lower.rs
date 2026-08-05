@@ -9836,9 +9836,13 @@ impl LowerCtx {
                     numeric_binop(input0?, input1?, Some(IntBinOp::Max), Some(FloatBinOp::Max))?
                 }
                 RiscOp::Abs => numeric_unop(input0?, Some(IntUnOp::Abs), Some(FloatUnOp::Abs))?,
-                RiscOp::Floor => numeric_unop(input0?, None, Some(FloatUnOp::Floor))?,
-                RiscOp::Ceil => numeric_unop(input0?, None, Some(FloatUnOp::Ceil))?,
-                RiscOp::Round => numeric_unop(input0?, None, Some(FloatUnOp::Round))?,
+                RiscOp::Floor => {
+                    numeric_unop(input0?, Some(IntUnOp::Floor), Some(FloatUnOp::Floor))?
+                }
+                RiscOp::Ceil => numeric_unop(input0?, Some(IntUnOp::Ceil), Some(FloatUnOp::Ceil))?,
+                RiscOp::Round => {
+                    numeric_unop(input0?, Some(IntUnOp::Round), Some(FloatUnOp::Round))?
+                }
                 _ => return None,
             };
             // chelis#620 red-team fix: refuse the fold on any non-finite

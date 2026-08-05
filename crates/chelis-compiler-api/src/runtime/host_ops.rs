@@ -490,18 +490,6 @@ pub(super) fn numeric_unop(
     }
 }
 
-pub(super) fn tensor_float_unop(
-    tensor: &RuntimeTensorValue,
-    op: FloatUnOp,
-) -> Result<RuntimeTensorValue, String> {
-    let storage =
-        float_tensor_unop(op, tensor.value.storage()).map_err(|error| error.to_string())?;
-    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
-        tensor.value.shape.clone(),
-        storage,
-    )))
-}
-
 pub(super) fn eval_div(args: &[RuntimeValue]) -> Result<RuntimeValue, String> {
     numeric_binop(args, Some(IntBinOp::TruncDiv), Some(FloatBinOp::Div))
 }
