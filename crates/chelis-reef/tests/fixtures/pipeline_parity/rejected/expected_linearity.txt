@@ -1,1 +1,1 @@
-variable `x` was already consumed by realize at surf:87..97; later use at surf:104..105 is invalid; variable `x` was already consumed by realize at surf:171..181; later use at surf:188..189 is invalid
+variable `x` was already consumed by realize at surf:86..96; later use at surf:103..104 is invalid; variable `x` was already consumed by realize at surf:169..179; later use at surf:186..187 is invalid
