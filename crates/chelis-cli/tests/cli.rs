@@ -3993,8 +3993,8 @@ fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
 
 /// Regression for PR #261 review finding #1: `chelis build --target c` on a
 /// bf16 `reduce_window_*` must fail with a clean `unsupported_feature`
-/// diagnostic, not an emitter `panic!`. `reject_unsupported_c_precisions`
-/// admits bf16 generally, but the C windowed-reduction emitter is f32-only.
+/// diagnostic, not an emitter `panic!`. The C backend admits bf16 generally,
+/// but the C windowed-reduction emitter is f32-only.
 /// See `spec/05-risc-primitives.md` §2.3.1.
 #[test]
 fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {

@@ -3,6 +3,7 @@
 mod prove;
 mod style_gate;
 
+use chelis_compiler_api::compiler::BuildTarget;
 use chelis_compiler_api::schema::{
     EvalRequest, SourceKind, WireInferredDim, WireInferredEffect, WireInferredPrecision,
     WireInferredType,
@@ -2875,7 +2876,7 @@ fn format_cli_dim(dim: &Dim) -> String {
 /// cannot lower yet. Today it is a no-op.
 fn reject_with_seed_for_build_target(
     _decls: &[Decl],
-    _target: &str,
+    _target: BuildTarget,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
@@ -2899,6 +2900,7 @@ fn cmd_build_dispatch(
     deep_flag: bool,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let target = BuildTarget::try_from(target).map_err(boxed_string_error)?;
     let extension_is_dp = file
         .extension()
         .and_then(|s| s.to_str())
@@ -2938,7 +2940,7 @@ fn cmd_build_dispatch(
 fn cmd_build(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
-    target: &str,
+    target: BuildTarget,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(source) = fs::read_to_string(file) {
@@ -3011,12 +3013,17 @@ fn cmd_build(
         };
 
     let preserve_host_library_surface = if prepared.is_none()
-        && target == "c"
+        && target == BuildTarget::C
         && pruned_deep_exprs.len() != full_deep_exprs.len()
     {
         let full_checked = checked_program_with_effects(&full_deep_exprs)
             .map_err(|e| format!("Check errors: {e}"))?;
-        reject_host_only_builtins_before_host_lowering(&full_checked, target)?;
+        shared_compiler_gate(
+            chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
+                &full_checked,
+                target,
+            ),
+        )?;
         chelis_ir::host::try_lower_compiled_program(&full_checked)
             .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
             .host
@@ -3054,9 +3061,13 @@ fn cmd_build(
             .map_err(|e| format!("Check errors: {e}"))?,
     };
     let checked = checked_compilation.program();
-    chelis_effects::validate_build_target(checked, target)
+    chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    reject_host_only_builtins_before_host_lowering(checked, target)?;
+    shared_compiler_gate(
+        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
+            checked, target,
+        ),
+    )?;
     let mut compiled_program = chelis_ir::host::try_lower_compiled_program(checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
@@ -3125,7 +3136,7 @@ fn cmd_build(
         .unwrap_or("chelis_main");
 
     match target {
-        "c" => {
+        BuildTarget::C => {
             if let Some(host_program) = compiled_program.host.as_ref()
                 && (chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -3160,25 +3171,21 @@ fn cmd_build(
                     )
                     .into());
                 }
-                reject_eval_only_builtins_host(host_program, "c")?;
-                reject_unsupported_c_precisions_host(host_program)?;
-                reject_symbolic_windowed_reduce_host(host_program, "c")?;
-                reject_unsupported_reduce_window_precision_host(host_program, "c")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
+                apply_shared_window_gates_to_host_program(host_program, BuildTarget::C)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
-                reject_unsupported_c_precisions(&dag)?;
-                reject_symbolic_windowed_reduce(&dag, "c")?;
-                reject_unsupported_reduce_window_precision(&dag, "c")?;
+                apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "hip" => {
+        BuildTarget::Hip => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                reject_eval_only_builtins_host(host_program, "hip")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3216,14 +3223,16 @@ fn cmd_build(
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
-                reject_unsupported_hip_ops(&specialized)?;
+                shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_hip_ops(
+                    &specialized,
+                ))?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "metal" => {
+        BuildTarget::Metal => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                reject_eval_only_builtins_host(host_program, "metal")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3276,7 +3285,6 @@ fn cmd_build(
                 cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        other => Err(format!("unknown target '{other}': expected 'c', 'hip', or 'metal'").into()),
     }
 }
 
@@ -3297,7 +3305,7 @@ fn cmd_build(
 fn cmd_build_deep(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
-    target: &str,
+    target: BuildTarget,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
@@ -3313,10 +3321,15 @@ fn cmd_build_deep(
     let entry_deep_exprs = deep_exprs.clone();
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_deep_exprs);
     let preserve_host_library_surface =
-        if target == "c" && pruned_deep_exprs.len() != deep_exprs.len() {
+        if target == BuildTarget::C && pruned_deep_exprs.len() != deep_exprs.len() {
             let full_checked = checked_program_with_effects(&deep_exprs)
                 .map_err(|e| format!("Check errors: {e}"))?;
-            reject_host_only_builtins_before_host_lowering(&full_checked, target)?;
+            shared_compiler_gate(
+                chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
+                    &full_checked,
+                    target,
+                ),
+            )?;
             chelis_ir::host::try_lower_compiled_program(&full_checked)
                 .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
                 .host
@@ -3335,9 +3348,13 @@ fn cmd_build_deep(
     let checked_compilation = checked_compilation_with_effects(&final_deep_exprs)
         .map_err(|e| format!("Check errors: {e}"))?;
     let checked = checked_compilation.program();
-    chelis_effects::validate_build_target(checked, target)
+    chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
-    reject_host_only_builtins_before_host_lowering(checked, target)?;
+    shared_compiler_gate(
+        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
+            checked, target,
+        ),
+    )?;
     let mut compiled_program = chelis_ir::host::try_lower_compiled_program(checked)
         .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
@@ -3399,7 +3416,7 @@ fn cmd_build_deep(
         .unwrap_or("chelis_main");
 
     match target {
-        "c" => {
+        BuildTarget::C => {
             if let Some(host_program) = compiled_program.host.as_ref()
                 && (chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -3420,25 +3437,21 @@ fn cmd_build_deep(
                     )
                     .into());
                 }
-                reject_eval_only_builtins_host(host_program, "c")?;
-                reject_unsupported_c_precisions_host(host_program)?;
-                reject_symbolic_windowed_reduce_host(host_program, "c")?;
-                reject_unsupported_reduce_window_precision_host(host_program, "c")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
+                apply_shared_window_gates_to_host_program(host_program, BuildTarget::C)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
-                reject_unsupported_c_precisions(&dag)?;
-                reject_symbolic_windowed_reduce(&dag, "c")?;
-                reject_unsupported_reduce_window_precision(&dag, "c")?;
+                apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "hip" => {
+        BuildTarget::Hip => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                reject_eval_only_builtins_host(host_program, "hip")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3471,14 +3484,16 @@ fn cmd_build_deep(
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
                 reject_unsupported_effect_ops(&hip_dag, "hip")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
-                reject_unsupported_hip_ops(&specialized)?;
+                shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_hip_ops(
+                    &specialized,
+                ))?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "metal" => {
+        BuildTarget::Metal => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                reject_eval_only_builtins_host(host_program, "metal")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3520,7 +3535,6 @@ fn cmd_build_deep(
                 cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        other => Err(format!("unknown target '{other}': expected 'c', 'hip', or 'metal'").into()),
     }
 }
 
@@ -6058,6 +6072,51 @@ fn compiler_error_messages(err: &chelis_compiler_api::compiler::CompilerError) -
     }
 }
 
+fn shared_compiler_gate(
+    result: Result<(), chelis_compiler_api::compiler::CompilerError>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    result.map_err(|error| boxed_string_error(compiler_error_messages(&error)))
+}
+
+fn apply_shared_host_builtin_gates(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: BuildTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
+    shared_compiler_gate(chelis_compiler_api::compiler::reject_host_only_builtins(
+        program, target,
+    ))?;
+    shared_compiler_gate(chelis_compiler_api::compiler::reject_eval_only_builtins(
+        program, target,
+    ))
+}
+
+fn apply_shared_window_gates(
+    dag: &chelis_ir::Dag,
+    target: BuildTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
+    shared_compiler_gate(
+        chelis_compiler_api::compiler::reject_symbolic_windowed_reduce(dag, target),
+    )?;
+    shared_compiler_gate(
+        chelis_compiler_api::compiler::reject_unsupported_reduce_window_precision(dag, target),
+    )
+}
+
+fn apply_shared_window_gates_to_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    target: BuildTarget,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for helper in &program.global_tensor_helpers {
+        apply_shared_window_gates(&helper.dag, target)?;
+    }
+    for function in &program.functions {
+        for helper in &function.tensor_helpers {
+            apply_shared_window_gates(&helper.dag, target)?;
+        }
+    }
+    Ok(())
+}
+
 fn is_local_registry_hash_unsupported(err: &chelis_compiler_api::compiler::CompilerError) -> bool {
     err.errors.iter().any(|diagnostic| {
         diagnostic.kind() == DiagnosticKind::HashError
@@ -8328,349 +8387,6 @@ fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::e
     Ok((decls.clone(), decls))
 }
 
-fn reject_unsupported_hip_ops(dag: &chelis_ir::dag::Dag) -> Result<(), Box<dyn std::error::Error>> {
-    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> = dag
-        .nodes()
-        .iter()
-        .filter_map(|node| match node.op {
-            chelis_ir::dag::RiscOp::Gather { .. }
-            | chelis_ir::dag::RiscOp::ScatterAdd { .. }
-            | chelis_ir::dag::RiscOp::Scatter { .. } => node.inputs.get(1).copied(),
-            _ => None,
-        })
-        .collect();
-
-    for node in dag.nodes() {
-        match &node.op {
-            // `pad` / `shrink` are implemented on the HIP backend (typed
-            // per-output-element kernels). They fall through to codegen;
-            // no reject arm here.
-
-            // `reduce_window_*` HIP codegen is deferred (spec §2.3.1). Reject
-            // cleanly here rather than reaching the launch-emit `todo!`, which
-            // would abort the build with an `internal error` panic.
-            // [05-OP-6] demands identical eval-vs-compiled behavior, and
-            // the HIP cast kernels carry no numeric-trap guard at all, so
-            // the Domain/Overflow traps cannot be honored on device.
-            // Mirrors the `chelis-compiler-api` copy of this gate so both
-            // consumers render the same text.
-            chelis_ir::dag::RiscOp::CastTrunc { .. } => {
-                return Err(format!(
-                    "`chelis build --target hip` does not support `cast_trunc`; \
-                     lowered node {} requires it. The HIP cast kernels carry no \
-                     numeric-trap guard, so the [05-OP-6] Domain/Overflow traps \
-                     cannot be honored on device yet; use `--target c`.",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::ReduceWindow { .. } => {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support `reduce_window_*`; \
-                     lowered node {} requires it. HIP windowed-reduction codegen is deferred \
-                     (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::ReduceWindowGrad { .. } => {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support the `reduce_window_*` \
-                     adjoint; lowered node {} requires it. HIP windowed-reduction codegen is \
-                     deferred (spec/05-risc-primitives.md §2.3.1); use `--target c`.",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::OneHot { .. } => {
-                return Err(format!(
-                    "`chelis build --target hip` cannot compile internal one_hot node {}: \
-                     the sparse gather recognizer must consume OneHot before backend emission",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::Shape { .. } => {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support the runtime `shape` \
-                     value read; lowered node {} requires it. The C backend is canonical \
-                     for runtime-dim reads (chelis#513/#558); use `--target c`.",
-                    node.id.0
-                )
-                .into());
-            }
-            // chelis#616: node-valued (runtime) movement bounds are C-only.
-            chelis_ir::dag::RiscOp::Shrink { bounds }
-                if bounds
-                    .iter()
-                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()) =>
-            {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                     `shrink` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::Pad { padding, .. }
-                if padding
-                    .iter()
-                    .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()) =>
-            {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                     `pad` bound; lowered node {} requires it. Use `--target c` (chelis#616).",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::Stride { strides }
-                if strides.iter().any(|s| s.node_input().is_some()) =>
-            {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                     `stride` step; lowered node {} requires it. Use `--target c` (chelis#616).",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::Reshape { new_shape }
-                if new_shape.iter().any(|d| d.node_input().is_some()) =>
-            {
-                return Err(format!(
-                    "`chelis build --target hip` does not yet support a runtime (node-valued) \
-                     `reshape` target extent; lowered node {} requires it. \
-                     Use `--target c` (chelis#616).",
-                    node.id.0
-                )
-                .into());
-            }
-            chelis_ir::dag::RiscOp::Gather { .. } => {
-                let values = &dag.get(node.inputs[0]).unwrap().output_type;
-                let index_node = dag.get(node.inputs[1]).unwrap();
-                let indices = &index_node.output_type;
-                if values.precision != chelis_types::types::Prim::F32
-                    || node.output_type.precision != chelis_types::types::Prim::F32
-                {
-                    return Err(format!(
-                        "`chelis build --target hip` sparse gather supports f32 payloads only; \
-                         node {} carries payload precision `{}` and output precision `{}`",
-                        node.id.0,
-                        values.precision.name(),
-                        node.output_type.precision.name()
-                    )
-                    .into());
-                }
-                if !matches!(
-                    indices.precision,
-                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
-                ) {
-                    return Err(format!(
-                        "`chelis build --target hip` sparse gather requires int32/int64 indices; \
-                         node {} uses `{}`",
-                        node.id.0,
-                        indices.precision.name()
-                    )
-                    .into());
-                }
-                if !matches!(index_node.op, chelis_ir::dag::RiscOp::Load { .. }) {
-                    return Err(format!(
-                        "`chelis build --target hip` sparse gather requires indices to be loaded input tensors in this milestone; \
-                         node {} uses indices produced by {:?}. \
-                         Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
-                        node.id.0,
-                        index_node.op
-                    )
-                    .into());
-                }
-            }
-            chelis_ir::dag::RiscOp::ScatterAdd { .. } | chelis_ir::dag::RiscOp::Scatter { .. } => {
-                let (label, payload_blocker) = match &node.op {
-                    chelis_ir::dag::RiscOp::ScatterAdd { .. } => (
-                        "scatter_add",
-                        "f64 scatter_add needs backend-specific atomic support and is not in this milestone.",
-                    ),
-                    chelis_ir::dag::RiscOp::Scatter { .. } => (
-                        "scatter_replace",
-                        "f64 scatter_replace requires a widened serial last-write-wins kernel and is not in this milestone.",
-                    ),
-                    _ => unreachable!(),
-                };
-                let target = &dag.get(node.inputs[0]).unwrap().output_type;
-                let index_node = dag.get(node.inputs[1]).unwrap();
-                let indices = &index_node.output_type;
-                let updates = &dag.get(node.inputs[2]).unwrap().output_type;
-                if target.precision != chelis_types::types::Prim::F32
-                    || updates.precision != chelis_types::types::Prim::F32
-                    || node.output_type.precision != chelis_types::types::Prim::F32
-                {
-                    return Err(format!(
-                        "`chelis build --target hip` sparse {label} supports f32 payloads only; \
-                         node {} carries target `{}`, updates `{}`, output `{}`. \
-                         {payload_blocker}",
-                        node.id.0,
-                        target.precision.name(),
-                        updates.precision.name(),
-                        node.output_type.precision.name()
-                    )
-                    .into());
-                }
-                if !matches!(
-                    indices.precision,
-                    chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
-                ) {
-                    return Err(format!(
-                        "`chelis build --target hip` sparse {label} requires int32/int64 indices; \
-                         node {} uses `{}`",
-                        node.id.0,
-                        indices.precision.name()
-                    )
-                    .into());
-                }
-                if !matches!(index_node.op, chelis_ir::dag::RiscOp::Load { .. }) {
-                    return Err(format!(
-                        "`chelis build --target hip` sparse {label} requires indices to be loaded input tensors in this milestone; \
-                         node {} uses indices produced by {:?}. \
-                         Non-load integer index producers need integer HIP codegen before they can feed sparse kernels safely.",
-                        node.id.0,
-                        index_node.op
-                    )
-                    .into());
-                }
-            }
-            _ => {}
-        }
-    }
-    // RT-4 F5: HIP backend dtype coverage today (verified end-to-end
-    // before admitting):
-    //   * f32, bool — full elementwise + matmul + reductions.
-    //   * f64       — full elementwise + dgemm matmul (WS-A2).
-    //   * bf16, f16 — MATMUL ONLY via `hipblasGemmEx` (WS-A3). The
-    //                 elementwise kernel suffix path
-    //                 (`dtype_kernel_suffix`) panics on bf16/f16.
-    //                 Admit only when every bf16/f16 node is an input
-    //                 load, output store, or BLAS matmul / its operand
-    //                 path; reject earlier otherwise so the user sees
-    //                 a structured CLI diagnostic instead of a panic.
-    //   * int8/int16/int32/int64 — typed elementwise kernels (WS-A4),
-    //                 plus loaded sparse indices.
-    //
-    // The widened admit-list (was f32/bool only) closes the divergence
-    // the RT-4 red team flagged: the HIP backend's bf16/f16 GEMM
-    // machinery was unreachable from the CLI surface.
-    // First pass: collect the directly-admitted bf16/f16 nodes (Load,
-    // Store, BlasMatmul). Then reachability-extend through the operand
-    // path of any BlasMatmul: a bf16/f16 helper that lowers to BlasMatmul
-    // typically introduces intermediate Expand / Realize / Copy nodes
-    // (the matmul lowering shape per spec/04-type-system.md §5.7) whose
-    // bf16/f16 buffers are never actually read by an elementwise kernel
-    // because the BlasMatmul subsumes them; admitting these intermediates
-    // keeps the WS-A3 hipblasGemmEx path reachable from the Surf CLI.
-    let mut bf16_or_f16_admissible_ops: HashSet<chelis_ir::dag::NodeId> = dag
-        .nodes()
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.output_type.precision,
-                chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
-            )
-        })
-        .filter_map(|node| match &node.op {
-            // Loads / stores carrying bf16/f16 are admitted; the storage
-            // is 2 bytes (per `chelis_gpu_dtype_size`) and the buffers
-            // round-trip without per-element arithmetic.
-            chelis_ir::dag::RiscOp::Load { .. } | chelis_ir::dag::RiscOp::Store { .. } => {
-                Some(node.id)
-            }
-            // BLAS matmul on bf16/f16 dispatches to `hipblasGemmEx` with
-            // an f32 accumulator (WS-A3). Its operands stay bf16/f16.
-            chelis_ir::dag::RiscOp::BlasMatmul { .. } => Some(node.id),
-            _ => None,
-        })
-        .collect();
-    // Reachability pass: walk upward from each BlasMatmul through its
-    // direct/transitive operand bf16/f16 nodes. Admit Expand / Realize /
-    // Copy / Mul / Sum that are subsumed by the BLAS substitution at
-    // emit time.
-    let mut frontier: Vec<chelis_ir::dag::NodeId> = bf16_or_f16_admissible_ops
-        .iter()
-        .copied()
-        .filter(|id| {
-            matches!(
-                dag.get(*id).map(|n| &n.op),
-                Some(chelis_ir::dag::RiscOp::BlasMatmul { .. })
-            )
-        })
-        .collect();
-    while let Some(id) = frontier.pop() {
-        if let Some(node) = dag.get(id) {
-            for &input in &node.inputs {
-                if let Some(inp_node) = dag.get(input)
-                    && matches!(
-                        inp_node.output_type.precision,
-                        chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
-                    )
-                    && bf16_or_f16_admissible_ops.insert(input)
-                {
-                    frontier.push(input);
-                }
-            }
-        }
-    }
-
-    for node in dag.nodes() {
-        match node.output_type.precision {
-            chelis_types::types::Prim::F32
-            | chelis_types::types::Prim::F64
-            | chelis_types::types::Prim::Bool
-            | chelis_types::types::Prim::Int8
-            | chelis_types::types::Prim::Int16 => {}
-            chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64 => {
-                // Loaded int32/int64 sparse indices are still admitted
-                // unconditionally; non-load int producers are admitted
-                // via the WS-A4 typed kernel templates.
-                let _ = sparse_index_nodes.contains(&node.id);
-            }
-            chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {
-                // Admit only nodes that the HIP backend can actually
-                // emit today: load/store buffers and BLAS matmul.
-                // Other bf16/f16 producers (elementwise, reductions,
-                // casts) would panic in the kernel-suffix path; reject
-                // here with a citation so the user gets a useful
-                // error and not a Rust stack trace.
-                if !bf16_or_f16_admissible_ops.contains(&node.id) {
-                    return Err(format!(
-                        "unsupported: `chelis build --target hip` admits `{}` only on tensor \
-                         load/store nodes and on `BlasMatmul` operands today \
-                         (`hipblasGemmEx` with an f32 accumulator, WS-A3). \
-                         Node {} carries op {:?} which has no bf16/f16 kernel \
-                         template yet (chelis-backend-hip emit::dtype_kernel_suffix). \
-                         See spec/04-type-system.md §5.7.1.",
-                        node.output_type.precision.name(),
-                        node.id.0,
-                        node.op
-                    )
-                    .into());
-                }
-            }
-            other => {
-                return Err(format!(
-                    "unsupported: `chelis build --target hip` DAG path does not support tensor \
-                     precision `{}` (node {}). \
-                     Supported: f32/f64/bool plus the integer family \
-                     (int8/int16/int32/int64), with bf16/f16 admitted on matmul \
-                     and load/store nodes. See spec/04-type-system.md §5.7.1.",
-                    other.name(),
-                    node.id.0,
-                )
-                .into());
-            }
-        }
-    }
-    let _ = sparse_index_nodes;
-    Ok(())
-}
-
 fn reject_unsupported_metal_ops(
     dag: &chelis_ir::dag::Dag,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -8756,267 +8472,6 @@ fn reject_unsupported_metal_ops(
     Ok(())
 }
 
-/// Decide whether a tensor precision is supported by the C backend.
-///
-/// Mirrors the admit-list in `validate_supported_precisions` inside
-/// `chelis-backend-c::emit`. WS-1 admits bf16 and f16 (storage as
-/// `uint16_t`; arithmetic via `chelis_bf16_to_f32` / `chelis_f16_to_f32`
-/// per spec/04-type-system.md §5.7.1; matmul via convert-then-`cblas_sgemm`
-/// with f32 scratch buffers). The C backend now admits the full active
-/// numeric dtype set; f8e4m3 remains deferred per §1.1.1.
-fn c_backend_supports_precision(precision: chelis_types::types::Prim) -> bool {
-    use chelis_types::types::Prim;
-    matches!(
-        precision,
-        Prim::F32
-            | Prim::F64
-            | Prim::Bool
-            | Prim::Bf16
-            | Prim::F16
-            | Prim::Int8
-            | Prim::Int16
-            | Prim::Int32
-            | Prim::Int64
-    )
-}
-
-/// Target-build builtins that must reject before host lowering examines an
-/// argument with no standalone compiled representation.
-const COMPILED_HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
-
-fn reject_host_only_builtins_before_host_lowering(
-    program: &chelis_types::CheckedProgram,
-    target: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let target = match target {
-        "c" => "c",
-        "hip" => "hip",
-        "metal" => "metal",
-        _ => return Ok(()),
-    };
-    if let Some(name) =
-        chelis_ir::host::find_direct_builtin_call(program, COMPILED_HOST_ONLY_BUILTINS)
-    {
-        return Err(
-            chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target)
-                .to_string()
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-/// Reject eval/test-only builtins that have no compiled-target lowering.
-///
-/// Hull Phase 0a: `process_run` runs a subprocess from the IR evaluator
-/// (under `chelis eval` / `chelis test`) but is deliberately unsupported by
-/// the C/HIP/Metal build backends -- a compiled artifact cannot reach the
-/// host interpreter's `Command` exec path, and emitting C for it would
-/// silently fall through to `/* unsupported builtin */ 0` (a wrong value,
-/// not a diagnostic). This guard turns that into a clean build error.
-fn reject_eval_only_builtins_host(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: &'static str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(builtin) = chelis_ir::host::find_eval_only_host_builtin(program) {
-        // Branded through `Unsupported` (section C2,
-        // spec/design/loud_unsupported.md): this rejection predates the C2
-        // contract and shipped unbranded while it covered one name
-        // (`process_run`); widening the list to the chelis#890/#903
-        // JSON/CSV families would have made it a 26-name unbranded site
-        // invisible to the brand-based #730 sweeps. The sibling gate
-        // above (`compiled_host_only_builtin`) is the shape, and
-        // `compile_for_execution`'s twin (`reject_eval_only_builtins` in
-        // chelis-compiler-api) brands identically.
-        // The stage tag names the ACTUAL rejecting lane (round-2 red-team
-        // finding: a hardcoded "c" misstated the lane on HIP builds).
-        return Err(chelis_types::unsupported::Unsupported::new(
-            chelis_types::unsupported::UnsupportedKind::Builtin(builtin.to_string()),
-            "compiled targets (the host interpreter's eval/test lanes only)",
-            chelis_types::unsupported::Stage::Codegen(target),
-            chelis_types::deliberate_rejection!(
-                "[05-HOST-2]",
-                "run the program with `chelis eval` or `chelis test`, or remove the \
-                 call before building (spec/05-risc-primitives.md section 3.7)"
-            ),
-        )
-        .to_string()
-        .into());
-    }
-    Ok(())
-}
-
-/// Mirror of `reject_unsupported_c_precisions` for the host-program lane.
-///
-/// The C backend's `codegen_host_program` recursively invokes
-/// `CEmitter::emit_dag_with_options` on every `tensor_helper`'s DAG, which
-/// internally panics on unsupported precisions (`validate_supported_precisions`
-/// at chelis-backend-c::emit). For the DAG-only path the CLI guards the
-/// panic with `reject_unsupported_c_precisions`; this function does the
-/// same for the host-program lane (RT-4 F4: `def f(x: tensor[3, bf16]) ...`
-/// previously panicked with a Rust stack trace).
-fn reject_unsupported_c_precisions_host(
-    program: &chelis_ir::host::ConcreteHostProgram,
-) -> Result<(), Box<dyn std::error::Error>> {
-    fn check_host_type(
-        ty: &chelis_ir::ConcreteHostType,
-        context: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use chelis_ir::ConcreteHostType as HostType;
-        match ty {
-            HostType::Tensor(t) if !c_backend_supports_precision(t.precision) => {
-                return Err(format!(
-                    "`chelis build --target c` host-program lane does not yet support \
-                     tensor precision `{}` ({}). The C backend admits \
-                     f32/f64/bf16/f16/bool/int8/int16/int32/int64; f8e4m3 is \
-                     deferred per spec/04-type-system.md §1.1.1.",
-                    t.precision.name(),
-                    context
-                )
-                .into());
-            }
-            HostType::Tensor(_) => {}
-            HostType::List(inner) | HostType::Option(inner) => check_host_type(inner, context)?,
-            HostType::Dict(k, v) => {
-                check_host_type(k, context)?;
-                check_host_type(v, context)?;
-            }
-            HostType::Tuple(items) => {
-                for item in items {
-                    check_host_type(item, context)?;
-                }
-            }
-            HostType::Function(params, ret) => {
-                for p in params {
-                    check_host_type(p, context)?;
-                }
-                check_host_type(ret, context)?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn check_helper(
-        helper: &chelis_ir::host::HostTensorHelper,
-        context: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        for input in &helper.inputs {
-            if !c_backend_supports_precision(input.ty.precision) {
-                return Err(format!(
-                    "`chelis build --target c` host-program lane does not yet support \
-                     tensor precision `{}` (helper `{}` input `{}` in {}). \
-                     The C backend admits f32/f64/bf16/f16/bool/int8/int16/int32/int64; \
-                     f8e4m3 is deferred per spec/04-type-system.md §1.1.1.",
-                    input.ty.precision.name(),
-                    helper.name,
-                    input.name,
-                    context
-                )
-                .into());
-            }
-        }
-        if !c_backend_supports_precision(helper.output.precision) {
-            return Err(format!(
-                "`chelis build --target c` host-program lane does not yet support \
-                 tensor precision `{}` (helper `{}` output in {}). \
-                 The C backend admits f32/f64/bf16/f16/bool/int8/int16/int32/int64; \
-                 f8e4m3 is deferred per spec/04-type-system.md §1.1.1.",
-                helper.output.precision.name(),
-                helper.name,
-                context
-            )
-            .into());
-        }
-        for node in helper.dag.nodes() {
-            if !c_backend_supports_precision(node.output_type.precision) {
-                return Err(format!(
-                    "`chelis build --target c` host-program lane does not yet support \
-                     tensor precision `{}` (helper `{}` node {} in {}). \
-                     The C backend admits f32/f64/bf16/f16/bool/int8/int16/int32/int64; \
-                     f8e4m3 is deferred per spec/04-type-system.md §1.1.1.",
-                    node.output_type.precision.name(),
-                    helper.name,
-                    node.id.0,
-                    context
-                )
-                .into());
-            }
-        }
-        Ok(())
-    }
-
-    for binding in &program.globals {
-        check_host_type(&binding.ty, &format!("global `{}`", binding.name))?;
-    }
-    for helper in &program.global_tensor_helpers {
-        check_helper(helper, "global tensor helpers")?;
-    }
-    for function in &program.functions {
-        let context = format!("function `{}`", function.name);
-        for param in &function.params {
-            check_host_type(&param.ty, &format!("{} param `{}`", context, param.name))?;
-        }
-        check_host_type(&function.ret_ty, &format!("{} return", context))?;
-        for helper in &function.tensor_helpers {
-            check_helper(helper, &context)?;
-        }
-    }
-    Ok(())
-}
-
-/// Mirror of the per-node precision walk that the C backend's emitter
-/// performs internally (`validate_supported_precisions` panics). Emits a
-/// clean user-facing error BEFORE the backend panics, closing a
-/// check-pass/build-panic gap for programs like `def f() -> f64 = cast(1.0, f64)`
-/// that reach DAG lowering with a non-F32/Bool node.
-///
-/// Prefer reporting the node that first mismatches the user's declared
-/// output type (usually a scalar literal whose declared type is int64/f64
-/// vs an internal int32/f32 node) so the error line matches the source
-/// intent rather than the internal lowering.
-fn reject_unsupported_c_precisions(
-    dag: &chelis_ir::dag::Dag,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let sparse_index_nodes: HashSet<chelis_ir::dag::NodeId> = dag
-        .nodes()
-        .iter()
-        .filter_map(|node| match node.op {
-            chelis_ir::dag::RiscOp::Gather { .. }
-            | chelis_ir::dag::RiscOp::ScatterAdd { .. }
-            | chelis_ir::dag::RiscOp::Scatter { .. } => node.inputs.get(1).copied(),
-            _ => None,
-        })
-        .collect();
-
-    for node in dag.nodes() {
-        match node.output_type.precision {
-            chelis_types::types::Prim::F32 | chelis_types::types::Prim::Bool => {}
-            // WS-1: bf16 / f16 are admitted on the C-backend DAG path
-            // post-cycle. The emitter routes elementwise ops through
-            // `chelis_<x>_to_f32` convert-load helpers and matmul
-            // through `convert-then-cblas_sgemm` per spec §5.7.1.
-            chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16 => {}
-            chelis_types::types::Prim::Int32 | chelis_types::types::Prim::Int64
-                if sparse_index_nodes.contains(&node.id) => {}
-            other => {
-                return Err(format!(
-                    "`chelis build --target c` DAG path only supports f32/bool/bf16/f16 tensors, \
-                     plus int32/int64 tensors when they are consumed as sparse indices; \
-                     node {} carries precision `{}`. \
-                     Non-f32/bool/bf16/f16 tensors must flow through the host-lane wrapper \
-                     (use `to_tensor([...])`/`pad_sequences` or declare a helper fn \
-                     that the host lane can emit as a real C symbol).",
-                    node.id.0,
-                    other.name()
-                )
-                .into());
-            }
-        }
-    }
-    Ok(())
-}
-
 fn reject_unsupported_effect_ops(
     dag: &chelis_ir::dag::Dag,
     target: &str,
@@ -9027,126 +8482,6 @@ fn reject_unsupported_effect_ops(
                 "`chelis build --target {target}` does not yet codegen `dropout`; evaluate it under `with seed(...)` instead"
             )
             .into());
-        }
-    }
-    Ok(())
-}
-
-/// `reduce_window_*` over a runtime-symbolic windowed axis cannot be
-/// lowered to a correct static output shape on the build path: the
-/// windowed output extent `floor((d - window) / stride) + 1` is strictly
-/// smaller than the input extent `d` and is not representable as a
-/// `DimExpr` (no subtraction / floor), so the backend's symbolic-dim
-/// binding would tie the windowed output axis to the *input* extent —
-/// silently mis-allocating the output and emitting an out-of-bounds
-/// window read (build output then diverges from the IR evaluator / host
-/// runtime). Reject per spec/05-risc-primitives.md §2.3.1.
-///
-/// Mirrors `chelis_compiler_api::compiler::reject_symbolic_windowed_reduce`;
-/// the CLI build pipeline is independent of `compile_for_execution`, so
-/// the guard is duplicated here. Only the windowed (trailing
-/// `window_shape.len()`) axes are checked; leading pass-through axes may
-/// remain symbolic and bind correctly.
-fn reject_symbolic_windowed_reduce(
-    dag: &chelis_ir::dag::Dag,
-    target: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use chelis_ir::dag::{DimInfo, RiscOp};
-    for node in dag.nodes() {
-        let RiscOp::ReduceWindow { window_shape, .. } = &node.op else {
-            continue;
-        };
-        let dims = &node.output_type.dims;
-        let leading = dims.len().saturating_sub(window_shape.len());
-        for (offset, dim) in dims.iter().enumerate().skip(leading) {
-            if let DimInfo::Named(name, None) = dim {
-                return Err(format!(
-                    "`chelis build --target {target}` requires statically-known \
-                     windowed-axis extents for `reduce_window_*`; node {} windowed axis \
-                     {offset} has runtime-only symbolic dimension `{name}`. The windowed \
-                     output extent floor((d - window) / stride) + 1 is not representable \
-                     for a runtime-only input extent, so the build cannot allocate a \
-                     correct output. Window over a statically-sized axis, or pad the \
-                     input to a concrete extent first. See spec/05-risc-primitives.md §2.3.1.",
-                    node.id.0
-                )
-                .into());
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Apply [`reject_symbolic_windowed_reduce`] to every tensor-helper DAG
-/// embedded in a host program. The host codegen path
-/// (`codegen_host_program`) lowers `reduce_window_*` from these helper
-/// DAGs, so the pure-DAG guard alone would miss the node.
-fn reject_symbolic_windowed_reduce_host(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for helper in &program.global_tensor_helpers {
-        reject_symbolic_windowed_reduce(&helper.dag, target)?;
-    }
-    for function in &program.functions {
-        for helper in &function.tensor_helpers {
-            reject_symbolic_windowed_reduce(&helper.dag, target)?;
-        }
-    }
-    Ok(())
-}
-
-/// `reduce_window_*` (and its adjoint) are f32-only in the C backend:
-/// `emit_reduce_window{,_grad}` have no bf16/f16 convert-load path yet.
-/// `reject_unsupported_c_precisions` admits bf16/f16 generally, so without
-/// this guard a bf16/f16 windowed reduction reaches the emitter and aborts
-/// with an `internal error` panic instead of a clean diagnostic. Reject it
-/// at compile time; the emitter `panic!` stays as a defensive backstop.
-///
-/// Mirrors `chelis_compiler_api::compiler::reject_unsupported_reduce_window_precision`;
-/// the CLI build pipeline is independent of `compile_for_execution`, so the
-/// guard is duplicated here. See spec/05-risc-primitives.md §2.3.1.
-fn reject_unsupported_reduce_window_precision(
-    dag: &chelis_ir::dag::Dag,
-    target: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use chelis_ir::dag::RiscOp;
-    for node in dag.nodes() {
-        let (op_label, reducer) = match &node.op {
-            RiscOp::ReduceWindow { reducer, .. } => ("reduce_window_*", reducer),
-            RiscOp::ReduceWindowGrad { reducer, .. } => ("reduce_window_* adjoint", reducer),
-            _ => continue,
-        };
-        let prec = node.output_type.precision;
-        if prec != chelis_types::types::Prim::F32 {
-            return Err(format!(
-                "`chelis build --target {target}` supports `{op_label}` (`{}`) on f32 \
-                 tensors only; node {} carries precision `{}`. bf16/f16 windowed \
-                 reductions are not yet lowered (no convert-load path); cast to f32 \
-                 before the windowed reduction. See spec/05-risc-primitives.md §2.3.1.",
-                reducer.surf_name(),
-                node.id.0,
-                prec.name(),
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
-
-/// Apply [`reject_unsupported_reduce_window_precision`] to every
-/// tensor-helper DAG embedded in a host program, mirroring
-/// [`reject_symbolic_windowed_reduce_host`].
-fn reject_unsupported_reduce_window_precision_host(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for helper in &program.global_tensor_helpers {
-        reject_unsupported_reduce_window_precision(&helper.dag, target)?;
-    }
-    for function in &program.functions {
-        for helper in &function.tensor_helpers {
-            reject_unsupported_reduce_window_precision(&helper.dag, target)?;
         }
     }
     Ok(())
@@ -10027,8 +9362,8 @@ fn deep_named_decl_name(expr: &DeepExpr) -> Option<&str> {
 
 /// Host builtins that the IR evaluator (`chelis eval` / `chelis test`)
 /// supports but the compiled build backends deliberately do not. Kept in
-/// one place so [`reject_eval_only_builtins_host`] and
-/// [`drop_unreachable_eval_only_defs`] stay in agreement.
+/// one place so the shared compiler gate and [`drop_unreachable_eval_only_defs`]
+/// stay in agreement.
 // The list itself lives in `chelis_ir::host` and is shared with the
 // public compiler API's `compile_for_execution` gate, so the CLI build
 // pipeline and the chelis-python path cannot drift (chelis#891 review
@@ -10873,7 +10208,8 @@ mod eval_only_pruning_tests {
 /// seam (`chelis-compiler-api::compiler::reject_unsupported_hip_ops`).
 #[cfg(test)]
 mod runtime_dim_reject_tests {
-    use super::{reject_unsupported_hip_ops, reject_unsupported_metal_ops};
+    use super::{compiler_error_messages, reject_unsupported_metal_ops};
+    use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
     use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
 
@@ -10921,7 +10257,7 @@ mod runtime_dim_reject_tests {
         );
         let err = reject_unsupported_hip_ops(&dag)
             .expect_err("HIP seam must reject a node-valued reshape target");
-        let message = err.to_string();
+        let message = compiler_error_messages(&err);
         assert!(
             message.contains("reshape") && message.contains("--target c"),
             "unexpected message: {message}"
@@ -10972,7 +10308,13 @@ mod runtime_dim_reject_tests {
     /// rejection is scoped to node-valued dims only.
     #[test]
     fn seams_accept_literal_movement_and_reshape() {
-        let (mut dag, x, _m) = dag_with_scalar();
+        let mut dag = Dag::new();
+        let x = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(lit_dims(&[4]), Prim::F32),
+            None,
+        );
         let shrunk = dag.add_node(
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(2))],

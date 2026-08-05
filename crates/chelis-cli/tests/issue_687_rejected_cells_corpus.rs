@@ -145,7 +145,9 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "error: unsupported: `chelis build --target hip` admits `f16` only on tensor load/store \
          nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
          WS-A3). Node 2 carries op Add which has no bf16/f16 kernel template yet \
-         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1.\n",
+         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1. \
+         on `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: the HIP narrow-float compute cell has no typed kernel template\n",
     ),
     (
         "hip_bf16_compute",
@@ -154,7 +156,37 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "error: unsupported: `chelis build --target hip` admits `bf16` only on tensor load/store \
          nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
          WS-A3). Node 2 carries op Add which has no bf16/f16 kernel template yet \
-         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1.\n",
+         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1. \
+         on `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: the HIP narrow-float compute cell has no typed kernel template\n",
+    ),
+    (
+        "hip_f16_matmul_operand_compute",
+        "def f(a: tensor[2, 2, f16], b: tensor[2, 2, f16], c: tensor[2, 2, f16]) \
+         -> tensor[2, 2, f16] = matmul(add(a, b), c)\n",
+        "hip",
+        "warning: rejected summary for `f` (blas-non-load-operand): BLAS matmul operand[0] is \
+         not a direct load of a helper input; callsite=<no-span>, helper-body=surf:95..115\n\
+         error: unsupported: `chelis build --target hip` admits `f16` only on tensor load/store \
+         nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
+         WS-A3). Node 3 carries op Add which has no bf16/f16 kernel template yet \
+         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1. \
+         on `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: the HIP narrow-float compute cell has no typed kernel template\n",
+    ),
+    (
+        "hip_bf16_matmul_operand_compute",
+        "def f(a: tensor[2, 2, bf16], b: tensor[2, 2, bf16], c: tensor[2, 2, bf16]) \
+         -> tensor[2, 2, bf16] = matmul(add(a, b), c)\n",
+        "hip",
+        "warning: rejected summary for `f` (blas-non-load-operand): BLAS matmul operand[0] is \
+         not a direct load of a helper input; callsite=<no-span>, helper-body=surf:99..119\n\
+         error: unsupported: `chelis build --target hip` admits `bf16` only on tensor load/store \
+         nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
+         WS-A3). Node 3 carries op Add which has no bf16/f16 kernel template yet \
+         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1. \
+         on `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: the HIP narrow-float compute cell has no typed kernel template\n",
     ),
     (
         "metal_f64",

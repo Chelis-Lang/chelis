@@ -1053,12 +1053,10 @@ fn borrow_of_int64_scalar_is_rejected_loudly() {
 // the opposite of #680. A fix must make both lanes exact, not just move the
 // error to the other lane.
 //
-// Reachability: this needs a `def`, which is the ordinary way to write
-// Chelis. A `def` takes the permissive host-lane precision gate
-// (`reject_unsupported_c_precisions_host`, crates/chelis-cli/src/main.rs:
-// 7054-7162), which admits int64 generically. Only a `def`-free program hits
-// the strict bare-DAG gate (`reject_unsupported_c_precisions`, `:7174-7214`)
-// that rejects int64 tensors. Both lanes emit through the same `CEmitter`.
+// Historical reachability: before chelis#730 Phase 3, whether this int64
+// program reached the C emitter depended on whether an unrelated declaration
+// forced the host lane. The divergent precision preflights are now deleted;
+// active dtype admission is independent of that lowering-path choice.
 // ===========================================================================
 
 /// Before Phase 3, eval returned `[16777217, 1, 2, 3]` while compiled C

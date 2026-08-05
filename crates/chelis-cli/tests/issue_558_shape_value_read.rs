@@ -445,8 +445,9 @@ fn issue_558_runtime_axis_shape_forward_uses_host_lane() {
 // c` emits it directly (covered above). Under `--target hip`, a `grad`
 // export host-falls-back to the C emitter (the grad-in-host-position lane),
 // so it works there too; a `Shape` node reaching the HIP DEVICE-kernel path
-// is defensively rejected by `reject_unsupported_hip_ops` (compiler-api + CLI
-// mirror) with an `unsupported_feature` diagnostic citing chelis#513/#558.
+// is defensively rejected by the shared compiler-api
+// `reject_unsupported_hip_ops` gate with an `unsupported_feature` diagnostic
+// citing chelis#513/#558.
 // The HIP device-path rejection is not exercised here because it needs a GPU
 // toolchain (hipcc) that CI does not guarantee; the mandatory lanes are eval
 // + C, which the oracles above lock end to end.
