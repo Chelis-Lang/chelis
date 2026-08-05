@@ -2860,8 +2860,7 @@ offender unspecified while guaranteeing the trap - was rejected because the
 kind is part of the rendered line, so an unspecified offender would have
 required weakening [04-NUM-9]'s byte-identity requirement to accommodate an
 implementation. Stated for elementwise trapping maps generally rather than
-for `cast`, so a later trapping map does not reopen the same question. Not
-fully honored on the checked `cast` today: chelis#1152.)*
+for `cast`, so a later trapping map does not reopen the same question.)*
 
 ---
 
