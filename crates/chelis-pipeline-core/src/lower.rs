@@ -8,6 +8,7 @@ use crate::roots::root_metadata;
 use crate::{
     CheckedCompilation, CheckedLibrary, ContextCheckedCompilation, CoreLowerError,
     ForwardNodeIndex, LoweredCompilation, LoweringMode, NamedRoots, RootCountContext,
+    TensorRootNames,
 };
 
 /// An immutable lowered payload bound to a semantically checked library.
@@ -67,6 +68,15 @@ impl From<IrLoweredLibrary> for LoweredProgram {
     fn from(library: IrLoweredLibrary) -> Self {
         let (dag, rootless_defs) = library.into_dag_and_rootless_defs();
         Self { dag, rootless_defs }
+    }
+}
+
+impl From<chelis_ir::lower::ComposedLowering> for LoweredProgram {
+    fn from(composed: chelis_ir::lower::ComposedLowering) -> Self {
+        Self {
+            dag: composed.dag,
+            rootless_defs: composed.rootless_defs,
+        }
     }
 }
 
@@ -135,7 +145,22 @@ pub fn lower_checked_with_context(
     let tensor_names = checked.root_metadata.tensor_names.clone();
 
     let lower_result =
-        chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program);
+        chelis_ir::lower::try_lower_program_with_context(library.raw(), &checked.program)
+            .map(LoweredProgram::from);
+    finish_contextual_lowering(checked, library.dag(), mode, lower_result, &tensor_names)
+}
+
+/// Bind new-code roots after contextual lowering, applying the same host
+/// policy the isolated path applies. Under `AllowHostBackend` a nonfatal lower
+/// rejection yields an empty host result, matching `finish_isolated_lowering`,
+/// so the two paths agree for a selected host backend.
+fn finish_contextual_lowering(
+    checked: CheckedCompilation,
+    library_dag: &Dag,
+    mode: LoweringMode,
+    lower_result: Result<LoweredProgram, LowerDiagnostic>,
+    tensor_names: &TensorRootNames,
+) -> Result<LoweredCompilation, CoreLowerError> {
     let (mut dag, rootless_defs, accepted_nonfatal_rejection) = match lower_result {
         Ok(composed) => (composed.dag, composed.rootless_defs, false),
         Err(diagnostic)
@@ -143,12 +168,15 @@ pub fn lower_checked_with_context(
                 && !diagnostic.fatal
                 && tensor_names.is_empty() =>
         {
-            (library.dag().clone(), BTreeSet::new(), true)
+            (library_dag.clone(), BTreeSet::new(), true)
+        }
+        Err(diagnostic) if mode == LoweringMode::AllowHostBackend && !diagnostic.fatal => {
+            (library_dag.clone(), BTreeSet::new(), true)
         }
         Err(diagnostic) => return Err(CoreLowerError::Lower(diagnostic)),
     };
 
-    let library_root_count = library.dag().roots().len();
+    let library_root_count = library_dag.roots().len();
     let root_start = library_root_count.min(dag.roots().len());
     let new_roots = dag.roots()[root_start..].to_vec();
     dag.set_roots(new_roots);
@@ -292,6 +320,61 @@ mod tests {
 
         assert!(lowered.dag().roots().is_empty());
         assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn contextual_host_backend_accepts_a_nonfatal_lower_rejection() {
+        let checked = checked_compilation(
+            "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
+        );
+        let tensor_names = checked.root_metadata().tensor_names().clone();
+        assert!(
+            !tensor_names.is_empty(),
+            "the fixture must carry a tensor root name so the arm is not vacuous"
+        );
+        let diagnostic = LowerDiagnostic {
+            message: "host backend required".to_string(),
+            span: None,
+            span_id: None,
+            fatal: false,
+        };
+
+        let lowered = finish_contextual_lowering(
+            checked,
+            &Dag::new(),
+            LoweringMode::AllowHostBackend,
+            Err(diagnostic),
+            &tensor_names,
+        )
+        .expect("contextual host backend accepts a nonfatal rejection, matching isolated");
+
+        assert!(lowered.dag().roots().is_empty());
+        assert!(lowered.named_roots().is_empty());
+    }
+
+    #[test]
+    fn contextual_host_only_rejects_a_nonfatal_rejection_with_tensor_names() {
+        let checked = checked_compilation(
+            "(def {} identity (fn {} (params {} (x {type: (t-tensor {} (d-name {} n) (t-prim {} f32))})) (var {} x)))",
+        );
+        let tensor_names = checked.root_metadata().tensor_names().clone();
+        let diagnostic = LowerDiagnostic {
+            message: "host backend required".to_string(),
+            span: None,
+            span_id: None,
+            fatal: false,
+        };
+
+        let error = finish_contextual_lowering(
+            checked,
+            &Dag::new(),
+            LoweringMode::AllowHostOnly,
+            Err(diagnostic),
+            &tensor_names,
+        )
+        .expect_err("host-only keeps its tensor-name guard; only host-backend is permissive");
+
+        assert!(matches!(error, CoreLowerError::Lower(_)));
     }
 
     #[test]

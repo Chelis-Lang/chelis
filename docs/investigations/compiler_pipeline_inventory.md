@@ -383,6 +383,8 @@ The standard-library and compiled-context cache parsers require the identities a
 They rerun semantic checks without another type-inference session.
 They rerun the lower phase and compare each canonical payload with its cache payload.
 The compiler API installs linked-program policy for linked cache payloads before this validation.
+
+The stored library proof identity is a self-consistency check between the cached type environment and program, not a recomputation from the decoded source. The identity is bound before the effect and linearity passes, and a layered build's cached library is a composed program whose identity is the extension's identity over the base context, so the decoded program's own source cannot reproduce it. Cache trust rests on the identity agreement, the semantic reruns, the re-lowered payload comparison, and the envelope's source and build identity. A canonical post-effects derivation that would let the boundary recompute the identity from source is tracked as the `canonicalize-library-proof-identity` follow-up.
 Both pipeline crates forbid unsafe code.
 
 The manifest guard now scans normal and build dependencies. It also scans target-specific tables.

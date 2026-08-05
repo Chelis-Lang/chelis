@@ -55,6 +55,19 @@ pub fn check_prepared_library(
 }
 
 /// Parse cached library products into a checked library proof.
+///
+/// The stored `LibraryProofId` is checked for self-consistency: the cached
+/// `TypeEnv` and `CheckedProgram` must agree on it and their declared-type maps
+/// must match. It is NOT recomputed from the decoded source. The identity is
+/// bound before the effect and linearity passes, and a layered build's cached
+/// library is a composed program whose id is the extension's id over the base
+/// context while its `exprs()` are the base++extension concatenation, so the id
+/// cannot be reproduced from the decoded program's own source. Cache trust
+/// therefore rests on this agreement, the rerun of effect and linearity checks
+/// below, the re-lowered payload comparison at the decode boundary, and the
+/// envelope's source and build identity. Turning the id into a source-recompute
+/// needs a canonical post-effects derivation; that is tracked by the
+/// `canonicalize-library-proof-identity` OpenSpec change.
 pub fn validate_cached_library(
     cached_type_env: TypeEnv,
     cached_program: CheckedProgram,
