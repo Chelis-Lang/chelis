@@ -1,14 +1,20 @@
-//! The chelis#730 Phase 3 no-duplicate-gates tripwire.
+//! The chelis#730 Phase 3 reviewed `reject_*` source inventory.
 //!
-//! The inventory is intentionally exact. A new top-level `reject_*` decision
-//! in either public build path must update this reviewed manifest; a name in
-//! both files is always a failure because it creates two editable policies.
+//! The inventory is intentionally syntactic and exact. Every `reject_*`
+//! function anywhere in either public build crate's Rust source tree,
+//! including nested modules and nested item definitions, must update this
+//! reviewed manifest. A name in both crates is always a failure because it
+//! creates two editable policies. This test does not claim to recognize a
+//! semantic reimplementation hidden under an unrelated name; that remains an
+//! architectural-review concern rather than a property an AST name census can
+//! prove.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use syn::{Item, Visibility};
+use syn::Visibility;
+use syn::visit::{self, Visit};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -18,46 +24,170 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+#[derive(Default)]
+struct RejectFunctionVisitor {
+    functions: BTreeSet<(String, bool)>,
+}
+
+impl<'ast> Visit<'ast> for RejectFunctionVisitor {
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        let name = function.sig.ident.to_string();
+        if name.starts_with("reject_") {
+            self.functions
+                .insert((name, matches!(function.vis, Visibility::Public(_))));
+        }
+        visit::visit_item_fn(self, function);
+    }
+}
+
 fn reject_functions(path: &Path) -> BTreeSet<(String, bool)> {
     let source =
         fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let file = syn::parse_file(&source)
         .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
-    file.items
+    let mut visitor = RejectFunctionVisitor::default();
+    visitor.visit_file(&file);
+    visitor.functions
+}
+
+fn rust_sources_under(root: &Path) -> Vec<PathBuf> {
+    fn visit_directory(directory: &Path, sources: &mut Vec<PathBuf>) {
+        let mut entries = fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("read directory {}: {error}", directory.display()))
+            .map(|entry| entry.expect("read directory entry").path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                visit_directory(&path, sources);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                sources.push(path);
+            }
+        }
+    }
+
+    let mut sources = Vec::new();
+    visit_directory(root, &mut sources);
+    sources
+}
+
+fn reject_functions_under(root: &Path) -> BTreeSet<(String, String, bool)> {
+    rust_sources_under(root)
         .into_iter()
-        .filter_map(|item| {
-            let Item::Fn(function) = item else {
-                return None;
-            };
-            let name = function.sig.ident.to_string();
-            name.starts_with("reject_")
-                .then_some((name, matches!(function.vis, Visibility::Public(_))))
+        .flat_map(|path| {
+            let relative = path
+                .strip_prefix(root)
+                .expect("source must be below root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            reject_functions(&path)
+                .into_iter()
+                .map(move |(name, public)| (relative.clone(), name, public))
         })
         .collect()
 }
 
 #[test]
-fn phase3_gate_inventory_has_one_definition_per_decision() {
+fn reject_inventory_discovers_nested_function_definitions() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let source = directory.path().join("nested.rs");
+    fs::write(
+        &source,
+        r#"
+mod nested {
+    pub fn reject_shadow_policy() -> Result<(), ()> {
+        Ok(())
+    }
+}
+"#,
+    )
+    .expect("write nested source");
+
+    assert_eq!(
+        reject_functions(&source),
+        BTreeSet::from([("reject_shadow_policy".to_string(), true)]),
+        "nested gate definitions are part of the recurrence surface"
+    );
+}
+
+#[test]
+fn reject_inventory_discovers_every_rust_file_under_a_crate_source_tree() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let nested = directory.path().join("nested");
+    fs::create_dir(&nested).expect("create nested directory");
+    fs::write(
+        nested.join("policy.rs"),
+        "pub(crate) fn reject_moved_policy() -> Result<(), ()> { Ok(()) }\n",
+    )
+    .expect("write nested source file");
+
+    assert_eq!(
+        reject_functions_under(directory.path()),
+        BTreeSet::from([(
+            "nested/policy.rs".to_string(),
+            "reject_moved_policy".to_string(),
+            false,
+        )]),
+        "moving a gate out of the historical main files must not escape the inventory"
+    );
+}
+
+#[test]
+fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
     let root = workspace_root();
-    let cli = reject_functions(&root.join("crates/chelis-cli/src/main.rs"));
-    let compiler = reject_functions(&root.join("crates/chelis-compiler-api/src/compiler.rs"));
+    let cli = reject_functions_under(&root.join("crates/chelis-cli/src"));
+    let compiler = reject_functions_under(&root.join("crates/chelis-compiler-api/src"));
 
     let expected_cli = BTreeSet::from([
-        ("reject_unsupported_effect_ops".to_string(), false),
-        ("reject_unsupported_metal_ops".to_string(), false),
-        ("reject_with_seed_for_build_target".to_string(), false),
+        (
+            "main.rs".to_string(),
+            "reject_unsupported_effect_ops".to_string(),
+            false,
+        ),
+        (
+            "main.rs".to_string(),
+            "reject_unsupported_metal_ops".to_string(),
+            false,
+        ),
+        (
+            "main.rs".to_string(),
+            "reject_with_seed_for_build_target".to_string(),
+            false,
+        ),
     ]);
     let expected_compiler = BTreeSet::from([
-        ("reject_eval_only_builtins".to_string(), true),
-        ("reject_host_only_builtins".to_string(), true),
         (
+            "compiler.rs".to_string(),
+            "reject_eval_only_builtins".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
+            "reject_host_only_builtins".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
             "reject_host_only_builtins_before_host_lowering".to_string(),
             true,
         ),
-        ("reject_symbolic_windowed_reduce".to_string(), true),
-        ("reject_unsized_named_dims".to_string(), false),
-        ("reject_unsupported_hip_ops".to_string(), true),
         (
+            "compiler.rs".to_string(),
+            "reject_symbolic_windowed_reduce".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
+            "reject_unsized_named_dims".to_string(),
+            false,
+        ),
+        (
+            "compiler.rs".to_string(),
+            "reject_unsupported_hip_ops".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
             "reject_unsupported_reduce_window_precision".to_string(),
             true,
         ),
@@ -69,10 +199,10 @@ fn phase3_gate_inventory_has_one_definition_per_decision() {
         "review the shared compiler gate inventory change"
     );
 
-    let cli_names = cli.iter().map(|(name, _)| name).collect::<BTreeSet<_>>();
+    let cli_names = cli.iter().map(|(_, name, _)| name).collect::<BTreeSet<_>>();
     let compiler_names = compiler
         .iter()
-        .map(|(name, _)| name)
+        .map(|(_, name, _)| name)
         .collect::<BTreeSet<_>>();
     let duplicates = cli_names
         .intersection(&compiler_names)

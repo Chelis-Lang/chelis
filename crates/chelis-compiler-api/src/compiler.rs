@@ -1513,8 +1513,8 @@ fn execution_artifact_from_compiled(
     entry_name: Option<&str>,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
-    let target_label = compile_target_label(target);
-    reject_host_only_builtins_before_host_lowering(&compiled.checked, target_label)?;
+    let build_target = BuildTarget::from(target);
+    reject_host_only_builtins_before_host_lowering(&compiled.checked, build_target)?;
     let host_compiled =
         chelis_ir::host::try_lower_compiled_program(&compiled.checked).map_err(|diagnostic| {
             stage_error_with_span(
@@ -1533,8 +1533,8 @@ fn execution_artifact_from_compiled(
     // and is not the correctness boundary. See spec/05-risc-primitives.md
     // §3.6 and spec/design/loud_unsupported.md §C6.3.
     if let Some(host_program) = host_compiled.host.as_ref() {
-        reject_host_only_builtins(host_program, target_label)?;
-        reject_eval_only_builtins(host_program, target_label)?;
+        reject_host_only_builtins(host_program, build_target)?;
+        reject_eval_only_builtins(host_program, build_target)?;
     }
 
     // Two C-build-path guards over `reduce_window_*`, applied before
@@ -1552,8 +1552,8 @@ fn execution_artifact_from_compiled(
     // misleading there. See spec/05-risc-primitives.md §2.3.1.
     if target == CompileTarget::C {
         let check = |dag: &Dag| -> Result<()> {
-            reject_symbolic_windowed_reduce(dag, "c")?;
-            reject_unsupported_reduce_window_precision(dag, "c")?;
+            reject_symbolic_windowed_reduce(dag, BuildTarget::C)?;
+            reject_unsupported_reduce_window_precision(dag, BuildTarget::C)?;
             Ok(())
         };
         check(&compiled.dag)?;
@@ -1671,8 +1671,8 @@ fn execution_artifact_from_compiled(
                 // Fix 2: the entry-scoped symbol is the fixed, collision-free
                 // `chelis_main` so a def named `main`/`free`/`chelis_*` links.
                 let entry_symbol = EXECUTION_ENTRY_C_SYMBOL;
-                reject_symbolic_windowed_reduce(&entry_dag, "c")?;
-                reject_unsupported_reduce_window_precision(&entry_dag, "c")?;
+                reject_symbolic_windowed_reduce(&entry_dag, BuildTarget::C)?;
+                reject_unsupported_reduce_window_precision(&entry_dag, BuildTarget::C)?;
                 reject_unsized_named_dims(&entry_dag, "c")?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&entry_dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
@@ -3061,8 +3061,9 @@ fn reject_unsized_named_dims(dag: &Dag, target: &'static str) -> Result<()> {
 /// extents.
 pub fn reject_symbolic_windowed_reduce(
     dag: &Dag,
-    target: &'static str,
+    target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let target = target.as_str();
     for node in dag.nodes() {
         let RiscOp::ReduceWindow { window_shape, .. } = &node.op else {
             continue;
@@ -3107,8 +3108,9 @@ pub fn reject_symbolic_windowed_reduce(
 /// follow-on work — see spec/05-risc-primitives.md §2.3.1.
 pub fn reject_unsupported_reduce_window_precision(
     dag: &Dag,
-    target: &'static str,
+    target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
+    let target = target.as_str();
     for node in dag.nodes() {
         let (op_label, reducer) = match &node.op {
             RiscOp::ReduceWindow { reducer, .. } => ("reduce_window_*", reducer),
@@ -3144,16 +3146,56 @@ pub fn reject_unsupported_reduce_window_precision(
 /// the independent safety mechanism. Spec: `spec/05-risc-primitives.md` §3.6.
 const HOST_ONLY_BUILTINS: &[&str] = &["tensor_scan"];
 
-const fn compile_target_label(target: CompileTarget) -> &'static str {
-    match target {
-        CompileTarget::C => "c",
-        CompileTarget::Hip => "hip",
+/// Closed target vocabulary for shared pre-codegen build gates.
+///
+/// Gate callers cannot pass an arbitrary string: every target spelling is
+/// decoded once at the public boundary, then every shared policy consumes
+/// this exhaustive enum. An unknown spelling is therefore an error, never a
+/// request to skip the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildTarget {
+    C,
+    Hip,
+    Metal,
+}
+
+impl BuildTarget {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::Hip => "hip",
+            Self::Metal => "metal",
+        }
     }
 }
 
-fn host_only_builtin_error(name: &str, target: &'static str) -> CompilerError {
+impl From<CompileTarget> for BuildTarget {
+    fn from(target: CompileTarget) -> Self {
+        match target {
+            CompileTarget::C => Self::C,
+            CompileTarget::Hip => Self::Hip,
+        }
+    }
+}
+
+impl TryFrom<&str> for BuildTarget {
+    type Error = String;
+
+    fn try_from(target: &str) -> std::result::Result<Self, Self::Error> {
+        match target {
+            "c" => Ok(Self::C),
+            "hip" => Ok(Self::Hip),
+            "metal" => Ok(Self::Metal),
+            other => Err(format!(
+                "unknown target '{other}': expected 'c', 'hip', or 'metal'"
+            )),
+        }
+    }
+}
+
+fn host_only_builtin_error(name: &str, target: BuildTarget) -> CompilerError {
     let unsupported =
-        chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target);
+        chelis_types::unsupported::Unsupported::compiled_host_only_builtin(name, target.as_str());
     unsupported_stage_error(unsupported)
 }
 
@@ -3178,14 +3220,8 @@ fn unsupported_gate_error(
 /// and other shapes materialized by lowering.
 pub fn reject_host_only_builtins_before_host_lowering(
     program: &CheckedProgram,
-    target: &str,
+    target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
-    let target = match target {
-        "c" => "c",
-        "hip" => "hip",
-        "metal" => "metal",
-        _ => return Ok(()),
-    };
     if let Some(name) = chelis_ir::host::find_direct_builtin_call(program, HOST_ONLY_BUILTINS) {
         return Err(host_only_builtin_error(&name, target));
     }
@@ -3201,7 +3237,7 @@ pub fn reject_host_only_builtins_before_host_lowering(
 /// and this gate is consumed by both public build paths.
 pub fn reject_eval_only_builtins(
     program: &chelis_ir::host::ConcreteHostProgram,
-    target: &'static str,
+    target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     if let Some(name) = chelis_ir::host::find_eval_only_host_builtin(program) {
         // Branded through `Unsupported` (section C2,
@@ -3213,7 +3249,7 @@ pub fn reject_eval_only_builtins(
             chelis_types::unsupported::Unsupported::new(
                 chelis_types::unsupported::UnsupportedKind::Builtin(name.to_string()),
                 "compiled targets (the host interpreter's eval/test lanes only)",
-                chelis_types::unsupported::Stage::Codegen(target),
+                chelis_types::unsupported::Stage::Codegen(target.as_str()),
                 chelis_types::deliberate_rejection!(
                     "[05-HOST-2]",
                     "run the program with `chelis eval` or `chelis test`, or remove the \
@@ -3227,7 +3263,7 @@ pub fn reject_eval_only_builtins(
 
 pub fn reject_host_only_builtins(
     program: &chelis_ir::host::ConcreteHostProgram,
-    target: &'static str,
+    target: BuildTarget,
 ) -> std::result::Result<(), CompilerError> {
     use chelis_ir::host::{
         ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
@@ -3697,7 +3733,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
     // the integer family have typed kernel templates. bf16/f16 are narrower:
     // storage and hipBLAS matmul are implemented, while an ordinary compute
     // node would still reach the elementwise suffix rejection.
-    let mut narrow_float_admissible: HashSet<NodeId> = dag
+    let narrow_float_admissible: HashSet<NodeId> = dag
         .nodes()
         .iter()
         .filter(|node| {
@@ -3711,35 +3747,6 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
             _ => None,
         })
         .collect();
-
-    // A lowered matmul may contain Expand/Realize/Copy/Mul/Sum nodes on its
-    // operand path. BlasMatmul subsumes that path at emission time, so those
-    // nodes do not require an elementwise narrow-float kernel.
-    let mut frontier: Vec<NodeId> = narrow_float_admissible
-        .iter()
-        .copied()
-        .filter(|id| {
-            matches!(
-                dag.get(*id).map(|node| &node.op),
-                Some(RiscOp::BlasMatmul { .. })
-            )
-        })
-        .collect();
-    while let Some(id) = frontier.pop() {
-        if let Some(node) = dag.get(id) {
-            for &input in &node.inputs {
-                if let Some(input_node) = dag.get(input)
-                    && matches!(
-                        input_node.output_type.precision,
-                        chelis_types::types::Prim::Bf16 | chelis_types::types::Prim::F16
-                    )
-                    && narrow_float_admissible.insert(input)
-                {
-                    frontier.push(input);
-                }
-            }
-        }
-    }
 
     for node in dag.nodes() {
         match node.output_type.precision {
@@ -5103,7 +5110,7 @@ mod tests {
             ],
             vec![2],
         );
-        let err = reject_symbolic_windowed_reduce(&dag, "c")
+        let err = reject_symbolic_windowed_reduce(&dag, BuildTarget::C)
             .expect_err("a runtime-only windowed axis must be rejected on the build path");
         let message = &err.errors[0].message;
         assert!(
@@ -5126,7 +5133,7 @@ mod tests {
             vec![DimInfo::Named("batch".into(), None), DimInfo::Lit(7)],
             vec![2],
         );
-        reject_symbolic_windowed_reduce(&dag, "c")
+        reject_symbolic_windowed_reduce(&dag, BuildTarget::C)
             .expect("symbolic leading axis with a statically-sized windowed axis is allowed");
     }
 
@@ -5134,13 +5141,14 @@ mod tests {
     fn reduce_window_allows_statically_sized_windowed_axis_dag() {
         // Both a literal and a named-with-size windowed axis are allowed.
         let lit_dag = reduce_window_node_dag(vec![DimInfo::Lit(2), DimInfo::Lit(7)], vec![2]);
-        reject_symbolic_windowed_reduce(&lit_dag, "c").expect("literal windowed axis is allowed");
+        reject_symbolic_windowed_reduce(&lit_dag, BuildTarget::C)
+            .expect("literal windowed axis is allowed");
 
         let named_sized_dag = reduce_window_node_dag(
             vec![DimInfo::Lit(2), DimInfo::Named("h_out".into(), Some(7))],
             vec![2],
         );
-        reject_symbolic_windowed_reduce(&named_sized_dag, "c")
+        reject_symbolic_windowed_reduce(&named_sized_dag, BuildTarget::C)
             .expect("named-with-size windowed axis is allowed");
     }
 
@@ -5206,7 +5214,7 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
     #[test]
     fn reduce_window_rejects_bf16_precision_on_c_build() {
         let bf16 = reduce_window_dag_with_precision(chelis_types::types::Prim::Bf16);
-        let err = reject_unsupported_reduce_window_precision(&bf16, "c")
+        let err = reject_unsupported_reduce_window_precision(&bf16, BuildTarget::C)
             .expect_err("bf16 reduce_window must be rejected on the C build path");
         let message = &err.errors[0].message;
         assert!(
@@ -5221,10 +5229,10 @@ windowed = reduce_window_max(padded, [2i64], [1i64])
 
         // f16 is rejected the same way; f32 is allowed.
         let f16 = reduce_window_dag_with_precision(chelis_types::types::Prim::F16);
-        reject_unsupported_reduce_window_precision(&f16, "c")
+        reject_unsupported_reduce_window_precision(&f16, BuildTarget::C)
             .expect_err("f16 reduce_window must be rejected on the C build path");
         let f32 = reduce_window_dag_with_precision(chelis_types::types::Prim::F32);
-        reject_unsupported_reduce_window_precision(&f32, "c")
+        reject_unsupported_reduce_window_precision(&f32, BuildTarget::C)
             .expect("f32 reduce_window must be allowed");
     }
 

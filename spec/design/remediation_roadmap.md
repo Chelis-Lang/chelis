@@ -176,9 +176,14 @@ were gated; per this doc's own rule the plan won and the sentence was
 corrected 2026-07-30. As of 2026-08-04 the focused typed-authority and sealed
 diagnostic-kind slices are implemented, followed by the first gate-contract
 slice: one typed compiler-api policy now serves both public build paths, the
-stale C precision preflights are gone, and an exact no-duplicate-gates
-inventory is executable. The CLI-local Metal/effect diagnostic migration and
-the full Phase 3 oracle remain. [#730] Phase 4 (ratchet totality, added
+stale C precision preflights are gone, shared gates accept only the closed
+`BuildTarget` vocabulary, and the exact syntactic `reject_*` manifest is
+recursively executable across both crate source trees. The HIP contract keeps
+direct-load f16/bf16 `BlasMatmul` admitted but rejects real narrow-float
+operand compute before emission. The source manifest is intentionally scoped
+to syntactic `reject_*` definitions; it does not claim to detect a semantic
+reimplementation hidden under an unrelated name. The CLI-local Metal/effect
+diagnostic migration and the full Phase 3 oracle remain. [#730] Phase 4 (ratchet totality, added
 2026-07-30: product-source-manifest ratchets with non-Cargo language
 adapters, typed/live exclusion references, the non-product
 mutation-based panic contract, and the change-gated + nightly

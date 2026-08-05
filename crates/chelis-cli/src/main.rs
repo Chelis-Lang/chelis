@@ -3,6 +3,7 @@
 mod prove;
 mod style_gate;
 
+use chelis_compiler_api::compiler::BuildTarget;
 use chelis_compiler_api::schema::{
     EvalRequest, SourceKind, WireInferredDim, WireInferredEffect, WireInferredPrecision,
     WireInferredType,
@@ -2875,7 +2876,7 @@ fn format_cli_dim(dim: &Dim) -> String {
 /// cannot lower yet. Today it is a no-op.
 fn reject_with_seed_for_build_target(
     _decls: &[Decl],
-    _target: &str,
+    _target: BuildTarget,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
@@ -2899,6 +2900,7 @@ fn cmd_build_dispatch(
     deep_flag: bool,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let target = BuildTarget::try_from(target).map_err(boxed_string_error)?;
     let extension_is_dp = file
         .extension()
         .and_then(|s| s.to_str())
@@ -2938,7 +2940,7 @@ fn cmd_build_dispatch(
 fn cmd_build(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
-    target: &str,
+    target: BuildTarget,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(source) = fs::read_to_string(file) {
@@ -3011,7 +3013,7 @@ fn cmd_build(
         };
 
     let preserve_host_library_surface = if prepared.is_none()
-        && target == "c"
+        && target == BuildTarget::C
         && pruned_deep_exprs.len() != full_deep_exprs.len()
     {
         let full_checked = checked_program_with_effects(&full_deep_exprs)
@@ -3059,7 +3061,7 @@ fn cmd_build(
             .map_err(|e| format!("Check errors: {e}"))?,
     };
     let checked = checked_compilation.program();
-    chelis_effects::validate_build_target(checked, target)
+    chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
     shared_compiler_gate(
         chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
@@ -3134,7 +3136,7 @@ fn cmd_build(
         .unwrap_or("chelis_main");
 
     match target {
-        "c" => {
+        BuildTarget::C => {
             if let Some(host_program) = compiled_program.host.as_ref()
                 && (chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -3169,21 +3171,21 @@ fn cmd_build(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, "c")?;
-                apply_shared_window_gates_to_host_program(host_program, "c")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
+                apply_shared_window_gates_to_host_program(host_program, BuildTarget::C)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
-                apply_shared_window_gates(&dag, "c")?;
+                apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "hip" => {
+        BuildTarget::Hip => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, "hip")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3228,9 +3230,9 @@ fn cmd_build(
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "metal" => {
+        BuildTarget::Metal => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, "metal")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3283,7 +3285,6 @@ fn cmd_build(
                 cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        other => Err(format!("unknown target '{other}': expected 'c', 'hip', or 'metal'").into()),
     }
 }
 
@@ -3304,7 +3305,7 @@ fn cmd_build(
 fn cmd_build_deep(
     file: &std::path::Path,
     output: Option<&std::path::Path>,
-    target: &str,
+    target: BuildTarget,
     allow_style_violations: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(file)?;
@@ -3320,7 +3321,7 @@ fn cmd_build_deep(
     let entry_deep_exprs = deep_exprs.clone();
     let pruned_deep_exprs = prune_build_program_to_reachable_defs(&deep_exprs, &entry_deep_exprs);
     let preserve_host_library_surface =
-        if target == "c" && pruned_deep_exprs.len() != deep_exprs.len() {
+        if target == BuildTarget::C && pruned_deep_exprs.len() != deep_exprs.len() {
             let full_checked = checked_program_with_effects(&deep_exprs)
                 .map_err(|e| format!("Check errors: {e}"))?;
             shared_compiler_gate(
@@ -3347,7 +3348,7 @@ fn cmd_build_deep(
     let checked_compilation = checked_compilation_with_effects(&final_deep_exprs)
         .map_err(|e| format!("Check errors: {e}"))?;
     let checked = checked_compilation.program();
-    chelis_effects::validate_build_target(checked, target)
+    chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
     shared_compiler_gate(
         chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
@@ -3415,7 +3416,7 @@ fn cmd_build_deep(
         .unwrap_or("chelis_main");
 
     match target {
-        "c" => {
+        BuildTarget::C => {
             if let Some(host_program) = compiled_program.host.as_ref()
                 && (chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
@@ -3436,21 +3437,21 @@ fn cmd_build_deep(
                     )
                     .into());
                 }
-                apply_shared_host_builtin_gates(host_program, "c")?;
-                apply_shared_window_gates_to_host_program(host_program, "c")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
+                apply_shared_window_gates_to_host_program(host_program, BuildTarget::C)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
                 reject_unsupported_effect_ops(&dag, "c")?;
-                apply_shared_window_gates(&dag, "c")?;
+                apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
                 cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "hip" => {
+        BuildTarget::Hip => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, "hip")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3490,9 +3491,9 @@ fn cmd_build_deep(
                 cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        "metal" => {
+        BuildTarget::Metal => {
             if let Some(host_program) = compiled_program.host.as_ref() {
-                apply_shared_host_builtin_gates(host_program, "metal")?;
+                apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3534,7 +3535,6 @@ fn cmd_build_deep(
                 cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
             }
         }
-        other => Err(format!("unknown target '{other}': expected 'c', 'hip', or 'metal'").into()),
     }
 }
 
@@ -6080,7 +6080,7 @@ fn shared_compiler_gate(
 
 fn apply_shared_host_builtin_gates(
     program: &chelis_ir::host::ConcreteHostProgram,
-    target: &'static str,
+    target: BuildTarget,
 ) -> Result<(), Box<dyn std::error::Error>> {
     shared_compiler_gate(chelis_compiler_api::compiler::reject_host_only_builtins(
         program, target,
@@ -6092,7 +6092,7 @@ fn apply_shared_host_builtin_gates(
 
 fn apply_shared_window_gates(
     dag: &chelis_ir::Dag,
-    target: &'static str,
+    target: BuildTarget,
 ) -> Result<(), Box<dyn std::error::Error>> {
     shared_compiler_gate(
         chelis_compiler_api::compiler::reject_symbolic_windowed_reduce(dag, target),
@@ -6104,7 +6104,7 @@ fn apply_shared_window_gates(
 
 fn apply_shared_window_gates_to_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
-    target: &'static str,
+    target: BuildTarget,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for helper in &program.global_tensor_helpers {
         apply_shared_window_gates(&helper.dag, target)?;

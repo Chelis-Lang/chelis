@@ -8,7 +8,7 @@ use std::fs;
 
 use assert_cmd::Command;
 use chelis_compiler_api::{
-    compiler::compile,
+    compiler::{BuildTarget, compile},
     schema::{CompileRequest, CompileTarget, SourceKind},
 };
 use tempfile::tempdir;
@@ -29,6 +29,20 @@ fn build(source: &str, stem: &str, target: &str) -> assert_cmd::assert::Assert {
         output_path.to_str().expect("utf-8 output path"),
     ]);
     command.assert()
+}
+
+/// Shared gate APIs accept only the closed build-target vocabulary. A caller
+/// cannot smuggle an unknown spelling through a stringly fallback that turns
+/// the gate into a silent no-op.
+#[test]
+fn shared_gate_target_parser_rejects_unknown_spellings() {
+    assert_eq!(BuildTarget::try_from("c"), Ok(BuildTarget::C));
+    assert_eq!(BuildTarget::try_from("hip"), Ok(BuildTarget::Hip));
+    assert_eq!(BuildTarget::try_from("metal"), Ok(BuildTarget::Metal));
+    assert_eq!(
+        BuildTarget::try_from("vulkan").expect_err("unknown target must not be admitted"),
+        "unknown target 'vulkan': expected 'c', 'hip', or 'metal'"
+    );
 }
 
 /// chelis#697: C dtype admission is a property of the lowered operation and
@@ -90,4 +104,65 @@ fn hip_scatter_elements_rejects_an_unimplemented_f64_payload_cell() {
     .failure()
     .stderr(predicates::str::contains("scatter_elements"))
     .stderr(predicates::str::contains("early capability gate"));
+}
+
+/// A BLAS matmul only subsumes its own operation. Narrow-float arithmetic in
+/// either operand is real upstream compute and must be rejected by the shared
+/// gate before the HIP emitter reaches its missing elementwise suffix.
+#[test]
+fn hip_narrow_matmul_operand_compute_rejects_without_panicking_across_build_paths() {
+    for precision in ["f16", "bf16"] {
+        let source = format!(
+            "def mm(a: tensor[2, 2, {precision}], b: tensor[2, 2, {precision}], \
+             c: tensor[2, 2, {precision}]) -> tensor[2, 2, {precision}] = \
+             matmul(add(a, b), c)\n"
+        );
+
+        let result = std::panic::catch_unwind(|| {
+            compile(CompileRequest {
+                source_kind: SourceKind::Surf,
+                source: source.clone(),
+                target: CompileTarget::Hip,
+                entry_name: Some(format!("hip_{precision}_matmul_operand_compute")),
+            })
+        });
+        let error = result
+            .unwrap_or_else(|_| panic!("compiler API panicked for {precision} operand compute"))
+            .expect_err("narrow-float operand compute must be rejected");
+        let message = &error.errors[0].message;
+        assert!(message.contains("early capability gate"), "{message}");
+        assert!(message.contains(precision), "{message}");
+        assert!(message.contains("Add"), "{message}");
+
+        build(
+            &source,
+            &format!("hip_{precision}_matmul_operand_compute"),
+            "hip",
+        )
+        .failure()
+        .stderr(predicates::str::contains("early capability gate"))
+        .stderr(predicates::str::contains("Add"));
+    }
+}
+
+/// Positive parity: the supported narrow-float cell is the `BlasMatmul`
+/// itself over loaded operands. Removing the erroneous input-cone walk must
+/// not restore the compiler API's former over-strict rejection.
+#[test]
+fn hip_narrow_blas_matmul_stays_admitted_across_build_paths() {
+    for precision in ["f16", "bf16"] {
+        let source = format!(
+            "def mm(a: tensor[2, 2, {precision}], b: tensor[2, 2, {precision}]) \
+             -> tensor[2, 2, {precision}] = matmul(a, b)\n"
+        );
+
+        compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.clone(),
+            target: CompileTarget::Hip,
+            entry_name: Some(format!("hip_{precision}_blas_matmul")),
+        })
+        .unwrap_or_else(|error| panic!("compiler API rejected {precision} BLAS matmul: {error:?}"));
+        build(&source, &format!("hip_{precision}_blas_matmul"), "hip").success();
+    }
 }
