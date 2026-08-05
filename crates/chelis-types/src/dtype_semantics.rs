@@ -1011,7 +1011,17 @@ fn activation_constant(
     scalar_from_f64(op.name(), prim, value).map_err(Into::into)
 }
 
+#[cfg(test)]
+thread_local! {
+    static SCALAR_ACTIVATION_CALL_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 fn float_activation(op: FloatUnOp, value: ScalarValue) -> Result<ScalarValue, NumericKernelError> {
+    #[cfg(test)]
+    SCALAR_ACTIVATION_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
     let prim = value.prim();
     match op {
         FloatUnOp::Relu => float_binop(FloatBinOp::Max, value, activation_constant(op, prim, 0.0)?),
@@ -1873,6 +1883,159 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
     }
 }
 
+trait ActivationElement: Copy {
+    fn constant(value: f64) -> Self;
+    fn neg(self) -> Self;
+    fn exp(self) -> Self;
+    fn recip(self) -> Self;
+    fn add(self, rhs: Self) -> Self;
+    fn mul(self, rhs: Self) -> Self;
+    fn max(self, rhs: Self) -> Self;
+}
+
+macro_rules! impl_native_activation_element {
+    ($ty:ty) => {
+        impl ActivationElement for $ty {
+            fn constant(value: f64) -> Self {
+                value as Self
+            }
+
+            fn neg(self) -> Self {
+                -self
+            }
+
+            fn exp(self) -> Self {
+                self.exp()
+            }
+
+            fn recip(self) -> Self {
+                self.recip()
+            }
+
+            fn add(self, rhs: Self) -> Self {
+                self + rhs
+            }
+
+            fn mul(self, rhs: Self) -> Self {
+                self * rhs
+            }
+
+            fn max(self, rhs: Self) -> Self {
+                self.max(rhs)
+            }
+        }
+    };
+}
+
+impl_native_activation_element!(f32);
+impl_native_activation_element!(f64);
+
+macro_rules! impl_reduced_activation_element {
+    ($ty:ty) => {
+        impl ActivationElement for $ty {
+            fn constant(value: f64) -> Self {
+                Self::from_f64(value)
+            }
+
+            fn neg(self) -> Self {
+                Self::from_f32(-self.to_f32())
+            }
+
+            fn exp(self) -> Self {
+                Self::from_f32(self.to_f32().exp())
+            }
+
+            fn recip(self) -> Self {
+                Self::from_f32(self.to_f32().recip())
+            }
+
+            fn add(self, rhs: Self) -> Self {
+                Self::from_f32(self.to_f32() + rhs.to_f32())
+            }
+
+            fn mul(self, rhs: Self) -> Self {
+                Self::from_f32(self.to_f32() * rhs.to_f32())
+            }
+
+            fn max(self, rhs: Self) -> Self {
+                Self::from_f32(self.to_f32().max(rhs.to_f32()))
+            }
+        }
+    };
+}
+
+impl_reduced_activation_element!(half::f16);
+impl_reduced_activation_element!(half::bf16);
+
+fn activation_sigmoid<T: ActivationElement>(value: T, one: T) -> T {
+    one.add(value.neg().exp()).recip()
+}
+
+fn activation_tanh<T: ActivationElement>(value: T, one: T, two: T, neg_one: T) -> T {
+    two.mul(activation_sigmoid(two.mul(value), one))
+        .add(neg_one)
+}
+
+fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Vec<T> {
+    match op {
+        FloatUnOp::Relu => {
+            let zero = T::constant(0.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| value.max(zero))
+                .collect()
+        }
+        FloatUnOp::Sigmoid => {
+            let one = T::constant(1.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| activation_sigmoid(value, one))
+                .collect()
+        }
+        FloatUnOp::Tanh => {
+            let one = T::constant(1.0);
+            let two = T::constant(2.0);
+            let neg_one = T::constant(-1.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| activation_tanh(value, one, two, neg_one))
+                .collect()
+        }
+        FloatUnOp::Silu => {
+            let one = T::constant(1.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| value.mul(activation_sigmoid(value, one)))
+                .collect()
+        }
+        FloatUnOp::Gelu => {
+            let one = T::constant(1.0);
+            let two = T::constant(2.0);
+            let neg_one = T::constant(-1.0);
+            let cubic_scale = T::constant(0.044715);
+            let tanh_scale = T::constant(0.7978845608028654);
+            let half = T::constant(0.5);
+            values
+                .iter()
+                .copied()
+                .map(|value| {
+                    let squared = value.mul(value);
+                    let cubed = squared.mul(value);
+                    let scaled_cube = cubic_scale.mul(cubed);
+                    let inner = tanh_scale.mul(value.add(scaled_cube));
+                    let tanh_inner = activation_tanh(inner, one, two, neg_one);
+                    half.mul(value.mul(one.add(tanh_inner)))
+                })
+                .collect()
+        }
+        _ => unreachable!("float_vec_activation requires an activation selector"),
+    }
+}
+
 /// Bulk float unary kernel with one operation dispatch per buffer.
 pub fn float_tensor_unop(
     op: FloatUnOp,
@@ -1886,10 +2049,14 @@ pub fn float_tensor_unop(
         });
     }
     if op.is_activation() {
-        let values = (0..value.len())
-            .map(|index| float_activation(op, value.scalar_at(index)))
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(tensor_from_scalars(value.prim(), &values));
+        let buf = match &value.buf {
+            Buf::F64(values) => Buf::F64(float_vec_activation(op, values)),
+            Buf::F32(values) => Buf::F32(float_vec_activation(op, values)),
+            Buf::F16(values) => Buf::F16(float_vec_activation(op, values)),
+            Buf::Bf16(values) => Buf::Bf16(float_vec_activation(op, values)),
+            _ => unreachable!("family check makes the float buffer exhaustive"),
+        };
+        return Ok(TensorStorage { buf });
     }
     let buf = match &value.buf {
         Buf::F64(values) => Buf::F64(float_vec_unop_f64(op, values)),
@@ -4363,6 +4530,30 @@ mod tests {
                 .to_i64_exact_vec(),
             Some(vec![0])
         );
+    }
+
+    #[test]
+    fn tensor_activations_do_not_dispatch_through_the_scalar_kernel_per_element() {
+        let scalar = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
+        SCALAR_ACTIVATION_CALL_COUNT.with(|count| count.set(0));
+        float_unop(FloatUnOp::Gelu, scalar).unwrap();
+        SCALAR_ACTIVATION_CALL_COUNT.with(|count| {
+            assert!(
+                count.get() > 0,
+                "the scalar control must exercise the instrumented dispatcher"
+            );
+            count.set(0);
+        });
+
+        let input = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![0.5; 4])).unwrap();
+        float_tensor_unop(FloatUnOp::Gelu, &input).unwrap();
+        SCALAR_ACTIVATION_CALL_COUNT.with(|count| {
+            assert_eq!(
+                count.get(),
+                0,
+                "the tensor kernel must dispatch once per buffer, not once per element"
+            );
+        });
     }
 
     fn one_group(len: usize) -> Vec<Vec<usize>> {

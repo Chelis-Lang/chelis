@@ -970,6 +970,174 @@ fn tensor_signature_defs(host_program: &chelis_ir::host::ConcreteHostProgram) ->
         .collect()
 }
 
+fn project_host_program_to_entry(
+    program: &chelis_ir::host::ConcreteHostProgram,
+    entry: &str,
+) -> Option<chelis_ir::host::ConcreteHostProgram> {
+    use chelis_ir::host::{
+        ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
+    };
+
+    fn collect_callback(callback: &ConcreteHostCallback, out: &mut HashSet<String>) {
+        match &callback.kind {
+            HostCallbackKind::Named { function, .. } => {
+                out.insert(function.clone());
+            }
+            HostCallbackKind::Inline { body, .. } => collect_expr(body, out),
+        }
+    }
+
+    fn collect_expr(expr: &ConcreteHostExpr, out: &mut HashSet<String>) {
+        match &expr.kind {
+            ConcreteHostExprKind::Call { function, args, .. } => {
+                out.insert(function.clone());
+                for arg in args {
+                    collect_expr(arg, out);
+                }
+            }
+            ConcreteHostExprKind::Var(name, _) => {
+                // A bare function value is a dependency too. Ordinary local
+                // names are removed when the set is intersected with defs.
+                out.insert(name.clone());
+            }
+            ConcreteHostExprKind::Builtin { args, .. }
+            | ConcreteHostExprKind::TensorCall { args, .. } => {
+                for arg in args {
+                    collect_expr(arg, out);
+                }
+            }
+            ConcreteHostExprKind::List(items, _) | ConcreteHostExprKind::Tuple(items, _) => {
+                for item in items {
+                    collect_expr(item, out);
+                }
+            }
+            ConcreteHostExprKind::AdtConstruct { fields, .. } => {
+                for field in fields {
+                    collect_expr(field, out);
+                }
+            }
+            ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, out),
+            ConcreteHostExprKind::If {
+                cond,
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                collect_expr(cond, out);
+                collect_expr(then_expr, out);
+                collect_expr(else_expr, out);
+            }
+            ConcreteHostExprKind::MatchOption {
+                scrutinee,
+                some_expr,
+                none_expr,
+                ..
+            } => {
+                collect_expr(scrutinee, out);
+                collect_expr(some_expr, out);
+                collect_expr(none_expr, out);
+            }
+            ConcreteHostExprKind::MatchAdt {
+                scrutinee,
+                arms,
+                default_expr,
+                ..
+            } => {
+                collect_expr(scrutinee, out);
+                for arm in arms {
+                    collect_expr(&arm.expr, out);
+                }
+                if let Some(default_expr) = default_expr {
+                    collect_expr(default_expr, out);
+                }
+            }
+            ConcreteHostExprKind::Let { bindings, body, .. } => {
+                for binding in bindings {
+                    collect_expr(&binding.value, out);
+                }
+                collect_expr(body, out);
+            }
+            ConcreteHostExprKind::Map { callback, list, .. }
+            | ConcreteHostExprKind::Filter { callback, list, .. }
+            | ConcreteHostExprKind::Partition { callback, list, .. }
+            | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
+                collect_callback(callback, out);
+                collect_expr(list, out);
+            }
+            ConcreteHostExprKind::Fold {
+                callback,
+                init,
+                list,
+                ..
+            }
+            | ConcreteHostExprKind::Scan {
+                callback,
+                init,
+                list,
+                ..
+            } => {
+                collect_callback(callback, out);
+                collect_expr(init, out);
+                collect_expr(list, out);
+            }
+            ConcreteHostExprKind::WithSeed { seed, body, .. } => {
+                collect_expr(seed, out);
+                collect_expr(body, out);
+            }
+            ConcreteHostExprKind::Int(_)
+            | ConcreteHostExprKind::Float(_)
+            | ConcreteHostExprKind::Bool(_)
+            | ConcreteHostExprKind::String(_)
+            | ConcreteHostExprKind::Unit => {}
+        }
+    }
+
+    let function_names: HashSet<&str> = program
+        .functions
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect();
+    if !function_names.contains(entry) {
+        return None;
+    }
+
+    let mut reachable = HashSet::from([entry.to_string()]);
+    let mut pending = vec![entry.to_string()];
+    while let Some(name) = pending.pop() {
+        let function = program
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .expect("pending host function comes from the program");
+        let mut referenced = HashSet::new();
+        collect_expr(&function.body, &mut referenced);
+        for referenced_name in referenced {
+            if function_names.contains(referenced_name.as_str())
+                && reachable.insert(referenced_name.clone())
+            {
+                pending.push(referenced_name);
+            }
+        }
+    }
+
+    let functions: Vec<_> = program
+        .functions
+        .iter()
+        .filter(|function| reachable.contains(&function.name))
+        .cloned()
+        .collect();
+    let summary_rejections = functions
+        .iter()
+        .flat_map(|function| function.summary_rejections.iter().cloned())
+        .collect();
+    Some(chelis_ir::host::ConcreteHostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions,
+        summary_rejections,
+    })
+}
+
 /// Resolve the entry def used to *scope* compiled-execution metadata
 /// (`inputs`/`outputs`), independent of the emitted C symbol.
 ///
@@ -1703,6 +1871,25 @@ fn execution_artifact_from_compiled(
             if let Some(host_program) = host_compiled.host.as_ref()
                 && (host_only || compiled.dag.roots().is_empty())
             {
+                let projected_host_program = match (&entry_lane_decline, strictness) {
+                    (
+                        Some(EntryLaneDecline::NotTensorSignature { entry }),
+                        EntryStrictness::Strict,
+                    ) => Some(
+                        project_host_program_to_entry(host_program, entry).ok_or_else(|| {
+                            stage_error(
+                                "compile",
+                                format!(
+                                    "internal: selected scalar entry `{entry}` disappeared \
+                                     before host-program projection; please report it"
+                                ),
+                                GeneralKind::CompileError,
+                            )
+                        })?,
+                    ),
+                    _ => None,
+                };
+                let host_program = projected_host_program.as_ref().unwrap_or(host_program);
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::C)?;
                 reject_unsupported_windowed_reductions_in_host_program(
                     host_program,

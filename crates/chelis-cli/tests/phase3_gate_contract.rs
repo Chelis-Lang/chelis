@@ -257,6 +257,40 @@ fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
     );
 }
 
+/// A scalar activation uses the host-expression lane, but callable
+/// compilation is still entry-scoped. An unsupported tensor helper owned by
+/// an unselected sibling must not enter either the typed gates or emission.
+#[test]
+fn scalar_activation_entry_ignores_an_unemitted_dropout_sibling() {
+    let source = "def activate(x: f64) -> f64 = gelu(x)\n\
+                  def clean(x: f64) -> f64 = activate(x)\n\
+                  def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n";
+
+    let artifact = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("clean".to_string()),
+    })
+    .expect("an un-emitted dropout sibling must not block the selected scalar entry");
+
+    let emitted = artifact
+        .compile_result
+        .files
+        .iter()
+        .map(|file| file.contents.as_str())
+        .collect::<String>();
+    assert!(
+        emitted.contains("chelis_host_gelu_f64"),
+        "the selected scalar activation must be emitted:\n{emitted}"
+    );
+    assert!(
+        !emitted.contains("dropout") && !emitted.contains("noisy"),
+        "the unselected sibling must be absent from the artifact:\n{emitted}"
+    );
+}
+
 /// The Deep ingestion branch used to carry its own call sites to the
 /// CLI-local policy. It must now reach the same typed compiler-api gate as
 /// Surf rather than preserving a second stringly rejection path.
