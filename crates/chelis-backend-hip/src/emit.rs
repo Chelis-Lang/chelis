@@ -8,6 +8,7 @@ use chelis_ir::dag::{
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_types::{ElementRef, ScalarValue};
 
 /// chelis#616: the HIP device-kernel lane does not support runtime (node-valued)
 /// movement bounds; `reject_unsupported_hip_ops` (compiler-api + CLI) rejects
@@ -165,6 +166,16 @@ impl MatmulWrapper {
 }
 
 impl HipEmitter {
+    fn i64_c_literal(value: i64) -> String {
+        if value == i64::MIN {
+            "INT64_MIN".to_string()
+        } else if value < 0 {
+            format!("-INT64_C({})", value.unsigned_abs())
+        } else {
+            format!("INT64_C({value})")
+        }
+    }
+
     /// The current HIP unary kernel spells `fabsf` for every dtype. Keep
     /// integer `abs` out of that float-only template until Phase 3 supplies
     /// the typed, trapping backend kernel (chelis#699).
@@ -2161,23 +2172,31 @@ impl HipEmitter {
         let kernel = format!("kernel_uniform_like_{}", elem.suffix());
         self.line("{");
         self.indent += 1;
-        // The PRNG itself is f32; the f64 kernel widens at the final
-        // store. Emit `low` / `high` as `float` regardless of `ty.precision`.
-        //
-        // Issue #251 (parallel #248): narrow `low` / `high` to f32 and
-        // reconstruct each from its exact bit pattern via the
-        // `chelis_f32_from_bits` static inline helper (from the included
-        // `chelis_runtime.h`). The pre-fix `{:.8}f` format string drifted
-        // up to one ULP for ordinary values and collapsed sub-normal-range
-        // inputs like `1e-40` to `0.0f` outright.
+        // [05-OP-8]: bounds have f32 dtype. The f32 kernel consumes those
+        // exact images; the f64 kernel widens the same images exactly and
+        // executes the affine at f64 width.
         let low_bits = (low as f32).to_bits();
         let high_bits = (high as f32).to_bits();
-        self.line(&format!(
-            "float t{id}_low = chelis_f32_from_bits(0x{low_bits:08x}u);"
-        ));
-        self.line(&format!(
-            "float t{id}_high = chelis_f32_from_bits(0x{high_bits:08x}u);"
-        ));
+        match elem {
+            kernels::ElemKind::F32 => {
+                self.line(&format!(
+                    "float t{id}_low = chelis_f32_from_bits(0x{low_bits:08x}u);"
+                ));
+                self.line(&format!(
+                    "float t{id}_high = chelis_f32_from_bits(0x{high_bits:08x}u);"
+                ));
+            }
+            kernels::ElemKind::F64 => {
+                let low_wide_bits = (low as f32 as f64).to_bits();
+                let high_wide_bits = (high as f32 as f64).to_bits();
+                self.line(&format!(
+                    "double t{id}_low = chelis_f64_from_bits(0x{low_wide_bits:016x}uLL);"
+                ));
+                self.line(&format!(
+                    "double t{id}_high = chelis_f64_from_bits(0x{high_wide_bits:016x}uLL);"
+                ));
+            }
+        }
         self.line(&format!("unsigned long long t{id}_seed = {seed}ULL;"));
         self.line(&format!("int t{id}_size = d_t{id}->size;"));
         self.emit_shape_vars(id, "out", id);
@@ -3045,7 +3064,7 @@ impl HipEmitter {
         &mut self,
         id: usize,
         padding: &[(usize, usize)],
-        fill: f64,
+        fill: ScalarValue,
         kernel_name: &str,
         inputs: &[NodeId],
         ty: &TensorType,
@@ -3070,7 +3089,7 @@ impl HipEmitter {
         // Source shape is read from runtime metadata so symbolic/strided
         // inputs bounds-check against their real extents.
         self.emit_shape_vars(id, "srcsh", a);
-        self.emit_typed_scalar_local(&format!("t{id}_fill"), prec, fill);
+        self.emit_typed_scalar_local(&format!("t{id}_fill"), fill);
         self.emit_shape_vars(id, "out", id);
         self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
         self.line(&format!(
@@ -3142,32 +3161,39 @@ impl HipEmitter {
         self.line("}");
     }
 
-    /// Emit a typed scalar local (`<c_type> name = <reconstructed>;`)
-    /// from an `f64` source value, reconstructing floats from their exact
-    /// bit pattern (no lossy decimal round-trip; sibling of the #189/#250
-    /// fixes) and casting integers/bool directly. Used by the `pad` fill.
-    fn emit_typed_scalar_local(&mut self, name: &str, prec: Prim, value: f64) {
-        match prec {
-            Prim::F32 | Prim::Bool => {
-                let bits = (value as f32).to_bits();
+    /// Emit a typed scalar local from its finalized, dtype-tagged value.
+    fn emit_typed_scalar_local(&mut self, name: &str, value: ScalarValue) {
+        match value.element_ref() {
+            ElementRef::F32(value) => {
+                let bits = value.to_bits();
                 self.line(&format!(
                     "float {name} = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
-            Prim::F64 => {
+            ElementRef::F64(value) => {
                 let bits = value.to_bits();
                 self.line(&format!(
                     "double {name} = chelis_f64_from_bits(0x{bits:016x}uLL);"
                 ));
             }
-            Prim::Int8 => self.line(&format!("int8_t {name} = (int8_t){};", value as i64)),
-            Prim::Int16 => self.line(&format!("int16_t {name} = (int16_t){};", value as i64)),
-            Prim::Int32 => self.line(&format!("int32_t {name} = (int32_t){};", value as i64)),
-            Prim::Int64 => self.line(&format!("int64_t {name} = (int64_t){}LL;", value as i64)),
-            other => panic!(
-                "HIP pad fill: dtype `{}` not in the active set (spec/04-type-system.md §1.1)",
-                other.name()
-            ),
+            ElementRef::F16(value) => self.line(&format!(
+                "uint16_t {name} = UINT16_C(0x{:04x});",
+                value.to_bits()
+            )),
+            ElementRef::Bf16(value) => self.line(&format!(
+                "uint16_t {name} = UINT16_C(0x{:04x});",
+                value.to_bits()
+            )),
+            ElementRef::I8(value) => self.line(&format!("int8_t {name} = INT8_C({value});")),
+            ElementRef::I16(value) => self.line(&format!("int16_t {name} = INT16_C({value});")),
+            ElementRef::I32(value) => self.line(&format!("int32_t {name} = INT32_C({value});")),
+            ElementRef::I64(value) => {
+                self.line(&format!("int64_t {name} = {};", Self::i64_c_literal(value)))
+            }
+            ElementRef::Bool(value) => self.line(&format!(
+                "float {name} = {};",
+                if value { "1.0f" } else { "0.0f" }
+            )),
         }
     }
 
@@ -3765,6 +3791,7 @@ impl HipEmitter {
             Prim::Int16 => "int16_t",
             Prim::Int32 => "int32_t",
             Prim::Int64 => "int64_t",
+            Prim::F16 | Prim::Bf16 => "uint16_t",
             other => panic!(
                 "HIP element type not defined for {} (active dtype set per spec/04-type-system.md §1.1)",
                 other.name()
@@ -3843,6 +3870,15 @@ impl HipEmitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_878_i64_pad_literal_spelling_is_portable_at_signed_min() {
+        assert_eq!(HipEmitter::i64_c_literal(i64::MIN), "INT64_MIN");
+        assert_eq!(
+            HipEmitter::i64_c_literal(-9_007_199_254_740_993),
+            "-INT64_C(9007199254740993)"
+        );
+    }
     use chelis_ir::dag::{FusedInput, FusedStep, FusedStepOp};
 
     fn vec_f32(n: usize) -> TensorType {
@@ -4125,6 +4161,36 @@ mod tests {
         assert!(
             !hip.contains("float t0_low = 0.00000000f;"),
             "uniform_like must not emit a lossy `{{:.8}}f` literal:\n{hip}"
+        );
+    }
+
+    #[test]
+    fn issue_937_uniform_like_f64_uses_f64_sampler_and_bounds() {
+        let low = 0.1_f64;
+        let high = 0.9_f64;
+        let mut dag = Dag::new();
+        let u = dag.add_node(
+            RiscOp::UniformLike {
+                low,
+                high,
+                seed: 17,
+            },
+            vec![],
+            vec_f64(8),
+            None,
+        );
+        dag.add_root(u);
+        let (hip, _) = HipEmitter::emit_dag(&dag, "test_fn").unwrap();
+
+        assert!(hip.contains("__device__ double chelis_uniform_sample_f64("));
+        assert!(hip.contains("double t0_low = chelis_f64_from_bits("));
+        assert!(hip.contains("double t0_high = chelis_f64_from_bits("));
+        assert!(hip.contains("double low, double high"));
+        assert!(hip.contains("out[i] = chelis_uniform_sample_f64("));
+        assert!(
+            !hip.lines()
+                .any(|line| line.contains("out[i]") && line.contains("sample_f32")),
+            "f64 HIP output must not widen an f32 random sample:\n{hip}"
         );
     }
 }

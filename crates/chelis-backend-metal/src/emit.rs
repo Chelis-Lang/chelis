@@ -6,6 +6,7 @@
 //! layouts will be added incrementally.
 
 use chelis_ir::dag::{Dag, DagNode, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use chelis_types::ScalarValue;
 
 /// chelis#616: the Metal lane requires compile-time movement bounds (it rejects
 /// symbolic movement shapes via `require_movement_shape`). This converter
@@ -33,13 +34,19 @@ mod rejection_authority_tests {
 
     #[test]
     fn pad_fill_rejections_use_case_specific_authorities() {
-        let f64 = Emitter::host_scalar_literal(Prim::F64, 0.0).unwrap_err();
-        let f8 = Emitter::host_scalar_literal(Prim::F8e4m3, 0.0).unwrap_err();
-        let string = Emitter::host_scalar_literal(Prim::String, 0.0).unwrap_err();
+        let fill = chelis_types::scalar_from_f64("pad", Prim::F64, 0.0).unwrap();
+        let f64 = Emitter::host_scalar_literal(Prim::F64, fill).unwrap_err();
 
         assert!(f64.contains("deliberate [04-TGT-1]"), "{f64}");
-        assert!(f8.contains("deliberate [04-DTYPE-1]"), "{f8}");
-        assert!(string.contains("unimplemented chelis#729"), "{string}");
+    }
+
+    #[test]
+    fn int64_min_pad_fill_has_a_portable_host_literal() {
+        let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, i64::MIN).unwrap();
+        assert_eq!(
+            Emitter::host_scalar_literal(Prim::Int64, fill).unwrap(),
+            "(-9223372036854775807LL - 1LL)"
+        );
     }
 }
 
@@ -1296,7 +1303,7 @@ impl Emitter {
         &mut self,
         node: &DagNode,
         padding: &[(usize, usize)],
-        fill: f64,
+        fill: ScalarValue,
     ) -> Result<(), String> {
         let in_id = *node
             .inputs
@@ -1454,13 +1461,34 @@ impl Emitter {
     /// (f64 behind the Metal gate, the deferred f8e4m3, string) are a
     /// section C2 diagnostic through this emitter's existing String error
     /// channel; exhaustive per section C4.1 - no wildcard arm.
-    fn host_scalar_literal(prec: Prim, value: f64) -> Result<String, String> {
+    fn host_scalar_literal(prec: Prim, value: ScalarValue) -> Result<String, String> {
+        if value.prim() != prec {
+            return Err(format!(
+                "Metal pad fill dtype `{}` does not match output `{}`",
+                value.prim().name(),
+                prec.name()
+            ));
+        }
         Ok(match prec {
-            Prim::F32 => format!("{value:?}f"),
-            Prim::F16 | Prim::Bf16 => format!("{value:?}"),
-            Prim::Bool => (if value != 0.0 { "true" } else { "false" }).to_string(),
-            Prim::Int8 | Prim::Int16 | Prim::Int32 => format!("{}", value as i64),
-            Prim::Int64 => format!("{}LL", value as i64),
+            Prim::F32 => format!("{:?}f", value.as_f64_lossy()),
+            Prim::F16 | Prim::Bf16 => format!("{:?}", value.as_f64_lossy()),
+            Prim::Bool => (if value.as_bool_exact().unwrap_or(false) {
+                "true"
+            } else {
+                "false"
+            })
+            .to_string(),
+            Prim::Int8 | Prim::Int16 | Prim::Int32 => {
+                value.as_i64_exact().expect("integer pad fill").to_string()
+            }
+            Prim::Int64 => {
+                let value = value.as_i64_exact().expect("int64 pad fill");
+                if value == i64::MIN {
+                    "(-9223372036854775807LL - 1LL)".to_string()
+                } else {
+                    format!("{value}LL")
+                }
+            }
             Prim::F64 => {
                 return Err(Unsupported::new(
                     UnsupportedKind::Dtype(prec.name().to_string()),

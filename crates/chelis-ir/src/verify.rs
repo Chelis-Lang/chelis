@@ -605,6 +605,26 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     ));
                 }
             }
+            RiscOp::UniformLike { .. } => {
+                if arity == 1
+                    && let Some(input) = dag.get(node.inputs[0])
+                {
+                    if !input.output_type.precision.is_float() {
+                        errors.push(format!(
+                            "uniform_like at node {} requires a float template, got {:?}",
+                            node.id.0, input.output_type.precision
+                        ));
+                    }
+                    if node.output_type.precision != input.output_type.precision {
+                        errors.push(format!(
+                            "uniform_like at node {} output precision {:?} must match template precision {:?}",
+                            node.id.0,
+                            node.output_type.precision,
+                            input.output_type.precision
+                        ));
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -853,7 +873,7 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                     }
                 }
             }
-            RiscOp::Pad { padding, .. } => {
+            RiscOp::Pad { padding, fill } => {
                 if !node.inputs.is_empty() {
                     let input = dag.get(node.inputs[0]).unwrap();
                     let input_rank = input.output_type.dims.len();
@@ -869,6 +889,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         errors.push(format!(
                             "pad at node {}: output precision {:?} != input precision {:?}",
                             node.id.0, node.output_type.precision, input.output_type.precision
+                        ));
+                    }
+                    if fill.prim() != node.output_type.precision {
+                        errors.push(format!(
+                            "pad at node {}: fill precision {:?} != output precision {:?}",
+                            node.id.0,
+                            fill.prim(),
+                            node.output_type.precision
                         ));
                     }
                     // chelis#616: validate node-valued bound sources; `ToEnd` is
@@ -2173,10 +2201,7 @@ mod tests {
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], input_ty, None);
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-                fill: 0.0,
-            },
+            RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
             vec![x],
             TensorType {
                 dims: vec![DimInfo::Lit(5), DimInfo::Lit(4)],
@@ -2186,6 +2211,63 @@ mod tests {
         );
         let errs = verify(&dag);
         assert!(errs.iter().any(|e| e.contains("pad")));
+    }
+
+    #[test]
+    fn pad_fill_dtype_mismatch_is_error() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int64,
+        };
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let wrong_fill = chelis_types::scalar_from_i64("pad", Prim::Int32, 0).unwrap();
+        dag.add_node(
+            RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], wrong_fill),
+            vec![x],
+            TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::Int64,
+            },
+            None,
+        );
+        assert!(
+            verify(&dag)
+                .iter()
+                .any(|error| error.contains("fill precision Int32 != output precision Int64"))
+        );
+    }
+
+    #[test]
+    fn uniform_like_rejects_non_float_template() {
+        let mut dag = Dag::new();
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int64,
+        };
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 7,
+            },
+            vec![template],
+            ty,
+            None,
+        );
+        assert!(
+            verify(&dag)
+                .iter()
+                .any(|error| error.contains("requires a float template"))
+        );
     }
 
     #[test]

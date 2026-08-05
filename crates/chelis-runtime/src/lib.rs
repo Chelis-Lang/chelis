@@ -192,6 +192,54 @@ macro_rules! runtime_fail {
     }};
 }
 
+/// Arithmetic used by runtime tensor loops whose operation is governed by
+/// [04-NUM-3]. Float implementations retain IEEE arithmetic; signed integer
+/// implementations detect overflow explicitly so behavior is identical in
+/// debug and release builds and never depends on Rust panic settings.
+trait RuntimeArithmetic: TensorElement + Copy + Default {
+    fn runtime_add(self, rhs: Self, op: &'static str) -> Self;
+    fn runtime_mul(self, rhs: Self, op: &'static str) -> Self;
+}
+
+macro_rules! impl_runtime_float_arithmetic {
+    ($ty:ty) => {
+        impl RuntimeArithmetic for $ty {
+            #[inline]
+            fn runtime_add(self, rhs: Self, _op: &'static str) -> Self {
+                self + rhs
+            }
+
+            #[inline]
+            fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
+                self * rhs
+            }
+        }
+    };
+}
+
+macro_rules! impl_runtime_integer_arithmetic {
+    ($ty:ty, $name:literal) => {
+        impl RuntimeArithmetic for $ty {
+            #[inline]
+            fn runtime_add(self, rhs: Self, op: &'static str) -> Self {
+                self.checked_add(rhs)
+                    .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+            }
+
+            #[inline]
+            fn runtime_mul(self, rhs: Self, op: &'static str) -> Self {
+                self.checked_mul(rhs)
+                    .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+            }
+        }
+    };
+}
+
+impl_runtime_float_arithmetic!(f32);
+impl_runtime_float_arithmetic!(f64);
+impl_runtime_integer_arithmetic!(i32, "int32");
+impl_runtime_integer_arithmetic!(i64, "int64");
+
 // chelis#732 Phase 2: the compiled lane's shortest-round-trip float
 // formatter (declared after `runtime_fail!` so the macro is in scope).
 mod format_shortest;
@@ -2936,13 +2984,13 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
                     let op = i64::data_ptr_unchecked(out);
                     let up = i64::data_ptr_unchecked(updates as *mut chelis_tensor);
                     *op.add(out_linear) =
-                        (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
+                        (*op.add(out_linear)).runtime_add(*up.add(linear as usize), "scatter");
                 }
                 RuntimeDType::I32 => {
                     let op = i32::data_ptr_unchecked(out);
                     let up = i32::data_ptr_unchecked(updates as *mut chelis_tensor);
                     *op.add(out_linear) =
-                        (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
+                        (*op.add(out_linear)).runtime_add(*up.add(linear as usize), "scatter");
                 }
                 RuntimeDType::Bool => {
                     runtime_fail!("scatter add-mode is undefined for bool tensors");
@@ -3060,7 +3108,7 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
     // each precision accumulates in its native width.  Pre-migration
     // accumulated as f32 regardless, corrupting F64 / I64.  Bool is
     // semantically undefined here (Contract 3).
-    unsafe fn cumsum_loop<T: TensorElement + Copy + Default + core::ops::AddAssign>(
+    unsafe fn cumsum_loop<T: RuntimeArithmetic>(
         out: *mut chelis_tensor,
         outer: usize,
         axis_size: usize,
@@ -3072,7 +3120,7 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
                 let mut running: T = T::default();
                 for axis_idx in 0..axis_size {
                     let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                    running += *p.add(linear);
+                    running = running.runtime_add(*p.add(linear), "cumsum");
                     *p.add(linear) = running;
                 }
             }
@@ -3265,7 +3313,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
     // each precision accumulates in its native width.  Pre-migration
     // f32-only accumulation corrupted F64 / I64 traces silently.  Bool
     // is undefined per Contract 3.
-    unsafe fn trace_loop<T: TensorElement + Copy + Default + core::ops::AddAssign>(
+    unsafe fn trace_loop<T: RuntimeArithmetic>(
         diag: *mut chelis_tensor,
         out: *mut chelis_tensor,
         outer: usize,
@@ -3279,7 +3327,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
                 let mut sum: T = T::default();
                 for axis_idx in 0..axis_size {
                     let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                    sum += *dp.add(linear);
+                    sum = sum.runtime_add(*dp.add(linear), "trace");
                 }
                 *op.add(outer_idx * inner + inner_idx) = sum;
             }
@@ -3503,7 +3551,7 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         reduction_total: usize,
         label_values: &mut [i64; 256],
     ) where
-        T: TensorElement + Copy + Default + core::ops::Mul<Output = T> + core::ops::AddAssign,
+        T: RuntimeArithmetic,
     {
         let lp = T::data_ptr_unchecked(lhs as *mut chelis_tensor);
         let rp = T::data_ptr_unchecked(rhs as *mut chelis_tensor);
@@ -3553,7 +3601,8 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
                     (*rhs).strides.as_ptr(),
                     rhs_chars.len() as c_int,
                 ) as usize);
-                acc += lv * rv;
+                let product = lv.runtime_mul(rv, "einsum");
+                acc = acc.runtime_add(product, "einsum");
             }
             *op.add(out_linear) = acc;
         }

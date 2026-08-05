@@ -9,6 +9,13 @@ sprint audit (`docs/investigations/sprint_audit_2026_08_908_912_729.md`), and
 a five-agent execution-adjacent validation pass over every cited child issue,
 followed by an executed cleanup (closures, parent links, doc corrections).
 
+Post-basis update: the #729 follow-through after PR #1167 repairs #878,
+#901, #937, #942, #980, #1009, and #1113 in the same change set that updates
+this report. The defect entries below retain the exact audit evidence at the
+recorded state basis; rows marked repaired are no longer current-state claims.
+The live delivery ledger and recurrence guards are in
+[`spec/design/remediation_roadmap.md`](../../spec/design/remediation_roadmap.md).
+
 ## TL;DR
 
 Waves 0-3 of the remediation roadmap are complete, with one exception: #733's
@@ -19,7 +26,8 @@ remains), #730 Phase 3 is partially delivered with Phase 4 unbuilt, and #733
 has nothing at all. The correctness *repairs* of Waves 1-3 held up under
 validation: the issue graph was carrying ~29 already-fixed issues as open,
 and those are now closed. What remains splits cleanly: a short list of
-verified live defects, two real engineering campaigns (the capability table
+state-basis verified defects (minus the post-basis repairs above), two real
+engineering campaigns (the capability table
 and the #912 root-boundary chain), one unowned keystone (#1088), and an
 institutional enforcement layer that is specified but largely not running.
 
@@ -162,9 +170,10 @@ would honor the convention). Structural note: #1023 and #1029 are
 `tracking`-labelled hubs that themselves carry parent #908 - legal, but
 worth confirming intended.
 
-## Verified live defects (the correctness remainder)
+## State-basis verified defects (historical inventory)
 
-Each entry is tagged with its owning tracker class. All but the last two
+Each entry is tagged with its owning tracker class and describes the repository
+at the recorded state basis. All but the last two
 bullets are parented sub-issues of a class this doc covers; the caveat is
 that **parented != scheduled** - a parent gives ownership and the oracle that
 proves the fix, but several of these appear in no remaining phase
@@ -173,17 +182,27 @@ deliverable of their owning plan (see gap 5 below).
 - **#690** (owner: #729) - HIP integer division by zero: kernels emit bare `a/b`; exit-0
   garbage on GPU where eval traps branded. Fix is a kernel-template guard,
   validatable locally via `scripts/hip_test.py`.
-- **#901** (owner: #729) - `i.abs()` at `eval.rs:164` panics on `i64::MIN` in debug. This
-  is the originally reported bug relocated by the storage migration, not a
-  residual; a one-line `unsigned_abs`/`checked_abs` fix plus a test.
-- **#937** (owner: #729) - `emit_uniform_like` writes f32 samples through `float *data`
+- **#901** (owner: #729; **repaired post-basis**) - mixed int/float equality used
+  signed absolute value and could panic on `i64::MIN`. The repair uses a shared,
+  total exact-representability predicate keyed by the actual float dtype.
+- **#937** (owner: #729; **repaired post-basis**) - `emit_uniform_like` writes f32 samples through `float *data`
   with no dtype dispatch: f64 `uniform_like` silently returns near-zero
   garbage in compiled C. The exact silent-wrong-value class the program
-  exists to kill, still live.
-- **#942** (owner: #729) - cast rejects any tensor whose element type came from inference
-  (`expand`, `uniform_like` results): a false rejection; missing match arm.
-- **#878** (owner: #729) - `RiscOp::Pad { fill: f64 }`: the last raw constant-carrier seam
-  (int64 fills above 2^53 collapse) now that #856 is closed.
+  exists to kill. The repair dispatches sampling and storage by float dtype and
+  locks the f64 raw-bit result in the compiled C and HIP gates.
+- **#942** (owner: #729; **repaired post-basis**) - cast rejected tensors whose
+  element type came from inference (`expand`, `uniform_like` results). The
+  repair makes the cast match exhaustive and carries a monomorphic deferred
+  shape obligation from positional `expand` through its binding. Declared
+  results or later tensor consumers select insertion versus same-rank
+  replacement; a shape-neutral cast materializes the documented default. The
+  final checked-program freeze point materializes the same default for an
+  otherwise unconsumed result and refreshes earlier owner stamps before
+  annotation, while reusable library contexts serialize the unresolved choice
+  for downstream selection.
+- **#878** (owner: #729; **repaired post-basis**) - `RiscOp::Pad { fill: f64 }`
+  was the last raw constant-carrier seam. `Pad` now carries `ScalarValue`
+  through lowering, IR, wire schema v5, eval, and typed backend emission.
 - **#795** (owner: #730) - conv2d's present-but-non-literal stride/padding fall to
   `unwrap_or(1)`/`unwrap_or(0)` verbatim (census row 23); §C1.4
   raise-or-prove applies.
@@ -205,10 +224,16 @@ deliverable of their owning plan (see gap 5 below).
   with no `def` checks at 1.0 and builds to an undeclared C call), #874
   (partial: role totality landed; the tag-keyed exemption remains), #1131
   (a `lit` whose atom kind contradicts its prim family scores 1.0).
-- **#730 partials** - #699 (integer floor/ceil/round support), #704 (scalar
-  relu/sigmoid/silu/gelu arms), #705 (the gate-dedup half), #722 (compiled
-  unary grad rows), #794 (the `extract_f64_value` par catch-all), #960 (the
+- **#730 partials** - #699 (integer floor/ceil/round support), #705 (the
+  gate-dedup half), #722 (compiled unary grad rows), #794 (the
+  `extract_f64_value` par catch-all), #960 (the
   chelis-python input side: raw `dtype: i32` fields, hardcoded DLPack code).
+- **#729 follow-through** - #704's scalar dispatch gap remains live under
+  #729. The rows #980 (op/profile/lane-dependent integer overflow), #1009
+  (`pad_sequences` normative gap), and #1113 (axis-argument dtype
+  inconsistency) are **repaired post-basis** with the dev/release overflow
+  oracle, [05-OP-9]/[05-OP-10] semantic registrations, and required
+  `BuiltinDecl` axis-layout metadata respectively.
 - **Structural/other** - #888 (compiler size arithmetic saturates ->
   memory-planning slot reuse at wrong capacity; **deliberately standalone**,
   held in the roadmap's unclaimed ledger with its disposition prose) and
@@ -217,10 +242,7 @@ deliverable of their owning plan (see gap 5 below).
   owner #730, dual-claimed in prose by #883; #870 (prove SIGABRT instead of
   degrading), #872 (depth-32 fuse projects to `Type::Unit`), #955, #957
   (~224 production panic sites), #958 (the einsum `unwrap_or`,
-  token-anchored at `host.rs:8843`), #959 - all owner #730; #980
-  (op/profile/lane-dependent integer overflow - evidence intact, unverified
-  by repro), #1009 (pad_sequences spec gap), #1113 (axis-argument dtype
-  enforcement inconsistent) - all owner #729.
+  token-anchored at `host.rs:8843`), #959 - all owner #730.
 - **Evidence gaps that could hide wrong answers** (standalone
   deferred-evidence items, not class children) - #737 (Metal typed
   kernels have never executed), the #735 RNG confirmation re-sweep
@@ -313,28 +335,26 @@ says cannot satisfy [05-UNS-1]. The dependency order is written: #1082 ->
 build-routing. Jeff's chain; #1097 landed its fail-closed disposition piece;
 #730's deliverable 6 lands inside it.
 
-### 5. The verified live defects - small list, real wrongness, and no delivery slot
+### 5. The state-basis defects exposed missing delivery slots
 
-The list above ("Verified live defects") is the inventory. The highest-value
-quick wins: #901 (one line), #851 (port an existing helper), #1147 (copy an
-existing inference arm), #942 (one match arm). The lane-level items - #690
+The list above is the audit inventory at its recorded basis. The post-basis
+#729 follow-through now resolves #878, #901, #937, #942, #980, #1009, and
+#1113 and records each repair's recurrence guard in the roadmap. The remaining
+high-value quick wins include #851 (port an existing helper) and #1147 (copy an
+existing inference arm). The lane-level items - #690
 and the pinned support cells (#689 HIP int64 kernels, #951 fused reduce,
 #759's HIP cast trap) - close only by landing kernels and validating through
-the local HIP gate. #937 needs a C-side dtype dispatch plus a parity row.
+the local HIP gate.
 
-**The structural problem underneath the list: these are owned but not
-scheduled, and the design docs need amending to fix that.** Every entry has
-a parent class, but almost none appears in any remaining phase deliverable
-of its owning plan - #937, #942, #901, and #878 sit under #729 whose only
-remaining phase is the capability table (which decides cells, not these
-repairs); #780, #783, #847, #850, and #851 were sequenced "behind #731
-Phase 1-2", which have now shipped without them, so their sequencing note
-no longer schedules anything; #795, #906, #870, #872, and the #957 panic
-family sit under #730 with only the gate half and Phase 4 remaining, neither
-of which claims them. The consequence is that no plan oracle turns red while
-they stay open, and phase completion claims can be honestly green over live
-wrong-value defects. The fix is a design-doc pass over the five plans (and
-the roadmap's ledger): give each owned defect an explicit disposition - a
+**The structural problem at the state basis was that these defects were owned
+but not scheduled.** Every entry had a parent class, but almost none appeared
+in a remaining phase deliverable. The #729 follow-through now supplies a
+delivery disposition and recurrence guard for #878, #901, #937, #942, #980,
+#1009, and #1113. The scheduling gap remains for #780, #783, #847, #850, and
+#851, whose "behind #731 Phase 1-2" sequencing point has passed, and for #795,
+#906, #870, #872, and the #957 panic family under #730. No owning plan oracle
+turns red while those defects stay open. Their class plans and the roadmap
+ledger still need an explicit disposition - a
 named phase/kill-table row in its owning plan, an assignment to a v0.19
 capability decision, or a recorded "standalone fix, no phase dependency"
 line like the ledger already does for #681 and #888 - so the delivery story
@@ -344,7 +364,8 @@ is inspectable rather than implied by parentage.
 
 #733's Phase 0 is self-contained and Chelis-owned, so its dormancy has no
 external excuse; the measured cost is already visible (twenty builtins and a
-prelude ADT with zero spec entries; #1009). #740/#895 stay untouched even
+prelude ADT with zero spec entries at the state basis; the #1009 instance is
+now repaired). #740/#895 stay untouched even
 though #895's worked instance showed a plan's own inventory row silently
 skipped. #1089's four unwired oracles are empirically proven gaps. The
 keyword-auto-close guard is owed and unowned after three incidents and one

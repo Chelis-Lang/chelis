@@ -470,6 +470,16 @@ impl InferenceProduct {
         }
     }
 
+    /// Apply the complete program substitution to the frozen owner stamps.
+    /// Most stamps are already concrete when their root finishes. Deferred
+    /// positional-expand shapes are intentionally selected by later roots,
+    /// so their earlier stamps need one final resolution before annotation.
+    pub(super) fn resolve_owner_types(&mut self, subst: &Subst) {
+        for owner in self.owner_types.values_mut() {
+            owner.ty = subst.apply(&owner.ty);
+        }
+    }
+
     pub(super) fn owner_type(
         &self,
         expr: &deep::Expr,

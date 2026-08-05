@@ -707,7 +707,14 @@ pub(super) fn infer_cast(
     };
 
     let expr_ty = infer_expr(&kids[0], env, vg, subst, adt_reg, errors, product);
-    let resolved = subst.apply(&expr_ty);
+    let resolved = match subst.apply(&expr_ty) {
+        Type::Var(v) => match subst.materialize_deferred_expand_default(v) {
+            Ok(Some(ty)) => ty,
+            Ok(None) => Type::Var(v),
+            Err(error) => return report(errors, error.into()),
+        },
+        other => other,
+    };
 
     // Every target spelling first crosses the centralized resolver. Bare
     // primitive symbols are retained for historical compatibility; canonical
@@ -842,11 +849,16 @@ pub(super) fn infer_cast(
             Type::Prim(new_prec)
         }
         Type::Error(w) => propagate(&w),
-        _ => report(
+        other @ (Type::Fn(_, _)
+        | Type::Ref(_)
+        | Type::Adt(_, _)
+        | Type::Var(_)
+        | Type::Tuple(_)
+        | Type::Unit) => report(
             errors,
             CheckError::new(
                 CheckErrorKind::CastNonTensor,
-                format!("cast requires tensor or prim type, got {resolved}"),
+                format!("cast requires tensor or prim type, got {other}"),
                 vec![],
             ),
         ),

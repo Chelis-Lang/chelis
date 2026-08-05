@@ -172,7 +172,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
                 reject_if_non_finite(id, "high", *high)?;
             }
             WireRiscOp::Dropout { rate, .. } => reject_if_non_finite(id, "rate", *rate)?,
-            WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", *fill)?,
+            WireRiscOp::Pad { fill, .. } => reject_if_non_finite(id, "fill", fill.as_f64_lossy())?,
             // Wire v4 (chelis#856): the constant payloads are sealed
             // dtype-tagged values. Prove's real-envelope reading takes
             // the f64 image (integer payloads are always finite; the
@@ -494,7 +494,7 @@ const _: () = {
     // integer constants above 2^53 are now representable on the wire and
     // still enter the real envelope through the same lossy image (the
     // exact-envelope swap is the chelis#688 Phase 2 work).
-    assert!(WIRE_DAG_SCHEMA_VERSION == 4);
+    assert!(WIRE_DAG_SCHEMA_VERSION == 5);
 };
 
 #[cfg(test)]

@@ -110,7 +110,7 @@ loss_fn = fn (w, b) -> mse_loss(predict(x, w, b), y)
 - Tuples: `(a, b, c)`. `(a)` is grouping, not a tuple; there is no one-element tuple.
 - Bracket literals: `[1.0, 2.0, 3.0]` builds a tensor, and bracket lists also pass list
   arguments to operators, for example the window and stride lists in
-  `reduce_window_max(grid, [2, 2], [1, 1])`. A negative numeral is unary minus applied to a
+  `reduce_window_max(grid, [2i64, 2i64], [1i64, 1i64])`. A negative numeral is unary minus applied to a
   literal, so write `f(-42)` to pass a negative argument.
 
 In a position with a known element type (a tensor-typed argument, a tensor return body, or

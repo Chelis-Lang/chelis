@@ -355,13 +355,13 @@ mod tests {
         // Padded leading axis by (2,0): output SHOULD be [4, batch] but is
         // MIS-SIZED to the operand extent [2, batch] (the #593 wrapper clobber).
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![
+            RiscOp::zero_pad(
+                Prim::F32,
+                vec![
                     (RtDim::Lit(2), RtDim::Lit(0)),
                     (RtDim::Lit(0), RtDim::Lit(0)),
                 ],
-                fill: 0.0,
-            },
+            ),
             vec![x],
             sym,
             None,
@@ -385,13 +385,13 @@ mod tests {
         };
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], in_ty, None);
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![
+            RiscOp::zero_pad(
+                Prim::F32,
+                vec![
                     (RtDim::Lit(2), RtDim::Lit(0)),
                     (RtDim::Lit(0), RtDim::Lit(0)),
                 ],
-                fill: 0.0,
-            },
+            ),
             vec![x],
             out_ty,
             None,
@@ -2104,10 +2104,10 @@ int main(void) {{
         let mut dag = Dag::new();
         let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![(RtDim::Lit(1), RtDim::Lit(2))],
-                fill: -1.0,
-            },
+            RiscOp::pad(
+                vec![(RtDim::Lit(1), RtDim::Lit(2))],
+                chelis_types::scalar_from_f64("pad", Prim::F32, -1.0).unwrap(),
+            ),
             vec![x],
             vec_f32(6),
             None,

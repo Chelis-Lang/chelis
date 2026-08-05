@@ -14,6 +14,7 @@ pub(super) fn infer_app(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    expected_result: Option<&Type>,
 ) -> Type {
     let kids = children(list);
     if kids.is_empty() {
@@ -179,6 +180,17 @@ pub(super) fn infer_app(
 
     if matches!(func_name.as_deref(), Some("drop")) && arg_tys.len() == 1 {
         return Type::Unit;
+    }
+
+    // [05-DIM-3]: the semantic registry owns axis dtype slots. `concat`
+    // is overloaded with ordinary list concatenation and therefore runs
+    // the same shared gate only after its tensor-list arm is identified in
+    // `postprocess_application`; every unambiguous builtin is screened here.
+    if let Some(fname) = func_name.as_deref()
+        && fname != "concat"
+        && let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors)
+    {
+        return rejected;
     }
 
     // [05-DIM-1] fix-naming diagnostic for expand's extent slot: a wrong
@@ -416,7 +428,17 @@ pub(super) fn infer_app(
 
     match unify(&func_ty, &expected_fn, subst) {
         Ok(()) => finish_unified_app(
-            list, kids, func_name, arg_tys, ret_tv, env, vg, subst, errors, product,
+            list,
+            kids,
+            func_name,
+            arg_tys,
+            ret_tv,
+            env,
+            vg,
+            subst,
+            errors,
+            product,
+            expected_result,
         ),
         Err(te) => {
             let mut e: CheckError = te.into();

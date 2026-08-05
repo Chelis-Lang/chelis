@@ -684,6 +684,19 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push("    return fmaf(high - low, (float)unit, low);".to_string());
     out.push("}".to_string());
     out.push(
+        "static inline double chelis_uniform_sample_f64(uint64_t seed, uint64_t index, double low, double high) {"
+            .to_string(),
+    );
+    out.push("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);".to_string());
+    out.push("    x ^= x >> 30;".to_string());
+    out.push("    x *= 0xBF58476D1CE4E5B9ULL;".to_string());
+    out.push("    x ^= x >> 27;".to_string());
+    out.push("    x *= 0x94D049BB133111EBULL;".to_string());
+    out.push("    x ^= x >> 31;".to_string());
+    out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
+    out.push("    return fma(high - low, unit, low);".to_string());
+    out.push("}".to_string());
+    out.push(
         "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
             .to_string(),
     );
@@ -1183,8 +1196,8 @@ fn append_helper(
             ..crate::CodegenOptions::default()
         },
     )?;
-    // The CEmitter prepends a `static inline float chelis_uniform_sample_f32`
-    // prelude to every DAG it emits so that a standalone-emitted kernel
+    // The CEmitter prepends dtype-specific uniform sampling helpers to
+    // every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
     // single `main.c` that duplicates the definition and gcc rejects the
     // redefinition. We filter the prelude out here and rely on
@@ -1201,12 +1214,12 @@ fn append_helper(
             }
             continue;
         }
-        if line.contains("chelis_uniform_sample_f32(uint64_t seed") {
+        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" {
             skipping_uniform_prelude = true;
             continue;
         }
         if skipping_uniform_prelude {
-            if line == "}" {
+            if line == "/* CHELIS_UNIFORM_HELPERS_END */" {
                 skipping_uniform_prelude = false;
             }
             continue;

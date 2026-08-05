@@ -293,10 +293,13 @@ compiler-synthesized constants construct through
 dtype-tagged payloads (v4, finalize-on-decode with loud rejection of
 corrupt reduced-float images), the bincode caches bumped
 (`CHELIS_CTX_V6`, stdlib format 3), and constant folds decline rather
-than bake a collapsed integer or a trap in. This is deliberately scoped to
-the constant families, not a globally total claim about every IR field:
-`RiscOp::Pad { fill: f64 }` remains a raw numeric-capacity seam tracked by
-open [#878]. Partial adoption of the
+than bake a collapsed integer or a trap in. The [#878] follow-through
+extends the same carrier to `RiscOp::Pad.fill` and `WireRiscOp::Pad.fill`:
+WireDag v5 carries a typed `ScalarValue`, older otherwise-decodable Pad rows
+are migrated by finalizing the raw number at the owning node's declared
+output precision, and a v5 raw-number spelling is rejected rather than
+retained as an alternate grammar. The serialized-shape change bumps the
+bincode caches to `CHELIS_CTX_V7` and stdlib format 4. Partial adoption of the
 storage decision is forbidden: it is the one all-layers-or-nothing
 element of this plan, because a mixed state re-creates the very
 boundary bugs ([#684]/[#686]) it exists to end. The mechanical
@@ -305,20 +308,16 @@ is the in-tree `crates/chelis-cli/tests/issue_729_payload_census.rs`, whose
 scope is `RiscOp`/`WireRiscOp` carrier fields rather than every numeric form
 in the repository.
 
-**The Pad fill is scheduled, not permanently exempt ([#878]).** That carrier
-migrates to the sealed `ScalarValue` form - finalized at the padded tensor's
-dtype, with the `WireDag` bump that implies - BEFORE Phase 4 closes, and it
-rides the v0.19 cut with the rest of the storage family so a shipped field
-changes shape once rather than twice (the same anti-churn invariant that binds
-the prelude JSON integer decision above). The guard for it already exists and
-the migration SHRINKS that guard rather than growing an exemption: §C6's typed
-wire leg carries `WireRiscOp::Pad.fill: f64` as a FLAGGED `float-carrier` row,
-and a FLAGGED capacity row has no issue-citation path at all - redesign onto
-the tagged carrier is its first sanctioned outcome, so sealing the fill retires
-the row (through that leg's manifest and enumerator, per B1) instead of earning
-it a maintainer override. Until then the IR-side row stays cited in the
-no-sixth-layer census above, which turns red the moment the field grows a
-sibling.
+**The Pad fill is not an exemption ([#878]).** `Pad.fill` is finalized once at
+the padded tensor's dtype during lowering and remains tagged through eval,
+wire transport, proving, and every backend emitter. Exact int64 values above
+2^53 therefore never acquire an f64 image. The migration SHRINKS both guards:
+the IR payload census now requires the sealed `ScalarValue`, and §C6's typed
+wire manifest no longer carries the former FLAGGED `float-carrier` row. The
+WireDag v5 consumer break remains a cross-repository coordination fact:
+Beacon advertises only versions 1-3, so the chelis launcher must reject that
+mismatch through [#708]'s version-negotiation gate rather than dispatching v5
+bytes optimistically.
 
 **Normative home for the GUARANTEE this delivers:**
 `spec/04-type-system.md` [04-NUM-11] - a value survives storage,
@@ -1741,6 +1740,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#699]: https://github.com/Chelis-Lang/chelis/issues/699
 [#703]: https://github.com/Chelis-Lang/chelis/issues/703
 [#705]: https://github.com/Chelis-Lang/chelis/issues/705
+[#708]: https://github.com/Chelis-Lang/chelis/issues/708
 [#709]: https://github.com/Chelis-Lang/chelis/issues/709
 [#711]: https://github.com/Chelis-Lang/chelis/issues/711
 [#712]: https://github.com/Chelis-Lang/chelis/issues/712
@@ -1762,6 +1762,7 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
+[#878]: https://github.com/Chelis-Lang/chelis/issues/878
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023

@@ -523,7 +523,12 @@ fn every_f64_bearing_op_field_is_guarded() {
         (
             WireRiscOp::Pad {
                 padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
-                fill: f64::NAN,
+                fill: chelis_types::scalar_from_f64(
+                    "test",
+                    chelis_types::types::Prim::F64,
+                    f64::NAN,
+                )
+                .expect("f64 accepts NaN"),
             },
             "fill",
         ),
@@ -578,7 +583,8 @@ fn finite_f64_bearing_ops_pass_the_finite_guard() {
         WireRiscOp::Dropout { rate: 0.5, seed: 0 },
         WireRiscOp::Pad {
             padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
-            fill: 0.0,
+            fill: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 0.0)
+                .expect("finite f64"),
         },
         WireRiscOp::Const {
             value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5)

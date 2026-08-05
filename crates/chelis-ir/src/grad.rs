@@ -1105,7 +1105,6 @@ fn compute_adjoints(
 
             // Per-slice local gradient = prefix[i] * suffix[i], padded back to
             // the full axis width. Sum them into a single full-shape tensor.
-            let zero_const = 0.0f64;
             let mut acc: Option<NodeId> = None;
             for i in 0..axis_size {
                 let local = dag.add_node(
@@ -1124,10 +1123,7 @@ fn compute_adjoints(
                     })
                     .collect();
                 let padded = dag.add_node(
-                    RiscOp::Pad {
-                        padding,
-                        fill: zero_const,
-                    },
+                    RiscOp::zero_pad(input_ty.precision, padding),
                     vec![local],
                     input_ty.clone(),
                     None,
@@ -1383,7 +1379,7 @@ fn compute_adjoints(
                 }
             }
             let dx = dag.add_node(
-                RiscOp::Pad { padding, fill: 0.0 },
+                RiscOp::zero_pad(input_ty.precision, padding),
                 pad_inputs,
                 input_ty,
                 None,
@@ -1502,7 +1498,7 @@ fn compute_adjoints(
                 let mut padded_dims = split_dims.clone();
                 padded_dims[axis + 1] = DimInfo::Lit(step);
                 let padded = dag.add_node(
-                    RiscOp::Pad { padding, fill: 0.0 },
+                    RiscOp::zero_pad(precision, padding),
                     vec![split],
                     TensorType {
                         dims: padded_dims.clone(),
@@ -3590,10 +3586,10 @@ mod tests {
             None,
         );
         let padded = dag.add_node(
-            RiscOp::Pad {
-                padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-                fill: 0.0,
-            },
+            RiscOp::zero_pad(
+                chelis_types::types::Prim::F32,
+                vec![(RtDim::Lit(1), RtDim::Lit(1))],
+            ),
             vec![x],
             vec5_ty.clone(),
             None,

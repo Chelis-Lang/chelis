@@ -902,10 +902,7 @@ fn ws8a_pad_emits_msl_kernel_and_two_uniform_launch() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
         vec![x],
         vec_f32(6),
         None,
@@ -984,13 +981,13 @@ fn ws8a_pad_2d_uses_movement_dims() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![
                 (RtDim::Lit(1), RtDim::Lit(0)),
                 (RtDim::Lit(0), RtDim::Lit(2)),
             ],
-            fill: 0.0,
-        },
+        ),
         vec![x],
         mat_f32(3, 5),
         None,

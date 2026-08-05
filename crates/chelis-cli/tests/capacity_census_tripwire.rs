@@ -1348,6 +1348,21 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
                    target: int8 | int16 | int32 | int64) -> int8 | int16 | int32 | int64",
         atom: "[05-OP-6]",
     },
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] uniform_like(template: &tensor[D, p], low: f32, \
+                   high: f32) -> tensor[D, p]",
+        atom: "[05-OP-8]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] pad_sequences(sequences: List[List[T]], pad: T) \
+                   -> tensor[len(sequences), width, T]",
+        atom: "[05-OP-9]",
+    },
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], \
+                   width: int64, pad: T) -> tensor[len(sequences), width, T]",
+        atom: "[05-OP-10]",
+    },
     // chelis#1112 narrowed the runtime extent read's axis-domain input to
     // int32 while preserving its exact int64 extent result. The successor
     // identity is issue-bound and registered rather than retroactively
@@ -5831,6 +5846,37 @@ fn cast_trunc_is_registered_against_its_authority_atom() {
         "the `cast_trunc` registration must satisfy the same atom-existence \
          contract as every other registered callable"
     );
+}
+
+#[test]
+fn post_1167_compiler_numeric_builtins_have_exact_authority_registrations() {
+    let expected = [
+        (
+            "[compiler-builtin-numeric] uniform_like(template: &tensor[D, p], low: f32, high: f32) -> tensor[D, p]",
+            "[05-OP-8]",
+        ),
+        (
+            "[compiler-builtin-numeric] pad_sequences(sequences: List[List[T]], pad: T) -> tensor[len(sequences), width, T]",
+            "[05-OP-9]",
+        ),
+        (
+            "[compiler-builtin-numeric] pad_sequences_to(sequences: List[List[T]], width: int64, pad: T) -> tensor[len(sequences), width, T]",
+            "[05-OP-10]",
+        ),
+    ];
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL))
+        .expect("controlling spec/05 must be readable");
+    for (callable, atom) in expected {
+        let registration = SEMANTIC_REGISTRATIONS
+            .iter()
+            .find(|registration| registration.callable == callable)
+            .unwrap_or_else(|| panic!("missing semantic registration for `{callable}`"));
+        assert_eq!(registration.atom, atom, "wrong authority for `{callable}`");
+        assert!(
+            registration_problem(*registration, &spec).is_none(),
+            "`{callable}` must name an existing normative atom"
+        );
+    }
 }
 
 /// prelude-adt-numeric positive control: the real registered prelude

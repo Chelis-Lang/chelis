@@ -1,13 +1,13 @@
 //! chelis#1113 fail-closed guard: axis-argument dtype acceptance is
-//! consistent while the classification atom is pending.
+//! consistent with spec/05-risc-primitives.md [05-DIM-3].
 //!
-//! An axis names a rank position and is int32 in every enforced surface
-//! (spec/05-risc-primitives.md [05-DIM-1] states the split for the
-//! movement/shape surface; chelis#1113 owns extending the classification
-//! to reduction, concatenation, and windowed ops). Before this guard,
+//! An axis names a rank position and is int32 in every covered surface.
+//! [05-DIM-1] states the movement/shape split and [05-DIM-3] applies it to
+//! reductions, concatenation, and the remaining axis-taking builtins. Before
+//! this guard,
 //! `sum` rejected an int64 axis while `cumsum` and `concat` silently
-//! accepted both dtypes. The guard closes that acceptance without
-//! deciding chelis#1113: every axis-taking builtin on the
+//! accepted both dtypes. Every builtin now carries a required axis-layout
+//! classification, and the shared guard closes that acceptance on the
 //! `resolve_builtin_axis` path (cumsum, sort, gather, scatter,
 //! scatter_replace), the `resolve_axis_pair_member` path (trace,
 //! diagonal), and the inline `concat`/`split` arms now reject a
@@ -17,8 +17,8 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::check_typed_program;
 use chelis_types::errors::CheckError;
+use chelis_types::{AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, check_typed_program};
 
 fn typecheck_surf(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("surf parse should succeed");
@@ -84,6 +84,22 @@ def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = cumsum(&x, 1i64)
 }
 
 #[test]
+fn softmax_int32_axis_accepted_int64_rejected() {
+    assert_clean(
+        r#"
+def f(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(&x, 1)
+"#,
+        "softmax with a bare int32 axis",
+    );
+    assert_rejects_int64_axis(
+        r#"
+def g(x: tensor[2, 4, f32]) -> tensor[2, 4, f32] = softmax(&x, 1i64)
+"#,
+        "softmax",
+    );
+}
+
+#[test]
 fn concat_int32_axis_accepted_int64_rejected() {
     assert_clean(
         r#"
@@ -96,6 +112,17 @@ def f(x: tensor[2, 4, f32], y: tensor[2, 4, f32]) -> tensor[4, 4, f32] = concat(
 def g(x: tensor[2, 4, f32], y: tensor[2, 4, f32]) -> tensor[4, 4, f32] = concat([x, y], 0i64)
 "#,
         "concat",
+    );
+}
+
+#[test]
+fn concat_list_overload_does_not_apply_the_axis_contract() {
+    assert_clean(
+        r#"
+xs = [1.0, 2.0]
+ys = concat(xs, [3.0, 4.0])
+"#,
+        "ordinary List concat has no axis slot",
     );
 }
 
@@ -199,6 +226,23 @@ def g(b: tensor[4, 3, f32], i: tensor[2, int32], u: tensor[2, 3, f32]) -> tensor
     );
 }
 
+#[test]
+fn scatter_elements_int32_axis_accepted_int64_rejected() {
+    let setup = r#"
+data = to_tensor([[0.0f32, 0.0f32], [0.0f32, 0.0f32]])
+indices = to_tensor([[1, 0], [0, 1]])
+updates = to_tensor([[5.0f32, 6.0f32], [7.0f32, 8.0f32]])
+"#;
+    assert_clean(
+        &format!("{setup}\nout = scatter_elements(data, indices, updates, 0)"),
+        "scatter_elements with a bare int32 axis",
+    );
+    assert_rejects_int64_axis(
+        &format!("{setup}\nout = scatter_elements(data, indices, updates, 0i64)"),
+        "scatter_elements",
+    );
+}
+
 /// `split`'s inline arm carried the same `precision.is_integer()`
 /// acceptance `concat` did, so an int64 axis checked clean there too.
 #[test]
@@ -287,5 +331,52 @@ d = diagonal(m, "zero", 1)
 "#,
         "diagonal",
         "string",
+    );
+}
+
+/// Structural class guard: each active axis-taking builtin has exactly one
+/// axis layout. The checker consumes this table for every
+/// unambiguous generic application; operation-specific paths share the same
+/// `reject_non_int32_axis` gate for value/rank handling.
+#[test]
+fn every_axis_builtin_has_one_axis_layout() {
+    let mut actual = BUILTINS
+        .iter()
+        .filter(|decl| decl.axis_arguments != AxisArgumentLayout::NoAxes)
+        .map(|decl| decl.name)
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    let mut deduped = actual.clone();
+    deduped.dedup();
+    assert_eq!(actual, deduped, "axis registrations must be unique");
+
+    let mut expected = vec![
+        "argmax_reduce",
+        "argmin_reduce",
+        "concat",
+        "cumsum",
+        "diagonal",
+        "expand",
+        "gather",
+        "max_reduce",
+        "mean",
+        "min_reduce",
+        "permute",
+        "prod_reduce",
+        "scatter",
+        "scatter_elements",
+        "scatter_replace",
+        "shape",
+        "softmax",
+        "sort",
+        "split",
+        "sum",
+        "trace",
+    ];
+    expected.sort_unstable();
+    assert_eq!(actual, expected, "axis builtin inventory drifted");
+    assert!(
+        actual.iter().all(|name| BUILTIN_NAMES.contains(name)),
+        "axis registrations must name active builtins"
     );
 }

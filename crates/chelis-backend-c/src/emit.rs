@@ -4,9 +4,9 @@ use chelis_ir::dag::{
     Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, ReduceWindowKind,
     RiscOp, RtDim, SymbolicDimSource, TensorType, symbolic_bindings,
 };
-use chelis_types::NumericTrap;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
+use chelis_types::{ElementRef, NumericTrap, ScalarValue};
 
 use crate::memory::{MemoryPlan, NodeMemoryKind};
 
@@ -154,6 +154,7 @@ impl CEmitter {
         if e.math_lib != crate::MathLib::None {
             e.line("#include \"chelis_math.h\"");
         }
+        e.line("/* CHELIS_UNIFORM_HELPERS_BEGIN */");
         e.line(
             "static inline float chelis_uniform_sample_f32(uint64_t seed, uint64_t index, float low, float high) {",
         );
@@ -175,6 +176,19 @@ impl CEmitter {
         // line byte-identical to `host_emit.rs`'s copy.
         e.line("    return fmaf(high - low, (float)unit, low);");
         e.line("}");
+        e.line(
+            "static inline double chelis_uniform_sample_f64(uint64_t seed, uint64_t index, double low, double high) {",
+        );
+        e.line("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);");
+        e.line("    x ^= x >> 30;");
+        e.line("    x *= 0xBF58476D1CE4E5B9ULL;");
+        e.line("    x ^= x >> 27;");
+        e.line("    x *= 0x94D049BB133111EBULL;");
+        e.line("    x ^= x >> 31;");
+        e.line("    double unit = (double)(x >> 11) / (double)(1ULL << 53);");
+        e.line("    return fma(high - low, unit, low);");
+        e.line("}");
+        e.line("/* CHELIS_UNIFORM_HELPERS_END */");
         e.line("#ifndef CHELIS_EFFECTIVE_UNIFORM_SEED");
         e.line("#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) (seed)");
         e.line("#endif");
@@ -1350,6 +1364,19 @@ impl CEmitter {
                  this is a backend bug",
                 other.name()
             ),
+        }
+    }
+
+    /// Render a portable exact-width signed literal. In particular,
+    /// `INT64_C(-9223372036854775808)` is not a portable spelling because
+    /// the positive magnitude is outside int64 before unary negation.
+    fn i64_c_literal(value: i64) -> String {
+        if value == i64::MIN {
+            "INT64_MIN".to_string()
+        } else if value < 0 {
+            format!("-INT64_C({})", value.unsigned_abs())
+        } else {
+            format!("INT64_C({value})")
         }
     }
 
@@ -2962,18 +2989,37 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        // Issue #248 (#189 follow-up): the sampler takes f32 args, so
-        // narrow the IR's f64 `low`/`high` to f32 explicitly via
-        // `f64_to_f32_truncate` and reconstruct each argument from its
-        // exact bit pattern through the `chelis_f32_from_bits` static
-        // inline helper. The pre-fix `{:.8}f` format string drifted up
-        // to one ULP for ordinary values and collapsed sub-normal-range
-        // values like `1e-40` to `0.0f` outright.
+        // [05-OP-8]: the source bounds have f32 dtype. f64 output widens
+        // those exact stored images and samples in f64; f32 samples in
+        // f32; f16/bf16 sample in f32 and round once at the final store.
         let low_bits = Self::f64_to_f32_truncate(low).to_bits();
         let high_bits = Self::f64_to_f32_truncate(high).to_bits();
-        self.line(&format!(
-            "t{id}->data[i] = chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, chelis_f32_from_bits(0x{low_bits:08x}u), chelis_f32_from_bits(0x{high_bits:08x}u));"
-        ));
+        let low_f32 = format!("chelis_f32_from_bits(0x{low_bits:08x}u)");
+        let high_f32 = format!("chelis_f32_from_bits(0x{high_bits:08x}u)");
+        match ty.precision {
+            Prim::F64 => {
+                let low_wide_bits = (Self::f64_to_f32_truncate(low) as f64).to_bits();
+                let high_wide_bits = (Self::f64_to_f32_truncate(high) as f64).to_bits();
+                self.line(&format!(
+                    "((double*)t{id}->data)[i] = chelis_uniform_sample_f64(t{id}_seed, (uint64_t)i, chelis_f64_from_bits(UINT64_C(0x{low_wide_bits:016x})), chelis_f64_from_bits(UINT64_C(0x{high_wide_bits:016x})));"
+                ));
+            }
+            Prim::F32 => {
+                self.line(&format!(
+                    "((float*)t{id}->data)[i] = chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, {low_f32}, {high_f32});"
+                ));
+            }
+            Prim::F16 | Prim::Bf16 => {
+                let store = Self::f32_to_reduced_fn(ty.precision);
+                self.line(&format!(
+                    "((uint16_t*)t{id}->data)[i] = {store}(chelis_uniform_sample_f32(t{id}_seed, (uint64_t)i, {low_f32}, {high_f32}));"
+                ));
+            }
+            other => panic!(
+                "uniform_like requires an active float output dtype, got `{}`",
+                other.name()
+            ),
+        }
         self.indent -= 1;
         self.line("}");
     }
@@ -5902,7 +5948,7 @@ impl CEmitter {
         &mut self,
         id: usize,
         padding: &[(RtDim, RtDim)],
-        fill: f64,
+        fill: ScalarValue,
         inputs: &[NodeId],
         ty: &TensorType,
         dag: &Dag,
@@ -5940,43 +5986,53 @@ impl CEmitter {
         // outputs, silently truncating the fill value. Match each
         // active dtype explicitly; an unhandled dtype panics rather
         // than silently downgrades.
-        match ty.precision {
-            Prim::Int64 => {
+        assert_eq!(fill.prim(), ty.precision, "verified pad fill dtype");
+        match fill.element_ref() {
+            ElementRef::I8(value) => {
                 self.line(&format!(
-                    "chelis_fill_i64(t{id}, (int64_t){});",
-                    fill as i64
+                    "{{ int8_t *__p = (int8_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = INT8_C({value}); }}"
                 ));
             }
-            Prim::Int32 => {
+            ElementRef::I16(value) => {
                 self.line(&format!(
-                    "{{ int32_t *__p = (int32_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = (int32_t){}; }}",
-                    fill as i32
+                    "{{ int16_t *__p = (int16_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = INT16_C({value}); }}"
                 ));
             }
-            Prim::F64 => {
-                // Issue #189 sibling sweep: same bit-pattern story as
-                // `emit_const`. The pre-fix `{:.17}` format string
-                // dropped small magnitudes to zero.
-                let bits = fill.to_bits();
+            ElementRef::I32(value) => {
+                self.line(&format!(
+                    "{{ int32_t *__p = (int32_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = INT32_C({value}); }}"
+                ));
+            }
+            ElementRef::I64(value) => {
+                self.line(&format!(
+                    "chelis_fill_i64(t{id}, {});",
+                    Self::i64_c_literal(value)
+                ));
+            }
+            ElementRef::F64(value) => {
+                let bits = value.to_bits();
                 self.line(&format!("chelis_fill_f64_bits(t{id}, 0x{bits:016x}uLL);"));
             }
-            Prim::F32 => {
-                // Issue #189 sibling sweep: narrow + bit-pattern emit.
-                let bits = (fill as f32).to_bits();
+            ElementRef::F32(value) => {
+                let bits = value.to_bits();
                 self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
             }
-            Prim::Bool => {
-                // Issue #365 sibling sweep: a Bool Pad fill uses the same
-                // f32-encoded storage but its dtype tag is CHELIS_BOOL, so
-                // it must go through the dtype-correct `chelis_fill_bool_bits`
-                // to avoid the debug-runtime dtype assert.
-                let bits = (fill as f32).to_bits();
+            ElementRef::F16(value) => {
+                let bits = value.to_bits();
+                self.line(&format!(
+                    "{{ uint16_t *__p = (uint16_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = UINT16_C(0x{bits:04x}); }}"
+                ));
+            }
+            ElementRef::Bf16(value) => {
+                let bits = value.to_bits();
+                self.line(&format!(
+                    "{{ uint16_t *__p = (uint16_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = UINT16_C(0x{bits:04x}); }}"
+                ));
+            }
+            ElementRef::Bool(value) => {
+                let bits = (if value { 1.0f32 } else { 0.0f32 }).to_bits();
                 self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
             }
-            other => panic!(
-                "C backend Pad does not yet support `{}` fill (spec/04-type-system.md §1.1)",
-                other.name()
-            ),
         }
         // Copy source data into the padded region
         self.line(&format!("for (int64_t i = 0; i < t{a}->size; i++) {{"));
@@ -6437,6 +6493,60 @@ mod tests {
             c.contains(&format!("0x{want_bits:08x}")),
             "f32 const must emit exact bit pattern; got:\n{c}"
         );
+    }
+
+    #[test]
+    fn issue_878_pad_emits_exact_int64_fill_above_f64_boundary() {
+        let exact = 9_007_199_254_740_993i64;
+        let ty = tensor_ty(&[1], Prim::Int64);
+        let out_ty = tensor_ty(&[3], Prim::Int64);
+        let mut dag = Dag::new();
+        let input = dag.add_node(RiscOp::synth_const(Prim::Int64, 7.0), vec![], ty, None);
+        let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, exact).unwrap();
+        let padded = dag.add_node(
+            RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], fill),
+            vec![input],
+            out_ty,
+            None,
+        );
+        dag.set_roots(vec![padded]);
+
+        let c = CEmitter::emit_dag(&dag, "pad_exact_int64").unwrap();
+        assert!(c.contains(&format!("chelis_fill_i64(t1, INT64_C({exact}));")));
+        assert!(
+            !c.contains("9007199254740992"),
+            "the exact int64 fill must never pass through its rounded f64 image:\n{c}"
+        );
+    }
+
+    #[test]
+    fn issue_878_pad_emits_portable_signed_int64_extremes() {
+        for (value, spelling) in [
+            (i64::MIN, "INT64_MIN"),
+            (-9_007_199_254_740_993, "-INT64_C(9007199254740993)"),
+        ] {
+            let ty = tensor_ty(&[1], Prim::Int64);
+            let mut dag = Dag::new();
+            let input = dag.add_node(
+                RiscOp::synth_const(Prim::Int64, 7.0),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, value).unwrap();
+            let padded = dag.add_node(
+                RiscOp::pad(vec![(RtDim::Lit(1), RtDim::Lit(1))], fill),
+                vec![input],
+                tensor_ty(&[3], Prim::Int64),
+                None,
+            );
+            dag.set_roots(vec![padded]);
+            let c = CEmitter::emit_dag(&dag, "pad_signed_int64").unwrap();
+            assert!(
+                c.contains(&format!("chelis_fill_i64(t1, {spelling});")),
+                "{c}"
+            );
+        }
     }
 
     #[test]
@@ -7029,10 +7139,7 @@ mod tests {
             None,
         );
         dag.add_node(
-            RiscOp::Pad {
-                padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-                fill: 0.0,
-            },
+            RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
             vec![a],
             vec_f32(5),
             None,

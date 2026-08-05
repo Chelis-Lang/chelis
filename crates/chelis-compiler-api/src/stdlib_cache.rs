@@ -62,8 +62,9 @@ use crate::compiler::CompilerError;
 
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
-/// Mixed into the content-addressed key.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 3;
+/// Mixed into the content-addressed key. V4 also captures chelis#942's
+/// serialized positional-expand obligations inside `TypeEnv`.
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 4;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///

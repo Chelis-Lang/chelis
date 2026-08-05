@@ -357,15 +357,15 @@ fn lower_one_hot_node(out: &mut Dag, indices: NodeId, source: &DagNode, vocab: u
             source.span_id.clone(),
         );
         let padded = out.add_node(
-            RiscOp::Pad {
-                padding: indices_ty
+            RiscOp::zero_pad(
+                source.output_type.precision,
+                indices_ty
                     .dims
                     .iter()
                     .map(|_| (RtDim::Lit(0), RtDim::Lit(0)))
                     .chain([(RtDim::Lit(class), RtDim::Lit(vocab - class - 1))])
                     .collect(),
-                fill: 0.0,
-            },
+            ),
             vec![col],
             source.output_type.clone(),
             source.span_id.clone(),
