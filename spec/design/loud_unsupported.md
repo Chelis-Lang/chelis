@@ -15,10 +15,17 @@ syntactic `reject_*` inventory (source path, name, and visibility for free
 functions and `impl` methods across both crate source trees) in
 `crates/chelis-compiler-api/tests/phase3_gate_inventory.rs`. Shared gates take
 the closed `BuildTarget` enum, so an unknown target cannot silently skip a
-gate. Census rows
-17-18 are converted; row 26 remains live for the CLI-local Metal/effect
-diagnostics and the full Phase 3 oracle. Deliverables 1, 2, and 5 are
-therefore partial, not complete. Phase 3 was amended 2026-07-30 to absorb
+gate. The final gate-contract slice moved the Metal and effect policies to
+compiler-api as typed shared definitions, applied the effect policy to host
+tensor-helper DAGs as well as pure DAGs, and scoped pure-DAG rejection to the
+entry actually emitted. It prevents a host tensor-helper `dropout` from
+reaching the C emitter's panic boundary, cites the compiled-kernel owner
+[#1192], and replaces stale closed-#616 Metal/HIP diagnostic prose with the
+deciding [05-MOV-1] atom. Census rows 17-18 and row 26 are converted. The
+authoritative Phase 3 runner now exists, but
+its final root-realizability leg deliberately remains red until independently
+owned [#912] removes the ignored/stubbed integration cases. Phase 3 is
+therefore not complete. Phase 3 was amended 2026-07-30 to absorb
 the typed slices. Phase 4
 (ratchet totality, §C7) was added 2026-07-30 after the nine-PR
 class-coverage review recorded on [#730] found four holes in this plan's
@@ -320,8 +327,13 @@ authority. The windowed-reduction dtype gap cites its implementation owner
 [#1058], compiled tensor/list `to_string` cites [#1059], and host-runtime-only
 builders cite the deliberate [05-HOST-1] contract; remediation instances
 [#705], [#725], [#734], and [#959] are not capability owners.
-The remaining Phase 3 work is the CLI-local Metal/effect gate migration and
-the full phase oracle; these focused slices do not claim Phase 3 completion.
+Compiled `dropout` rejection cites its actual kernel owner [#1192]; the shared
+host-helper traversal closes the former C-emitter panic path, while
+entry-scoped pure-DAG compilation ignores unsupported effects in siblings it
+does not emit. The remaining Phase 3 work is the independently owned [#912]
+root-realizability interlock. The Metal/effect gate migration and the full
+phase runner are implemented, but those focused slices do not claim Phase 3
+completion while the runner's final leg is red.
 
 The amended Phase 3 replaces the bare `hint` field on `Unsupported`
 with an OPAQUE `RejectionAuthority` type. Two things are NOT the
@@ -661,7 +673,7 @@ between the amended Phase 3 (row 26) and Phase 4 scope entry plus
 |---|---|---|---|---|
 | 24 | the lowering/emission panic family: `emit_fused_elem`/`emit_fused_reduce` f32-hardcoded panics in `chelis-backend-c/src/emit.rs` plus ~150 production `panic!`/`unreachable!`/`todo!` across `chelis-ir` and the three backends, ~44 of them §C2 rejections wearing panics (row-two: panic, not substitution - the rows 11/12 class, uncensused growth) | - | [#919] (the fused pair) + [#957] (the family) | live (population measured 2026-07-30; the fused pair execution-confirmed per [#919]); backing tests land with the Phase 4 §C7.2 sweep |
 | 25 | `chelis-ir/src/host.rs` einsum output-precision inference: the `.unwrap_or(chelis_types::types::Prim::F32)` site (line 8843 as of 2026-08-04, re-measured; the token is the durable anchor - #975 already moved it once, and the site has drifted again since) - path-qualified, so the `unwrap_or(Prim::` token misses it; in-scope for the class and absent from BASELINE | F32 precision | [#958] | live-suspect (liveness not execution-confirmed - the empty-operand path may be checker-guarded); §C1.4 raise-or-prove applies regardless; converted at Phase 4 |
-| 26 | the rejection-inventory class, anchored to expression identities rather than line numbers: the CLI-local `reject_*` family and hand-typed `"unsupported: "` literals, plus compiler-api free-literal kinds, debug/substr kind dispatch, and uncited window-gate hints | (gate/kind skew, not a value) | [#959] | PARTIALLY CONVERTED (2026-08-04). PR [#1037] sealed the diagnostic-kind and authority channels. The first gate-contract slice then removed the duplicate HIP, host-builtin, eval-only, and windowed-reduction definitions from `chelis-cli`; both public build paths consume the typed compiler-api definitions, the stale C precision pair is deleted, shared gate targets are closed by `BuildTarget`, and `phase3_gate_inventory.rs` recursively freezes every syntactic `reject_*` definition under both crate source trees by source path, name, and visibility. That inventory deliberately does not claim semantic detection of a reimplementation hidden under an unrelated name; the typed shared-policy boundary and review remain the controls for that broader property. Remaining: the CLI-local Metal/effect gates and one hand-typed `"unsupported: "` literal must move through typed `Unsupported` constructors before the full Phase 3 oracle can pass |
+| 26 | the rejection-inventory class, anchored to expression identities rather than line numbers: the CLI-local `reject_*` family and hand-typed `"unsupported: "` literals, plus compiler-api free-literal kinds, debug/substr kind dispatch, and uncited window-gate hints | (gate/kind skew, not a value) | [#959] | CONVERTED (2026-08-05). PR [#1037] sealed the diagnostic-kind and authority channels. The first gate-contract slice removed the duplicate HIP, host-builtin, eval-only, and windowed-reduction definitions from `chelis-cli`; the final slice moved the Metal/effect definitions into compiler-api, routes Surf and Deep plus host tensor-helper DAGs through those typed policies, and replaced Metal's hand-typed brand and closed-#616 prose with [04-TGT-1], [05-MOV-1], or the open [#729] implementation owner as appropriate. Both public build paths consume the typed compiler-api definitions, the stale C precision pair is deleted, shared gate targets are closed by `BuildTarget`, and `phase3_gate_inventory.rs` recursively freezes every syntactic `reject_*` definition under both crate source trees by source path, name, and visibility. That inventory deliberately does not claim semantic detection of a reimplementation hidden under an unrelated name; the typed shared-policy boundary and review remain the controls for that broader property. The full Phase 3 runner exists; its independent [#912] interlock, not row 26, remains red |
 | 27 | `chelis-python` raw-i32 dtype surface: `dtype: i32` struct fields, no decode-on-entry anywhere, string-gated dtype checks, hardcoded DLPack `code: 2, bits: 32`, 4 production `unwrap_or_default()` - the crate is outside every `UnwrapOr*` tripwire scope and the Phase 2 oracle's evidence set | dtype identity by convention | [#960] (requirement half; representation fix shape is [#893]'s - the runtime-representation tracker, corrected 2026-07-30 from the earlier [#909] misassignment) | live ([#900] is the executed value-corrupting instance); scope entry + §C6.2 row at Phase 4; FFI/representation redesign at [#893] |
 
 `chelis-runtime` is deliberately not a row: it is the reference
@@ -1738,19 +1750,18 @@ demonstrations that the unpoliced shape is actively widening (PR
 [#891]'s 1 -> 21 eval-only gate names; PR [#822]'s `"compile_error"`
 mislabel).
 
-**Delivery status (2026-08-04): the first gate-contract slice is
-implemented, but Phase 3 is not complete.** The CLI now consumes
-compiler-api's typed host-builtin, eval-only, HIP, and windowed-reduction
-gate definitions; its obsolete C precision pair is deleted; all shared gate
-target arguments use the closed `BuildTarget` enum; direct-load f16/bf16
+**Delivery status (2026-08-05): the gate, kind, and authority work is
+implemented, but Phase 3 is not complete.** The CLI consumes compiler-api's
+typed host-builtin, eval-only, effect, HIP, Metal, and windowed-reduction gate
+definitions; its obsolete C precision pair is deleted; all shared gate target
+arguments use the closed `BuildTarget` enum; direct-load f16/bf16
 `BlasMatmul` remains admitted while actual narrow-float operand compute is
 rejected; and the exact syntactic `reject_*` inventories (path, name, and
 visibility across every Rust file, nested free function, and `impl` method in
-both crate source trees)
-are locked by a parsed-source tripwire. The tripwire does not claim semantic
-uniqueness for unrelated function names.
-The remaining row-26 work is the CLI-local Metal/effect diagnostic migration
-and the full oracle below.
+both crate source trees) are locked by a parsed-source tripwire. The tripwire
+does not claim semantic uniqueness for unrelated function names. The only
+remaining Phase 3 deliverable is the independently owned [#912]
+root-realizability integration.
 
 **You deliver:**
 
@@ -1808,7 +1819,10 @@ span threading and the check-JSON serialization mechanics
 `Serialize`); deciding which roots exist, their order, or whether an artifact
 is owed ([#912]).
 
-**Oracle:** the rejected-cells corpus stable (or improved-with-updated-
+**Oracle:** `.venv/bin/python scripts/loud_unsupported_phase3_oracle.py` is
+the single authoritative Phase 3 command. Success is exit 0 with final line
+`LOUD UNSUPPORTED PHASE 3 ORACLE: PASS`. It runs the rejected-cells corpus
+and requires it to remain stable (or improved-with-updated-
 expectations in the same PR) - substring-level today by design, with
 byte-exact per-lane assertions arriving via the [#732] Phase 3
 handshake, a named cross-plan residual this phase does not wait for;
@@ -1836,7 +1850,9 @@ control is an open ISSUE manifest row (chelis#879), which passes those
 structural checks; deliberately attaching that unrelated issue to a
 rejection is the paired review-negative control and MUST be rejected
 in review. The machine check does not pretend to prove that semantic
-relationship.
+relationship. Its final leg runs `issue_912_root_boundary` including ignored
+tests; that leg is intentionally red as of 2026-08-05, so the runner cannot
+print PASS and Phase 3 cannot be called complete until [#912] lands.
 
 ## Phase 4 - ratchet totality (added 2026-07-30)
 
@@ -2268,5 +2284,6 @@ and never depends on predicting a path.
 [#1144]: https://github.com/Chelis-Lang/chelis/pull/1144
 [#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
+[#1192]: https://github.com/Chelis-Lang/chelis/issues/1192
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
