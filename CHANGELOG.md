@@ -6,6 +6,238 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.4] — 2026-08-05
+
+This release is dominated by breaking boundary changes: the published C
+ABI widens its dimension carrier to 64 bits, the Surf grammar moves to
+canonical v0.19, the checker enforces the deferred-inference and
+`defsig` declaration contracts, and the WireDag payload schema advances
+to 5. Read the four **BREAKING** entries below before upgrading.
+
+The Surf grammar change ships with a migration tool —
+`chelis migrate surf --from 0.18 --inplace <paths>...` — which handles
+everything except identifiers that became reserved words; those need an
+authored rename. The C ABI change needs a rebuild against the new
+header, WireDag payloads migrate on read, and the `defsig` change needs
+authored edits.
+
+### Added
+
+- **`chelis migrate surf` — the source migration tool for the new Surf
+  grammar (chelis#1031).** The grammar this release canonicalizes is
+  named **Surf v0.19**, and the migrator rewrites the isolated **Surf
+  v0.18** grammar into it. Note that the grammar version and the
+  compiler version are on separate tracks: chelis 0.18.4 reads the v0.18
+  grammar and writes canonical v0.19.
+
+  ```sh
+  chelis migrate surf --from 0.18 --check   <paths>...  # report, write nothing
+  chelis migrate surf --from 0.18 --inplace <paths>...  # rewrite the batch
+  chelis migrate surf --from 0.18           <path>      # print to stdout
+  ```
+
+  `--from 0.18` is required and is the only accepted value. `--check`
+  exits non-zero listing every path that still needs migrating;
+  `--inplace` rewrites; passing neither prints the migrated source to
+  stdout and accepts **exactly one** path. `--check` and `--inplace`
+  together is an error.
+
+  **The preflight covers the whole batch before any file is written.**
+  Each path must migrate cleanly, be a fixed point of the canonical
+  formatter, re-parse, and satisfy the
+  Surf → Deep → Surf → Deep structural oracle after macro expansion; a
+  failure anywhere aborts the run with nothing changed. Writes then
+  stage beside each destination and replace atomically with rollback on
+  a later failure, preserving the original file permissions. A path
+  that is a symlink, or a regular file with more than one hard link, is
+  rejected rather than followed or broken.
+
+  Identifiers that became reserved words are **not** guessed. The
+  migrator stops with `identifier <name> is reserved in canonical Surf;
+  rename it manually before migrating`, naming the byte offset, and the
+  rename is yours to author.
+
+- **[04-NUM-15]: elementwise trap offender selection (chelis#1169,
+  chelis#1152).** When an elementwise trapping operation has several
+  offending elements whose trap kinds disagree, the offender with the
+  **lowest row-major flat index** determines the reported trap. This was
+  previously unauthored, so the reported kind was scheduling-dependent
+  under OpenMP while eval was biased toward `Domain` by its whole-buffer
+  pre-pass. The rule follows [04-NUM-10]'s "first failing element index"
+  and `Scatter`'s existing row-major deterministic order rather than
+  inventing a third convention.
+
+- **[05-DIM-3] and [05-OP-8..10] (chelis#1181).** The controlling atoms
+  for the axis/extent domain split and for the numeric callables this
+  release seals, registered in the capacity census's semantic registry.
+
+### Changed
+
+- **BREAKING — the published C ABI carries extents as `int64_t`
+  (chelis#1149, part of chelis#1112).** `chelis_tensor`'s `shape`,
+  `strides`, and `size` fields are now `int64_t`; `chelis_alloc` and
+  `chelis_alloc_view` take `const int64_t *shape`. `ndim` and `dtype`
+  stay `int` — rank and the dtype tag are axis-domain, bounded by
+  `CHELIS_MAX_DIM` and the dtype table, not extents. In the other
+  direction, `chelis_tensor_shape`'s `axis` parameter **narrows** from
+  `int64_t` to `int32_t`, the axis-domain half of [05-DIM-1]; its return
+  was already `int64_t`. The `static inline` index helpers, the Rust
+  `#[repr(C)]` mirror in `chelis-runtime`, every `#[no_mangle]`
+  implementation, and the PyO3 host `ChelisTensor` mirror follow.
+  Emitted C carries `int64_t` for extents, strides, flat offsets,
+  per-axis coordinates, and element counts, and renders them with
+  `%lld`.
+
+  **Anything that links against `chelis_runtime.h`, or that compiles or
+  consumes emitted C, must be rebuilt against the new header.** A stale
+  caller passing `int *shape` to `chelis_alloc` is now a pointer-type
+  mismatch, and a stale struct definition disagrees with the runtime
+  about field offsets. `ChelisGpuTensor` deliberately does **not**
+  change: it mirrors `chelis_hip_runtime.h`'s separate
+  `chelis_gpu_tensor`, whose carrier is unchanged.
+
+  The 0.18.3 `chelis_host_reshape_tensor` guard that trapped
+  `dim > 2147483647LL` is removed together with the truncating `(int)`
+  store it protected — with a 64-bit carrier there is nothing left to
+  truncate. One narrowing is retained deliberately: Accelerate's vForce
+  batch API takes `const int *` for its element count, a foreign ABI
+  that does not widen, so above `INT_MAX` the emitter takes the scalar
+  loop instead of casting a wrapped prefix.
+
+- **BREAKING — the Surf grammar changed: v0.19 is the one canonical
+  written form, and `chelis fmt` output changed with it (chelis#1031).**
+  *Migration tool: `chelis migrate surf --from 0.18`, documented under
+  **Added** above.* This release defines a single canonical
+  repository and producer spelling for Surf while still *accepting* a
+  bounded set of harmless, value-preserving input spellings (one trailing
+  separator in delimited families and in `par`/`do`, value-preserving
+  numeric spellings, valid Unicode escape aliases, whitespace before a
+  parenthesized call). Canonical output picks one spelling; the accepted
+  set is strictly wider than the emitted set.
+
+  Because the style gate runs `chelis fmt --check` ahead of `build`,
+  `check`, `validate`, and `eval --file`, **source that was canonical
+  under 0.18.3 can now fail the gate**. Run
+  `chelis migrate surf --from 0.18 --inplace` (or `chelis fmt --inplace`)
+  across your tree. Semantic boundaries stay closed and are *not*
+  migrated for you: suffix adoption, overflow, non-finite values, literal
+  patterns, raw controls, invalid escapes, and structurally ambiguous
+  legacy forms still reject. Juxtaposition remains rejected — Chelis has
+  flat multi-argument application and no implicit currying. `unit`
+  remains the unit type and `()` the unit value.
+
+  Decompilation now routes through a typed Deep-to-Surf AST resugaring
+  boundary and the shared Surf printer, with a total disposition for
+  every public Deep tag, and fails closed on malformed Deep, invalid
+  surface identifiers, unknown `surf_*` metadata, incompatible literal
+  metadata, and non-finite constructed values. Three laws are now
+  executable against the real CLI pipeline:
+  `desugar(resugar(deep)) = normalize_deep(deep)`,
+  `format(format(surf)) = format(surf)`, and
+  `normalize_deep(desugar(resugar(desugar(surf)))) = normalize_deep(desugar(surf))`.
+  Diagnostics continue to point at **authored** byte offsets: the
+  compiler parses the original source once, keeps its spans, and prints
+  a separate canonical representation only for style comparison.
+
+- **BREAKING — `defsig` is a same-unit annotation, and deferred inference
+  must resolve at its declaration ([04-INF-1], chelis#1178).** A `defsig`
+  is now an annotation for a matching `def` **in the same unit**; only a
+  narrow, provenance-marked linked-dependency shell survives as an
+  exception. An orphan `defsig` no longer checks. Separately, [04-INF-1]
+  makes unknown-constructor obligations — synthesized signature holes,
+  authored bare type variables, and projection-derived variables — stay
+  lambda-owned, bind monomorphically on first use *within their
+  declaration*, and **reject if still unresolved at that declaration
+  boundary**. The boundary is declaration-local by design: a result
+  annotation or a later top-level caller cannot retroactively bind an
+  earlier declaration, and the diagnostic says so.
+
+  Type-metadata writeback is now monotone, so unresolved, error-derived,
+  dimension-variable, rank-variable, and wildcard candidates can no
+  longer clobber a more informative annotation. Every builtin declares an
+  exact inference disposition, backed by bidirectional route tripwires
+  and a runtime execution witness, and `scatter_elements` gains its
+  complete shape/dtype/axis rule. Programs that leaned on an
+  under-constrained signature hole, or on a cross-unit `defsig`, need
+  authored annotations.
+
+- **BREAKING — WireDag payload schema 4 → 5 (chelis#1181).** `Pad` fill
+  values are now sealed in `ScalarValue` from checking through IR,
+  WireDag, evaluation, proof extraction, and C/HIP/Metal emission.
+  Legacy schema-4 payloads migrate by deriving the fill dtype from the
+  owning result; malformed or falsely-versioned payloads are rejected
+  rather than guessed. Serialized DAGs written by 0.18.3 and earlier are
+  read through that migration; artifacts written by 0.18.4 are not
+  readable by older compilers.
+
+- **Integer overflow traps identically in debug and release
+  (chelis#1181).** `scatter`, `cumsum`, `trace`, and `einsum` previously
+  trapped integer overflow only in debug builds. They now trap in both,
+  so a release binary no longer silently wraps where the debug binary
+  aborted. Exact integer-to-float representability is centralized, and
+  `uniform_like` is dtype-aware.
+
+- **Axis and extent domains are enforced consistently (chelis#1181,
+  chelis#1112).** Every builtin declares its axis layout, axis values are
+  int32 across the board, and `reduce_window` extents move to
+  `List<int64>`. Positional `expand` now carries a monomorphic deferred
+  two-shape obligation until a declared result or a shape-bearing
+  consumer selects replacement versus insertion; `cast` handles inferred
+  tensor states exhaustively, so a shape-neutral `cast` materializes
+  positional `expand`'s documented default while unrelated ranks — and
+  two consumers choosing different shapes for one binding — fail loudly
+  instead of silently picking one.
+
+- **HIP rejects real f16/bf16 operand compute before emission
+  (chelis#1175).** The typed host-builtin, eval-only, HIP, and
+  windowed-reduction gates are now one policy shared by both public build
+  paths, so a gate can no longer be strict in one path and absent in the
+  other (chelis#697, chelis#698, chelis#705). Gate target parameters are
+  closed over the `BuildTarget` enum — the CLI decodes the target string
+  once at its boundary and an unknown spelling now fails instead of
+  silently skipping a gate. The HIP dtype policy is reconciled with
+  supported f64, integer, and direct-load narrow-matmul cells; f16/bf16
+  direct-load `matmul(a, b)` stays admitted, while f16/bf16 operand
+  compute such as `matmul(add(a, b), c)` rejects cleanly rather than
+  panicking. Both stale CLI C precision preflights are deleted, so dtype
+  admission no longer changes because an unrelated declaration selected
+  the host lane.
+
+- **Three rejection diagnostics now cite their real owner (chelis#1164).**
+  Sites that named chelis#691 and chelis#714 — both repaired on `main` —
+  are re-cited to chelis#729, and those two issues drop out of the
+  rejection-authority manifest. No rejection is removed and no site
+  becomes silent; only the cited issue changes.
+
+### Fixed
+
+- chelis#1181 closes chelis#878, chelis#901, chelis#937, chelis#942,
+  chelis#980, chelis#1009, and chelis#1113.
+- chelis#1178 closes chelis#780, chelis#783, chelis#847, chelis#851,
+  chelis#1131, and chelis#1147, and repairs the checker half of
+  chelis#850 (native emission honesty remains open under chelis#730 and
+  chelis#763). It also centralizes the exhaustive Deep pattern-binder
+  policy and repairs match-arm eager-reference scoping.
+- chelis#1031 fixes the un-negated signed-minimum magnitude (a source
+  diagnostic plus checked negation during integer extraction, so double
+  negation traps instead of aborting the compiler) and makes conflicting
+  `defsig`, definition, function, parameter, property-quantifier, and
+  property-result metadata fail closed.
+
+### Known issues
+
+- **chelis#1112 is not finished.** This release widens the C carrier and
+  seals the axis domain, but the producer/consumer extent-dtype work
+  continues under that issue.
+- **chelis#1179** (integer literals accepted as ordinary types) and
+  **chelis#1180** (reversed operand evaluation order for `a > b`) both
+  predate this release and are tracked under chelis#1024.
+- **chelis#1172**: the broader structural-span defect class is not
+  repaired here.
+- **chelis#1128**: `scripts/bump_compiler_pins.py` still misses the
+  checkpoint compile-fail fixture's `Cargo.lock`, which the release
+  operator must regenerate by hand.
+
 ## [0.18.3] — 2026-08-04
 
 ### Added
