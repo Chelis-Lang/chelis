@@ -443,8 +443,17 @@ pub struct PreparedProgram {
     pub stdlib_decls: Vec<Decl>,
     /// `decls` minus `stdlib_decls`, in the same relative order: the
     /// user package's own modules plus any non-stdlib path-deps. Checked
-    /// `_with_context` against the cached chelis-std sub-context. The
-    /// concatenation `stdlib_decls ++ non_stdlib_decls` equals `decls`.
+    /// `_with_context` against the cached chelis-std sub-context.
+    ///
+    /// For a multi-dependency graph the assembly is `stdlib ++ deps ++ root`
+    /// (chelis#1182: the root package's modules are emitted last, so every
+    /// dependency lands in the cached prefix), so `stdlib_decls ++
+    /// non_stdlib_decls` equals `decls` exactly. For a dep-free graph the
+    /// original package-name walk order is preserved (output unchanged), where
+    /// that concatenation may not hold if the root name sorts before
+    /// "chelis-std" -- harmless, since build-time pruning virtually always
+    /// fires and the layered `CheckedCompilation` is then not the codegen
+    /// target.
     pub non_stdlib_decls: Vec<Decl>,
     /// Linker-produced declarations owned by resolved dependency packages
     /// (including chelis-std), excluding every declaration from the root
@@ -524,24 +533,23 @@ impl PreparedProgram {
     /// `stdlib ++ dependency ++ entry` reconstructs
     /// `stdlib ++ non_stdlib == decls`).
     ///
-    /// Why a prefix/suffix split and not "all dependency packages": the
-    /// reef linker orders `non_stdlib_decls` by package name
-    /// (`BTreeMap` walk), so the root package's modules are *interleaved*
-    /// with dependency packages rather than forming a contiguous block. A
-    /// dependency package that sorts after the root lands in the entry
-    /// suffix and is re-analyzed each build; only the decls that sort
-    /// before the entry module are cached. This keeps the split a pure
-    /// prefix/suffix of `non_stdlib_decls` (no reordering, so no risk of
-    /// perturbing the composed program's declaration order), at the cost
-    /// of not caching post-root dependencies.
+    /// The prefix holds ALL dependency packages: `prepare_graph_from_loaded`
+    /// emits the root package's modules LAST among the non-stdlib decls for a
+    /// multi-dependency graph (chelis#1182), so every dependency package sorts
+    /// before the entry module and lands in the cached prefix, independent of
+    /// how the root package name sorts. The root's own modules (including the
+    /// entry) form the trailing block; those before the entry module are still
+    /// cached, the entry module onward is re-analyzed. The split stays a pure
+    /// prefix/suffix of `non_stdlib_decls` because the reorder is applied ONCE,
+    /// at the linker assembly, to BOTH the monolithic `decls` and this
+    /// partition — so the composed `stdlib ++ dependency ++ entry` still equals
+    /// the monolithic program and the two paths stay byte-identical.
     ///
-    /// Note the "dependency prefix" is not only path-dependency *packages*: for
-    /// a single-package project it is the user's OWN non-entry sibling modules,
-    /// and the split point is decided by module-name sort order relative to the
-    /// entry module — there need be no `[dependencies]` table at all. One
-    /// consequence worth stating outright: renaming the entry module can move it
-    /// before its siblings in that order and thereby silently disable the whole
-    /// Layer-2 cache for the package (see chelis#1182 for the ordering fix).
+    /// For a dep-free single-package project no reorder is applied (output stays
+    /// byte-identical), so the "dependency prefix" is the user's OWN non-entry
+    /// sibling modules that sort before the entry module in the package-name
+    /// walk; renaming the entry module can move it earlier and shrink what is
+    /// cached for that package.
     ///
     /// The entry module's declarations are a contiguous run inside
     /// `non_stdlib_decls` (they come from one linked module), and
@@ -2129,15 +2137,53 @@ fn prepare_graph_from_loaded(
         .map(|package| package.manifest.package.module_prefix.clone())
         .unwrap_or_default();
 
-    // Partition the linked library decls into the chelis-std slice and
-    // everything else, preserving relative order so the concatenation
-    // `stdlib ++ non_stdlib` equals `linked_library_decls`. The
-    // chelis-std typecheck cache content-addresses the stdlib slice.
+    // chelis#1182: emit the ROOT package's modules LAST among the non-stdlib
+    // decls, so every dependency (shell) package lands in the cached dependency
+    // prefix that `dependency_entry_partition` splits before the entry module --
+    // regardless of how the root package name sorts against the deps. The reef
+    // linker walks packages in BTreeMap (name) order, so without this the root
+    // is interleaved and a dependency sorting after the root name is re-inferred
+    // every build (chelis#1182). Only reorder when the graph has a real
+    // dependency (a non-std, non-root package); a dep-free project keeps the
+    // original package-name walk byte-for-byte -- chelis-std is ALWAYS in the
+    // graph, so reordering unconditionally would move an early-sorting single
+    // package after chelis-std and perturb its output.
+    //
+    // Assembling `stdlib ++ deps ++ root` for a reordered graph also restores
+    // the `stdlib_decls ++ non_stdlib_decls == decls` invariant (otherwise only
+    // approximately true when a package name sorts before "chelis-std"). The
+    // reorder is confined to this assembly loop; `link_graph_with_package_tags`
+    // output order is unchanged, so reef build / schema artifacts do not churn.
+    let has_dependency = linked
+        .iter()
+        .any(|(name, _)| name.as_str() != CHELIS_STD_PACKAGE_NAME && name != &graph.root_package);
+    let ordered: Vec<(String, LinkedModule)> = if has_dependency {
+        let mut std_mods = Vec::new();
+        let mut dep_mods = Vec::new();
+        let mut root_mods = Vec::new();
+        for entry in linked {
+            if entry.0 == CHELIS_STD_PACKAGE_NAME {
+                std_mods.push(entry);
+            } else if entry.0 == graph.root_package {
+                root_mods.push(entry);
+            } else {
+                dep_mods.push(entry);
+            }
+        }
+        std_mods
+            .into_iter()
+            .chain(dep_mods)
+            .chain(root_mods)
+            .collect()
+    } else {
+        linked
+    };
+
     let mut linked_library_decls = Vec::new();
     let mut linked_stdlib_decls = Vec::new();
     let mut linked_non_stdlib_library_decls = Vec::new();
     let mut linked_dependency_decls = Vec::new();
-    for (package_name, module) in linked {
+    for (package_name, module) in ordered {
         if package_name == CHELIS_STD_PACKAGE_NAME {
             linked_stdlib_decls.extend(module.decls.iter().cloned());
         } else {
@@ -2163,7 +2209,11 @@ fn prepare_graph_from_loaded(
 }
 
 const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 1;
+// v2 (chelis#1182): the assembly loop now emits the root package's modules last
+// for multi-dependency graphs, changing the serialized decl order. Bumped so a
+// warm project does not load a stale old-order graph (which would make #1182
+// inert and make the same binary emit different C depending on cache state).
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
@@ -8949,15 +8999,18 @@ mod tests {
     /// begin with the entry module.
     #[test]
     fn dependency_entry_partition_reconstructs_non_stdlib() {
-        // Case A: dependency package sorts BEFORE the root ("coral" <
-        // "school"), so the entry is a suffix and the dependency prefix is
-        // non-empty (the cache engages).
-        // Case B: dependency package sorts AFTER the root ("aaaapp" <
-        // "zzzlib"), so the entry is the prefix and the dependency prefix
-        // is empty (the split degenerates to two-layer behavior).
+        // chelis#1182: `prepare_graph_from_loaded` emits the root package's
+        // modules LAST for a multi-dependency graph, so EITHER ordering leaves
+        // the dependency package before the entry module -> the dependency
+        // prefix is non-empty and the cache engages. (Before #1182, Case B --
+        // a dependency sorting after the root -- degenerated to an empty
+        // prefix / two-layer behavior; that is exactly the ordering dependence
+        // #1182 removes.)
+        // Case A: dependency ("coral") sorts BEFORE the root ("school").
+        // Case B: dependency ("zzzlib") sorts AFTER the root ("aaaapp").
         for (root_name, root_prefix, dep_name, dep_prefix, expect_nonempty_dep_prefix) in [
             ("school", "School", "coral", "Coral", true),
-            ("aaaapp", "Aaaapp", "zzzlib", "Zzzlib", false),
+            ("aaaapp", "Aaaapp", "zzzlib", "Zzzlib", true),
         ] {
             let (_dir, root) = two_pkg_fixture(root_name, root_prefix, dep_name, dep_prefix);
             let entry = root.join("src/main.ch");

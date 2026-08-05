@@ -241,15 +241,104 @@ pub fn load_or_build_library_context(
     // Only a clean compose is cacheable; an `Ok(None)` fallback is not an
     // artifact and must not be written (the next build re-derives the
     // byte-identical monolithic error path).
-    if let Some(ctx) = &built
-        && let Err(e) = cache_envelope::save(&cache_path, key, ctx)
-    {
-        eprintln!(
-            "chelis: warning: failed to write dependency typecheck cache to {}: {e}",
-            cache_path.display()
-        );
+    if let Some(ctx) = &built {
+        match cache_envelope::save(&cache_path, key, ctx) {
+            Ok(()) => {
+                // chelis#1183: keep the cache dir bounded. Only on the miss
+                // path, after a successful write, never evicting what we just
+                // wrote. Best-effort.
+                evict_typecheck_cache(&cache_dir, &cache_path);
+            }
+            Err(e) => {
+                eprintln!(
+                    "chelis: warning: failed to write dependency typecheck cache to {}: {e}",
+                    cache_path.display()
+                );
+            }
+        }
     }
     Ok(built)
+}
+
+/// Default size cap on the typecheck cache directory (512 MiB). Overridable via
+/// `CHELIS_TYPECHECK_CACHE_MAX_BYTES`. See [`evict_typecheck_cache`].
+const DEFAULT_TYPECHECK_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+fn typecheck_cache_max_bytes() -> u64 {
+    std::env::var("CHELIS_TYPECHECK_CACHE_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TYPECHECK_CACHE_MAX_BYTES)
+}
+
+/// Best-effort eviction to keep the typecheck cache dir under
+/// [`typecheck_cache_max_bytes`] (chelis#1183). Layer 1 (`chelis-std-*.tc`) is
+/// bounded by toolchain identity, but Layer 2 (`chelis-lib-*.tc`) is keyed on
+/// user source and churns ~MiB per sibling/entry edit with nothing reclaiming
+/// it. Called only on the miss path, after a successful write.
+///
+/// Policy: evict oldest-first by mtime, but `chelis-lib-*` BEFORE `chelis-std-*`
+/// — the stdlib entry is written once and hit forever, so it would otherwise be
+/// the oldest file and the first casualty, forcing a costly re-inference. The
+/// just-written entry is never evicted. Also sweeps `.tmp.*` orphans older than
+/// an hour (age-gated so it never races an in-flight `save`'s rename). Every
+/// filesystem error is ignored: eviction must never fail a build, and a reader
+/// that loses the unlink race falls through to a clean recompute.
+fn evict_typecheck_cache(cache_dir: &Path, just_written: &Path) {
+    let max_bytes = typecheck_cache_max_bytes();
+    let Ok(read_dir) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    // (path, size, mtime, is_lib)
+    let mut entries: Vec<(PathBuf, u64, std::time::SystemTime, bool)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in read_dir.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let mtime = meta.modified().unwrap_or(now);
+        if name.contains(".tmp.") || name.ends_with(".tmp") {
+            // Age-gated orphan sweep: only reap a temp file too old to be an
+            // in-flight `save` about to rename into place.
+            if now
+                .duration_since(mtime)
+                .map(|age| age.as_secs() > 3600)
+                .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+            continue;
+        }
+        if !(name.starts_with("chelis-lib-") || name.starts_with("chelis-std-")) {
+            continue;
+        }
+        total += meta.len();
+        let is_lib = name.starts_with("chelis-lib-");
+        entries.push((entry.path(), meta.len(), mtime, is_lib));
+    }
+    if total <= max_bytes {
+        return;
+    }
+    // `chelis-lib-*` first (b.is_lib vs a.is_lib puts true first), then
+    // oldest-first by mtime within each group.
+    entries.sort_by(|a, b| b.3.cmp(&a.3).then(a.2.cmp(&b.2)));
+    for (path, size, _, _) in entries {
+        if total <= max_bytes {
+            break;
+        }
+        if path == just_written {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
 }
 
 /// Build a [`LibraryContext`] by stacking the dependency decls on the

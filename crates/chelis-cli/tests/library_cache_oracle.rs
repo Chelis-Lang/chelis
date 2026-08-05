@@ -637,6 +637,140 @@ fn chelis_std_declares_no_macros() {
     );
 }
 
+/// Like `stage_dep_fixture` but with explicit package names, so a test can put
+/// the dependency package AFTER the root in name order (the chelis#1182 case).
+fn stage_named_dep_fixture(
+    scratch: &Path,
+    root_name: &str,
+    root_prefix: &str,
+    dep_name: &str,
+    dep_prefix: &str,
+    dep_body: &str,
+    entry_body: &str,
+) -> PathBuf {
+    let root = scratch.join(root_name);
+    write(
+        &root.join("reef.toml"),
+        &format!(
+            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./{dep_name}\" }}\n"
+        ),
+    );
+    write(&root.join("src/main.ch"), entry_body);
+    write(
+        &root.join(format!("{dep_name}/reef.toml")),
+        &format!(
+            "[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{dep_prefix}\"\n"
+        ),
+    );
+    write(&root.join(format!("{dep_name}/src/math.ch")), dep_body);
+    write(
+        &root.join("reef.lock"),
+        &format!(
+            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./{dep_name}\"\n"
+        ),
+    );
+    root.join("src/main.ch")
+}
+
+#[test]
+fn dependency_after_root_engages_cache_and_matches_monolithic() {
+    // chelis#1182 acceptance: a dependency package whose name sorts AFTER the
+    // root's used to land in the entry suffix (re-inferred every build, no
+    // artifact written). With the root emitted last, it lands in the cached
+    // prefix. Assert the artifact IS written AND warm C == monolithic C.
+    let (scratch, cache_home) = fresh_cache_home();
+    let entry = stage_named_dep_fixture(
+        scratch.path(),
+        "pseudo-app",
+        "PseudoApp",
+        "zzdep", // "zzdep" > "pseudo-app": sorts AFTER the root
+        "Zzdep",
+        "module Zzdep.Math\nexport (zz_add)\n\ndef zz_add(x: int32, y: int32) -> int32 = add(x, y)\n",
+        "module PseudoApp.Main\nimport Zzdep.Math (zz_add)\n\ndef main_value -> int32 = zz_add(cast(3, int32), cast(4, int32))\n",
+    );
+    let monolithic = build_c(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let _cold = build_c(&entry, &cache_home, &[]);
+    let warm = build_c(&entry, &cache_home, &[]);
+    assert!(
+        !library_cache_artifacts(&cache_home).is_empty(),
+        "chelis#1182: a dependency sorting after the root must now be cached \
+         (a chelis-lib-*.tc must be written)"
+    );
+    assert_eq!(
+        monolithic, warm,
+        "after-root dependency: warm C must equal monolithic C"
+    );
+}
+
+/// Total bytes of files under `dir` (0 if unreadable).
+fn dir_size(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Total bytes of `chelis-std-*.tc` entries under `dir`.
+fn std_artifact_bytes(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("chelis-std-"))
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+#[test]
+fn library_cache_evicts_under_cap_and_protects_stdlib() {
+    // chelis#1183: the Layer-2 cache is bounded. Build several distinct-dep
+    // packages with a cap set to force eviction; assert chelis-lib entries are
+    // bounded (older ones evicted), and chelis-std survives (it is evicted only
+    // after all chelis-lib, so a once-written-hit-forever std entry is not the
+    // first casualty).
+    let (scratch, cache_home) = fresh_cache_home();
+    let dep = |i: usize| {
+        format!(
+            "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(add(x, y), cast({i}, int32))\n"
+        )
+    };
+    let entry = "module PseudoApp.Main\nimport Azdep.Math (az_add)\n\ndef main_value -> int32 = az_add(cast(3, int32), cast(4, int32))\n";
+    let td = cache_home.join(".cache").join("typecheck");
+
+    // First build (default cap): writes chelis-std + one chelis-lib.
+    let f0 = stage_dep_fixture(&scratch.path().join("p0"), &dep(0), entry);
+    let _ = build_c(&f0, &cache_home, &[]);
+    assert!(
+        std_artifact_bytes(&td) > 0,
+        "chelis-std artifact must exist after the first build"
+    );
+    // Cap = current dir size, so each new chelis-lib pushes over → eviction.
+    let cap_env = dir_size(&td).to_string();
+    for i in 1..=4 {
+        let f = stage_dep_fixture(&scratch.path().join(format!("p{i}")), &dep(i), entry);
+        let _ = build_c(
+            &f,
+            &cache_home,
+            &[("CHELIS_TYPECHECK_CACHE_MAX_BYTES", &cap_env)],
+        );
+    }
+
+    assert!(
+        std_artifact_bytes(&td) > 0,
+        "chelis-std must survive eviction (chelis-lib is evicted first)"
+    );
+    let lib_count = library_cache_artifacts(&cache_home).len();
+    assert!(
+        lib_count < 5,
+        "eviction must bound chelis-lib entries under the cap; found {lib_count}"
+    );
+}
+
 #[test]
 fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
     // The other oracles use no-chelis-std fixtures. This one imports chelis-std,

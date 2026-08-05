@@ -425,15 +425,15 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
 
     let patterns: Vec<Vec<u8>> = vec![
         vec![],                                               // empty
-        b"CHELIS_CTX_V7\n".to_vec(),                          // magic only, no envelope
-        b"CHELIS_CTX_V6\n".to_vec(),                          // stale-version magic only
+        b"CHELIS_CTX_V8\n".to_vec(),                          // current magic only, no envelope
+        b"CHELIS_CTX_V7\n".to_vec(),                          // stale-version magic only
         b"not a cache file at all".to_vec(),                  // no magic
         vec![0u8; 4096],                                      // all zeros
         vec![0xffu8; 4096],                                   // all ones
         (0..4096).map(|i| ((i * 31) ^ 0x5a) as u8).collect(), // pseudo-random
         {
-            // valid magic followed by garbage
-            let mut v = b"CHELIS_CTX_V7\n".to_vec();
+            // valid (current) magic followed by garbage
+            let mut v = b"CHELIS_CTX_V8\n".to_vec();
             v.extend((0..512).map(|i| (i % 256) as u8));
             v
         },
@@ -485,29 +485,30 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 
 #[test]
 fn a_forged_stale_magic_file_is_rejected_not_decoded() {
-    // The current magic is `CHELIS_CTX_V7\n` (chelis#878). A leftover file
-    // written by a pre-bump binary carries `CHELIS_CTX_V6\n`. Forge one by
-    // taking a real V7 file and rewriting the magic's version digit.
-    // load_if_fresh must reject it (the magic no longer matches), never
-    // attempt to decode the V6-shaped envelope as a V7 one.
-    let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-v4", TRIVIAL_MAIN);
+    // The current magic is `CHELIS_CTX_V8\n` (chelis#1182 decl-order bump, on
+    // top of chelis#878's V7). A leftover file written by a pre-bump binary
+    // carries `CHELIS_CTX_V7\n`. Forge one by taking a real V8 file and
+    // rewriting the magic's version digit. load_if_fresh must reject it (the
+    // magic no longer matches), never attempt to decode the stale-shaped
+    // envelope.
+    let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-stale-magic", TRIVIAL_MAIN);
     assert!(
-        bytes.starts_with(b"CHELIS_CTX_V7\n"),
-        "fixture must be written with the typed-Pad V7 magic"
+        bytes.starts_with(b"CHELIS_CTX_V8\n"),
+        "fixture must be written with the current V8 magic"
     );
 
     let mut forged = bytes.clone();
-    // `CHELIS_CTX_V7\n` -> `CHELIS_CTX_V6\n`: the version digit is at
+    // `CHELIS_CTX_V8\n` -> `CHELIS_CTX_V7\n`: the version digit is at
     // index 12 ("CHELIS_CTX_V" is 12 chars).
-    forged[12] = b'6';
-    fs::write(&cache_path, &forged).expect("write forged V6 file");
+    forged[12] = b'7';
+    fs::write(&cache_path, &forged).expect("write forged stale-magic file");
 
     let outcome =
         CompiledContext::load_if_fresh(&cache_path, Path::new("/tmp/unused"), &cache_path);
     match outcome {
-        Ok(Some(_)) => panic!("a V6-magic file must NEVER load as a V7 Ok(Some(_))"),
+        Ok(Some(_)) => panic!("a stale-magic file must NEVER load as an Ok(Some(_))"),
         Ok(None) => panic!(
-            "a V6-magic file is corrupt bytes for a V7 binary, not a clean miss: \
+            "a stale-magic file is corrupt bytes for the current binary, not a clean miss: \
              load_if_fresh must flag it so the operator sees the version skew"
         ),
         Err(CacheError::Corrupt(_)) => { /* expected: wrong magic header */ }
@@ -520,18 +521,18 @@ fn a_forged_stale_magic_file_is_rejected_not_decoded() {
 
 #[test]
 fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
-    // Distinct from the magic check: keep the V7 magic intact but corrupt
-    // the envelope's `version: u32` field so it decodes to a value other
-    // than 7. load_if_fresh must reject it as
+    // Distinct from the magic check: keep the current magic intact but corrupt
+    // the envelope's `version: u32` field so it decodes to a value other than
+    // the expected one. load_if_fresh must reject it as
     // `CacheError::UnsupportedVersion`, never decode the payload. The
     // envelope `version` field is the first field after the magic, so it
     // sits at bytes [magic.len() .. magic.len()+4].
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-envver", TRIVIAL_MAIN);
-    let magic_len = b"CHELIS_CTX_V7\n".len();
+    let magic_len = b"CHELIS_CTX_V8\n".len();
     assert!(bytes.len() > magic_len + 4);
 
     let mut forged = bytes.clone();
-    // bincode encodes a u32 little-endian; bump the low byte well past 6.
+    // bincode encodes a u32 little-endian; bump the low byte well past 8.
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
@@ -541,8 +542,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 7, "the running binary expects format version 7");
-            assert_ne!(stored, 7, "the forged version must differ from 7");
+            assert_eq!(expected, 8, "the running binary expects format version 8");
+            assert_ne!(stored, 8, "the forged version must differ from 8");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape

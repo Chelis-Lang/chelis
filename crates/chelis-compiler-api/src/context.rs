@@ -707,13 +707,19 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// scalar, and chelis#942 made deferred positional-expand constraints part of
 /// the serialized checker context. Both alter cached bincode shapes; V6 files
 /// are stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V7\n";
+/// V8: chelis#1182 emits the root package's modules LAST in the linker
+/// assembly, so the `reef_state` (`PreparedReefGraph`) decl order serialized
+/// in this cache changed. Without the bump a V7 file written by a pre-#1182
+/// binary would replay the old decl order to a post-#1182 binary at the same
+/// compiler version -- the same stale-order hazard the
+/// `PREPARED_GRAPH_CACHE_VERSION` bump closes for the graph cache.
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V8\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 7;
+const CACHE_FORMAT_VERSION: u32 = 8;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
