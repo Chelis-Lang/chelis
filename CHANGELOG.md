@@ -67,6 +67,26 @@ authored edits.
   and `Scatter`'s existing row-major deterministic order rather than
   inventing a third convention.
 
+  **The rule is enforced in this same release (chelis#1189).** Parallel C
+  DAG casts now reduce the lowest offending row-major flat index and
+  render its trap after the OpenMP region, so the reported kind no longer
+  depends on thread scheduling. Verified across eval, C DAG, and C host at
+  `OMP_NUM_THREADS=1,2,4,8` with Domain and Overflow offenders permuted
+  across lower and higher indices.
+
+- **Checked `cast` is exhaustive over every active dtype pair
+  (chelis#1189).** One `CheckedCastPlan` covers the full source-`Prim` x
+  target-`Prim` product — all 81 active pairs, exercised across scalar,
+  tensor-DAG, and host-built tensor surfaces in both eval and compiled C —
+  with identity only on the exact same-`Prim` diagonal, so a false
+  identity can no longer slip through. The C host tensor path replaces its
+  fallback reinterpretation with typed, stride-aware element conversion:
+  a `permute` followed by a same-type `cast` now materializes in logical
+  row-major order instead of copying in backing order. Direct
+  target-width `f64`/`int64` to `f16`/`bf16` rounding is preserved through
+  private translation-unit helpers, with **no change to the public C ABI**.
+  `cast_trunc` behavior is unchanged. Closes chelis#1150 and chelis#1152.
+
 - **[05-DIM-3] and [05-OP-8..10] (chelis#1181).** The controlling atoms
   for the axis/extent domain split and for the numeric callables this
   release seals, registered in the capacity census's semantic registry.
