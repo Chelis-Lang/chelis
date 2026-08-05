@@ -291,6 +291,39 @@ fn scalar_activation_entry_ignores_an_unemitted_dropout_sibling() {
     );
 }
 
+/// A parameter is a lexical binding, even when its spelling collides with an
+/// unselected top-level function. Entry projection must not retain that
+/// sibling merely because the selected body reads the parameter.
+#[test]
+fn scalar_activation_entry_respects_parameter_shadowing() {
+    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n\
+                  def clean(noisy: f64) -> f64 = gelu(noisy)\n";
+
+    let artifact = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("clean".to_string()),
+    })
+    .expect("a shadowed un-emitted sibling must not block the selected scalar entry");
+
+    let emitted = artifact
+        .compile_result
+        .files
+        .iter()
+        .map(|file| file.contents.as_str())
+        .collect::<String>();
+    assert!(
+        emitted.contains("chelis_host_gelu_f64"),
+        "the selected scalar activation must be emitted:\n{emitted}"
+    );
+    assert!(
+        !emitted.contains("dropout"),
+        "the shadowed unselected sibling must be absent from the artifact:\n{emitted}"
+    );
+}
+
 /// The Deep ingestion branch used to carry its own call sites to the
 /// CLI-local policy. It must now reach the same typed compiler-api gate as
 /// Surf rather than preserving a second stringly rejection path.

@@ -978,64 +978,79 @@ fn project_host_program_to_entry(
         ConcreteHostCallback, ConcreteHostExpr, ConcreteHostExprKind, HostCallbackKind,
     };
 
-    fn collect_callback(callback: &ConcreteHostCallback, out: &mut HashSet<String>) {
+    fn collect_callback(
+        callback: &ConcreteHostCallback,
+        bound: &HashSet<String>,
+        out: &mut HashSet<String>,
+    ) {
         match &callback.kind {
             HostCallbackKind::Named { function, .. } => {
-                out.insert(function.clone());
+                if !bound.contains(function) {
+                    out.insert(function.clone());
+                }
             }
-            HostCallbackKind::Inline { body, .. } => collect_expr(body, out),
+            HostCallbackKind::Inline { params, body } => {
+                let mut scoped = bound.clone();
+                scoped.extend(params.iter().map(|param| param.name.clone()));
+                collect_expr(body, &scoped, out);
+            }
         }
     }
 
-    fn collect_expr(expr: &ConcreteHostExpr, out: &mut HashSet<String>) {
+    fn collect_expr(expr: &ConcreteHostExpr, bound: &HashSet<String>, out: &mut HashSet<String>) {
         match &expr.kind {
             ConcreteHostExprKind::Call { function, args, .. } => {
-                out.insert(function.clone());
+                if !bound.contains(function) {
+                    out.insert(function.clone());
+                }
                 for arg in args {
-                    collect_expr(arg, out);
+                    collect_expr(arg, bound, out);
                 }
             }
             ConcreteHostExprKind::Var(name, _) => {
-                // A bare function value is a dependency too. Ordinary local
-                // names are removed when the set is intersected with defs.
-                out.insert(name.clone());
+                if !bound.contains(name) {
+                    out.insert(name.clone());
+                }
             }
             ConcreteHostExprKind::Builtin { args, .. }
             | ConcreteHostExprKind::TensorCall { args, .. } => {
                 for arg in args {
-                    collect_expr(arg, out);
+                    collect_expr(arg, bound, out);
                 }
             }
             ConcreteHostExprKind::List(items, _) | ConcreteHostExprKind::Tuple(items, _) => {
                 for item in items {
-                    collect_expr(item, out);
+                    collect_expr(item, bound, out);
                 }
             }
             ConcreteHostExprKind::AdtConstruct { fields, .. } => {
                 for field in fields {
-                    collect_expr(field, out);
+                    collect_expr(field, bound, out);
                 }
             }
-            ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, out),
+            ConcreteHostExprKind::AdtFieldAccess { base, .. } => collect_expr(base, bound, out),
             ConcreteHostExprKind::If {
                 cond,
                 then_expr,
                 else_expr,
                 ..
             } => {
-                collect_expr(cond, out);
-                collect_expr(then_expr, out);
-                collect_expr(else_expr, out);
+                collect_expr(cond, bound, out);
+                collect_expr(then_expr, bound, out);
+                collect_expr(else_expr, bound, out);
             }
             ConcreteHostExprKind::MatchOption {
                 scrutinee,
+                bind_name,
                 some_expr,
                 none_expr,
                 ..
             } => {
-                collect_expr(scrutinee, out);
-                collect_expr(some_expr, out);
-                collect_expr(none_expr, out);
+                collect_expr(scrutinee, bound, out);
+                let mut some_scope = bound.clone();
+                some_scope.insert(bind_name.clone());
+                collect_expr(some_expr, &some_scope, out);
+                collect_expr(none_expr, bound, out);
             }
             ConcreteHostExprKind::MatchAdt {
                 scrutinee,
@@ -1043,26 +1058,30 @@ fn project_host_program_to_entry(
                 default_expr,
                 ..
             } => {
-                collect_expr(scrutinee, out);
+                collect_expr(scrutinee, bound, out);
                 for arm in arms {
-                    collect_expr(&arm.expr, out);
+                    let mut arm_scope = bound.clone();
+                    arm_scope.extend(arm.bindings.iter().map(|binding| binding.name.clone()));
+                    collect_expr(&arm.expr, &arm_scope, out);
                 }
                 if let Some(default_expr) = default_expr {
-                    collect_expr(default_expr, out);
+                    collect_expr(default_expr, bound, out);
                 }
             }
             ConcreteHostExprKind::Let { bindings, body, .. } => {
+                let mut scoped = bound.clone();
                 for binding in bindings {
-                    collect_expr(&binding.value, out);
+                    collect_expr(&binding.value, &scoped, out);
+                    scoped.insert(binding.name.clone());
                 }
-                collect_expr(body, out);
+                collect_expr(body, &scoped, out);
             }
             ConcreteHostExprKind::Map { callback, list, .. }
             | ConcreteHostExprKind::Filter { callback, list, .. }
             | ConcreteHostExprKind::Partition { callback, list, .. }
             | ConcreteHostExprKind::FlatMap { callback, list, .. } => {
-                collect_callback(callback, out);
-                collect_expr(list, out);
+                collect_callback(callback, bound, out);
+                collect_expr(list, bound, out);
             }
             ConcreteHostExprKind::Fold {
                 callback,
@@ -1076,13 +1095,13 @@ fn project_host_program_to_entry(
                 list,
                 ..
             } => {
-                collect_callback(callback, out);
-                collect_expr(init, out);
-                collect_expr(list, out);
+                collect_callback(callback, bound, out);
+                collect_expr(init, bound, out);
+                collect_expr(list, bound, out);
             }
             ConcreteHostExprKind::WithSeed { seed, body, .. } => {
-                collect_expr(seed, out);
-                collect_expr(body, out);
+                collect_expr(seed, bound, out);
+                collect_expr(body, bound, out);
             }
             ConcreteHostExprKind::Int(_)
             | ConcreteHostExprKind::Float(_)
@@ -1109,8 +1128,13 @@ fn project_host_program_to_entry(
             .iter()
             .find(|function| function.name == name)
             .expect("pending host function comes from the program");
+        let bound = function
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect();
         let mut referenced = HashSet::new();
-        collect_expr(&function.body, &mut referenced);
+        collect_expr(&function.body, &bound, &mut referenced);
         for referenced_name in referenced {
             if function_names.contains(referenced_name.as_str())
                 && reachable.insert(referenced_name.clone())
