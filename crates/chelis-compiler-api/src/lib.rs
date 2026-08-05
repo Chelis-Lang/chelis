@@ -6,6 +6,7 @@ pub mod context;
 pub mod decode;
 pub mod fragment;
 pub mod layered;
+pub mod library_cache;
 pub mod pipeline;
 pub mod prune;
 pub(crate) mod runtime;
@@ -48,6 +49,9 @@ pub use fragment::{
     check_body_replacement, check_whole_module_edit,
 };
 pub use layered::{LayeredCheck, check_layered, check_layered_for_build, stdlib_structural_stats};
+pub use library_cache::{
+    LibraryContext, build_library_context, library_cache_key, load_or_build_library_context,
+};
 /// The host-runtime value type returned by the decode chokepoint.
 /// Experimental: surfaced for the decode contract point; its shape is not
 /// yet a stable public commitment (V1 has no production decode caller).

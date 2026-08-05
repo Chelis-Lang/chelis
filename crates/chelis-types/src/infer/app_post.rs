@@ -20,6 +20,8 @@ pub(super) fn finish_unified_app(
     expected_result: Option<&Type>,
 ) -> Type {
     let mut result_ty = subst.apply(&ret_tv);
+    let checked_rule = checked_inference_rule(func_name.as_deref());
+    let mut checked_route_observed = false;
 
     // [04-TENSOR-EXPAND]: an expected tensor fixes whether positional expand
     // replaces an existing axis (same rank) or inserts one (rank + 1).
@@ -35,15 +37,26 @@ pub(super) fn finish_unified_app(
         result_ty = subst.apply(&result_ty);
     }
 
-    if let Some(rejected) =
-        validate_numeric_and_reduction_arguments(list, kids, &func_name, &arg_tys, subst, errors)
-    {
+    if let Some(rejected) = reject_unregistered_checked_route(func_name.as_deref(), errors) {
+        return rejected;
+    }
+
+    if let Some(rejected) = validate_numeric_and_reduction_arguments(
+        list,
+        kids,
+        &func_name,
+        &arg_tys,
+        subst,
+        errors,
+        &mut checked_route_observed,
+    ) {
         return rejected;
     }
 
     if let Some(ref fname) = func_name
         && fname == "uniform_like"
     {
+        checked_route_observed = true;
         if let Some(first_arg) = arg_tys.first() {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
@@ -130,6 +143,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && fname == "dropout"
     {
+        checked_route_observed = true;
         if let Some(first_arg) = arg_tys.first() {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
@@ -174,6 +188,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && fname == "conv2d"
     {
+        checked_route_observed = true;
         for (index, arg_ty) in arg_tys.iter().enumerate() {
             let resolved = type_for_readonly_check(arg_ty, subst);
             if index < 2 {
@@ -328,11 +343,13 @@ pub(super) fn finish_unified_app(
                 | "expand"
                 | "layer_norm"
                 | "conv2d"
+                | "scatter_elements"
         ) && arg_tys
             .iter()
             .any(|ty| matches!(subst.apply(ty), Type::Error(_)))
     });
     if shape_override_operand_error {
+        checked_route_observed = true;
         // Cascade: a shape-computed builtin operand already typed as
         // `Type::Error`; propagate its witness rather than mint a fresh
         // error (chelis#731 §C3). The `.any(... Error ...)` guard above
@@ -345,12 +362,38 @@ pub(super) fn finish_unified_app(
             })
             .unwrap_or(result_ty);
     } else if let Some(ref fname) = func_name {
+        let owes_shape_replay = arg_tys
+            .iter()
+            .any(|ty| product.shape_operand_awaits_lambda_binding(ty, subst));
+        let mut retained_shape_obligation = false;
         match fname.as_str() {
             "matmul" => {
+                checked_route_observed = true;
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Matmul,
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
             }
             "sum" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
             | "argmin_reduce" | "mean" => {
+                checked_route_observed = true;
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Reduction {
+                            name: fname.clone(),
+                        },
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_reduction_signature(
                     fname,
                     &kids[1..],
@@ -361,6 +404,7 @@ pub(super) fn finish_unified_app(
                 );
             }
             "expand" => {
+                checked_route_observed = true;
                 // chelis#339: the axis slot is a dim NAME (the
                 // named-axis insert form) only when it is not bound in
                 // the value environment — a bound `int32` var is the
@@ -378,6 +422,19 @@ pub(super) fn finish_unified_app(
                     .get(3)
                     .map(|arg| classify_expand_size(arg, env))
                     .unwrap_or(SizeClass::Unknown);
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Expand {
+                            axis_is_dim_name,
+                            size_class,
+                            env: env.clone(),
+                        },
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_expand_signature(
                     &kids[1..],
                     &arg_tys,
@@ -390,13 +447,66 @@ pub(super) fn finish_unified_app(
                 );
             }
             "layer_norm" => {
+                checked_route_observed = true;
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::LayerNorm,
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty = check_layer_norm_signature(&arg_tys, &result_ty, vg, subst, errors);
             }
             "conv2d" => {
+                checked_route_observed = true;
+                if owes_shape_replay {
+                    product.defer_shape_check(
+                        DeferredShapeRule::Conv2d,
+                        kids[1..].to_vec(),
+                        arg_tys.clone(),
+                        result_ty.clone(),
+                    );
+                    retained_shape_obligation = true;
+                }
                 result_ty =
                     check_conv2d_signature(&kids[1..], &arg_tys, &result_ty, vg, subst, errors);
             }
+            "scatter_elements" if owes_shape_replay => {
+                checked_route_observed = true;
+                product.defer_shape_check(
+                    DeferredShapeRule::ScatterElements { list: list.clone() },
+                    kids[1..].to_vec(),
+                    arg_tys.clone(),
+                    result_ty.clone(),
+                );
+                retained_shape_obligation = true;
+            }
             _ => {}
+        }
+        if owes_shape_replay
+            && !retained_shape_obligation
+            && builtins::builtin_decl(fname).is_some_and(|decl| {
+                decl.inference
+                    == builtins::InferenceDisposition::Checked(
+                        builtins::BuiltinInferenceRule::ShapeComputed,
+                    )
+            })
+        {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::Other,
+                    format!(
+                        "internal: shape-computed builtin `{fname}` reached an unbound operand without retaining its semantic obligation"
+                    ),
+                    vec![
+                        "Add the builtin's ordinary checker rule to the deferred shape ledger in the same change as its ShapeComputed disposition"
+                            .to_string(),
+                    ],
+                ),
+            );
         }
     }
 
@@ -404,6 +514,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && LOGICAL_OPS.contains(&fname.as_str())
     {
+        checked_route_observed = true;
         for arg_ty in &arg_tys {
             let resolved = type_for_readonly_check(arg_ty, subst);
             match &resolved {
@@ -455,6 +566,7 @@ pub(super) fn finish_unified_app(
     if let Some(ref fname) = func_name
         && builtins::COMPARISON_OPS.contains(&fname.as_str())
     {
+        checked_route_observed = true;
         // Prefer any tensor-shaped arg as the dim source.
         let tensor_dims = arg_tys.iter().find_map(|t| match subst.apply(t) {
             Type::Tensor(dims, _) => Some(dims),
@@ -931,7 +1043,7 @@ pub(super) fn finish_unified_app(
                     Ok(axis) => axis,
                     Err(err) => return err,
                 };
-                match infer_gather_result_type(&tensor_ty, &indices_ty, axis) {
+                match infer_gather_result_type("gather", &tensor_ty, &indices_ty, axis) {
                     Ok(ty) => return ty,
                     Err(message) => {
                         return report(
@@ -1261,7 +1373,7 @@ pub(super) fn finish_unified_app(
                         );
                     }
                 }
-                match infer_gather_result_type(&base_ty, &indices_ty, axis) {
+                match infer_gather_result_type("scatter", &base_ty, &indices_ty, axis) {
                     Ok(expected_updates) => {
                         if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
                             return report(errors, te.into());
@@ -1306,7 +1418,7 @@ pub(super) fn finish_unified_app(
                     Ok(axis) => axis,
                     Err(err) => return err,
                 };
-                match infer_gather_result_type(&base_ty, &indices_ty, axis) {
+                match infer_gather_result_type("scatter_replace", &base_ty, &indices_ty, axis) {
                     Ok(expected_updates) => {
                         if let Err(te) = unify(&expected_updates, &updates_ty, subst) {
                             return report(errors, te.into());
@@ -1327,6 +1439,9 @@ pub(super) fn finish_unified_app(
                         );
                     }
                 }
+            }
+            "scatter_elements" => {
+                return check_scatter_elements(list, kids, &arg_tys, result_ty, subst, errors);
             }
             "len" => {
                 if let Some(first_arg) = arg_tys.first() {
@@ -2867,5 +2982,15 @@ pub(super) fn finish_unified_app(
         }
     }
 
-    result_ty
+    if let Some(rule) = checked_rule
+        && !checked_route_observed
+    {
+        return report(
+            errors,
+            unobserved_checked_route_diagnostic(func_name.as_deref().unwrap_or("<unknown>"), rule),
+        );
+    }
+
+    product.replay_ready_shape_checks(vg, subst, errors);
+    subst.apply(&result_ty)
 }

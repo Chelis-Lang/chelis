@@ -281,7 +281,7 @@ impl Expander {
                 let arm_kids = children(arm_list);
                 if arm_kids.len() >= 3 {
                     let mut arm_scope = scope.clone();
-                    arm_scope.add_blockers(pattern_binders(&arm_kids[0]));
+                    arm_scope.add_blockers(chelis_deep::pattern_binder_names(&arm_kids[0]));
                     let mut arm_elements = arm_list.elements.clone();
                     arm_elements[4] = self.expand_expr(&arm_kids[2], macros, &arm_scope)?;
                     if !is_unit_list(&arm_kids[1]) {
@@ -656,7 +656,7 @@ fn substitute_match(
             let arm_kids = children(arm_list);
             if arm_kids.len() >= 3 {
                 let mut arm_shadowed = shadowed.clone();
-                arm_shadowed.extend(pattern_binders(&arm_kids[0]));
+                arm_shadowed.extend(chelis_deep::pattern_binder_names(&arm_kids[0]));
                 let mut arm_elements = arm_list.elements.clone();
                 if !is_unit_list(&arm_kids[1]) {
                     arm_elements[3] = substitute_expr(&arm_kids[1], params, &arm_shadowed);
@@ -1017,55 +1017,6 @@ fn params_blockers(expr: &Expr) -> Vec<String> {
             })
             .collect(),
         _ => Vec::new(),
-    }
-}
-
-fn pattern_binders(expr: &Expr) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_pattern_binders(expr, &mut names);
-    names
-}
-
-fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
-    let Expr::List(list, _) = expr else {
-        return;
-    };
-    match get_tag(list) {
-        Some(DeepTag::PatVar) => {
-            if let Some(name) = children(list).first().and_then(symbol_name) {
-                out.push(name.to_string());
-            }
-        }
-        Some(DeepTag::PatAs) => {
-            let kids = children(list);
-            if let Some(name) = kids.first().and_then(symbol_name) {
-                out.push(name.to_string());
-            }
-            if let Some(inner) = kids.get(1) {
-                collect_pattern_binders(inner, out);
-            }
-        }
-        Some(DeepTag::PatTuple) => {
-            for child in children(list) {
-                collect_pattern_binders(child, out);
-            }
-        }
-        Some(DeepTag::PatCtor) => {
-            for child in children(list).iter().skip(1) {
-                collect_pattern_binders(child, out);
-            }
-        }
-        Some(DeepTag::PatRecord) => {
-            for kv in children(list).iter().skip(1) {
-                if let Expr::List(kv_list, _) = kv
-                    && get_tag(kv_list) == Some(DeepTag::Kv)
-                    && let Some(pattern) = children(kv_list).get(1)
-                {
-                    collect_pattern_binders(pattern, out);
-                }
-            }
-        }
-        _ => {}
     }
 }
 

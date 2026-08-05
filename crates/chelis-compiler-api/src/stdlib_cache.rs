@@ -245,10 +245,14 @@ pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
     hasher.update((shell.len() as u64).to_le_bytes());
     hasher.update(shell.as_bytes());
     // The decls actually being checked. `bincode` is a deterministic
-    // encoding, so this is a stable content hash; a `serialize` failure
-    // here is impossible for a well-formed `Decl` slice, but fall back to
-    // a fixed tag rather than panic so a cache-key computation never
-    // aborts a compile.
+    // encoding, so this is a stable content hash. A `serialize` failure here
+    // is unreachable for a well-formed `Decl` slice (bincode of `Decl` never
+    // fails today), so rather than panic we fold a fixed tag. NOTE this is
+    // fail-OPEN, exactly like `library_cache::library_cache_key` /
+    // `expanded_deep_digest` (see their comments): two distinct unserializable
+    // slices fold the same tag and collide onto one key. Unreachable for
+    // `Decl`; a future fallible-`serialize` type must instead fail closed
+    // (return `None` / skip the cache). chelis#1176 review (F2/G4).
     match bincode::serialize(stdlib_decls) {
         Ok(decl_bytes) => {
             hasher.update(b"decls");
@@ -261,7 +265,7 @@ pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
 }
 
 /// Lower-case hex of the first `n` bytes of `data`.
-fn hex_prefix(data: &[u8], n: usize) -> String {
+pub(crate) fn hex_prefix(data: &[u8], n: usize) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let n = n.min(data.len());
     let mut out = String::with_capacity(n * 2);
@@ -548,6 +552,8 @@ mod tests {
             let shell = chelis_std_bundle::shell_sha256();
             hasher.update((shell.len() as u64).to_le_bytes());
             hasher.update(shell.as_bytes());
+            // Faithful mirror of `stdlib_cache_key`'s fallback (fail-open; see
+            // that fn's NOTE). This recompute must match it byte-for-byte.
             match bincode::serialize(&decls) {
                 Ok(decl_bytes) => {
                     hasher.update(b"decls");

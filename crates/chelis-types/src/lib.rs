@@ -42,8 +42,9 @@ mod builtins;
 mod source_arch;
 
 pub use builtins::{
-    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinDecl, Realizability, ShapeClass,
-    axis_argument_layout, builtin_decl, builtin_env, prelude_adt_defs, realizability, shape_class,
+    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinDecl, BuiltinInferenceRule,
+    InferenceDisposition, Realizability, ShapeClass, axis_argument_layout, builtin_decl,
+    builtin_env, prelude_adt_defs, realizability, shape_class,
 };
 pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
@@ -52,7 +53,8 @@ pub use cancel::{
 pub use chelis_vocab::EffectKind;
 pub use context::{LibraryProofId, TypeEnv};
 pub use dtype_semantics::{
-    ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, NUMERIC_TRAP_DIV_ZERO_KIND,
+    ArgReduceOp, CheckedCastKind, CheckedCastPlan, CheckedCastPlanError, CompareOp, FloatBinOp,
+    FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, NUMERIC_TRAP_DIV_ZERO_KIND,
     NUMERIC_TRAP_DOMAIN_KIND, NUMERIC_TRAP_DTYPE_SEPARATOR, NUMERIC_TRAP_OPERATION_SEPARATOR,
     NUMERIC_TRAP_OVERFLOW_KIND, NUMERIC_TRAP_PREFIX, NumericFamily, NumericKernelError,
     NumericTrap, RawScalar, RawTensor, ReduceWindowGradOp, ScalarValue, StorageView,

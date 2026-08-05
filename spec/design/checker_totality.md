@@ -805,9 +805,9 @@ above.
 
 ### PP1. The function-parameter typing channel ([#780], [#847], with [#783])
 
-**Opened 2026-08-04.** Two open defects are the two faces of one undecided
-semantics question: how the type of a lambda-bound or function-valued
-parameter binds, and which checks re-run once it is bound.
+**Opened 2026-08-04; decided below.** Two filed defects were treated as the
+two faces of one semantics question: how the type of a lambda-bound or
+function-valued parameter binds, and which checks re-run once it is bound.
 
 - [#780] is the silent-acceptance face. An operand flows through an
   UNANNOTATED lambda parameter, that parameter stays a bare type var, the
@@ -841,6 +841,52 @@ consumers are the IR lowering's type readers, the host pipeline's `expr_type`,
 and eval-root expansion; the conv2d ICE was that value arriving as plausible
 metadata rather than as a diagnostic.
 
+**Decision (2026-08-04).** `spec/04-type-system.md` [04-INF-1] is the
+controlling rule. A shape-constrained lambda with an unknown parameter
+constructor retains an obligation over the exact inference variables seen by
+the ordinary operation checker, stays monomorphic, and binds at its first
+application within the enclosing declaration. That application replays the
+same checker function. A still-unbound obligation at that declaration's own
+boundary is a type error requiring an outer-constructor parameter annotation;
+a result annotation and a later top-level caller are not binding sites. An
+ordinary lambda with no such obligation still generalizes. Readiness is
+deliberately about an unknown outer type constructor (`Type::Var`), including
+a wildcard/bare-variable signature slot and a projection-derived descendant,
+not every free variable: a declared tensor with symbolic dimensions or
+precision is already shape-checkable and remains polymorphic.
+
+The implementation ledger is owned by `InferenceProduct`, not by `matmul`.
+It covers the eleven existing shape-computed overrides (`matmul`; the seven
+reductions; `expand`; `layer_norm`; `conv2d`) plus PP2's
+`scatter_elements`, and stores the ordinary rule plus its original argument
+expressions and types. Construction records unresolved type variables owned by
+lambda parameters regardless of whether the surface omitted an annotation or
+a signature supplied an informationless hole. Ownership follows the resolved
+parameter structure, so tuple/record/function projections cannot sever it,
+while an unrelated unresolved value governed by contextual inference is not
+mistaken for a lambda awaiting its first application. This is the single replay path
+for the class. `let` consults that ledger before generalization, applications
+replay newly ready rows, and both program drivers reject residual rows before
+successful finalization. The `ShapeComputed` disposition is also a fail-loud
+construction guard: if any present or future shape-computed builtin reaches an
+unbound operand without recording its ordinary rule in this ledger, the
+application is rejected as an internal coverage failure rather than returning
+an unchecked result variable.
+
+[#783] rides PP1. Annotation writeback now uses one information-ordering
+gate: a Var-, Error-, or partial-dimension-derived candidate cannot replace a
+more informative existing type expression. Resolved owner metadata may still
+refresh derived metadata, and a symbolic type may still be written when there
+is no existing annotation to degrade. That distinction preserves legitimate
+generic metadata while making the clobber class impossible at the write site.
+
+[#847]'s exact `jacobian_row` reproducer already checked clean at this change
+set's `origin/main` baseline, so no one-off `grad` or rigidity patch was
+justified. It remains in PP1 as a permanent positive regression for
+[04-INF-1]'s declared-symbolic side, paired with a genuinely equal-dim body
+that still rejects. This is a verified migration miss/stale instance, not
+evidence for a second typing policy.
+
 **You deliver:**
 
 1. **The decision, recorded once.** At minimum it covers: when an unannotated
@@ -868,15 +914,9 @@ metadata rather than as a diagnostic.
    the choice costs a sentence; leaving it to be inferred is how [#780] and
    [#847] spent three phases attached to a note that scheduled nothing.
 
-**This item names no owner and no date, and that is its one live risk.** The
-sequencing notes it replaces failed for exactly that reason rather than for
-being wrongly scoped: they described a dependency without anyone holding it.
-A named deliverable is a better artifact than a sequencing note only if
-someone is assigned to decide it.
-
-This entry does not decide the semantics. It contracts that ONE decision is
-made, states what the decision must cover, and binds both fixes to it; open
-question 5 below is its tracking row and is not answered here.
+This entry's former open semantics question is answered by [04-INF-1]. The
+delivery remains one class change: a site-only `matmul` retry or a separate
+rigidity exception does not satisfy it.
 
 **Oracle:**
 
@@ -889,7 +929,7 @@ question 5 below is its tracking row and is not answered here.
   the fix is a correct binding rule and not a disabled rigidity check.
 - Both reproducers become named regression tests, and [#780]'s ill-typed
   program joins the §C4.4 fitness-honesty corpus scoring strictly below 1.0.
-- If [#783] rides: a writeback whose re-inference yields Var or Error over a
+- [#783] rides: a writeback whose owner type yields Var or Error over a
   node carrying a concrete annotation preserves that annotation byte for
   byte or fails loudly, plus the sweep of the writeback's other degrade paths
   (Error-derived, partial-dim) against the same invariant.
@@ -950,14 +990,62 @@ indices helper hardcodes `gather` in its message, so `scatter` and
 `scatter_replace` reject with a diagnostic naming an op the program does not
 call. A rejection that names the wrong op is loud but not actionable.
 
-**Oracle:** the tripwire test red on a planted armless builtin - a scratch
-registration with neither an arm nor a recorded disposition must fail it,
-verified in the PR, recorded, then the scratch registration deleted (the
-Phase 3 mutation-oracle idiom) - and green on the real registry only once
-every current name is armed or dispositioned. The four [#1147] programs reject
-with the diagnostics their `scatter` equivalents produce, each joining the
-§C4.4 fitness-honesty corpus; a well-typed `scatter_elements` call is the
-positive control.
+**Implementation.** `BuiltinDecl.inference` is a required field with no
+default. A declaration is either `Checked(ShapeComputed|Specialized)` or
+`GenericAccepted { reason }`. The checked route sets are bidirectionally
+pinned: every checked declaration must name an exact route, and every route
+must be owned by the exact checked declaration. Runtime dispatch additionally
+requires an execution witness set inside the actual semantic checker family;
+a checked application that falls through because an arm was removed is an
+internal error rather than a generic-signature acceptance. `scatter_elements` is a
+shape-computed route in its own `app_scatter` module and checks all four operands,
+rank, indices dtype, update shape/precision, axis dtype/bounds, and non-axis
+extent containment. The shared gather/scatter helper now receives the actual
+operation name, removing the misleading `gather` diagnostic.
+
+**Oracle:** the required `BuiltinDecl.inference` field is compile-fail tested,
+the route tripwire must turn red when a checked declaration's exact route is
+deleted, and the runtime observation guard must reject a checked application
+that reaches no real semantic family. On 2026-08-04, deleting `scatter_elements` from
+`SHAPE_COMPUTED_INFERENCE_BUILTINS` and running
+`cargo nextest run -p chelis-types
+every_checked_builtin_has_an_exact_inference_route` failed with
+`builtin 'scatter_elements' declares ShapeComputed but no exact route owns it`;
+restoring the route made the same command green. The four [#1147] programs
+reject with the diagnostics their `scatter` equivalents produce, each joining
+the §C4.4 fitness-honesty corpus; a well-typed `scatter_elements` call is the
+positive control. The synthetic `probe_unarmed_op` unit control pins the
+fail-loud observation diagnostic independently of the two route manifests.
+
+### Adjacent ledger rows delivered with the class change
+
+- **[#850], checker half.** `defsig` is now a same-unit annotation for a
+  same-name `def`, as required by `spec/03-deep-syntax.md` §2.2. Declaration
+  collection rejects an orphan before persistent library context can make it
+  look backed. Reef applies the same pair check to every authored source
+  module and synthetic entry before linking; only a provenance-marked
+  dependency-shell interface may then carry signature-only internal rows.
+  The §C4.4 corpus contains the declaration-only negative row and a paired
+  positive. A repository sweep found three stdlib files relying on
+  signature-only placeholders (Parquet, SafeTensors, and Xavier); each now has
+  an explicit fail-loud Chelis body. The native-emission half remains [#730]
+  work and is not claimed here.
+- **[#851].** Match-arm pattern binders are removed from eager-reference
+  collection for both the guard and body. The exhaustive binder walk has one
+  shared home in `chelis-deep` and is consumed by authoring, macros, and the
+  checker. Reef's Surf `Pattern` walk remains separate because it operates on
+  a different typed AST, and the source records that boundary. This is the
+  missed-migration case the roadmap predicted, repaired at the policy owner
+  rather than with a fourth walk.
+- **[#1131].** `spec/03` §6.4 and [04-LIT-1] define the closed atom/primitive
+  matrix. The checker enforces every cross-family scalar pairing after alias
+  resolution. Deep and Surf producers use the one typed exception for an
+  integer-spelled float: an exact Int payload plus `literal_source: integer`.
+  That form preserves [04-NUM-14]'s direct target-width rounding instead of
+  manufacturing a double-rounding route through f64 in both the tensor/DAG
+  and scalar host-eval constructors. The full positive,
+  malformed-marker, cross-family, and producer paths are regression-tested;
+  the former score-1 input is also in §C4.4.
 
 ---
 
@@ -1001,7 +1089,7 @@ positive control.
 | 2 | typecheck-cache deserialization as a witness mint (accepted, or cache entries re-validated?) | Phase 2 | §C3 note + the cache module doc |
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | DECIDED 2026-07-23: deferred; REVERSED 2026-07-24 by the decode-once rework directive - printers, desugar, and every other producer/consumer migrated; no string-keyed tag idiom survives outside the parse/serialize boundary | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
-| 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | OPEN 2026-08-04, contracted by PP1. Sequenced behind Phases 1-2 and still undecided after Phase 3; [#780] (silent acceptance) and [#847] (over-unification) are its two faces and may not be patched ahead of it | PP1 + `spec/04-type-system.md` if the rule is a language decision |
+| 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | DECIDED 2026-08-04: shape-constrained lambdas with an unknown outer parameter constructor are monomorphic bind-on-first-use within their enclosing declaration, replay the ordinary semantic rule, and reject unresolved at that declaration's own boundary; a result annotation or later top-level caller does not bind them; symbolic declared tensors remain polymorphic and rigid dimensions remain distinct absent a real equality constraint | [04-INF-1] + PP1 |
 
 ## Contract summary
 
@@ -1029,10 +1117,13 @@ continuous-oracle guarantees.
 [#783]: https://github.com/Chelis-Lang/chelis/issues/783
 [#833]: https://github.com/Chelis-Lang/chelis/issues/833
 [#847]: https://github.com/Chelis-Lang/chelis/issues/847
+[#850]: https://github.com/Chelis-Lang/chelis/issues/850
+[#851]: https://github.com/Chelis-Lang/chelis/issues/851
 [#858]: https://github.com/Chelis-Lang/chelis/issues/858
 [#859]: https://github.com/Chelis-Lang/chelis/issues/859
 [#874]: https://github.com/Chelis-Lang/chelis/issues/874
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
 [#1088]: https://github.com/Chelis-Lang/chelis/issues/1088
+[#1131]: https://github.com/Chelis-Lang/chelis/issues/1131
 [#1147]: https://github.com/Chelis-Lang/chelis/issues/1147

@@ -158,7 +158,7 @@ fn incompatible_literal_type_metadata_is_rejected() {
 
     let diagnostic = error.to_string();
     assert!(
-        diagnostic.contains("`type` metadata") && diagnostic.contains("compatible"),
+        diagnostic.contains("canonical atom/primitive pairing"),
         "diagnostic should identify the literal/type mismatch: {error}"
     );
 }

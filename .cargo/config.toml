@@ -10,13 +10,16 @@
 # project policy on every platform (see AGENTS.md "Scripting Language
 # Policy") so behavior is consistent across dev and CI.
 #
-# MANUAL BUILDS REQUIRE: a `.venv/` at the repo root. Create it once with:
+# DIRECT MANUAL BUILDS DEFAULT TO: a `.venv/` at the repo root. Create it with:
 #     uv venv --python 3.11
 # (see README.md "Prerequisites"). Devenv builds use the managed state
-# environment instead. On a fresh manual checkout without `.venv/`, `cargo
-# build` for a crate that pulls pyo3 (today only `chelis-python`) will fail
-# with `failed to run the Python interpreter at .venv/bin/python: No such
-# file or directory`. Run `uv venv --python 3.11` before a manual build.
+# environment instead. A dedicated worktree can avoid duplicating `.venv/`
+# by invoking direct Cargo commands with:
+#     PYO3_PYTHON="$(uv python find 3.11)" cargo ...
+# `scripts/gate.py` does this automatically with its uv-selected interpreter.
+# Without either override or `.venv/`, a crate that pulls pyo3 (today only
+# `chelis-python`) fails with `failed to run the Python interpreter at
+# .venv/bin/python: No such file or directory`.
 #
 # The `relative = true` flag resolves `.venv/bin/python` against the
 # directory containing this config.toml, so the setting works from

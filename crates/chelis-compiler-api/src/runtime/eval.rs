@@ -375,9 +375,13 @@ impl<'a> EvalContext<'a> {
         let meta_dtype = get_meta(list).and_then(lit_meta_prim);
         match value {
             Expr::Atom(Atom::Int(value), _) => match meta_dtype {
-                Some(dtype) if dtype.is_integer() => RuntimeValue::scalar_like_int(dtype, *value),
-                Some(dtype) if dtype.is_float() => {
-                    RuntimeValue::scalar_like_float(dtype, *value as f64)
+                Some(dtype) if dtype.is_integer() || dtype.is_float() => {
+                    // Keep the exact i64 payload until the sealed dtype
+                    // constructor finalizes it at the declared width. An
+                    // `as f64` step here double-rounds integer-spelled f32,
+                    // f16, and bf16 literals above 2^53 and disagrees with
+                    // both IR lowering and generated C ([04-LIT-1]).
+                    RuntimeValue::scalar_like_int(dtype, *value)
                 }
                 _ => Ok(RuntimeValue::int_lit(*value)),
             },
@@ -926,8 +930,10 @@ impl<'a> EvalContext<'a> {
             (RuntimeValue::Bool(value), dst_dtype)
                 if dst_dtype.is_integer() || dst_dtype.is_float() =>
             {
-                let raw = chelis_types::RawScalar::Int(if value { 1 } else { 0 });
-                let cast = chelis_types::cast_raw("cast", raw, dst_dtype)
+                let source =
+                    chelis_types::scalar_from_i64("cast", Prim::Bool, if value { 1 } else { 0 })
+                        .expect("bool payload is always in the bool value set");
+                let cast = chelis_types::cast_scalar("cast", source, dst_dtype)
                     .map_err(|trap| trap.to_string())?;
                 Ok(RuntimeValue::from_scalar_value(cast))
             }
@@ -983,12 +989,12 @@ impl<'a> EvalContext<'a> {
             "cos" => float_unop_with_tensor(args, FloatUnOp::Cos),
             "tan" => float_unop_with_tensor(args, FloatUnOp::Tan),
             "atan" => float_unop_with_tensor(args, FloatUnOp::Atan),
-            "floor" => float_unop_with_tensor(args, FloatUnOp::Floor),
-            "ceil" => float_unop_with_tensor(args, FloatUnOp::Ceil),
+            "floor" => numeric_unop(args, Some(IntUnOp::Floor), Some(FloatUnOp::Floor)),
+            "ceil" => numeric_unop(args, Some(IntUnOp::Ceil), Some(FloatUnOp::Ceil)),
             // Round-half-to-even (banker's rounding), matching the DAG
             // evaluator and the C backend's `rintf`. NOT `round`, which
             // is ties-away-from-zero.
-            "round" => float_unop_with_tensor(args, FloatUnOp::Round),
+            "round" => numeric_unop(args, Some(IntUnOp::Round), Some(FloatUnOp::Round)),
             // `abs` accepts ints and floats and is sign-flipping for both;
             // route through `numeric_unop` so scalar Int64/Int32/F32/F64
             // inputs all keep their dtype.
@@ -2517,33 +2523,15 @@ impl<'a> EvalContext<'a> {
             }
             // Activation primitives (Bucket 3).
             //
-            // Per-dtype since chelis#729 Phase 1 (`tensor_float_unop`):
-            // an f64 tensor computes through the f64 activation body at
-            // full precision, while f32/f16/bf16 tensors keep the f32
-            // bodies (byte-identical, to documented float tolerance, with
-            // the C backend's `chelis_host_*_f32` helpers emitted from
-            // `crates/chelis-backend-c/src/host_emit.rs`) and finalize
-            // once at their own width.
-            "relu" => {
-                let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, FloatUnOp::Relu).map(RuntimeValue::Tensor)
-            }
-            "sigmoid" => {
-                let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, FloatUnOp::Sigmoid).map(RuntimeValue::Tensor)
-            }
-            "tanh" => {
-                let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, FloatUnOp::Tanh).map(RuntimeValue::Tensor)
-            }
-            "silu" => {
-                let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, FloatUnOp::Silu).map(RuntimeValue::Tensor)
-            }
-            "gelu" => {
-                let tensor = expect_tensor_arg(args, 0)?;
-                tensor_float_unop(&tensor, FloatUnOp::Gelu).map(RuntimeValue::Tensor)
-            }
+            // Scalar values are rank-0 numeric values under spec/05 §2.2.
+            // Route both surfaces through the sealed dtype-keyed Tier-2
+            // composition so every constituent primitive finalizes before
+            // the next node observes it.
+            "relu" => numeric_unop(args, None, Some(FloatUnOp::Relu)),
+            "sigmoid" => numeric_unop(args, None, Some(FloatUnOp::Sigmoid)),
+            "tanh" => numeric_unop(args, None, Some(FloatUnOp::Tanh)),
+            "silu" => numeric_unop(args, None, Some(FloatUnOp::Silu)),
+            "gelu" => numeric_unop(args, None, Some(FloatUnOp::Gelu)),
             other => Err(format!("unsupported builtin `{other}` in host runtime")),
         }
     }

@@ -235,6 +235,7 @@ impl<'a> RawParser<'a> {
         }
 
         let mut elements = Vec::new();
+        let mut third_child_was_typed_literal_token = false;
         loop {
             let tok = self.peek().ok_or(ParseError::UnexpectedEof {
                 offset: self.current_offset(),
@@ -243,9 +244,21 @@ impl<'a> RawParser<'a> {
                 let end_span = tok.span;
                 self.advance();
                 let full_span = start_span.merge(end_span);
-                return Ok(RawExpr::List(elements, full_span));
+                return Ok(normalize_typed_literal_wrapper(
+                    elements,
+                    full_span,
+                    third_child_was_typed_literal_token,
+                ));
             }
+            let is_typed_literal_token = matches!(
+                &tok.kind,
+                TokenKind::TypedInt(..) | TokenKind::TypedFloat(..)
+            );
+            let child_index = elements.len();
             elements.push(self.parse_expr()?);
+            if child_index == 2 && is_typed_literal_token {
+                third_child_was_typed_literal_token = true;
+            }
         }
     }
 
@@ -410,6 +423,8 @@ fn raw_typed_literal_lit_expr(
     span: crate::Span,
 ) -> RawExpr {
     let prim_name = suffix.t_prim_name();
+    let integer_spelled_float =
+        matches!(value, RawAtom::Int(_)) && matches!(prim_name, "f32" | "f64" | "bf16" | "f16");
     let t_prim = RawExpr::List(
         vec![
             RawExpr::Atom(RawAtom::Symbol("t-prim".to_string()), span),
@@ -418,7 +433,16 @@ fn raw_typed_literal_lit_expr(
         ],
         span,
     );
-    let meta = RawExpr::Map(vec![("type".to_string(), t_prim)], span);
+    let mut entries = vec![("type".to_string(), t_prim)];
+    if integer_spelled_float {
+        // Retain the exact i64 payload until target-width finalization. Turning
+        // it into f64 here can double-round f32/f16/bf16 literals above 2^53.
+        entries.push((
+            "literal_source".to_string(),
+            RawExpr::Atom(RawAtom::Symbol("integer".to_string()), span),
+        ));
+    }
+    let meta = RawExpr::Map(entries, span);
     RawExpr::List(
         vec![
             RawExpr::Atom(RawAtom::Symbol("lit".to_string()), span),
@@ -427,6 +451,44 @@ fn raw_typed_literal_lit_expr(
         ],
         span,
     )
+}
+
+/// A suffixed TOKEN already expands to a complete typed `lit`. When that token
+/// appears in the producer-friendly spelling `(lit {} 7f32)`, avoid leaving
+/// the expansion nested as the outer literal's value. The token-origin bit is
+/// essential: after parsing, a hand-authored nested `(lit {} (lit ...))` has
+/// the same tree shape and must remain malformed input for the checker.
+fn normalize_typed_literal_wrapper(
+    elements: Vec<RawExpr>,
+    span: crate::Span,
+    third_child_was_typed_literal_token: bool,
+) -> RawExpr {
+    if !third_child_was_typed_literal_token {
+        return RawExpr::List(elements, span);
+    }
+    let expanded = match elements.as_slice() {
+        [
+            RawExpr::Atom(RawAtom::Symbol(outer_tag), _),
+            RawExpr::Map(outer_meta, _),
+            RawExpr::List(inner, _),
+        ] if outer_tag == "lit" && outer_meta.is_empty() => inner,
+        _ => return RawExpr::List(elements, span),
+    };
+
+    let is_typed_literal_expansion = matches!(
+        expanded.as_slice(),
+        [
+            RawExpr::Atom(RawAtom::Symbol(inner_tag), _),
+            RawExpr::Map(inner_meta, _),
+            RawExpr::Atom(_, _),
+        ] if inner_tag == "lit" && inner_meta.iter().any(|(key, _)| key == "type")
+    );
+
+    if is_typed_literal_expansion {
+        RawExpr::List(expanded.to_vec(), span)
+    } else {
+        RawExpr::List(elements, span)
+    }
 }
 
 /// Parse a token stream into raw (untyped) expressions.
@@ -602,6 +664,43 @@ mod tests {
         match &exprs[0] {
             Expr::Atom(Atom::Float(f), _) => assert!((f - 3.125).abs() < 1e-10),
             other => panic!("expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_suffixed_literal_inside_explicit_lit_without_nesting() {
+        let exprs = p("(lit {} 7f32)");
+        match &exprs[0] {
+            Expr::Node(node, _) => {
+                assert_eq!(node.tag(), crate::tag::DeepTag::Lit);
+                assert_eq!(node.child_count(), 1);
+                assert!(matches!(
+                    node.children_slice()[0],
+                    Expr::Atom(Atom::Int(7), _)
+                ));
+                assert!(node.meta().entries.iter().any(|(key, _)| key == "type"));
+                assert!(node.meta().entries.iter().any(|(key, value)| {
+                    key == "literal_source"
+                        && matches!(value, Expr::Atom(Atom::Name(name), _) if name == "integer")
+                }));
+            }
+            other => panic!("expected lit Node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hand_authored_nested_typed_lit_is_not_token_normalized() {
+        let exprs = p("(lit {} (lit {type: (t-prim {} f32)} 7.5))");
+        match &exprs[0] {
+            Expr::Node(outer, _) => {
+                assert_eq!(outer.tag(), crate::tag::DeepTag::Lit);
+                assert_eq!(outer.child_count(), 1);
+                assert!(
+                    matches!(&outer.children_slice()[0], Expr::Node(inner, _) if inner.tag() == crate::tag::DeepTag::Lit),
+                    "a hand-authored nested lit must remain malformed input for the checker"
+                );
+            }
+            other => panic!("expected outer lit Node, got {other:?}"),
         }
     }
 

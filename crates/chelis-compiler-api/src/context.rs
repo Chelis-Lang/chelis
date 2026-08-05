@@ -766,20 +766,25 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
-/// V8: this merge unifies two independent V7 formats. The pipeline-core
+/// V9: two independent V8 formats are unified here. The pipeline-core
 /// extraction sealed the lowered-library proof identity into the cached
-/// context, while chelis#878 (`RiscOp::Pad::fill` sealed dtype-tagged scalar)
-/// and chelis#942 (deferred positional-expand constraints in the serialized
-/// checker context) landed on main. The merged context struct carries every
-/// field from both, and bincode is positional, so a file that lacks either
-/// side's fields cannot be decoded; a V6 or either V7 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V8\n";
+/// context (branch V8). On main (main V8), chelis#878 (`RiscOp::Pad::fill`
+/// sealed dtype-tagged scalar), chelis#942 (deferred positional-expand
+/// constraints in the serialized checker context), and chelis#1182 (root
+/// package modules emitted LAST, changing the serialized `reef_state`
+/// (`PreparedReefGraph`) decl order) all landed. Both predecessors used V8
+/// for their own shape at the same compiler version, and released 0.18.4
+/// carries the main V8. The merged struct carries every field from both, so
+/// bincode is positional and a V8 file of either lineage would decode to a
+/// wrong shape; the magic check rejects it before any decode. A V6, V7, or
+/// either V8 file is stale.
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V9\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 8;
+const CACHE_FORMAT_VERSION: u32 = 9;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1087,7 +1092,7 @@ pub fn compile_reef_context(
     })
 }
 
-fn library_rejection_to_compiler_error(
+pub(crate) fn library_rejection_to_compiler_error(
     rejection: crate::pipeline::LibraryRejection,
 ) -> CompilerError {
     match rejection {

@@ -207,10 +207,10 @@ fn check_score_and_output(program: &str, ext: &str) -> (f64, String) {
 /// `chelis build --target hip` on an int64 `neg` is REJECTED with the
 /// branded section C2 diagnostic - `elem_kind`'s former `_ =>
 /// ElemKind::F32` wildcard is deleted (census row 5, chelis#689;
-/// runtime-confirmed corrupt on gfx1151). The permissive CLI gate still
-/// admits int64 (row 18's chelis#698 half, Phase 3 territory); the
-/// EMITTER channel is what refuses now - the enforcement-ladder rung the
-/// plan demands. Emission-only; no hipcc needed.
+/// runtime-confirmed corrupt on gfx1151). The shared typed gate admits
+/// int64 because the HIP target has typed integer kernels; the EMITTER
+/// remains responsible for refusing this unsupported op/dtype cell - the
+/// enforcement-ladder rung the plan demands. Emission-only; no hipcc needed.
 #[test]
 fn hip_int64_neg_is_rejected_with_the_branded_diagnostic() {
     let (ok, stderr, emitted) = build_target(

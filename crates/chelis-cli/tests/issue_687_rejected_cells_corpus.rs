@@ -142,27 +142,64 @@ const BUILD_REJECTION_ROWS: &[(&str, &str, &str, &str)] = &[
         "hip_f16_compute",
         "def f(a: tensor[4, f16], b: tensor[4, f16]) -> tensor[4, f16] = add(a, b)\n",
         "hip",
-        "error: unsupported: `chelis build --target hip` admits `f16` only on tensor load/store \
-         nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
-         WS-A3). Node 2 carries op Add which has no bf16/f16 kernel template yet \
-         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1.\n",
+        "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `f16`) on \
+         `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: `f16` is implemented only for HIP tensor load/store and `BlasMatmul` \
+         operands; this operation needs a typed bf16/f16 kernel \
+         (spec/04-type-system.md §5.7.1)\n",
     ),
     (
         "hip_bf16_compute",
         "def f(a: tensor[4, bf16], b: tensor[4, bf16]) -> tensor[4, bf16] = add(a, b)\n",
         "hip",
-        "error: unsupported: `chelis build --target hip` admits `bf16` only on tensor load/store \
-         nodes and on `BlasMatmul` operands today (`hipblasGemmEx` with an f32 accumulator, \
-         WS-A3). Node 2 carries op Add which has no bf16/f16 kernel template yet \
-         (chelis-backend-hip emit::dtype_kernel_suffix). See spec/04-type-system.md §5.7.1.\n",
+        "error: unsupported: narrow-float compute at lowered node 2 (`Add` with `bf16`) on \
+         `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: `bf16` is implemented only for HIP tensor load/store and `BlasMatmul` \
+         operands; this operation needs a typed bf16/f16 kernel \
+         (spec/04-type-system.md §5.7.1)\n",
+    ),
+    (
+        "hip_f16_matmul_operand_compute",
+        "def f(a: tensor[2, 2, f16], b: tensor[2, 2, f16], c: tensor[2, 2, f16]) \
+         -> tensor[2, 2, f16] = matmul(add(a, b), c)\n",
+        "hip",
+        "warning: rejected summary for `f` (blas-non-load-operand): BLAS matmul operand[0] is \
+         not a direct load of a helper input; callsite=<no-span>, helper-body=surf:95..115\n\
+         error: unsupported: narrow-float compute at lowered node 3 (`Add` with `f16`) on \
+         `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: `f16` is implemented only for HIP tensor load/store and `BlasMatmul` \
+         operands; this operation needs a typed bf16/f16 kernel \
+         (spec/04-type-system.md §5.7.1)\n",
+    ),
+    (
+        "hip_bf16_matmul_operand_compute",
+        "def f(a: tensor[2, 2, bf16], b: tensor[2, 2, bf16], c: tensor[2, 2, bf16]) \
+         -> tensor[2, 2, bf16] = matmul(add(a, b), c)\n",
+        "hip",
+        "warning: rejected summary for `f` (blas-non-load-operand): BLAS matmul operand[0] is \
+         not a direct load of a helper input; callsite=<no-span>, helper-body=surf:99..119\n\
+         error: unsupported: narrow-float compute at lowered node 3 (`Add` with `bf16`) on \
+         `chelis build --target hip` early capability gate (codegen:hip); unimplemented \
+         chelis#729: `bf16` is implemented only for HIP tensor load/store and `BlasMatmul` \
+         operands; this operation needs a typed bf16/f16 kernel \
+         (spec/04-type-system.md §5.7.1)\n",
     ),
     (
         "metal_f64",
         "def f(a: tensor[4, f64], b: tensor[4, f64]) -> tensor[4, f64] = add(a, b)\n",
         "metal",
-        "error: unsupported: `chelis build --target metal` rejects f64 (node 0): Apple Silicon \
-         GPUs lack FP64 ALUs; use `--target c` or `--target hip` for f64 workloads. See \
-         spec/04-type-system.md §1.1.3.\n",
+        "error: unsupported: f64 value at lowered node 0 on `chelis build --target metal` early \
+         capability gate (codegen:metal); deliberate [04-TGT-1]: Apple Silicon GPUs lack FP64 \
+         ALUs; use `--target c` or `--target hip` for f64 workloads\n",
+    ),
+    (
+        "c_seeded_dropout",
+        "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+         with seed(42i64) { dropout(x, 0.5) }\n",
+        "c",
+        "error: unsupported: compiled `dropout` op at lowered node 1 on `chelis build --target c` \
+         early capability gate (codegen:c); unimplemented chelis#1192: compiled `dropout` \
+         kernels are not implemented; run this program with `chelis eval`\n",
     ),
     // -- chelis#730 Phase 1 rows: the converted census sites, each pinned
     // to the branded section C2 rendering. --------------------------------

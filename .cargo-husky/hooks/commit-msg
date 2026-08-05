@@ -9,9 +9,12 @@ if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
     python_path="$repo_root/.devenv/state/venv/bin/python"
 elif [ -x "$repo_root/.venv/bin/python" ]; then
     python_path="$repo_root/.venv/bin/python"
+elif command -v uv >/dev/null 2>&1; then
+    exec uv run --managed-python --python 3.11 --no-project python \
+        "$repo_root/scripts/check_commit_message.py" "$@"
 else
     printf '%s\n' 'ERROR: no managed Python interpreter exists for the commit hook.' >&2
-    printf '%s\n' 'Run devenv test or uv venv --python 3.11.' >&2
+    printf '%s\n' 'Install uv, run uv python install 3.11, or enter Devenv.' >&2
     exit 2
 fi
 

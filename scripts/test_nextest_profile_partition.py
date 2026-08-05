@@ -1,7 +1,8 @@
 """Adversarial coverage for the heavy-e2e nextest profile split.
 
-Run via: `python3 -m unittest scripts.test_nextest_profile_partition`
-from repo root, or `python3 scripts/test_nextest_profile_partition.py`.
+Run via:
+`uv run --managed-python --python 3.11 --no-project python -m unittest
+scripts.test_nextest_profile_partition` from the repo root.
 
 PR #126 (refined by #127) split the heavyweight end-to-end suite off the
 per-PR integration gate. `.config/nextest.toml` carries three profiles:
@@ -31,10 +32,12 @@ Two tiers of check:
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -118,6 +121,16 @@ ORACLE_OWNED_FILTERS = tuple(
 )
 
 
+def _cargo_environment(
+    environ: dict[str, str] | None = None,
+) -> dict[str, str]:
+    environment = dict(os.environ if environ is None else environ)
+    environment.setdefault("PYO3_PYTHON", sys.executable)
+    environment.setdefault("CARGO_TARGET_DIR", str(REPO_ROOT / "target"))
+    environment["CARGO_HUSKY_DONT_INSTALL_HOOKS"] = "1"
+    return environment
+
+
 class FilterTextTests(unittest.TestCase):
     """No-compile lock on the three filter blocks' text."""
 
@@ -132,6 +145,16 @@ class FilterTextTests(unittest.TestCase):
             "expected exactly three default-filter blocks "
             "(default, ci, nightly)",
         )
+
+    def test_every_profile_runs_to_completion_after_failures(self):
+        config = tomllib.loads(NEXTEST_TOML.read_text())
+        for profile in ("default", "ci", "nightly"):
+            with self.subTest(profile=profile):
+                self.assertIs(
+                    config["profile"][profile].get("fail-fast"),
+                    False,
+                    f"nextest profile {profile!r} hides later failures",
+                )
 
     def test_ci_adds_only_oracle_owned_binaries_to_default_exclusion(self):
         default_block, ci_block, _nightly = _filter_blocks()
@@ -176,6 +199,24 @@ class FilterTextTests(unittest.TestCase):
             "now falls into neither profile or both",
         )
 
+    def test_cargo_uses_the_current_managed_python(self):
+        environment = _cargo_environment({"PATH": "/usr/bin"})
+        self.assertEqual(environment["PYO3_PYTHON"], sys.executable)
+        self.assertEqual(
+            environment["CARGO_TARGET_DIR"], str(REPO_ROOT / "target")
+        )
+        self.assertEqual(
+            environment["CARGO_HUSKY_DONT_INSTALL_HOOKS"], "1"
+        )
+
+    def test_explicit_cargo_python_remains_authoritative(self):
+        environment = _cargo_environment(
+            {"PYO3_PYTHON": "/configured/python"}
+        )
+        self.assertEqual(
+            environment["PYO3_PYTHON"], "/configured/python"
+        )
+
 
 def _have_nextest() -> bool:
     if shutil.which("cargo") is None:
@@ -184,6 +225,7 @@ def _have_nextest() -> bool:
         out = subprocess.run(
             ["cargo", "nextest", "--version"],
             cwd=REPO_ROOT,
+            env=_cargo_environment(),
             capture_output=True,
             timeout=60,
         )
@@ -205,7 +247,12 @@ def _list_profile(profile: str | None) -> dict[str, tuple[str, bool]]:
     if profile is not None:
         cmd += ["--profile", profile]
     result = subprocess.run(
-        cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=900
+        cmd,
+        cwd=REPO_ROOT,
+        env=_cargo_environment(),
+        capture_output=True,
+        text=True,
+        timeout=900,
     )
     if result.returncode != 0:
         raise RuntimeError(

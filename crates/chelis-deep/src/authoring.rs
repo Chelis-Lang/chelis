@@ -1031,7 +1031,7 @@ where
             return;
         };
         f(pattern, scope, format!("{path}.0"));
-        let added = pattern_binders(pattern);
+        let added = crate::pattern_binder_names(pattern);
         with_scope(scope, added, |scope| {
             for (semantic_index, child) in node.children.iter().enumerate().skip(1) {
                 f(child, scope, format!("{path}.{semantic_index}"));
@@ -1143,7 +1143,7 @@ where
         let added = list
             .elements
             .get(2)
-            .map(pattern_binders)
+            .map(crate::pattern_binder_names)
             .unwrap_or_default();
         if let Some(pattern) = list.elements.get_mut(2) {
             f(pattern, scope);
@@ -1444,111 +1444,6 @@ fn params_node_names(expr: &Expr) -> Option<Vec<String>> {
             .map(str::to_string)
             .collect(),
     )
-}
-
-fn pattern_binders(expr: &Expr) -> Vec<String> {
-    let mut names = Vec::new();
-    collect_pattern_binders(expr, &mut names);
-    names
-}
-
-fn collect_pattern_binders(expr: &Expr, out: &mut Vec<String>) {
-    let Some(pattern) = node_view(expr) else {
-        return;
-    };
-    match pattern.tag {
-        DeepTag::PatVar => {
-            if let Some(name) = pattern.children.first().and_then(symbol) {
-                out.push(name.to_string());
-            }
-        }
-        DeepTag::PatAs => {
-            if let Some(name) = pattern.children.first().and_then(symbol) {
-                out.push(name.to_string());
-            }
-            if let Some(inner) = pattern.children.get(1) {
-                collect_pattern_binders(inner, out);
-            }
-        }
-        DeepTag::PatTuple => {
-            for child in pattern.children {
-                collect_pattern_binders(child, out);
-            }
-        }
-        DeepTag::PatCtor => {
-            for child in pattern.children.iter().skip(1) {
-                collect_pattern_binders(child, out);
-            }
-        }
-        DeepTag::PatRecord => {
-            for field in pattern.children.iter().skip(1) {
-                if let Some(kv) = tagged_node_view(field, DeepTag::Kv)
-                    && let Some(field_pattern) = kv.children.get(1)
-                {
-                    collect_pattern_binders(field_pattern, out);
-                }
-            }
-        }
-        DeepTag::PatLit | DeepTag::PatWild => {}
-        // Explicit non-pattern dispositions make a future DeepTag addition a
-        // compile-time decision here instead of silently treating a new
-        // pattern form as binder-free.
-        DeepTag::Module
-        | DeepTag::Import
-        | DeepTag::ImportAll
-        | DeepTag::Export
-        | DeepTag::Defsig
-        | DeepTag::Def
-        | DeepTag::Deftype
-        | DeepTag::Typealias
-        | DeepTag::Variant
-        | DeepTag::Field
-        | DeepTag::Defdim
-        | DeepTag::If
-        | DeepTag::Match
-        | DeepTag::Arm
-        | DeepTag::Fn
-        | DeepTag::Let
-        | DeepTag::Bind
-        | DeepTag::Var
-        | DeepTag::Lit
-        | DeepTag::App
-        | DeepTag::Record
-        | DeepTag::Access
-        | DeepTag::Pipe
-        | DeepTag::Block
-        | DeepTag::Tuple
-        | DeepTag::TupleGet
-        | DeepTag::RecordUpdate
-        | DeepTag::Par
-        | DeepTag::Borrow
-        | DeepTag::TPrim
-        | DeepTag::TFn
-        | DeepTag::TTensor
-        | DeepTag::TRef
-        | DeepTag::TAdt
-        | DeepTag::TVar
-        | DeepTag::TUnit
-        | DeepTag::TTuple
-        | DeepTag::DName
-        | DeepTag::DVar
-        | DeepTag::DLit
-        | DeepTag::DRank
-        | DeepTag::Effects
-        | DeepTag::Resource
-        | DeepTag::HandleEffect
-        | DeepTag::Grad
-        | DeepTag::Vmap
-        | DeepTag::Jit
-        | DeepTag::Realize
-        | DeepTag::Cast
-        | DeepTag::Copy
-        | DeepTag::Quote
-        | DeepTag::Unquote
-        | DeepTag::Splice
-        | DeepTag::Params
-        | DeepTag::Kv => {}
-    }
 }
 
 fn param_name(expr: &Expr) -> Option<&str> {

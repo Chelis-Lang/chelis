@@ -11,6 +11,7 @@ pub mod lexer;
 pub mod node;
 pub mod parser;
 pub mod path;
+mod pattern;
 pub mod printer;
 pub mod raw;
 pub mod role;
@@ -28,6 +29,7 @@ pub use path::{
     function_body, function_defsig, insert_function_decls, module_excluding_function_def,
     module_has_defsig_for, resolve_function, splice_function_body, spliced_function_def,
 };
+pub use pattern::pattern_binder_names;
 pub use raw::{RawAtom, RawExpr};
 pub use span::Span;
 pub use stamp_to_typed::{StampError, StampErrorKind, stamp_deep_file, stamp_to_typed};

@@ -443,8 +443,17 @@ pub struct PreparedProgram {
     pub stdlib_decls: Vec<Decl>,
     /// `decls` minus `stdlib_decls`, in the same relative order: the
     /// user package's own modules plus any non-stdlib path-deps. Checked
-    /// `_with_context` against the cached chelis-std sub-context. The
-    /// concatenation `stdlib_decls ++ non_stdlib_decls` equals `decls`.
+    /// `_with_context` against the cached chelis-std sub-context.
+    ///
+    /// For a multi-dependency graph the assembly is `stdlib ++ deps ++ root`
+    /// (chelis#1182: the root package's modules are emitted last, so every
+    /// dependency lands in the cached prefix), so `stdlib_decls ++
+    /// non_stdlib_decls` equals `decls` exactly. For a dep-free graph the
+    /// original package-name walk order is preserved (output unchanged), where
+    /// that concatenation may not hold if the root name sorts before
+    /// "chelis-std" -- harmless, since build-time pruning virtually always
+    /// fires and the layered `CheckedCompilation` is then not the codegen
+    /// target.
     pub non_stdlib_decls: Vec<Decl>,
     /// Linker-produced declarations owned by resolved dependency packages
     /// (including chelis-std), excluding every declaration from the root
@@ -505,6 +514,94 @@ pub struct DependencyReferenceEdge {
 }
 
 impl PreparedProgram {
+    /// Partition `non_stdlib_decls` into the build-lane library cache's
+    /// **stable dependency prefix** and its **volatile entry suffix**
+    /// (chelis#1168).
+    ///
+    /// The build-lane type-check stacks three cache layers: the cached
+    /// chelis-std sub-context (`stdlib_decls`), a cached dependency
+    /// sub-context (the first slice returned here), and the freshly
+    /// re-analyzed entry (the second slice). This method decides the
+    /// boundary between the latter two.
+    ///
+    /// The returned pair `(dependency, entry)` is a `split_at` of
+    /// `non_stdlib_decls`: `dependency` is everything up to the entry
+    /// module's first declaration, `entry` is the entry module onward.
+    /// Their concatenation therefore equals `non_stdlib_decls` **exactly,
+    /// in order** — the invariant the layered checker relies on to stay
+    /// byte-identical to the monolithic path (composing
+    /// `stdlib ++ dependency ++ entry` reconstructs
+    /// `stdlib ++ non_stdlib == decls`).
+    ///
+    /// The prefix holds ALL dependency packages: `prepare_graph_from_loaded`
+    /// emits the root package's modules LAST among the non-stdlib decls for a
+    /// multi-dependency graph (chelis#1182), so every dependency package sorts
+    /// before the entry module and lands in the cached prefix, independent of
+    /// how the root package name sorts. The root's own modules (including the
+    /// entry) form the trailing block; those before the entry module are still
+    /// cached, the entry module onward is re-analyzed. The split stays a pure
+    /// prefix/suffix of `non_stdlib_decls` because the reorder is applied ONCE,
+    /// at the linker assembly, to BOTH the monolithic `decls` and this
+    /// partition — so the composed `stdlib ++ dependency ++ entry` still equals
+    /// the monolithic program and the two paths stay byte-identical.
+    ///
+    /// For a dep-free single-package project no reorder is applied (output stays
+    /// byte-identical), so the "dependency prefix" is the user's OWN non-entry
+    /// sibling modules that sort before the entry module in the package-name
+    /// walk; renaming the entry module can move it earlier and shrink what is
+    /// cached for that package.
+    ///
+    /// The entry module's declarations are a contiguous run inside
+    /// `non_stdlib_decls` (they come from one linked module), and
+    /// `entry_decls` is a byte-identical re-link of that same module, so
+    /// the run is located by an exact contiguous match. If it is not found
+    /// (no entry decls, or a caller that did not derive `entry_decls` from
+    /// `non_stdlib_decls`), the split degenerates to an empty dependency
+    /// prefix and the whole of `non_stdlib_decls` as the entry suffix —
+    /// i.e. the pre-chelis#1168 two-layer behavior, still byte-identical.
+    pub fn dependency_entry_partition(&self) -> (&[Decl], &[Decl]) {
+        match self.entry_module_offset_in_non_stdlib() {
+            Some(split) => {
+                let (dependency, entry) = self.non_stdlib_decls.split_at(split);
+                // Falsifiable: the entry suffix must begin with the entry
+                // module's decls (split_at already guarantees the trivial
+                // `dependency ++ entry == non_stdlib_decls`).
+                debug_assert!(
+                    entry.len() >= self.entry_decls.len()
+                        && entry[..self.entry_decls.len()] == self.entry_decls[..],
+                    "the entry suffix must begin with the entry module"
+                );
+                (dependency, entry)
+            }
+            // Degenerate fallback: the entry decls were not located as a
+            // contiguous run of `non_stdlib_decls` (empty entry, or a caller
+            // that did not derive `entry_decls` from it). No cacheable
+            // dependency prefix; the whole slice is the entry layer, which
+            // reproduces the pre-chelis#1168 two-layer behavior exactly.
+            None => (&[], &self.non_stdlib_decls),
+        }
+    }
+
+    /// The offset of the entry module's first declaration within
+    /// `non_stdlib_decls`, or `None` when `entry_decls` is empty or does
+    /// not occur as a contiguous sub-slice.
+    ///
+    /// This is an O(n·k) structural scan (`Decl` `PartialEq` over each start
+    /// position, n = `non_stdlib_decls`, k = `entry_decls`). It is cheap in
+    /// practice only because a first-element mismatch short-circuits nearly
+    /// every start position — a property of the data, not the algorithm. Do not
+    /// "optimize" it into a hash index without measuring first: the naive scan
+    /// is fine precisely because entry-module first decls rarely collide.
+    fn entry_module_offset_in_non_stdlib(&self) -> Option<usize> {
+        let entry = &self.entry_decls;
+        let haystack = &self.non_stdlib_decls;
+        if entry.is_empty() || entry.len() > haystack.len() {
+            return None;
+        }
+        (0..=(haystack.len() - entry.len()))
+            .find(|&start| &haystack[start..start + entry.len()] == entry.as_slice())
+    }
+
     /// Return the fail-closed declaration slice for checking a selected entry
     /// module after a prove verdict (chelis#924).
     ///
@@ -2040,15 +2137,53 @@ fn prepare_graph_from_loaded(
         .map(|package| package.manifest.package.module_prefix.clone())
         .unwrap_or_default();
 
-    // Partition the linked library decls into the chelis-std slice and
-    // everything else, preserving relative order so the concatenation
-    // `stdlib ++ non_stdlib` equals `linked_library_decls`. The
-    // chelis-std typecheck cache content-addresses the stdlib slice.
+    // chelis#1182: emit the ROOT package's modules LAST among the non-stdlib
+    // decls, so every dependency (shell) package lands in the cached dependency
+    // prefix that `dependency_entry_partition` splits before the entry module --
+    // regardless of how the root package name sorts against the deps. The reef
+    // linker walks packages in BTreeMap (name) order, so without this the root
+    // is interleaved and a dependency sorting after the root name is re-inferred
+    // every build (chelis#1182). Only reorder when the graph has a real
+    // dependency (a non-std, non-root package); a dep-free project keeps the
+    // original package-name walk byte-for-byte -- chelis-std is ALWAYS in the
+    // graph, so reordering unconditionally would move an early-sorting single
+    // package after chelis-std and perturb its output.
+    //
+    // Assembling `stdlib ++ deps ++ root` for a reordered graph also restores
+    // the `stdlib_decls ++ non_stdlib_decls == decls` invariant (otherwise only
+    // approximately true when a package name sorts before "chelis-std"). The
+    // reorder is confined to this assembly loop; `link_graph_with_package_tags`
+    // output order is unchanged, so reef build / schema artifacts do not churn.
+    let has_dependency = linked
+        .iter()
+        .any(|(name, _)| name.as_str() != CHELIS_STD_PACKAGE_NAME && name != &graph.root_package);
+    let ordered: Vec<(String, LinkedModule)> = if has_dependency {
+        let mut std_mods = Vec::new();
+        let mut dep_mods = Vec::new();
+        let mut root_mods = Vec::new();
+        for entry in linked {
+            if entry.0 == CHELIS_STD_PACKAGE_NAME {
+                std_mods.push(entry);
+            } else if entry.0 == graph.root_package {
+                root_mods.push(entry);
+            } else {
+                dep_mods.push(entry);
+            }
+        }
+        std_mods
+            .into_iter()
+            .chain(dep_mods)
+            .chain(root_mods)
+            .collect()
+    } else {
+        linked
+    };
+
     let mut linked_library_decls = Vec::new();
     let mut linked_stdlib_decls = Vec::new();
     let mut linked_non_stdlib_library_decls = Vec::new();
     let mut linked_dependency_decls = Vec::new();
-    for (package_name, module) in linked {
+    for (package_name, module) in ordered {
         if package_name == CHELIS_STD_PACKAGE_NAME {
             linked_stdlib_decls.extend(module.decls.iter().cloned());
         } else {
@@ -2074,7 +2209,11 @@ fn prepare_graph_from_loaded(
 }
 
 const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 1;
+// v2 (chelis#1182): the assembly loop now emits the root package's modules last
+// for multi-dependency graphs, changing the serialized decl order. Bumped so a
+// warm project does not load a stale old-order graph (which would make #1182
+// inert and make the same binary emit different C depending on cache state).
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
@@ -2325,6 +2464,7 @@ pub fn rewrite_entry_decls_with_reef_graph(
     } else {
         format!("{}.__Eval", graph.eval_module_prefix)
     };
+    validate_source_signature_pairs(entry_decls, &eval_module_name)?;
     let eval_module = ModuleSource {
         package_name: graph.graph.root_package.clone(),
         module_name: eval_module_name,
@@ -6871,6 +7011,7 @@ fn load_package_modules(
                     ));
                 }
             };
+            validate_source_signature_pairs(&module_decl.1, &module_decl.0)?;
             validate_module_path(
                 &manifest.package.module_prefix,
                 &module_decl.0,
@@ -7068,6 +7209,33 @@ fn collect_symbol_kinds(decls: &[Decl]) -> BTreeMap<String, SymbolKind> {
         }
     }
     symbols
+}
+
+/// Enforce the authored-source half of the `defsig` pairing contract before
+/// Reef rewrites names or replaces dependency bodies with a trusted shell
+/// interface. A linked shell is allowed to contain signature-only ABI rows;
+/// a live source module or synthetic entry is not.
+fn validate_source_signature_pairs(decls: &[Decl], module: &str) -> Result<(), String> {
+    let definitions = decls
+        .iter()
+        .filter_map(|decl| match decl {
+            Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    for decl in decls {
+        let Decl::Sig { name, .. } = decl else {
+            continue;
+        };
+        if !definitions.contains(name.as_str()) {
+            return Err(format!(
+                "signature `{module}.{name}` has no matching definition in the same source module; \
+                 signatures annotate Chelis definitions and cannot borrow a body from a linked library context"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn module_name_for_input(root: &Path, file: &Path, package_name: &str) -> Result<String, String> {
@@ -8501,6 +8669,9 @@ fn rewrite_let_binding(
     }
 }
 
+// Deliberately separate from `chelis_deep::pattern_binder_names`: Reef is
+// resolving the Surf parser's `Pattern` AST before any Deep pattern exists.
+// Deep consumers must use the shared helper instead of copying its tag walk.
 fn collect_pattern_binders(pattern: &Pattern, locals: &mut HashSet<String>) {
     match pattern {
         Pattern::Var(name, _) => {
@@ -8764,6 +8935,104 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent");
         }
         fs::write(path, contents).expect("write file");
+    }
+
+    /// Two-package fixture (root + one path dependency) used to exercise
+    /// `PreparedProgram::dependency_entry_partition` under both link
+    /// orderings: a dependency sorting before the root, and one sorting
+    /// after it.
+    fn two_pkg_fixture(
+        root_name: &str,
+        root_prefix: &str,
+        dep_name: &str,
+        dep_prefix: &str,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("app");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"{ver}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./thedep\" }}\n",
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            &format!(
+                "module {root_prefix}.Main\nimport {dep_prefix}.Math (dep_add)\n\ndef main_value() -> int32 = dep_add(1, 2)\n"
+            ),
+        );
+        write(
+            &root.join("thedep/reef.toml"),
+            &format!(
+                "[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"{ver}\"\nmodule_prefix = \"{dep_prefix}\"\n",
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        write(
+            &root.join("thedep/src/math.ch"),
+            &format!(
+                "module {dep_prefix}.Math\nexport (dep_add)\n\ndef dep_add(x: int32, y: int32) -> int32 = cast(0, int32)\n"
+            ),
+        );
+        write(
+            &root.join("reef.lock"),
+            &format!(
+                "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"{ver}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./thedep\"\n",
+                ver = CURRENT_COMPILER_VERSION
+            ),
+        );
+        (dir, root)
+    }
+
+    /// `dependency_entry_partition` must return a pure prefix/suffix of
+    /// `non_stdlib_decls` whose concatenation reconstructs it exactly,
+    /// under both alphabetical link orderings, and the entry suffix must
+    /// begin with the entry module.
+    #[test]
+    fn dependency_entry_partition_reconstructs_non_stdlib() {
+        // chelis#1182: `prepare_graph_from_loaded` emits the root package's
+        // modules LAST for a multi-dependency graph, so EITHER ordering leaves
+        // the dependency package before the entry module -> the dependency
+        // prefix is non-empty and the cache engages. (Before #1182, Case B --
+        // a dependency sorting after the root -- degenerated to an empty
+        // prefix / two-layer behavior; that is exactly the ordering dependence
+        // #1182 removes.)
+        // Case A: dependency ("coral") sorts BEFORE the root ("school").
+        // Case B: dependency ("zzzlib") sorts AFTER the root ("aaaapp").
+        for (root_name, root_prefix, dep_name, dep_prefix, expect_nonempty_dep_prefix) in [
+            ("school", "School", "coral", "Coral", true),
+            ("aaaapp", "Aaaapp", "zzzlib", "Zzzlib", true),
+        ] {
+            let (_dir, root) = two_pkg_fixture(root_name, root_prefix, dep_name, dep_prefix);
+            let entry = root.join("src/main.ch");
+            let prepared = prepare_program_for_file(&entry)
+                .expect("prepare ok")
+                .expect("inside reef package");
+
+            let (dependency, entry_suffix) = prepared.dependency_entry_partition();
+
+            // Concatenation reconstructs non_stdlib_decls exactly, in order.
+            let mut reconstructed = dependency.to_vec();
+            reconstructed.extend(entry_suffix.iter().cloned());
+            assert_eq!(
+                reconstructed, prepared.non_stdlib_decls,
+                "dependency ++ entry must equal non_stdlib_decls for {root_name}"
+            );
+
+            // The entry suffix begins with the entry module's decls.
+            assert!(
+                entry_suffix.len() >= prepared.entry_decls.len()
+                    && entry_suffix[..prepared.entry_decls.len()] == prepared.entry_decls[..],
+                "entry suffix must start with entry_decls for {root_name}"
+            );
+
+            assert_eq!(
+                !dependency.is_empty(),
+                expect_nonempty_dep_prefix,
+                "dependency-prefix emptiness under link ordering mismatch for {root_name}"
+            );
+        }
     }
 
     /// Lock the runtime version invariant: the `BUNDLED_CHELIS_STD_VERSION`
@@ -10163,6 +10432,52 @@ path = "./mylib"
         );
 
         (dir, root)
+    }
+
+    #[test]
+    fn live_package_orphan_signature_is_rejected_before_linking() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("orphan-sig");
+        write(
+            &root.join("reef.toml"),
+            &format!(
+                r#"[package]
+name = "orphan-sig"
+version = "0.1.0"
+compiler = "{CURRENT_COMPILER_VERSION}"
+module_prefix = "OrphanSig"
+"#,
+            ),
+        );
+        write(
+            &root.join("src/main.ch"),
+            "module OrphanSig.Main\nsig missing: int32\n",
+        );
+
+        let error = prepare_reef_graph(&root)
+            .expect_err("an authored package signature needs a same-module definition");
+        assert!(
+            error.contains("missing") && error.contains("same source module"),
+            "unexpected orphan-signature diagnostic: {error}"
+        );
+    }
+
+    #[test]
+    fn synthetic_entry_signatures_require_same_entry_definitions() {
+        let (_dir, root) = shared_graph_fixture();
+        let graph = prepare_reef_graph(&root).expect("prepare graph");
+        let orphan = chelis_surf::parser::parse_str("sig missing: int32").expect("parse orphan");
+        let error = compile_with_reef_graph(&graph, &orphan)
+            .expect_err("an eval entry signature cannot borrow a library definition");
+        assert!(
+            error.contains("missing") && error.contains("same source module"),
+            "unexpected synthetic-entry diagnostic: {error}"
+        );
+
+        let paired =
+            chelis_surf::parser::parse_str("sig present: int32\ndef present() -> int32 = 1")
+                .expect("parse pair");
+        compile_with_reef_graph(&graph, &paired).expect("paired entry signature must link");
     }
 
     // ---- chelis#157: module-scoped constructor resolution ----

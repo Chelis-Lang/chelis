@@ -755,6 +755,32 @@ Standard Algorithm W with extensions for tensor types. The flow:
 3. **Generalization:** At `let` boundaries, generalize unconstrained type variables to produce polymorphic types.
 4. **Annotation checking:** Where the programmer/agent provided `type` metadata, check that the inferred type is compatible with the annotation.
 
+> **[04-INF-1]** A lambda whose body reaches a semantic typing rule while an
+> operand's outer type constructor is still unknown SHALL retain that rule as
+> an obligation and SHALL remain monomorphic until an application binds the
+> operand. The trigger is semantic: an absent annotation, a synthesized
+> wildcard signature slot, an authored bare type variable, and a variable
+> derived from such a parameter by projection all remain unknown constructors.
+> The first application within the enclosing declaration binds the lambda and
+> replays the same semantic rule; every later use has that same instantiation.
+> If no application or outer-constructor parameter annotation resolves the
+> obligation by that declaration's own boundary, the declaration is a type
+> error; later top-level declarations are not binding sites for it, and a
+> result annotation alone does not resolve an unknown parameter constructor.
+> Ordinary lambdas with no deferred semantic obligation generalize normally.
+> A symbolic tensor is not an unknown constructor: declared dimension and
+> precision variables remain polymorphic, independently declared rigid
+> dimensions remain distinct, and they unify only when an ordinary body
+> constraint requires equality.
+
+The replay requirement applies to every operation whose result or admission
+depends on the resolved operand shape, not to a hand-maintained exception for
+one builtin. In particular, a `matmul`, reduction, `expand`, `layer_norm`,
+`conv2d`, or `scatter_elements` reached through a bare lambda parameter is
+checked again after the parameter binds. The check used on replay is the
+operation's ordinary typing rule, so immediate and deferred applications
+cannot acquire different semantics.
+
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."
@@ -1752,6 +1778,18 @@ non-overridable except by the three mechanisms above. Implementation
 references for verification: `crates/chelis-surf/src/desugar.rs` (literal
 desugaring emits `(lit {type: (t-prim {} int32)} N)`), `crates/chelis-types/src/infer.rs`
 (literal inference rule maps `Atom::Int → Prim::Int32`, `Atom::Float → Prim::F32`).
+
+> **[04-LIT-1]** A primitive literal's Deep value atom SHALL agree with its
+> declared primitive family: integer atoms denote only integer primitives,
+> float atoms denote only float primitives, boolean atoms denote only `bool`,
+> and string atoms denote only `string`. Primitive type metadata never casts
+> or reinterprets an atom. The sole cross-family representation is an exact
+> Int atom explicitly marked `literal_source: integer` and bound directly to
+> a float primitive by a suffix or surrounding literal context. It SHALL be
+> finalized once at the declared float width; it SHALL NOT pass through f64
+> first. Every producer SHALL emit one of these canonical forms and every
+> consumer SHALL reject an unmarked contradiction or a malformed marker.
+> `spec/03-deep-syntax.md` §6.4 defines the canonical Deep forms.
 
 ### 5.4 Precision Compatibility Table
 
@@ -2822,8 +2860,7 @@ offender unspecified while guaranteeing the trap - was rejected because the
 kind is part of the rendered line, so an unspecified offender would have
 required weakening [04-NUM-9]'s byte-identity requirement to accommodate an
 implementation. Stated for elementwise trapping maps generally rather than
-for `cast`, so a later trapping map does not reopen the same question. Not
-fully honored on the checked `cast` today: chelis#1152.)*
+for `cast`, so a later trapping map does not reopen the same question.)*
 
 ---
 

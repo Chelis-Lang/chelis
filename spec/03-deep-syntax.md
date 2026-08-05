@@ -195,7 +195,7 @@ handling.
 **Provenance metadata.** After macro expansion, each node in the expanded
 form may carry a `source` key in its metadata map indicating the macro invocation it
 originated from.
-Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0))`.
+Example: `(app {source: (relu input)} (var {} max_elem) (var {} input) (lit {type: (t-prim {} f32)} 0.0))`.
 Provenance is informational — it does not affect parsing, type checking, or evaluation.
 The node is a standard `app` node; the `source` key is ignored by all compiler passes
 except error reporting.
@@ -273,6 +273,19 @@ using it forges module identity through the name stem
 | `variant` | `(variant {} Name field...)` | Sum type constructor (fields optional) |
 | `field` | `(field {} name type-expr)` | Named field in variant |
 | `defdim` | `(defdim {} name)` | Dimension name declaration |
+
+A `defsig` annotates a Chelis `def`; it does not declare a runtime symbol or
+an externally supplied implementation. Every `defsig` therefore has exactly
+one same-name `def` in the same module and check unit. A `def` may omit its
+`defsig` and use inference. Imports and an existing library context do not
+satisfy this pairing rule: a new unit cannot redeclare an imported name with
+an unbacked signature. A capability supplied by a host or another lane uses
+that capability's explicit typed declaration form, never an orphan `defsig`.
+After every authored source module has passed this rule, a trusted package
+linker may materialize a dependency interface as signature-only internal
+records whose bodies remain in the supplying artifact. Those records are not
+an authored check unit, use the linker's reserved-name/provenance channel, and
+cannot be produced by source-level `defsig` syntax.
 
 `deftype` may carry `opaque: true` metadata:
 
@@ -700,6 +713,32 @@ an invalid Surf token.
 Every valid Deep string atom has a Surf representation. Resugaring uses the
 single P11 spelling: printable Unicode remains literal, the six named escapes
 are preferred, and other C0/C1 controls use minimal lowercase `\u{h}`.
+
+When a `lit` node's `type` metadata resolves to a primitive, the value atom
+and primitive family have one closed canonical pairing:
+
+| Value atom | Permitted primitive family |
+|---|---|
+| integer | `int8`, `int16`, `int32`, `int64` |
+| float | `f16`, `bf16`, `f32`, `f64` |
+| boolean | `bool` |
+| string | `string` |
+
+Type metadata is not a cast. Every cross-family pairing is a type error, not
+a conversion or a request to reinterpret the atom. There is one explicit
+source-preserving form: an integer-spelled token bound directly at a float
+dtype carries its exact Int atom together with `literal_source: integer` in
+the `lit` metadata. This covers a suffix such as `7f32` and an integer element
+in a contextually `f32` tensor literal. The marker is valid exactly once, only
+with an Int atom and a float primitive; every other use is a type error. It
+keeps the exact integer available for the one target-width rounding required
+by [04-NUM-1] and [04-NUM-14], instead of first rounding through f64. An
+unmarked Int atom under a float primitive remains contradictory. An explicit
+`cast` is the only form that converts an already-typed literal value between
+primitive families. `literal_source` is producer-asserted provenance, not a
+lexer authenticity proof: hand-written Deep MAY author the canonical marker,
+and the checker validates its closed atom/primitive/uniqueness contract before
+any consumer may rely on it.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
 `int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an

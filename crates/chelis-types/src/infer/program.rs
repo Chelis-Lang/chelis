@@ -137,6 +137,7 @@ pub(super) fn infer_program_with_product_in_session(
             ) {
                 deferred_bindings.push(binding);
             }
+            product.finish_deferred_shape_checks(&mut vg, &mut subst, errors);
             product.finish_root(&subst, errors);
             // Issue #256 round 2: re-check each deferred borrow against the
             // now-complete substitution (see `validate_deferred_borrow_vars`).
@@ -1099,6 +1100,7 @@ pub(super) fn infer_ir_program_with_state(
             ) {
                 deferred_bindings.push(binding);
             }
+            product.finish_deferred_shape_checks(&mut state.var_gen, &mut state.subst, errors);
             product.finish_root(&state.subst, errors);
             if let Some(t0) = t0 {
                 let elapsed = t0.elapsed();

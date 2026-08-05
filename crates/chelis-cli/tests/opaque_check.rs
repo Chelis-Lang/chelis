@@ -522,6 +522,15 @@ def attack(x: f32) -> f32 = prob_value(raw_make(x))
 fn build_reef_rejects_unexported_producer_reference() {
     // RT-1 F1: the same bare-call attack must also be rejected by
     // `chelis build` (RT-1 confirmed it emitted C in W1).
+    //
+    // chelis#1176 REGRESSION ANCHOR: since #1176, `cmd_build`'s layered
+    // typecheck cache subsumes the monolithic `checked_program_with_effects`
+    // full-program check whenever it returns `Some`, so the cross-module
+    // opaque-encapsulation guard now runs ONLY on the layered path for a
+    // reef package under pruning. This fixture prunes the unexported producer
+    // and confirms the layered path still returns `Ok(None)` (→ monolithic
+    // fallback → the `OpaqueTypeViolation` still surfaces). If it ever passes
+    // silently, the cache is masking a whole-program rejection. Keep it green.
     let (_dir, pkg) = reef_package(&[
         ("types.ch", REEF_SIXTH_TYPES_CH),
         (

@@ -225,16 +225,214 @@ pub enum Realizability {
     TensorAtTensorType,
 }
 
-/// A builtin's complete declaration: name, realizability, shape class, and
-/// axis-argument layout.
+/// Whether a builtin is accepted solely by its polymorphic HM signature or
+/// must reach checker-owned semantic inference. Required on every
+/// [`BuiltinDecl`]; there is intentionally no default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceDisposition {
+    /// The signature fully determines the builtin's type behavior. The reason
+    /// is part of the reviewed declaration rather than an implicit fallback.
+    GenericAccepted { reason: &'static str },
+    /// The builtin must reach the named semantic checker family.
+    Checked(BuiltinInferenceRule),
+}
+
+/// Closed checker families used by builtin declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinInferenceRule {
+    /// A shape-computed result that may owe a deferred obligation when an
+    /// input is not yet bound.
+    ShapeComputed,
+    /// A dedicated type/arity/static-value rule in the application dispatcher.
+    Specialized,
+}
+
+const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
+    "matmul",
+    "sum",
+    "max_reduce",
+    "min_reduce",
+    "prod_reduce",
+    "argmax_reduce",
+    "argmin_reduce",
+    "mean",
+    "expand",
+    "layer_norm",
+    "conv2d",
+    "scatter_elements",
+];
+
+const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
+    "add",
+    "mul",
+    "max_elem",
+    "neg",
+    "recip",
+    "exp",
+    "log",
+    "sin",
+    "tan",
+    "atan",
+    "sqrt",
+    "floor",
+    "ceil",
+    "round",
+    "uniform_like",
+    "cmplt",
+    "sub",
+    "div",
+    "floor_div",
+    "trunc_div",
+    "mod",
+    "eq",
+    "neq",
+    "lt",
+    "gt",
+    "lte",
+    "gte",
+    "bitand",
+    "bitor",
+    "bitxor",
+    "shl",
+    "shr",
+    "and",
+    "or",
+    "not",
+    "relu",
+    "sigmoid",
+    "tanh",
+    "silu",
+    "gelu",
+    "softmax",
+    "normalize",
+    "min_elem",
+    "reduce_window_max",
+    "reduce_window_min",
+    "reduce_window_sum",
+    "reduce_window_mean",
+    "reshape",
+    "permute",
+    "pad",
+    "shrink",
+    "stride",
+    "print",
+    "fail",
+    "debug",
+    "string_len",
+    "string_concat",
+    "string_slice",
+    "string_contains",
+    "string_starts_with",
+    "string_ends_with",
+    "string_trim",
+    "to_string",
+    "to_int",
+    "to_float",
+    "rank",
+    "shape",
+    "numel",
+    "tensor_to_scalar",
+    "scalar_to_tensor",
+    "len",
+    "index",
+    "append",
+    "concat",
+    "take",
+    "drop",
+    "chunk",
+    "range",
+    "map",
+    "filter",
+    "fold",
+    "scan",
+    "tensor_scan",
+    "partition",
+    "flat_map",
+    "flatten",
+    "zip",
+    "enumerate",
+    "dict_of",
+    "dict_get",
+    "dict_contains",
+    "dict_remove",
+    "dict_insert",
+    "dict_merge",
+    "dict_keys",
+    "dict_values",
+    "dict_entries",
+    "to_tensor",
+    "to_list",
+    "pad_sequences",
+    "pad_sequences_to",
+    "read_file",
+    "write_file",
+    "read_lines",
+    "read_bytes",
+    "file_exists",
+    "list_dir",
+    "mmap_file",
+    "mmap_read",
+    "mmap_len",
+    "process_run",
+    "parse_json",
+    "to_json",
+    "json_f64",
+    "json_int",
+    "json_str",
+    "json_list",
+    "json_f64s",
+    "json_ints",
+    "jnum",
+    "jint",
+    "jstr",
+    "jlist",
+    "jdict",
+    "json_set",
+    "round_to",
+    "parse_csv",
+    "to_csv",
+    "csv_f64s",
+    "csv_ints",
+    "csv_strs",
+    "csv_nrows",
+    "csv_cols",
+    "csv_f64",
+    "csv_int",
+    "csv_str",
+    "einsum",
+    "split",
+    "gather",
+    "scatter",
+    "scatter_replace",
+    "where",
+    "cumsum",
+    "sort",
+    "diagonal",
+    "trace",
+    "clamp",
+];
+
+/// True only when the declared rule is wired to the corresponding closed
+/// application-dispatch family. This is consulted at runtime and by the
+/// registry tripwire; a checked declaration with no route fails loudly.
+pub(crate) fn has_registered_inference_route(name: &str, rule: BuiltinInferenceRule) -> bool {
+    match rule {
+        BuiltinInferenceRule::ShapeComputed => SHAPE_COMPUTED_INFERENCE_BUILTINS.contains(&name),
+        BuiltinInferenceRule::Specialized => SPECIALIZED_INFERENCE_BUILTINS.contains(&name),
+    }
+}
+
+/// A builtin's complete declaration: name, inference disposition,
+/// realizability, shape class, and axis-argument layout.
 /// All fields are required — adding a builtin without any field is a
 /// compile error (missing struct field). No `Default` implementation.
 ///
 /// ```compile_fail
 /// // Omitting `realizability` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, ShapeClass};
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, ShapeClass};
 /// let _ = BuiltinDecl {
 ///     name: "x",
+///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     shape_class: ShapeClass::Rewriting,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
 /// };
@@ -242,19 +440,32 @@ pub enum Realizability {
 ///
 /// ```compile_fail
 /// // Omitting `shape_class` must fail to compile.
-/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, Realizability};
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability};
 /// let _ = BuiltinDecl {
 ///     name: "x",
+///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     realizability: Realizability::Universal,
 ///     axis_arguments: AxisArgumentLayout::NoAxes,
 /// };
 /// ```
 ///
 /// ```compile_fail
-/// // Omitting `axis_arguments` must fail to compile.
-/// use chelis_types::{BuiltinDecl, Realizability, ShapeClass};
+/// // Omitting `inference` must fail to compile.
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, Realizability, ShapeClass};
 /// let _ = BuiltinDecl {
 ///     name: "x",
+///     realizability: Realizability::Universal,
+///     shape_class: ShapeClass::Rewriting,
+///     axis_arguments: AxisArgumentLayout::NoAxes,
+/// };
+/// ```
+///
+/// ```compile_fail
+/// // Omitting `axis_arguments` must fail to compile.
+/// use chelis_types::{BuiltinDecl, BuiltinInferenceRule, InferenceDisposition, Realizability, ShapeClass};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
 ///     realizability: Realizability::Universal,
 ///     shape_class: ShapeClass::Rewriting,
 /// };
@@ -262,283 +473,333 @@ pub enum Realizability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinDecl {
     pub name: &'static str,
+    pub inference: InferenceDisposition,
     pub realizability: Realizability,
     pub shape_class: ShapeClass,
     pub axis_arguments: AxisArgumentLayout,
 }
 
 /// The consolidated builtin table. Single source of truth for builtin
-/// metadata. Each entry declares name, realizability, shape class, and axis
-/// layout.
+/// metadata. Each entry declares name, inference disposition, realizability,
+/// shape class, and axis layout.
 /// Omitting any field is a compile error.
 pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Tensor elementwise (Universal, Identity) ────────────────────
     BuiltinDecl {
         name: "add",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mul",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sub",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "div",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "floor_div",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "trunc_div",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "max_elem",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "min_elem",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "neg",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "recip",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "exp",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "log",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sin",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sqrt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "cos",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "atan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "abs",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "floor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "ceil",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "round",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "relu",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sigmoid",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tanh",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "silu",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gelu",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "uniform_like",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "cmplt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "eq",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "neq",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "lt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gt",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "lte",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gte",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mod",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "bitand",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "bitor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "bitxor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shl",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shr",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "and",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "or",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "not",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "where",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "clamp",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -546,54 +807,63 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Reductions (Universal, NameTracked) ─────────────────────────
     BuiltinDecl {
         name: "softmax",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "normalize",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mean",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "sum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "max_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "min_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "prod_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "argmax_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "argmin_reduce",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
@@ -601,24 +871,28 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Windowed reductions ─────────────────────────────────────────
     BuiltinDecl {
         name: "reduce_window_max",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reduce_window_min",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reduce_window_sum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reduce_window_mean",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -626,114 +900,133 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Shape ops (Universal, Rewriting) ────────────────────────────
     BuiltinDecl {
         name: "matmul",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "layer_norm",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "conv2d",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reshape",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "permute",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "expand",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
         axis_arguments: AxisArgumentLayout::Fixed(&[1, 3]),
     },
     BuiltinDecl {
         name: "pad",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shrink",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "stride",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gather",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[2]),
     },
     BuiltinDecl {
         name: "scatter",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
         name: "scatter_replace",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
         name: "scatter_elements",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
         name: "einsum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "split",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "cumsum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "sort",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "diagonal",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
     },
     BuiltinDecl {
         name: "trace",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
@@ -741,78 +1034,91 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── IO / effects (HostOnly) ─────────────────────────────────────
     BuiltinDecl {
         name: "print",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "fail",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "debug",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "read_file",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "write_file",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "read_lines",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "read_bytes",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "file_exists",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "list_dir",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mmap_file",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mmap_read",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mmap_len",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "process_run",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -820,90 +1126,105 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Host-lane JSON I/O (chelis#890, HostOnly, eval-only) ────────
     BuiltinDecl {
         name: "parse_json",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_json",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_f64",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_int",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_str",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_list",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_f64s",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_ints",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jnum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jint",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jstr",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jlist",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jdict",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_set",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "round_to",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -911,60 +1232,70 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Host-lane CSV I/O (chelis#903, HostOnly, eval-only) ─────────
     BuiltinDecl {
         name: "parse_csv",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_csv",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_f64s",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_ints",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_strs",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_nrows",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_cols",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_f64",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_int",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_str",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -972,60 +1303,70 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── String ops (HostOnly) ───────────────────────────────────────
     BuiltinDecl {
         name: "string_len",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_concat",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_slice",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_contains",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_starts_with",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_ends_with",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_trim",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_string",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_int",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_float",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1033,30 +1374,35 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Tensor introspection (HostOnly at scalar type) ──────────────
     BuiltinDecl {
         name: "rank",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shape",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "numel",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tensor_to_scalar",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "scalar_to_tensor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1064,108 +1410,126 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── List ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
         name: "len",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "index",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "append",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "concat",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "take",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "drop",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "chunk",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "range",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "map",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "filter",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "fold",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "scan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tensor_scan",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "partition",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "flat_map",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "flatten",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "zip",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "enumerate",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1173,54 +1537,63 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Dict ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
         name: "dict_of",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_get",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_contains",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_remove",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_insert",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_merge",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_keys",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_values",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_entries",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1228,24 +1601,28 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Tensor conversion (HostOnly) ────────────────────────────────
     BuiltinDecl {
         name: "to_tensor",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_list",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "pad_sequences",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "pad_sequences_to",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -1253,42 +1630,63 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Test builtins (HostOnly) ────────────────────────────────────
     BuiltinDecl {
         name: "test_assert",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_f32",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_int",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_bool",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_string",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_close_tensor",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_tensor_int64",
+        inference: InferenceDisposition::GenericAccepted {
+            reason: "the polymorphic signature fully determines this builtin type",
+        },
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -3077,6 +3475,48 @@ mod tests {
                 "shape_class mismatch for builtin `{}`",
                 decl.name
             );
+        }
+    }
+
+    #[test]
+    fn every_checked_builtin_has_an_exact_inference_route() {
+        for decl in super::BUILTINS {
+            match decl.inference {
+                super::InferenceDisposition::Checked(rule) => assert!(
+                    super::has_registered_inference_route(decl.name, rule),
+                    "builtin `{}` declares {rule:?} but no exact route owns it",
+                    decl.name
+                ),
+                super::InferenceDisposition::GenericAccepted { reason } => assert!(
+                    !reason.trim().is_empty(),
+                    "generic acceptance for `{}` requires a reviewable reason",
+                    decl.name
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn every_inference_route_is_owned_by_the_exact_checked_declaration() {
+        for (rule, names) in [
+            (
+                super::BuiltinInferenceRule::ShapeComputed,
+                super::SHAPE_COMPUTED_INFERENCE_BUILTINS,
+            ),
+            (
+                super::BuiltinInferenceRule::Specialized,
+                super::SPECIALIZED_INFERENCE_BUILTINS,
+            ),
+        ] {
+            for name in names {
+                let decl = super::builtin_decl(name)
+                    .unwrap_or_else(|| panic!("inference route names unknown builtin `{name}`"));
+                assert_eq!(
+                    decl.inference,
+                    super::InferenceDisposition::Checked(rule),
+                    "inference route for `{name}` is not owned by its exact declaration"
+                );
+            }
         }
     }
 }

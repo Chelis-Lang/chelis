@@ -131,19 +131,46 @@ charset checker was added: that would be a second source of truth for
   CI stage (`lint-and-unit`, `integration`), with the union as the
   full gate. The workflow's `workspace-tests` job invokes the integration
   stage; the stable `Integration Tests (Linux)` context aggregates that job
-  with the parallel Phase 0-3 oracle. `--stage` runs one subset; `--list`
-  prints the canonical full list.
+  with the parallel Phase 0-3 oracle. A stage name runs one subset; `--list`
+  prints the canonical full list and `--local` derives per-crate tests from
+  the diff against `origin/main`.
+- `python3 scripts/gate.py ...` is a bootstrap command, not permission to use
+  the system interpreter for gate logic. Unless it is already running in
+  Devenv, a uv-created venv, or `uv run`, the script re-executes itself as
+  `uv run --managed-python --python 3.11 --no-project python
+  scripts/gate.py ...`. It validates an explicit `PYO3_PYTHON` or exports the
+  selected interpreter to every child command.
+- Every child command's combined stdout/stderr streams live and is teed to a
+  temporary transcript. Successful transcripts are removed. On failure the
+  transcript moves under `target/gate-failures/`; diagnostics include the
+  stage/index, duration, exit code or signal, host and relevant environment,
+  exact rerun command, complete-log path, and a 200-line tail replay.
+- The gate normalizes `CARGO_TARGET_DIR` inside the current worktree and
+  rejects external paths. It sets `CARGO_HUSKY_DONT_INSTALL_HOOKS=1` so a
+  build cannot mutate the clone's shared Git hooks while sibling worktrees
+  are active.
+- Every nextest profile sets `fail-fast = false`, and gate-owned nextest
+  commands also pass `--no-fail-fast` explicitly. A failing assertion does
+  not cancel later tests that may reveal independent failures.
 - The canonical full list:
   - `cargo build --workspace --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo fmt --all -- --check`
   - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
-  - `cargo nextest run --workspace --profile ci`
+  - `cargo test -p chelis-types --doc`
+  - `cargo test -p chelis-compiler-api --doc`
+  - `<managed-python> scripts/check_checkpoint_compile_fail.py`
+  - `cargo nextest run --workspace --no-fail-fast`
+- CI substitutes `cargo nextest run --workspace --profile ci
+  --no-fail-fast` for the last
+  command and delegates the excluded capacity-census binaries to the required
+  dtype oracle.
 - `.github/workflows/ci.yml` gate steps call
   `python3 scripts/gate.py <stage>` instead of inlining
   cargo/chelis commands.
 - `AGENTS.md` "Minimum repo gate" points at `python3 scripts/gate.py`
-  plus a `--list` echo of the canonical list.
+  plus a `--list` echo of the canonical list and documents uv routing and
+  retained failure diagnostics.
 - Scope is the per-PR developer-runnable gate ONLY. The dtype oracle and
   result aggregator, sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
   and docs CI jobs are out of scope by design.
@@ -160,6 +187,9 @@ charset checker was added: that would be a second source of truth for
   LOC-report / no-AI-authorship jobs by name (`NON_GATE_JOBS`) so the
   exclusion is visible and reviewable;
 - `--list` prints the canonical list.
+- uv/Devenv detection, unmanaged re-exec, missing-uv guidance, child
+  `PYO3_PYTHON` propagation, success cleanup, and complete failed-command
+  diagnostics are covered by `scripts/test_gate_diagnostics.py`.
 
 A `run: |` multi-line block in either gate job would hide its commands
 from the line-based parity parser; `test_no_multiline_run_in_gate_jobs`
@@ -175,11 +205,13 @@ both.
 ## Acceptance
 
 - `cargo build --workspace --all-targets`
-- `cargo nextest run --workspace`
+- `cargo nextest run --workspace --no-fail-fast`
 - `cargo test --workspace --lib`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
 - `cargo run -p chelis-cli --bin chelis --quiet -- lint --check .`
   (exit 0)
-- `python3 -m unittest scripts/test_test_timing_check.py scripts/test_gate.py`
+- `uv run --managed-python --python 3.11 --no-project python -m unittest
+  scripts.test_test_timing_check scripts.test_gate scripts.test_gate_local
+  scripts.test_gate_diagnostics`
 - `python3 scripts/gate.py` (runs and passes)

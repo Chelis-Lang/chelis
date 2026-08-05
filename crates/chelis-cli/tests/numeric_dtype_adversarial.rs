@@ -35,13 +35,11 @@
 //!      The panic happens in `crates/chelis-backend-c/src/emit.rs:588`
 //!      AFTER style/check pass.
 //!
-//!   F5 (SPEC-DIVERGENCE): `chelis build --target hip` rejects bf16/f16
-//!      at the CLI's `reject_unsupported_hip_ops` (only f32/bool/sparse
-//!      indices admitted), even though the HIP backend has full
-//!      `chelis_hipblas_bf16_gemm_f32_acc_*` machinery. The
-//!      brief's coverage matrix and spec §5.7.1 both treat HIP as the
-//!      bf16/f16 carrier; users have no end-to-end CLI path to either.
-//!      Offending code: crates/chelis-cli/src/main.rs:3878.
+//!   F5 (REPAIRED): the old HIP gate rejected bf16/f16 before the backend's
+//!      `chelis_hipblas_bf16_gemm_f32_acc_*` machinery could run. The shared
+//!      gate now admits narrow-float storage and matmul paths while rejecting
+//!      ordinary narrow-float compute nodes that still lack typed kernels.
+//!      The positive and negative controls below lock that boundary.
 //!
 //!   F6 (SPEC-DIVERGENCE): `chelis-metal-runtime/runtime/chelis_metal_runtime.h`
 //!      lines 178 and 236 contain em-dashes in user-facing fprintf
@@ -499,7 +497,7 @@ fn rt4_f7_bf16_matmul_fixture_builds_through_hip() {
         "RT-4 F7: bf16 fixture must check cleanly; got errors {errors:?}"
     );
     // `chelis build --target hip` must succeed (matmul-only is the
-    // bf16 carrier per WS-A3; the CLI's reject_unsupported_hip_ops
+    // bf16 carrier per WS-A3; the shared reject_unsupported_hip_ops
     // admits bf16 on BlasMatmul nodes after the F5 widen).
     let build = run_build_target(dir.path(), &fixture, "hip");
     let stderr = String::from_utf8_lossy(&build.stderr);

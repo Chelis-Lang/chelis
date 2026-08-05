@@ -14,7 +14,12 @@ pub(super) const TENSOR_OPS: &[&str] = &[
     "exp",
     "log",
     "sin",
+    "tan",
+    "atan",
     "sqrt",
+    "floor",
+    "ceil",
+    "round",
     "relu",
     "sigmoid",
     "tanh",
@@ -133,7 +138,8 @@ pub(super) fn operand_dtype_rejection(
         "matmul" | "layer_norm" | "normalize" => {
             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
         }
-        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" | "floor_div" => {
+        "add" | "mul" | "sub" | "max_elem" | "min_elem" | "neg" | "floor_div" | "floor"
+        | "ceil" | "round" => {
             matches!(resolved, Type::Tensor(_, _) | Type::Var(_) | Type::Error(_))
                 || matches!(resolved, Type::Prim(prim) if prim.is_numeric())
         }
@@ -151,8 +157,8 @@ pub(super) fn operand_dtype_rejection(
             ) || matches!(resolved, Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_integer())
                 || matches!(resolved, Type::Prim(prim) if prim.is_integer())
         }
-        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu"
-        | "recip" => {
+        "exp" | "log" | "sin" | "tan" | "atan" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu"
+        | "gelu" | "recip" => {
             matches!(
                 resolved,
                 Type::Tensor(_, TensorPrec::Var(_)) | Type::Var(_) | Type::Error(_)
@@ -181,7 +187,18 @@ pub(super) fn operand_dtype_rejection(
 
     let is_transcendental = matches!(
         fname,
-        "exp" | "log" | "sin" | "sqrt" | "relu" | "sigmoid" | "tanh" | "silu" | "gelu" | "recip"
+        "exp"
+            | "log"
+            | "sin"
+            | "tan"
+            | "atan"
+            | "sqrt"
+            | "relu"
+            | "sigmoid"
+            | "tanh"
+            | "silu"
+            | "gelu"
+            | "recip"
     );
     let resolved_int_prim = match resolved {
         Type::Tensor(_, TensorPrec::Concrete(prim)) if prim.is_integer() => Some(prim.name()),
@@ -265,6 +282,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     arg_tys: &[Type],
     subst: &Subst,
     errors: &mut DiagnosticSink<'_>,
+    route_observed: &mut bool,
 ) -> Option<Type> {
     macro_rules! reject {
         ($($arg:tt)*) => {
@@ -276,6 +294,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
     if let Some(fname) = func_name
         && TENSOR_OPS.contains(&fname.as_str())
     {
+        *route_observed = true;
         for arg_ty in arg_tys {
             let resolved = type_for_readonly_check(arg_ty, subst);
             if let Some((kind, message, hints)) = operand_dtype_rejection(fname, &resolved) {
@@ -307,6 +326,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
                 | "argmin_reduce"
         )
     {
+        *route_observed = true;
         if let Some(first_arg) = arg_tys.first() {
             let resolved = type_for_readonly_check(first_arg, subst);
             match &resolved {
