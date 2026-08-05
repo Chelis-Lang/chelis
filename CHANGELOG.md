@@ -239,9 +239,11 @@ authored edits.
     dependency-free builds are byte-for-byte unchanged, and
     monolithic == layered == warm stays byte-identical within 0.18.4.
 
-  The typecheck cache directory is now bounded — least-recently-used
-  eviction down to `CHELIS_TYPECHECK_CACHE_MAX_BYTES` (default 512 MiB),
-  evicting `chelis-lib-*` entries before `chelis-std-*` — and
+  The typecheck cache directory is now bounded — best-effort eviction
+  oldest-first by mtime down to `CHELIS_TYPECHECK_CACHE_MAX_BYTES`
+  (default 512 MiB), taking `chelis-lib-*` entries before `chelis-std-*`
+  so the write-once stdlib entry is not the first casualty, and never
+  evicting the just-written entry — and
   `CHELIS_PROFILE_COMPILE_CONTEXT=1` now names the reason when the
   layered path bails to the monolithic one instead of falling back
   silently.
