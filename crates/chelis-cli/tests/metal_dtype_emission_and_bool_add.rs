@@ -128,8 +128,16 @@ fn metal_rejects_f64_with_a_specific_diagnostic() {
     );
     assert!(!ok, "Metal must reject f64");
     assert!(
-        stderr.contains("rejects f64"),
+        stderr.contains("f64 value"),
         "the rejection must name f64; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("deliberate [04-TGT-1]"),
+        "the rejection must cite the Metal target contract; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--target c") && stderr.contains("--target hip"),
+        "the rejection must name targets that support f64; got: {stderr}"
     );
 }
 

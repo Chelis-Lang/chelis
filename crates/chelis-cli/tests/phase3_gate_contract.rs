@@ -8,7 +8,7 @@ use std::fs;
 
 use assert_cmd::Command;
 use chelis_compiler_api::{
-    compiler::{BuildTarget, compile},
+    compiler::{BuildTarget, compile, compile_for_execution},
     schema::{CompileRequest, CompileTarget, SourceKind},
 };
 use tempfile::tempdir;
@@ -23,6 +23,25 @@ fn build(source: &str, stem: &str, target: &str) -> assert_cmd::assert::Assert {
     command.env("CHELIS_STYLE_GATE_DISABLE", "1").args([
         "build",
         source_path.to_str().expect("utf-8 source path"),
+        "--target",
+        target,
+        "--output",
+        output_path.to_str().expect("utf-8 output path"),
+    ]);
+    command.assert()
+}
+
+fn build_deep(source: &str, stem: &str, target: &str) -> assert_cmd::assert::Assert {
+    let dir = tempdir().expect("tempdir");
+    let source_path = dir.path().join(format!("{stem}.dp"));
+    let output_path = dir.path().join("out");
+    fs::write(&source_path, source).expect("write Deep source");
+
+    let mut command = Command::cargo_bin("chelis").expect("chelis binary");
+    command.env("CHELIS_STYLE_GATE_DISABLE", "1").args([
+        "build",
+        source_path.to_str().expect("utf-8 source path"),
+        "--deep",
         "--target",
         target,
         "--output",
@@ -165,4 +184,106 @@ fn hip_narrow_blas_matmul_stays_admitted_across_build_paths() {
         .unwrap_or_else(|error| panic!("compiler API rejected {precision} BLAS matmul: {error:?}"));
         build(&source, &format!("hip_{precision}_blas_matmul"), "hip").success();
     }
+}
+
+/// The seeded evaluator implementation does not imply compiled support.
+/// Every public compiled entry must consume the same typed effect policy,
+/// carrying the closed kind and a real implementation owner.
+#[test]
+fn compiled_dropout_rejection_agrees_across_public_build_paths() {
+    let source = "def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n";
+
+    for target in [CompileTarget::C, CompileTarget::Hip] {
+        let error = compile(CompileRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            target,
+            entry_name: Some("noisy".to_string()),
+        })
+        .expect_err("compiled dropout must be rejected by the shared effect gate");
+        let diagnostic = &error.errors[0];
+        assert_eq!(diagnostic.kind().as_str(), "unsupported_feature");
+        assert!(diagnostic.message.contains("early capability gate"));
+        assert!(diagnostic.message.contains("unimplemented chelis#1192"));
+        assert!(
+            diagnostic
+                .message
+                .contains("run this program with `chelis eval`")
+        );
+        assert!(!diagnostic.message.contains("with seed(...)` instead"));
+    }
+
+    for target in ["c", "hip", "metal"] {
+        build(source, &format!("dropout_{target}"), target)
+            .failure()
+            .stderr(predicates::str::contains("unsupported:"))
+            .stderr(predicates::str::contains("early capability gate"))
+            .stderr(predicates::str::contains("unimplemented chelis#1192"))
+            .stderr(predicates::str::contains(
+                "run this program with `chelis eval`",
+            ));
+    }
+}
+
+/// Entry-scoped compilation emits only the selected DAG. An unsupported
+/// effect in an un-emitted sibling must not block the clean entry, while
+/// selecting that sibling still reaches the same typed rejection.
+#[test]
+fn compiled_dropout_gate_follows_the_emitted_entry_scope() {
+    let source = "def clean(x: tensor[4, f32]) -> tensor[4, f32] = add(x, x)\n\
+                  def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n";
+
+    compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("clean".to_string()),
+    })
+    .expect("an un-emitted dropout sibling must not block the selected clean entry");
+
+    let error = compile_for_execution(CompileRequest {
+        source_kind: SourceKind::Surf,
+        source: source.to_string(),
+        target: CompileTarget::C,
+        entry_name: Some("noisy".to_string()),
+    })
+    .expect_err("selecting the dropout entry must retain the typed rejection");
+    assert!(
+        error.errors[0]
+            .message
+            .contains("unimplemented chelis#1192")
+    );
+}
+
+/// The Deep ingestion branch used to carry its own call sites to the
+/// CLI-local policy. It must now reach the same typed compiler-api gate as
+/// Surf rather than preserving a second stringly rejection path.
+#[test]
+fn deep_dropout_uses_the_shared_typed_effect_gate() {
+    let source = include_str!("fixtures/phase3_seeded_dropout.dp");
+    for target in ["c", "hip", "metal"] {
+        build_deep(source, &format!("deep_dropout_{target}"), target)
+            .failure()
+            .stderr(predicates::str::contains("unsupported:"))
+            .stderr(predicates::str::contains("early capability gate"))
+            .stderr(predicates::str::contains("unimplemented chelis#1192"));
+    }
+}
+
+/// A host-lane cohabitant changes where the tensor def is stored, not the
+/// target policy. The shared effect gate must inspect host tensor-helper DAGs
+/// so this shape cannot fall through to an emitter panic.
+#[test]
+fn host_tensor_helper_dropout_uses_the_shared_typed_effect_gate() {
+    let source = "def label() -> string = \"host\"\n\
+                  def noisy(x: tensor[4, f32]) -> tensor[4, f32] = \
+                  with seed(42i64) { dropout(x, 0.5) }\n";
+
+    build(source, "host_helper_dropout", "c")
+        .failure()
+        .stderr(predicates::str::contains("unsupported:"))
+        .stderr(predicates::str::contains("early capability gate"))
+        .stderr(predicates::str::contains("unimplemented chelis#1192"));
 }

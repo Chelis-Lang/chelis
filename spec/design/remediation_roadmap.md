@@ -174,7 +174,7 @@ recommended slot but is NOT gated on the capability table or the Buoy
 pilot - its own deliverable stands on "let the emitter's channel speak"
 whether or not the table has landed. This doc previously read as if it
 were gated; per this doc's own rule the plan won and the sentence was
-corrected 2026-07-30. As of 2026-08-04 the focused typed-authority and sealed
+corrected 2026-07-30. As of 2026-08-05 the focused typed-authority and sealed
 diagnostic-kind slices are implemented, followed by the first gate-contract
 slice: one typed compiler-api policy now serves both public build paths, the
 stale C precision preflights are gone, shared gates accept only the closed
@@ -184,8 +184,16 @@ contract keeps
 direct-load f16/bf16 `BlasMatmul` admitted but rejects real narrow-float
 operand compute before emission. The source manifest is intentionally scoped
 to syntactic `reject_*` definitions; it does not claim to detect a semantic
-reimplementation hidden under an unrelated name. The CLI-local Metal/effect
-diagnostic migration and the full Phase 3 oracle remain. [#730] Phase 4 (ratchet totality, added
+reimplementation hidden under an unrelated name. The final gate-contract
+slice moves Metal/effect policy into those same typed compiler-api
+definitions, including one shared traversal for host tensor-helper DAGs, and
+scopes pure-DAG effect rejection to the entry actually emitted. It closes the
+former host-helper `dropout` emitter panic, cites the compiled-kernel owner
+[#1192], removes the no-op CLI reject hook, and corrects stale closed-#616
+Metal/HIP diagnostic prose to [05-MOV-1]. The single Phase 3 runner is
+`scripts/loud_unsupported_phase3_oracle.py`; it remains red only at the
+independently owned [#912] root-realizability leg, so Phase 3 is not complete.
+[#730] Phase 4 (ratchet totality, added
 2026-07-30: product-source-manifest ratchets with non-Cargo language
 adapters, typed/live exclusion references, the non-product
 mutation-based panic contract, and the change-gated + nightly
@@ -883,3 +891,4 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#1170]: https://github.com/Chelis-Lang/chelis/issues/1170
+[#1192]: https://github.com/Chelis-Lang/chelis/issues/1192

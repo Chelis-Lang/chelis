@@ -2864,23 +2864,6 @@ fn format_cli_dim(dim: &Dim) -> String {
     }
 }
 
-/// Bucket-5 closure: `with seed(...)` no longer blocks `chelis build`.
-/// Direct `uniform_like` DAG lowering can bake the handled seed into
-/// `RiscOp::UniformLike { seed }`; generated C host code also preserves
-/// nested handler scopes with runtime RNG state so stdlib/user helpers
-/// that call `uniform_like` draw from the active seed. Seeded dropout
-/// backend codegen remains outside this hook's shipped coverage.
-///
-/// This function is retained as a forward-compatibility hook for
-/// future user-defined effect handlers that the backends genuinely
-/// cannot lower yet. Today it is a no-op.
-fn reject_with_seed_for_build_target(
-    _decls: &[Decl],
-    _target: BuildTarget,
-) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
-}
-
 /// Dispatch between the Surf and Deep ingestion paths per the rules in
 /// `spec/design/chelis_span_survival.md` §2.5.
 ///
@@ -2973,7 +2956,6 @@ fn cmd_build(
     if user_decls_empty {
         return Err(boxed_string_error(EMPTY_PROGRAM_MESSAGE.to_string()));
     }
-    reject_with_seed_for_build_target(&decls, target)?;
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
     // chelis#334: drop dead library defs that use an eval-only host builtin
@@ -3172,11 +3154,27 @@ fn cmd_build(
                     .into());
                 }
                 apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
-                apply_shared_window_gates_to_host_program(host_program, BuildTarget::C)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::C,
+                    ),
+                )?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_windowed_reductions_in_host_program(
+                        host_program,
+                        BuildTarget::C,
+                    ),
+                )?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
-                reject_unsupported_effect_ops(&dag, "c")?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops(
+                        &dag,
+                        BuildTarget::C,
+                    ),
+                )?;
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
@@ -3186,6 +3184,12 @@ fn cmd_build(
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::Hip,
+                    ),
+                )?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3221,7 +3225,12 @@ fn cmd_build(
                     )?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
-                reject_unsupported_effect_ops(&hip_dag, "hip")?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops(
+                        &hip_dag,
+                        BuildTarget::Hip,
+                    ),
+                )?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
                 shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_hip_ops(
                     &specialized,
@@ -3233,6 +3242,12 @@ fn cmd_build(
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::Metal,
+                    ),
+                )?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3270,16 +3285,22 @@ fn cmd_build(
                     )?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
-                reject_unsupported_effect_ops(&metal_dag, "metal")?;
-                reject_unsupported_metal_ops(&metal_dag)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops(
+                        &metal_dag,
+                        BuildTarget::Metal,
+                    ),
+                )?;
+                shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_metal_ops(
+                    &metal_dag,
+                ))?;
                 // F4: IR validation pass for the Metal admissible-precision
                 // matrix per spec/04-type-system.md §1.1.3. The spec names
                 // three rejection surfaces; this is the second (the CLI
                 // gate `reject_unsupported_metal_ops` above is the first;
                 // `Emitter::require_metal_admissible` in the backend is
-                // the third). All three share the same diagnostic text
-                // so the user sees one voice regardless of which surface
-                // catches the f64 first.
+                // the third). Each independently enforces the same target
+                // boundary; this typed gate owns the public early diagnostic.
                 chelis_ir::verify::validate_metal_admissible_precisions(&metal_dag)?;
                 let fused = chelis_ir::fuse::fuse(&metal_dag);
                 cmd_build_metal(&fused, func_name, file, output, &symbolic_dims)
@@ -3438,11 +3459,27 @@ fn cmd_build_deep(
                     .into());
                 }
                 apply_shared_host_builtin_gates(host_program, BuildTarget::C)?;
-                apply_shared_window_gates_to_host_program(host_program, BuildTarget::C)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::C,
+                    ),
+                )?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_windowed_reductions_in_host_program(
+                        host_program,
+                        BuildTarget::C,
+                    ),
+                )?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
                 cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
             } else {
-                reject_unsupported_effect_ops(&dag, "c")?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops(
+                        &dag,
+                        BuildTarget::C,
+                    ),
+                )?;
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
@@ -3452,6 +3489,12 @@ fn cmd_build_deep(
         BuildTarget::Hip => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Hip)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::Hip,
+                    ),
+                )?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3482,7 +3525,12 @@ fn cmd_build_deep(
                     )?
                 };
                 hip_dag = chelis_ir::optimize::dead_code_eliminate(&hip_dag);
-                reject_unsupported_effect_ops(&hip_dag, "hip")?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops(
+                        &hip_dag,
+                        BuildTarget::Hip,
+                    ),
+                )?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&hip_dag);
                 shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_hip_ops(
                     &specialized,
@@ -3494,6 +3542,12 @@ fn cmd_build_deep(
         BuildTarget::Metal => {
             if let Some(host_program) = compiled_program.host.as_ref() {
                 apply_shared_host_builtin_gates(host_program, BuildTarget::Metal)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
+                        host_program,
+                        BuildTarget::Metal,
+                    ),
+                )?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3524,8 +3578,15 @@ fn cmd_build_deep(
                     )?
                 };
                 metal_dag = chelis_ir::optimize::dead_code_eliminate(&metal_dag);
-                reject_unsupported_effect_ops(&metal_dag, "metal")?;
-                reject_unsupported_metal_ops(&metal_dag)?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_effect_ops(
+                        &metal_dag,
+                        BuildTarget::Metal,
+                    ),
+                )?;
+                shared_compiler_gate(chelis_compiler_api::compiler::reject_unsupported_metal_ops(
+                    &metal_dag,
+                ))?;
                 // F4: IR validation pass; see cmd_build for the full
                 // rationale. This is the same surface from the Deep
                 // ingestion path so symbolic-dim and span-attributed
@@ -6102,21 +6163,6 @@ fn apply_shared_window_gates(
     )
 }
 
-fn apply_shared_window_gates_to_host_program(
-    program: &chelis_ir::host::ConcreteHostProgram,
-    target: BuildTarget,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for helper in &program.global_tensor_helpers {
-        apply_shared_window_gates(&helper.dag, target)?;
-    }
-    for function in &program.functions {
-        for helper in &function.tensor_helpers {
-            apply_shared_window_gates(&helper.dag, target)?;
-        }
-    }
-    Ok(())
-}
-
 fn is_local_registry_hash_unsupported(err: &chelis_compiler_api::compiler::CompilerError) -> bool {
     err.errors.iter().any(|diagnostic| {
         diagnostic.kind() == DiagnosticKind::HashError
@@ -8387,106 +8433,6 @@ fn load_eval_decls(file: &Path) -> Result<(Vec<Decl>, Vec<Decl>), Box<dyn std::e
     Ok((decls.clone(), decls))
 }
 
-fn reject_unsupported_metal_ops(
-    dag: &chelis_ir::dag::Dag,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // WS-M1: per spec/04-type-system.md §1.1.3, the Metal backend admits
-    // every active dtype except f64 (Apple Silicon GPUs lack FP64 ALUs;
-    // software emulation explicitly out of scope). bf16 additionally
-    // requires Apple7+ (M3 or later) at runtime; the kernel template
-    // gates `bfloat` behind `#if __METAL_VERSION__ >= 320` so the
-    // emitted source artifact is valid on every toolchain.
-    //
-    // Mirrors `reject_unsupported_hip_ops` precision discipline: admit
-    // a precise allow-list per spec, reject the rest with a structured
-    // CLI diagnostic instead of a panic from the kernel templates.
-    for node in dag.nodes() {
-        // WS-8A: `pad` / `shrink` are implemented on the Metal backend
-        // (typed per-output-element MSL kernels). They fall through to
-        // codegen; no reject arm here. f64 and any out-of-matrix dtype are
-        // still rejected by the precision gate below.
-        //
-        // chelis#616: node-valued (runtime) movement bounds and reshape
-        // target extents are C-only. Without this arm a runtime `pad` /
-        // `shrink` bound reaches `metal_bound_to_usize`'s defensive panic
-        // instead of a clean CLI diagnostic.
-        let node_valued = match &node.op {
-            chelis_ir::dag::RiscOp::Shrink { bounds } => bounds
-                .iter()
-                .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()),
-            chelis_ir::dag::RiscOp::Pad { padding, .. } => padding
-                .iter()
-                .any(|(s, e)| s.node_input().is_some() || e.node_input().is_some()),
-            chelis_ir::dag::RiscOp::Stride { strides } => {
-                strides.iter().any(|s| s.node_input().is_some())
-            }
-            chelis_ir::dag::RiscOp::Reshape { new_shape } => {
-                new_shape.iter().any(|d| d.node_input().is_some())
-            }
-            _ => false,
-        };
-        if node_valued {
-            return Err(format!(
-                "`chelis build --target metal` does not support a runtime (node-valued) \
-                 movement bound or reshape target extent; lowered node {} requires it. \
-                 Use `--target c` (chelis#616).",
-                node.id.0
-            )
-            .into());
-        }
-        match node.output_type.precision {
-            chelis_types::types::Prim::F32
-            | chelis_types::types::Prim::F16
-            | chelis_types::types::Prim::Bf16
-            | chelis_types::types::Prim::Int8
-            | chelis_types::types::Prim::Int16
-            | chelis_types::types::Prim::Int32
-            | chelis_types::types::Prim::Int64
-            | chelis_types::types::Prim::Bool => {}
-            chelis_types::types::Prim::F64 => {
-                // Hardware-rejected per spec/04-type-system.md §1.1.3.
-                // Diagnostic text is the spec-pinned string; tests
-                // assert exact-string match so this must not drift.
-                return Err(format!(
-                    "unsupported: `chelis build --target metal` rejects f64 (node {}): \
-                     Apple Silicon GPUs lack FP64 ALUs; use `--target c` or \
-                     `--target hip` for f64 workloads. \
-                     See spec/04-type-system.md §1.1.3.",
-                    node.id.0
-                )
-                .into());
-            }
-            other => {
-                return Err(format!(
-                    "`chelis build --target metal` DAG path does not support tensor \
-                     precision `{}` (node {}). The Metal backend admits the \
-                     active dtype set per spec/04-type-system.md §1.1.3 except \
-                     f64; supported: f32/f16/bf16/int8/int16/int32/int64/bool.",
-                    other.name(),
-                    node.id.0
-                )
-                .into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn reject_unsupported_effect_ops(
-    dag: &chelis_ir::dag::Dag,
-    target: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for node in dag.nodes() {
-        if let chelis_ir::dag::RiscOp::Dropout { .. } = &node.op {
-            return Err(format!(
-                "`chelis build --target {target}` does not yet codegen `dropout`; evaluate it under `with seed(...)` instead"
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
-
 fn cmd_validate(
     file: &Path,
     surf: bool,
@@ -10208,7 +10154,7 @@ mod eval_only_pruning_tests {
 /// seam (`chelis-compiler-api::compiler::reject_unsupported_hip_ops`).
 #[cfg(test)]
 mod runtime_dim_reject_tests {
-    use super::{compiler_error_messages, reject_unsupported_metal_ops};
+    use super::compiler_error_messages;
     use chelis_compiler_api::compiler::reject_unsupported_hip_ops;
     use chelis_ir::dag::{Dag, RiscOp, RtDim, TensorType};
     use chelis_types::types::Prim;
@@ -10264,50 +10210,10 @@ mod runtime_dim_reject_tests {
         );
     }
 
-    #[test]
-    fn metal_seam_rejects_node_valued_shrink_bound() {
-        let (mut dag, x, m) = dag_with_scalar();
-        dag.add_node(
-            RiscOp::Shrink {
-                bounds: vec![(RtDim::Lit(0), RtDim::Node(1))],
-            },
-            vec![x, m],
-            ty(lit_dims(&[4]), Prim::F32),
-            None,
-        );
-        let err = reject_unsupported_metal_ops(&dag)
-            .expect_err("Metal seam must reject a node-valued shrink bound, not panic later");
-        let message = err.to_string();
-        assert!(
-            message.contains("--target c") && message.contains("chelis#616"),
-            "unexpected message: {message}"
-        );
-    }
-
-    #[test]
-    fn metal_seam_rejects_node_valued_reshape_target() {
-        let (mut dag, x, m) = dag_with_scalar();
-        dag.add_node(
-            RiscOp::Reshape {
-                new_shape: vec![RtDim::Node(1)],
-            },
-            vec![x, m],
-            ty(lit_dims(&[4]), Prim::F32),
-            None,
-        );
-        let err = reject_unsupported_metal_ops(&dag)
-            .expect_err("Metal seam must reject a node-valued reshape target");
-        let message = err.to_string();
-        assert!(
-            message.contains("--target c") && message.contains("chelis#616"),
-            "unexpected message: {message}"
-        );
-    }
-
-    /// Concrete (literal) bounds keep flowing through both seams — the
+    /// Concrete (literal) bounds keep flowing through the HIP seam; the
     /// rejection is scoped to node-valued dims only.
     #[test]
-    fn seams_accept_literal_movement_and_reshape() {
+    fn hip_seam_accepts_literal_movement_and_reshape() {
         let mut dag = Dag::new();
         let x = dag.add_node(
             RiscOp::Load { name: "x".into() },
@@ -10332,6 +10238,5 @@ mod runtime_dim_reject_tests {
             None,
         );
         reject_unsupported_hip_ops(&dag).expect("literal bounds must pass the HIP seam");
-        reject_unsupported_metal_ops(&dag).expect("literal bounds must pass the Metal seam");
     }
 }
