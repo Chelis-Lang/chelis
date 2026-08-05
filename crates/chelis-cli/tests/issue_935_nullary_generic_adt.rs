@@ -317,80 +317,14 @@ out = print(concrete())
     );
 }
 
-#[test]
-fn invoked_recursive_generic_fails_before_emitting_an_undefined_symbol() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("recursive_generic.ch");
-    write_file(
-        &path,
-        "\
-type Box[a] =
-  | Empty
-  | Full { value: a }
-def loop[a](box: Box[a]) -> bool =
-  match box with {
-    | Empty => true
-    | Full { value: item } => loop(Empty)
-  }
-def main() -> bool = loop(Full { value: cast(1.0, f32) })
-",
-    );
-    Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            dir.path().join("out").to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("chelis#941"))
-        .stderr(predicates::str::contains(
-            "requires bounded monomorphized symbols",
-        ))
-        .stderr(predicates::str::contains("[05-UNS-1]"));
-}
-
-#[test]
-fn invoked_mutual_recursive_generic_cycle_fails_loudly() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("mutual_recursive_generic.ch");
-    write_file(
-        &path,
-        "\
-type Box[a] =
-  | Empty
-  | Full { value: a }
-def ping[a](box: Box[a], again: bool) -> bool =
-  if again then pong(box, false) else true
-def pong[a](box: Box[a], again: bool) -> bool =
-  if again then ping(box, false) else true
-def main() -> bool = ping(Full { value: cast(1.0, f32) }, true)
-",
-    );
-    Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            dir.path().join("out").to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("chelis#941"))
-        .stderr(predicates::str::contains(
-            "requires bounded monomorphized symbols",
-        ))
-        .stderr(predicates::str::contains("[05-UNS-1]"));
-}
+// chelis#1158 retired the two recursive-generic rejection tests that lived
+// here (`invoked_recursive_generic_fails_before_emitting_an_undefined_symbol`
+// and `invoked_mutual_recursive_generic_cycle_fails_loudly`). Both programs
+// now build and run through bounded memoized monomorphization; their positive
+// successors are `direct_recursive_generic_builds_and_runs` and
+// `mutually_recursive_generics_build_and_run` in
+// `issue_941_recursive_generic_mono.rs`, which also keeps the narrowed
+// `[05-UNS-1]` boundary under test for polymorphic recursion.
 
 #[test]
 fn concrete_nullary_generic_constructor_eval_and_c_agree() {
