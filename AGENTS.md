@@ -179,11 +179,19 @@ numeric data, whether or not you have read that document:
   review. Opening a fresh issue to cite is not authorization; new capacity debt does
   not land. This applies to the stdlib ADT family on the same terms as the C ones: a
   variant or field carrying a bare float primitive is a seam, while an INTEGER
-  primitive is classified `numeric-op` and owes the semantic registration below
-  rather than being a seam - which is why source-faithful ingestion variants
-  (`JsonInt(int64)`) are the wanted shape and a float funnel is not. Both
-  pre-ratchet citation strings are frozen to exact identity lists, so neither can be
-  copied onto a new row to skip its own disposition. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
+  primitive is classified `numeric-op` rather than being a seam. On a new,
+  post-ratchet row, that classification owes the semantic registration below;
+  the frozen initial descriptors retain their capacity dispositions without
+  retroactive registrations. This is why source-faithful ingestion variants
+  (`JsonInt(int64)`) are the wanted shape and a float funnel is not. The
+  grandfathered seam citation and the initial non-seam permanent disposition are
+  frozen to exact `(kind, canonical id, flags)` complete-descriptor lists, so neither
+  can be copied onto a new row to skip its own disposition. A rename, signature
+  change, or reclassification is a removal of the old descriptor plus an addition of
+  the successor descriptor; the successor follows the ordinary addition rules and
+  never inherits a frozen disposition by resemblance. In particular, a flagged
+  successor requires the named maintainer-override path until chelis#1160's separately
+  reviewed, tamper-evident relocation mechanism lands. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
   coverage become mandatory only through their named executable entry gates in §C6,
   and Phase 1 may not start before both are green. Coverage state comes from the
   test's typed `coverage_manifest()` (artifact, enumerator, command, expected
@@ -200,7 +208,12 @@ numeric data, whether or not you have read that document:
   the atom group and existence; reviewers validate that the selected atom's normative
   text actually governs the callable. Review does not confer semantic authority: if
   no existing atom governs it, amend the numbered spec first and register that new
-  atom.
+  atom. Before allocating its number, re-check the highest existing `[05-OP-N]` on
+  current `main`. Authoring the atom also requires running
+  `.venv/bin/python scripts/generate_rejection_registries.py --write` and committing
+  the resulting `crates/chelis-types/src/rejection_registry_generated.rs`; that
+  generated membership artifact is required in addition to, and is not a substitute
+  for, the exact `SemanticRegistration`.
 - **Never silently narrow at ingress.** Choosing a lossy dtype for ingested data
   (int64 IDs into an f32 tensor) is a decision: use the named lossy form (the
   chelis#759 pattern) or the exact dtype, never a quiet convenience cast. Better
@@ -224,13 +237,15 @@ numeric data, whether or not you have read that document:
   non-character built-in arithmetic value type - including bare `int`, `short`,
   `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
   types - makes a callable `numeric-op`. Names and parameter-name heuristics never
-  turn a future callable into plumbing. The only exception is the frozen set of
-  exactly three pre-ratchet canonical declarations in
-  `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS`; each must also remain in the frozen seam
-  identity set. Conditional macro definitions likewise taint their whole connected
-  local-include component, by either include spelling: a public declaration consuming
-  a tainted token is rejected even when the definition lives in another header. These two rules are
-  locked by PR #956 commit
+  turn a future callable into plumbing. The only exception is the closed set of
+  exactly three reviewed canonical declarations in
+  `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS`; each must also remain in an exact reviewed
+  seam-disposition set. Two remain in the shrink-only pre-ratchet set; PR #1149's
+  `chelis_alloc` successor remains in its closed one-off maintainer-override set.
+  Neither set is a route for a future declaration. Conditional macro definitions
+  likewise taint their whole connected local-include component, by either include
+  spelling: a public declaration consuming a tainted token is rejected even when the
+  definition lives in another header. These two rules are locked by PR #956 commit
   `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; widening either exception requires
   changing this contract and the negative controls together.
 - **An arithmetic spelling the census does not recognize is a BUILD FAILURE, not an

@@ -436,35 +436,35 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
 fn write_symbolic_matmul_program(path: &Path) {
     write_file(
         path,
-        "def f(a: tensor[batch, in_dim, f32], b: tensor[in_dim, out_dim, f32]): tensor[batch, out_dim, f32] = (matmul(a, b) : tensor[batch, out_dim, f32])\n",
+        "def f(a: tensor[batch, in_dim, f32], b: tensor[in_dim, out_dim, f32]) -> tensor[batch, out_dim, f32] = (matmul(a, b) : tensor[batch, out_dim, f32])\n",
     );
 }
 
 fn write_symbolic_softmax_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, seq, f32]): tensor[batch, seq, f32] = (softmax(x, 1) : tensor[batch, seq, f32])\n",
+        "def f(x: tensor[batch, seq, f32]) -> tensor[batch, seq, f32] = (softmax(x, 1) : tensor[batch, seq, f32])\n",
     );
 }
 
 fn write_symbolic_row_sum_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, seq, f32]): tensor[batch, f32] = (sum(x, 1) : tensor[batch, f32])\n",
+        "def f(x: tensor[batch, seq, f32]) -> tensor[batch, f32] = (sum(x, 1) : tensor[batch, f32])\n",
     );
 }
 
 fn write_symbolic_layer_norm_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]): tensor[batch, 128, f32] = (layer_norm(x, gamma, beta) : tensor[batch, 128, f32])\n",
+        "def f(x: tensor[batch, 128, f32], gamma: tensor[128, f32], beta: tensor[128, f32]) -> tensor[batch, 128, f32] = (layer_norm(x, gamma, beta) : tensor[batch, 128, f32])\n",
     );
 }
 
 fn write_symbolic_hidden_layer_norm_program(path: &Path) {
     write_file(
         path,
-        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]): tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta) : tensor[batch, hidden, f32])\n",
+        "def f(x: tensor[batch, hidden, f32], gamma: tensor[hidden, f32], beta: tensor[hidden, f32]) -> tensor[batch, hidden, f32] = (layer_norm(x, gamma, beta) : tensor[batch, hidden, f32])\n",
     );
 }
 
@@ -1513,7 +1513,7 @@ fn build_c_host_tensor_helper_dedups_repeated_inputs_at_callsite() {
 #include <stdio.h>
 
 int main(void) {
-    int shape[2] = {2, 3};
+    int64_t shape[2] = {2, 3};
     chelis_tensor *a = chelis_alloc(2, shape, CHELIS_F32);
     float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
     for (int i = 0; i < 6; ++i) {
@@ -1930,7 +1930,7 @@ fn build_c_map_tensor_grad_specializes_callback_item_type() {
         &path,
         "def loss(theta: tensor[2, f32], x: f32) -> f32 =\n\
            add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          xs: List[f32] = [1.0, 2.0]\n\
          rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
     );
@@ -1993,7 +1993,7 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
         &path,
         "def loss(theta: tensor[2, f32], x: f32) -> f32 =\n\
            if x < 0.0 then tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)) else add(tensor_to_scalar(sum(mul(copy(theta), copy(theta)), 0)), x)\n\
-         grad_loss = grad(loss, wrt=(theta))\n\
+         grad_loss = grad(loss, wrt=theta)\n\
          xs: List[f32] = [1.0, -2.0]\n\
          rows = map(fn (x) -> grad_loss(to_tensor([1.0, 2.0]), x), xs)\n",
     );
@@ -2039,7 +2039,7 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
            y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
            sub(y, y_hat)\n\
          }\n\
-         row = grad(residual, wrt=(theta))\n\
+         row = grad(residual, wrt=theta)\n\
          def jac[n, m](theta: tensor[n, f32], xs: tensor[m, f32], ys: tensor[m, f32]) -> List[tensor[n, f32]] = {\n\
            pairs = zip(to_list(xs), to_list(ys))\n\
            map(fn (pair: (f32, f32)) -> row(copy(theta), pair.0, pair.1), pairs)\n\
@@ -2088,7 +2088,7 @@ fn build_c_tensor_grad_local_wrapper_over_function_param_builds() {
         &path,
         "def jac_row[n](model: tensor[n, f32] -> f32 -> f32 -> f32, theta: tensor[n, f32], x: f32, y: f32) -> tensor[n, f32] = {\n\
            target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)\n\
-           grad(target, wrt=(theta_local))(theta)\n\
+           grad(target, wrt=theta_local)(theta)\n\
          }\n\
          def lm_model(theta: tensor[2, f32], x: f32, y: f32) -> f32 = {\n\
            y_hat = if lt(x, cast(0.0, f32)) then tensor_to_scalar(sum(copy(theta), 0)) else add(tensor_to_scalar(sum(copy(theta), 0)), x)\n\
@@ -2155,7 +2155,7 @@ fn build_c_scalar_grad_builds_and_is_numerically_correct() {
     write_file(
         &path,
         "def square(x: f32) -> f32 = mul(x, x)\n\
-         def dsquare(x: f32) -> f32 = grad(square, wrt=(x))(x)\n\
+         def dsquare(x: f32) -> f32 = grad(square, wrt=x)(x)\n\
          out = dsquare(2.0)\n",
     );
 
@@ -2391,7 +2391,7 @@ fn build_c_scalar_grad_recursive_callee_fails_closed() {
     write_file(
         &path,
         "def f(x: f32) -> f32 = mul(x, f(x))\n\
-         def df(x: f32) -> f32 = grad(f, wrt=(x))(x)\n\
+         def df(x: f32) -> f32 = grad(f, wrt=x)(x)\n\
          out = df(cast(2.0, f32))\n",
     );
 
@@ -2429,7 +2429,7 @@ fn build_c_scalar_grad_block_body_builds_and_is_numerically_correct() {
          \x20 y = mul(x, x)\n\
          \x20 add(y, x)\n\
          }\n\
-         def dh(x: f32) -> f32 = grad(h, wrt=(x))(x)\n\
+         def dh(x: f32) -> f32 = grad(h, wrt=x)(x)\n\
          out = dh(3.0)\n",
     );
     // d/dx(x^2 + x) at x = 3.0 is 2*3 + 1 = 7.0.
@@ -2456,7 +2456,7 @@ fn build_c_scalar_grad_through_user_defined_call_is_numerically_correct() {
         "scalar_grad_usercall",
         "def inner(x: f32) -> f32 = mul(x, x)\n\
          def outer(x: f32) -> f32 = add(inner(x), x)\n\
-         def douter(x: f32) -> f32 = grad(outer, wrt=(x))(x)\n\
+         def douter(x: f32) -> f32 = grad(outer, wrt=x)(x)\n\
          out = douter(3.0)\n",
     );
     assert!(
@@ -2477,7 +2477,7 @@ fn build_c_scalar_grad_through_user_defined_call_is_numerically_correct() {
 fn build_c_scalar_grad_black_scholes_greeks_are_numerically_correct() {
     const PRELUDE: &str = "def normal_cdf(x: f32) -> f32 = {\n\
          \x20 k = div(1.0, add(1.0, mul(0.2316419, x)))\n\
-         \x20 poly = mul(k, add(0.319381530, mul(k, sub(0.356563782, mul(k, add(1.781477937, mul(k, sub(-1.821255978, mul(k, 1.330274429)))))))))\n\
+         \x20 poly = mul(k, add(0.31938153, mul(k, sub(0.356563782, mul(k, add(1.781477937, mul(k, sub(-1.821255978, mul(k, 1.330274429)))))))))\n\
          \x20 pdf = mul(0.3989422804014327, exp(neg(div(mul(x, x), 2.0))))\n\
          \x20 sub(1.0, mul(pdf, poly))\n\
          }\n\
@@ -2774,7 +2774,7 @@ fn build_c_grad_locally_bound_alias_form_matches_inline_form_output() {
 }
 
 /// Regression test for the Coral UPSTREAM_BUGS.md pattern:
-/// `grad(loss, wrt=(x))(theta, x)` differentiates w.r.t. the second argument.
+/// `grad(loss, wrt=x)(theta, x)` differentiates w.r.t. the second argument.
 /// Verifies: build exits 0, generated C compiles, and grad of sum(theta*x) w.r.t. x equals theta.
 #[test]
 fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
@@ -2785,7 +2785,7 @@ fn build_c_grad_named_fn_wrt_second_param_is_numerically_correct() {
         &path,
         "def loss(theta: tensor[2, f32], x: tensor[2, f32]) -> tensor[f32] =\n\
            sum(mul(theta, x), 0)\n\
-         out = grad(loss, wrt=(x))(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
+         out = grad(loss, wrt=x)(to_tensor([1.0, 2.0]), to_tensor([3.0, 4.0]))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -3183,7 +3183,7 @@ fn build_c_preserves_generic_unreachable_tensor_defs_without_raw_dim_symbols() {
         "expected generic tensor def to remain callable from downstream code:\n{source}"
     );
     assert!(
-        !source.contains("(int[]){ d"),
+        !source.contains("(int64_t[]){ d"),
         "generic tensor helper dims must be rebound to caller-visible symbols before C emission:\n{source}"
     );
 
@@ -3543,9 +3543,9 @@ def apply(
 #include "scatter_runtime_bad.h"
 
 int main(void) {
-    int base_shape[2] = {3, 2};
-    int idx_shape[1] = {2};
-    int updates_shape[2] = {2, 2};
+    int64_t base_shape[2] = {3, 2};
+    int64_t idx_shape[1] = {2};
+    int64_t updates_shape[2] = {2, 2};
 
     chelis_tensor *base = chelis_alloc(2, base_shape, CHELIS_F32);
     chelis_tensor *idx = chelis_alloc(1, idx_shape, CHELIS_I32);
@@ -3966,7 +3966,7 @@ fn build_c_rejects_reduce_window_over_runtime_symbolic_axis() {
     write_file(
         &path,
         "padded = pad_sequences([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], 0.0)\n\
-         windowed = reduce_window_max(padded, [2], [1])\n",
+         windowed = reduce_window_max(padded, [2i64], [1i64])\n",
     );
     let out_dir = dir.path().join("rw-build");
 
@@ -4003,7 +4003,7 @@ fn build_c_rejects_bf16_reduce_window_with_clean_diagnostic() {
     write_file(
         &path,
         "def pool_bf16(x: tensor[1, 1, 4, 4, bf16]) -> tensor[1, 1, 3, 3, bf16] = \
-         reduce_window_max(&x, [2, 2], [1, 1])\n",
+         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
     );
     let out_dir = dir.path().join("rw-bf16-build");
 
@@ -4037,7 +4037,7 @@ fn build_hip_rejects_reduce_window_with_clean_diagnostic() {
     write_file(
         &path,
         "def pool_hip(x: tensor[1, 1, 4, 4, f32]) -> tensor[1, 1, 3, 3, f32] = \
-         reduce_window_max(&x, [2, 2], [1, 1])\n",
+         reduce_window_max(&x, [2i64, 2i64], [1i64, 1i64])\n",
     );
     let out_dir = dir.path().join("rw-hip-build");
 
@@ -4438,7 +4438,7 @@ fn fmt_rejects_check_and_inplace_together() {
 }
 
 #[test]
-fn surf_default_collapses_load_program_into_typed_def() {
+fn surf_default_preserves_top_level_value_bindings() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("forward.ch");
     write_matmul_program(&path);
@@ -4449,11 +4449,11 @@ fn surf_default_collapses_load_program_into_typed_def() {
         .args(["surf", path.to_str().unwrap()])
         .assert()
         .success()
+        .stdout(predicate::str::contains("a = (a : tensor[2, 3, f32])"))
         .stdout(predicate::str::contains(
-            "def forward(a: tensor[2, 3, f32], b: tensor[3, 4, f32]) -> tensor[2, 4, f32] =",
+            "out = (matmul(a, b) : tensor[2, 4, f32])",
         ))
-        .stdout(predicate::str::contains("matmul(a, b)"))
-        .stdout(predicate::str::contains("a =").not());
+        .stdout(predicate::str::contains("def forward").not());
 }
 
 #[test]
@@ -4475,12 +4475,12 @@ fn surf_verbose_preserves_debug_style_annotations() {
 }
 
 #[test]
-fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
+fn surf_roundtrip_preserves_canonical_def_return_types() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("typed.ch");
     write_file(
         &path,
-        "def f(x: tensor[n, f32]): tensor[n, f32] = relu(x)\n",
+        "def f(x: tensor[n, f32]) -> tensor[n, f32] = relu(x)\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4490,9 +4490,47 @@ fn surf_roundtrip_canonicalizes_def_return_types_to_arrow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "def f(x: tensor[n, f32]) -> tensor[n, f32] =",
+            "def f[n](x: tensor[n, f32]) -> tensor[n, f32] =",
         ))
         .stdout(predicate::str::contains("sig f").not());
+}
+
+#[test]
+fn surf_deep_cast_and_par_emit_canonical_spellings() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("cast_par.dp");
+    write_file(
+        &path,
+        "(def {} result (fn {} (params {}) (par {}\n  (cast {} (lit {} 1.0) (t-prim {} f32))\n  (cast {} (lit {} 2.0) (t-prim {} f32)))))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("par {"))
+        .stdout(predicate::str::contains("cast(1.0, f32)"))
+        .stdout(predicate::str::contains("cast(2.0, f32)"))
+        .stdout(predicate::str::contains(" as ").not())
+        .stdout(predicate::str::contains("par(").not());
+}
+
+#[test]
+fn surf_rejects_malformed_deep_cast_before_decompiling() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("malformed_cast.dp");
+    write_file(
+        &path,
+        "(def {} result (fn {} (params {}) (cast {} (lit {} 1.0))))\n",
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["surf", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong child count for `cast`"));
 }
 
 #[test]
@@ -4959,7 +4997,7 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
     let out_dir = dir.path().join("hip-out");
     write_file(
         &path,
-        "def f(xs: tensor[batch, features, f32]): tensor[batch, features, f32] = xs\n",
+        "def f(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs\n",
     );
 
     Command::cargo_bin("chelis")
@@ -4979,8 +5017,8 @@ fn build_hip_accepts_symbolic_dims_and_binds_them_from_input_metadata() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let source = fs::read_to_string(out_dir.join("symbolic_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int features = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t features = inputs[0]->shape[1];"));
 }
 
 #[test]
@@ -5027,14 +5065,14 @@ fn build_symbolic_matmul_succeeds_on_c_and_hip_targets() {
         .stdout(predicate::str::contains("Peak device memory formula:"));
 
     let c_source = fs::read_to_string(c_out.join("symbolic_matmul.c")).expect("generated c");
-    assert!(c_source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(c_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(c_source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(c_source.contains("int64_t in_dim = inputs[0]->shape[1];"));
     assert!(c_source.contains("inputs[1]->shape[0] != in_dim"));
 
     let hip_source =
         fs::read_to_string(hip_out.join("symbolic_matmul_hip.cpp")).expect("generated hip");
-    assert!(hip_source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(hip_source.contains("int in_dim = inputs[0]->shape[1];"));
+    assert!(hip_source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(hip_source.contains("int64_t in_dim = inputs[0]->shape[1];"));
     assert!(hip_source.contains("inputs[1]->shape[0] != in_dim"));
 }
 
@@ -5063,8 +5101,8 @@ fn build_hip_accepts_symbolic_softmax() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_softmax_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t seq = inputs[0]->shape[1];"));
     assert!(source.contains("kernel_maxred_ax1"));
     assert!(source.contains("kernel_sum_ax1"));
 }
@@ -5094,8 +5132,8 @@ fn build_hip_accepts_symbolic_row_sum() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_sum_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
-    assert!(source.contains("int seq = inputs[0]->shape[1];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t seq = inputs[0]->shape[1];"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5124,7 +5162,7 @@ fn build_hip_accepts_symbolic_leading_dims_for_layer_norm() {
 
     let source =
         fs::read_to_string(out_dir.join("symbolic_layer_norm_hip.cpp")).expect("generated source");
-    assert!(source.contains("int batch = inputs[0]->shape[0];"));
+    assert!(source.contains("int64_t batch = inputs[0]->shape[0];"));
     assert!(source.contains("kernel_sum_ax1"));
 }
 
@@ -5276,7 +5314,7 @@ fn build_c_emits_sparse_gather_loop_for_int32_indices() {
     assert!(c_src.contains("_out_data"));
     assert!(!c_src.contains("chelis_tensor_gather("));
     assert!(
-        !c_src.contains("(int[]){ 64, 1000, 128 }"),
+        !c_src.contains("(int64_t[]){ 64, 1000, 128 }"),
         "C sparse gather must not allocate the dense [N,V,D] one-hot/product shape"
     );
 }
@@ -5462,7 +5500,7 @@ fn check_reports_linearity_errors() {
     let path = dir.path().join("linearity.ch");
     write_file(
         &path,
-        "def bad(x: tensor[4, f32]): tensor[4, f32] = {\n  y: tensor[4, f32] = realize(x)\n  add(x, y)\n}\n",
+        "def bad(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y: tensor[4, f32] = realize(x)\n  add(x, y)\n}\n",
     );
 
     let json = run_json_check(&path);
@@ -5484,7 +5522,7 @@ fn check_reports_macro_provenance_for_type_errors() {
         &path,
         r#"
 macro bad_bool(x) = and(x, x)
-def bad(x: tensor[4, f32]): tensor[4, f32] = bad_bool(x)
+def bad(x: tensor[4, f32]) -> tensor[4, f32] = bad_bool(x)
 "#,
     );
 
@@ -5505,7 +5543,7 @@ fn check_reports_macro_provenance_for_linearity_errors() {
         &path,
         r#"
 macro dup_relu(x) = add(realize(x), x)
-def bad(x: tensor[4, f32]): tensor[4, f32] = dup_relu(x)
+def bad(x: tensor[4, f32]) -> tensor[4, f32] = dup_relu(x)
 "#,
     );
 
@@ -5525,7 +5563,7 @@ fn check_reports_match_linearity_without_old_ir_rejection() {
     let path = dir.path().join("match_linearity.ch");
     write_file(
         &path,
-        r#"def bad(pair: (tensor[4, f32], int32)): int32 = {
+        r#"def bad(pair: (tensor[4, f32], int32)) -> int32 = {
   n: int32 = match pair with {
     | (x, _) => 1
   }
@@ -5559,7 +5597,7 @@ fn deep_expands_macros_and_emits_provenance() {
         &path,
         r#"
 macro relu_ref(x) = max_elem(x, 0.0)
-def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+def f(x: tensor[4, f32]) -> tensor[4, f32] = relu_ref(x)
 "#,
     );
 
@@ -5587,7 +5625,7 @@ fn fmt_preserves_macro_syntax() {
         &path,
         r#"
 macro keep(x)=x
-def f(x: tensor[4, f32]): tensor[4, f32] = keep(x)
+def f(x: tensor[4, f32]) -> tensor[4, f32] = keep(x)
 "#,
     );
 
@@ -5612,7 +5650,7 @@ fn validate_desugar_accepts_macro_program() {
         &path,
         r#"
 macro relu_ref(x) = max_elem(x, 0.0)
-def f(x: tensor[4, f32]): tensor[4, f32] = relu_ref(x)
+def f(x: tensor[4, f32]) -> tensor[4, f32] = relu_ref(x)
 "#,
     );
 
@@ -5997,12 +6035,12 @@ fn validate_surf_rejects_malformed_operator_chain() {
 }
 
 #[test]
-fn validate_surf_accepts_semicolon_block_and_axis_identifier() {
+fn validate_surf_accepts_newline_block_and_axis_identifier() {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("ok.ch");
     write_file(
         &path,
-        "def f(axis) = { y = axis; y }\ndef g() = par { a; b }\n",
+        "def f(axis) = {\n  y = axis\n  y\n}\ndef g() = par { a; b }\n",
     );
 
     Command::cargo_bin("chelis")
@@ -6569,7 +6607,7 @@ def relu_apply(x: tensor[5, f32]) -> tensor[5, f32] = relu(x)
 input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(0.0, f32), cast(3.5, f32), cast(-0.5, f32)])
 actual = relu_apply(input)
 expected = to_tensor([cast(1.0, f32), cast(0.0, f32), cast(0.0, f32), cast(3.5, f32), cast(0.0, f32)])
-ok = test_assert_close_tensor(actual, expected, 0.000001, "relu pointwise")
+ok = test_assert_close_tensor(actual, expected, 1e-6, "relu pointwise")
 "#,
     );
 }
@@ -6588,7 +6626,7 @@ def relu_apply(x: tensor[3, f32]) -> tensor[3, f32] = relu(x)
 input = to_tensor([cast(1.0, f32), cast(-2.0, f32), cast(3.0, f32)])
 actual = relu_apply(input)
 wrong = to_tensor([cast(1.0, f32), cast(99.0, f32), cast(3.0, f32)])
-ok = test_assert_close_tensor(actual, wrong, 0.000001, "relu wrong")
+ok = test_assert_close_tensor(actual, wrong, 1e-6, "relu wrong")
 "#,
     );
 
@@ -6688,7 +6726,7 @@ def sqrt_apply(x: tensor[3, f32]) -> tensor[3, f32] = sqrt(x)
 input = to_tensor([cast(4.0, f32), cast(9.0, f32), cast(16.0, f32)])
 actual = sqrt_apply(input)
 expected = to_tensor([cast(2.0, f32), cast(3.0, f32), cast(4.0, f32)])
-ok = test_assert_close_tensor(actual, expected, 0.000001, "sqrt pointwise")
+ok = test_assert_close_tensor(actual, expected, 1e-6, "sqrt pointwise")
 "#,
     );
 }
@@ -8256,9 +8294,7 @@ fn build_c_mnist_loss_tail_tensor_pipeline_compiles_object() {
     let out_dir = dir.path().join("out");
     write_file(
         &src,
-        r#"def loss_tail(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] = {
-  softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg |> mean(0)
-}
+        r#"def loss_tail(logits: tensor[2, 3, f32], labels: tensor[2, 3, f32]) -> tensor[f32] = softmax(logits, 1) |> log |> mul(labels) |> sum(1) |> neg |> mean(0)
 logits = to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(0.5, f32), cast(1.5, f32), cast(2.5, f32)]])
 labels = to_tensor([[cast(0.0, f32), cast(0.0, f32), cast(1.0, f32)], [cast(1.0, f32), cast(0.0, f32), cast(0.0, f32)]])
 loss_value = loss_tail(logits, labels)
@@ -8466,7 +8502,7 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
     // generated allocation; previously the runtime divergence caused
     // the C emit to render the wrong rank.
     assert!(
-        generated.contains("(int[]){ 4, 1 }"),
+        generated.contains("(int64_t[]){ 4, 1 }"),
         "expected generated C to allocate rank-2 [4, 1] for the expand result; got:\n{generated}",
     );
 
@@ -8487,7 +8523,7 @@ fn build_c_linreg_expand_singleton_bias_keeps_rank2_shape() {
 /// carries a polymorphic dim (e.g. `tensor[n, f32]`) must declare every
 /// referenced dim in the generated C. Previously a fresh dim variable
 /// (`d36`-style autogenerated name) could leak into a
-/// `chelis_alloc_view(1, (int[]){ d36 }, ...)` call without a
+/// `chelis_alloc_view(1, (int64_t[]){ d36 }, ...)` call without a
 /// corresponding `int d36 = inputs[k]->shape[axis];` declaration, so
 /// the generated C failed to compile with `error: 'd36' undeclared`.
 ///
@@ -8504,7 +8540,7 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     write_file(
         &path,
         "def quadratic[n](theta: tensor[n, f32]) -> tensor[f32] = sum(mul(copy(theta), theta), 0)\n\
-         g: tensor[n, f32] = grad(quadratic, wrt=(theta))(to_tensor([1.0, 2.0, 3.0]))\n",
+         g: tensor[n, f32] = grad(quadratic, wrt=theta)(to_tensor([1.0, 2.0, 3.0]))\n",
     );
 
     Command::cargo_bin("chelis")
@@ -8522,12 +8558,12 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
         .success();
 
     let source = fs::read_to_string(out_dir.join("poly_top_dim.c")).expect("generated c");
-    // Every dim that appears in a `(int[]){ <name>` literal must also
-    // appear as an `int <name> = inputs[...]->shape[<axis>];`
+    // Every dim that appears in a `(int64_t[]){ <name>` literal must also
+    // appear as an `int64_t <name> = inputs[...]->shape[<axis>];`
     // declaration. Walk both sets and assert containment.
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in source.lines() {
-        if let Some(after) = line.split("(int[]){ ").nth(1) {
+        if let Some(after) = line.split("(int64_t[]){ ").nth(1) {
             let name: String = after
                 .chars()
                 .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
@@ -8539,8 +8575,8 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     }
     let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in source.lines() {
-        if let Some(idx) = line.find("int ")
-            && let Some(rest) = line.get(idx + 4..)
+        if let Some(idx) = line.find("int64_t ")
+            && let Some(rest) = line.get(idx + 8..)
             && rest.contains(" = inputs[")
         {
             let name: String = rest
@@ -8555,8 +8591,8 @@ fn build_c_polymorphic_top_level_tensor_dims_are_declared() {
     for name in &used {
         assert!(
             declared.contains(name),
-            "dim `{name}` used in `(int[]){{ {name} }}` but never declared as \
-             `int {name} = inputs[...]->shape[...];` -- Bucket 4c symbolic-dim \
+            "dim `{name}` used in `(int64_t[]){{ {name} }}` but never declared as \
+             `int64_t {name} = inputs[...]->shape[...];` -- Bucket 4c symbolic-dim \
              leakage. Generated source:\n{source}",
         );
     }
@@ -8751,7 +8787,7 @@ fn build_c_higher_order_def_with_unused_fn_param_keeps_its_kernel() {
     // A pure-DAG module emits no `main`, so drive the kernel directly.
     write_file(
         &out_dir.join("driver.c"),
-        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
+        "#include <stdio.h>\n         #include <string.h>\n         #include \"chelis_runtime.h\"\n         void only_ho(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);\n         int main(void) {\n         \x20   int64_t shape[1] = {3};\n         \x20   chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);\n         \x20   float xd[3] = {1.0f, 2.0f, 3.0f};\n         \x20   memcpy(x->data, xd, sizeof(xd));\n         \x20   chelis_tensor* ins[1] = { x };\n         \x20   chelis_tensor* outs[1] = { NULL };\n         \x20   only_ho(ins, 1, outs, 1);\n         \x20   for (int i = 0; i < 3; i++) printf(\"%.1f\\n\", outs[0]->data[i]);\n         \x20   return 0;\n         }\n",
     );
 
     let status = gcc_link_sources(&out_dir, &["driver.c", "only_ho.c"], "only_ho_driver");

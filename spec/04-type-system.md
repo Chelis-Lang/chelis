@@ -903,7 +903,7 @@ Functions can be generic over dimensions using dimension variables:
 
 ```scheme
 ;; In Surf:
-;; def transpose[a, b](x: tensor[a, b, f32]): tensor[b, a, f32]
+;; def transpose[a, b](x: tensor[a, b, f32]) -> tensor[b, a, f32]
 
 (defsig {} transpose
   (t-fn {}
@@ -931,7 +931,7 @@ distinct from call-site instantiation: it is only at the call site that a
 dim variable is genuinely bound to a concrete dimension.
 
 ```scheme
-;; def f[n, m](x: tensor[n, f32], y: tensor[m, f32]): tensor[n, f32] = y
+;; def f[n, m](x: tensor[n, f32], y: tensor[m, f32]) -> tensor[n, f32] = y
 ;; TYPE ERROR: the body returns tensor[m, f32] but the declared return is
 ;; tensor[n, f32]; n and m are distinct rigid dim parameters.
 ```
@@ -966,16 +966,16 @@ dimension to the caller-visible input world. Both of the following are
   a distinct param-position declared dim parameter.
 
 ```scheme
-;; def f[k](a: tensor[2, f32]): tensor[k, f32] = a
+;; def f[k](a: tensor[2, f32]) -> tensor[k, f32] = a
 ;; TYPE ERROR: the body pins the return-only dim parameter k to the
 ;; parameter's concrete Lit(2); the signature promised an output
 ;; dimension the body does not derive from the inputs.
 
-;; def f[n, m](x: tensor[n, f32]): tensor[m, f32] = x
+;; def f[n, m](x: tensor[n, f32]) -> tensor[m, f32] = x
 ;; TYPE ERROR: the return-only dim parameter m collapses with the
 ;; param-position dim parameter n.
 
-;; def make(): tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
+;; def make() -> tensor[n, f32] = to_tensor([1.0, 2.0, 3.0])
 ;; OK: output-inferred. The body produces a body-internal tensor[3, f32]
 ;; and the scheme resolves n := 3; no input dimension is involved.
 ```
@@ -1397,8 +1397,6 @@ dimension that is only known at run time. The relevant built-ins are:
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
   `shape_list`, a `List<int64>`.
 
-*(Not fully implemented; chelis#1112.)*
-
 This section pins which call shapes preserve symbolic dims in the type
 checker's output and which fall back to `(d-name {} *)` (see §4.5). The
 canonical examples live in
@@ -1446,6 +1444,20 @@ type error (`DimensionMismatch`).
    call: the typer defers the output rank slot to whatever the
    declared signature's return-type or the surrounding call context
    imposes via standard unification.
+
+For a positional three-argument call, a declared result tensor or the first
+shape-bearing consumer fixes which of the two shapes applies: a same-rank
+result replaces the extent at `axis`, while a result of rank `rank(x) + 1`
+inserts the new extent at `axis`. The result remains one monomorphic value
+while that choice is deferred; separate uses cannot choose different shapes
+for the same binding. If a shape-neutral consumer such as `cast` requires the
+tensor type before any shape-bearing context fixes it, an axis within the
+input rank selects the established same-rank replacement form. `axis ==
+rank(x)` has no replacement form and therefore selects trailing insertion.
+The same default is materialized when no consumer in the complete program
+fixes the shape. A reusable library context carries the unresolved choice to
+its downstream program rather than deciding it early. An axis greater than
+`rank(x)` is a type error.
 
 **Sourceless-size rejection (source-tracking).** A runtime `size`
 that is neither form (1) nor a form-(2)/form-(3) shape source has no
@@ -1778,10 +1790,10 @@ narrowing. The closed suffix set is:
 | `i32` | `(t-prim {} int32)` | `42i32` |
 | `i64` | `(t-prim {} int64)` | `42i64` |
 
-Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) attach to either an integer
-or a float literal token (`42f32` and `1.0f32` are both well-formed and bind
-at f32). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`) attach to integer
-literal tokens only; `1.0i8` is a parse error.
+Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) bind the decoded float at
+that type. Canonical Surf requires the canonical float body (`42.0f32`, not
+the v0.18 alias `42f32`). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`)
+attach to integer literal tokens only; `1.0i8` is a parse error.
 
 Suffix lexing rule: a suffix is part of the literal token only if it
 **immediately** follows the digit sequence with no intervening whitespace,
@@ -1789,15 +1801,13 @@ comment, or other character. `1.0 f32` (with whitespace) is two tokens (a
 float followed by an identifier) and binds at the literal default per §5.3,
 which is then subject to the surrounding-position rules in the type checker.
 
-Hex-literal interaction (parser-implementation note): the lexer's hex-literal
-rule consumes `[0-9a-fA-F_]*` after `0x`. Because `f` is a hex digit, a hex
-integer literal cannot directly carry a float-typed suffix (`0xFFf32` is not
-"hex 0xFF then suffix f32"; it is "hex 0xFFf then int 32" under maximal-munch
-hex lexing, which is rejected as malformed). Hex integer literals MAY carry
-integer-typed suffixes only (`0xFFi8`, `0xFFi32`, etc.); float-typed suffixes
-on hex literals are a parse error with a diagnostic suggesting an explicit
-`cast`. Decimal float literals carry float suffixes without ambiguity
-(`1.0f32`, `1.0e3f32`).
+The normal Surf parser accepts value-preserving hexadecimal/binary integer
+spellings, digit separators strictly between digits, and equivalent finite
+exponent spellings. Integer radix forms may carry an integer suffix; they may
+not carry a float suffix. These lexical choices do not change the exact suffix
+binding rule, and the canonical printer emits the decoded decimal token.
+Canonical decimal float literals carry float suffixes without ambiguity
+(`1.0f32`, `1000.0f32`).
 
 Deferred suffixes:
 
@@ -2496,6 +2506,8 @@ rejections with no citation).
 > comparison, fold, or output, in every lane and on every surface
 > (scalar and tensor alike).
 
+*(Not honored today: chelis#689, #693, #699, #714.)*
+
 > **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
 > ties-to-even, at the dtype's own STORAGE width (f64 identity; f32
 > 24-bit, f16 11-bit including subnormals, bf16 8-bit mantissa), with
@@ -2503,7 +2515,7 @@ rejections with no citation).
 > infinities preserved. The width at which the op is COMPUTED before
 > finalization is fixed by [04-NUM-8], not by this atom.
 
-*(Honored today only by the eval scalar lane; see chelis#717.)*
+*(Not honored today: chelis#714.)*
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
@@ -2511,15 +2523,11 @@ rejections with no citation).
 > operations of [04-NUM-7]), saturate, or silently widen.
 > In-range integer arithmetic SHALL be exact at every width.
 
-*(Not honored today: int8/16/32 wrap in eval scalars, int64 saturates,
-the compiled scalar lane widens, the compiled tensor lane wraps -
-chelis#680/#718.)*
+*(Not honored today: chelis#689.)*
 
 > **[04-NUM-4]** A `bool` value SHALL be exactly 0 or 1; arithmetic
 > that would produce any other value in a bool-typed position SHALL be
 > rejected by the checker or trap.
-
-*(Not honored today: chelis#726.)*
 
 > **[04-NUM-5]** Comparisons SHALL compare finalized values: a cast's
 > rounding applies before any comparison reads it, including in
@@ -2527,8 +2535,6 @@ chelis#680/#718.)*
 > per-dtype semantics or decline to fold. A fold SHALL never remove a
 > branch that exact semantics would take, and SHALL never fold away or
 > introduce a trap.
-
-*(Not honored today: chelis#711, #720.)*
 
 > **[04-NUM-6]** `f64 add(2^53, 1) == 2^53` and every other correctly
 > rounded float result at the dtype's own mantissa boundary is CORRECT
@@ -2723,7 +2729,8 @@ above 2^53 collapsed at every boundary no matter how exactly it had been
 computed - chelis#684, chelis#685, chelis#686. This atom is the
 user-visible statement of what `spec/design/dtype_semantics.md` §C3's
 storage decision delivers: that document owns the mechanism, this atom owns
-the guarantee.)*
+the guarantee. Also not honored on the Metal host/device bool boundary,
+where a value crosses at a quarter of its storage width: chelis#892.)*
 
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
@@ -2785,6 +2792,38 @@ divergence as conforming only under this atom's conditions.)*
 > ties-to-even at the target width per [04-NUM-2], even when that loses
 > integer exactness. A source cast to `bool` accepts exactly 0 or 1 per
 > [04-NUM-4].
+
+> **[04-NUM-15]** For an elementwise operation that maps a tensor to a
+> tensor and can trap per-element, the trap the operation raises SHALL be
+> the one belonging to the offending element with the LOWEST row-major flat
+> index. This fixes the "documented evaluation order" [04-NUM-12] requires
+> for the elementwise case: an elementwise trapping map's documented order
+> is row-major flat index order, in every lane. When a tensor carries
+> several offending elements whose kinds differ, the lowest-indexed
+> offender therefore determines the kind, and [04-NUM-9]'s rendering
+> identity applies to that trap unchanged. A lane SHALL NOT select the
+> offender by evaluation happenstance - thread scheduling, a whole-buffer
+> pre-pass biased toward one kind, or vectorization order - and SHALL NOT
+> report a different kind from another lane for the same input. This rule
+> does not constrain HOW a lane finds that element: a parallel
+> implementation that reduces per-thread candidates to the global minimum
+> index is conforming, and serialization is not required.
+
+*(Authored 2026-08-04. [04-NUM-12] defined occurrence by "that lane's
+documented evaluation order", but no lane documented an order for an
+elementwise trapping map, so the multi-offender case was unauthored while
+both [04-NUM-9]'s cross-lane rendering identity and [04-NUM-12]'s
+within-lane determinism formally applied to it. Index order is the choice
+consistent with the two existing precedents: [04-NUM-10] already requires a
+device lane to carry "the first failing element index", and
+`spec/05-risc-primitives.md`'s `Scatter` deterministic-order rule already
+uses updates-tensor row-major flat order. The alternative - leaving the
+offender unspecified while guaranteeing the trap - was rejected because the
+kind is part of the rendered line, so an unspecified offender would have
+required weakening [04-NUM-9]'s byte-identity requirement to accommodate an
+implementation. Stated for elementwise trapping maps generally rather than
+for `cast`, so a later trapping map does not reopen the same question. Not
+fully honored on the checked `cast` today: chelis#1152.)*
 
 ---
 

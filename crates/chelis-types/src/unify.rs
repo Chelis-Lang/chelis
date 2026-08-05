@@ -88,6 +88,24 @@ pub struct Subst {
     /// serialized: transient per-pass bookkeeping.
     #[serde(skip)]
     deferred_opaque_uses: Mutex<Vec<(TypeVar, DeferredOpaqueUse)>>,
+    /// chelis#942: positional `expand` has two legal output shapes until a
+    /// consumer fixes the result rank. The constraint stays attached to the
+    /// unresolved result variable so ordinary unification can select either
+    /// the same-rank replacement or rank-increasing insertion shape without
+    /// letting an unrelated tensor shape slip through. Reusable library
+    /// contexts serialize this obligation so a downstream checking unit can
+    /// make the first shape-bearing choice after a cache round trip.
+    deferred_expand_constraints: Mutex<HashMap<TypeVar, Vec<DeferredExpandConstraint>>>,
+}
+
+/// The two-shape obligation carried by an unresolved positional `expand`
+/// result (spec/04-type-system.md §4.7.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeferredExpandConstraint {
+    pub input_dims: Vec<Dim>,
+    pub input_prec: TensorPrec,
+    pub axis: usize,
+    pub size: Dim,
 }
 
 /// Which deferred use shape registered a ledger entry (determines the
@@ -116,6 +134,12 @@ impl Clone for Subst {
                 self.deferred_opaque_uses
                     .lock()
                     .expect("subst.deferred_opaque_uses poisoned")
+                    .clone(),
+            ),
+            deferred_expand_constraints: Mutex::new(
+                self.deferred_expand_constraints
+                    .lock()
+                    .expect("subst.deferred_expand_constraints poisoned")
                     .clone(),
             ),
         }
@@ -170,6 +194,99 @@ impl Subst {
             .lock()
             .expect("subst.ranks poisoned")
             .insert(r, dims);
+    }
+
+    /// Attach a positional-expand obligation to its unresolved result.
+    pub fn record_deferred_expand_constraint(
+        &self,
+        v: TypeVar,
+        constraint: DeferredExpandConstraint,
+    ) {
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .entry(v)
+            .or_default()
+            .push(constraint);
+    }
+
+    /// Whether `v` is an unresolved output carrying a positional-expand
+    /// obligation. Generalization uses this to keep one produced value
+    /// monomorphic: two consumers may not independently choose two shapes for
+    /// the same binding.
+    pub fn has_deferred_expand_constraint(&self, v: TypeVar) -> bool {
+        self.deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .contains_key(&v)
+    }
+
+    /// Materialize the context-free positional-expand default for `v`.
+    /// Existing-axis calls choose same-rank replacement; `axis == rank` has
+    /// no replacement form and therefore chooses trailing insertion. Every
+    /// obligation attached through alias unification must agree.
+    pub fn materialize_deferred_expand_default(
+        &mut self,
+        v: TypeVar,
+    ) -> Result<Option<Type>, TypeError> {
+        let constraints = self
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .get(&v)
+            .cloned();
+        let Some(constraints) = constraints else {
+            return Ok(None);
+        };
+
+        // Aliasing through an ordinary consumer can attach more than one
+        // expand obligation to the same result variable. In that case the
+        // consumer has imposed equality between the results, so choose the
+        // first legal shape of the first producer that satisfies every
+        // obligation. Candidate order preserves the context-free rule:
+        // same-rank replacement precedes insertion when both are legal.
+        // Probe on a clone because a failed tensor unification may have
+        // already bound dimension variables before discovering a later
+        // mismatch; rejected candidates must not mutate the real state.
+        let mut first_rejection = None;
+        for candidate in constraints[0].candidate_types()? {
+            let mut trial = self.clone();
+            let compatible = constraints.iter().try_for_each(|constraint| {
+                let canonical = constraint.canonical_for_output(&candidate)?;
+                unify(&canonical, &candidate, &mut trial)
+            });
+            match compatible {
+                Ok(()) => {
+                    unify(&Type::Var(v), &candidate, self)?;
+                    return Ok(Some(self.apply(&candidate)));
+                }
+                Err(error) => {
+                    first_rejection.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_rejection.expect("deferred expand constraint set has at least one candidate"))
+    }
+
+    /// Resolve every positional-expand result whose shape remained
+    /// unconstrained through the complete inference schedule. Consumers must
+    /// get the first opportunity to select either legal shape; only the
+    /// program freeze point invokes this fallback so no unresolved result can
+    /// escape into checked annotations.
+    pub fn materialize_deferred_expand_defaults(&mut self) -> Result<(), TypeError> {
+        let vars = self
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for var in vars {
+            if self.has_deferred_expand_constraint(var) {
+                self.materialize_deferred_expand_default(var)?;
+            }
+        }
+        Ok(())
     }
 
     /// Snapshot of the rank-variable bindings.
@@ -638,6 +755,89 @@ impl Subst {
     }
 }
 
+impl DeferredExpandConstraint {
+    fn canonical_for_output(&self, output: &Type) -> Result<Type, TypeError> {
+        let Type::Tensor(out_dims, out_prec) = output else {
+            return Err(TypeError {
+                kind: TypeErrorKind::TypeMismatch,
+                message: format!("expand expects tensor output, got {output}"),
+            });
+        };
+        if out_prec != &self.input_prec {
+            return Err(TypeError {
+                kind: TypeErrorKind::PrecisionMismatch,
+                message: format!(
+                    "expand output precision {} does not match input precision {}",
+                    out_prec.name(),
+                    self.input_prec.name(),
+                ),
+            });
+        }
+
+        let mut expected = self.input_dims.clone();
+        if out_dims.len() == self.input_dims.len() + 1 {
+            expected.insert(self.axis, self.size.clone());
+        } else if out_dims.len() == self.input_dims.len() {
+            if self.axis >= self.input_dims.len() {
+                return Err(TypeError {
+                    kind: TypeErrorKind::DimensionMismatch,
+                    message: format!(
+                        "expand axis {} is out of bounds for rank {} tensor",
+                        self.axis,
+                        self.input_dims.len(),
+                    ),
+                });
+            }
+            expected[self.axis] = self.size.clone();
+        } else {
+            return Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!(
+                    "expand output rank {} must equal input rank {} or {}",
+                    out_dims.len(),
+                    self.input_dims.len(),
+                    self.input_dims.len() + 1,
+                ),
+            });
+        }
+        Ok(Type::Tensor(expected, self.input_prec.clone()))
+    }
+
+    fn default_type(&self) -> Result<Type, TypeError> {
+        let mut dims = self.input_dims.clone();
+        if self.axis == dims.len() {
+            dims.insert(self.axis, self.size.clone());
+        } else if self.axis < dims.len() {
+            dims[self.axis] = self.size.clone();
+        } else {
+            return Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!(
+                    "expand insert axis {} is out of bounds for rank {} tensor",
+                    self.axis,
+                    dims.len(),
+                ),
+            });
+        }
+        Ok(Type::Tensor(dims, self.input_prec.clone()))
+    }
+
+    /// Legal output candidates in context-free preference order. An existing
+    /// positional axis defaults to replacement but may be selected as an
+    /// insertion by an equal-shape consumer; a trailing axis has only the
+    /// insertion form.
+    fn candidate_types(&self) -> Result<Vec<Type>, TypeError> {
+        let default = self.default_type()?;
+        let mut candidates = vec![default];
+        if self.axis < self.input_dims.len() {
+            let mut inserted = self.input_dims.clone();
+            inserted.insert(self.axis, self.size.clone());
+            candidates.push(Type::Tensor(inserted, self.input_prec.clone()));
+        }
+        Ok(candidates)
+    }
+}
+
 /// Unify two types, producing a substitution or a type error.
 pub fn unify(t1: &Type, t2: &Type, subst: &mut Subst) -> Result<(), TypeError> {
     let t1 = subst.apply(t1);
@@ -880,6 +1080,28 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
             kind: TypeErrorKind::OccursCheck,
             message: format!("infinite type: ?{} occurs in {ty}", v.0),
         });
+    }
+
+    let constraints = subst
+        .deferred_expand_constraints
+        .lock()
+        .expect("subst.deferred_expand_constraints poisoned")
+        .remove(&v);
+    if let Some(constraints) = constraints {
+        if let Type::Var(target) = ty {
+            subst
+                .deferred_expand_constraints
+                .lock()
+                .expect("subst.deferred_expand_constraints poisoned")
+                .entry(*target)
+                .or_default()
+                .extend(constraints);
+        } else {
+            for constraint in constraints {
+                let canonical = constraint.canonical_for_output(ty)?;
+                unify(&canonical, ty, subst)?;
+            }
+        }
     }
     subst.insert_type(v, ty.clone());
     Ok(())

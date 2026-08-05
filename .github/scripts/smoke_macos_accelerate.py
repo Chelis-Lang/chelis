@@ -39,8 +39,8 @@ DRIVER_C = """\
 void matmul(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 
 int main(void) {
-    int a_shape[2] = {2, 3};
-    int b_shape[2] = {3, 4};
+    int64_t a_shape[2] = {2, 3};
+    int64_t b_shape[2] = {3, 4};
     chelis_tensor *a = chelis_alloc(2, a_shape, CHELIS_F32);
     chelis_tensor *b = chelis_alloc(2, b_shape, CHELIS_F32);
     float a_values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};

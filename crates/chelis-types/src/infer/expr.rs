@@ -33,7 +33,33 @@ pub(super) fn infer_expr(
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
 ) -> Type {
-    infer_expr_with_type_metadata_ownership(expr, env, vg, subst, adt_reg, errors, product, None)
+    infer_expr_with_type_metadata_ownership(
+        expr, env, vg, subst, adt_reg, errors, product, None, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn infer_expr_with_expected(
+    expr: &deep::Expr,
+    expected: &Type,
+    env: &mut Env,
+    vg: &mut VarGen,
+    subst: &mut Subst,
+    adt_reg: &AdtRegistry,
+    errors: &mut DiagnosticSink<'_>,
+    product: &mut InferenceProduct,
+) -> Type {
+    infer_expr_with_type_metadata_ownership(
+        expr,
+        env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+        Some(expected),
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -45,6 +71,7 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
     adt_reg: &AdtRegistry,
     errors: &mut DiagnosticSink<'_>,
     product: &mut InferenceProduct,
+    expected_result: Option<&Type>,
     type_metadata_resolution: Option<&mut Option<OwnedTypeMetadataResolution>>,
 ) -> Type {
     // Bail before a deeply-nested `app` tree exhausts the native stack and
@@ -76,7 +103,16 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 Some(DeepTag::Lit) => {
                     infer_lit(list, env, vg, adt_reg, errors, type_metadata_resolution)
                 }
-                Some(DeepTag::App) => infer_app(list, env, vg, subst, adt_reg, errors, product),
+                Some(DeepTag::App) => infer_app(
+                    list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    expected_result,
+                ),
                 Some(DeepTag::Fn) => infer_fn(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::Let) => infer_let(list, env, vg, subst, adt_reg, errors, product),
                 Some(DeepTag::If) => infer_if(list, env, vg, subst, adt_reg, errors, product),
@@ -360,7 +396,16 @@ pub(super) fn infer_expr_with_type_metadata_ownership(
                 DeepTag::Lit => {
                     infer_lit(&list, env, vg, adt_reg, errors, type_metadata_resolution)
                 }
-                DeepTag::App => infer_app(&list, env, vg, subst, adt_reg, errors, product),
+                DeepTag::App => infer_app(
+                    &list,
+                    env,
+                    vg,
+                    subst,
+                    adt_reg,
+                    errors,
+                    product,
+                    expected_result,
+                ),
                 DeepTag::Fn => infer_fn(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::Let => infer_let(&list, env, vg, subst, adt_reg, errors, product),
                 DeepTag::If => infer_if(&list, env, vg, subst, adt_reg, errors, product),

@@ -172,7 +172,7 @@ def test_gamma_recurrence() -> unit ! { Test } = {
 
 -- Range / property checks
 def test_erf_bounded() -> unit ! { Test } = {
-  _ = assert_true(lt(erf(cast(0.5, f32)), cast(1.0, f32)), "erf(x) < 1 for finite x");
+  _ = assert_true(lt(erf(cast(0.5, f32)), cast(1.0, f32)), "erf(x) < 1 for finite x")
   assert_true(gt(erf(cast(0.5, f32)), cast(0.0, f32)), "erf(x) > 0 for x > 0")
 }
 
@@ -345,7 +345,7 @@ import Std.Test (assert_eq_int, assert_close_tensor, assert_true)
 def test_construction() -> unit ! { Test } = {
   prices = to_tensor([cast(100.0, f32), cast(200.0, f32), cast(300.0, f32)])
   df = from_pairs([("price", FloatCol(prices))])
-  _ = assert_eq_int(nrows(df), cast(3, int64), "nrows = 3");
+  _ = assert_eq_int(nrows(df), cast(3, int64), "nrows = 3")
   assert_eq_int(ncols(df), cast(1, int64), "ncols = 1")
 }
 
@@ -362,7 +362,7 @@ def test_with_column_preserves_existing() -> unit ! { Test } = {
   vols = to_tensor([cast(0.1, f32), cast(0.2, f32), cast(0.3, f32)])
   df = from_pairs([("price", FloatCol(prices))])
   df2 = with_column(df, "vol", FloatCol(vols))
-  _ = assert_eq_int(ncols(df2), cast(2, int64), "added column");
+  _ = assert_eq_int(ncols(df2), cast(2, int64), "added column")
   assert_close_tensor(get_float_col(df2, "price"), prices, cast(1e-10, f32), "price preserved")
 }
 ```

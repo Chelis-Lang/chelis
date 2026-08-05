@@ -820,6 +820,7 @@ dependencies = [
  "chelis-vocab",
  "miette",
  "proptest",
+ "ryu",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -3907,6 +3908,9 @@ name = "tree-sitter-chelis"
 version = "0.18.3"
 dependencies = [
  "cc",
+ "chelis-surf",
+ "ryu",
+ "tempfile",
  "tree-sitter",
 ]
 

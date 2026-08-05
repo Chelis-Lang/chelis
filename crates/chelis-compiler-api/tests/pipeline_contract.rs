@@ -33,7 +33,7 @@ fn root_name_text<'a>(names: impl Iterator<Item = &'a IrName>) -> Vec<&'a str> {
 #[test]
 fn type_analysis_goal_returns_fitness_and_one_checked_product() {
     let outcome = run_source(request(
-        "def answer -> int32 = 42\n",
+        "def answer() -> int32 = 42\n",
         PipelineGoal::TypeAnalysis,
     ))
     .expect("valid source must prepare");
@@ -135,7 +135,7 @@ fn pre_cancelled_pipeline_rejects_structurally_before_parsing() {
     let _guard = chelis_types::install_cancel_token(token);
 
     let rejection = run_source(request(
-        "def answer -> int32 = 42\n",
+        "def answer() -> int32 = 42\n",
         PipelineGoal::FullCheck,
     ))
     .expect_err("a pre-cancelled pipeline must not start parsing");
@@ -154,7 +154,7 @@ fn direct_lower_functions_keep_the_lower_cancellation_stage() {
     )
     .expect("the fixture must pass semantic checks");
     let library = check_prepared_library(
-        prepare_source(SourceKind::Surf, "def library_value -> int32 = 1\n", None)
+        prepare_source(SourceKind::Surf, "def library_value() -> int32 = 1\n", None)
             .expect("the library source must prepare"),
     )
     .expect("the library fixture must pass semantic checks");
@@ -188,7 +188,7 @@ fn dynamic_pipeline_goals_keep_their_initial_cancellation_stage() {
     .map(|goal| {
         (
             goal,
-            prepare_source(SourceKind::Surf, "def answer -> int32 = 42\n", None)
+            prepare_source(SourceKind::Surf, "def answer() -> int32 = 42\n", None)
                 .expect("the fixture source must prepare"),
         )
     });
@@ -209,7 +209,7 @@ fn dynamic_pipeline_goals_keep_their_initial_cancellation_stage() {
 #[test]
 fn type_rejection_has_no_checked_or_lowered_product() {
     let rejection = run_source(request(
-        "def broken -> int32 = missing\n",
+        "def broken() -> int32 = missing\n",
         PipelineGoal::Lower(LoweringMode::Strict),
     ))
     .expect_err("an unbound name must reject type analysis");
@@ -244,7 +244,7 @@ fn effect_rejection_uses_the_narrow_semantic_error() {
 #[test]
 fn linearity_rejection_uses_the_narrow_semantic_error() {
     let source =
-        "def broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n";
+        "def broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n";
     let rejection = complete_checks(accepted_analysis(source), SemanticContext::Isolated)
         .expect_err("a consumed tensor cannot be used again");
     assert!(matches!(rejection, SemanticRejection::Linearity { .. }));
@@ -259,7 +259,7 @@ fn linearity_rejection_uses_the_narrow_semantic_error() {
 
 #[test]
 fn strict_lowering_rejection_retains_the_lower_diagnostic() {
-    let source = "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=(theta))\nout = grad_loss(to_tensor([1.5, 2.5]))\n";
+    let source = "def loss(theta: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(floor(copy(theta)), 0))\ngrad_loss = grad(loss, wrt=theta)\nout = grad_loss(to_tensor([1.5, 2.5]))\n";
     let rejection = run_source(request(source, PipelineGoal::Lower(LoweringMode::Strict)))
         .expect_err("grad through floor must reject during lowering");
     let PipelineRejection::Lower(diagnostic) = rejection else {

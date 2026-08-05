@@ -25,7 +25,7 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
 /// diagnostic that suggests an `i64` suffix or explicit cast.
 #[test]
 fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
-    let src = "def main -> int32 = 2147483648";
+    let src = "def main() -> int32 = 2147483648";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err(
@@ -64,7 +64,7 @@ fn literal_2_pow_31_rejected_with_spec_5_3_range_diagnostic() {
 /// type-check cleanly. Off-by-one regression check.
 #[test]
 fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
-    let src = "def main -> int32 = 2147483647";
+    let src = "def main() -> int32 = 2147483647";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -83,7 +83,7 @@ fn literal_i32_max_does_not_trip_d1_range_diagnostic() {
 /// that suggested it.
 #[test]
 fn cast_wrapped_out_of_i32_range_literal_checks_cleanly() {
-    let src = "def main -> int64 = cast(2147483648, int64)";
+    let src = "def main() -> int64 = cast(2147483648, int64)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -100,7 +100,7 @@ fn cast_wrapped_out_of_i32_range_literal_checks_cleanly() {
 /// target, it does not bypass range checking.
 #[test]
 fn cast_to_int32_of_out_of_range_literal_still_rejected() {
-    let src = "def main -> int32 = cast(2147483648, int32)";
+    let src = "def main() -> int32 = cast(2147483648, int32)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     assert!(
@@ -121,7 +121,7 @@ fn literal_i32_min_minus_one_overflows_with_spec_5_3_diagnostic() {
     // `-2147483649` = -(2^31 + 1) is out of i32 range on the negative
     // side. The inner literal is parsed at i64 so we can diagnose
     // before defaulting.
-    let src = "def main -> int32 = -2147483649";
+    let src = "def main() -> int32 = -2147483649";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     // The negation path may parse as `(neg LIT)` where LIT is the

@@ -51,7 +51,7 @@ struct Counts {
     allocs: usize,
     fused: usize,
     user_helper_defs: usize,
-    /// Total bytes summed across every `chelis_alloc(N, (int[]){...},
+    /// Total bytes summed across every `chelis_alloc(N, (int64_t[]){...},
     /// CHELIS_F32)` call. This approximates peak working set under the C
     /// backend's Phase-0 free-all-at-end strategy.
     total_alloc_bytes: usize,
@@ -84,15 +84,15 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     let fused = c.matches("parallel for simd").count();
     let user_helper_defs = c.matches("static void my_mm__tensor_").count();
 
-    // Sum bytes across every chelis_alloc(N, (int[]){...}, CHELIS_F32) call.
+    // Sum bytes across every chelis_alloc(N, (int64_t[]){...}, CHELIS_F32) call.
     let mut total_alloc_bytes = 0usize;
     let mut idx = 0;
     while let Some(start) = c[idx..].find("chelis_alloc(") {
         let pos = idx + start;
         let after = &c[pos..];
         let window = &after[..(256.min(after.len()))];
-        if let Some(brace_open) = window.find("(int[]){") {
-            let dims_start = brace_open + "(int[]){".len();
+        if let Some(brace_open) = window.find("(int64_t[]){") {
+            let dims_start = brace_open + "(int64_t[]){".len();
             if let Some(brace_close) = window[dims_start..].find('}') {
                 let dims_text = &window[dims_start..dims_start + brace_close];
                 let mut const_factor: usize = 1;

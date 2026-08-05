@@ -88,7 +88,7 @@ fn window_sum_uses_declared_float_arithmetic_width() {
     assert_eq!(
         eval_list(
             "reduce_window_sum(\
-             to_tensor([16777216.0f32, 1.0f32, -16777216.0f32]), [3], [1])"
+             to_tensor([16777216.0f32, 1.0f32, -16777216.0f32]), [3i64], [1i64])"
         ),
         "[0.0]",
         "the sequential f32 accumulator rounds after the first add"
@@ -97,7 +97,7 @@ fn window_sum_uses_declared_float_arithmetic_width() {
     // Negative-parity control: a nearby exactly representable sum must stay
     // successful rather than acquiring a spurious precision trap.
     assert_eq!(
-        eval_list("reduce_window_sum(to_tensor([1.0f32, 2.0f32, 3.0f32]), [3], [1])"),
+        eval_list("reduce_window_sum(to_tensor([1.0f32, 2.0f32, 3.0f32]), [3i64], [1i64])"),
         "[6.0]"
     );
 }
@@ -107,12 +107,12 @@ fn window_sum_preserves_exact_int64_above_two_pow_53() {
     assert_eq!(
         eval_list(
             "reduce_window_sum(\
-             to_tensor([9007199254740992i64, 1i64]), [2], [1])"
+             to_tensor([9007199254740992i64, 1i64]), [2i64], [1i64])"
         ),
         "[9007199254740993]"
     );
     assert_eq!(
-        eval_list("reduce_window_sum(to_tensor([40i64, 2i64]), [2], [1])"),
+        eval_list("reduce_window_sum(to_tensor([40i64, 2i64]), [2i64], [1i64])"),
         "[42]"
     );
 }
@@ -140,13 +140,13 @@ fn window_sum_traps_at_each_integer_operand_width() {
             "[9007199254740992]",
         ),
     ] {
-        let expr = format!("reduce_window_sum(to_tensor([{values}]), [3], [1])");
+        let expr = format!("reduce_window_sum(to_tensor([{values}]), [3i64], [1i64])");
         assert_numeric_trap(
             &expr,
             &format!("numeric trap: overflow in reduce_window_sum at {dtype}"),
         );
 
-        let control_expr = format!("reduce_window_sum(to_tensor([{control}]), [3], [1])");
+        let control_expr = format!("reduce_window_sum(to_tensor([{control}]), [3i64], [1i64])");
         assert_eq!(
             eval_list(&control_expr),
             expected_control,

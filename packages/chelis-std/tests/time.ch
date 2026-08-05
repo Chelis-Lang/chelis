@@ -32,24 +32,21 @@ def test_date_ordering() -> unit ! { Test } = {
   _ = assert_eq_bool(date_lt(d2, d1), false, "not d2 < d1")
   assert_eq_bool(date_gt(d1, d2), false, "not d1 > d2")
 }
-def test_try_date_rejects_feb_30_non_leap() -> unit ! { Test } = {
+def test_try_date_rejects_feb_30_non_leap() -> unit ! { Test } =
   match try_date(cast(2026, int64), cast(2, int64), cast(30, int64)) with {
     | Some(_) => fail("2026-02-30 should not parse")
     | None => assert_true(true, "2026-02-30 rejected")
   }
-}
-def test_try_date_accepts_leap_day() -> unit ! { Test } = {
+def test_try_date_accepts_leap_day() -> unit ! { Test } =
   match try_date(cast(2024, int64), cast(2, int64), cast(29, int64)) with {
     | Some(_) => assert_true(true, "2024-02-29 accepted")
     | None => fail("2024-02-29 should be valid leap day")
   }
-}
-def test_try_date_rejects_feb_30_leap_year() -> unit ! { Test } = {
+def test_try_date_rejects_feb_30_leap_year() -> unit ! { Test } =
   match try_date(cast(2024, int64), cast(2, int64), cast(30, int64)) with {
     | Some(_) => fail("2024-02-30 never exists")
     | None => assert_true(true, "2024-02-30 rejected even in leap year")
   }
-}
 def test_iso_round_trip() -> unit ! { Test } = {
   d = date(cast(2026, int64), cast(4, int64), cast(25, int64))
   s = date_to_string(d)

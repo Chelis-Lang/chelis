@@ -25,5 +25,5 @@ tr = trace(matrix, 0, 1)
 sorted_values = sort(diag, 0).0
 sorted_indices = sort(diag, 0).1
 pool_grid = to_tensor([[cast(1.0, f32), cast(2.0, f32), cast(3.0, f32)], [cast(4.0, f32), cast(5.0, f32), cast(6.0, f32)], [cast(7.0, f32), cast(8.0, f32), cast(9.0, f32)]])
-windowed_max = reduce_window_max(pool_grid, [2, 2], [1, 1])
-windowed_mean = reduce_window_mean(pool_grid, [2, 2], [2, 2])
+windowed_max = reduce_window_max(pool_grid, [2i64, 2i64], [1i64, 1i64])
+windowed_mean = reduce_window_mean(pool_grid, [2i64, 2i64], [2i64, 2i64])

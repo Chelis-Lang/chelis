@@ -47,8 +47,8 @@ Windowed reductions slide a window over the tensor:
   for these.
 
 ```chelis-surf-fragment
-windowed_max = reduce_window_max(pool_grid, [2, 2], [1, 1])
-windowed_mean = reduce_window_mean(pool_grid, [2, 2], [2, 2])
+windowed_max = reduce_window_max(pool_grid, [2i64, 2i64], [1i64, 1i64])
+windowed_mean = reduce_window_mean(pool_grid, [2i64, 2i64], [2i64, 2i64])
 ```
 
 ### Structural and shape operations
@@ -84,7 +84,8 @@ clipped = clamp(running, floor15, ceil30)
 - `to_tensor(list)`, `to_list(tensor)` bridge lists and tensors. `pad_sequences(list, fill)`
   builds a rectangular tensor from ragged rows.
 - `cast(x, precision)` changes precision.
-- `shape(t, axis)` returns a runtime `int32` scalar for an axis length.
+- `shape(t, axis)` returns a runtime `int64` scalar for an axis length; the
+  axis argument itself is `int32`.
 - `copy(x)` produces a fresh owned value; `realize(x)` materializes an intermediate.
 
 ### Randomness

@@ -240,7 +240,7 @@ fn spaced_coverage_entry_covers_a_cite_and_explain_names_the_site() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("src/thing.ch"),
-        "def x -> I32 = fail(\"blocked on chelis#316\")\n",
+        "def x() -> I32 = fail(\"blocked on chelis#316\")\n",
     )
     .unwrap();
 

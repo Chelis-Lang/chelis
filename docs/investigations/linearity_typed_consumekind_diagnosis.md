@@ -18,7 +18,7 @@ counterfactual after the fix.
 ### Fixture 1 — aliasing-consume control
 
 ```
-def f(w: tensor[4, f32]): tensor[4, f32] =
+def f(w: tensor[4, f32]) -> tensor[4, f32] =
   { y: tensor[4, f32] = w
     realize(y) }
 ```
@@ -40,7 +40,7 @@ discrimination is by typed field, not by string prefix.
 ### Fixture 2 — structural-consume control
 
 ```
-def f(w: tensor[4, f32]): tensor[4, f32] =
+def f(w: tensor[4, f32]) -> tensor[4, f32] =
   { y: tensor[4, f32] = realize(w)
     add(w, y) }
 ```
@@ -65,7 +65,7 @@ After PR 1: same path, but the test in `read_or_error` is
 ### Fixture 3 — aliased-consume bypass (AliasedConsume-F1)
 
 ```
-def f(w: tensor[4, f32]): tensor[4, f32] =
+def f(w: tensor[4, f32]) -> tensor[4, f32] =
   { y: tensor[4, f32] = w
     z: tensor[4, f32] = realize(y)
     add(w, z) }
@@ -99,7 +99,7 @@ and surfaces `UseAfterConsume` per the Fixture 2 path.
 ### Fixture 4 — tuple-destructure linearity (F2)
 
 ```
-def f(pair: (tensor[4, f32], tensor[4, f32])): tensor[4, f32] =
+def f(pair: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] =
   { (a, b) = pair
     r1: tensor[4, f32] = realize(a)
     realize(a) }

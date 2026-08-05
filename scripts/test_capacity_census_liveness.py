@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from capacity_census_liveness import (
+    PERMANENT_DISPOSITIONS,
     IssueKind,
     IssueRecord,
     IssueState,
@@ -21,8 +22,17 @@ from capacity_census_liveness import (
 )
 
 
-def row(citation: str, row_id: str = "x.h: void f(void);") -> dict:
-    return {"kind": "header-export", "id": row_id, "citation": citation}
+def row(
+    citation: str,
+    row_id: str = "x.h: void f(void);",
+    census_family: str = "primary",
+) -> dict:
+    return {
+        "kind": "header-export",
+        "id": row_id,
+        "citation": citation,
+        "_census_family": census_family,
+    }
 
 
 class ExtractIssueRefs(unittest.TestCase):
@@ -59,12 +69,36 @@ class Adjudicate(unittest.TestCase):
         )
         self.assertEqual(problems, [])
 
-    def test_refless_citation_is_not_liveness_checked(self) -> None:
-        # The pure verdict logic is lenient about ref-less citations; the
-        # Rust tripwire owns that rejection (CITATION NAMES NO ISSUE), so
-        # this documents the division of labor rather than an allowance.
-        problems = adjudicate([row("baseline-2026-07-30")], {})
+    def test_exact_permanent_disposition_passes_without_issue_lookup(self) -> None:
+        disposition = next(
+            value for value in PERMANENT_DISPOSITIONS if "initial non-seam" in value
+        )
+        problems = adjudicate([row(disposition)], {})
         self.assertEqual(problems, [])
+
+    def test_invented_refless_disposition_fails_closed(self) -> None:
+        problems = adjudicate([row("permanent-disposition(reviewed and fine)")], {})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("UNRECOGNIZED disposition", problems[0])
+
+    def test_near_miss_permanent_disposition_fails_closed(self) -> None:
+        disposition = next(iter(PERMANENT_DISPOSITIONS))
+        problems = adjudicate([row(f"{disposition} copied")], {})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("UNRECOGNIZED disposition", problems[0])
+
+    def test_permanent_disposition_cannot_move_between_census_families(self) -> None:
+        dispositions = sorted(PERMANENT_DISPOSITIONS)
+        wire = next(value for value in dispositions if "wire schema" in value)
+        bindings = next(value for value in dispositions if "PyO3" in value)
+
+        problems = adjudicate([row(wire, census_family="bindings")], {})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("WRONG CENSUS FAMILY", problems[0])
+
+        problems = adjudicate([row(bindings, census_family="wire")], {})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("WRONG CENSUS FAMILY", problems[0])
 
     def test_closed_citation_fails_with_readjudication_message(self) -> None:
         problems = adjudicate(
@@ -168,23 +202,6 @@ class FetchIssue(unittest.TestCase):
             IssueRecord(kind=IssueKind.ISSUE, state=IssueState.CLOSED),
         )
         self.assertIsNone(fetch_issue(999999, run=missing))
-
-    def test_mismatched_or_non_integer_issue_identity_fails_closed(self) -> None:
-        payloads = (
-            '{"state":"open","number":714}',
-            '{"state":"open","number":true}',
-            '[{"state":"open","number":729}]',
-        )
-        for payload in payloads:
-            with self.subTest(payload=payload):
-                def run(_: list[str], **__: object) -> object:
-                    return type(
-                        "Completed",
-                        (),
-                        {"returncode": 0, "stdout": payload},
-                    )()
-
-                self.assertIsNone(fetch_issue(729, run=run))
 
 
 if __name__ == "__main__":

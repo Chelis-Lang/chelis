@@ -69,8 +69,12 @@ use crate::schema::{Diagnostic, GeneralKind};
 
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
-/// Mixed into the content-addressed key.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 4;
+/// Mixed into the content-addressed key. V5 unifies two independent V4
+/// bumps: the pipeline-core `CheckedLibrary`/proof-identity products
+/// (branch) and chelis#942's serialized positional-expand obligations
+/// inside `TypeEnv` (main). Bincode is positional, so a V4 entry from
+/// either side is a clean miss.
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 5;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -461,8 +465,10 @@ mod tests {
     /// exact shape is irrelevant; what matters is that the same slice
     /// hashes identically and a different slice hashes differently.
     fn sample_decls(marker: &str) -> Vec<chelis_surf::ast::Decl> {
-        chelis_surf::parser::parse_str(&format!("module Sample\ndef {marker}_value -> int32 = 1\n"))
-            .expect("sample decls must parse")
+        chelis_surf::parser::parse_str(&format!(
+            "module Sample\ndef {marker}_value() -> int32 = 1\n"
+        ))
+        .expect("sample decls must parse")
     }
 
     #[test]

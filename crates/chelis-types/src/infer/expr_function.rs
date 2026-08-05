@@ -146,11 +146,19 @@ pub(super) fn infer_def_body_with_sig(
     // tensor[n, f32] = y`, so checking here (pre-sig-unify) would miss
     // it. Running it only at the caller also avoids double-reporting.
     let body_expr = &kids[1];
-    let body_ty = infer_expr(body_expr, &mut fn_env, vg, subst, adt_reg, errors, product);
+    let body_ty = infer_expr_with_expected(
+        body_expr,
+        decl_ret,
+        &mut fn_env,
+        vg,
+        subst,
+        adt_reg,
+        errors,
+        product,
+    );
 
     let resolved_params: Vec<Type> = param_types.iter().map(|t| subst.apply(t)).collect();
     let resolved_body = subst.apply(&body_ty);
-    let _ = decl_ret; // referenced for documentation; sig-unify happens at the call site
 
     Type::Fn(resolved_params, Box::new(resolved_body))
 }
@@ -276,6 +284,7 @@ pub(super) fn infer_let(
                     adt_reg,
                     errors,
                     product,
+                    None,
                     Some(&mut rhs_type_metadata_resolution),
                 );
 

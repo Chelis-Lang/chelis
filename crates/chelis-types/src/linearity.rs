@@ -535,7 +535,7 @@ impl Checker {
                     self.invalid_borrow(body, "borrow cannot be returned from a function");
                     return;
                 }
-                // V2-F4: top-level `def name = x` where the body is a
+                // V2-F4: top-level `def name() = x` where the body is a
                 // bare `(var x)` of an owned-linear type is an
                 // aliasing binding consume; at the IR level
                 // `lower_var` returns the cached `bindings["x"]` node
@@ -794,9 +794,6 @@ impl Checker {
         // error rather than the silent fallthrough used by regular
         // bindings.
         let bind_introduces_destructure = bind_introduces_destructure_tmp(&kids[0]);
-        if bind_introduces_destructure {
-            self.destructure_scope_depth += 1;
-        }
         if let Some(bind_kids) = tagged_children(&kids[0], DeepTag::Bind) {
             let mut index = 0;
             while index + 1 < bind_kids.len() {
@@ -828,6 +825,14 @@ impl Checker {
                 pushed.push(name.to_string());
                 index += 2;
             }
+        }
+        // The marker governs the bindings introduced above and therefore the
+        // let body. The binding values are evaluated in the enclosing scope:
+        // treating the root destructure value as already inside the new scope
+        // incorrectly classifies an ordinary source variable as a
+        // destructured component.
+        if bind_introduces_destructure {
+            self.destructure_scope_depth += 1;
         }
         self.check_expr(&kids[1], scope);
         for name in pushed.into_iter().rev() {

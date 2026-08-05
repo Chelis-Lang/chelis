@@ -5857,7 +5857,7 @@ impl LowerCtx {
                     _ => None,
                 })?;
                 // `visited` protects THIS resolution walk from alias cycles
-                // (`def a = b; def b = a`). It deliberately does NOT consult
+                // (`def a() = b; def b() = a`). It deliberately does NOT consult
                 // the active-inline state: a re-entrant call to a callee that
                 // is mid-inline resolves normally and unrolls, bounded by the
                 // depth caps in `lower_plain_callable_app` (chelis#620; the
@@ -7485,8 +7485,10 @@ impl LowerCtx {
                 // chelis#776: statically resolve each bound (through neg /
                 // float-cast wrappers) or fail loudly — never the silent [0,1)
                 // default that dropped a wrapped or computed range in codegen.
-                let low = self.resolve_static_f64_arg(&args[1], "uniform_like", "low bound");
-                let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound");
+                let low = self.resolve_static_f64_arg(&args[1], "uniform_like", "low bound") as f32
+                    as f64;
+                let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound")
+                    as f32 as f64;
                 let seed = self.random_seed.unwrap_or(0);
                 // When no `type` metadata is attached to the `app` form
                 // (as is common when the host lane drives sub-expression
@@ -8518,12 +8520,13 @@ impl LowerCtx {
                     // statically (through neg / float-cast wrappers) or fail
                     // loudly. The `else` arm below is a true structural default
                     // — no fill was given, so pad with zeros.
-                    self.resolve_static_f64_arg(&args[2], "pad", "fill value")
+                    self.resolve_static_scalar_arg(&args[2], ty.precision, "pad", "fill value")
                 } else {
-                    0.0
+                    chelis_types::scalar_from_i64("pad", ty.precision, 0)
+                        .expect("zero is a member of every active pad dtype")
                 };
                 self.dag.add_node(
-                    RiscOp::Pad { padding, fill },
+                    RiscOp::pad(padding, fill),
                     inputs,
                     ty.clone(),
                     self.current_span_id.clone(),
@@ -9019,7 +9022,7 @@ impl LowerCtx {
             let mut padding = vec![(RtDim::Lit(0), RtDim::Lit(0)); rank];
             padding[axis] = (RtDim::Lit(before), RtDim::Lit(after));
             let padded = self.dag.add_node(
-                RiscOp::Pad { padding, fill: 0.0 },
+                RiscOp::zero_pad(out_ty.precision, padding),
                 vec![*node],
                 out_ty.clone(),
                 self.current_span_id.clone(),
@@ -9277,10 +9280,10 @@ impl LowerCtx {
                 self.current_span_id.clone(),
             );
             let padded = self.dag.add_node(
-                RiscOp::Pad {
-                    padding: vec![(RtDim::Lit(index), RtDim::Lit(out_len - index - 1))],
-                    fill: 0.0,
-                },
+                RiscOp::zero_pad(
+                    out_ty.precision,
+                    vec![(RtDim::Lit(index), RtDim::Lit(out_len - index - 1))],
+                ),
                 vec![unit],
                 out_ty.clone(),
                 self.current_span_id.clone(),
@@ -10367,6 +10370,36 @@ impl LowerCtx {
                      float type); a runtime-computed value is not supported here \
                      (Chelis-Lang/chelis#776)"
                 ),
+                Some(expr.span()),
+                expr.span_id().map(ToOwned::to_owned),
+            )
+        })
+    }
+
+    /// Resolve a statically-known scalar and finalize it once at `target`.
+    /// Unlike the legacy f64 extractor, an integer leaf remains exact through
+    /// int64 and a typed leaf retains its source dtype until the checked cast.
+    fn resolve_static_scalar_arg(
+        &self,
+        expr: &Expr,
+        target: Prim,
+        builtin: &'static str,
+        arg_desc: &str,
+    ) -> chelis_types::ScalarValue {
+        let value = match extract_numeric_leaf(expr) {
+            Some(StagedScalar::Raw(raw)) => chelis_types::cast_raw(builtin, raw, target),
+            Some(StagedScalar::Typed(value)) => chelis_types::cast_scalar(builtin, value, target),
+            None => raise_fatal_lowering_error(
+                format!(
+                    "`{builtin}` requires a statically-resolvable {arg_desc}; a runtime-computed value cannot be carried by this DAG operand. Use a numeric literal (optionally negated or cast to the output dtype); compiled runtime values remain unsupported here (Chelis-Lang/chelis#776)"
+                ),
+                Some(expr.span()),
+                expr.span_id().map(ToOwned::to_owned),
+            ),
+        };
+        value.unwrap_or_else(|trap| {
+            raise_fatal_lowering_error(
+                trap.to_string(),
                 Some(expr.span()),
                 expr.span_id().map(ToOwned::to_owned),
             )
@@ -15005,7 +15038,7 @@ mod regression_tests {
         );
     }
 
-    fn pad_fill(dag: &Dag) -> f64 {
+    fn pad_fill(dag: &Dag) -> chelis_types::ScalarValue {
         dag.nodes()
             .iter()
             .find_map(|node| match &node.op {
@@ -15024,7 +15057,25 @@ mod regression_tests {
             "(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING} \
              (cast {{}} (lit {{}} 7.0) (t-prim {{}} f32)))"
         );
-        assert_eq!(pad_fill(&parse_and_lower_unchecked(&src)), 7.0);
+        assert_eq!(
+            pad_fill(&parse_and_lower_unchecked(&src)).as_f64_lossy(),
+            7.0
+        );
+    }
+
+    #[test]
+    fn issue_878_pad_fill_preserves_exact_int64_above_f64_boundary() {
+        let exact = 9_007_199_254_740_993i64;
+        let src = format!(
+            "(app {{type: (t-tensor {{}} (d-lit {{}} 6) (t-prim {{}} int64))}} \
+             (var {{}} pad) \
+             (lit {{type: (t-tensor {{}} (d-lit {{}} 4) (t-prim {{}} int64))}} 0) \
+             {PAD_PADDING} \
+             (cast {{}} (lit {{}} {exact}) (t-prim {{}} int64)))"
+        );
+        let fill = pad_fill(&parse_and_lower_unchecked(&src));
+        assert_eq!(fill.prim(), Prim::Int64);
+        assert_eq!(fill.as_i64_exact(), Some(exact));
     }
 
     #[test]
@@ -15049,7 +15100,10 @@ mod regression_tests {
         // still resolve to 0.0, not go loud (chelis#776 fix is scoped to the
         // present-but-unresolvable case).
         let src = format!("(app {{}} (var {{}} pad) {WRAPPED_ARG_TEMPLATE} {PAD_PADDING})");
-        assert_eq!(pad_fill(&parse_and_lower_unchecked(&src)), 0.0);
+        assert_eq!(
+            pad_fill(&parse_and_lower_unchecked(&src)).as_f64_lossy(),
+            0.0
+        );
     }
 
     #[test]

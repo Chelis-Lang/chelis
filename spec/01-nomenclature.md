@@ -75,19 +75,18 @@ snake_case to be importable.
 
 ### 1.3 Reserved keywords
 
-23 reserved Surf keywords, all lowercase:
+28 active Surf keywords are lexically reserved, all lowercase:
 
 ```
-def sig type dim macro match with fn module import
-if then else grad vmap jit realize copy tensor cast
-export par true false
+def sig type dim macro match with fn module import export
+if then else grad vmap jit realize copy tensor cast par do
+quote unquote splice true false
 ```
 
-Plus 7 reserved-for-Phase-2:
-
-```
-effect handler perform resume borrow where do
-```
+Grammar-specific words such as `property`, `forall`, `where`, `opaque`, and
+`invariant` are contextual rather than globally reserved. The future words
+`effect`, `handler`, `perform`, `resume`, and `borrow` are also lexically
+reserved but have no active production. Explicit borrow syntax is `&`.
 
 ### 1.4 Deep tag vocabulary
 
@@ -356,13 +355,12 @@ def softmax(x: Tensor[batch, vocab, f32]) -> Tensor[batch, vocab, f32] =
 def loss(p: f32, q: f32) -> f32 = -(p * log(q))
 ```
 
-Both forms parse, but the arrow is the canonical surface choice
-ecosystem-wide: it visually pairs with parameter `:` annotations without
-overloading the colon for two unrelated jobs (parameter binding vs.
-function-result type), and it matches the Surf Style Guide bullet in
-`AGENTS.md` / `CLAUDE.md`. The lint rule `surf-def-arrow-form` enforces
-this; `chelis fmt` rewrites colon-form decls to arrow-form on next
-canonicalization.
+The arrow is the only canonical Surf spelling. The canonical parser rejects a
+colon in result position; the explicit v0.18 migration path rewrites legacy
+colon-form declarations. This visually pairs with parameter `:` annotations
+without overloading the colon for two unrelated jobs (parameter binding vs.
+function-result type). `chelis fmt` formats canonical Surf and does not act as
+a dialect translator.
 
 ### 3.6 Pipe-first composition and first-argument stages
 
@@ -387,6 +385,15 @@ explicit lambda:
 ```chelis
 x |> fn (v) -> f(y, v)
 ```
+
+Canonical Surf producers promote a nested application chain to this pipe form
+only when the typed pipeline proof establishes a linear first-argument
+dataflow chain. If that proof fails, the producer retains calls;
+later-position insertion retains the explicit lambda. The equivalence is
+limited to the proven chain and does not authorize token-only or untyped call
+rewriting.
+
+(This requirement is not fully implemented; see chelis#1171.)
 
 The decompiler may compact a lambda stage back to call-stage sugar only
 when the carried value is the first argument of the call. Naming rules

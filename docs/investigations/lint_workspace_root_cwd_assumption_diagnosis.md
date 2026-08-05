@@ -30,7 +30,7 @@ Reproduction:
 mkdir -p ws/crates/chelis-surf/tests/fixtures
 printf '[workspace]\nmembers=[]\nresolver="2"\n' > ws/Cargo.toml
 # fixture uses the legacy colon-form def, exempted by the §3.5 exception
-printf 'def f(x: f32): f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n' \
+printf 'def f(x: f32) -> f32 = {\n  y = mul(x, x)\n  add(y, x)\n}\n' \
   > ws/crates/chelis-surf/tests/fixtures/block_binding_expr.ch
 
 (cd ws && chelis lint --check .)            # exception applies, exit 0

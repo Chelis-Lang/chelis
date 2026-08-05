@@ -477,7 +477,7 @@ Pragmatic surface. IO effect on everything.
 | Operation | Signature | Effect | Notes |
 |---|---|---|---|
 | `read_file` | `String -> String` | IO | Read entire file as UTF-8 string |
-| `write_file` | `(String, String) -> ()` | IO | Write string to file |
+| `write_file` | `(String, String) -> unit` | IO | Write string to file |
 | `read_lines` | `String -> List[String]` | IO | Read file, split by newline |
 | `read_bytes` | `String -> List[Int]` | IO | Read raw bytes as integer list |
 | `file_exists` | `String -> Bool` | IO | Check file existence |

@@ -74,3 +74,4 @@ stacker = "0.1"
 # stack_guard! walker-coverage test in chelis-types). Dev-only.
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 quote = "1"
+ryu = "1"

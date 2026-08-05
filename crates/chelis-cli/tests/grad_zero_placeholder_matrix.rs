@@ -215,7 +215,7 @@ fn c_tensor_abs_min_traps_at_every_integer_width() {
         ("int8", "-128.0"),
         ("int16", "-32768.0"),
         ("int32", "-2147483648.0"),
-        ("int64", "-9223372036854775808.0"),
+        ("int64", "-9.223372036854776e18"),
     ] {
         let program = format!(
             "def int_abs(x: tensor[1, {prim}]) -> tensor[1, {prim}] = abs(x)\n\

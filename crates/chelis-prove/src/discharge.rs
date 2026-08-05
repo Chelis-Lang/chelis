@@ -30,12 +30,12 @@ use crate::tier_b::{SmtProperty, TierBResult};
 
 /// A content-addressed back-reference to a serialized `WireDag` v1 artifact.
 ///
-/// This is exactly what an out-of-tree consumer (Beacon) resolves: it parses
-/// the serialized `WireDag` JSON bytes, validates `schema_version <=
-/// WIRE_DAG_SCHEMA_VERSION` (currently `3` since chelis#616; a lower version
-/// is forward-compatible via additive defaults, a higher one fails closed),
+/// This is the artifact an out-of-tree consumer resolves: it parses the
+/// serialized `WireDag` JSON bytes, validates a negotiated schema version,
 /// computes a sha256 over those bytes, and selects the output of interest by
-/// `root_index`. So the handle addresses that artifact by:
+/// `root_index`. Chelis currently stamps v5; Beacon still advertises v1-v3,
+/// so chelis#708 requires negotiation to reject that mismatch before
+/// dispatch until the consumer adopts v5. The handle addresses that artifact by:
 ///
 /// - [`dag_hash`](Self::dag_hash): the lowercase-hex sha256 of the serialized
 ///   `WireDag` v1 bytes. A consumer recomputes the same digest over the bytes

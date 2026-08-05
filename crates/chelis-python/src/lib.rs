@@ -67,15 +67,21 @@ const DLTENSOR_CAPSULE: &[u8] = b"dltensor\0";
 
 create_exception!(chelis, ChelisError, pyo3::exceptions::PyException);
 
+/// Mirrors `chelis_runtime.h`'s `chelis_tensor`. chelis#1112 widened the
+/// extent domain there to `int64_t`, so this mirror follows: a mismatch is
+/// silent field-offset corruption on every host-entry call, not a compile
+/// error. `ChelisGpuTensor` below deliberately keeps `i32` - it mirrors
+/// `chelis_hip_runtime.h`'s `chelis_gpu_tensor`, a separate struct whose
+/// carrier has not widened.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ChelisTensor {
     data: *mut f32,
-    shape: [i32; CHELIS_MAX_DIM],
-    strides: [i32; CHELIS_MAX_DIM],
+    shape: [i64; CHELIS_MAX_DIM],
+    strides: [i64; CHELIS_MAX_DIM],
     ndim: i32,
     dtype: i32,
-    size: i32,
+    size: i64,
     owns_data: i32,
 }
 
@@ -1700,11 +1706,11 @@ fn cpu_input_tensor(
     let data_ptr = numpy_data_ptr(&array)?;
     let tensor = ChelisTensor {
         data: data_ptr,
-        shape: dims_array(&shape)?,
-        strides: dims_array(&strides)?,
+        shape: host_dims_array(&shape)?,
+        strides: host_dims_array(&strides)?,
         ndim: shape.len() as i32,
         dtype: runtime_dtype,
-        size: element_count(&shape)? as i32,
+        size: element_count(&shape)? as i64,
         owns_data: 0,
     };
     Ok(CpuInputTensor {
@@ -1804,6 +1810,19 @@ fn validate_shape(spec: &ExecutionTensorSpec, shape: &[usize]) -> PyResult<()> {
         }
     }
     Ok(())
+}
+
+/// chelis#1112: the host ABI's extent carrier is `int64_t`, so a shape
+/// crosses at its own width. `dims_array` below still narrows to `i32`
+/// for the GPU mirror, whose carrier is unchanged, and keeps its loud
+/// rejection for a dimension that does not fit.
+fn host_dims_array(dims: &[usize]) -> PyResult<[i64; CHELIS_MAX_DIM]> {
+    let mut out = [0i64; CHELIS_MAX_DIM];
+    for (index, dim) in dims.iter().enumerate() {
+        out[index] = i64::try_from(*dim)
+            .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
+    }
+    Ok(out)
 }
 
 fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
@@ -2364,9 +2383,9 @@ loss = (mean(x, 0) : tensor[f32])
             };
 
             let mut data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
-            let mut shape = [0i32; CHELIS_MAX_DIM];
+            let mut shape = [0i64; CHELIS_MAX_DIM];
             shape[0] = 4;
-            let mut strides = [0i32; CHELIS_MAX_DIM];
+            let mut strides = [0i64; CHELIS_MAX_DIM];
             strides[0] = 1;
             let mut tensor = ChelisTensor {
                 data: data.as_mut_ptr(),
@@ -2505,10 +2524,10 @@ loss = (mean(x, 0) : tensor[f32])
         // as read-only; `f64_fused_chain_does_not_mutate_the_input`
         // states the invariant under its own name.
         let input_before = data.clone();
-        let mut shape = [0i32; CHELIS_MAX_DIM];
-        shape[0] = input.len() as i32;
-        let mut strides = [0i32; CHELIS_MAX_DIM];
-        strides[0] = element_stride as i32;
+        let mut shape = [0i64; CHELIS_MAX_DIM];
+        shape[0] = input.len() as i64;
+        let mut strides = [0i64; CHELIS_MAX_DIM];
+        strides[0] = element_stride as i64;
         let mut tensor = ChelisTensor {
             // `ChelisTensor::data` is `*mut f32` for C-ABI compatibility
             // with `chelis_runtime.h`'s `float *data`; the dtype tag is
@@ -2518,7 +2537,7 @@ loss = (mean(x, 0) : tensor[f32])
             strides,
             ndim: 1,
             dtype: CHELIS_F64,
-            size: input.len() as i32,
+            size: input.len() as i64,
             owns_data: 0,
         };
         let mut input_ptrs: Vec<*mut ChelisTensor> = vec![&mut tensor as *mut ChelisTensor];
@@ -2763,9 +2782,9 @@ loss = (mean(x, 0) : tensor[f32])
         };
 
         let mut data: Vec<f32> = vec![1.0];
-        let mut shape = [0i32; CHELIS_MAX_DIM];
+        let mut shape = [0i64; CHELIS_MAX_DIM];
         shape[0] = 1;
-        let mut strides = [0i32; CHELIS_MAX_DIM];
+        let mut strides = [0i64; CHELIS_MAX_DIM];
         strides[0] = 1;
         let mut tensor = ChelisTensor {
             data: data.as_mut_ptr(),
@@ -3034,11 +3053,11 @@ def main(a: tensor[1, f32], b: tensor[1, f32]) -> tensor[2, f32] = {
             let strides = contiguous_strides(shape);
             input_tensors.push(ChelisTensor {
                 data: buffers[index].as_mut_ptr(),
-                shape: dims_array(shape).expect("shape fits ABI"),
-                strides: dims_array(&strides).expect("strides fit ABI"),
+                shape: host_dims_array(shape).expect("shape fits ABI"),
+                strides: host_dims_array(&strides).expect("strides fit ABI"),
                 ndim: shape.len() as i32,
                 dtype: CHELIS_F32,
-                size: element_count(shape).expect("element count") as i32,
+                size: element_count(shape).expect("element count") as i64,
                 owns_data: 0,
             });
         }
@@ -3681,7 +3700,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         .expect("write app reef.lock");
         fs::write(
             root.join("src/main.ch"),
-            "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+            "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
         )
         .expect("write app main");
         fs::write(
@@ -3755,8 +3774,8 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
         let strides = contiguous_strides(&[2]);
         let mut input = ChelisTensor {
             data: buffer.as_mut_ptr(),
-            shape: dims_array(&[2]).expect("shape"),
-            strides: dims_array(&strides).expect("strides"),
+            shape: host_dims_array(&[2]).expect("shape"),
+            strides: host_dims_array(&strides).expect("strides"),
             ndim: 1,
             dtype: CHELIS_F32,
             size: 2,
@@ -3834,7 +3853,7 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             &source_path,
             "def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)\n\
              def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = \
-             xs |> vmap(process, axis=0)\n",
+             xs |> vmap(process)\n",
         )
         .expect("write source");
         let result = run_compile_and_load_job(CompileAndLoadJob {

@@ -70,7 +70,7 @@ def jac_row[n](
   theta: tensor[n, f32], x: f32, y: f32
 ) -> tensor[n, f32] = {
   target = fn (theta_local: tensor[n, f32]) -> model(theta_local, x, y)
-  grad(target, wrt=(theta_local))(theta)
+  grad(target, wrt=theta_local)(theta)
 }
 ```
 

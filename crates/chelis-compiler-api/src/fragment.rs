@@ -404,13 +404,13 @@ mod tests {
     #[test]
     fn whole_module_rejections_return_no_validation_proof() {
         let fixtures = [
-            ("module M\ndef broken -> int32 = missing\n", "check"),
+            ("module M\ndef broken() -> int32 = missing\n", "check"),
             (
                 "module M\ndef noisy(x: tensor[4, f32]) -> tensor[4, f32] ! { } = dropout(x, 0.5)\n",
                 "effects",
             ),
             (
-                "module M\ndef broken(x: tensor[4, f32]) -> tensor[4, f32] = { y = realize(x); add(x, y) }\n",
+                "module M\ndef broken(x: tensor[4, f32]) -> tensor[4, f32] = {\n  y = realize(x)\n  add(x, y)\n}\n",
                 "linearity",
             ),
         ];

@@ -180,8 +180,8 @@ integer operand, with no float conversion. No unary numeric primitive admits
 
 | Name | Signature | Semantics | AD Adjoint |
 |---|---|---|---|
-| `sum` | `(&tensor[d1,...,dn,p], axis: int, accumulator: prec = default(p)) -> tensor[d1,...,d{k-1},d{k+1},...,dn,acc]` | Sum over axis k, removing that dimension. `accumulator` controls the precision of the running sum and the result element type. | `expand(g, original_shape, axis=k)` (gradient flows back at the operand precision `p`; the adjoint is computed in operand precision) |
-| `max_reduce` | `(&tensor[d1,...,dn,p], axis: int) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Max over axis k, removing that dimension | `g * one_hot(argmax(x, k))` — gradient flows to the max element only |
+| `sum` | `(&tensor[d1,...,dn,p], axis: int32, accumulator: prec = default(p)) -> tensor[d1,...,d{k-1},d{k+1},...,dn,acc]` | Sum over axis k, removing that dimension. `accumulator` controls the precision of the running sum and the result element type. | `expand(g, original_shape, axis=k)` (gradient flows back at the operand precision `p`; the adjoint is computed in operand precision) |
+| `max_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Max over axis k, removing that dimension | `g * one_hot(argmax(x, k))` — gradient flows to the max element only |
 
 **Axis:** Integer index into the input rank. Non-negative axes are
 zero-indexed from the front. A negative axis indexes from the end:
@@ -261,10 +261,10 @@ type matches the operand element type.
 
 | Name | Signature | Semantics | AD adjoint |
 |---|---|---|---|
-| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's max (ties distribute, as `max_reduce`); accumulated over overlapping windows |
-| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's min (ties distribute, as `min_reduce`); accumulated over overlapping windows |
-| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
-| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int32], strides: List[int32]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
+| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's max (ties distribute, as `max_reduce`); accumulated over overlapping windows |
+| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's min (ties distribute, as `min_reduce`); accumulated over overlapping windows |
+| `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
+| `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
 
 **Design rationale: four primitives, not one with a Reducer enum.** The
 issue text (Chelis-Lang/chelis#254) proposed a `Reducer` enum argument
@@ -292,14 +292,14 @@ explicit mode; this matches `Valid` as the implicit default.
 
 > **[05-RWIN-1]** `reduce_window_*` SHALL receive equal-length, non-empty
 > `window_shape` and `strides` lists; their length SHALL NOT exceed the input
-> rank; and every entry SHALL be a positive int32. A violation is a type
+> rank; and every entry SHALL be a positive int64. A violation is a type
 > error, never an empty-list default, truncated rank, or backend assertion.
 
-- `window_shape` and `strides` are int32 lists of equal length
+- `window_shape` and `strides` are int64 lists of equal length
   `n >= 1`.
 - The trailing `n` axes of the input are the windowed axes. The
   leading `rank(input) - n` axes pass through unchanged.
-- Each windowed entry must be a positive int32. `window_shape[i] >= 1`
+- Each windowed entry must be a positive int64. `window_shape[i] >= 1`
   and `strides[i] >= 1`.
 - The output rank equals the input rank. Leading dims match the
   input; trailing dim `i` is
@@ -538,10 +538,17 @@ value is bounded by rank, which is small and statically known, so `int32` is
 permanent headroom rather than a limit anyone can reach.
 
 [05-DIM-1] scopes to movement and shape arguments. The axis parameters of
-reduction and concatenation ops (`sum`, `cumsum`, `concat`) are axis-domain
-in nature, and the window extents and stride steps of the `reduce_window_*`
-family are extent-domain in nature, but neither group is yet classified by
-a numbered atom; chelis#1113 owns both classifications.
+reduction and concatenation ops are governed by [05-DIM-3].
+
+> **[05-DIM-3]** Every positional axis-domain argument to an operation SHALL
+> be `int32`, including movement, shape, reduction, ordering, gathering,
+> scattering, splitting, and concatenation operations. A symbolic dimension
+> name used as a rank-polymorphic axis anchor is not a scalar axis-domain
+> value and retains the named-dimension rules of spec/04 §4.5.3. The
+> `window_shape` and `strides` arguments to every
+> `reduce_window_*` operation SHALL be extent-domain `List[int64]`. No
+> evaluator, lowering, runtime, binding, or compiled lane SHALL accept a
+> wider or narrower substitute for either carrier.
 
 Two things make the distinction normative rather than stylistic. First,
 `spec/04-type-system.md` [04-NUM-11]: a value crosses every boundary at its
@@ -660,7 +667,22 @@ dependency and fails closed when its input is absent (chelis#351).
 | `shape` | `(&tensor[d1,...,dn,p], axis: int32) -> int64` | Runtime extent of the input along `axis`, as a rank-0 integer scalar. |
 
 The Surf `shape(tensor, axis)` builtin types this read as an `int64` scalar
-per [05-DIM-2] — extent-domain out, axis-domain in. Two lowering shapes
+per [05-DIM-2] — extent-domain out, axis-domain in.
+
+#### Runtime extent read atom
+
+> **[05-OP-7]** The runtime extent read (`shape(x, axis)`; C ABI
+> `chelis_tensor_shape`) returns the stored extent of `x` along `axis` as
+> an exact `int64` ([05-DIM-2]). The read is metadata-exact at every
+> tensor dtype `p`: it performs no arithmetic and no width change on the
+> stored extent, so [04-NUM-8]'s arithmetic-width table is not engaged
+> and the value crosses the boundary exactly ([04-NUM-11]). Its `axis`
+> operand is axis-domain `int32` ([05-DIM-1]); a negative or
+> out-of-range axis is a loud error. The read is non-differentiable: it
+> produces no adjoint and contributes no gradient. No accumulator rule
+> applies.
+
+Two lowering shapes
 exist, and they are distinct:
 
 - **As an extent argument** to `expand` / `reshape`, a `shape()` read is folded
@@ -711,7 +733,7 @@ node; see §2.4.1.
 | Name | Signature | Semantics | AD / effect note |
 |---|---|---|---|
 | `dropout` | `(&tensor[D, f32], f32) -> tensor[D, f32]` | Zero elements according to a pseudorandom mask determined by the active `with seed(...)` handler and the dropout rate | Introduces `Random`. In the shipped evaluator/AD path, the mask is treated as fixed with respect to the handled seed so the backward pass reuses the same seeded dropout pattern. |
-| `uniform_like` | `(&tensor[D, f32], f32, f32) -> tensor[D, f32]` | Create a tensor matching the input shape, filled from a deterministic uniform distribution under the active `with seed(...)` handler | Introduces `Random`. C backend codegen supports direct DAG lowering and generated host functions that call random stdlib/user helpers. |
+| `uniform_like` | `(&tensor[D, p], f32, f32) -> tensor[D, p]` | Create a tensor matching the input shape and float dtype `p`, filled by the deterministic affine sampler defined by [05-OP-8] under the active `with seed(...)` handler | Introduces `Random`. The template values are not observed; its adjoint is the zero cotangent. |
 | `process_run` | `(String, List[String]) -> (Int64, String, String)` | Run an external program with the given argv and capture `(exit_code, stdout, stderr)`. Arguments are passed straight to the OS as argv (no shell, no interpolation), so a value in the args list cannot inject extra shell commands. A process killed by a signal reports exit code `-1`. | Introduces `Io`. Eval/test-only: implemented by the IR evaluator (`chelis eval` / `chelis test`); rejected by the C/HIP/Metal build backends with a clean diagnostic rather than a silent fallthrough. |
 
 Operational note: the evaluator and lowering path implement seeded `dropout`, but
@@ -724,6 +746,19 @@ program that applies `process_run` because a compiled artifact has no host
 interpreter to reach the subprocess-exec path; the rejection is a build error,
 not a silent zero. Full backend support (host-side `host_emit` lowering plus a
 sandboxed runtime exec helper) is tracked in Chelis-Lang/chelis#267.
+
+> **[05-OP-8]** `uniform_like(template, low, high) -> result` admits every
+> active float template dtype `p` in spec/04 §1.1, requires `low` and `high`
+> to be `f32`, and returns `tensor[D, p]` with the template's dimensions. For flat
+> element index `i`, SplitMix64 over the handled seed and `i` supplies a
+> 53-bit unit value `u` in `[0, 1)`. For `p = f64`, the element is the one
+> `f64` fused multiply-add `fma(high_f64 - low_f64, u, low_f64)`, where the
+> two bounds are widened exactly from their stored `f32` values. For
+> `p = f32`, the element is the one `f32` fused multiply-add
+> `fma(high - low, f32(u), low)`. For `p = f16` or `bf16`, that same `f32`
+> result is rounded exactly once to `p`. The operation introduces `Random`,
+> does not observe the template's element values, and contributes a zero
+> cotangent to the template. It has no accumulator parameter.
 
 #### Seed determinism atom
 
@@ -1102,6 +1137,28 @@ binary that can *fail its own assertions* — requires real C assertion helpers
 make the build reject them *whole-program* like `tensor_scan`, not make them
 assertable — a rejection-cleanliness change, not the compiled-lane arm.)
 Until the compiled-lane helpers land, assertions are an eval-lane contract.
+
+### 3.6.2 Sequence-padding builders
+
+> **[05-OP-9]** `pad_sequences(sequences: List[List[T]], pad: T) ->
+> tensor[len(sequences), width, T]` admits exactly the active numeric
+> primitive dtypes `T` in spec/04 §1.1, with arithmetic width governed by
+> [04-NUM-8]; `bool`, `string`, and every reserved dtype are type errors.
+> `width` is the greatest source-row length, or
+> zero when the outer list is empty. Result element `(r, c)` is
+> `sequences[r][c]` when `c < len(sequences[r])`, and `pad` otherwise.
+> Every source and padding element is moved at its declared dtype `T` with
+> no arithmetic, widening, narrowing, or other rounding. The operation is
+> non-differentiable because its host `List` input carries no adjoint, and
+> it has no accumulator rule.
+
+> **[05-OP-10]** `pad_sequences_to(sequences: List[List[T]], width: int64,
+> pad: T) -> tensor[len(sequences), width, T]` has the same dtype,
+> element-movement, non-differentiability, and no-accumulator rules as
+> [05-OP-9]. `width` SHALL be non-negative. Result element `(r, c)` for
+> `0 <= c < width` is `sequences[r][c]` when that source element exists,
+> and `pad` otherwise; source elements at index `width` or beyond do not
+> appear in the result.
 
 ### 3.7 Host-Lane Data I/O Numeric Operations (Eval-Only; chelis#890 / chelis#903)
 

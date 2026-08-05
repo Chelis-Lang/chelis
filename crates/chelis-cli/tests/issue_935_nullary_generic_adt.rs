@@ -146,7 +146,7 @@ def keep_unmasked(masks: List[bool], rows: List[int64]) -> List[int64] =
     fn (acc: List[int64], row: int64) ->
       if index(masks, row) then acc else append(acc, row),
     [],
-    rows,
+    rows
   )
 def main() -> List[int64] = keep_unmasked([false], [cast(0, int64)])
 ";
@@ -182,12 +182,12 @@ type Hamt[a] =
   | Leaf { value: a }
 type Frame[n] =
   | Frame { cols: Hamt[Column[n]] }
-def singleton[a](value: a) -> Hamt[a] = Leaf { value: value }
+def singleton[a](value: a) -> Hamt[a] = Leaf { value }
 def from_column[n](column: Column[n]) -> Frame[n] =
   Frame { cols: singleton(column) }
 def total[n](frame: Frame[n]) -> f32 =
   match frame with {
-    | Frame { cols: cols } =>
+    | Frame { cols } =>
       match cols with {
         | Leaf { value: column } =>
           match column with {
@@ -195,7 +195,7 @@ def total[n](frame: Frame[n]) -> f32 =
               fold(
                 fn (acc: f32, value: f32) -> add(acc, value),
                 cast(0.0, f32),
-                to_list(values),
+                to_list(values)
               )
           }
       }
@@ -257,12 +257,12 @@ type Hamt[payload] =
   | Leaf { value: payload }
 type Frame[rows, dtype] =
   | Frame { cols: Hamt[Column[rows, dtype]] }
-def singleton[payload](value: payload) -> Hamt[payload] = Leaf { value: value }
+def singleton[payload](value: payload) -> Hamt[payload] = Leaf { value }
 def from_column[rows, dtype](column: Column[rows, dtype]) -> Frame[rows, dtype] =
   Frame { cols: singleton(column) }
 def first[rows, dtype](frame: Frame[rows, dtype]) -> dtype =
   match frame with {
-    | Frame { cols: cols } =>
+    | Frame { cols } =>
       match cols with {
         | Leaf { value: column } =>
           match column with {

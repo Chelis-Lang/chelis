@@ -193,6 +193,21 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "clamp",
 ];
 
+/// Zero-based argument slots, after the callee, whose values name tensor
+/// axes and therefore carry the [05-DIM-3] `int32` contract.
+///
+/// This is semantic registration, not a name heuristic. A new axis-taking
+/// builtin must select a layout here; inference consults this table before
+/// the operation-specific shape rule. `concat` is registered but screened
+/// in its overloaded tensor-list arm because list concatenation uses the
+/// same surface name with no axis argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisArgumentLayout {
+    NoAxes,
+    Fixed(&'static [usize]),
+    VariadicFrom(usize),
+}
+
 /// Lane realizability declaration for a builtin. Part of `BuiltinDecl`.
 /// Determines whether the tensor-DAG path or host path realizes this op.
 ///
@@ -210,30 +225,51 @@ pub enum Realizability {
     TensorAtTensorType,
 }
 
-/// A builtin's complete declaration: name, realizability, and shape class.
+/// A builtin's complete declaration: name, realizability, shape class, and
+/// axis-argument layout.
 /// All fields are required — adding a builtin without any field is a
 /// compile error (missing struct field). No `Default` implementation.
 ///
 /// ```compile_fail
 /// // Omitting `realizability` must fail to compile.
-/// use chelis_types::{BuiltinDecl, ShapeClass};
-/// let _ = BuiltinDecl { name: "x", shape_class: ShapeClass::Rewriting };
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, ShapeClass};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     shape_class: ShapeClass::Rewriting,
+///     axis_arguments: AxisArgumentLayout::NoAxes,
+/// };
 /// ```
 ///
 /// ```compile_fail
 /// // Omitting `shape_class` must fail to compile.
-/// use chelis_types::{BuiltinDecl, Realizability};
-/// let _ = BuiltinDecl { name: "x", realizability: Realizability::Universal };
+/// use chelis_types::{AxisArgumentLayout, BuiltinDecl, Realizability};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     realizability: Realizability::Universal,
+///     axis_arguments: AxisArgumentLayout::NoAxes,
+/// };
+/// ```
+///
+/// ```compile_fail
+/// // Omitting `axis_arguments` must fail to compile.
+/// use chelis_types::{BuiltinDecl, Realizability, ShapeClass};
+/// let _ = BuiltinDecl {
+///     name: "x",
+///     realizability: Realizability::Universal,
+///     shape_class: ShapeClass::Rewriting,
+/// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinDecl {
     pub name: &'static str,
     pub realizability: Realizability,
     pub shape_class: ShapeClass,
+    pub axis_arguments: AxisArgumentLayout,
 }
 
 /// The consolidated builtin table. Single source of truth for builtin
-/// metadata. Each entry declares name, realizability, and shape class.
+/// metadata. Each entry declares name, realizability, shape class, and axis
+/// layout.
 /// Omitting any field is a compile error.
 pub const BUILTINS: &[BuiltinDecl] = &[
     // ─── Tensor elementwise (Universal, Identity) ────────────────────
@@ -241,859 +277,1034 @@ pub const BUILTINS: &[BuiltinDecl] = &[
         name: "add",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mul",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sub",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "div",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "floor_div",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "trunc_div",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "max_elem",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "min_elem",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "neg",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "recip",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "exp",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "log",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sin",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sqrt",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "cos",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tan",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "atan",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "abs",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "floor",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "ceil",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "round",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "relu",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "sigmoid",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tanh",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "silu",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gelu",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "uniform_like",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "cmplt",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "eq",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "neq",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "lt",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gt",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "lte",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gte",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mod",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "bitand",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "bitor",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "bitxor",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shl",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shr",
         realizability: Realizability::TensorAtTensorType,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "and",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "or",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "not",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "where",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "clamp",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Identity,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Reductions (Universal, NameTracked) ─────────────────────────
     BuiltinDecl {
         name: "softmax",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "normalize",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mean",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "sum",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "max_reduce",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "min_reduce",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "prod_reduce",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "argmax_reduce",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "argmin_reduce",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     // ─── Windowed reductions ─────────────────────────────────────────
     BuiltinDecl {
         name: "reduce_window_max",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reduce_window_min",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reduce_window_sum",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reduce_window_mean",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Shape ops (Universal, Rewriting) ────────────────────────────
     BuiltinDecl {
         name: "matmul",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "layer_norm",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "conv2d",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "reshape",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "permute",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
     },
     BuiltinDecl {
         name: "expand",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 3]),
     },
     BuiltinDecl {
         name: "pad",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shrink",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "stride",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "gather",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[2]),
     },
     BuiltinDecl {
         name: "scatter",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
         name: "scatter_replace",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
         name: "scatter_elements",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[3]),
     },
     BuiltinDecl {
         name: "einsum",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "split",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "cumsum",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "sort",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "diagonal",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
     },
     BuiltinDecl {
         name: "trace",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1, 2]),
     },
     // ─── IO / effects (HostOnly) ─────────────────────────────────────
     BuiltinDecl {
         name: "print",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "fail",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "debug",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "read_file",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "write_file",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "read_lines",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "read_bytes",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "file_exists",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "list_dir",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mmap_file",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mmap_read",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "mmap_len",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "process_run",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Host-lane JSON I/O (chelis#890, HostOnly, eval-only) ────────
     BuiltinDecl {
         name: "parse_json",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_json",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_f64",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_int",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_str",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_list",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_f64s",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_ints",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jnum",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jint",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jstr",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jlist",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "jdict",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "json_set",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "round_to",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Host-lane CSV I/O (chelis#903, HostOnly, eval-only) ─────────
     BuiltinDecl {
         name: "parse_csv",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_csv",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_f64s",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_ints",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_strs",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_nrows",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_cols",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_f64",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_int",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "csv_str",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── String ops (HostOnly) ───────────────────────────────────────
     BuiltinDecl {
         name: "string_len",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_concat",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_slice",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_contains",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_starts_with",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_ends_with",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "string_trim",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_string",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_int",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_float",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Tensor introspection (HostOnly at scalar type) ──────────────
     BuiltinDecl {
         name: "rank",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "shape",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "numel",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tensor_to_scalar",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "scalar_to_tensor",
         realizability: Realizability::Universal,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── List ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
         name: "len",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "index",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "append",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "concat",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::Fixed(&[1]),
     },
     BuiltinDecl {
         name: "take",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "drop",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "chunk",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "range",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "map",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "filter",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "fold",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "scan",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "tensor_scan",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "partition",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "flat_map",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "flatten",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "zip",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "enumerate",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Dict ops (HostOnly) ─────────────────────────────────────────
     BuiltinDecl {
         name: "dict_of",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_get",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_contains",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_remove",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_insert",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_merge",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_keys",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_values",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "dict_entries",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Tensor conversion (HostOnly) ────────────────────────────────
     BuiltinDecl {
         name: "to_tensor",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "to_list",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "pad_sequences",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "pad_sequences_to",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     // ─── Test builtins (HostOnly) ────────────────────────────────────
     BuiltinDecl {
         name: "test_assert",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_f32",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_int",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_bool",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_string",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_close_tensor",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
     BuiltinDecl {
         name: "test_assert_eq_tensor_int64",
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
+        axis_arguments: AxisArgumentLayout::NoAxes,
     },
 ];
 
 /// Look up a builtin's declaration by name. Returns `None` for non-builtins.
 pub fn builtin_decl(name: &str) -> Option<&'static BuiltinDecl> {
     BUILTINS.iter().find(|b| b.name == name)
+}
+
+pub fn axis_argument_layout(name: &str) -> Option<AxisArgumentLayout> {
+    match builtin_decl(name)?.axis_arguments {
+        AxisArgumentLayout::NoAxes => None,
+        layout => Some(layout),
+    }
 }
 
 /// Look up a builtin's realizability by name.
@@ -1343,11 +1554,11 @@ pub fn builtin_env() -> (Env, VarGen) {
     /// `infer_reduce_window_app` arm in `infer.rs` overrides the result
     /// type with the spec §2.3.1 shape contract; this scheme exists so
     /// the function name is in scope at lookup time and the canonical
-    /// arg-arity / list-of-int32 constraints are visible during unification.
+    /// arg-arity / list-of-int64 constraints are visible during unification.
     fn tensor_reduce_window(name: &str, env: &mut Env, vg: &mut VarGen) {
         let input = vg.fresh_tvar();
         let out = vg.fresh_tvar();
-        let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+        let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
         let scheme = Scheme {
             tvars: vec![input, out],
             dvars: vec![],

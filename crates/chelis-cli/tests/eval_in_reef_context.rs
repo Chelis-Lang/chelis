@@ -58,7 +58,7 @@ mylib = {{ path = "./mylib" }}
     );
     write_file(
         &root.join("src/main.ch"),
-        "module App.Main\n\ndef placeholder -> int32 = cast(0, int32)\n",
+        "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n",
     );
 
     write_file(
@@ -172,7 +172,7 @@ fn root_display(root: &chelis_compiler_api::schema::EvaluatedRoot) -> String {
 fn cmd_eval_reef_package_simple_def_matches_baseline() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalsimple.ch");
-    let snippet = "module App.EvalSimple\n\ndef simple_value -> int32 = 42\n";
+    let snippet = "module App.EvalSimple\n\ndef simple_value() -> int32 = 42\n";
     write_file(&entry_path, snippet);
 
     let expected = expected_stdout(&root, snippet);
@@ -205,7 +205,7 @@ fn cmd_eval_reef_package_simple_def_matches_baseline() {
 fn cmd_eval_json_reef_package_simple_def_emits_json() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evaljson.ch");
-    let snippet = "module App.EvalJson\n\ndef simple_value -> int32 = 42\n";
+    let snippet = "module App.EvalJson\n\ndef simple_value() -> int32 = 42\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")
@@ -248,7 +248,7 @@ fn cmd_eval_reef_package_path_dep_import_matches_baseline() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/evalpathdep.ch");
     let snippet = "module App.EvalPathDep\nimport Mylib.Math (add)\n\n\
-                   def imported_sum -> int32 = add(20, 22)\n";
+                   def imported_sum() -> int32 = add(20, 22)\n";
     write_file(&entry_path, snippet);
 
     let expected = expected_stdout(&root, snippet);
@@ -476,7 +476,7 @@ module_prefix = "Mylib"
 
 /// Host-arrow-root surfacing, case (a) — POSITIVE.
 ///
-/// The arrow form `def n -> int32 = <host expr>` desugars to a nullary
+/// The arrow form `def n() -> int32 = <host expr>` desugars to a nullary
 /// thunk `(def n (fn () body))`. The host runtime's eager value-binding
 /// order skips it (it looks like a function), so before the surfacing
 /// pass a host-lane arrow root was dropped entirely: `--json` reported
@@ -492,7 +492,7 @@ fn cmd_eval_host_arrow_pure_root_surfaces_applied_value() {
     let entry_path = root.join("src/arrowpure.ch");
     let snippet = "module App.ArrowPure\n\
                    import Mylib.Math (add)\n\n\
-                   def priced -> int32 = add(20, 22)\n";
+                   def priced() -> int32 = add(20, 22)\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")
@@ -539,7 +539,7 @@ fn cmd_eval_host_arrow_effectful_root_stays_unsurfaced_and_effect_does_not_run()
     // `SENTINEL_QF017` is the rendered `debug` argument; if the effect ran
     // it would land in the transcript (stdout) and/or the surfaced value.
     let snippet = "module App.ArrowEff\n\n\
-                   def logged -> string = debug(\"SENTINEL_QF017\")\n";
+                   def logged() -> string = debug(\"SENTINEL_QF017\")\n";
     write_file(&entry_path, snippet);
 
     let output = Command::cargo_bin("chelis")
@@ -597,7 +597,7 @@ fn cmd_eval_host_arrow_consumed_pure_root_is_not_double_applied() {
     let entry_path = root.join("src/arrowconsumed.ch");
     let snippet = "module App.ArrowConsumed\n\
                    import Mylib.Math (add)\n\n\
-                   def base -> int32 = add(20, 22)\n\
+                   def base() -> int32 = add(20, 22)\n\
                    consumer: int32 = base() + cast(100, int32)\n";
     write_file(&entry_path, snippet);
 

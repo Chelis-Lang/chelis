@@ -25,7 +25,7 @@ fn surf_to_deep(source: &str) -> Vec<chelis_deep::Expr> {
 #[test]
 fn cast_scalar_to_f8e4m3_rejected_with_spec_diagnostic() {
     // `cast(1.0, f8e4m3)` should error at type-check time.
-    let src = "def main -> f32 = cast(1.0, f8e4m3)";
+    let src = "def main() -> f32 = cast(1.0, f8e4m3)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("cast to f8e4m3 must be a type error");
@@ -67,7 +67,7 @@ fn cast_tensor_to_f8e4m3_rejected_with_spec_diagnostic() {
 fn declared_tensor_with_f8e4m3_rejected_with_spec_diagnostic() {
     // Direct `(t-tensor ... (t-prim {} f8e4m3))` use in a declared
     // signature must surface the same f8e4m3-specific message.
-    let src = "def x -> tensor[3, f8e4m3] = cast(to_tensor([1.0, 2.0, 3.0]), f8e4m3)";
+    let src = "def x() -> tensor[3, f8e4m3] = cast(to_tensor([1.0, 2.0, 3.0]), f8e4m3)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     let rep = res.expect_err("tensor[..., f8e4m3] must be a type error");
@@ -90,7 +90,7 @@ fn other_unsupported_precision_does_not_pretend_to_be_f8e4m3_path() {
     // the f8e4m3-specific message. Currently every active dtype is
     // supported by `is_valid_*`, so we check the diagnostic doesn't
     // mention the f8e4m3 deferral phrase for an int-precision cast.
-    let src = "def main -> int32 = cast(1, int32)";
+    let src = "def main() -> int32 = cast(1, int32)";
     let deep = surf_to_deep(src);
     let res = check_ir_program(&deep);
     if let Err(rep) = res {

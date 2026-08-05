@@ -6,4 +6,5 @@ pub mod desugar;
 pub mod format;
 pub mod lexer;
 pub mod parser;
+pub mod resugar;
 pub mod token;

@@ -7,8 +7,12 @@ execution red team, PASS WITH FINDINGS, every finding dispositioned:
 `docs/investigations/pr799_returned_function_values_redteam.md`). Count
 baselines and the token tripwire remain supporting checks, not completion
 evidence. Phase 3 is in progress: its typed rejection-authority (§C2.1)
-and sealed diagnostic-kind (§C2.2) slices are implemented; the gate
-inventory/contract, deduplication, and full phase oracle remain. Phase 3 was
+and sealed diagnostic-kind (§C2.2) slices landed on main in PR [#1037]
+(merged 2026-08-04); the gate
+inventory/contract, deduplication, and full phase oracle remain. Those
+remaining deliverables (1, 2, and 5) are unstarted rather than partial -
+re-measured 2026-08-04, the `chelis-cli` gate surface is untouched by
+PR [#1037] and census row 26 is still live. Phase 3 was
 amended 2026-07-30 to absorb those typed slices. Phase 4
 (ratchet totality, §C7) was added 2026-07-30 after the nine-PR
 class-coverage review recorded on [#730] found four holes in this plan's
@@ -326,90 +330,37 @@ REGISTRIES of what actually exists:
   public implementation edge each, taking the raw literal and performing
   validation inside `chelis-types`; downstream crates cannot construct a
   `SpecAtomRef`/`IssueRef` and then compose it with a second generic authority
-  constructor. The authority carriers and their private fields live in a
-  sealed child module, so a sibling descendant of `unsupported` cannot use
-  Rust's ancestor-module visibility to add a constructor or trait
-  implementation. `SpecAtomRef` and `IssueRef` remain private even to sibling
-  modules; the public authority accessors return only the raw read-only atom or
-  issue value. The owner exposes only the exact `RejectionAuthority` API types
-  and the two validating macro helpers.
-  `scripts/check_rejection_authority_boundary.py`
-  locks the complete public-function inventory of the owning module (free
-  functions as well as methods), locks those module and re-export edges,
-  rejects any extra module/re-export/include edge, rejects direct production
-  calls to the hidden builders, and mutation-tests those bypasses. Construction
-  itself refuses [05-UNS-1..6], so a macro alias or a direct validating-builder
-  call cannot turn the response contract into a semantic authority.
+  constructor. `scripts/check_rejection_authority_boundary.py` locks the
+  complete public-function inventory of the owning module (free functions as
+  well as methods), rejects extra module/re-export/include edges, rejects
+  direct production calls to the hidden builders, and mutation-tests those
+  bypasses. Construction itself refuses [05-UNS-1..6], so a macro alias or a
+  direct validating-builder call cannot turn the response contract into a
+  semantic authority.
 - `SpecAtomRef` validates in two gates: the `[NN-AAA-N]` grammar,
   then MEMBERSHIP in the derived atom registry - a generated artifact
   parsed from the numbered specs' blockquote atoms and locked by a
   byte-agreement test (the §C4.3 generated-header pattern), so the
   registry cannot drift from `spec/` silently. Citing an atom that no
   numbered spec declares is a construction error.
-- `IssueRef` wraps `NonZeroU32` AND validates membership in a generated
-  issue manifest recording, per number: every executable production
-  construction site, its exact file and line, and the last-verified facts that
-  the number is an ISSUE (not a PR) and is OPEN. The manifest and Rust registry
-  are derived together from literal `unimplemented_rejection!` construction
-  sites in workspace production sources and build scripts; byte-agreement tests
-  reject hand edits and additions/removals that do not follow source. Workspace
-  members and explicit lib, bin, example, and custom build roots come from the
-  root and package Cargo manifests, so a non-`crates/` member or custom target
-  path is part of the same inventory. Every exact non-test Cargo target is
-  counted regardless of its filename suffix; its parent tree is additionally
-  walked for ordinary `*.rs` module files. Every path dependency must resolve
-  to a workspace member. Root-manifest `patch`/`replace` and Cargo-config
-  `patch`/`paths`/`replace`/`source` overrides are forbidden because they can
-  substitute compiled local packages that `metadata --no-deps` does not expose
-  as paths. The metadata query runs from an isolated working directory and
-  Cargo home after clearing dependency-override environment keys, so a
-  developer-global override cannot change the inventoried graph. The scanner
-  masks nested Rust comments and string forms while preserving offsets, so
-  historical text cannot manufacture a site and comments or whitespace around
-  macro tokens cannot hide one. Macro aliases and re-exports fail generation,
-  as do production `include!`, built-in Rust `path` attributes, build-script
-  helper-module declarations, and Rust source symlinks: every accepted
-  construction remains in an ordinary Rust file under a manifest-derived
-  lexical source root and retains the canonical macro name the inventory can
-  locate.
-  Unrelated tool metadata containing a nested `path` key is not a module edge
-  and remains accepted. Every `src/**/*.rs` file is conservatively counted,
-  including `src/tests/` and co-located `#[cfg(test)]` modules, because directory
-  names do not establish Rust reachability and this lexical inventory does not
-  evaluate configurations. The macro owner is scanned on the same terms; only
-  its balanced canonical `macro_rules!` definition span is masked. The
-  privileged owner boundary forbids authority type/import aliases, including
-  grouped and nested `use` trees, and forbids every `type` declaration in the
-  owner, including generic-default aliases and associated types, so balanced
-  token substitutions cannot attach a standard public trait implementation to
-  a hidden identity. Outside the owner, balanced macro token trees are walked;
-  a macro definition or invocation that carries a protected authority identity
-  is rejected instead of being trusted to expand without a hidden impl.
-- `Rejection Authority Liveness` runs on every pull request and re-runs when
-  its body is edited, not only when authority files or the head SHA change. It
-  live-validates the standing source-derived manifest, queries GitHub's
-  paginated `closingIssuesReferences` relation (including manual links visible
-  at that run), and additionally inspects the PR body and every retrievable
-  commit message for closing keywords. The event supplies a canonical positive
-  commit count and exact head object ID; the REST commit inventory must equal
-  that count and end at that head. The endpoint's 250-commit ceiling therefore
-  fails closed rather than silently truncating a larger PR, and a stale or
-  racing response cannot certify another head. A closing reference to an
-  issue with live constructors fails and reports every offending `path:line`;
-  the constructors and generated artifacts must move to their still-open
-  capability owner before the delivered instance can close. The PR title is
-  scanned because it becomes the squash commit subject. Issue comments and
-  repository prose are historical context rather than closing-capable merge
-  inputs and are not scanned. Tracker, GraphQL pagination, or PR-commit
-  retrieval failure stays a blocking failure. GitHub emits no pull-request
-  workflow activity when a manual sidebar link is added, so the required check
-  cannot claim a new run for that metadata change. A separate
-  `issues.closed` workflow derives authorities from the current default branch
-  and reopens the issue with exact sites when such a late link or direct close
-  strands an authority; inventory ambiguity also reopens fail-closed. Thus
-  membership answers the compile-time question, the per-PR job rejects every
-  closing input observable at each run, and the compensating guard restores the
-  OPEN-state invariant after otherwise unobservable closure metadata.
+- `IssueRef` wraps `NonZeroU32` AND validates membership in a
+  checked-in issue manifest recording, per number: it is an ISSUE
+  (not a PR), and it is OPEN. **A checked-in manifest is
+  self-authorizing unless its edits are gated** - the same PR that
+  cites a bogus number can add the manifest row that blesses it (the
+  2026-07-30 addendum's countermodel: after a same-PR edit, a closed
+  issue, a PR number, and a 404 all "validate"). So manifest
+  ADDITIONS receive blocking LIVE validation: every construction,
+  registry, validator, imported liveness-helper, detector, and workflow input
+  is in the `Rejection Authority Liveness` change set, and that job verifies
+  every added or modified row against the live tracker (exists, is an
+  issue, is open) before the PR can merge. Phase 4's §C7.5 scheduled job
+  will re-verify the STANDING manifest for drift, so a cited issue closing
+  later makes the stale citation red - the shell contract's "probe flips
+  green, remove the citation" rule, pointed inward. Until that Phase 4 job
+  lands, standing-state drift remains a named pending control rather than an
+  implied continuous guarantee. Membership answers the compile-time question;
+  the change-gated job answers the truth question when authority inputs change.
 - Hints are validated non-empty; direct struct-literal construction and the
   former scalar constructor composition from outside the owning module are
   privacy errors, locked by `compile_fail` doctests. The required CI job also
@@ -421,10 +372,10 @@ REGISTRIES of what actually exists:
   become derivation inputs rather than the standalone source.
 
 **Calibrated claim:** construction proves only citation IDENTITY and
-last-verified tracker STATE - an existing atom, or a source-derived manifest
-member live-verified as an open ISSUE by the most recent pull-request check.
-Between checks the issue manifest means "open at last verification", never
-"open this instant".
+last-verified tracker STATE - an existing atom, or a manifest member
+that was live-verified as an open ISSUE when its row was added and at
+the last scheduled re-verification since. Between schedules the issue
+manifest means "open at last verification", never "open this instant".
 Neither registry proves RELEVANCE: whether an atom semantically
 decides this rejection, or an issue actually tracks implementing this
 rejected site/capability, remains an explicit review obligation.
@@ -437,9 +388,8 @@ admission route: the empty atom, the malformed atom, the WELL-SHAPED
 NONEXISTENT atom, issue zero, a real-but-closed issue, a real number
 that is a PR rather than an issue, a nonexistent nonzero issue, and
 the out-of-module struct literal each fail to compile, construct, or
-validate; a source construction citing a closed issue, a PR number,
-or a nonexistent number fails live validation. A closing PR body or commit
-that would strand an existing construction fails before merge. An
+validate; a same-PR manifest addition of a closed issue, a PR number,
+or a nonexistent number fails the change-gated live validation. An
 open but unrelated issue (chelis#879) is the supported structural
 control: it passes construction/live validation and MUST fail review
 when attached to an unrelated rejection. The [#687] corpus update
@@ -692,8 +642,8 @@ controls while leaving genuinely unsupported siblings branded. Appended rows:
 | 20 | `host.rs` handle-effect arm (host-lane sibling of row 9) | drops handler, lowers body for non-`random` kinds | [#709]-adjacent (P1 discovery, B2.5) | CONVERTED with row 9 in the same change set (test `unknown_effect_kind_is_rejected`) |
 | 21 | `lower.rs` `expand` positional-axis `unwrap_or(0)` | axis 0 | flagged by [#782] | CONVERTED: fatal raise (section C1.4; a computed axis previously expanded axis 0 silently) |
 | 22 | `lower.rs` `tuple-get` index `unwrap_or(0)` | field 0 | flagged by [#782] | CONVERTED: raise (section C1.4; compile-time index by construction) |
-| 23 | `lower.rs` conv2d present-but-non-literal stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | P1 discovery (the [#776] shape); TO FILE | flagged and left per B2.5 (absent-arg defaults are the documented optional-arg semantics; the present-but-non-literal case needs its own probe + issue); baselined in the tripwire's numeric-unwrap class |
-| 24 | `emit.rs` `emit_fused_elem` and `emit_fused_reduce` non-f32 arms | `panic!` (row-two: panic, not substitution) | [#919] (P1 discovery, B2.5); [#951] owns the surviving `emit_fused_reduce` half | CONVERTED in [#932]: both arms now return a section C2 `Unsupported` instead of panicking (tests `f64_activations_compute_in_double_not_float`, `f64_exp_returns_full_double_precision`, and both `*_is_a_diagnostic_not_a_panic`). `emit_fused_elem` is additionally **widened** to f64, so its arm now fires only for the reduced-float and integer dtypes ([#691]); `emit_fused_reduce` stays a rejection ([#951]) - a shipped divergence from `spec/04-type-system.md` §1.1.3's admitted f64 cell, recorded here so [#729] Phase 4 inherits a known hole rather than discovering one |
+| 23 | `lower.rs` conv2d present-but-non-literal stride/padding `unwrap_or(1)`/`unwrap_or(0)` | stride 1 / padding 0 | P1 discovery (the [#776] shape); FILED as [#795] | flagged and left per B2.5 (absent-arg defaults are the documented optional-arg semantics; the present-but-non-literal case needs its own probe + issue); baselined in the tripwire's numeric-unwrap class. **SCHEDULING (recorded 2026-08-04):** the §C1.4 raise-or-prove disposition converts to a live `Result` raise as a STANDALONE change on the Phase 1 pattern - split the fused `unwrap_or`, keep the documented default for the ABSENT argument, and raise the branded §C2 diagnostic for the PRESENT-but-unresolvable one (the `resolve_static_f64_arg` / `extract_literal_axis_list` shapes already in `lower.rs`). Explicitly NOT gated on Phase 3 or Phase 4: nothing in the conversion needs the gate inventory or the ratchet-totality work, and the probe [#795] asks for is the conversion's own liveness evidence rather than a prerequisite phase. The tripwire's `unwrap-or-numeric-literal` count for `lower.rs` shrinks by the two conv2d sites in that same PR, per B1 (removals only with the site's fix) |
+| 24 | `emit.rs` `emit_fused_elem` and `emit_fused_reduce` non-f32 arms | `panic!` (row-two: panic, not substitution) | [#919] (P1 discovery, B2.5); [#951] owns the surviving `emit_fused_reduce` half | CONVERTED in [#932]: both arms now return a section C2 `Unsupported` instead of panicking (tests `f64_activations_compute_in_double_not_float`, `f64_exp_returns_full_double_precision`, and both `*_is_a_diagnostic_not_a_panic`). `emit_fused_elem` is additionally **widened** to f64, so its arm now fires only for the reduced-float and integer dtypes ([#691] - whose direct DAG integer path is repaired by [#729] Phase 3; PR #1164 rehomed the emitter citations off that issue as authority and it CLOSED 2026-08-04, so this arm's remaining scope is the reduced-float and integer dtypes on its own terms rather than under a live [#691] rejection); `emit_fused_reduce` stays a rejection ([#951]) - a shipped divergence from `spec/04-type-system.md` §1.1.3's admitted f64 cell, recorded here so [#729] Phase 4 inherits a known hole rather than discovering one |
 
 **2026-07-30 ratchet-review appends (rows 24-27).** Filed per B2.5 from
 the nine-PR class-coverage review recorded on [#730]. Each row lands
@@ -704,8 +654,8 @@ between the amended Phase 3 (row 26) and Phase 4 scope entry plus
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
 | 24 | the lowering/emission panic family: `emit_fused_elem`/`emit_fused_reduce` f32-hardcoded panics in `chelis-backend-c/src/emit.rs` plus ~150 production `panic!`/`unreachable!`/`todo!` across `chelis-ir` and the three backends, ~44 of them §C2 rejections wearing panics (row-two: panic, not substitution - the rows 11/12 class, uncensused growth) | - | [#919] (the fused pair) + [#957] (the family) | live (population measured 2026-07-30; the fused pair execution-confirmed per [#919]); backing tests land with the Phase 4 §C7.2 sweep |
-| 25 | `chelis-ir/src/host.rs` einsum output-precision inference: the `.unwrap_or(chelis_types::types::Prim::F32)` site (line 8634 as of 2026-07-31; the token is the durable anchor - #975 already moved it once) - path-qualified, so the `unwrap_or(Prim::` token misses it; in-scope for the class and absent from BASELINE | F32 precision | [#958] | live-suspect (liveness not execution-confirmed - the empty-operand path may be checker-guarded); §C1.4 raise-or-prove applies regardless; converted at Phase 4 |
-| 26 | the unbranded/mislabeled rejection inventory: kindless CLI `reject_*` gates (`main.rs:8137-8420`, incl. the `process_run` eval-only gate PR [#891] widens 1 -> 21), hand-typed `"unsupported: "` literals at `main.rs:7963/:7978/:8055`, ~23 free-literal `"unsupported_feature"` sites and the `format!("{:?}")` / substring-dispatch kind paths in compiler-api, and the two uncited `reduce_window` hints (gate row, the 17/18 precedent) | (gate/kind skew, not a value) | [#959] | live (read-confirmed 2026-07-30, instances executed in the PR sweep); resolved by the amended Phase 3 |
+| 25 | `chelis-ir/src/host.rs` einsum output-precision inference: the `.unwrap_or(chelis_types::types::Prim::F32)` site (line 8843 as of 2026-08-04, re-measured; the token is the durable anchor - #975 already moved it once, and the site has drifted again since) - path-qualified, so the `unwrap_or(Prim::` token misses it; in-scope for the class and absent from BASELINE | F32 precision | [#958] | live-suspect (liveness not execution-confirmed - the empty-operand path may be checker-guarded); §C1.4 raise-or-prove applies regardless; converted at Phase 4 |
+| 26 | the unbranded/mislabeled rejection inventory, RE-ANCHORED 2026-08-04 to expression identities rather than line numbers (a deliberate B1 baseline change, and the last one this row should need: line anchors in a frozen artifact drift by construction, which is its own recurrence class, so the durable anchor is the expression - the shape rows 28-30 use. Filed line numbers are retained below as history, not as the anchor): the kindless CLI `reject_*` gate family in `chelis-cli/src/main.rs` (filed at `:8137-8420`, incl. the `process_run` eval-only gate PR [#891] widens 1 -> 21), the hand-typed `"unsupported: "` string literals in the same file (filed at `:7963/:7978/:8055`, re-measured `:8343/:8358/:8435`), ~23 free-literal `"unsupported_feature"` sites and the `format!("{:?}")` / substring-dispatch kind paths in compiler-api, and the two uncited `reduce_window` hints (gate row, the 17/18 precedent) | (gate/kind skew, not a value) | [#959] | live (read-confirmed 2026-07-30, instances executed in the PR sweep); STILL LIVE on main - re-measured 2026-08-04 after PR [#1037]. That PR landed §C2.1/§C2.2 in `chelis-types` and compiler-api; the CLI gate half this row names is untouched. `chelis-cli` has zero `unimplemented_rejection!` uses and still carries hand-typed `"unsupported: "` literals (`main.rs:8343/:8358/:8435`); `reject_unsupported_hip_ops` still exists in two copies that have drifted (`chelis-cli/src/main.rs:8031` collects no `ScatterElements` sparse index where `chelis-compiler-api/src/compiler.rs:3382` does); and `COMPILED_HOST_ONLY_BUILTINS` (`main.rs:8485`) still duplicates `HOST_ONLY_BUILTINS` (`compiler.rs:3136`). Resolution is Phase 3 REMAINING work (deliverables 1, 2, and 5), not delivered |
 | 27 | `chelis-python` raw-i32 dtype surface: `dtype: i32` struct fields, no decode-on-entry anywhere, string-gated dtype checks, hardcoded DLPack `code: 2, bits: 32`, 4 production `unwrap_or_default()` - the crate is outside every `UnwrapOr*` tripwire scope and the Phase 2 oracle's evidence set | dtype identity by convention | [#960] (requirement half; representation fix shape is [#893]'s - the runtime-representation tracker, corrected 2026-07-30 from the earlier [#909] misassignment) | live ([#900] is the executed value-corrupting instance); scope entry + §C6.2 row at Phase 4; FFI/representation redesign at [#893] |
 
 `chelis-runtime` is deliberately not a row: it is the reference
@@ -714,11 +664,37 @@ implementation of the §C6.2 decode-on-entry contract
 fallbacks) and enters the derived scan scope at Phase 4 as a clean
 baseline, not a finding.
 
+**2026-08-04 disposition-sweep appends (rows 28-30).** Filed per B2.5
+from the 2026-08-04 cross-plan disposition pass over the open [#730]
+surface. Each row lands censused-not-fixed and carries a STANDALONE
+disposition rather than a phase slot, which is the point of recording
+them here: this class's recurrence guard IS the census plus the
+ratchets, so a site found between phases enters the census instead of
+taking a side patch. They are therefore absent from the Issue map
+below, which allocates issues to phases and would misdescribe these
+three. None of the three carries a tripwire baseline edit, and the
+reason is that none is owed rather than that this document cannot make
+one: no spelling below matches a declared §C4.5 token class. A
+`return Some(...)` fuse, an identity match arm, an OpenMP pragma, and
+an eval pre-pass are no class's token, and `chelis-prove` is outside
+every `UnwrapOr*` and `ElemKind` scope (it sits inside the global
+string/format scopes, which row 28 does not touch). So until §C7.4's
+binder lands, each row here is its own recurrence record - recorded
+pending, with nothing held back on the code side. Rows 29 and 30 have
+no probe-corpus record yet: a §C7.4 obligation named here rather than
+left for the binder to discover.
+
+| # | site | substitutes | issue | status |
+|---|---|---|---|---|
+| 28 | `chelis-prove/src/obligations.rs` `type_from_deep_depth`'s depth-32 fuse (`if depth > 32 { return Some(Type::Unit) }`, `:230-232` re-measured 2026-08-04 - [#872] filed it at `:238-241`, so the fuse expression is the durable anchor) | `Type::Unit` returned as a SUCCESS: the consumer `type_contains_depth` ends in `_ => false`, so the stand-in reads as "this type does not contain the opaque type" and a producer nested deeper than 32 generates NO proof obligation | [#872] | live-suspect (source-confirmed on `origin/main` @ `2b80b474`, not execution; no upstream depth bound was located in `DeepTypeResolver` or the parser, so the site is neither raised nor proven dead); §C1.4 raise-or-prove applies regardless. Exactly the §C1 rule 1 shape - a stand-in verdict where the answer is unavailable - with §C1 rule 5's honesty invariant as the consequence in the prove lane: `chelis prove` reports success over an obligation it never formed. The channel is already present and used immediately after the fuse's closing brace (`tag(ty)?`, `:233`), so this is a chosen substitution rather than a missing failure path. Disposition: the Phase 1 pattern applied STANDALONE - the fuse returns `None` and `collect_obligations` reports a branded §C2 rejection through its existing `col.errors` path - explicitly not gated on Phase 3 or Phase 4, and not waiting for a phase to adopt it. The five sibling placeholders in the same function are separately dispositioned in [#872] as §C1.4 canary-and-comment debt and are NOT part of this row |
+| 29 | `chelis-backend-c/src/host_emit.rs` checked-`cast` host arm identity fallthrough (`_ => arg_vars[0].0.clone()` closing the `cast` match, `:2566` re-measured 2026-08-04 - [#1150] filed it at `:2572`, so the arm expression is the durable anchor) | no conversion at all on a host-built tensor: the f32 buffer is reinterpreted at the target dtype, with no `chelis_checked_float_to_int` call, no cast loop, no `Overflow` trap for an out-of-range element and no `Domain` trap for a non-finite one | [#1150] | live (read-confirmed on the generated C during the PR [#1144] fold; PRE-EXISTING, not introduced there). Silently violates [04-NUM-11] and [04-NUM-14]. The head-of-document recurrence signature with its time direction reversed, which is why it is not counted as a fifth sighting there: the correct mechanism now sits one level out, as a sibling arm of the OUTER builtin-name match (the `"cast_trunc"` arm at `:2576`, under its [05-OP-6] comment at `:2572`) rather than inside this inner `(source, target)` one - `cast_trunc` carries no identity fallthrough and rejects with its [05-OP-6] diagnostic, pinned by PR [#1144] so the NEW op could not inherit the hole - but it was built after this site rather than beside it, so what went uncalled here is a back-application, not an existing neighbor. Disposition: PARITY COVERAGE FIRST - the checked `cast` acquires the cross-lane locks `cast_trunc` already carries before the site itself moves. B2.3 and B2.4 require both lanes and a supported-neighbor control to land WITH the conversion; this row takes that one step earlier on purpose, because a fix here changes which programs compile and a lock set written after the fact records the new behavior instead of measuring the change. Then the §C1 choice at the site: emit the guarded conversion or reject loudly, never reinterpret. The support half (which shapes earn the conversion) crosses [#729]'s cast surface |
+| 30 | checked-`cast` multi-offender trap identity, two sites: the eval whole-buffer int-width pre-pass (the `int_wide` collection short-circuits on domain BEFORE the per-width range loop runs) and the `#pragma omp parallel for` on the emitted conversion loop (`chelis-backend-c/src/emit.rs`) | (trap-kind skew, not a substituted value - the rows 17/18/26 shape) for a tensor carrying BOTH an out-of-range and a non-finite element: which trap kind fires is thread-scheduling-dependent under OpenMP, and eval is domain-biased rather than first-offender-in-order | [#1152] | live (execution-observed as the PR [#1144] Linux CI failure, where `cast_trunc`'s mixed-offender case exposed the class; macOS clang ignores the pragma, which is why local runs look deterministic - PRE-EXISTING for the checked `cast`, unobserved because untested). The disposition SPLITS, and the split is the whole content of this row: the OpenMP half needs no decision at all, because [04-NUM-12] already requires that the same program, inputs, and lane always produce the same trap, so the parallel emitted loop violates a ratified atom outright and PR [#1144]'s serial loop for `cast_trunc` applies unchanged. The KIND half WAS spec-decision-first and the decision has now landed: [04-NUM-15] (PR #1169) documents the elementwise trapping map's order as row-major flat index in every lane, so the lowest-indexed offender is authoritative. Both lanes now converge on a ratified rule rather than on each other - eval drops the domain-biased pre-pass, the C lane selects by lowest index, and neither is required to serialize (the atom admits a per-thread-candidate minimum-index reduction). This plan owns the failure CHANNEL and never which trap a multi-offender buffer earns - the eval half touches [#729]'s kernel surface and the pre-pass shape shared by `finalize_tensor` consumers. `cast_trunc`'s equivalent is pinned by `mixed_offender_tensors_agree_on_the_trap_kind_across_lanes` (PR [#1144]); the checked `cast` needs its own lock in the same change as the fix |
+
 | # | site | substitutes | issue | status |
 |---|---|---|---|---|
 | 1 | `lower.rs` `lower_transcendental` non-float arm | `Const 0.0`, operand dropped | [#699] (+[#722] via grad) | live (test `cos_on_integer_tensor_is_not_silently_zeroed`) |
-| 2 | `host_emit.rs:2300` builtin fallback | literal `0` | [#704] [#705] [#715] | live (test `no_build_ever_emits_a_silent_unsupported_builtin_stub`); [#682]'s bitwise/shift instances are closed |
-| 3 | `host_emit.rs:2236` string fallback | `chelis_string_from_cstr("<value>")` | [#734] | **live** (test `to_string_of_a_tensor_stringifies_in_the_compiled_lane`; probed 2026-07-16, status carried by P0 - scalar-arm controls green in `issue_734_tostring_placeholder.rs`) |
+| 2 | `host_emit.rs:2300` builtin fallback | literal `0` | [#704] [#705] [#715] | live at P0 (test `no_build_ever_emits_a_silent_unsupported_builtin_stub`); [#682]'s bitwise/shift instances are CONVERTED and no longer reach this fallback - `bitand`/`bitor`/`bitxor`/`shl`/`shr` are exhaustive `SCALAR_NUMERIC_BUILTINS` arms emitting real declared-width C (landed 2026-07-31 with the [#935] generic-ADT specialization change, shipped in 0.17.4), and [#682] closed 2026-08-04 |
+| 3 | `host_emit.rs:2236` string fallback | `chelis_string_from_cstr("<value>")` | [#734] | live at P0 (test `to_string_of_a_tensor_stringifies_in_the_compiled_lane`; probed 2026-07-16, status carried by P0 - scalar-arm controls green in `issue_734_tostring_placeholder.rs`); CONVERTED in PR [#1037] - the catch-all is now a section C2 `Unsupported` carrying `unimplemented_rejection!(1059, ...)`, so compiled tensor/list `to_string` rejects instead of substituting and the support half is owned by [#1059]; [#734] closed 2026-08-04 |
 | 4 | `host_emit.rs:4305/4390` print of unclassifiable value | literal `<value>` text | [#714] symptom | live (test `c_f16_floor_prints_the_value_placeholder_today`) |
 | 5 | HIP `emit.rs` `elem_kind` `_` arm | `ElemKind::F32` | [#689] | live (test `hip_int64_neg_emits_the_f32_fallback_kernel_today`; emission-proven) |
 | 6 | `host.rs:7572-7583` `parse_host_type` `_` arm | `HostType::Unknown` -> downstream `int64_t`/`void*` | [#714] | live (tests `f16_scalar_abs_compiles_and_runs`, `f16_scalar_fraction_survives_compilation`) |
@@ -728,13 +704,13 @@ baseline, not a finding.
 | 10 | emitted print helper `default:` arm | reads buffer as f32 | [#716] ([#728] owns fix) | live (test `c_print_of_f16_tensor_prints_f16_values`) |
 | 11 | `emit.rs:4238/4406/4777` reduce panics | (row-two: panic, not substitution) | [#692] | live (test `int64_max_reduce_does_not_panic_the_compiler`) |
 | 12 | `emit.rs:4509` window-length assert | (row-two) | [#725] half | live (test `c_nonliteral_window_does_not_panic_the_compiler`) |
-| 13 | `lower.rs:9833`, `:10235` `unwrap_or(Prim::F32)` | F32 dtype | [#710]-adjacent, [#744] | **live via `.dp` build lane** for `:10235` (test `dp_bogus_cast_target_must_not_build_silently`; P0 re-execution refuted the dead-by-probe claim - the guard is eval-only, [#744]); eval guard locked green (canary `canary_dp_cast_bogus_dtype_is_guarded`); `:9833` needs an internal desync; §C1.4 applies |
+| 13 | `lower.rs:9833`, `:10235` `unwrap_or(Prim::F32)` | F32 dtype | [#710]-adjacent, [#744] | **live via `.dp` build lane** for `:10235` (test `dp_bogus_cast_target_must_not_build_silently`; P0 re-execution refuted the dead-by-probe claim - the guard is eval-only, [#744]); eval guard locked green (canary `canary_dp_cast_bogus_dtype_is_guarded`); `:9833` needs an internal desync; §C1.4 applies. CONVERTED in PR [#791]: re-measured 2026-08-04, `lower.rs` contains no `unwrap_or(Prim::F32)` at all - a bogus `.dp` cast target now hits the `raise_bogus_target` fatal raise instead of building an f32 binary; [#744] closed 2026-08-04 |
 | 14 | `named_axis.rs:430` `unwrap_or(Prim::F32)` | F32 dtype | audit item 7 | dead (reachable-surface clearance: `canary_vmap_int64_roots_keep_integer_precision`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 15 | `host_emit.rs` `assign_partition` non-tuple arm | emits a C comment, no assignment | audit item 7 | dead (reachable-surface clearance: `partition_agrees_across_lanes`; the arm is internal-desync-only, undrivable from input); §C1.4 applies |
 | 16 | ~25 guarded `Const { 0.0 }` sites in `lower.rs` | zero values | backlog §pattern | dead (bare keywords are parse-guarded per `spec/03-deep-syntax.md` §8.1; canaries `canary_unknown_deep_tag_is_rejected`, `canary_bare_keyword_atom_fails_cleanly`, `canary_dynamic_fail_aborts_loudly`); §C1.4 applies |
 | 17 | `HOST_ONLY_BUILTINS` one-entry allowlist | (gate, not site - lets sites 1-2 fire) | [#705] | live (test `tensor_scan_does_not_silently_compile_to_a_stub`); [#682] no longer depends on this gate |
 | 18 | duplicated/drifted gates | (gate skew) | [#697] [#698] | live (tests `hip_int64_neg_emits_the_f32_fallback_kernel_today` for the [#698] half, `int64_max_reduce_does_not_panic_the_compiler` for the [#697] half) |
-| 19 | Metal `emit.rs:1419` `host_scalar_literal` pad-fill catch-all | `/* unsupported pad fill dtype */ 0` | [#745] (P0 token-sweep discovery, B2.5) | dead (canaries `metal_rejects_f64_with_a_specific_diagnostic`, `f8e4m3_is_rejected_in_both_lanes` - the gate/checker are the only defense); §C1.4 applies |
+| 19 | Metal `emit.rs:1419` `host_scalar_literal` pad-fill catch-all | `/* unsupported pad fill dtype */ 0` | [#745] (P0 token-sweep discovery, B2.5) | dead at P0 (canaries `metal_rejects_f64_with_a_specific_diagnostic`, `f8e4m3_is_rejected_in_both_lanes` - the gate/checker were the only defense); CONVERTED - §C1.4's raise-or-prove was applied in PR [#791] and re-typed in PR [#1037]: `host_scalar_literal` is now exhaustive over `Prim` with no catch-all, and f64/f8e4m3/string each return a section C2 `Unsupported` carrying its own authority, so the gate is no longer the only defense; [#745] closed 2026-08-04 |
 
 **Status backing convention** (Phase 0 verification, executed 2026-07-17):
 a `test <name>` backing a live row is either a green evidence lock that
@@ -2145,10 +2121,12 @@ and never depends on predicting a path.
 [#776]: https://github.com/Chelis-Lang/chelis/issues/776
 [#782]: https://github.com/Chelis-Lang/chelis/pull/782
 [#791]: https://github.com/Chelis-Lang/chelis/pull/791
+[#795]: https://github.com/Chelis-Lang/chelis/issues/795
 [#799]: https://github.com/Chelis-Lang/chelis/pull/799
 [#815]: https://github.com/Chelis-Lang/chelis/pull/815
 [#822]: https://github.com/Chelis-Lang/chelis/pull/822
 [#871]: https://github.com/Chelis-Lang/chelis/pull/871
+[#872]: https://github.com/Chelis-Lang/chelis/issues/872
 [#875]: https://github.com/Chelis-Lang/chelis/issues/875
 [#883]: https://github.com/Chelis-Lang/chelis/issues/883
 [#886]: https://github.com/Chelis-Lang/chelis/issues/886
@@ -2158,11 +2136,16 @@ and never depends on predicting a path.
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
 [#919]: https://github.com/Chelis-Lang/chelis/issues/919
 [#932]: https://github.com/Chelis-Lang/chelis/pull/932
+[#935]: https://github.com/Chelis-Lang/chelis/issues/935
 [#951]: https://github.com/Chelis-Lang/chelis/issues/951
 [#957]: https://github.com/Chelis-Lang/chelis/issues/957
 [#958]: https://github.com/Chelis-Lang/chelis/issues/958
 [#959]: https://github.com/Chelis-Lang/chelis/issues/959
+[#1037]: https://github.com/Chelis-Lang/chelis/pull/1037
 [#1058]: https://github.com/Chelis-Lang/chelis/issues/1058
 [#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
+[#1144]: https://github.com/Chelis-Lang/chelis/pull/1144
+[#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
+[#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#960]: https://github.com/Chelis-Lang/chelis/issues/960
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912

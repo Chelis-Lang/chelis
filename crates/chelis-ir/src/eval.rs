@@ -25,7 +25,8 @@ use chelis_types::dtype_semantics::{
     ArgReduceOp, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, RawScalar, RawTensor,
     ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
     finalize_tensor, float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
-    reduce_tensor_groups, reduce_window_grad_tensor_groups, scalar_from_f64,
+    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
+    tensor_from_scalars, uniform_sample,
 };
 use chelis_types::types::Prim;
 
@@ -142,26 +143,32 @@ pub fn cast_tensor(input: &TensorValue, src: Prim, dst: Prim) -> Result<TensorVa
 
 /// Value equality for tests and fixtures: shapes equal and element values
 /// equal, compared exactly per family. Cross-family (an int-family stored
-/// result against an f64-storage `from_vec` fixture) compares by value
-/// only where f64 carries the integer exactly (|i| <= 2^53); above that
-/// the comparison is `false` so a lossy fixture can never mask an exact
-/// stored value. NaN keeps `!=` semantics, as the old `Vec<f64>` derive
-/// had.
+/// result against a float-storage fixture) compares by value only where
+/// that fixture's actual dtype carries the integer exactly. This is a
+/// significand test, not a magnitude cutoff: powers of two such as
+/// `i64::MIN` are exactly representable in f64, while `i64::MAX` is not.
+/// NaN keeps `!=` semantics, as the old `Vec<f64>` derive had.
 impl PartialEq for TensorValue {
     fn eq(&self, other: &Self) -> bool {
         if self.shape != other.shape {
             return false;
         }
+        let self_prim = self.prim();
+        let other_prim = other.prim();
         match (self.storage.to_raw(), other.storage.to_raw()) {
             (RawTensor::Int(a), RawTensor::Int(b)) => a == b,
             (RawTensor::Float(a), RawTensor::Float(b)) => a == b,
-            (RawTensor::Int(ints), RawTensor::Float(floats))
-            | (RawTensor::Float(floats), RawTensor::Int(ints)) => {
+            (RawTensor::Int(ints), RawTensor::Float(floats)) => {
                 ints.len() == floats.len()
-                    && ints
-                        .iter()
-                        .zip(&floats)
-                        .all(|(&i, &f)| i.abs() <= (1i64 << 53) && (i as f64) == f)
+                    && ints.iter().zip(&floats).all(|(&i, &f)| {
+                        integer_is_exactly_representable(i, other_prim) && (i as f64) == f
+                    })
+            }
+            (RawTensor::Float(floats), RawTensor::Int(ints)) => {
+                ints.len() == floats.len()
+                    && ints.iter().zip(&floats).all(|(&i, &f)| {
+                        integer_is_exactly_representable(i, self_prim) && (i as f64) == f
+                    })
             }
         }
     }
@@ -386,20 +393,16 @@ fn uniform_like(
     seed: u64,
     prim: Prim,
 ) -> Result<TensorValue, String> {
-    // chelis#770: conform to the C f32 sampler affine
-    // (chelis-backend-c/src/emit.rs: `low + (high - low) * (float)unit` with
-    // f32 `low`/`high`). The default toolchain contracts C's `low + span *
-    // unit` into a single-rounding fused multiply-add, so
-    // `span_f.mul_add(unit_f, low_f)` (also one rounding) matches it
-    // bit-for-bit; a two-rounding `low_f + span_f * unit_f` drifts 1 ULP on
-    // some elements. `dropout_sample` stays f64; the f32 casts are local.
     let low_f = low as f32;
     let high_f = high as f32;
-    let span_f = high_f - low_f;
-    let data = (0..numel(shape))
-        .map(|index| span_f.mul_add(dropout_sample(seed, index as u64) as f32, low_f) as f64)
-        .collect();
-    finalize_wide("uniform_like", prim, shape.to_vec(), data)
+    let values = (0..numel(shape))
+        .map(|index| uniform_sample(prim, low_f, high_f, seed, index as u64))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    Ok(TensorValue::from_storage(
+        shape.to_vec(),
+        tensor_from_scalars(prim, &values),
+    ))
 }
 
 /// Closed elementwise binary vocabulary for the IR evaluator. The enum is
@@ -1245,7 +1248,11 @@ fn resolve_eval_strides(
         .collect()
 }
 
-fn pad(input: &TensorValue, padding: &[(usize, usize)], fill: f64) -> Result<TensorValue, String> {
+fn pad(
+    input: &TensorValue,
+    padding: &[(usize, usize)],
+    fill: chelis_types::ScalarValue,
+) -> Result<TensorValue, String> {
     assert_eq!(padding.len(), input.shape.len());
     let out_shape: Vec<usize> = input
         .shape
@@ -1263,9 +1270,13 @@ fn pad(input: &TensorValue, padding: &[(usize, usize)], fill: f64) -> Result<Ten
             .collect();
         map[index_to_linear(&out_index, &out_shape)] = Some(flat_idx);
     }
-    // The fill value ingress-finalizes at the buffer's dtype (an integer
-    // pad fill must be a member of the integer dtype, loudly).
-    let fill = scalar_from_f64("pad", input.prim(), fill).map_err(|trap| trap.to_string())?;
+    if fill.prim() != input.prim() {
+        return Err(format!(
+            "pad fill dtype {} does not match input dtype {}",
+            fill.prim().name(),
+            input.prim().name()
+        ));
+    }
     // reuse_* contract: pad moves existing elements and places a
     // finalized fill (section C3, element-preserving).
     Ok(TensorValue::from_storage(
@@ -3655,12 +3666,12 @@ mod tests {
     }
 
     #[test]
-    fn uniform_like_affine_mirrors_c_f32_sampler() {
+    fn uniform_like_f32_affine_mirrors_c_f32_sampler() {
         // chelis#770: the affine is a single correctly-rounded FMA
         // (`span_f.mul_add(unit_f, low_f)`), conforming to the compiled C
         // sampler `chelis_uniform_sample_f32` (which the default toolchain
         // contracts to the same FMA). seed=42, shape=[8], [2,5).
-        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F64).unwrap();
+        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F32).unwrap();
         // elem[4]: where the OLD f64 affine diverged from the C f32 sampler by
         // 1 ULP (the #735 sweep: eval 0x404215a9 vs C 0x404215aa).
         assert_eq!(
@@ -3699,14 +3710,82 @@ mod tests {
     }
 
     #[test]
-    fn uniform_like_affine_negative_range_is_f32() {
+    fn uniform_like_f32_affine_negative_range_is_f32() {
         // chelis#770: negative range at unit level (the C cross-lane path
         // can't be driven with a bare negative literal — a separate lowering
         // gap). seed=42, index=3, low=-3.0, high=-1.0 → 0xc010167a.
-        let out = uniform_like(&[8], -3.0, -1.0, 42, Prim::F64).unwrap();
+        let out = uniform_like(&[8], -3.0, -1.0, 42, Prim::F32).unwrap();
         assert_eq!(
             out.to_f64_lossy_vec()[3].to_bits(),
             (f32::from_bits(0xc010167a) as f64).to_bits(),
+        );
+    }
+
+    #[test]
+    fn uniform_like_f64_uses_the_f64_affine() {
+        let out = uniform_like(&[8], 2.0, 5.0, 42, Prim::F64).unwrap();
+        let expected = (5.0f64 - 2.0).mul_add(dropout_sample(42, 4), 2.0);
+        assert_eq!(out.to_f64_lossy_vec()[4].to_bits(), expected.to_bits());
+        assert_ne!(
+            out.to_f64_lossy_vec()[4].to_bits(),
+            (f32::from_bits(0x404215aa) as f64).to_bits(),
+        );
+    }
+
+    #[test]
+    fn cross_family_equality_handles_signed_min_and_actual_float_width() {
+        let int_min = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![i64::MIN])).unwrap(),
+        );
+        let float_min = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::F64, RawTensor::Float(vec![i64::MIN as f64])).unwrap(),
+        );
+        assert_eq!(int_min, float_min, "i64::MIN is an exact power of two");
+
+        let int_max = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![i64::MAX])).unwrap(),
+        );
+        let rounded_float_max = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::F64, RawTensor::Float(vec![i64::MAX as f64])).unwrap(),
+        );
+        assert_ne!(
+            int_max, rounded_float_max,
+            "a lossy float fixture must not mask i64::MAX"
+        );
+
+        let exact_f32 = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![1 << 24])).unwrap(),
+        );
+        let float_f32 = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::F32, RawTensor::Float(vec![(1 << 24) as f64])).unwrap(),
+        );
+        assert_eq!(exact_f32, float_f32);
+
+        let inexact_f32 = TensorValue::from_storage(
+            vec![],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![(1 << 24) + 1])).unwrap(),
+        );
+        assert_ne!(inexact_f32, float_f32);
+    }
+
+    #[test]
+    fn issue_878_pad_fill_preserves_exact_int64_above_f64_boundary() {
+        let exact = 9_007_199_254_740_993i64;
+        let input = TensorValue::from_storage(
+            vec![1],
+            finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![7])).unwrap(),
+        );
+        let fill = chelis_types::scalar_from_i64("pad", Prim::Int64, exact).unwrap();
+        let out = pad(&input, &[(1, 1)], fill).unwrap();
+        assert_eq!(
+            out.storage().to_i64_exact_vec(),
+            Some(vec![exact, 7, exact])
         );
     }
 

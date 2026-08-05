@@ -83,12 +83,8 @@ async fn parse_endpoint_returns_ast_and_parse_errors() {
 async fn desugar_endpoint_returns_deep_and_rejects_bad_surf() {
     let (_, ok) = post_json(router(), "/desugar", json!({"source":HELLO_TENSOR})).await;
     assert!(ok["ok"].as_bool().unwrap());
-    assert!(
-        ok["result"]["deep_text"]
-            .as_str()
-            .unwrap()
-            .contains("(module {}")
-    );
+    let deep_text = ok["result"]["deep_text"].as_str().unwrap();
+    assert!(deep_text.contains("(module {surf_path:"), "{deep_text}");
 
     let (_, bad) = post_json(
         router(),
@@ -247,7 +243,7 @@ async fn compile_endpoint_returns_generated_files_and_backend_errors() {
         "/compile",
         json!({
             "source_kind":"surf",
-            "source":"def f(xs: tensor[batch, features, f32]): tensor[batch, features, f32] = xs\n",
+            "source":"def f(xs: tensor[batch, features, f32]) -> tensor[batch, features, f32] = xs\n",
             "target":"hip"
         }),
     )

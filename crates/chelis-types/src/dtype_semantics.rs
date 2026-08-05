@@ -2399,6 +2399,67 @@ pub fn scalar_from_f64(op: &'static str, prim: Prim, v: f64) -> Result<ScalarVal
     finalize_scalar(op, prim, RawScalar::Float(v))
 }
 
+/// Return whether `value` is exactly representable by the float dtype
+/// `prim`. This is a value-set predicate, not a conversion: it performs no
+/// cast and therefore cannot hide an integer through a rounded f64 image.
+/// Non-float dtypes return `false`.
+pub fn integer_is_exactly_representable(value: i64, prim: Prim) -> bool {
+    let precision = match prim {
+        Prim::F64 => 53,
+        Prim::F32 => 24,
+        Prim::F16 => 11,
+        Prim::Bf16 => 8,
+        Prim::Int64
+        | Prim::Int32
+        | Prim::Int16
+        | Prim::Int8
+        | Prim::Bool
+        | Prim::F8e4m3
+        | Prim::String => return false,
+    };
+    let magnitude = value.unsigned_abs();
+    if magnitude == 0 {
+        return true;
+    }
+    let significant_bits = u64::BITS - magnitude.leading_zeros();
+    significant_bits <= precision
+        || magnitude.trailing_zeros() >= significant_bits.saturating_sub(precision)
+}
+
+/// Deterministic `[05-OP-8]` sample at the requested float width.
+///
+/// The bounds already carry their required f32 dtype. f64 computes the
+/// affine transform in f64 from the exact f32 images; f32 computes it at
+/// f32 width; f16/bf16 compute once in f32 and finalize once to storage.
+pub fn uniform_sample(
+    prim: Prim,
+    low: f32,
+    high: f32,
+    seed: u64,
+    index: u64,
+) -> Result<ScalarValue, NumericKernelError> {
+    if !prim.is_float() {
+        return Err(NumericKernelError::WrongFamily {
+            op: "uniform_like",
+            expected: NumericFamily::Float,
+            actual: prim,
+        });
+    }
+    let mut x = seed ^ index.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    let unit = ((x >> 11) as f64) / ((1u64 << 53) as f64);
+    let value = if prim == Prim::F64 {
+        (f64::from(high) - f64::from(low)).mul_add(unit, f64::from(low))
+    } else {
+        (high - low).mul_add(unit as f32, low) as f64
+    };
+    scalar_from_f64("uniform_like", prim, value).map_err(Into::into)
+}
+
 /// THE authored cast ladder (the chelis#759 one-rule-per-direction
 /// obligation, executed at the chelis#729 rework): the DEFAULT cast is
 /// CHECKED on every eval surface. Per direction:
@@ -3026,6 +3087,60 @@ mod tests {
 
     fn fin_i(prim: Prim, i: i64) -> Result<ScalarValue, NumericTrap> {
         finalize_scalar("test_op", prim, RawScalar::Int(i))
+    }
+
+    #[test]
+    fn exact_integer_representability_is_total_at_every_float_width() {
+        for (prim, precision) in [
+            (Prim::Bf16, 8u32),
+            (Prim::F16, 11),
+            (Prim::F32, 24),
+            (Prim::F64, 53),
+        ] {
+            let boundary = 1i64 << precision;
+            for value in [0, 1, -1, boundary - 1, boundary, -boundary] {
+                assert!(
+                    integer_is_exactly_representable(value, prim),
+                    "{} must represent {value} exactly",
+                    prim.name()
+                );
+            }
+            assert!(!integer_is_exactly_representable(boundary + 1, prim));
+            assert!(!integer_is_exactly_representable(-(boundary + 1), prim));
+            assert!(integer_is_exactly_representable(boundary * 2, prim));
+        }
+        assert!(integer_is_exactly_representable(i64::MIN, Prim::F64));
+        assert!(!integer_is_exactly_representable(i64::MAX, Prim::F64));
+        assert!(!integer_is_exactly_representable(1, Prim::Int64));
+        assert!(!integer_is_exactly_representable(1, Prim::Bool));
+        assert!(!integer_is_exactly_representable(1, Prim::String));
+        assert!(!integer_is_exactly_representable(1, Prim::F8e4m3));
+    }
+
+    #[test]
+    fn uniform_sampler_dispatches_at_the_output_dtype_width() {
+        let low = 2.0f32;
+        let high = 7.0f32;
+        let seed = 42;
+        let index = 4;
+        let f32_value = uniform_sample(Prim::F32, low, high, seed, index).unwrap();
+        let f64_value = uniform_sample(Prim::F64, low, high, seed, index).unwrap();
+        assert_eq!(f32_value.prim(), Prim::F32);
+        assert_eq!(f64_value.prim(), Prim::F64);
+        assert_ne!(
+            f32_value.as_f64_lossy().to_bits(),
+            f64_value.as_f64_lossy().to_bits(),
+            "the two widths must not share a post-hoc f32 sampler"
+        );
+        for prim in [Prim::F16, Prim::Bf16] {
+            let value = uniform_sample(prim, low, high, seed, index).unwrap();
+            assert_eq!(value.prim(), prim);
+            assert!((low as f64..high as f64).contains(&value.as_f64_lossy()));
+        }
+        assert!(matches!(
+            uniform_sample(Prim::Int32, low, high, seed, index),
+            Err(NumericKernelError::WrongFamily { .. })
+        ));
     }
 
     // ---- chelis#1116: exact insertion from already-finalized scalars ----

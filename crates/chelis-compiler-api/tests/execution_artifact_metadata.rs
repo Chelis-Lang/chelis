@@ -563,7 +563,7 @@ fn compile_emits_entry_scoped_kernel_not_sibling_def() {
 /// the STRICT surface it is now a loud unsupported-feature error.
 const VMAP_ENTRY: &str = "\
 def process(x: tensor[4, f32]) -> tensor[4, f32] = relu(x)
-def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = xs |> vmap(process, axis=0)
+def batch_process(xs: tensor[8, 4, f32]) -> tensor[8, 4, f32] = xs |> vmap(process)
 ";
 
 #[test]

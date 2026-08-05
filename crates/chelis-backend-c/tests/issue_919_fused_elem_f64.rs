@@ -196,8 +196,10 @@ fn f32_fused_chain_emission_is_unchanged() {
 #[test]
 fn integer_fused_chain_is_a_diagnostic_not_a_panic() {
     // The fused-elem path admits f32 and f64 only. Integer chains need
-    // integer step operators rather than libm calls (chelis#691), and
-    // reduced floats (bf16/f16) need the convert-then-compute routing.
+    // integer step operators rather than libm calls (chelis#729 owns that
+    // dtype capability; chelis#691's direct `emit_binary_func` / abs nodes
+    // are repaired), and reduced floats (bf16/f16) need the
+    // convert-then-compute routing.
     // Both must reject through the `Result` channel: a `panic!` here
     // reaches Python as a `PanicException` rather than a diagnostic,
     // which is the failure mode chelis#919 reports.

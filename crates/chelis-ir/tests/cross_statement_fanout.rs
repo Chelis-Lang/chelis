@@ -262,7 +262,7 @@ fn top_level_no_module_var_rhs_aliased_fan_out_passes_linearity() {
     // `UseAfterConsume`.
     //
     // After the fix, `check_top_level` recognizes the var-body
-    // `def name = x` shape as an aliasing binding and uses a
+    // `def name() = x` shape as an aliasing binding and uses a
     // `"binding `name` at offset N"` consume site, mirroring
     // `check_let`. The borrow-read path then routes through the
     // existing PR #29 tolerance and the program passes linearity.

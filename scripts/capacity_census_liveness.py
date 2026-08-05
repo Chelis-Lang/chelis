@@ -16,11 +16,12 @@ manually at release cuts and during red-team passes):
 
 Success is exit 0 with the final line `CAPACITY CENSUS LIVENESS: PASS`.
 Run it at every release cut and in red-team passes over the numeric surface.
-Every sanctioned citation names at least one chelis#N reference, so every row
-is liveness-bound: the seam rows cite chelis#893 and the plain baselines cite
-chelis#729, which means the entire inventory comes up for re-adjudication when
-the plan closes. The typed wire and PyO3 baselines carry one top-level citation
-that is inherited by every generated row.
+Issue-bound dispositions name at least one chelis#N reference. Exact permanent
+dispositions are closed, family-specific strings backed by non-regenerable
+complete-row manifests in the owning Rust tripwires. The remaining live seam
+rows cite chelis#893. The typed wire and PyO3 baselines carry distinct
+top-level dispositions; their row manifests prevent a new row from inheriting
+either disposition.
 """
 
 from __future__ import annotations
@@ -41,6 +42,40 @@ CENSUS_RELS = (
     Path("spec/design/capacity_census_bindings.json"),
 )
 ISSUE_REF = re.compile(r"chelis#(\d+)")
+PERMANENT_DISPOSITIONS_BY_FAMILY = {
+    "primary": frozenset(
+        {
+            "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)",
+            "permanent-disposition([05-OP-2] source-faithful prelude Json numeric split; exact descriptor ratified 2026-08-04)",
+        }
+    ),
+    "wire": frozenset(
+        {
+            "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)",
+        }
+    ),
+    "bindings": frozenset(
+        {
+            "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)",
+        }
+    ),
+}
+PERMANENT_DISPOSITIONS = frozenset(
+    disposition
+    for dispositions in PERMANENT_DISPOSITIONS_BY_FAMILY.values()
+    for disposition in dispositions
+)
+
+
+def census_family(census_rel: Path) -> str:
+    """Return the closed family identity for a checked census artifact."""
+    if census_rel.name == "capacity_census.json":
+        return "primary"
+    if census_rel.name == "capacity_census_wire.json":
+        return "wire"
+    if census_rel.name == "capacity_census_bindings.json":
+        return "bindings"
+    return census_rel.stem
 
 
 class IssueKind(Enum):
@@ -89,9 +124,11 @@ def load_census_rows(
     rows: list[dict] = []
     for census_rel in census_rels:
         payload = json.loads((root / census_rel).read_text())
+        family = census_family(census_rel)
         inherited_citation = str(payload.get("citation", "")).strip()
         for source_row in payload["rows"]:
             row = dict(source_row)
+            row["_census_family"] = family
             if not str(row.get("citation", "")).strip() and inherited_citation:
                 row["citation"] = inherited_citation
             rows.append(row)
@@ -112,7 +149,24 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
         if not citation or citation == "TODO":
             problems.append(f"UNCITED row (CI tripwire should have caught this): {row_id}")
             continue
-        for number in extract_issue_refs(citation):
+        family = str(row.get("_census_family", "")).strip()
+        family_dispositions = PERMANENT_DISPOSITIONS_BY_FAMILY.get(family, frozenset())
+        if citation in family_dispositions:
+            continue
+        if citation in PERMANENT_DISPOSITIONS:
+            problems.append(
+                f"WRONG CENSUS FAMILY: permanent disposition does not belong to "
+                f"{family or '<missing>'}: {row_id}"
+            )
+            continue
+        issue_numbers = extract_issue_refs(citation)
+        if not issue_numbers:
+            problems.append(
+                f"UNRECOGNIZED disposition (expected an exact permanent disposition "
+                f"or chelis#N): {row_id}"
+            )
+            continue
+        for number in issue_numbers:
             issue = issues.get(number)
             if issue is None:
                 problems.append(f"UNRESOLVABLE citation chelis#{number}: {row_id}")
@@ -151,13 +205,6 @@ def fetch_issue(
         return None
     try:
         payload = json.loads(result.stdout)
-        if type(payload) is not dict:
-            return None
-        returned_number = payload.get("number")
-        if type(returned_number) is not int or returned_number <= 0:
-            return None
-        if returned_number != number:
-            return None
         state = IssueState(str(payload["state"]).upper())
         kind = (
             IssueKind.PULL_REQUEST

@@ -40,7 +40,7 @@ fn bump_with_only_author_follow_up_exits_zero_and_lists_steps() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("src/x.ch"),
-        "def f -> I32 = fail(\"blocked on chelis#999\")\n",
+        "def f() -> I32 = fail(\"blocked on chelis#999\")\n",
     )
     .unwrap();
 

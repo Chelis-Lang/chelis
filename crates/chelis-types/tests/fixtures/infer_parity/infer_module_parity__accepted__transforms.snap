@@ -1,5 +1,5 @@
 == annotated deep ==
-(module {}
+(module {surf_path: "Parity.Transforms"}
   parity.transforms
   (defsig {}
     process
@@ -54,14 +54,14 @@
                     (d-name {} features)
                     (t-prim {} f32))
           }))
-      (pipe {span: "surf:184..211",
+      (pipe {span: "surf:184..203",
               type: (t-tensor {}
                       (d-name {} batch)
                       (d-name {} features)
                       (t-prim {} f32))
             }
         (var {span: "surf:184..186"} xs)
-        (vmap {span: "surf:190..211",
+        (vmap {span: "surf:190..203",
                 type: (t-fn {}
                         (t-tensor {}
                           (d-name {} batch)

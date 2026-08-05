@@ -176,7 +176,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
                     .map(|d| d.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                body.push(format!("    int shape_{slot}[{ndim}] = {{ {dims} }};"));
+                body.push(format!("    int64_t shape_{slot}[{ndim}] = {{ {dims} }};"));
                 body.push(format!(
                     "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_F32);"
                 ));
@@ -917,10 +917,7 @@ fn m6_pad_1d_zero_fill_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(1), RtDim::Lit(1))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(1), RtDim::Lit(1))]),
         vec![x],
         vec_f32(6),
         None,
@@ -938,10 +935,10 @@ fn m6_pad_1d_nonzero_fill_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(3), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(2), RtDim::Lit(1))],
-            fill: -7.5,
-        },
+        RiscOp::pad(
+            vec![(RtDim::Lit(2), RtDim::Lit(1))],
+            chelis_types::scalar_from_f64("pad", Prim::F32, -7.5).unwrap(),
+        ),
         vec![x],
         vec_f32(6),
         None,
@@ -964,13 +961,13 @@ fn m6_pad_2d_asymmetric_matches_evaluator() {
         None,
     );
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![
+        RiscOp::zero_pad(
+            Prim::F32,
+            vec![
                 (RtDim::Lit(1), RtDim::Lit(0)),
                 (RtDim::Lit(0), RtDim::Lit(2)),
             ],
-            fill: 0.0,
-        },
+        ),
         vec![x],
         mat_f32(3, 5),
         None,
@@ -1046,10 +1043,7 @@ fn m6_pad_then_shrink_roundtrip_matches_evaluator() {
     let mut dag = Dag::new();
     let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
     let p = dag.add_node(
-        RiscOp::Pad {
-            padding: vec![(RtDim::Lit(2), RtDim::Lit(2))],
-            fill: 0.0,
-        },
+        RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(2), RtDim::Lit(2))]),
         vec![x],
         vec_f32(8),
         None,

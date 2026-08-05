@@ -218,7 +218,7 @@ fn local_constructor_construct_and_match_checks_clean() {
 #[test]
 fn module_qualified_constructor_checks_clean() {
     // The module-qualified form (#316) is also in scope without naming the
-    // constructor in the import list: `import Pkg.Adt ()` then
+    // constructor in the import list: `import Pkg.Adt` then
     // `Pkg.Adt.Alpha` resolves through the qualified-module map, so the
     // chelis#317 guard must not reject it.
     let dir = tempdir().expect("tempdir");
@@ -228,7 +228,7 @@ fn module_qualified_constructor_checks_clean() {
     write_file(
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
-         import Pkg.Adt ()\n\
+         import Pkg.Adt\n\
          def use_alpha() -> i64 = Pkg.Adt.classify(Pkg.Adt.Alpha)\n",
     );
 
@@ -410,8 +410,8 @@ fn ambiguous_foreign_constructor_pattern_under_wildcard_is_rejected() {
     write_file(
         &root.join("src/consumer.ch"),
         "module Pkg.Consumer\n\
-         import Pkg.One ()\n\
-         import Pkg.Two ()\n\
+         import Pkg.One\n\
+         import Pkg.Two\n\
          def label(n: i64) -> i64 = match n with { | Dup => 1 | _ => 0 }\n",
     );
 

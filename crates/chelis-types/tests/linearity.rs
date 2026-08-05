@@ -22,7 +22,7 @@ fn typecheck_surf(source: &str) -> Result<(), Vec<chelis_types::errors::CheckErr
 fn detects_use_after_consume() {
     let errors = check_surf(
         r#"
-def bad(x: tensor[4, f32]): tensor[4, f32] =
+def bad(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(x)
     add(x, y)
@@ -42,7 +42,7 @@ def bad(x: tensor[4, f32]): tensor[4, f32] =
 fn copy_allows_reuse() {
     check_surf(
         r#"
-def ok(x: tensor[4, f32]): tensor[4, f32] =
+def ok(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = relu(copy(x))
     out: tensor[4, f32] = add(x, y)
@@ -59,7 +59,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 fn auto_borrowed_read_only_primitives_allow_fanout() {
     check_surf(
         r#"
-def ok(x: tensor[4, f32]): tensor[4, f32] =
+def ok(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = relu(x)
     z: tensor[4, f32] = sigmoid(x)
@@ -78,7 +78,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 fn pipe_auto_borrows_read_only_stage_input() {
     check_surf(
         r#"
-def ok(x: tensor[4, f32]): tensor[4, f32] =
+def ok(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = x |> relu |> sigmoid
     _ = drop(x)
@@ -95,12 +95,9 @@ fn explicit_borrow_does_not_satisfy_owned_parameter() {
     // name and bare shadowing defs are now rejected at declaration time.
     let errors = typecheck_surf(
         r#"
-def grab(x: tensor[4, f32]): tensor[4, f32] = x
+def grab(x: tensor[4, f32]) -> tensor[4, f32] = x
 
-def bad(x: tensor[4, f32]): tensor[4, f32] =
-  {
-    grab(&x)
-  }
+def bad(x: tensor[4, f32]) -> tensor[4, f32] = grab(&x)
 "#,
     )
     .expect_err("borrow-to-owned must require an explicit copy");
@@ -116,7 +113,7 @@ def bad(x: tensor[4, f32]): tensor[4, f32] =
 fn copy_accepts_explicit_borrow_and_returns_owned_tensor() {
     check_surf(
         r#"
-def ok(x: tensor[4, f32]): tensor[4, f32] =
+def ok(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = copy(&x)
     _ = drop(x)
@@ -131,7 +128,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 fn borrowed_but_never_consumed_is_auto_dropped() {
     check_surf(
         r#"
-def ok(): tensor[4, f32] =
+def ok() -> tensor[4, f32] =
   {
     x: tensor[4, f32] = to_tensor([1.0, 2.0, 3.0, 4.0])
     y: tensor[4, f32] = relu(x)
@@ -146,7 +143,7 @@ def ok(): tensor[4, f32] =
 fn borrow_cannot_escape_as_function_result() {
     let errors = check_surf(
         r#"
-def bad(x: tensor[4, f32]): &tensor[4, f32] = &x
+def bad(x: tensor[4, f32]) -> &tensor[4, f32] = &x
 "#,
     )
     .expect_err("borrows cannot be returned from functions");
@@ -162,7 +159,7 @@ def bad(x: tensor[4, f32]): &tensor[4, f32] = &x
 fn closure_capture_consumes_outer_tensor() {
     let errors = check_surf(
         r#"
-def bad(x: tensor[4, f32]): tensor[4, f32] =
+def bad(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     f = fn () -> x
     realize(x)
@@ -196,7 +193,7 @@ type Params[n] =
 sig use_params: Params[n] -> bool
 def use_params(p) = true
 
-def bad[n](p: Params[n]): bool =
+def bad[n](p: Params[n]) -> bool =
   {
     f = fn () -> use_params(p)
     use_params(p)
@@ -218,7 +215,7 @@ def bad[n](p: Params[n]): bool =
 fn match_consumes_tuple_scrutinee() {
     let errors = check_surf(
         r#"
-def bad(pair: (tensor[4, f32], int32)): int32 =
+def bad(pair: (tensor[4, f32], int32)) -> int32 =
   {
     n: int32 = match pair with {
       | (x, _) => 1
@@ -241,7 +238,7 @@ def bad(pair: (tensor[4, f32], int32)): int32 =
 fn tensor_shape_queries_do_not_consume_tensor_inputs() {
     check_surf(
         r#"
-def ok(x: tensor[2, 3, f32]): int64 =
+def ok(x: tensor[2, 3, f32]) -> int64 =
   {
     r: int32 = rank(x)
     c: int64 = shape(x, 1)
@@ -258,7 +255,7 @@ def ok(x: tensor[2, 3, f32]): int64 =
 fn to_list_does_not_consume_tensor_input() {
     check_surf(
         r#"
-def ok(x: tensor[4, f32]): tensor[4, f32] =
+def ok(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     xs: List[f32] = to_list(x)
     _ = drop(xs)
@@ -275,7 +272,7 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 fn to_list_still_flags_use_after_genuine_consume() {
     let errors = check_surf(
         r#"
-def bad(x: tensor[4, f32]): tensor[4, f32] =
+def bad(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     y: tensor[4, f32] = realize(x)
     xs: List[f32] = to_list(x)
@@ -295,7 +292,7 @@ def bad(x: tensor[4, f32]): tensor[4, f32] =
 fn tensor_to_scalar_does_not_consume_tensor_input() {
     check_surf(
         r#"
-def ok(x: tensor[f32]): tensor[f32] =
+def ok(x: tensor[f32]) -> tensor[f32] =
   {
     v: f32 = tensor_to_scalar(x)
     _ = drop(v)
@@ -312,7 +309,7 @@ def ok(x: tensor[f32]): tensor[f32] =
 fn tensor_to_scalar_still_flags_use_after_genuine_consume() {
     let errors = check_surf(
         r#"
-def bad(x: tensor[f32]): tensor[f32] =
+def bad(x: tensor[f32]) -> tensor[f32] =
   {
     y: tensor[f32] = realize(x)
     v: f32 = tensor_to_scalar(x)
@@ -338,7 +335,7 @@ fn len_does_not_consume_list_argument() {
     // regression for the School `_step_list` read-then-reuse shape.
     check_surf(
         r#"
-def ok(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
+def ok(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
     n: int64 = len(params)
     params
@@ -354,7 +351,7 @@ fn index_does_not_consume_list_argument() {
     // list via a `const *` (`chelis_list_index`), never freeing it.
     check_surf(
         r#"
-def ok(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
+def ok(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
     first: tensor[k, f32] = index(params, 0)
     _ = drop(first)
@@ -374,7 +371,7 @@ fn list_len_then_index_then_reuse_compiles() {
     // clean at 0.10.0, regressed at 0.10.1 (chelis#527).
     check_surf(
         r#"
-def step(params: List[tensor[k, f32]]): List[tensor[k, f32]] =
+def step(params: List[tensor[k, f32]]) -> List[tensor[k, f32]] =
   {
     n: int64 = len(params)
     first: tensor[k, f32] = index(params, 0)
@@ -393,7 +390,7 @@ fn len_still_flags_use_after_genuine_consume() {
     // the later `len(params)` borrow-read is a use-after-consume.
     let errors = check_surf(
         r#"
-def bad(params: List[tensor[k, f32]]): int64 =
+def bad(params: List[tensor[k, f32]]) -> int64 =
   {
     _ = drop(params)
     n: int64 = len(params)
@@ -414,7 +411,7 @@ fn index_still_flags_use_after_genuine_consume() {
     // Negative parity for `index`, mirroring the `len` case above.
     let errors = check_surf(
         r#"
-def bad(params: List[tensor[k, f32]]): tensor[k, f32] =
+def bad(params: List[tensor[k, f32]]) -> tensor[k, f32] =
   {
     _ = drop(params)
     first: tensor[k, f32] = index(params, 0)
@@ -443,7 +440,7 @@ fn len_explicit_container_borrow_is_a_type_error() {
     // `len(&xs)`.
     let errors = typecheck_surf(
         r#"
-def bad(params: List[tensor[k, f32]]): int64 =
+def bad(params: List[tensor[k, f32]]) -> int64 =
   {
     n: int64 = len(&params)
     n
@@ -470,7 +467,7 @@ fn index_explicit_container_borrow_is_a_type_error() {
     // `index(&xs, i)` is rejected at check time (chelis#527).
     let errors = typecheck_surf(
         r#"
-def bad(params: List[tensor[k, f32]]): tensor[k, f32] =
+def bad(params: List[tensor[k, f32]]) -> tensor[k, f32] =
   {
     first: tensor[k, f32] = index(&params, 0)
     first
@@ -499,7 +496,7 @@ fn len_of_non_container_does_not_mention_auto_borrow() {
     // an argument that is not even a container.
     let errors = typecheck_surf(
         r#"
-def bad(x: f32): int64 =
+def bad(x: f32) -> int64 =
   {
     n: int64 = len(x)
     n
@@ -519,9 +516,9 @@ def bad(x: f32): int64 =
 fn grad_accepts_function_with_borrowed_tensor_parameter() {
     check_surf(
         r#"
-def loss(x: &tensor[4, f32]): tensor[f32] = sum(mul(x, x), 0)
+def loss(x: &tensor[4, f32]) -> tensor[f32] = sum(mul(x, x), 0)
 
-def ok(x: tensor[4, f32]): tensor[4, f32] =
+def ok(x: tensor[4, f32]) -> tensor[4, f32] =
   {
     g: tensor[4, f32] = grad(loss)(x)
     _ = drop(x)
@@ -536,11 +533,11 @@ def ok(x: tensor[4, f32]): tensor[4, f32] =
 fn vmap_lifts_function_with_borrowed_tensor_parameter() {
     check_surf(
         r#"
-def activate(x: &tensor[4, f32]): tensor[4, f32] = relu(x)
+def activate(x: &tensor[4, f32]) -> tensor[4, f32] = relu(x)
 
-def ok(xs: tensor[batch, 4, f32]): tensor[batch, 4, f32] =
+def ok(xs: tensor[batch, 4, f32]) -> tensor[batch, 4, f32] =
   {
-    ys: tensor[batch, 4, f32] = vmap(activate, axis=0)(xs)
+    ys: tensor[batch, 4, f32] = vmap(activate)(xs)
     _ = drop(xs)
     ys
   }

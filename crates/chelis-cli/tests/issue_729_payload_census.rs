@@ -14,12 +14,9 @@
 //! The cited allowlist:
 //!
 //! * `UniformLike { low, high }` and `Dropout { rate }` - float-only op
-//!   PARAMETERS (RNG bounds and a probability); f64 is their exact
-//!   domain, no integer capacity exists to lose.
-//! * `Pad { fill }` - a VALUE at the padded tensor's dtype with f64
-//!   capacity only; the user-reachable int64 collapse above 2^53 is
-//!   filed as chelis#878 (the chelis#856 sibling) and owns this row
-//!   until the fill is sealed.
+//!   PARAMETERS (RNG bounds and a probability). Their f32-domain values
+//!   are stored as exact f64 images here; no tensor element payload or
+//!   integer capacity crosses these fields.
 //!
 //! Prove's own `f64` fields (`ad_rail`/`arb_oracle` box and range
 //! bounds) are real-valued ENVELOPE mathematics, not dtype-carrying
@@ -92,10 +89,8 @@ fn risc_op_has_no_unsealed_numeric_payload_beyond_the_census() {
     assert_eq!(
         fields,
         vec![
-            // Pad's fill: chelis#878 owns this row (see the file header).
-            "fill: f64".to_string(),
-            // UniformLike bounds + Dropout rate: float-only op
-            // parameters, exact in f64 by domain.
+            // UniformLike bounds + Dropout rate: exact images of
+            // float-only f32-domain parameters.
             "high: f64".to_string(),
             "low: f64".to_string(),
             "rate: f64".to_string(),
@@ -117,6 +112,10 @@ fn risc_op_has_no_unsealed_numeric_payload_beyond_the_census() {
         block.contains("data: chelis_types::TensorStorage"),
         "RiscOp::ConstTensor must carry the sealed TensorStorage payload (chelis#856)"
     );
+    assert!(
+        block.contains("fill: chelis_types::ScalarValue"),
+        "RiscOp::Pad must carry the sealed ScalarValue payload (chelis#878)"
+    );
 }
 
 #[test]
@@ -130,9 +129,7 @@ fn wire_risc_op_mirror_has_no_unsealed_numeric_payload_beyond_the_census() {
     assert_eq!(
         fields,
         vec![
-            // The wire mirrors of the cited RiscOp rows; Pad's fill is
-            // chelis#878's, the rest are float-only op parameters.
-            "fill: f64".to_string(),
+            // Float-only operation parameters.
             "high: f64".to_string(),
             "low: f64".to_string(),
             "rate: f64".to_string(),
@@ -149,5 +146,9 @@ fn wire_risc_op_mirror_has_no_unsealed_numeric_payload_beyond_the_census() {
     assert!(
         block.contains("data: chelis_types::TensorStorage"),
         "WireRiscOp::ConstTensor must carry the sealed dtype-tagged payload (wire v4)"
+    );
+    assert!(
+        block.contains("fill: ScalarValue"),
+        "WireRiscOp::Pad must carry the sealed dtype-tagged payload (wire v5)"
     );
 }

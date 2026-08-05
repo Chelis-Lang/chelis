@@ -24,28 +24,63 @@ use chelis_backend_c::emit::CEmitter;
 use chelis_ir::dag::{Dag, DimInfo, RiscOp, TensorType};
 use chelis_types::types::Prim;
 
-fn f32_tensor(size: usize) -> TensorType {
+fn tensor(precision: Prim, size: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(size)],
-        precision: Prim::F32,
+        precision,
     }
 }
 
 fn build_uniform_like_dag(low: f64, high: f64, seed: u64) -> Dag {
+    build_uniform_like_dag_for(Prim::F32, low, high, seed)
+}
+
+fn build_uniform_like_dag_for(precision: Prim, low: f64, high: f64, seed: u64) -> Dag {
     let mut dag = Dag::new();
     let template = dag.add_node(
-        RiscOp::synth_const(f32_tensor(4).precision, 0.0),
+        RiscOp::synth_const(precision, 0.0),
         vec![],
-        f32_tensor(4),
+        tensor(precision, 4),
         None,
     );
     dag.add_node(
         RiscOp::UniformLike { low, high, seed },
         vec![template],
-        f32_tensor(4),
+        tensor(precision, 4),
         None,
     );
     dag
+}
+
+#[test]
+fn issue_937_uniform_like_emits_dtype_specific_sampler_and_storage() {
+    let f64_src = CEmitter::emit_dag(
+        &build_uniform_like_dag_for(Prim::F64, 0.1, 0.9, 17),
+        "uniform_f64",
+    )
+    .unwrap();
+    assert!(f64_src.contains("static inline double chelis_uniform_sample_f64("));
+    assert!(f64_src.contains("((double*)t1->data)[i] = chelis_uniform_sample_f64("));
+    assert!(f64_src.contains("chelis_f64_from_bits("));
+    assert!(
+        !f64_src
+            .lines()
+            .any(|line| line.contains("t1->data)[i]") && line.contains("sample_f32")),
+        "f64 output must never widen an f32 sample:\n{f64_src}"
+    );
+
+    for (precision, conversion) in [
+        (Prim::F16, "chelis_f32_to_f16"),
+        (Prim::Bf16, "chelis_f32_to_bf16"),
+    ] {
+        let src = CEmitter::emit_dag(
+            &build_uniform_like_dag_for(precision, 0.1, 0.9, 17),
+            "uniform_reduced",
+        )
+        .unwrap();
+        assert!(src.contains("chelis_uniform_sample_f32("));
+        assert!(src.contains(&format!("((uint16_t*)t1->data)[i] = {conversion}(")));
+    }
 }
 
 /// Bit-pattern reproducer: the sub-normal-range `1e-40` reproducer
@@ -329,4 +364,52 @@ int main(void) {
         "uniform_like low byte-identical mismatch: expected `{expected}`, got `{}`. Source:\n{src}",
         output.trim()
     );
+}
+
+/// chelis#937: f64 output executes the affine at f64 width. This Linux
+/// compile-run lock reads the emitted buffer as f64 and compares raw bits
+/// with the shared [05-OP-8] sampler, so widening f32 output cannot pass.
+#[cfg(target_os = "linux")]
+#[test]
+fn issue_937_uniform_like_f64_matches_shared_sampler_under_gcc() {
+    let dag = build_uniform_like_dag_for(Prim::F64, 2.0, 5.0, 42);
+    let result = codegen(&dag, "test_uniform_like_f64").unwrap();
+    let src = &result.c_source;
+    let harness = r#"
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include "chelis_runtime.h"
+
+extern void test_uniform_like_f64(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main(void) {
+    chelis_tensor* outputs[1] = { NULL };
+    test_uniform_like_f64(NULL, 0, outputs, 1);
+    double *data = (double *)outputs[0]->data;
+    for (int i = 0; i < outputs[0]->size; i++) {
+        uint64_t bits;
+        memcpy(&bits, &data[i], sizeof(bits));
+        printf(i == 0 ? "%016llx" : " %016llx", (unsigned long long)bits);
+    }
+    printf("\n");
+    return 0;
+}
+"#;
+    let Some(output) = compile_and_run("uniform_like_f64", src, harness) else {
+        panic!("emitted f64 C did not compile/run");
+    };
+    let expected = (0..4)
+        .map(|index| {
+            format!(
+                "{:016x}",
+                chelis_types::uniform_sample(Prim::F64, 2.0, 5.0, 42, index)
+                    .unwrap()
+                    .as_f64_lossy()
+                    .to_bits()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(output.trim(), expected, "emitted source:\n{src}");
 }

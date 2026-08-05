@@ -684,6 +684,19 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
     out.push("    return fmaf(high - low, (float)unit, low);".to_string());
     out.push("}".to_string());
     out.push(
+        "static inline double chelis_uniform_sample_f64(uint64_t seed, uint64_t index, double low, double high) {"
+            .to_string(),
+    );
+    out.push("    uint64_t x = seed ^ (index * 0x9E3779B97F4A7C15ULL);".to_string());
+    out.push("    x ^= x >> 30;".to_string());
+    out.push("    x *= 0xBF58476D1CE4E5B9ULL;".to_string());
+    out.push("    x ^= x >> 27;".to_string());
+    out.push("    x *= 0x94D049BB133111EBULL;".to_string());
+    out.push("    x ^= x >> 31;".to_string());
+    out.push("    double unit = (double)(x >> 11) / (double)(1ULL << 53);".to_string());
+    out.push("    return fma(high - low, unit, low);".to_string());
+    out.push("}".to_string());
+    out.push(
         "typedef struct { uint64_t seed; uint64_t counter; int active; } chelis_rng_state;"
             .to_string(),
     );
@@ -1036,7 +1049,12 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push("        exit(1);".to_string());
     out.push("    }".to_string());
     out.push("    int ndim = (int)ndim64;".to_string());
-    out.push("    int shape[CHELIS_MAX_DIM] = {0};".to_string());
+    // chelis#1112: the shape buffer IS the ABI's extent carrier, so the
+    // list value is stored at the width it was read at. The retired 32-bit
+    // buffer needed an `(int)` cast here, and that cast needed a companion
+    // trap above INT_MAX because the only other guard (`dim < 0`) ran
+    // before it; both are gone with the narrowing they existed to catch.
+    out.push("    int64_t shape[CHELIS_MAX_DIM] = {0};".to_string());
     out.push("    int64_t expected = 1;".to_string());
     out.push("    for (int i = 0; i < ndim; ++i) {".to_string());
     out.push(
@@ -1050,23 +1068,12 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     );
     out.push("            exit(1);".to_string());
     out.push("        }".to_string());
-    // chelis#1112: the C lane's dim carrier is still 32-bit `int`. Until
-    // that carrier widens to int64_t, an extent above INT_MAX must trap
-    // loudly here; the `(int)` store below would otherwise truncate it
-    // silently and the only guard (dim < 0) runs before the cast.
-    out.push("        if (dim > 2147483647LL) {".to_string());
-    out.push(
-        "            fprintf(stderr, \"reshape extent %lld exceeds the int32 dim carrier (chelis#1112)\\n\", (long long)dim);"
-            .to_string(),
-    );
-    out.push("            exit(1);".to_string());
-    out.push("        }".to_string());
-    out.push("        shape[i] = (int)dim;".to_string());
+    out.push("        shape[i] = dim;".to_string());
     out.push("        expected *= dim;".to_string());
     out.push("    }".to_string());
     out.push("    if (expected != input->size) {".to_string());
     out.push(
-        "        fprintf(stderr, \"reshape expects %lld elements but tensor has %d\\n\", (long long)expected, input->size);"
+        "        fprintf(stderr, \"reshape expects %lld elements but tensor has %lld\\n\", (long long)expected, (long long)input->size);"
             .to_string(),
     );
     out.push("        exit(1);".to_string());
@@ -1189,8 +1196,8 @@ fn append_helper(
             ..crate::CodegenOptions::default()
         },
     )?;
-    // The CEmitter prepends a `static inline float chelis_uniform_sample_f32`
-    // prelude to every DAG it emits so that a standalone-emitted kernel
+    // The CEmitter prepends dtype-specific uniform sampling helpers to
+    // every DAG it emits so that a standalone-emitted kernel
     // stays self-contained. When multiple helpers get concatenated into a
     // single `main.c` that duplicates the definition and gcc rejects the
     // redefinition. We filter the prelude out here and rely on
@@ -1207,12 +1214,12 @@ fn append_helper(
             }
             continue;
         }
-        if line.contains("chelis_uniform_sample_f32(uint64_t seed") {
+        if line == "/* CHELIS_UNIFORM_HELPERS_BEGIN */" {
             skipping_uniform_prelude = true;
             continue;
         }
         if skipping_uniform_prelude {
-            if line == "}" {
+            if line == "/* CHELIS_UNIFORM_HELPERS_END */" {
                 skipping_uniform_prelude = false;
             }
             continue;
@@ -3345,6 +3352,12 @@ impl<'a> HostEmitter<'a> {
                         Prim::Bf16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_bf16", [arg(0)])
                         }
+                        // chelis#714 asked for the f16/bf16 host-scalar
+                        // representation and is repaired: both dtypes have
+                        // their own constructor arm above. What survives here
+                        // is the general dtype-capability gap chelis#729
+                        // owns, for the precisions that still have no
+                        // scalar-tensor constructor at all.
                         precision => {
                             return Err(Unsupported::new(
                                 UnsupportedKind::HostType(format!(
@@ -3679,18 +3692,18 @@ impl<'a> HostEmitter<'a> {
             "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*){rhs}->data;"
         ));
         self.lines.push(format!(
-            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
+            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
         self.lines
-            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
+            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
             "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
         ));
         self.lines.push(format!(
-            "{ind}            int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
@@ -3723,18 +3736,18 @@ impl<'a> HostEmitter<'a> {
             "{ind}        const {elem_t} *__rhs_data = (const {elem_t}*){rhs}->data;"
         ));
         self.lines.push(format!(
-            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
+            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
         self.lines
-            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
+            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
             "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
         ));
         self.lines.push(format!(
-            "{ind}            int idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
         ));
         let expression = match arm {
             DtypeArm::F32 | DtypeArm::Bool => format!(
@@ -3769,15 +3782,15 @@ impl<'a> HostEmitter<'a> {
             "{ind}        const {elem_t} *__input_data = (const {elem_t}*){input}->data;"
         ));
         self.lines.push(format!(
-            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
+            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
         self.lines
-            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
+            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
             "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {op}__input_data[idx];"
@@ -3806,15 +3819,15 @@ impl<'a> HostEmitter<'a> {
             "{ind}        const {elem_t} *__input_data = (const {elem_t}*){input}->data;"
         ));
         self.lines.push(format!(
-            "{ind}        for (int i = 0; i < {target}->size; i++) {{"
+            "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
         self.lines
-            .push(format!("{ind}            int indices[CHELIS_MAX_DIM];"));
+            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
             "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {func}(__input_data[idx]);"
@@ -4112,7 +4125,7 @@ impl<'a> HostEmitter<'a> {
             .collect::<Vec<_>>();
         let shape_name = self.next_temp("blas_shape");
         self.lines.push(format!(
-            "{}int {shape_name}[{}] = {{ {} }};",
+            "{}int64_t {shape_name}[{}] = {{ {} }};",
             self.indent,
             output_dims.len(),
             output_dims.join(", ")
@@ -4170,23 +4183,23 @@ impl<'a> HostEmitter<'a> {
             let rhs_offset = self.next_temp("blas_rhs_offset");
             let out_offset = self.next_temp("blas_out_offset");
             self.lines.push(format!(
-                "{}for (int {batch} = 0; {batch} < {batch_count}; {batch}++) {{",
+                "{}for (int64_t {batch} = 0; {batch} < {batch_count}; {batch}++) {{",
                 self.indent
             ));
             self.lines
-                .push(format!("{}    int {rem} = {batch};", self.indent));
+                .push(format!("{}    int64_t {rem} = {batch};", self.indent));
             self.lines
-                .push(format!("{}    int {lhs_offset} = 0;", self.indent));
+                .push(format!("{}    int64_t {lhs_offset} = 0;", self.indent));
             self.lines
-                .push(format!("{}    int {rhs_offset} = 0;", self.indent));
+                .push(format!("{}    int64_t {rhs_offset} = 0;", self.indent));
             self.lines
-                .push(format!("{}    int {out_offset} = 0;", self.indent));
+                .push(format!("{}    int64_t {out_offset} = 0;", self.indent));
             for axis in (0..summary.batch_dims.len()).rev() {
                 let dim_expr =
                     self.summary_dim_expr(&summary.batch_dims[axis], summary, &tensor_args);
                 let coord = self.next_temp(&format!("blas_coord_{axis}"));
                 self.lines.push(format!(
-                    "{}    int {coord} = {rem} % ({dim_expr});",
+                    "{}    int64_t {coord} = {rem} % ({dim_expr});",
                     self.indent
                 ));
                 self.lines
@@ -4265,7 +4278,7 @@ impl<'a> HostEmitter<'a> {
                             self.indent
                         ));
                         self.lines.push(format!(
-                            "{}    fprintf(stderr, \"specialized BLAS call input {input_index} axis {axis} expected {size}, got %d\\n\", {arg}->shape[{axis}]);",
+                            "{}    fprintf(stderr, \"specialized BLAS call input {input_index} axis {axis} expected {size}, got %lld\\n\", (long long){arg}->shape[{axis}]);",
                             self.indent
                         ));
                         self.lines.push(format!("{}    abort();", self.indent));
@@ -4387,7 +4400,7 @@ impl<'a> HostEmitter<'a> {
             .collect::<Vec<_>>();
         let shape_name = self.next_temp("sparse_shape");
         self.lines.push(format!(
-            "{}int {shape_name}[{}] = {{ {} }};",
+            "{}int64_t {shape_name}[{}] = {{ {} }};",
             self.indent,
             output_dims.len(),
             output_dims.join(", ")
@@ -4478,7 +4491,7 @@ impl<'a> HostEmitter<'a> {
                             self.indent
                         ));
                         self.lines.push(format!(
-                            "{}    fprintf(stderr, \"specialized sparse call input {input_index} axis {axis} expected {size}, got %d\\n\", {arg}->shape[{axis}]);",
+                            "{}    fprintf(stderr, \"specialized sparse call input {input_index} axis {axis} expected {size}, got %lld\\n\", (long long){arg}->shape[{axis}]);",
                             self.indent
                         ));
                         self.lines.push(format!("{}    abort();", self.indent));
@@ -4551,28 +4564,30 @@ impl<'a> HostEmitter<'a> {
             "{}{target_elem_t} *{target}_out_data = ({target_elem_t}*){target}->data;",
             self.indent
         ));
-        self.lines
-            .push(format!("{}int {target}_before = {before};", self.indent));
         self.lines.push(format!(
-            "{}int {target}_axis_size = {axis_size};",
+            "{}int64_t {target}_before = {before};",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}int64_t {target}_axis_size = {axis_size};",
             self.indent
         ));
         self.lines
-            .push(format!("{}int {target}_after = {after};", self.indent));
+            .push(format!("{}int64_t {target}_after = {after};", self.indent));
         self.lines.push(format!(
-            "{}int {target}_index_count = {indices_ct}->size;",
+            "{}int64_t {target}_index_count = {indices_ct}->size;",
             self.indent
         ));
         self.lines.push(format!(
-            "{}for (int {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
+            "{}for (int64_t {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
             self.indent
         ));
         self.lines.push(format!(
-            "{}    for (int {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
+            "{}    for (int64_t {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int)((const int64_t*){indices_ct}->data)[{target}_i] : (int)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -4580,15 +4595,15 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        for (int {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
+            "{}        for (int64_t {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
             self.indent
         ));
         self.lines.push(format!(
-            "{}            int {target}_out = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
+            "{}            int64_t {target}_out = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
             self.indent
         ));
         self.lines.push(format!(
-            "{}            int {target}_src = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
+            "{}            int64_t {target}_src = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
             self.indent
         ));
         self.lines.push(format!(
@@ -4667,28 +4682,30 @@ impl<'a> HostEmitter<'a> {
             "{}memcpy({target}->data, {target_ct}->data, (size_t){target}->size * {target_elem_size});",
             self.indent
         ));
-        self.lines
-            .push(format!("{}int {target}_before = {before};", self.indent));
         self.lines.push(format!(
-            "{}int {target}_axis_size = {axis_size};",
+            "{}int64_t {target}_before = {before};",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}int64_t {target}_axis_size = {axis_size};",
             self.indent
         ));
         self.lines
-            .push(format!("{}int {target}_after = {after};", self.indent));
+            .push(format!("{}int64_t {target}_after = {after};", self.indent));
         self.lines.push(format!(
-            "{}int {target}_index_count = {indices_ct}->size;",
+            "{}int64_t {target}_index_count = {indices_ct}->size;",
             self.indent
         ));
         self.lines.push(format!(
-            "{}for (int {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
+            "{}for (int64_t {target}_b = 0; {target}_b < {target}_before; {target}_b++) {{",
             self.indent
         ));
         self.lines.push(format!(
-            "{}    for (int {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
+            "{}    for (int64_t {target}_i = 0; {target}_i < {target}_index_count; {target}_i++) {{",
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int)((const int64_t*){indices_ct}->data)[{target}_i] : (int)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -4696,15 +4713,15 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        for (int {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
+            "{}        for (int64_t {target}_d = 0; {target}_d < {target}_after; {target}_d++) {{",
             self.indent
         ));
         self.lines.push(format!(
-            "{}            int {target}_src = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
+            "{}            int64_t {target}_src = (({target}_b * {target}_index_count + {target}_i) * {target}_after) + {target}_d;",
             self.indent
         ));
         self.lines.push(format!(
-            "{}            int {target}_out = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
+            "{}            int64_t {target}_out = (({target}_b * {target}_axis_size + {target}_g) * {target}_after) + {target}_d;",
             self.indent
         ));
         let op = if accumulate { "+=" } else { "=" };
@@ -6630,28 +6647,51 @@ mod expression_dispatch_tests {
         );
     }
 
-    /// chelis#1112 fail-closed guard: the emitted reshape helper must trap
-    /// an extent above INT_MAX BEFORE the `(int)` store into the 32-bit
-    /// shape array, so an unrepresentable extent can never truncate into
-    /// a silent wrong answer while the dim carrier is still `int`.
+    /// chelis#1112: the emitted reshape helper stores the extent it read,
+    /// at the width it read it. `chelis_value_as_int64` returns int64 and
+    /// the shape buffer is the ABI's int64 extent carrier, so no cast sits
+    /// between them.
+    ///
+    /// This replaces `reshape_helper_traps_extent_above_int32_before_the_store`,
+    /// which pinned the ordering of a trap against the `(int)` store it
+    /// guarded. Both are gone: the trap existed only because the store was
+    /// lossy, and rejecting a representable extent would now itself be the
+    /// defect. Pinning the ABSENCE of the cast is what stops a later edit
+    /// from quietly reintroducing the narrowing, so several assertions
+    /// below are negative on purpose.
     #[test]
-    fn reshape_helper_traps_extent_above_int32_before_the_store() {
+    fn reshape_helper_stores_the_extent_at_int64_with_no_truncating_cast() {
         let mut out = Vec::new();
         append_tensor_reshape_helper(&mut out);
         let text = out.join("\n");
-        let guard = text
-            .find("if (dim > 2147483647LL) {")
-            .expect("emitted reshape helper must guard dim > INT_MAX");
-        let trap = text
-            .find("exceeds the int32 dim carrier (chelis#1112)")
-            .expect("guard must name the carrier and the owning issue");
-        let store = text
-            .find("shape[i] = (int)dim;")
-            .expect("emitted reshape helper stores into the int shape array");
         assert!(
-            guard < store && trap < store,
-            "the overflow trap must run before the (int) store; \
-             guard at {guard}, trap at {trap}, store at {store}"
+            text.contains("int64_t shape[CHELIS_MAX_DIM] = {0};"),
+            "the shape buffer must be the int64 extent carrier:\n{text}"
+        );
+        let read = text
+            .find("int64_t dim = chelis_value_as_int64(")
+            .expect("the extent is read at int64");
+        let store = text
+            .find("shape[i] = dim;")
+            .expect("the extent is stored without a cast");
+        assert!(
+            read < store,
+            "the extent must be read before it is stored; read at {read}, store at {store}"
+        );
+        assert!(
+            !text.contains("shape[i] = (int)dim;"),
+            "a truncating store into the shape buffer is the defect chelis#1112 removed:\n{text}"
+        );
+        assert!(
+            !text.contains("2147483647LL"),
+            "the int32 extent trap is dead with the cast it guarded:\n{text}"
+        );
+        // The negative-extent guard is NOT dead: a negative dim is invalid
+        // at every carrier width, so the widening must not have taken it
+        // along with the truncation trap.
+        assert!(
+            text.contains("if (dim < 0) {"),
+            "the negative-extent rejection survives the widening:\n{text}"
         );
     }
 }

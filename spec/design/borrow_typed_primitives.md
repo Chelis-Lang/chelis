@@ -63,7 +63,7 @@ Required coverage for this feature:
 - a borrowed local owner that is never consumed reports the specialized diagnostic
 - returning a borrow from a function is rejected
 - `grad(f)(x)` works when `f` takes `&tensor`
-- `vmap(f, axis=0)(xs)` works when `f` takes `&tensor`
+- `vmap(f)(xs)` works when `f` takes `&tensor`
 - Deep validation accepts `t-ref` and keeps the 62-tag vocabulary closed
 - macro-expanded programs continue through check/build when borrow nodes are present
 - read-only `List` / `Dict` queries (`len`, `index`) auto-borrow their container and do

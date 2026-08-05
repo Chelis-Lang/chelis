@@ -21,6 +21,6 @@ def exp_monotonicity_contract() -> string = "std.exp.monotonicity"
 def exp_zero_contract() -> string = "std.exp.zero"
 def log_monotonicity_contract() -> string = "std.log.monotonicity"
 def log_one_contract() -> string = "std.log.one"
-def standard_contract_tolerance() -> f32 = cast(0.0000000001, f32)
+def standard_contract_tolerance() -> f32 = cast(1e-10, f32)
 def normal_cdf_contract_samples() -> int64 = cast(8192, int64)
 def normal_cdf_contract_seed() -> int64 = add(mul(cast(3235848, int64), cast(1000, int64)), cast(230, int64))

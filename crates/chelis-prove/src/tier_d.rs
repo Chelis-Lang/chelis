@@ -286,7 +286,7 @@ mod tests {
             parameter: "n".to_string(),
         };
         let result = attempt_induction(
-            "module M\ndef f(n: i32) -> f32 = 1.0\n@property p forall(n: i32): (f(n) > 0.0)",
+            "module M\ndef f(n: i32) -> f32 = 1.0\n@property p forall(n: i32) -> (f(n) > 0.0)",
             "p",
             &class,
             &InductionOptions::default(),

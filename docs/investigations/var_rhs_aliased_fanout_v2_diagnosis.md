@@ -58,10 +58,10 @@ The V2-F4 case routes through a different path:
    pre-declare loop (lines 126-133) iterates these defs and
    declares each name in scope with its type.
 2. `check_top_level` (lines 246-263) is called for each def. For
-   `(def y (var x))` the body is `(var x)`. The method's
+   Surf `y = x` (Deep `(def y (var x))`) has body `(var x)`. The method's
    `!(is_var_expr(body) && var_name(body) == Some(name))` guard
-   only skips the `def y = y` self-reference shape, so for
-   `def y = x` it falls through and calls `check_expr(body, scope)`.
+   only skips the Deep self-reference shape `(def y (var y))`, so for
+   Surf `y = x` it falls through and calls `check_expr(body, scope)`.
 3. `check_expr` (lines 265-294) dispatches on the tag and at line
    275 calls `self.consume_var_expr(expr, scope, generic_site(expr))`.
 4. `generic_site` (lines 1125-1129) yields
@@ -96,7 +96,7 @@ The `check_let` path knows the consume is a binding (it builds the
 description as `"binding `{name}` at offset N"`). The
 `check_top_level` -> `check_expr -> consume_var_expr` path uses
 `generic_site`, which is the generic "bare variable use" description
-intended for things like `def y = x` written at the top-level
+intended for things like Surf `y = x` written at the top-level
 without realizing this is morally a binding consume.
 
 ## Why the module-wrapped case accepts

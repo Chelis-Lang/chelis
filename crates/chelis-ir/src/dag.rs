@@ -843,7 +843,7 @@ pub enum RiscOp {
     },
     Pad {
         padding: Vec<(RtDim, RtDim)>,
-        fill: f64,
+        fill: chelis_types::ScalarValue,
     },
     Shrink {
         bounds: Vec<(RtDim, RtDim)>,
@@ -1004,6 +1004,23 @@ pub enum RiscOp {
 }
 
 impl RiscOp {
+    /// Construct a pad from an already-finalized fill value. The dtype tag
+    /// travels with the value, so a fill/output mismatch is verifier-visible.
+    pub fn pad(padding: Vec<(RtDim, RtDim)>, fill: chelis_types::ScalarValue) -> Self {
+        Self::Pad { padding, fill }
+    }
+
+    /// Compiler-synthesized zero pad at the output dtype.
+    pub fn zero_pad(prim: Prim, padding: Vec<(RtDim, RtDim)>) -> Self {
+        let fill = chelis_types::scalar_from_i64("pad", prim, 0).unwrap_or_else(|trap| {
+            panic!(
+                "internal: zero pad fill does not finalize at {}: {trap}",
+                prim.name()
+            )
+        });
+        Self::Pad { padding, fill }
+    }
+
     /// Compiler-SYNTHESIZED scalar constant at `prim` (structural
     /// zeros/ones, adjoint seeds, mask fills; the chelis#729 fifth
     /// storage layer). The wide value finalizes through the sealed
@@ -3181,10 +3198,7 @@ mod tests {
                 size: DimExpr::Concrete(4),
             },
             RiscOp::OneHot { vocab: 8 },
-            RiscOp::Pad {
-                padding: vec![(RtDim::Lit(0), RtDim::Lit(0))],
-                fill: 0.0,
-            },
+            RiscOp::zero_pad(Prim::F32, vec![(RtDim::Lit(0), RtDim::Lit(0))]),
             RiscOp::Shrink {
                 bounds: vec![(RtDim::Lit(0), RtDim::Lit(1))],
             },

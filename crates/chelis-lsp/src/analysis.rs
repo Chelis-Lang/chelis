@@ -727,6 +727,28 @@ fn collect_expr_symbols(
                 );
             }
         }
+        Expr::RecordUpdate(base, fields, _) => {
+            collect_expr_symbols(
+                text,
+                base,
+                top_level,
+                locals,
+                references,
+                definitions,
+                completions,
+            );
+            for (_, value) in fields {
+                collect_expr_symbols(
+                    text,
+                    value,
+                    top_level,
+                    locals,
+                    references,
+                    definitions,
+                    completions,
+                );
+            }
+        }
         Expr::Access(base, _, _)
         | Expr::TupleGet(base, _, _)
         | Expr::Borrow(base, _)
@@ -736,6 +758,9 @@ fn collect_expr_symbols(
         | Expr::Realize(base, _)
         | Expr::Copy(base, _)
         | Expr::Cast(base, _, _, _)
+        | Expr::Quote(base, _)
+        | Expr::Unquote(base, _)
+        | Expr::Splice(base, _)
         | Expr::Annotate(base, _, _) => {
             collect_expr_symbols(
                 text,
@@ -974,7 +999,7 @@ fn collect_expr_symbols(
             );
             locals.truncate(start_len);
         }
-        Expr::Tuple(items, _) | Expr::Par(items, _) => {
+        Expr::Tuple(items, _) | Expr::Par(items, _) | Expr::Do(items, _) => {
             for item in items {
                 collect_expr_symbols(
                     text,
@@ -1296,7 +1321,12 @@ fn parse_error_offset(text: &str, err: &chelis_surf::parser::ParseError) -> usiz
         chelis_surf::parser::ParseError::Expected { offset, .. }
         | chelis_surf::parser::ParseError::ReservedWordBinding { offset, .. }
         | chelis_surf::parser::ParseError::NonAssocChain { offset }
-        | chelis_surf::parser::ParseError::BareStatementInBlock { offset } => *offset,
+        | chelis_surf::parser::ParseError::BareStatementInBlock { offset }
+        | chelis_surf::parser::ParseError::NonCanonicalLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::NonFiniteLiteral { offset, .. }
+        | chelis_surf::parser::ParseError::SignedMinimumMagnitudeRequiresNegation {
+            offset, ..
+        } => *offset,
     }
 }
 
@@ -1318,6 +1348,7 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::Apply(_, _, span)
         | Expr::List(_, span)
         | Expr::Record(_, _, span)
+        | Expr::RecordUpdate(_, _, span)
         | Expr::Access(_, _, span)
         | Expr::TupleGet(_, _, span)
         | Expr::Binary(_, _, _, span)
@@ -1337,6 +1368,10 @@ fn range_for_expr(text: &str, expr: &Expr) -> Range {
         | Expr::WithSeed(_, _, span)
         | Expr::WithDevice(_, _, span)
         | Expr::Par(_, span)
+        | Expr::Do(_, span)
+        | Expr::Quote(_, span)
+        | Expr::Unquote(_, span)
+        | Expr::Splice(_, span)
         | Expr::Annotate(_, _, span)
         | Expr::Block(_, _, span) => *span,
     };
@@ -1531,7 +1566,7 @@ mod tests {
 
     #[test]
     fn completions_include_builtins_and_locals() {
-        let text = "def f(x: f32): f32 = {\n  y = x\n  add(y, x)\n}\n";
+        let text = "def f(x: f32) -> f32 = {\n  y = x\n  add(y, x)\n}\n";
         let state = DocumentState {
             uri: surf_uri(),
             text: text.to_string(),
@@ -1544,7 +1579,7 @@ mod tests {
 
     #[test]
     fn completions_include_imported_names() {
-        let text = "module Main\nimport Foo.Bar (baz)\ndef f(x: f32): f32 = b\n";
+        let text = "module Main\nimport Foo.Bar (baz)\ndef f(x: f32) -> f32 = b\n";
         let state = DocumentState {
             uri: surf_uri(),
             text: text.to_string(),
@@ -1562,19 +1597,22 @@ mod tests {
         fs::create_dir_all(root.join("foo")).expect("mkdir");
         fs::write(
             root.join("foo/bar.ch"),
-            "module Foo.Bar\nexport (baz)\ndef baz(x: f32): f32 = x\n",
+            "module Foo.Bar\nexport (baz)\ndef baz(x: f32) -> f32 = x\n",
         )
         .expect("write");
         let uri = Url::from_file_path(root.join("main.ch")).expect("uri");
-        let text = "module Main\nimport Foo.Bar (baz)\ndef use_it(x: f32): f32 = baz(x)\n";
+        let text = "module Main\nimport Foo.Bar (baz)\ndef use_it(x: f32) -> f32 = baz(x)\n";
         let state = DocumentState {
             uri: uri.clone(),
             text: text.to_string(),
             analysis: analyze_document(&uri, text),
         };
-        let position = Position::new(2, 27);
+        let position = Position::new(2, 29);
         let location = definition_location(&state, position, Some(root)).expect("location");
-        assert!(location.uri.path().ends_with("/foo/bar.ch"));
+        assert!(
+            location.uri.path().ends_with("/foo/bar.ch"),
+            "resolved {location:?}"
+        );
     }
 
     fn named_ty(n: &str) -> TypeExpr {

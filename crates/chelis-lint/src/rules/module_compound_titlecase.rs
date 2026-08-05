@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn end_to_end_accepts_c_earchin_prefix() {
         use std::path::Path;
-        let src = "module CEarchin.Vocabulary\n\ndef x = 1\n";
+        let src = "module CEarchin.Vocabulary\n\ndef x() = 1\n";
         let path = Path::new("c-earchin/src/vocabulary.ch");
         let ctx = Context {
             root: Path::new("/"),
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn end_to_end_flags_coral_internal_hamt() {
         use std::path::Path;
-        let src = "module Coral.Internal.HAMT\n\ndef x = 1\n";
+        let src = "module Coral.Internal.HAMT\n\ndef x() = 1\n";
         let path = Path::new("coral/src/internal/hamt.ch");
         let ctx = Context {
             root: Path::new("/"),
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn end_to_end_passes_titlecase_module() {
         use std::path::Path;
-        let src = "module Coral.Internal.Hamt\n\ndef x = 1\n";
+        let src = "module Coral.Internal.Hamt\n\ndef x() = 1\n";
         let path = Path::new("coral/src/internal/hamt.ch");
         let ctx = Context {
             root: Path::new("/"),

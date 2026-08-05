@@ -116,12 +116,12 @@ float upcast (their default `divide`); use a `cast` first for that.
 
 | Name | Signature | AD adjoint |
 |---|---|---|
-| `sum` | `(&tensor[..,p], axis: int, accumulator: prec = default(p)) -> tensor[..,acc]` | `expand(g, axis)` |
-| `max_reduce` | `(&tensor[..,p], axis: int) -> tensor[..,p]` | `g * one_hot(argmax)` |
-| `min_reduce` | `(&tensor[..,p], axis: int) -> tensor[..,p]` | `g * one_hot(argmin)` |
-| `prod_reduce` | `(&tensor[..,p], axis: int) -> tensor[..,p]` | per-slice product/quotient |
-| `argmax_reduce` | `(&tensor[..,p], axis: int) -> tensor[..,int64]` | **non-differentiable** (index output) |
-| `argmin_reduce` | `(&tensor[..,p], axis: int) -> tensor[..,int64]` | **non-differentiable** (index output) |
+| `sum` | `(&tensor[..,p], axis: int32, accumulator: prec = default(p)) -> tensor[..,acc]` | `expand(g, axis)` |
+| `max_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmax)` |
+| `min_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmin)` |
+| `prod_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | per-slice product/quotient |
+| `argmax_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,int64]` | **non-differentiable** (index output) |
+| `argmin_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,int64]` | **non-differentiable** (index output) |
 
 - **Axis must be a compile-time constant** (literal, or `cast(N,int32)` of a literal).
   A runtime-axis reduction is a check-time error (chelis#259). Negative axes index
@@ -136,7 +136,7 @@ float upcast (their default `divide`); use a `cast` first for that.
 
 | Name | Signature |
 |---|---|
-| `reduce_window_max` / `_min` / `_sum` / `_mean` | `(&tensor[..,p], window_shape: List[int32], strides: List[int32]) -> tensor[..,p]` |
+| `reduce_window_max` / `_min` / `_sum` / `_mean` | `(&tensor[..,p], window_shape: List[int64], strides: List[int64]) -> tensor[..,p]` |
 
 Tier-1 in its own right (single `RiscOp::ReduceWindow{reducer,window_shape,strides}`;
 adjoint via `RiscOp::ReduceWindowGrad`). Output extent per windowed axis is
@@ -149,8 +149,8 @@ explicitly first. Windowed extents must be statically known on the build path.
 | Name | Signature | AD adjoint |
 |---|---|---|
 | `reshape` | `(&tensor[D_old,p], shape) -> tensor[D_new,p]` | `reshape(g, old_shape)` |
-| `permute` | `(&tensor[..,p], axes) -> tensor[..,p]` | `permute(g, inverse_axes)` |
-| `expand` | `(&tensor[D_small,p], axis, size) -> tensor[D_large,p]` | `sum(g, expanded_axes)` |
+| `permute` | `(&tensor[..,p], axes: int32...) -> tensor[..,p]` | `permute(g, inverse_axes)` |
+| `expand` | `(&tensor[D_small,p], axis: int32, size: int64) -> tensor[D_large,p]` | `sum(g, expanded_axes)` |
 | `pad` | `(&tensor[D,p], padding, fill) -> tensor[D',p]` | `shrink(g, inverse_padding)` |
 | `shrink` | `(&tensor[D,p], bounds) -> tensor[D',p]` | `pad(g, inverse_bounds)` |
 | `stride` | `(&tensor[D,p], strides) -> tensor[D',p]` | expand/scatter |
@@ -165,7 +165,7 @@ point by name; its insert axis must be a compile-time constant.
 | `const` | `(value, shape...) -> tensor[shape,p]` | zero gradient |
 | `load` | `(source, shape...) -> tensor[shape,p]` | zero gradient |
 | `dropout` | `(&tensor[D,f32], rate: f32) -> tensor[D,f32]` | differentiable (mask fixed wrt seed); introduces `Random`. **Eval-only — not codegen'd by C/HIP/Metal build yet.** |
-| `uniform_like` | `(&tensor[D,f32], lo: f32, hi: f32) -> tensor[D,f32]` | zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
+| `uniform_like` | `(&tensor[D,p], lo: f32, hi: f32) -> tensor[D,p]` | active float `p`; zero gradient; introduces `Random`; seeded via `with seed(Ni64) { }` |
 
 Internal-only `RiscOp`s not directly callable from Surf: `Store`, `Copy`, `Drop`,
 `Realize`, `Cast`, `FusedElem`, `OneHot`, `BlasMatmul` (the `matmul` specialization
@@ -177,9 +177,9 @@ First-class `RiscOp`s with evaluator/verifier/AD/C+HIP support:
 
 | Surf builtin | Lowers to | Signature | AD adjoint |
 |---|---|---|---|
-| `gather` | `RiscOp::Gather{axis}` | `(&values, &indices, axis) -> tensor` | `ScatterAdd` |
-| `scatter_replace` | `RiscOp::Scatter{axis}` | `(&base, &indices, &updates, axis) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
-| `scatter_elements` | `RiscOp::ScatterElements{axis}` | `(&data, &indices, &updates, axis) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
+| `gather` | `RiscOp::Gather{axis}` | `(&values, &indices, axis: int32) -> tensor` | `ScatterAdd` |
+| `scatter_replace` | `RiscOp::Scatter{axis}` | `(&base, &indices, &updates, axis: int32) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
+| `scatter_elements` | `RiscOp::ScatterElements{axis}` | `(&data, &indices, &updates, axis: int32) -> tensor` | **no_grad** (`NonDeterministicAtDuplicateIndices`) |
 | _(scatter-add internal)_ | `RiscOp::ScatterAdd{axis}` | — | `Gather` |
 
 `scatter_replace` is last-write-wins (hyperplane shape) with a deterministic row-major
@@ -239,16 +239,16 @@ capability.
 
 | Name | Signature | Notes |
 |---|---|---|
-| `cumsum` | `(&tensor, axis) -> tensor` | cumulative sum along axis; precision-preserving per dtype |
-| `sort` | `(&tensor, axis) -> (values, indices)` | returns sorted values + int32 index tensor |
+| `cumsum` | `(&tensor, axis: int32) -> tensor` | cumulative sum along axis; precision-preserving per dtype |
+| `sort` | `(&tensor, axis: int32) -> (values, indices)` | returns sorted values + int32 index tensor |
 | `einsum` | `(equation: string, &lhs, &rhs) -> tensor` | 2-operand only today; no ellipsis; static-extent errors rejected at check |
-| `diagonal` | `(&tensor, _, _) -> tensor` | diagonal extraction |
-| `trace` | `(&tensor, _, _) -> tensor` | matrix trace |
+| `diagonal` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | diagonal extraction |
+| `trace` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | matrix trace |
 | `where` | `(&cond, &a, &b) -> tensor` | `DAG+Host`: also has the `add(mul(cond,a),mul(neg(cond),b))` DAG form (`spec/05` §3.5) |
 | `clamp` | `(&tensor, lo, hi) -> tensor` | elementwise clip |
-| `concat` | `(lists/tensors, axis) -> tensor` | join along axis |
-| `split` | `(&tensor, sizes, axis) -> list` | partition along axis |
-| `scatter` | `(base, indices, updates, axis, mode: string) -> tensor` | host pentaop form (string mode); distinct from tensor-lane `scatter_replace` (§1.7) |
+| `concat` | `(tensors: List[tensor], axis: int32) -> tensor` | join tensors along axis; ordinary two-list concatenation has no axis slot |
+| `split` | `(&tensor, axis: int32, sizes: List[int]) -> list` | partition along axis |
+| `scatter` | `(base, indices, updates, axis: int32, mode: string) -> tensor` | host pentaop form (string mode); distinct from tensor-lane `scatter_replace` (§1.7) |
 | `pad_sequences`, `pad_sequences_to` | variable-length padding | runtime-derived extents |
 
 ### 3.2 Host-runtime tensor builder — `spec/05` §3.6
@@ -276,8 +276,9 @@ The host lane is eager (no lazy list fusion).
   `string_starts_with`, `string_ends_with`, `string_trim`, `to_string`.
 - **Scalar coercion:** `to_int`, `to_float`.
 - **Tensor↔host bridges & queries:** `rank`, `shape`, `numel`, `tensor_to_scalar`,
-  `scalar_to_tensor`, `to_tensor`, `to_list`. `shape` returns a runtime list;
-  reductions/expands still need compile-time-constant axes regardless.
+  `scalar_to_tensor`, `to_tensor`, `to_list`. `shape(t, axis: int32)` returns the
+  selected runtime extent as `int64`; reductions/expands still need
+  compile-time-constant axes regardless.
 
 ### 3.5 I/O and process — introduces `Io`
 

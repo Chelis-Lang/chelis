@@ -192,6 +192,54 @@ macro_rules! runtime_fail {
     }};
 }
 
+/// Arithmetic used by runtime tensor loops whose operation is governed by
+/// [04-NUM-3]. Float implementations retain IEEE arithmetic; signed integer
+/// implementations detect overflow explicitly so behavior is identical in
+/// debug and release builds and never depends on Rust panic settings.
+trait RuntimeArithmetic: TensorElement + Copy + Default {
+    fn runtime_add(self, rhs: Self, op: &'static str) -> Self;
+    fn runtime_mul(self, rhs: Self, op: &'static str) -> Self;
+}
+
+macro_rules! impl_runtime_float_arithmetic {
+    ($ty:ty) => {
+        impl RuntimeArithmetic for $ty {
+            #[inline]
+            fn runtime_add(self, rhs: Self, _op: &'static str) -> Self {
+                self + rhs
+            }
+
+            #[inline]
+            fn runtime_mul(self, rhs: Self, _op: &'static str) -> Self {
+                self * rhs
+            }
+        }
+    };
+}
+
+macro_rules! impl_runtime_integer_arithmetic {
+    ($ty:ty, $name:literal) => {
+        impl RuntimeArithmetic for $ty {
+            #[inline]
+            fn runtime_add(self, rhs: Self, op: &'static str) -> Self {
+                self.checked_add(rhs)
+                    .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+            }
+
+            #[inline]
+            fn runtime_mul(self, rhs: Self, op: &'static str) -> Self {
+                self.checked_mul(rhs)
+                    .unwrap_or_else(|| runtime_fail!("numeric trap: overflow in {op} at {}", $name))
+            }
+        }
+    };
+}
+
+impl_runtime_float_arithmetic!(f32);
+impl_runtime_float_arithmetic!(f64);
+impl_runtime_integer_arithmetic!(i32, "int32");
+impl_runtime_integer_arithmetic!(i64, "int64");
+
 // chelis#732 Phase 2: the compiled lane's shortest-round-trip float
 // formatter (declared after `runtime_fail!` so the macro is in scope).
 mod format_shortest;
@@ -237,11 +285,17 @@ pub struct chelis_tensor {
     /// compatible with the C header's `float *data` (both 8-byte
     /// pointers); the C side casts at use.
     pub data: *mut u8,
-    pub shape: [c_int; CHELIS_MAX_DIM],
-    pub strides: [c_int; CHELIS_MAX_DIM],
+    /// chelis#1112: extents, strides, and the element count carry `i64`,
+    /// mirroring the header's `int64_t` fields. The language's extent dtype
+    /// is int64 ([05-DIM-2]), so a shape crosses this boundary at its
+    /// declared dtype ([04-NUM-11]) instead of being truncated into a
+    /// 32-bit carrier. `ndim` and `dtype` stay `c_int`: rank and the dtype
+    /// tag are axis-domain quantities ([05-DIM-1]).
+    pub shape: [i64; CHELIS_MAX_DIM],
+    pub strides: [i64; CHELIS_MAX_DIM],
     pub ndim: c_int,
     pub dtype: c_int,
-    pub size: c_int,
+    pub size: i64,
     pub owns_data: c_int,
 }
 
@@ -279,7 +333,7 @@ pub union chelis_value_union {
     pub adt: *mut chelis_adt,
 }
 
-unsafe fn chelis_flat_to_indices(flat: c_int, shape: *const c_int, ndim: c_int, out: *mut c_int) {
+unsafe fn chelis_flat_to_indices(flat: i64, shape: *const i64, ndim: c_int, out: *mut i64) {
     let mut flat = flat;
     for d in (0..ndim as isize).rev() {
         *out.offset(d) = flat % *shape.offset(d);
@@ -287,11 +341,7 @@ unsafe fn chelis_flat_to_indices(flat: c_int, shape: *const c_int, ndim: c_int, 
     }
 }
 
-unsafe fn chelis_indices_to_flat(
-    indices: *const c_int,
-    strides: *const c_int,
-    ndim: c_int,
-) -> c_int {
+unsafe fn chelis_indices_to_flat(indices: *const i64, strides: *const i64, ndim: c_int) -> i64 {
     let mut flat = 0;
     for d in 0..ndim as isize {
         flat += *indices.offset(d) * *strides.offset(d);
@@ -620,7 +670,7 @@ unsafe fn int_list_value(list: *const chelis_list, index: i64, op: &str) -> i64 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_alloc(
     ndim: c_int,
-    shape: *const c_int,
+    shape: *const i64,
     dtype: c_int,
 ) -> *mut chelis_tensor {
     let dtype = require_runtime_dtype(dtype, "chelis_alloc");
@@ -686,7 +736,7 @@ pub extern "C" fn chelis_dtype_size(dtype: c_int) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn chelis_alloc_view(
     ndim: c_int,
-    shape: *const c_int,
+    shape: *const i64,
     dtype: c_int,
     data: *mut f32,
 ) -> *mut chelis_tensor {
@@ -1063,12 +1113,16 @@ pub unsafe extern "C" fn chelis_tensor_rank(t: *const chelis_tensor) -> i64 {
     }
 }
 
+/// chelis#1112: `axis` is axis-domain and carries `i32` ([05-DIM-1]); the
+/// returned extent is extent-domain and carries `i64` ([05-DIM-2]). The
+/// bounds check runs against the value the caller passed, so an axis
+/// outside `[0, ndim)` still fails loudly rather than indexing.
 #[no_mangle]
-pub unsafe extern "C" fn chelis_tensor_shape(t: *const chelis_tensor, axis: i64) -> i64 {
-    if t.is_null() || axis < 0 || axis >= (*t).ndim as i64 {
+pub unsafe extern "C" fn chelis_tensor_shape(t: *const chelis_tensor, axis: i32) -> i64 {
+    if t.is_null() || axis < 0 || axis >= (*t).ndim {
         runtime_fail!("chelis_tensor_shape axis out of bounds");
     }
-    (*t).shape[axis as usize] as i64
+    (*t).shape[axis as usize]
 }
 
 #[no_mangle]
@@ -1076,7 +1130,7 @@ pub unsafe extern "C" fn chelis_tensor_numel(t: *const chelis_tensor) -> i64 {
     if t.is_null() {
         0
     } else {
-        (*t).size as i64
+        (*t).size
     }
 }
 
@@ -2100,8 +2154,8 @@ pub unsafe extern "C" fn chelis_dict_entries(dict: *const chelis_dict) -> *mut c
 /// Bucket 4b: enables `to_tensor([[1.0, 2.0], [3.0, 4.0]])` etc.
 ///
 /// Returns `(shape, dtype)`. `shape` has one entry per nesting level.
-unsafe fn chelis_nested_list_shape(list: *const chelis_list) -> (Vec<c_int>, RuntimeDType) {
-    let mut shape: Vec<c_int> = Vec::new();
+unsafe fn chelis_nested_list_shape(list: *const chelis_list) -> (Vec<i64>, RuntimeDType) {
+    let mut shape: Vec<i64> = Vec::new();
     let mut current = list;
     let mut leaf_dtype = RuntimeDType::F32;
 
@@ -2110,7 +2164,7 @@ unsafe fn chelis_nested_list_shape(list: *const chelis_list) -> (Vec<c_int>, Run
             shape.push(0);
             break;
         }
-        let len = (*current).items.len() as c_int;
+        let len = (*current).items.len() as i64;
         shape.push(len);
         if len == 0 {
             // Empty inner list — treat as leaf-of-zero with default
@@ -2164,7 +2218,7 @@ unsafe fn chelis_nested_list_shape(list: *const chelis_list) -> (Vec<c_int>, Run
 /// that read back through the correct stride.
 unsafe fn chelis_flatten_nested_list_typed(
     list: *const chelis_list,
-    shape: &[c_int],
+    shape: &[i64],
     depth: usize,
     dst_dtype: RuntimeDType,
     out_bytes: *mut u8,
@@ -2488,7 +2542,7 @@ pub unsafe extern "C" fn chelis_pad_sequences(
             width = width.max((*item.as_.list).items.len());
         }
     }
-    let shape = [batch as c_int, width as c_int];
+    let shape = [batch as i64, width as i64];
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         RuntimeDType::I64
     } else {
@@ -2546,7 +2600,7 @@ pub unsafe extern "C" fn chelis_pad_sequences_to(
     }
     let batch = chelis_list_len(sequences) as usize;
     let width = width as usize;
-    let shape = [batch as c_int, width as c_int];
+    let shape = [batch as i64, width as i64];
     let dtype = if pad_value.tag == chelis_value_tag::CHELIS_VALUE_INT64 {
         RuntimeDType::I64
     } else {
@@ -2665,7 +2719,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
     for i in 0..chelis_list_len(sizes) {
         total += int_list_value(sizes, i, "split");
     }
-    if total != (*tensor).shape[axis_i] as i64 {
+    if total != (*tensor).shape[axis_i] {
         runtime_fail!("split sizes must sum to the selected axis extent");
     }
     let mut items = Vec::new();
@@ -2673,7 +2727,7 @@ pub unsafe extern "C" fn chelis_tensor_split(
     let mut indices = [0; CHELIS_MAX_DIM];
     let elem_size = tensor_elem_size(dtype);
     for part_idx in 0..chelis_list_len(sizes) {
-        let part_size = int_list_value(sizes, part_idx, "split") as c_int;
+        let part_size = int_list_value(sizes, part_idx, "split");
         let mut shape = (*tensor).shape;
         shape[axis_i] = part_size;
         let part = chelis_alloc((*tensor).ndim, shape.as_ptr(), dtype.id());
@@ -2755,10 +2809,10 @@ pub unsafe extern "C" fn chelis_tensor_gather(
             (*indices).ndim,
         );
         let gathered = read_index_slot(indices, index_linear as usize, indices_dtype);
-        if gathered < 0 || gathered >= (*tensor).shape[axis_i] as i64 {
+        if gathered < 0 || gathered >= (*tensor).shape[axis_i] {
             runtime_fail!("gather index {gathered} out of bounds");
         }
-        src_index[src_pos] = gathered as c_int;
+        src_index[src_pos] = gathered;
         src_pos += 1;
         for i in axis_i + 1..(*tensor).ndim as usize {
             src_index[src_pos] = out_index[axis_i + (*indices).ndim as usize + (i - axis_i - 1)];
@@ -2892,10 +2946,10 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
             (*indices).ndim,
         );
         let gathered = read_index_slot(indices, index_linear as usize, indices_dtype);
-        if gathered < 0 || gathered >= (*base).shape[axis_i] as i64 {
+        if gathered < 0 || gathered >= (*base).shape[axis_i] {
             runtime_fail!("scatter index {gathered} out of bounds");
         }
-        out_index[out_pos] = gathered as c_int;
+        out_index[out_pos] = gathered;
         out_pos += 1;
         for i in axis_i + 1..(*base).ndim as usize {
             out_index[out_pos] = update_index[axis_i + (*indices).ndim as usize + (i - axis_i - 1)];
@@ -2930,13 +2984,13 @@ pub unsafe extern "C" fn chelis_tensor_scatter(
                     let op = i64::data_ptr_unchecked(out);
                     let up = i64::data_ptr_unchecked(updates as *mut chelis_tensor);
                     *op.add(out_linear) =
-                        (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
+                        (*op.add(out_linear)).runtime_add(*up.add(linear as usize), "scatter");
                 }
                 RuntimeDType::I32 => {
                     let op = i32::data_ptr_unchecked(out);
                     let up = i32::data_ptr_unchecked(updates as *mut chelis_tensor);
                     *op.add(out_linear) =
-                        (*op.add(out_linear)).wrapping_add(*up.add(linear as usize));
+                        (*op.add(out_linear)).runtime_add(*up.add(linear as usize), "scatter");
                 }
                 RuntimeDType::Bool => {
                     runtime_fail!("scatter add-mode is undefined for bool tensors");
@@ -3054,7 +3108,7 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
     // each precision accumulates in its native width.  Pre-migration
     // accumulated as f32 regardless, corrupting F64 / I64.  Bool is
     // semantically undefined here (Contract 3).
-    unsafe fn cumsum_loop<T: TensorElement + Copy + Default + core::ops::AddAssign>(
+    unsafe fn cumsum_loop<T: RuntimeArithmetic>(
         out: *mut chelis_tensor,
         outer: usize,
         axis_size: usize,
@@ -3066,7 +3120,7 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
                 let mut running: T = T::default();
                 for axis_idx in 0..axis_size {
                     let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                    running += *p.add(linear);
+                    running = running.runtime_add(*p.add(linear), "cumsum");
                     *p.add(linear) = running;
                 }
             }
@@ -3259,7 +3313,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
     // each precision accumulates in its native width.  Pre-migration
     // f32-only accumulation corrupted F64 / I64 traces silently.  Bool
     // is undefined per Contract 3.
-    unsafe fn trace_loop<T: TensorElement + Copy + Default + core::ops::AddAssign>(
+    unsafe fn trace_loop<T: RuntimeArithmetic>(
         diag: *mut chelis_tensor,
         out: *mut chelis_tensor,
         outer: usize,
@@ -3273,7 +3327,7 @@ pub unsafe extern "C" fn chelis_tensor_trace(
                 let mut sum: T = T::default();
                 for axis_idx in 0..axis_size {
                     let linear = (outer_idx * axis_size + axis_idx) * inner + inner_idx;
-                    sum += *dp.add(linear);
+                    sum = sum.runtime_add(*dp.add(linear), "trace");
                 }
                 *op.add(outer_idx * inner + inner_idx) = sum;
             }
@@ -3435,8 +3489,8 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
     if lhs_chars.len() != (*lhs).ndim as usize || rhs_chars.len() != (*rhs).ndim as usize {
         runtime_fail!("einsum label count must match operand rank");
     }
-    let mut label_dims = [-1i32; 256];
-    let mut label_values = [0i32; 256];
+    let mut label_dims = [-1i64; 256];
+    let mut label_values = [0i64; 256];
     let mut out_contains = [false; 256];
     let mut reduction_seen = [false; 256];
     for &label in &out_labels {
@@ -3465,7 +3519,7 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         out_shape[i] = label_dims[idx];
     }
     let mut reduction_labels: Vec<char> = Vec::new();
-    let mut reduction_shape: Vec<i32> = Vec::new();
+    let mut reduction_shape: Vec<i64> = Vec::new();
     for &label in lhs_chars.iter().chain(rhs_chars.iter()) {
         let idx = label as usize;
         if !out_contains[idx] && !reduction_seen[idx] {
@@ -3492,12 +3546,12 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         lhs_chars: &[char],
         rhs_chars: &[char],
         reduction_labels: &[char],
-        out_shape: &[c_int],
-        reduction_shape: &[c_int],
+        out_shape: &[i64],
+        reduction_shape: &[i64],
         reduction_total: usize,
-        label_values: &mut [i32; 256],
+        label_values: &mut [i64; 256],
     ) where
-        T: TensorElement + Copy + Default + core::ops::Mul<Output = T> + core::ops::AddAssign,
+        T: RuntimeArithmetic,
     {
         let lp = T::data_ptr_unchecked(lhs as *mut chelis_tensor);
         let rp = T::data_ptr_unchecked(rhs as *mut chelis_tensor);
@@ -3509,7 +3563,7 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         for out_linear in 0..out_size {
             if !out_labels.is_empty() {
                 chelis_flat_to_indices(
-                    out_linear as c_int,
+                    out_linear as i64,
                     out_shape.as_ptr(),
                     out_labels.len() as c_int,
                     out_index.as_mut_ptr(),
@@ -3522,7 +3576,7 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             for reduction_linear in 0..reduction_total {
                 if !reduction_labels.is_empty() {
                     chelis_flat_to_indices(
-                        reduction_linear as c_int,
+                        reduction_linear as i64,
                         reduction_shape.as_ptr(),
                         reduction_shape.len() as c_int,
                         reduction_index.as_mut_ptr(),
@@ -3547,7 +3601,8 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
                     (*rhs).strides.as_ptr(),
                     rhs_chars.len() as c_int,
                 ) as usize);
-                acc += lv * rv;
+                let product = lv.runtime_mul(rv, "einsum");
+                acc = acc.runtime_add(product, "einsum");
             }
             *op.add(out_linear) = acc;
         }
@@ -4110,9 +4165,17 @@ mod tests {
         }
     }
 
+    /// chelis#1112 widened the extent domain (`shape`, `strides`, `size`)
+    /// from 32 to 64 bits, which moves this number from 88 to 160 by
+    /// construction: eight extents and eight strides gain four bytes each,
+    /// and `size` gains four more that the trailing padding absorbs. The
+    /// lock is the point - the number is here so a layout change has to be
+    /// stated rather than discovered. `dim_carrier_int64.rs` checks the
+    /// same layout against the published header, which is the half that
+    /// catches a Rust-only edit.
     #[test]
     fn tensor_layout_stays_stable() {
-        assert_eq!(std::mem::size_of::<chelis_tensor>(), 88);
+        assert_eq!(std::mem::size_of::<chelis_tensor>(), 160);
         assert_eq!(std::mem::align_of::<chelis_tensor>(), 8);
     }
 
@@ -4152,7 +4215,7 @@ mod tests {
             0.8370135426521301,
         ];
         unsafe {
-            let shape = [20i32, 20i32];
+            let shape = [20i64, 20i64];
             let matrix = chelis_alloc(2, shape.as_ptr(), CHELIS_F32);
             let data = data_as_f32(matrix);
             for (i, &v) in diag.iter().enumerate() {
@@ -4194,7 +4257,7 @@ mod tests {
         diag.push(-1e16_f64);
         let k = diag.len(); // 20
         unsafe {
-            let shape = [k as i32, k as i32];
+            let shape = [k as i64, k as i64];
             let matrix = chelis_alloc(2, shape.as_ptr(), CHELIS_F64);
             let data = (*matrix).data as *mut f64;
             for (i, &v) in diag.iter().enumerate() {
@@ -4217,7 +4280,7 @@ mod tests {
     #[test]
     fn chelis_alloc_returns_32_byte_aligned_data() {
         unsafe {
-            let shape = [1000i32];
+            let shape = [1000i64];
             let result = chelis_alloc(1, shape.as_ptr(), CHELIS_F32);
             assert!(
                 !(*result).data.is_null(),

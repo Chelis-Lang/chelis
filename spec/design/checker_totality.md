@@ -787,6 +787,178 @@ the raw-tag walker, and every new typed disposition table. Moving the carrier
 may change the compile-error site list, but may not reduce the class of
 undecided consumers that fail closed.
 
+## Post-Phase-3 work items
+
+Named deliverables opened after Phase 3 shipped. They are not a phase: they
+add no freeze point, inherit no phase's exit state, and change no contract in
+Part I. Each one exists because an instance was found whose local fix would
+leave the mechanism that produced it in place, and the class intent (§C1:
+every construct covered or loudly rejected) is a statement about mechanisms,
+not about the instances anyone has happened to trip over. Each therefore
+names the mechanism that holds the class, and carries its own oracle in the
+phase idiom.
+
+They are numbered PP-N rather than W-N to keep them distinct from the
+verification stack's WI-N work items (`verification_stack_dependency_map.md`),
+one of which - WI-1's depth-oracle harness - this document already cites
+above.
+
+### PP1. The function-parameter typing channel ([#780], [#847], with [#783])
+
+**Opened 2026-08-04.** Two open defects are the two faces of one undecided
+semantics question: how the type of a lambda-bound or function-valued
+parameter binds, and which checks re-run once it is bound.
+
+- [#780] is the silent-acceptance face. An operand flows through an
+  UNANNOTATED lambda parameter, that parameter stays a bare type var, the
+  shape-computed builtin's Var arm returns the unresolved result var instead
+  of deferring and re-checking once the application binds it, and the
+  `[4,4]`-vs-`[9,9]` conflict is never revisited. `chelis check` is clean on
+  a genuinely ill-shaped program.
+- [#847] is the over-unification face on the same channel. Differentiating a
+  scalar projection through an arbitrary FUNCTION-VALUED model parameter
+  unifies `n` and `m` - two independently declared, rigid dim parameters -
+  so a legitimate generic wrapper is rejected. The concrete-dim variant
+  checks; the same objective with the function parameter removed checks,
+  evaluates, and C-builds. The trigger is the function parameter, not `grad`.
+
+Both were sequenced behind Phases 1-2, and Phases 1, 2, and 3 all shipped
+without deciding it. That is the reason this is one item and not two: two
+local patches would encode two ad-hoc answers to one question - a
+bind-later rule at the shape-checker site and a keep-rigid rule at the
+differentiation site, neither written down anywhere a third site could read -
+and each would be free to drift back into the other's failure. §C1 is not
+satisfied by teaching one builtin to notice one unbound operand. The channel
+needs a decided rule, and the fixes are then derived from it.
+
+[#783]'s durable invariant belongs to the same channel and MAY ride this
+item: the post-inference annotation writeback never replaces a concrete type
+annotation with a degraded one (a Var-derived rank-0 `f32` default or an
+Error-derived type). When re-inference is unresolved, the existing annotation
+survives or the pass fails loudly - covered-or-rejected on the type-metadata
+channel. It is the same unresolved-Var value one layer down, where the
+consumers are the IR lowering's type readers, the host pipeline's `expr_type`,
+and eval-root expansion; the conv2d ICE was that value arriving as plausible
+metadata rather than as a diagnostic.
+
+**You deliver:**
+
+1. **The decision, recorded once.** At minimum it covers: when an unannotated
+   lambda or function-valued parameter's type is bound (at the abstraction, at
+   the application, or by explicit deferral); what happens when nothing ever
+   binds it - accepted as polymorphic, or rejected, and with which
+   diagnostic; which checks re-run at binding, naming the shape-computed
+   builtin overrides whose Var arm today returns an unresolved result var;
+   and how declared rigidity survives a function-valued parameter, so that
+   two independently declared rigid dim parameters reaching a differentiating
+   combinator stay distinct while genuinely required equalities still unify.
+2. **The authority for it.** If the rule is a language decision it amends
+   `spec/04-type-system.md` first and this item cites the amended text
+   (Numbered Specs Decide); if it is an inference-implementation rule under an
+   existing spec/04 authority, it names that authority. A rule that lives only
+   in this design doc is the drift shape the repo contract calls out.
+3. **Both fixes, derived from the decision, in one change set** - not a patch
+   at each site.
+4. **An explicit in-or-out record for [#783].** Whoever lands this states
+   whether [#783]'s writeback invariant rides here or stays standalone, and
+   why. The condition is real - if the decision changes what an unresolved
+   parameter type may BECOME, the writeback is downstream of the same value
+   and landing it separately risks a second, contradicting rule - but a
+   conditional left implicit in a plan is how a half gets dropped. Recording
+   the choice costs a sentence; leaving it to be inferred is how [#780] and
+   [#847] spent three phases attached to a note that scheduled nothing.
+
+**This item names no owner and no date, and that is its one live risk.** The
+sequencing notes it replaces failed for exactly that reason rather than for
+being wrongly scoped: they described a dependency without anyone holding it.
+A named deliverable is a better artifact than a sequencing note only if
+someone is assigned to decide it.
+
+This entry does not decide the semantics. It contracts that ONE decision is
+made, states what the decision must cover, and binds both fixes to it; open
+question 5 below is its tracking row and is not answered here.
+
+**Oracle:**
+
+- [#780]'s reproducer rejects with a shape mismatch naming `[4,4]` and
+  `[9,9]`; its annotated-lambda variant (today's control) and a
+  consistent-shape variant stay green.
+- [#847]'s `jacobian_row` reproducer checks clean with `n` and `m` distinct;
+  its concrete-dim variant stays green; and a negative control - a wrapper
+  whose body genuinely does require the two dims equal - still rejects, so
+  the fix is a correct binding rule and not a disabled rigidity check.
+- Both reproducers become named regression tests, and [#780]'s ill-typed
+  program joins the §C4.4 fitness-honesty corpus scoring strictly below 1.0.
+- If [#783] rides: a writeback whose re-inference yields Var or Error over a
+  node carrying a concrete annotation preserves that annotation byte for
+  byte or fails loudly, plus the sweep of the writeback's other degrade paths
+  (Error-derived, partial-dim) against the same invariant.
+- §C4.3 applies unchanged: the unannotated-lambda and function-valued-parameter
+  wrappers are wrapper constructs in the canary's sense, so each adds its
+  positive and negative row in the same change set.
+
+### PP2. The registered-builtin arm tripwire ([#1147])
+
+**Opened 2026-08-04.** `scatter_elements` shipped as a registered builtin -
+`generic_quadop("scatter_elements", ...)` in
+`crates/chelis-types/src/builtins.rs` - with no inference arm in
+`crates/chelis-types/src/infer/app_post.rs`. A string axis, an out-of-bounds
+axis on a rank-2 operand, an f32 tensor as indices, and a string operand all
+check clean at score 1.0, while the sibling `scatter` rejects every one. Found
+by the PR #1145 review sweep, after Phase 3.
+
+This is [#709]'s mechanism on a second keyed lookup, and it is why the item is
+a tripwire rather than an arm. The generic-arity registration hands the call a
+signature that unifies with whatever the caller supplies, so the checker
+reports success on operands it never examined: the registration IS the
+wildcard, and it is a wildcard nothing in Phases 1-3 quantifies over. Phase 3
+made a Deep TAG with no disposition uncompilable; a registered BUILTIN with no
+arm is the same silent exemption keyed by callable name, and the compiler has
+no reason to complain about it.
+
+**Relation to §C4.1's scope note and [#874].** §C4.1's coverage half is
+tag-keyed, so it quantifies over the checked result and is satisfied
+vacuously by a node with no tag to key on; [#874] tracks that face. PP2 covers
+the complementary face, and neither subsumes the other. Here the node IS
+tagged (`app`), IS visited, and IS stamped - §C4.1 holds - and the operands
+are still unchecked, because the disposition the `app` arm reaches is a
+generic signature. [#874] is about a node the checker never visits; PP2 is
+about a node it visits and learns nothing from.
+
+**You deliver:**
+
+1. **The `scatter_elements` arm** on the `scatter`/`scatter_replace` model -
+   operand, indices, updates, and axis checking - with both polarities. This
+   is the one-line-shaped prerequisite, not the deliverable; per [#1147], an
+   axis-dtype-only screen would misrepresent the builtin as checked and does
+   not satisfy it.
+2. **The tripwire.** Every name in the builtin registry (`BUILTIN_NAMES` and
+   the consolidated `BUILTINS` table in `builtins.rs`) either reaches a
+   name-keyed inference arm or carries an explicit, recorded generic-acceptance
+   disposition: a named entry stating that the generic signature IS the
+   intended check for that callable, with its reason. A registered builtin
+   that is neither armed nor dispositioned is a red check, never a silent 1.0.
+3. **The disposition lives beside the registration**, so the omission fails
+   where the builtin is added rather than being discovered months later by a
+   review sweep. `BuiltinDecl` is the existing single source of truth for
+   per-builtin metadata and already carries the doctrine this needs -
+   "Omitting any field is a compile error" - which is the [#730] Phase 2
+   typed-vocabulary shape applied to the callable registry.
+
+The adjacent cosmetic defect [#1147] records rides this change set: the shared
+indices helper hardcodes `gather` in its message, so `scatter` and
+`scatter_replace` reject with a diagnostic naming an op the program does not
+call. A rejection that names the wrong op is loud but not actionable.
+
+**Oracle:** the tripwire test red on a planted armless builtin - a scratch
+registration with neither an arm nor a recorded disposition must fail it,
+verified in the PR, recorded, then the scratch registration deleted (the
+Phase 3 mutation-oracle idiom) - and green on the real registry only once
+every current name is armed or dispositioned. The four [#1147] programs reject
+with the diagnostics their `scatter` equivalents produce, each joining the
+§C4.4 fitness-honesty corpus; a well-typed `scatter_elements` call is the
+positive control.
+
 ---
 
 # Part IV - bookkeeping
@@ -829,6 +1001,7 @@ undecided consumers that fail closed.
 | 2 | typecheck-cache deserialization as a witness mint (accepted, or cache entries re-validated?) | Phase 2 | §C3 note + the cache module doc |
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | DECIDED 2026-07-23: deferred; REVERSED 2026-07-24 by the decode-once rework directive - printers, desugar, and every other producer/consumer migrated; no string-keyed tag idiom survives outside the parse/serialize boundary | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
+| 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | OPEN 2026-08-04, contracted by PP1. Sequenced behind Phases 1-2 and still undecided after Phase 3; [#780] (silent acceptance) and [#847] (over-unification) are its two faces and may not be patched ahead of it | PP1 + `spec/04-type-system.md` if the rule is a language decision |
 
 ## Contract summary
 
@@ -852,10 +1025,14 @@ continuous-oracle guarantees.
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#755]: https://github.com/Chelis-Lang/chelis/issues/755
 [#756]: https://github.com/Chelis-Lang/chelis/issues/756
+[#780]: https://github.com/Chelis-Lang/chelis/issues/780
+[#783]: https://github.com/Chelis-Lang/chelis/issues/783
 [#833]: https://github.com/Chelis-Lang/chelis/issues/833
+[#847]: https://github.com/Chelis-Lang/chelis/issues/847
 [#858]: https://github.com/Chelis-Lang/chelis/issues/858
 [#859]: https://github.com/Chelis-Lang/chelis/issues/859
 [#874]: https://github.com/Chelis-Lang/chelis/issues/874
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
 [#1088]: https://github.com/Chelis-Lang/chelis/issues/1088
+[#1147]: https://github.com/Chelis-Lang/chelis/issues/1147

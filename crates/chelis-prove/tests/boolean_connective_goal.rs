@@ -83,14 +83,14 @@ const DISJ_FALSE: &str = "module M
 // transcendental has no cvc5 kind), TRUE on its precondition domain.
 const CONJ_NONLOWERABLE_TRUE: &str = "module M
 def helper(x: f32) -> f32 = log(x)
-@property conj_nl_true forall(x: f32) where (x > 0.0):
+@property conj_nl_true forall(x: f32) where x > 0.0:
   ((helper(x) <= x) && (x > 0.0))
 ";
 
 // Same non-lowerable shape but FALSE: `log(x) >= 0` fails for x in (0, 1).
 const CONJ_NONLOWERABLE_FALSE: &str = "module M
 def helper(x: f32) -> f32 = log(x)
-@property conj_nl_false forall(x: f32) where (x > 0.0):
+@property conj_nl_false forall(x: f32) where x > 0.0:
   ((helper(x) >= 0.0) && (x > 0.0))
 ";
 

@@ -47,9 +47,23 @@ portable across Surf and Reef boundaries.
 | `property_tolerance` | expr | Optional property runner tolerance metadata |
 | `property_seed` | expr | Optional property runner seed metadata |
 | `property_samples` | expr | Optional property runner sample-count metadata |
+| `property_contracts` | `(tuple {} string...)` | Ordered repeatable standard-contract dependencies authored with `with contract = "..."` |
 | `opaque` | `true` | On a `deftype`: the type is opaque (see §2.2) |
 | `invariant` | `(fn {} (params {} <binder>) <expr>)` | On an opaque `deftype`: the declared invariant predicate (see §2.2) |
 | `invariant_amenability` | string | On an invariant-carrying `deftype`: `"linear"`/`"polynomial"`/`"transcendental"`/`"opaque"`; derived data, recomputed on desugar (see §2.2) |
+| `surf_path` | string | Exact canonical Surf module path spelling; permitted only on `module`, `import`, and `import-all`; its ASCII-lowercased value must equal the node's lowered module-path child |
+| `surf_dim_group_size` | positive integer | Number of adjacent `defdim` declarations authored in one Surf `dim` group; permitted only on the first member |
+| `surf_pipe_stage` | `"call-first"` | First-argument call-stage origin; permitted only on an `fn` child used as a non-initial `pipe` stage |
+| `surf_literal_style` | `"unsuffixed"` / `"explicit"` | Numeric literal origin; permitted only on `lit` |
+| `surf_binding_type` | `"inferred"` / `"explicit"` | Block-binding type origin; permitted only on the expression child of a `bind` name/value pair |
+
+The `surf_*` namespace is closed. A public Deep parser or programmatic
+validator MUST reject an unknown `surf_*` key. Resugaring MUST also reject a
+known key with any value or placement outside the table above; a standalone
+metadata map or legacy metadata-expression wrapper is not a permitted
+placement. These five keys preserve only surface distinctions that canonical
+Deep otherwise erases; they do not change evaluation. Producers MUST NOT use
+the namespace for arbitrary provenance.
 
 **Reserved metadata:**
 
@@ -59,10 +73,11 @@ portable across Surf and Reef boundaries.
 | `doc` | string | Documentation |
 | `span_*` | reserved | Span-metadata extension namespace (see §1.1.1) |
 
-**Metadata propagation through transformations.** Metadata fields are
-preserved by all spec-defined transformations and round-trip through the
-canonical form (§6). Cross-tool provenance, including the `span` field, must
-survive the full compile pipeline.
+**Metadata propagation through transformations.** Semantic metadata and the
+validated surface-fidelity keys are preserved by all spec-defined
+transformations. Derived metadata may be recomputed according to §6.3.2.
+Cross-tool provenance (the `span` field in particular) remains governed by
+the span-survival contract below.
 
 #### 1.1.1 External-source spans (`span`, `span_*` namespace)
 
@@ -515,6 +530,12 @@ Deep uses explicit multi-argument application, not currying:
 
 If `f` expects 3 arguments and receives 2, this is a **type error**, not partial application.
 
+A nested application is nevertheless a distinct valid shape when the inner
+application returns a function value. `(app {} (app {} f x) y)` is not
+flattened to `(app {} f x y)`; canonical Surf writes it `(f(x))(y)`. The same
+grouped-callee rule preserves `if`, `fn`, unary, and other expression-valued
+callees.
+
 ### 4.2 Partial Application
 
 Explicit closure construction:
@@ -576,22 +597,109 @@ Deep has exactly one textual representation per program.
 ### 6.2 Ordering
 - Module declarations: declaration order (not sorted).
 - Import names within an import: alphabetized.
-- Record `kv` pairs: alphabetized by key.
+- Record and record-update `kv` pairs: written order, which is left-to-right
+  evaluation order.
 - Match arms: declaration order (semantically meaningful).
 - Bind pairs in `let`: declaration order (sequential semantics).
 
 ### 6.3 Comments
 None in canonical Deep. Comments are Surf-only. Stripped during desugaring. Use the `doc` meta key for structured documentation.
 
+### 6.3.1 Canonical Surf resugaring
+
+Every structurally valid public Deep tag has a canonical Surf representation.
+Deep `pipe` resugars as a pipeline. A Deep `app` chain resugars as that same
+pipeline only when the typed proof from `spec/01-nomenclature.md` §3.6
+establishes a linear first-argument chain; otherwise it remains a flat
+parenthesized call. Later-position insertion retains an explicit lambda.
+Resolved ordinary calls to the fixed operator builtins use Surf infix/prefix
+notation, while the same builtin name remains a value or pipe stage. A finite
+`Cons`/`Nil` chain uses bracket-list syntax; an open-tail `Cons` remains an
+explicit call. Explicit `borrow` and `copy` nodes remain explicit.
+
+(The typed `app`-to-pipe promotion is not fully implemented; see chelis#1171.)
+
+Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
+`base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
+same-named call-like forms. A matching `defsig` and `def` resugar as one inline
+typed Surf definition; a standalone `defsig` remains `sig`. A checked standalone
+`def` carrying semantic `type` metadata resugars as a typed Surf declaration;
+normalization materializes the equivalent `defsig` rather than erasing the type.
+All ordered pairs in one `bind` become ordered Surf block bindings. Empty
+`tuple` and `t-tuple` nodes normalize to the language's unit value and type;
+empty `pat-tuple` is written `()` directly. Every zero-argument `app`, including
+an application whose callee is an uppercase constructor, remains an explicit
+call such as `Ctor()` or `f()`. A bare uppercase `var` remains `Ctor`, and a
+zero-field `record` remains `Ctor {}`.
+
+The normal and debug emitters share this AST-backed resugarer and Surf printer.
+Debug output may append stable `-- deep-debug: ...` comments; it is not a
+second Surf dialect.
+
+Surf property declarations represent user-authored properties only. They have
+no syntax for the non-forgeable `bridge:c-earchin` producer identity or for a
+producer-local `property_source_id`. Resugaring a property with either form of
+provenance therefore fails explicitly; it must never emit an ordinary
+`@property` that would redesugar with `property_source_kind: "user"`.
+`property_quantifiers` must also be present and exactly match the property
+`fn` parameter list before resugaring; a mismatch fails rather than changing
+the bound names.
+
+### 6.3.2 Round-trip normalization
+
+`normalize_deep` may erase `span`, `loc`, macro `source` provenance after
+expansion, inferred `effects`, and `invariant_amenability` because those values
+are informational or deterministically recomputed. It may also erase
+matching `type` entries on a `def`, its `fn` value, and its function parameters
+when an adjacent matching `defsig` already carries the exact same types; a
+disagreement is never erased. For a standalone checked `def`, normalization may
+materialize that metadata as an adjacent `defsig` and then apply the same exact
+redundancy rule. Empty `tuple`/`t-tuple` normalize to `lit`/`t-unit`. No `app`
+normalizes to a `var`: `Ctor`, `Ctor()`, and `Ctor {}` retain their distinct
+`var`, `app`, and `record` structures. Because Surf negative
+numerals are unary minus rather than signed tokens, a negative Deep `lit`
+normalizes to the equivalent `neg` application. The full `int64` minimum uses
+Surf's directly representable signed-minimum literal; a narrower signed minimum
+uses `sub(neg(max), 1)` so its positive magnitude never overflows that literal
+width.
+An integer atom carrying a float primitive type normalizes to the equivalent
+float atom before that sign rule. A valid, correctly placed non-semantic
+`surf_literal_style` or `surf_binding_type` origin marker may be erased after it
+has selected the canonical Surf reconstruction; desugaring that Surf recreates
+the applicable marker. Normalization may likewise erase a `surf_path` equal to
+the deterministic default spelling of its lowered path child and a
+`surf_dim_group_size: 1` marker on the first member of its one-member group,
+because canonical desugaring deterministically recreates those defaults. A
+non-default, malformed, or misplaced marker is retained so the round-trip
+oracle cannot hide a resugaring error. Normalization may not erase or rewrite
+any other declared `type` or `eff` data, handler effects, `wrt`, `opaque`,
+`invariant`, property semantics, or validated `surf_*` values. Implementations
+compare macro-authored Surf after expansion. Any other metadata loss is a
+round-trip failure.
+
+A negative `pat-lit` is not normalized to an application because patterns do
+not contain expression nodes. It resugars as minus followed by the one
+unsuffixed canonical numeric pattern token, including `-0.0` and the full
+`int64` minimum.
+
 ### 6.4 Literal Normalization
 
 | Type | Canonical | Normalizations |
 |---|---|---|
 | Integer | Decimal, no leading zeros | `07` → `7` |
-| Float | `d.d` minimum | `1.` → `1.0`, `.5` → `0.5` |
-| Float (sci) | `d.dE±d` (uppercase E, explicit sign) | `1e3` → `1.0E+3` |
-| String | Double-quoted, standard escapes | |
+| Float | Finite, shortest round-trippable value spelling, with `.0` when otherwise integer-like | `1.` → `1.0`, `.5` → `0.5` |
+| Float (sci) | Lowercase `e`, only when selected by the shortest printer | equivalent longer spellings normalize to the printer result |
+| String | Double-quoted; named Surf escapes where available, otherwise minimal lowercase `\u{h}` for control scalars | Printable-character and named-escape Unicode aliases are not canonical |
 | Boolean | `true` / `false` | |
+
+Canonical Deep contains no non-finite float literal. Producers that construct
+Deep programmatically must reject NaN and infinity before serialization;
+Deep-to-Surf resugaring reports either as unrepresentable rather than emitting
+an invalid Surf token.
+
+Every valid Deep string atom has a Surf representation. Resugaring uses the
+single P11 spelling: printable Unicode remains literal, the six named escapes
+are preferred, and other C0/C1 controls use minimal lowercase `\u{h}`.
 
 **Literal default rule.** An unsuffixed integer literal binds at type
 `int32` (i.e. its `lit` node carries `{type: (t-prim {} int32)}`); an
@@ -648,14 +756,21 @@ lex time with a diagnostic citing §1.1.1; none is a literal suffix in this
 grammar. The short unsigned spellings (`u8`, `u16`,
 `u32`, `u64`) are not reserved in any form - `uint8`/`uint16`/`uint32`/
 `uint64` are canonical per §1.1.2 - and are likewise rejected at lex time.
-Hex integer literals interact with float-typed suffixes per the
-hex-suffix rule in `spec/02-surf-syntax.md` §P10a; the same rule applies
-to Deep.
+Deep's producer-friendly lexer accepts hexadecimal integer input and
+canonical Deep printing rewrites the decoded value in decimal. Canonical Surf
+also accepts value-preserving hexadecimal and binary integer spellings as
+input; the shared Surf printer owns the same decimal rewrite.
 
 ### 6.5 Identifier Rules
 - Variables/functions: `[a-z_][a-z0-9_]*` (snake_case)
 - Types/variants: `[A-Z][a-zA-Z0-9]*` (PascalCase)
 - Module paths: dot-separated identifiers
+
+Deep's lexer admits a broader symbol alphabet for tag and producer use, but a
+public declaration, expression, pattern, type, field, or module name that is to
+be resugared MUST satisfy its corresponding Surf identifier rule and MUST NOT
+be a reserved Surf word. Deep-to-Surf resugaring rejects an invalid name rather
+than quoting it, rewriting it, or emitting text with changed meaning.
 
 ---
 

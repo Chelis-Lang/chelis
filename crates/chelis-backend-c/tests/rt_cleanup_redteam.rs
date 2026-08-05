@@ -216,21 +216,21 @@ const HARNESS: &str = r#"
 #include "chelis_runtime.h"
 
 static chelis_tensor *bf16_tensor_from_bits(const uint16_t *bits, int n) {
-    int shape[1] = {n};
+    int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
     memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_bits(const uint16_t *bits, int n) {
-    int shape[1] = {n};
+    int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
     memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
     return t;
 }
 
 static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
-    int shape[1] = {n};
+    int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_bf16(src[i]);
@@ -238,7 +238,7 @@ static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
 }
 
 static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
-    int shape[1] = {n};
+    int64_t shape[1] = {n};
     chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_f16(src[i]);

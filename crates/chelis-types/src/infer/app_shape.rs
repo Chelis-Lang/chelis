@@ -1048,7 +1048,7 @@ pub(super) fn infer_reduce_window_app(
         return err;
     }
 
-    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int32)]);
+    let int_list = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
     if let Err(_te) = unify(&window_ty, &int_list, subst) {
         return report(
             errors,
@@ -1057,7 +1057,7 @@ pub(super) fn infer_reduce_window_app(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "{name} expects window_shape to be List[int32], got {}",
+                        "{name} expects window_shape to be List[int64], got {}",
                         subst.apply(&window_ty)
                     ),
                 ),
@@ -1073,7 +1073,7 @@ pub(super) fn infer_reduce_window_app(
                 with_macro_provenance(
                     &deep::Expr::List(list.clone(), zero_span()),
                     format!(
-                        "{name} expects strides to be List[int32], got {}",
+                        "{name} expects strides to be List[int64], got {}",
                         subst.apply(&stride_ty)
                     ),
                 ),
@@ -1102,7 +1102,7 @@ pub(super) fn infer_reduce_window_app(
     };
 
     // Extract literal window / stride entries. Non-literal arguments
-    // are accepted at infer time (the type is still `List[int32]`) but
+    // are accepted at infer time (the type is still `List[int64]`) but
     // the output shape collapses to wildcards so the host runtime can
     // do the final shape check.
     let window_lit = cons_chain_int_list(&kids[2]);
