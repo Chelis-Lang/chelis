@@ -404,6 +404,22 @@ pub(super) fn infer_reshape_app(
                 }
                 let dims =
                     reshape_output_dims(shape_expr, input_var_name.as_deref(), &input_dims, subst);
+                if let (Some(input_numel), Some(target_numel)) = (
+                    subst.static_dim_product(&input_dims),
+                    subst.static_dim_product(&dims),
+                ) && input_numel != target_numel
+                {
+                    return report(
+                        errors,
+                        CheckError::new(
+                            CheckErrorKind::DimensionMismatch,
+                            format!(
+                                "reshape target has {target_numel} elements but input tensor has {input_numel}"
+                            ),
+                            vec![],
+                        ),
+                    );
+                }
                 return Type::Tensor(dims, precision);
             }
 

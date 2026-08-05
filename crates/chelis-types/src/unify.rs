@@ -329,7 +329,7 @@ impl Subst {
         Err(first_rejection.expect("every deferred expand candidate was rejected"))
     }
 
-    fn static_dim_product(&self, dims: &[Dim]) -> Option<i64> {
+    pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i64> {
         dims.iter().try_fold(1_i64, |product, dim| {
             let Dim::Lit(value) = self.apply_dim(dim) else {
                 return None;

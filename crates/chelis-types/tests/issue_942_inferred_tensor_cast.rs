@@ -204,6 +204,52 @@ def f(bias: tensor[2, f32]) = {
 }
 
 #[test]
+fn reshape_rejects_replacement_after_shared_expand_selected_insertion() {
+    let errors = typecheck(
+        r#"
+def f(bias: tensor[2, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  inserted = reshape(expanded, [6i64])
+  reshape(expanded, [3i64])
+}
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error
+                    .message
+                    .contains("reshape target has 3 elements but input tensor has 6")
+        }),
+        "one deferred binding cannot select insertion then replacement:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn reshape_rejects_insertion_after_shared_expand_selected_replacement() {
+    let errors = typecheck(
+        r#"
+def f(bias: tensor[2, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  replaced = reshape(expanded, [3i64])
+  reshape(expanded, [6i64])
+}
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::DimensionMismatch)
+                && error
+                    .message
+                    .contains("reshape target has 6 elements but input tensor has 3")
+        }),
+        "one deferred binding cannot select replacement then insertion:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
 fn reshape_rejects_a_concrete_precision_incompatible_with_expand() {
     let errors = typecheck(
         r#"
