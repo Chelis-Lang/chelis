@@ -250,6 +250,44 @@ def f(bias: tensor[2, f32]) = {
 }
 
 #[test]
+fn ambiguous_reshape_before_consumer_leaves_deferred_expand_unresolved() {
+    let errors = typecheck(
+        r#"
+def require_inserted(x: tensor[3, 2, f32]) -> tensor[3, 2, f32] = x
+def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  reshaped = reshape(expanded, [shape(shape_source, 0)])
+  require_inserted(expanded)
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "a reshape with unknown numel must not preempt a later shape-bearing consumer:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn ambiguous_reshape_after_consumer_preserves_selected_deferred_expand() {
+    let errors = typecheck(
+        r#"
+def require_inserted(x: tensor[3, 2, f32]) -> tensor[3, 2, f32] = x
+def f(bias: tensor[2, f32], shape_source: tensor[6, f32]) = {
+  expanded = expand(bias, 0, 3i64)
+  inserted = require_inserted(expanded)
+  reshape(expanded, [shape(shape_source, 0)])
+}
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "an ambiguous reshape must accept an expand shape fixed by an earlier consumer:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
 fn reshape_rejects_a_concrete_precision_incompatible_with_expand() {
     let errors = typecheck(
         r#"

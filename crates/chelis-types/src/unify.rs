@@ -272,7 +272,8 @@ impl Subst {
     /// Reshape does not preserve rank or individual dimensions, but it does
     /// preserve element count. Derive the target separately for every legal
     /// expand candidate because `shape(expanded, axis)` may itself distinguish
-    /// replacement from insertion or reject an out-of-bounds candidate.
+    /// replacement from insertion or reject an out-of-bounds candidate. If
+    /// more than one candidate survives, leave the expand unresolved.
     pub fn materialize_deferred_expand_for_numel<F>(
         &mut self,
         v: TypeVar,
@@ -292,6 +293,7 @@ impl Subst {
         };
 
         let mut first_rejection = None;
+        let mut compatible_candidates = Vec::new();
         for candidate in constraints[0].candidate_types()? {
             let Type::Tensor(candidate_dims, _) = &candidate else {
                 unreachable!("deferred expand candidates are tensors");
@@ -318,15 +320,21 @@ impl Subst {
             });
             match compatible {
                 Ok(()) => {
-                    unify(&Type::Var(v), &candidate, self)?;
-                    return Ok(Some(self.apply(&candidate)));
+                    compatible_candidates.push(candidate);
                 }
                 Err(error) => {
                     first_rejection.get_or_insert(error);
                 }
             }
         }
-        Err(first_rejection.expect("every deferred expand candidate was rejected"))
+        match compatible_candidates.as_slice() {
+            [candidate] => {
+                unify(&Type::Var(v), candidate, self)?;
+                Ok(Some(self.apply(candidate)))
+            }
+            [] => Err(first_rejection.expect("every deferred expand candidate was rejected")),
+            _ => Ok(None),
+        }
     }
 
     pub(crate) fn static_dim_product(&self, dims: &[Dim]) -> Option<i64> {
@@ -2130,6 +2138,28 @@ mod tests {
                 .message
                 .contains("matches no legal expand output shape")
         );
+    }
+
+    #[test]
+    fn reshape_unknown_numel_leaves_deferred_expand_unresolved() {
+        let mut g = var_gen();
+        let result = g.fresh_tvar();
+        let mut s = Subst::new();
+        s.record_deferred_expand_constraint(
+            result,
+            DeferredExpandConstraint {
+                input_dims: vec![Dim::Lit(2)],
+                input_prec: tprec(Prim::F32),
+                axis: 0,
+                size: Dim::Lit(3),
+            },
+        );
+
+        let selected = s
+            .materialize_deferred_expand_for_numel(result, |_| Ok(vec![Dim::Wildcard]))
+            .expect("an unknown reshape target is compatible with either expand shape");
+        assert_eq!(selected, None);
+        assert!(s.has_deferred_expand_constraint(result));
     }
 
     #[test]
