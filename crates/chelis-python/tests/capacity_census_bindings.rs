@@ -10,6 +10,10 @@ use std::process::{Command, Output};
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyModule, PyType};
 use serde::Deserialize;
+
+#[path = "../../../tests/support/managed_python.rs"]
+mod managed_python;
+
 const PERMANENT_BINDING_DISPOSITION: &str = "permanent-disposition(C6 registered PyO3 signature surface complete descriptor set ratified 2026-08-04)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,7 +189,8 @@ fn registered_surface(include_reviewer_probe: bool) -> RegisteredSurface {
 
 fn run_typed_enumerator(surface: &RegisteredSurface) -> Output {
     let root = workspace_root();
-    let mut command = Command::new(root.join(".venv/bin/python"));
+    let python = managed_python::managed_python(&root).unwrap_or_else(|error| panic!("{error}"));
+    let mut command = Command::new(python);
     command
         .arg(root.join("scripts/capacity_census_typed.py"))
         // No `--target-dir`: see the wire census for why the enumerator owns
@@ -330,7 +335,8 @@ fn a_registered_pyfunction_with_a_raw_dtype_parameter_is_rejected() {
     );
 
     let root = workspace_root();
-    let mutation = Command::new(root.join(".venv/bin/python"))
+    let python = managed_python::managed_python(&root).unwrap_or_else(|error| panic!("{error}"));
+    let mutation = Command::new(python)
         .arg(root.join("scripts/test_capacity_census_typed.py"))
         .arg("BindingEnumerator")
         .current_dir(&root)

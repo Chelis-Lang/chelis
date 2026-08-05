@@ -1,6 +1,8 @@
 """Tests for the commit-message authorship policy.
 
-Run with `.venv/bin/python scripts/test_check_commit_message.py`.
+Run with
+`uv run --managed-python --python 3.11 --no-project python
+scripts/test_check_commit_message.py`.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ CARGO_HUSKY_DEPENDENCY = (
 class CargoHuskyFallback:
     checker_path: str
     interpreter_paths: tuple[str, str]
+    uv_command: str
     dependency: str
     locked_version: str
 
@@ -79,6 +82,13 @@ class CargoHuskyFallback:
                 "the cargo-husky hook must use the shared checker and managed Python: "
                 f"{missing_hook_paths!r}"
             )
+        uv_command = (
+            "uv run --managed-python --python 3.11 --no-project python"
+        )
+        if uv_command not in hook:
+            raise ValueError(
+                "the cargo-husky hook must fall back to uv-managed Python"
+            )
         if CARGO_HUSKY_DEPENDENCY not in manifest:
             raise ValueError("the chelis-cli manifest must retain cargo-husky")
 
@@ -91,6 +101,7 @@ class CargoHuskyFallback:
         return cls(
             checker_path=checker_path,
             interpreter_paths=interpreter_paths,
+            uv_command=uv_command,
             dependency=CARGO_HUSKY_DEPENDENCY,
             locked_version=locked.group("version"),
         )
@@ -143,6 +154,7 @@ class CommitMessagePolicyTests(unittest.TestCase):
     def test_cargo_husky_fallback_is_retained(self) -> None:
         fallback = CargoHuskyFallback.parse(*self.cargo_husky_inputs())
         self.assertEqual(fallback.checker_path, "scripts/check_commit_message.py")
+        self.assertIn("--managed-python", fallback.uv_command)
         self.assertEqual(fallback.locked_version, "1.5.0")
 
     def test_cargo_husky_hook_has_valid_posix_shell_syntax(self) -> None:
@@ -180,6 +192,7 @@ class CommitMessagePolicyTests(unittest.TestCase):
         hook, manifest, lock = self.cargo_husky_inputs()
         mutations = (
             (hook.replace("scripts/check_commit_message.py", "other.py"), manifest, lock),
+            (hook.replace("--managed-python", "--system"), manifest, lock),
             (hook, manifest.replace(CARGO_HUSKY_DEPENDENCY, ""), lock),
             (hook, manifest, lock.replace('name = "cargo-husky"', 'name = "other"')),
         )
