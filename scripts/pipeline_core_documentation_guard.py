@@ -46,28 +46,65 @@ def parse_text(text: str) -> InventoryDocument:
 
 def false_no_std_claim(line: str) -> bool:
     normalized = " ".join(
-        line.lower().replace("`", "").replace("#![no_std]", "no_std").split()
+        line.lower()
+        .replace("`", "")
+        .replace("#![no_std]", "no_std")
+        .replace("#![no-std]", "no_std")
+        .replace("no-std", "no_std")
+        .split()
     )
-    absence_claims = (
+
+    # Affirmative std-independence: the crate is claimed to not need std.
+    independence_claims = (
         "does not require std",
+        "does not need std",
         "no longer requires std",
+        "no longer needs std",
         "works without std",
         "work without std",
         "runs without std",
         "run without std",
     )
-    if any(claim in normalized for claim in absence_claims):
+    if any(claim in normalized for claim in independence_claims):
         return True
+
     if "no_std" not in normalized:
         return False
-    if re.search(r"\b(?:does not|cannot|is not)\b.{0,40}\bno_std\b", normalized):
-        return False
-    positive_patterns = (
-        r"\b(?:supports?|provides?|enables?|has|uses?)\b.{0,40}\bno_std\b",
-        r"\bno_std\b.{0,24}\b(?:compatible|ready|supported|capable)\b",
-        r"\bis\s+no_std\b",
+
+    # A negated no_std capability, or a future-target frame, is not a current
+    # claim. This is checked before any affirmative pattern so "supports std
+    # only, not no_std" and "does not support no_std" are never flagged, and so
+    # a blocker line that says what no_std would require is not a claim.
+    negation_or_future_patterns = (
+        r"\bnot\s+(?:a\s+|an\s+|yet\s+)?no_std\b",
+        r"\b(?:does not|do not|cannot|can not|is not|are not|will not|won't|wont|no longer)\b[^.]{0,25}\bno_std\b",
+        r"\bno_std\b[^.]{0,25}\b(?:is|are)\s+not\b",
+        r"\bno_std\b[^.]{0,25}\bnot\s+(?:yet\s+)?(?:supported|available|possible|current)\b",
+        r"\bfuture\s+(?:target|capability|goal|work|non-goal|milestone)\b",
+        r"\bnot\s+(?:a\s+|an\s+)?current\b",
+        # Hypothetical framing: a line that says what no_std *would* require is
+        # discussing a blocker, not asserting a current capability.
+        r"\bno_std\b[^.]{0,20}\b(?:would|could)\b",
+        r"\b(?:would|could)\b[^.]{0,20}\bno_std\b",
+        r"\bno_std\b[^.]{0,20}\bout of scope\b",
     )
-    return any(re.search(pattern, normalized) for pattern in positive_patterns)
+    if any(re.search(pattern, normalized) for pattern in negation_or_future_patterns):
+        return False
+
+    # An affirmative current no_std capability claim about the crate. The
+    # vocabulary is deliberately broad (support verbs, adjective forms, and
+    # environment phrasings) so a real claim does not slip through on a common
+    # wording such as "portable to no_std" or "works in a no_std environment".
+    affirmative_patterns = (
+        r"\b(?:supports?|provides?|enables?|offers?|gain(?:s|ed)?|add(?:s|ed)?)\b"
+        r"[^.]{0,20}\bno_std\b",
+        r"\bno_std\b[- ]?(?:compatible|compatibility|ready|capable|support|supported)\b",
+        r"\b(?:is|are)\s+no_std\b",
+        r"\b(?:portable\s+(?:to|on)|works?\s+(?:in|on|under)|runs?\s+(?:in|on|under)"
+        r"|compiles?\s+(?:as|for|to|under)|builds?\s+(?:as|for|under)|targets?)\b"
+        r"[^.]{0,25}\bno_std\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in affirmative_patterns)
 
 
 def validate_document(document: InventoryDocument) -> None:
