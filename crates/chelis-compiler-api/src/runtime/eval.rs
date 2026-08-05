@@ -2524,9 +2524,9 @@ impl<'a> EvalContext<'a> {
             // Activation primitives (Bucket 3).
             //
             // Scalar values are rank-0 numeric values under spec/05 §2.2.
-            // Route both surfaces through the sealed dtype-keyed kernel: f64
-            // computes at f64, f32 at f32, and f16/bf16 compute at f32 then
-            // finalize once at their declared storage width.
+            // Route both surfaces through the sealed dtype-keyed Tier-2
+            // composition so every constituent primitive finalizes before
+            // the next node observes it.
             "relu" => numeric_unop(args, None, Some(FloatUnOp::Relu)),
             "sigmoid" => numeric_unop(args, None, Some(FloatUnOp::Sigmoid)),
             "tanh" => numeric_unop(args, None, Some(FloatUnOp::Tanh)),

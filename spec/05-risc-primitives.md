@@ -842,10 +842,11 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 All five activation functions admit float tensors and float scalars at f16,
 bf16, f32, and f64. The scalar form returns the same scalar dtype and is the
 rank-zero instance of the tensor operation; non-float operands are type
-errors. The activation computes at [04-NUM-8]'s declared arithmetic width and
-finalizes once to the operand's storage width. The adjoint is the derivative
-of the lowering above, with `relu` using §2.1's `max_elem` subgradient
-convention.
+errors. Each RISC primitive in the lowering computes at [04-NUM-8]'s declared
+arithmetic width and finalizes to the operand's storage width before the next
+primitive observes it, as required by [04-NUM-1]. The adjoint is the
+derivative of the lowering above, with `relu` using §2.1's `max_elem`
+subgradient convention.
 
 ### 3.4 Higher-Level Operations
 

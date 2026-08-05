@@ -175,12 +175,18 @@ fn scalar_number(line: &str, context: &str) -> f64 {
 
 /// The scalar activation surface decided on chelis#712: every active float
 /// width is admitted, eval and compiled C both execute it, and each lane
-/// finalizes at the declared width.  The non-zero input makes the former C
-/// stub observable for every operation (including silu/gelu, whose value at
-/// zero would not distinguish a stub).
+/// follows the Tier-2 composition. The non-zero input makes the former C stub
+/// observable for every operation (including silu/gelu, whose value at zero
+/// would not distinguish a stub). The f64 input also distinguishes every f64
+/// helper call from an f32 detour.
 fn assert_activation_width_matrix(op: &str) {
     for dtype in ["f16", "bf16", "f32", "f64"] {
-        let expr = format!("{op}(cast(1.0, {dtype}))");
+        let input = if dtype == "f64" {
+            "1.0000000000000002"
+        } else {
+            "1.0"
+        };
+        let expr = format!("{op}(cast({input}, {dtype}))");
         let name = format!("scalar_{op}_{dtype}");
         let program = scalar_program(&expr, dtype);
         let eval = eval_first_line(&program)
@@ -193,6 +199,25 @@ fn assert_activation_width_matrix(op: &str) {
             !emitted.contains(STUB_MARKER),
             "{name}: emitted the historical unsupported-builtin stub"
         );
+        let run_body = emitted
+            .rfind(" run() {")
+            .and_then(|start| emitted.get(start..))
+            .unwrap_or_else(|| panic!("{name}: emitted C has no `run` definition:\n{emitted}"));
+        let helper_call = format!("chelis_host_{op}_{dtype}(");
+        assert!(
+            run_body.contains(&helper_call),
+            "{name}: no call site selects `{helper_call}`:\n{emitted}"
+        );
+        for wrong_width in ["f16", "bf16", "f32", "f64"]
+            .into_iter()
+            .filter(|width| *width != dtype)
+        {
+            let wrong_call = format!("chelis_host_{op}_{wrong_width}(");
+            assert!(
+                !run_body.contains(&wrong_call),
+                "{name}: a call site incorrectly selects `{wrong_call}`:\n{emitted}"
+            );
+        }
         common::assert_elements_in_domain(dtype, &compiled, &name);
         assert_eq!(
             compiled, eval,
@@ -200,17 +225,86 @@ fn assert_activation_width_matrix(op: &str) {
         );
 
         match op {
-            "relu" => assert_eq!(eval_number, 1.0, "{name}: relu(1) must be exact"),
+            "relu" => assert_eq!(
+                eval_number,
+                input.parse::<f64>().unwrap(),
+                "{name}: relu of a positive input must be exact"
+            ),
             "sigmoid" | "tanh" | "silu" => assert!(
                 (0.7..0.8).contains(&eval_number),
-                "{name}: {op}(1) must lie in (0.7, 0.8), got {eval_number}"
+                "{name}: {op}({input}) must lie in (0.7, 0.8), got {eval_number}"
             ),
             "gelu" => assert!(
                 (0.8..0.9).contains(&eval_number),
-                "{name}: gelu(1) must lie in (0.8, 0.9), got {eval_number}"
+                "{name}: gelu({input}) must lie in (0.8, 0.9), got {eval_number}"
             ),
             _ => unreachable!("activation matrix called for `{op}`"),
         }
+    }
+}
+
+fn tier2_sigmoid_expr(x: &str, dtype: &str) -> String {
+    format!("recip(add(cast(1.0, {dtype}), exp(neg({x}))))")
+}
+
+fn tier2_tanh_expr(x: &str, dtype: &str) -> String {
+    let sigmoid = tier2_sigmoid_expr(&format!("mul(cast(2.0, {dtype}), {x})"), dtype);
+    format!("add(mul(cast(2.0, {dtype}), {sigmoid}), cast(-1.0, {dtype}))")
+}
+
+fn tier2_activation_expr(op: &str, x: &str, dtype: &str) -> String {
+    match op {
+        "sigmoid" => tier2_sigmoid_expr(x, dtype),
+        "tanh" => tier2_tanh_expr(x, dtype),
+        "silu" => format!("mul({x}, {})", tier2_sigmoid_expr(x, dtype)),
+        "gelu" => {
+            let x_sq = format!("mul({x}, {x})");
+            let x_cu = format!("mul({x_sq}, {x})");
+            let k_x_cu = format!("mul(cast(0.044715, {dtype}), {x_cu})");
+            let sum_inner = format!("add({x}, {k_x_cu})");
+            let inner = format!("mul(cast(0.7978845608028654, {dtype}), {sum_inner})");
+            let tanh_inner = tier2_tanh_expr(&inner, dtype);
+            let one_plus_tanh = format!("add(cast(1.0, {dtype}), {tanh_inner})");
+            format!("mul(cast(0.5, {dtype}), mul({x}, {one_plus_tanh}))")
+        }
+        _ => unreachable!("no Tier-2 activation expression for `{op}`"),
+    }
+}
+
+#[test]
+fn reduced_float_scalar_activations_match_tier2_node_finalization() {
+    for (dtype, op, input) in [
+        ("f16", "sigmoid", "0.0007328987121582031"),
+        ("f16", "tanh", "5.960464477539063e-8"),
+        ("f16", "silu", "2.9802322387695313e-7"),
+        ("f16", "gelu", "2.9802322387695313e-7"),
+        ("bf16", "sigmoid", "0.005889892578125"),
+        ("bf16", "tanh", "9.183549615799121e-41"),
+        ("bf16", "silu", "0.00555419921875"),
+        ("bf16", "gelu", "0.0030975341796875"),
+    ] {
+        let x = format!("cast({input}, {dtype})");
+        let activation = format!("{op}({x})");
+        let tier2 = tier2_activation_expr(op, &x, dtype);
+        let name = format!("{dtype}_{op}_tier2_finalization");
+        let expected = eval_first_line(&scalar_program(&tier2, dtype))
+            .unwrap_or_else(|error| panic!("{name}: Tier-2 expression failed: {error}"));
+        let scalar = eval_first_line(&scalar_program(&activation, dtype))
+            .unwrap_or_else(|error| panic!("{name}: scalar activation failed: {error}"));
+        assert_eq!(
+            scalar, expected,
+            "{name}: scalar activation must equal its Tier-2 composition"
+        );
+        let (emitted, compiled) = c_lane(&scalar_program(&activation, dtype), &name)
+            .unwrap_or_else(|error| panic!("{name}: C lane failed: {error}"));
+        assert!(
+            !emitted.contains(STUB_MARKER),
+            "{name}: emitted the historical unsupported-builtin stub"
+        );
+        assert_eq!(
+            compiled, expected,
+            "{name}: compiled scalar activation must equal its Tier-2 composition"
+        );
     }
 }
 

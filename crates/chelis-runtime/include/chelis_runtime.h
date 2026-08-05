@@ -711,7 +711,8 @@ static inline uint16_t chelis_f32_to_f16(float v) {
             return (uint16_t)sign;
         }
         mant = (mant | 0x00800000u) >> (1 - exp);
-        uint32_t rounded = mant + 0x00001000u;
+        uint32_t lsb = (mant >> 13) & 1u;
+        uint32_t rounded = mant + 0x00000FFFu + lsb;
         return (uint16_t)(sign | (rounded >> 13));
     }
     /* Normal: round-to-nearest-even on the discarded 13 mantissa bits. */
