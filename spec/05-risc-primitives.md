@@ -1196,6 +1196,8 @@ family, whose members have no tensor-lane composition equivalent.
 > value. The diagnostic SHALL direct the caller to the host evaluator
 > (`chelis eval` / `chelis test`).
 
+(chelis#1184 tracks a `chelis build` / `chelis check` divergence on this rule.)
+
 #### Decimal rounding atom
 
 Transitional blockquote authority per `spec/design/spec_provenance.md`

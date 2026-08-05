@@ -110,6 +110,35 @@ For a fixture corpus that all imports the same bundled stdlib, Layer 1 is one
 shared cross-process hit; Layer 2 is small (just the user package); Layer 3 is
 the entry file. That is the ~200-worker win.
 
+### Build-lane Layer 2: a separate `LibraryContext` (chelis#1168/#1176)
+
+The layering above is the eval / `chelis test` shape, whose Layer 2 IS the whole
+`CompiledContext` (`context.rs::build_library_triple_layered`). The `chelis
+build` lane deliberately uses a SEPARATE Layer 2 — `LibraryContext`
+(`crates/chelis-compiler-api/src/library_cache.rs`), a distinct on-disk family
+(`chelis-lib-*.tc`) — rather than reusing the `CompiledContext` `.ctx`. Why they
+stay separate rather than fold:
+
+- **Cache key.** The `CompiledContext` `.ctx` is keyed on the digests of EVERY
+  source file in the package graph, *including the entry* (`context.rs`
+  `source_digests`), so an entry-only edit mints a new `.ctx` — a full recompile
+  on exactly the edit→build loop the build cache exists to accelerate.
+  `LibraryContext` is keyed on the *dependency* decls only (the entry stays out
+  of the key), so an entry edit is a warm hit.
+- **Split boundary.** The eval Layer 2 splits at the stdlib/non-stdlib boundary
+  (the entry is Layer 3, checked in-context per call). Build has no separate
+  in-context entry surface, so it splits `non_stdlib_decls` at the entry-module
+  offset (`PreparedProgram::dependency_entry_partition`): dependency prefix
+  cached, entry suffix re-analyzed. It carries the dependency expansion boundary
+  + a hygiene digest so the split stays byte-identical to the monolithic path.
+  (This prefix/suffix split only caches dependencies that sort before the entry
+  module — see chelis#1182.)
+
+The cost is two near-identical three-layer stackings. Folding them would need the
+build lane to adopt an entry-out-of-key `CompiledContext` variant (or the eval
+lane to adopt the entry-module split); until one lands, they are kept separate
+with divergent keys by design, not oversight.
+
 ### Concurrency
 
 ~200 nextest processes race on the first miss. Writes are atomic: a temp file in
