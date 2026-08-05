@@ -16,6 +16,40 @@ recorded state basis; rows marked repaired are no longer current-state claims.
 The live delivery ledger and recurrence guards are in
 [`spec/design/remediation_roadmap.md`](../../spec/design/remediation_roadmap.md).
 
+## Erratum (2026-08-05)
+
+The #732 row below overstated the executable Phase 2 state after PR #1118
+emptied `KNOWN_RED_CELLS`. The authoritative command failed on then-current
+`main`: its manifest required a runtime receipt from `classify_red_run`, but a
+zero-cell ledger has no real classifier invocation. Fabricating one would have
+made the receipt green while proving nothing. The repair moves the receipt to
+the complete-run-set boundary, where empty declared ledger plus empty real run
+set is a valid execution, and adds a regression through the shipped top-level
+zero-cell path.
+
+On the corrected 2026-08-05 revision, both authoritative commands pass:
+
+- `.venv/bin/python scripts/faithful_observation_phase2_oracle.py` ends in
+  `PHASE 2 ORACLE: PASS` with 19 consumed runtime receipts.
+- `.venv/bin/python scripts/faithful_observation_phase3_oracle.py` ends in
+  `PHASE 3 ORACLE: PASS`.
+
+Phase 2 now has its own blocking `Faithful Observation Phase 2 Oracle` CI job
+on every non-docs-only PR/push; the Integration status aggregates it beside the
+workspace and dtype jobs. This advances #1089 without claiming #990's
+broader change-gated/scheduled/liveness package.
+
+The four phase implementations remain delivered, but the #732 class is not
+closed: #997 is a direct §C1.6/§B2.4 violation and owns the structural
+`FO-DIAG` migration in `faithful_observation.md` §I2. Its current tripwire
+annotations account for 36 tokens (7 eval + 18 JSON + 10 CSV + 1 shared
+helper), correcting the report's earlier 21; one JSON token is explicitly
+cfg-test-only.
+#1059 is separate C-host `to_string` capability work and does not weaken the
+current loud-rejection contract. #732 therefore stays open while #997
+remains open. Finally, #732 Phase 3 shipped in v0.18.3 and is removed from the
+v0.20 release payload.
+
 ## TL;DR
 
 Waves 0-3 of the remediation roadmap are complete, with one exception: #733's
@@ -38,7 +72,7 @@ institutional enforcement layer that is specified but largely not running.
 | **#729 dtype semantics** | P0-P3 + §C6 census, all CI-wired (PRs #758, #956, #1033, #1049, #1054, #1065, #1118); Phase 4 opened by the merged PR #1154 (permanent dispositions for all 301 census rows, descriptor-manifest bound, red-teamed  x 2) | Capability table proper: Table A/B, derived checker acceptance, macro-generated dispatch (Supported cell without kernel = compile error), generated conformance suite, #912 projections. Plus: the P0 detector-half adjudication (unowned), the P3 oracle adjudication + stale tracker checkbox, and the #1160 seam-relocation decision |
 | **#730 loud unsupported** | P0-P2; P3's typed `RejectionAuthority` + sealed 48-kind `DiagnosticKind` slices (PR #1037) | P3's gate half - verified undelivered despite earlier plan-doc claims (now corrected): dedupe the drifted `reject_unsupported_hip_ops` pair and the `COMPILED_HOST_ONLY_BUILTINS`/`HOST_ONLY_BUILTINS` duplication, record the gate contract, delete emitter-duplicating gates, brand the chelis-cli surface (zero `unimplemented_rejection!` uses there); deliverable 6 rides Jeff's #912 chain; the first-error-vs-accumulate decision must be affirmed before the contract freezes; Phase 4 (ratchet totality, #990) is entirely unbuilt - no phase-4 oracle script, no nightly workflow |
 | **#731 checker totality** | P0-P3 implemented, incl. the construction gate (PR #1101) and authoring-scope fixes (PR #1136) | The decode-once rework's fresh-context red team (named pending in the doc header); the §C4.2 ingress half (#1088 -> open PR #1036); carrier deletion last (#1029, precondition currently false: ~1,082 `Expr::List` occurrences, production producers in 8+ crates) |
-| **#732 faithful observation** | All four phases (P3 via PRs #1099/#1115/#1118); both known-red ledgers empty; tolerance table + #687 handshake shipped | Nothing in-plan. Open residue: #997 (21 derived-Debug tokens), #1059 (C-host to_string capability). Oracle facts: the Phase 2 script is manual-only (invoked by nothing); the Phase 3 oracle runs continuously via the Dtype Phase 0-3 Oracle job on every non-docs-only PR, nesting enforced by `test_nextest_profile_partition.py` |
+| **#732 faithful observation** | All four phases (P3 via PRs #1099/#1115/#1118); both known-red ledgers empty; tolerance table + #687 handshake shipped; Phase 2 empty-ledger acceptance repaired and continuously wired | Direct class debt: #997's one structural diagnostic-rendering migration (36 attributed tokens, including one cfg-test token); keep #732 open. Separate capability: #1059 C-host `to_string`. The dedicated Phase 2 CI job and the nested Phase 3 oracle both run on every non-docs-only PR; #990's broader scheduled/change-gated package remains separate |
 | **#733 spec provenance** | Nothing - Phase 0 is defined but explicitly not activated; no oracle suite, no PR template, no CODEOWNERS | Everything. P0 is Chelis-owned and self-contained; P1-P3 additionally wait on three Buoy prerequisites (the pinned revision's `devenv test` oracle, the `buoy.adapter-sdk/v1` pin, the approved host parsed-item schema). v0.20 is formally blocked on P3 |
 
 ## Sibling classes (what the five plans structurally cannot deliver)
@@ -94,7 +128,9 @@ institutional enforcement layer that is specified but largely not running.
   sites become check errors; axis params stay int32 - this also retires
   0.18.2's #1120 divergence), compiled `round` now half-ties to even, and
   `cast_trunc` shipped as [05-OP-6] plus a reserved word. It is the migration
-  target for the #1091 shell breakage.
+  target for the #1091 shell breakage. It also shipped #732 Phase 3's
+  behavior-preserving tolerance table, shared comparator, and oracle through
+  PRs #1099/#1115/#1118.
 - **v0.19** (planned; source migration) - remaining payload: the manifested
   root completion (#912/#1023: complete root set/order, unavailable-root
   diagnostics, artifact routing), the residual capability decisions
@@ -110,7 +146,7 @@ institutional enforcement layer that is specified but largely not running.
 
 ## The issue graph after cleanup
 
-### Closed 2026-08-04 (29, each with evidence comments on the issue)
+### Closed by 2026-08-04 (31, each with evidence comments on the issue)
 
 - **#729 family (15):** #680, #684, #685, #686, #688, #711, #717, #720,
   #724, #726, #856, #860, #897, #1120 - verified fixed on main by the
@@ -125,9 +161,10 @@ institutional enforcement layer that is specified but largely not running.
   into their open support owners #1058 and #1059 per the one-tracker rule.
 - **#731 family (1):** #1132 (disposition A decided per [04-NUM-10], locked
   by PR #1123's test).
-- **#732 family (5):** #716, #723, #748, #749, #775 - all fixed by Phase 2
-  (PR #863) / Phase 3; the plan doc's own "close on the PR #863 merge" step
-  had simply never been performed.
+- **#732 family (7):** #716, #723, #748, #749, #775, #1078, #1104 - all
+  fixed by Phase 2/3 and their oracle hardening. Two direct children remain
+  open with different meanings: #997 is class-closing contract debt; #1059 is
+  separately accepted capability work.
 
 Deliberate holdouts: **#796** (spec/05 §3.6.1 now authors the eval-only
 `test_*` contract the issue asked for as an alternative - needs a maintainer
@@ -260,7 +297,7 @@ deliverable of their owning plan (see gap 5 below).
 | Gate drift / duplicate gates | #730 P3 gate contract + dedup + deletion | unstarted |
 | Unhandleable AST states reappearing | #731/#908: stamped-only ingress (#1088), then carrier deletion (#1029) | in flight (PR #1036, red CI); #1088 unowned |
 | Spec silence and stale claims | #733 end-to-end | nothing active - the weakest link, with the #891/#904 twenty-builtins-no-spec instance as its measured cost |
-| Guards existing but not running | #1089 oracle wiring (four oracles run in no CI job; empirically confirmed - a deleted assertion produced no CI failure while the unwired oracle caught it instantly) | partial; #1090 closed as refuted - the canary already auto-files, into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64) |
+| Guards existing but not running | #1089 oracle wiring (six oracles were inventoried outside continuous jobs; empirically confirmed when a deleted assertion produced no CI failure while the unwired oracle caught it instantly) | partial: the #732 Phase 2 oracle now has a dedicated blocking job and Phase 3 is nested continuously; the remaining #1089 inventory and #990's scheduled/change-gated package stay open. #1090 closed as refuted - the canary already auto-files into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64) |
 | Silent lane divergence | #754/#763 cross-lane gate; #738 shell compiled lanes | unblocked by #732 P2, undelivered |
 | Agent-driven recurrence | #740's enforcement-ladder backlog; #895 executable plan inventories | entirely unchecked, dormant |
 | Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159) |

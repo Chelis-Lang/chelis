@@ -1254,7 +1254,7 @@ B2_RULE_INSTRUMENTS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
     (
         3,
         "Red-to-green only by un-ignoring",
-        ("ledger_violations", "classify_red_run"),
+        ("ledger_violations", "known_red_run_violations"),
     ),
     (
         4,
@@ -1476,9 +1476,8 @@ def classify_probe_outputs(
     return violations
 
 
-@instrument
 def classify_red_run(cell: RedCell, returncode: int, output: str) -> str | None:
-    """Decide whether a known-red cell met its obligation."""
+    """Decide whether one real known-red cell met its obligation."""
 
     if returncode == 0:
         return (
@@ -1500,6 +1499,36 @@ def classify_red_run(cell: RedCell, returncode: int, output: str) -> str | None:
             f"what its ledger row claims. Output:\n{tail}"
         )
     return None
+
+
+@instrument
+def known_red_run_violations(
+    cells: Sequence[RedCell],
+    runs: Sequence[tuple[RedCell, int, str]],
+) -> list[str]:
+    """Validate the complete set of real executions for the known-red ledger.
+
+    The boundary itself is meaningful when ``cells`` is empty: the declared
+    ledger and the executed run set must both be empty. ``classify_red_run`` is
+    called only for actual cells, never with a synthetic placeholder merely to
+    mint an instrument receipt.
+    """
+
+    expected = [cell.name for cell in cells]
+    observed = [cell.name for cell, _returncode, _output in runs]
+    if observed != expected:
+        return [
+            "known-red ledger did not execute its declared run set exactly: "
+            f"expected {expected}, observed {observed}. A missing, duplicated, "
+            "or reordered run makes the red-cell boundary unverifiable."
+        ]
+
+    violations: list[str] = []
+    for cell, returncode, output in runs:
+        finding = classify_red_run(cell, returncode, output)
+        if finding is not None:
+            violations.append(finding)
+    return violations
 
 
 # ---------------------------------------------------------------------------
@@ -2005,47 +2034,54 @@ def run_exclusion_ground_truth_into(violations: list[str], env: dict[str, str]) 
 
 
 def run_known_red_cells(
-    env: dict[str, str], runner=subprocess.run, cells: tuple[RedCell, ...] = KNOWN_RED_CELLS
+    env: dict[str, str],
+    runner=subprocess.run,
+    cells: tuple[RedCell, ...] | None = None,
 ) -> None:
     """Re-run each known-red cell; `runner` is injectable so the unit
     suite can exercise this leg's classification and failure paths
     without cargo (round-4 F3: the gone-green branch shipped a
     `NameError` because nothing executed it)."""
 
+    if cells is None:
+        cells = KNOWN_RED_CELLS
+
+    runs: list[tuple[RedCell, int, str]] = []
+    for cell in cells:
+        command = (
+            "cargo",
+            "test",
+            "-p",
+            "chelis-cli",
+            "--test",
+            "observation_roundtrip_harness",
+            "--",
+            "--ignored",
+            "--exact",
+            cell.name,
+        )
+        print(f"+ {command_text(command)}", flush=True)
+        completed = runner(
+            command,
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        runs.append(
+            (cell, completed.returncode, completed.stdout + completed.stderr)
+        )
+
     with verdict_sink("known-red ledger failed") as violations:
-        for cell in cells:
-            command = (
-                "cargo",
-                "test",
-                "-p",
-                "chelis-cli",
-                "--test",
-                "observation_roundtrip_harness",
-                "--",
-                "--ignored",
-                "--exact",
-                cell.name,
-            )
-            print(f"+ {command_text(command)}", flush=True)
-            completed = runner(
-                command,
-                cwd=REPO_ROOT,
-                env=env,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            output = completed.stdout + completed.stderr
-            before = len(violations)
-            consume_optional_finding(
-                violations, classify_red_run, cell, completed.returncode, output
-            )
-            if len(violations) == before:
-                print(
-                    f"  known-red as declared: {cell.name} ({cell.issue}, "
-                    f"repair owned by {cell.owner})",
-                    flush=True,
-                )
+        consume_findings(violations, known_red_run_violations, cells, runs)
+
+    for cell in cells:
+        print(
+            f"  known-red as declared: {cell.name} ({cell.issue}, "
+            f"repair owned by {cell.owner})",
+            flush=True,
+        )
 
 
 def main() -> int:

@@ -162,11 +162,12 @@ tripwire compiling until the new dtype is classified.
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#733]
 Phase 3 (the first blocking provenance ratchet) ships with it only after
-the advisory Buoy pilot and change-impact phases are green; [#732] Phase 3
-(the tolerance table + the [#687] handshake) is delivered by the revision
-carrying this text and closes the internal oracle with
-`.venv/bin/python scripts/faithful_observation_phase3_oracle.py`; [#754]
-remains its external shell consumer.
+the advisory Buoy pilot and change-impact phases are green. [#732] Phase 3
+(the tolerance table + the [#687] handshake) already shipped in v0.18.3
+through PRs #1099/#1115/#1118 and is not v0.20 payload; [#754] remains its
+external shell consumer. The [#732] tracker stays open for [#997]'s direct
+diagnostic-rendering contract debt. [#1059] is separate support capability
+work, not unfinished Phase 3 delivery.
 [#730] Phase 3 (gates become UX; amended 2026-07-30 to also deliver the
 typed diagnostic-kind and rejection-authority work) keeps Wave 4 as its
 recommended slot but is NOT gated on the capability table or the Buoy
@@ -376,6 +377,9 @@ migration**, per its own release record:
 - `cast_trunc` exists as [05-OP-6] and is a new reserved word (chelis#1144):
   identifiers named `cast_trunc` no longer parse, and shells blocked by
   [04-NUM-14]'s fractional-cast trap migrate each site onto it.
+- [#732] Phase 3 shipped its tolerance table, shared comparator, [#687]
+  handshake, and continuously nested oracle (PRs #1099/#1115/#1118). This was
+  behavior-preserving guard work and adds no shell migration.
 
 The v0.17 and v0.18 rows
 below are therefore historical records, while v0.19 and v0.20 remain planned
@@ -413,8 +417,9 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 | **v0.17.0 - loud checking + canonical eval rendering** (SHIPPED) | [#730] P1 + [#731] P1 + [#732] P1, and everything else merged since 0.16.1 | **source migration** (wave 1) | breaking deltas only: loud rejections (incl. the new loud compiled-lane `test_*` assert, [#796] - the old inert-`0` stub is gone, so anything leaning on it fails heavily in E2E), `with seed(n)` -> `42i64` ([#731] P1 - the Shoals / Whale / hello-chelis HEAD canaries fail on unsuffixed seeds), and dtype-faithful eval rendering. Seed form frozen ([#735] changes only meaning); eval payload render frozen (C matches it at 0.18) |
 | **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** (SHIPPED) | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical payload rendering. The release-hygiene requirement is that the tarball ships `chelis_runtime_dtype.h`, which public `chelis_runtime.h` includes |
 | **v0.18.1 - always-labelled root prefix** (SHIPPED) | [05-OBS-6]'s `name = value` prefix from #994, with the stale repo expectations synchronized in #1011 | **exact-output migration** | shipped the prefix once without changing payload digits or value shape; it did not prove manifest completeness, dotted expansion/order, unavailable-root diagnostics, or artifact routing |
+| **v0.18.3 - extent/cast migration + faithful-observation guards** (SHIPPED) | [05-DIM-1/2] extent migration + `round` parity + `cast_trunc` + [#732] P3 (PRs #1099/#1115/#1118) | **source + exact-output migration** for the extent/round/cast changes; [#732] P3 itself is behavior-preserving | Phase 3's tolerance table and shared comparator shipped here and must not be scheduled again in v0.20 |
 | **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells, and the cells seeded 2026-08-04: [#704]'s scalar activation c-host B-cell, the scalar `tan`/`atan`/`recip` row, [#937]'s per-dtype `uniform_like` emission, and [#722]'s integer-unary B-cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the one wire break and one root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
-| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#732] P3 (tolerance / cross-lane oracle) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
+| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#732] P3 already shipped in v0.18.3. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
 Net downstream shape: the original four-cut `conform` model assumed one bump,
 probe re-run, and inventory refresh per minor cut. Actual history inserted two
@@ -559,9 +564,10 @@ Migration-note stubs (the breaking delta per cut):
   reordered dotted roots, and treat an unavailable owed root as a named
   diagnostic rather than a missing line or missing `main`."
 - **0.20** (mechanical) - "pin bump only: the capability table, gates-as-UX,
-  [#733] Phase 3 blocking provenance ratchet, and the cross-lane oracle land;
-  Phase 0 landed independently and Phases 1-2 were advisory prerequisites. All
-  encoding decisions already shipped in 0.19 - no behavior change."
+  and [#733] Phase 3 blocking provenance ratchet land; [#732]'s cross-lane
+  oracle already shipped in v0.18.3. Phase 0 landed independently and Phases
+  1-2 were advisory prerequisites. All encoding decisions already shipped in
+  0.19 - no behavior change."
 
 ### Historical tag gate and the 0.17 sequence
 
@@ -625,7 +631,7 @@ a judgement may not.
 | [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3. Scope boundary (2026-07): a verdict proves lane agreement for its RECORDED (target triple, C toolchain + flags incl. -ffp-contract, libm identity) only - never cross-platform determinism by itself; the platform axis compares verdicts across CI matrix entries under the same tolerance table. Platform priority (Jeff, 2026-07-20): server-side Linux x86-64 is the primary verdict platform before any wider matrix. The -ffp-contract entry in the provenance flag set now has a measured in-house exemplar: the pre-[#770]-fix `uniform_like` affine was contraction-dependent (PR #779 removed the sensitivity at the source) |
 | [#763] | `chelis lane-check` - the exact-only, Nix-hermetic first slice of [#754] (owner: brittonr) | child of the [#754] row: same one-comparator rule and proof-scope boundary; for its exact-safe corpus, byte-identity holds TODAY. [#732] Phase 2 unlocked corpus expansion, and [#729] Phase 3 returned the former [#751]/[#761] curated gaps as ordinary regression rows |
 | [#761] | C lane flushes f32 subnormal literals to zero at ingress (the to_tensor route; found by [#719]'s fix session) | repaired in [#729] Phase 3 by exact f32 bit emission at the C ingress; the direct and cast-mediated rows are unconditional oracle fixtures |
-| [#775] | scalar top-level roots render as a rank-0 tensor in eval but a bare scalar in compiled C | SUPERSEDED 2026-07-29: the disposition below said "deliberately fixed in NEITHER lane now ... until Phase 1 decides". Phase 1 DECIDED it on 2026-07-20 and shipped it as [05-OBS-4], and eval is conformant on execution (0.17.1: `root = run()` renders `root = 0.1`, not the rank-0 wrapper). The divergence as filed no longer reproduces. What survives is the MIRROR image - the C lane's `print` exit still emits `tensor(shape=[], data=[9.0])` where [05-OBS-4] says the rank-0 wrapper is not an exit form - which is [#732] Phase 2's scope. Re-verify and close, or re-scope to the C instance. This row is one of four faces of an unauthored root contract, tracked at [#912] |
+| [#775] | scalar top-level roots render as a rank-0 tensor in eval but a bare scalar in compiled C | CLOSED 2026-08-04 after re-verification. Phase 1 decided the bare scalar/rank-0 form on 2026-07-20 and ratified it as [05-OBS-4]; Phase 2/3 regressions now prove both eval roots and compiled C exits use that form. The divergence as filed and its former C-lane mirror no longer reproduce. The separate complete-root-set/order/artifact contract remains [#912], not residue of [#775] |
 | [#780] | matmul shape checking lost through an unannotated lambda parameter - a Surf-reachable false green (found in [#773]'s red team; pre-existing on both sides of the [#773] fix) | ADDRESSED by [#731] PP1 and `spec/04-type-system.md` [04-INF-1]. A checker-owned obligation ledger records every shape-computed operation reached from a lambda-owned unknown constructor, including synthesized/authored bare type holes and projection-derived variables; prevents let-generalization for that lambda; replays the ordinary rule when first use within the declaration binds it; and rejects any residual obligation at that declaration's own boundary. A top-level shape helper therefore declares its parameter's outer constructor instead of borrowing a later declaration's call site; a result annotation alone is not a remedy. The exact false-green spellings and projection cousin are named §C4.4 regressions, while consistent and ordinary-polymorphic controls stay green. This is the class mechanism, not a `matmul` retry |
 | [#783] | annotation writeback degrades an unresolved Var to a rank-0 default and clobbers a concrete annotation (a silent [#703]-class substitution; the enabler of the transient [#773]-fix conv2d ICE, hotfixed same day) | ADDRESSED inside [#731] PP1. One writeback information-ordering gate now prevents every Var-, Error-, or partial-dimension-derived candidate from replacing a more informative existing type expression. Symbolic metadata is still legal when no richer annotation exists, preserving generic checked programs. The byte-preservation regression and the pre-existing eleven shape-override guards cover both channel layers; this is no longer an inventory of point checks |
 | [#794] | `.dp`-reachable lowering-side value substitutions the PR #793 red team confirmed: `extract_f64_value`'s catch-all folds a `(par ...)` bound's FIRST child (spec/03 says last), and `extract_usize_value` silently maps a negative `.dp` int64 seed to 0 | [#730] census extension rows. The checker side is already closed (PR #793 narrowed its accept-set to `lit` and rejects negative literal seeds), so both are checker-unreachable today - the lowering fix is defense-in-depth per §C1.4 |
@@ -830,6 +836,8 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#893]: https://github.com/Chelis-Lang/chelis/issues/893
 [#1003]: https://github.com/Chelis-Lang/chelis/pull/1003
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
+[#990]: https://github.com/Chelis-Lang/chelis/issues/990
+[#997]: https://github.com/Chelis-Lang/chelis/issues/997
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
 [#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
 [#788]: https://github.com/Chelis-Lang/chelis/issues/788

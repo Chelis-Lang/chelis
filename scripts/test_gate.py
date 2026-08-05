@@ -239,6 +239,11 @@ NON_GATE_JOBS = {
     # while the integration job below aggregates both outcomes under the
     # stable branch-protection context.
     "dtype-phase3-oracle",
+    # Rule-id: GATE-SCOPE-FAITHFUL-OBSERVATION-ORACLE -- the authoritative
+    # #732 Phase 2 acceptance driver is a dedicated CI job. It runs beside
+    # the workspace and dtype legs and is aggregated under the stable
+    # branch-protection context.
+    "faithful-observation-phase2-oracle",
     "integration",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
@@ -686,12 +691,41 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn("dtype-phase3-oracle", workspace_block)
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
-            "needs: [changes, workspace-tests, dtype-phase3-oracle]",
+            "needs: [changes, workspace-tests, dtype-phase3-oracle, "
+            "faithful-observation-phase2-oracle]",
             aggregate_block,
         )
         self.assertNotIn("always()", aggregate_block)
         self.assertIn("!cancelled()", aggregate_block)
         self.assertIn("scripts/ci_require_success.py", aggregate_block)
+
+    def test_faithful_observation_phase2_oracle_is_a_dedicated_blocking_job(self):
+        workspace_block = _ci_job_block("workspace-tests")
+        dtype_block = _ci_job_block("dtype-phase3-oracle")
+        oracle_block = _ci_job_block("faithful-observation-phase2-oracle")
+        aggregate_block = _ci_job_block("integration")
+        command = ".venv/bin/python scripts/faithful_observation_phase2_oracle.py"
+
+        self.assertIn("name: Faithful Observation Phase 2 Oracle", oracle_block)
+        self.assertIn("needs: [changes]", oracle_block)
+        self.assertIn("contents: read", oracle_block)
+        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
+        self.assertIn("taiki-e/install-action@nextest", oracle_block)
+        cache_inputs = _rust_cache_inputs(oracle_block)
+        self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
+        self.assertEqual(cache_inputs.get("save-if"), "false")
+        self.assertIn(
+            "CARGO_TARGET_DIR: ${{ github.workspace }}/target",
+            oracle_block,
+        )
+        _assert_executable_run_once(oracle_block, command)
+        self.assertNotIn(command, workspace_block)
+        self.assertNotIn(command, dtype_block)
+        self.assertIn(
+            "faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}",
+            aggregate_block,
+        )
 
     def test_parallel_jobs_share_one_saved_rust_cache_namespace(self):
         workspace_inputs = _rust_cache_inputs(_ci_job_block("workspace-tests"))
@@ -1091,6 +1125,7 @@ class DocsOnlySkipTests(unittest.TestCase):
     HEAVY_GATED_JOBS = {
         "workspace-tests",
         "dtype-phase3-oracle",
+        "faithful-observation-phase2-oracle",
         "macos-smoke",
         "backend-sanitizers",
         "smt-build",
@@ -1180,7 +1215,8 @@ class DocsOnlySkipTests(unittest.TestCase):
         integration = attrs["integration"]
         self.assertEqual(
             integration.get("needs"),
-            "[changes, workspace-tests, dtype-phase3-oracle]",
+            "[changes, workspace-tests, dtype-phase3-oracle, "
+            "faithful-observation-phase2-oracle]",
         )
         cond = integration.get("if", "")
         self.assertNotIn("always()", cond)
@@ -1190,6 +1226,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         block = _ci_job_block("integration")
         self.assertIn("needs.workspace-tests.result", block)
         self.assertIn("needs.dtype-phase3-oracle.result", block)
+        self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
     def test_always_run_jobs_are_not_gated(self):
