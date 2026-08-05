@@ -45,6 +45,7 @@ gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
+CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 DEVENV_SETUP_ACTION = (
     "Chelis-Lang/ci/actions/setup-devenv@"
@@ -1037,7 +1038,7 @@ class SmtCiSplitTests(unittest.TestCase):
             "workflow_dispatch:",
             "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
-            "cargo test -p chelis-prove --features carcara",
+            "cargo test -p chelis-prove --features carcara -- --test-threads=1",
             "cargo test -p chelis-prove --features z3",
             'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
             "cargo test -p chelis-prove --features clarabel",
@@ -1063,6 +1064,24 @@ class SmtCiSplitTests(unittest.TestCase):
             text,
             "SMT full-prove must stay nightly/dispatch-only (no pull_request trigger)",
         )
+        self.assertNotRegex(
+            text,
+            r"(?m)^\s*run: cargo test -p chelis-prove --features carcara\s*$",
+            "the full Carcara suite must stay serial after its parallel SIGSEGV",
+        )
+
+    def test_carcara_dependency_stays_gmp_only(self):
+        text = CHELIS_PROVE_TOML.read_text()
+        dependency = next(
+            line
+            for line in text.splitlines()
+            if line.startswith("gmp-mpfr-sys = ")
+        )
+        self.assertIn("default-features = false", dependency)
+        self.assertIn("optional = true", dependency)
+        self.assertNotIn(", features =", dependency)
+        self.assertNotIn("gmp-mpfr-sys/mpfr", text)
+        self.assertNotIn("gmp-mpfr-sys/mpc", text)
 
     def test_full_smt_workflow_shares_smoke_cache_key(self):
         smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))

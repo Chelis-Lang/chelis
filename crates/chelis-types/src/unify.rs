@@ -268,6 +268,79 @@ impl Subst {
         Err(first_rejection.expect("deferred expand constraint set has at least one candidate"))
     }
 
+    /// Materialize a positional-expand result consumed by `reshape`.
+    /// Reshape does not preserve rank or individual dimensions, but it does
+    /// preserve element count. A fully static target therefore selects the
+    /// legal expand candidate with the same product; a dynamic target leaves
+    /// selection to the context-free default and the runtime numel guard.
+    pub fn materialize_deferred_expand_for_numel(
+        &mut self,
+        v: TypeVar,
+        target_dims: &[Dim],
+    ) -> Result<Option<Type>, TypeError> {
+        let Some(target_numel) = self.static_dim_product(target_dims) else {
+            return self.materialize_deferred_expand_default(v);
+        };
+        let constraints = self
+            .deferred_expand_constraints
+            .lock()
+            .expect("subst.deferred_expand_constraints poisoned")
+            .get(&v)
+            .cloned();
+        let Some(constraints) = constraints else {
+            return Ok(None);
+        };
+
+        let mut first_rejection = None;
+        let mut has_possible_numel = false;
+        for candidate in constraints[0].candidate_types()? {
+            let Type::Tensor(candidate_dims, _) = &candidate else {
+                unreachable!("deferred expand candidates are tensors");
+            };
+            if self
+                .static_dim_product(candidate_dims)
+                .is_some_and(|candidate_numel| candidate_numel != target_numel)
+            {
+                continue;
+            }
+            has_possible_numel = true;
+
+            let mut trial = self.clone();
+            let compatible = constraints.iter().try_for_each(|constraint| {
+                let canonical = constraint.canonical_for_output(&candidate)?;
+                unify(&canonical, &candidate, &mut trial)
+            });
+            match compatible {
+                Ok(()) => {
+                    unify(&Type::Var(v), &candidate, self)?;
+                    return Ok(Some(self.apply(&candidate)));
+                }
+                Err(error) => {
+                    first_rejection.get_or_insert(error);
+                }
+            }
+        }
+
+        if !has_possible_numel {
+            return Err(TypeError {
+                kind: TypeErrorKind::DimensionMismatch,
+                message: format!(
+                    "reshape target has {target_numel} elements, which matches no legal expand output shape"
+                ),
+            });
+        }
+        Err(first_rejection.expect("a possible deferred expand candidate was rejected"))
+    }
+
+    fn static_dim_product(&self, dims: &[Dim]) -> Option<i64> {
+        dims.iter().try_fold(1_i64, |product, dim| {
+            let Dim::Lit(value) = self.apply_dim(dim) else {
+                return None;
+            };
+            product.checked_mul(value)
+        })
+    }
+
     /// Resolve every positional-expand result whose shape remained
     /// unconstrained through the complete inference schedule. Consumers must
     /// get the first opportunity to select either legal shape; only the
@@ -757,22 +830,12 @@ impl Subst {
 
 impl DeferredExpandConstraint {
     fn canonical_for_output(&self, output: &Type) -> Result<Type, TypeError> {
-        let Type::Tensor(out_dims, out_prec) = output else {
+        let Type::Tensor(out_dims, _) = output else {
             return Err(TypeError {
                 kind: TypeErrorKind::TypeMismatch,
                 message: format!("expand expects tensor output, got {output}"),
             });
         };
-        if out_prec != &self.input_prec {
-            return Err(TypeError {
-                kind: TypeErrorKind::PrecisionMismatch,
-                message: format!(
-                    "expand output precision {} does not match input precision {}",
-                    out_prec.name(),
-                    self.input_prec.name(),
-                ),
-            });
-        }
 
         let mut expected = self.input_dims.clone();
         if out_dims.len() == self.input_dims.len() + 1 {
@@ -1967,6 +2030,110 @@ mod tests {
     }
 
     // === WS-A5 precision polymorphism unification ===
+
+    #[test]
+    fn deferred_expand_binds_unresolved_consumer_precision() {
+        let mut g = var_gen();
+        let result = g.fresh_tvar();
+        let consumer_prec = g.fresh_tvar();
+        let mut s = Subst::new();
+        s.record_deferred_expand_constraint(
+            result,
+            DeferredExpandConstraint {
+                input_dims: vec![Dim::Lit(2)],
+                input_prec: tprec(Prim::F32),
+                axis: 0,
+                size: Dim::Lit(3),
+            },
+        );
+
+        let consumer = Type::Tensor(
+            vec![Dim::Lit(3), Dim::Lit(2)],
+            TensorPrec::Var(consumer_prec),
+        );
+        unify(&Type::Var(result), &consumer, &mut s)
+            .expect("the expand input precision must bind the consumer precision variable");
+
+        assert_eq!(s.apply(&Type::Var(consumer_prec)), Type::Prim(Prim::F32));
+    }
+
+    #[test]
+    fn deferred_expand_rejects_concrete_consumer_precision_mismatch() {
+        let mut g = var_gen();
+        let result = g.fresh_tvar();
+        let mut s = Subst::new();
+        s.record_deferred_expand_constraint(
+            result,
+            DeferredExpandConstraint {
+                input_dims: vec![Dim::Lit(2)],
+                input_prec: tprec(Prim::F32),
+                axis: 0,
+                size: Dim::Lit(3),
+            },
+        );
+
+        let consumer = Type::Tensor(
+            vec![Dim::Lit(3), Dim::Lit(2)],
+            TensorPrec::Concrete(Prim::F64),
+        );
+        let error = unify(&Type::Var(result), &consumer, &mut s)
+            .expect_err("a concrete f64 consumer must not accept an f32 expand result");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+    }
+
+    #[test]
+    fn reshape_numel_selects_rank_increasing_deferred_expand() {
+        let mut g = var_gen();
+        let result = g.fresh_tvar();
+        let mut s = Subst::new();
+        s.record_deferred_expand_constraint(
+            result,
+            DeferredExpandConstraint {
+                input_dims: vec![Dim::Lit(2)],
+                input_prec: tprec(Prim::F32),
+                axis: 0,
+                size: Dim::Lit(3),
+            },
+        );
+
+        let selected = s
+            .materialize_deferred_expand_for_numel(result, &[Dim::Lit(6)])
+            .expect("a six-element reshape target must select insertion")
+            .expect("the result carries a deferred expand constraint");
+        assert_eq!(
+            selected,
+            Type::Tensor(
+                vec![Dim::Lit(3), Dim::Lit(2)],
+                TensorPrec::Concrete(Prim::F32)
+            )
+        );
+    }
+
+    #[test]
+    fn reshape_numel_rejects_every_incompatible_deferred_expand_shape() {
+        let mut g = var_gen();
+        let result = g.fresh_tvar();
+        let mut s = Subst::new();
+        s.record_deferred_expand_constraint(
+            result,
+            DeferredExpandConstraint {
+                input_dims: vec![Dim::Lit(2)],
+                input_prec: tprec(Prim::F32),
+                axis: 0,
+                size: Dim::Lit(3),
+            },
+        );
+
+        let error = s
+            .materialize_deferred_expand_for_numel(result, &[Dim::Lit(5)])
+            .expect_err("five elements match neither tensor[3] nor tensor[3, 2]");
+        assert!(matches!(error.kind, TypeErrorKind::DimensionMismatch));
+        assert!(
+            error
+                .message
+                .contains("matches no legal expand output shape")
+        );
+    }
 
     #[test]
     fn unify_tensor_prec_var_binds_to_concrete() {

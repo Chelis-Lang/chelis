@@ -40,10 +40,10 @@ clarabel = ["dep:clarabel", "num-rational", "dep:num-bigint", "dep:num-traits"]
 # SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
 # slice of Alethe is not reachable here). It audits cvc5's output, so it
 # implies `smt`. `gmp-mpfr-sys/use-system-libs` forces the
-# transitive `rug -> gmp-mpfr-sys` build to LINK the system GMP/MPFR (needs
-# the `gmp-devel`/`mpfr-devel` headers) instead of compiling GMP+MPFR from C
-# source, keeping the build off the slow from-source path. carcara's `rug`
-# enables only `integer`+`rational`, so only GMP and MPFR are needed (no MPC).
+# transitive `rug -> gmp-mpfr-sys` build to LINK system GMP (needs the
+# `gmp-devel` headers) instead of compiling GMP from C source, keeping the
+# build off the slow from-source path. Carcara's `rug` enables only
+# `integer`+`rational`, so neither MPFR nor MPC belongs in this feature.
 carcara = ["smt", "dep:carcara", "gmp-mpfr-sys/use-system-libs"]
 # WI-14 Arb/FLINT rigorous-enclosure oracle. `arb-sys` vendors FLINT + Arb C
 # source and compiles them (and pulls `gmp-mpfr-sys`, which compiles GMP/MPFR),
@@ -82,9 +82,9 @@ z3 = { version = "0.20", default-features = false, optional = true }
 carcara = { git = "https://github.com/ufmg-smite/carcara", rev = "45bfaedce92b31970cc2f8b07966813652aed8b0", optional = true }
 # Pulled in only so the `carcara` feature can force `use-system-libs` on the
 # transitive `rug -> gmp-mpfr-sys` build (cargo unifies the feature across the
-# graph). `default-features = false` + `mpfr` matches what carcara's `rug`
-# needs (GMP via the implied base, plus MPFR), without MPC.
-gmp-mpfr-sys = { version = "1", default-features = false, features = ["mpfr"], optional = true }
+# graph). `default-features = false` retains the GMP base required by Rug
+# without activating the default MPFR and MPC features.
+gmp-mpfr-sys = { version = "1", default-features = false, optional = true }
 # WI-15 SoS certificate engine (behind `clarabel`). clarabel is the float SDP
 # core that PROPOSES a Gram matrix; num-bigint/num-traits back the exact-rational
 # repair + verification that turns the proposal into a checked certificate

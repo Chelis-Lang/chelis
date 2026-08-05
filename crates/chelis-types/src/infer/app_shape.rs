@@ -409,7 +409,7 @@ pub(super) fn infer_reshape_app(
 
             Type::Tensor(vec![Dim::Wildcard], precision)
         }
-        Type::Var(_) | Type::Error(_) => {
+        Type::Var(input_var) => {
             if let Some(shape_expr) = kids.get(2) {
                 let shape_ty = infer_expr(shape_expr, env, vg, subst, adt_reg, errors, product);
                 let expected_shape_ty =
@@ -434,9 +434,35 @@ pub(super) fn infer_reshape_app(
                         ),
                     );
                 }
+                let provisional_dims =
+                    reshape_output_dims(shape_expr, input_var_name.as_deref(), &[], subst);
+                match subst.materialize_deferred_expand_for_numel(input_var, &provisional_dims) {
+                    Ok(Some(Type::Tensor(input_dims, precision))) => {
+                        let dims = reshape_output_dims(
+                            shape_expr,
+                            input_var_name.as_deref(),
+                            &input_dims,
+                            subst,
+                        );
+                        return Type::Tensor(dims, precision);
+                    }
+                    Ok(Some(other)) => {
+                        return report(
+                            errors,
+                            CheckError::new(
+                                CheckErrorKind::TypeMismatch,
+                                format!("reshape expects tensor input, got {other}"),
+                                vec![],
+                            ),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => return report(errors, error.into()),
+                }
             }
             input_ty
         }
+        Type::Error(_) => input_ty,
         _ => report(
             errors,
             CheckError::new(

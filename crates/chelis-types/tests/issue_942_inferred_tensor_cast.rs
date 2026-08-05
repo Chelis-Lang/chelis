@@ -147,6 +147,48 @@ y = add(matrix, expanded)
 }
 
 #[test]
+fn reshape_binds_deferred_expand_precision_from_its_input() {
+    let errors = typecheck(
+        r#"
+def flatten_expanded(bias: tensor[2, f32]) = {
+  expanded = expand(bias, 0, cast(3, int64))
+  reshape(expanded, [cast(6, int64)])
+}
+flat = flatten_expanded(to_tensor([1.0f32, 2.0f32]))
+"#,
+    );
+    assert!(
+        errors.is_empty(),
+        "reshape must bind its unresolved input precision to the expand operand:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
+fn reshape_rejects_a_concrete_precision_incompatible_with_expand() {
+    let errors = typecheck(
+        r#"
+def require_f64(x: tensor[6, f64]) -> tensor[6, f64] = x
+def flatten_expanded(bias: tensor[2, f32]) = {
+  expanded = expand(bias, 0, cast(3, int64))
+  reshape(expanded, [cast(6, int64)])
+}
+flat = flatten_expanded(to_tensor([1.0f32, 2.0f32]))
+bad = require_f64(flat)
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| {
+            matches!(error.kind, CheckErrorKind::PrecisionMismatch)
+                && error.message.contains("f32")
+                && error.message.contains("f64")
+        }),
+        "a concrete precision mismatch must still fail:\n{}",
+        summary(&errors)
+    );
+}
+
+#[test]
 fn elementwise_consumer_selects_common_shape_for_two_deferred_expands() {
     let errors = typecheck(
         r#"
