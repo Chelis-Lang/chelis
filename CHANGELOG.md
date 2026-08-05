@@ -209,6 +209,48 @@ authored edits.
   rejection-authority manifest. No rejection is removed and no site
   becomes silent; only the cited issue changes.
 
+- **`chelis build` reuses the dependency typecheck across builds
+  (chelis#1168, chelis#830, chelis#1182, chelis#1183).** A warm rebuild
+  of a reef package no longer re-type-checks its whole dependency
+  (shell) library; only the entry is re-analyzed. Measured on a 3000-def
+  synthetic path dependency: **20.5s → 0.45s (~45x)**, emitted C
+  byte-identical. The cache previously existed but was gated behind
+  `pruned == full`, so it never engaged for a package importing
+  chelis-std or any shell — that is, in practice it never engaged at
+  all. Any rejection still falls back to the monolithic check, so error
+  output stays byte-identical.
+
+  Two consequences for anyone with an existing build tree:
+
+  - **On-disk caches from 0.18.3 are invalidated by design.**
+    `PREPARED_GRAPH_CACHE_VERSION` advances 1 → 2 and the
+    `CompiledContext` `.ctx` format advances 6 → 7 (magic
+    `CHELIS_CTX_V6` → `CHELIS_CTX_V7`). Both bumps are load-bearing: a
+    warm project must not replay a stale pre-0.18.4 declaration order to
+    a 0.18.4 binary at the same compiler version. The first build after
+    upgrading is cold; no action is needed.
+  - **Emitted C for a multi-package reef build is reordered.** Root
+    package modules now sort last among the non-stdlib declarations so
+    every dependency lands in the cached prefix regardless of how the
+    root name sorts. Codegen follows declaration order, so prototype and
+    definition order changes; names and bodies do not. Loose-file and
+    dependency-free builds are byte-for-byte unchanged, and
+    monolithic == layered == warm stays byte-identical within 0.18.4.
+
+  The typecheck cache directory is now bounded — least-recently-used
+  eviction down to `CHELIS_TYPECHECK_CACHE_MAX_BYTES` (default 512 MiB),
+  evicting `chelis-lib-*` entries before `chelis-std-*` — and
+  `CHELIS_PROFILE_COMPILE_CONTEXT=1` now names the reason when the
+  layered path bails to the monolithic one instead of falling back
+  silently.
+
+  This also removes a **spurious build-only rejection**:
+  `drop_unreachable_eval_only_defs` is now a transitive closure, so an
+  unreachable eval-only-tainted definition no longer leaves a dangling
+  reference that `chelis build` reported as an unbound variable while
+  `chelis check` accepted the same program. See **Known issues** for the
+  divergence this widens (chelis#1184).
+
 ### Fixed
 
 - chelis#1181 closes chelis#878, chelis#901, chelis#937, chelis#942,
@@ -223,6 +265,14 @@ authored edits.
   negation traps instead of aborting the compiler) and makes conflicting
   `defsig`, definition, function, parameter, property-quantifier, and
   property-result metadata fail closed.
+- chelis#1186 closes chelis#959 (part of chelis#730): the Metal and
+  effect rejection gates are now one typed policy shared by the Surf,
+  Deep, compiler-API, and host-helper build paths, so a gate can no
+  longer be strict in one entry path and absent in another. The gates
+  are scoped to the program actually emitted — effect and window
+  policies stay entry-scoped rather than firing on unreachable
+  declarations — and the aligned diagnostics now cite the compiled
+  seeded-dropout owner.
 
 ### Known issues
 
@@ -234,6 +284,19 @@ authored edits.
   predate this release and are tracked under chelis#1024.
 - **chelis#1172**: the broader structural-span defect class is not
   repaired here.
+- **chelis#1184**: making the unreachable eval-only drop transitive
+  (chelis#1176) widens a known `build`-vs-`check` divergence. `chelis
+  build` alone no longer surfaces a real error located inside an
+  unreachable eval-only-tainted definition; `chelis check` remains the
+  gate that reports it. Whether the reachability scope belongs in the
+  `[05-HOST-2]` atom itself is a language decision left open under that
+  issue.
+- **Dependency typecheck cache, residual limits (chelis#1176).** The
+  cache is content-addressed with the entry out of key, so renaming the
+  entry module disables it until the next cold build. Macro cross-talk
+  between a dependency and the entry falls back to the monolithic check
+  (correct, just not cached); set `CHELIS_PROFILE_COMPILE_CONTEXT=1` to
+  see which case fired.
 - **chelis#1128**: `scripts/bump_compiler_pins.py` still misses the
   checkpoint compile-fail fixture's `Cargo.lock`, which the release
   operator must regenerate by hand.
