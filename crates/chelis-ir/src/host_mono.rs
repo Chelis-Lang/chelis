@@ -483,6 +483,21 @@ fn render_dim(dim: &DimInfo, out: &mut String) {
     }
 }
 
+/// The infix that marks an emitted symbol as a monomorphized specialization
+/// rather than an authored def. A Chelis source identifier cannot contain it
+/// in this position, because `mono_symbol` is the only producer.
+const MONO_SYMBOL_INFIX: &str = "__mono_";
+
+/// Whether an emitted host function name is a chelis#1158 specialization.
+///
+/// The C backend asks so it can keep these out of the program's published
+/// `.h`: the name is a hash of an interned signature, it moves whenever the
+/// instantiation set does, and it is compiler-owned. Kept here rather than
+/// re-derived in the backend so one module owns the convention.
+pub fn is_monomorphized_specialization(name: &str) -> bool {
+    name.contains(MONO_SYMBOL_INFIX)
+}
+
 /// The emitted C symbol for one specialization.
 ///
 /// The hash is FNV-1a rather than `DefaultHasher`: `std`'s default hasher is
@@ -503,7 +518,7 @@ pub(crate) fn mono_symbol(callee: &str, signature_key: &str) -> String {
         sanitized.insert(0, '_');
     }
     format!(
-        "{sanitized}__mono_{:016x}",
+        "{sanitized}{MONO_SYMBOL_INFIX}{:016x}",
         fnv1a64(signature_key.as_bytes())
     )
 }

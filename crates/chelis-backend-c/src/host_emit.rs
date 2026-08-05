@@ -1497,18 +1497,50 @@ pub fn emit_host_header(
     program_name: &str,
 ) -> Result<String, Unsupported> {
     let abi_program = project_program(program)?;
-    emit_host_header_with_linkage(&abi_program, program_name, false)
+    emit_published_host_header(&abi_program, program_name)
 }
 
 pub(crate) fn emit_host_abi_header(
     program: &HostProgram,
     program_name: &str,
 ) -> Result<String, Unsupported> {
-    emit_host_header_with_linkage(program, program_name, false)
+    emit_published_host_header(program, program_name)
+}
+
+/// The program's `.h` — its declared surface for a consumer.
+///
+/// chelis#1158's monomorphized specializations are omitted. A
+/// `<callee>__mono_<hash>` symbol is a compiler-owned implementation detail
+/// of one generic def: its name is a hash of an interned signature, it
+/// changes whenever the instantiation set does, and nothing outside the
+/// translation unit has any business calling it. The in-`.c` prototypes that
+/// let a specialization call one declared later are emitted separately by
+/// `emit_host_abi_program`, over the unfiltered function list, so hiding
+/// these from the published header cannot break forward references.
+fn emit_published_host_header(
+    program: &HostProgram,
+    program_name: &str,
+) -> Result<String, Unsupported> {
+    emit_host_declarations(
+        program
+            .functions
+            .iter()
+            .filter(|function| !chelis_ir::is_monomorphized_specialization(&function.name)),
+        program_name,
+        false,
+    )
 }
 
 fn emit_host_header_with_linkage(
     program: &HostProgram,
+    program_name: &str,
+    internal_linkage: bool,
+) -> Result<String, Unsupported> {
+    emit_host_declarations(program.functions.iter(), program_name, internal_linkage)
+}
+
+fn emit_host_declarations<'a>(
+    functions: impl Iterator<Item = &'a HostFunction>,
     program_name: &str,
     internal_linkage: bool,
 ) -> Result<String, Unsupported> {
@@ -1517,9 +1549,7 @@ fn emit_host_header_with_linkage(
     } else {
         ""
     };
-    program
-        .functions
-        .iter()
+    functions
         .map(|function| {
             let params = function
                 .params

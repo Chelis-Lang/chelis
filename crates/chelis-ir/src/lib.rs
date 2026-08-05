@@ -29,6 +29,7 @@ pub mod fuse;
 pub mod grad;
 pub mod host;
 mod host_mono;
+pub use host_mono::is_monomorphized_specialization;
 pub mod host_type_state;
 pub mod load_store_name;
 pub mod lower;
