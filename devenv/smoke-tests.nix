@@ -1,6 +1,18 @@
-{ ... }:
+{ config, ... }:
 
 {
+  tasks."chelis:cargo-nix-fresh" = {
+    description = "Check the committed Cargo.nix graph is fresh";
+    after = [ "devenv:enterShell" ];
+    before = [ "devenv:enterTest" ];
+    exec = ''
+      set -eu
+      export PATH="${config.outputs.crate2nix}/bin:$PATH"
+      "$VIRTUAL_ENV/bin/python" \
+        "${config.devenv.root}/scripts/regenerate_cargo_nix.py" --check
+    '';
+  };
+
   tasks."chelis:toolchain-test" = {
     description = "Check the common development tools";
     after = [ "devenv:enterShell" ];
@@ -15,12 +27,19 @@
         fi
       }
 
-      for command_name in rustc cargo uv cmake git pkg-config; do
+      for command_name in rustc cargo rust-analyzer uv cmake git pkg-config openspec; do
         require_command "$command_name"
       done
 
+      openspec_version="$(openspec --version)"
+      if [ "$openspec_version" != "1.6.0" ]; then
+        printf 'unexpected OpenSpec version: %s\n' "$openspec_version" >&2
+        exit 1
+      fi
+
       rustc --version
       cargo --version
+      rust-analyzer --version
       cargo nextest --version
       cargo llvm-cov --version
       uv --version

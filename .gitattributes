@@ -1,3 +1,6 @@
 # Temporary GitHub Linguist overrides until Chelis is eligible for native Linguist support.
 *.ch linguist-language=Haskell
 *.dp linguist-language=Clojure
+
+# Committed crate2nix graph; generated, not hand-edited.
+/Cargo.nix linguist-generated=true

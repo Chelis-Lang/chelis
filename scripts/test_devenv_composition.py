@@ -18,6 +18,7 @@ EXPECTED_IMPORTS = (
     "./devenv/generated-files.nix",
     "./devenv/git-hooks.nix",
     "./devenv/smoke-tests.nix",
+    "./devenv/package-outputs.nix",
 )
 EXPECTED_COMMANDS = {
     "chelis-gate": "scripts/gate.py",
@@ -41,6 +42,12 @@ class DevenvComposition:
 
 
 @dataclass(frozen=True)
+class DevenvPackageOutputs:
+    names: frozenset[str]
+    reuses_flake_packages: bool
+
+
+@dataclass(frozen=True)
 class DevenvPython:
     version: tuple[int, int]
     uses_uv: bool
@@ -59,8 +66,21 @@ class DevenvGeneratedFiles:
 
 
 def parse_root_composition(root_text: str, yaml_text: str) -> DevenvComposition:
-    if re.search(r"(?m)^\s*imports:\s*$", yaml_text):
-        raise ValueError("devenv.yaml must not define local imports")
+    # Remote inputs (e.g. `ci/devenv/consumer`) are composed through
+    # devenv.yaml. Local modules must stay in devenv.nix, so a `./`/`../` or
+    # `.nix` entry under any yaml `imports:` block is rejected.
+    for block in re.finditer(
+        r"(?m)^imports:\s*$\n(?P<body>(?:[ \t]+-[ \t]+\S+\n?)+)", yaml_text
+    ):
+        local = [
+            entry
+            for entry in re.findall(
+                r"(?m)^[ \t]+-[ \t]+(\S+)", block.group("body")
+            )
+            if entry.startswith(("./", "../")) or entry.endswith(".nix")
+        ]
+        if local:
+            raise ValueError("devenv.yaml must not define local imports")
 
     match = re.fullmatch(
         (
@@ -81,6 +101,39 @@ def parse_root_composition(root_text: str, yaml_text: str) -> DevenvComposition:
     return DevenvComposition(imports=parsed)
 
 
+def parse_package_outputs_module(text: str) -> DevenvPackageOutputs:
+    if "builtins.getFlake (toString ../.)" in text:
+        raise ValueError("the Devenv package flake source must exclude ignored paths")
+    required = (
+        'repoFlake = builtins.getFlake "git+file://${toString ../.}";',
+        "system = pkgs.stdenv.hostPlatform.system;",
+        "packageNames = (import ../nix/contracts.nix).packageNames;",
+        "repoPackages = repoFlake.packages.${system};",
+        "value = repoPackages.${name};",
+        "outputs = builtins.listToAttrs (builtins.map mkOutput packageNames);",
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    if missing:
+        raise ValueError(
+            f"the Devenv package outputs must reuse the root flake packages: {missing!r}"
+        )
+    forbidden = (
+        "languages.rust.import",
+        "import ../nix/packages.nix",
+        "pkgs.callPackage",
+        "pkgs.runCommand",
+    )
+    found = [fragment for fragment in forbidden if fragment in text]
+    if found:
+        raise ValueError(
+            f"the Devenv package outputs must not define another package graph: {found!r}"
+        )
+    return DevenvPackageOutputs(
+        names=frozenset({"chelis", "chelis-runtime", "chelisup", "default"}),
+        reuses_flake_packages=True,
+    )
+
+
 def parse_python_module(text: str) -> DevenvPython:
     required = (
         "package = pkgs.python311;",
@@ -99,6 +152,20 @@ def parse_python_module(text: str) -> DevenvPython:
         manages_venv=True,
         pyo3_uses_venv=True,
     )
+
+
+def parse_openspec_composition(toolchains_text: str, yaml_text: str) -> None:
+    # OpenSpec is provided by the ci consumer module (config.outputs.openspec),
+    # not built in the Devenv shell. Its version is pinned once in ci and
+    # verified at runtime by the smoke test's `openspec --version` check.
+    if "config.outputs.openspec" not in toolchains_text:
+        raise ValueError(
+            "the Devenv shell must use OpenSpec from the ci consumer module"
+        )
+    if "openspecPinned" in toolchains_text:
+        raise ValueError("the Devenv shell must not build its own OpenSpec")
+    if "ci/devenv/consumer" not in yaml_text:
+        raise ValueError("the Devenv shell must compose the ci consumer module")
 
 
 def parse_commands_module(text: str) -> DevenvCommands:
@@ -169,6 +236,11 @@ def parse_contributor_docs(text: str) -> None:
         "scripts/check_commit_message.py",
         ".devenv/state/venv",
         "PYO3_PYTHON",
+        "OpenSpec 1.6.0",
+        "openspec validate --all --strict --no-interactive",
+        "devenv build outputs.chelis",
+        "devenv build outputs.chelis-runtime",
+        "devenv build outputs.chelisup",
     )
     missing = [fragment for fragment in required if fragment not in text]
     if missing:
@@ -184,6 +256,17 @@ class DevenvCompositionTests(unittest.TestCase):
             EXPECTED_IMPORTS,
         )
 
+    def test_devenv_reuses_the_root_flake_package_outputs(self) -> None:
+        text = (REPO_ROOT / "devenv/package-outputs.nix").read_text(
+            encoding="utf-8"
+        )
+        parsed = parse_package_outputs_module(text)
+        self.assertEqual(
+            parsed.names,
+            frozenset({"chelis", "chelis-runtime", "chelisup", "default"}),
+        )
+        self.assertTrue(parsed.reuses_flake_packages)
+
     def test_devenv_manages_python_and_the_pyo3_interpreter(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         parsed = parse_python_module(text)
@@ -191,6 +274,11 @@ class DevenvCompositionTests(unittest.TestCase):
         self.assertTrue(parsed.uses_uv)
         self.assertTrue(parsed.manages_venv)
         self.assertTrue(parsed.pyo3_uses_venv)
+
+    def test_devenv_composes_openspec_from_ci(self) -> None:
+        toolchains = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        yaml = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        parse_openspec_composition(toolchains, yaml)
 
     def test_devenv_exposes_the_python_command_facade(self) -> None:
         text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")
@@ -232,11 +320,59 @@ class DevenvCompositionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not define local imports"):
             parse_root_composition(root_text, f"{yaml_text}\nimports:\n  - ./other.nix\n")
 
+    def test_non_package_flake_outputs_fail_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/package-outputs.nix").read_text(
+            encoding="utf-8"
+        )
+        mutated = text.replace(
+            "repoPackages = repoFlake.packages.${system};",
+            "repoPackages = repoFlake.checks.${system};",
+        )
+        with self.assertRaisesRegex(ValueError, "must reuse the root flake packages"):
+            parse_package_outputs_module(mutated)
+
+    def test_unfiltered_devenv_flake_source_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/package-outputs.nix").read_text(
+            encoding="utf-8"
+        )
+        mutated = text.replace(
+            'builtins.getFlake "git+file://${toString ../.}"',
+            "builtins.getFlake (toString ../.)",
+        )
+        with self.assertRaisesRegex(ValueError, "must exclude ignored paths"):
+            parse_package_outputs_module(mutated)
+
+    def test_independent_devenv_package_graph_fails_at_the_parse_boundary(
+        self,
+    ) -> None:
+        text = (REPO_ROOT / "devenv/package-outputs.nix").read_text(
+            encoding="utf-8"
+        )
+        mutated = text.replace(
+            "in\n{",
+            "  duplicate = import ../nix/packages.nix;\nin\n{",
+        )
+        with self.assertRaisesRegex(ValueError, "must not define another package graph"):
+            parse_package_outputs_module(mutated)
+
     def test_disabled_python_venv_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         mutated = text.replace("venv.enable = true;", "venv.enable = false;")
         with self.assertRaisesRegex(ValueError, "Python contract is incomplete"):
             parse_python_module(mutated)
+
+    def test_missing_openspec_composition_fails_at_the_parse_boundary(self) -> None:
+        toolchains = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        yaml = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "OpenSpec from the ci consumer"):
+            parse_openspec_composition(
+                toolchains.replace("config.outputs.openspec", "config.outputs.other"),
+                yaml,
+            )
+        with self.assertRaisesRegex(ValueError, "compose the ci consumer"):
+            parse_openspec_composition(
+                toolchains, yaml.replace("ci/devenv/consumer", "ci/devenv/other")
+            )
 
     def test_missing_command_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")

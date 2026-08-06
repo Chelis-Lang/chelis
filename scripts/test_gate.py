@@ -103,6 +103,11 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
             f"uses: {DEVENV_SETUP_ACTION}",
             f"shell: {PORTABLE_DEVENV_SHELL}",
             "run: devenv test --no-tui",
+            (
+                "run: devenv build --no-tui outputs.chelis "
+                "outputs.chelis-runtime outputs.chelisup"
+            ),
+            "uses: actions/create-github-app-token@",
         )
         for marker in required_markers:
             actual_count = block.count(marker)
@@ -886,6 +891,27 @@ class NixPackagesWorkflowTests(unittest.TestCase):
     def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         _assert_native_devenv_recipe(text)
+
+    def test_missing_devenv_package_build_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "run: devenv build --no-tui outputs.chelis "
+            "outputs.chelis-runtime outputs.chelisup",
+            "run: omitted",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "devenv build"):
+            _assert_native_devenv_recipe(mutated)
+
+    def test_missing_ci_app_token_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "uses: actions/create-github-app-token@",
+            "uses: omitted@",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "create-github-app-token"):
+            _assert_native_devenv_recipe(mutated)
 
     def test_missing_central_devenv_action_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")

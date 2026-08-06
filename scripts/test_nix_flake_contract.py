@@ -54,42 +54,43 @@ def nix_raw(*args: str) -> str:
     return completed.stdout.strip()
 
 
-def assert_automatic_crate2nix_contract(
+def assert_committed_crate2nix_contract(
     flake: str,
     packages: str,
     source: str,
     *,
     cargo_nix_exists: bool,
 ) -> None:
-    required_flake = "allow-import-from-derivation = true;"
-    if required_flake not in flake:
-        raise AssertionError("the flake must enable import from derivation")
+    if "allow-import-from-derivation" in flake:
+        raise AssertionError("the flake must not enable import from derivation")
 
     required_packages = (
-        'pkgs.callPackage (crate2nix + "/tools.nix")',
-        "generatedCargoNix",
-        "additionalCargoNixArgs",
-        '"--no-default-features"',
-        '"--features"',
-        '"chelis-cli/smt"',
-        'CARGO_NET_OFFLINE = "true";',
-        "import generatedCargoNix",
+        'import (root + "/Cargo.nix")',
+        'workspaceMembers."chelis-cli".build',
     )
     missing_packages = [item for item in required_packages if item not in packages]
     if missing_packages:
         raise AssertionError(
-            f"the automatic crate2nix contract is incomplete: {missing_packages!r}"
+            f"the committed crate2nix contract is incomplete: {missing_packages!r}"
         )
-    if 'import (root + "/Cargo.nix")' in packages:
-        raise AssertionError("the package layer must not import a repository Cargo.nix")
-    if cargo_nix_exists:
-        raise AssertionError("the repository must not track Cargo.nix")
+    forbidden_packages = (
+        "generatedCargoNix",
+        "additionalCargoNixArgs",
+        'CARGO_NET_OFFLINE = "true";',
+    )
+    present_forbidden = [item for item in forbidden_packages if item in packages]
+    if present_forbidden:
+        raise AssertionError(
+            f"the package layer must not generate the graph: {present_forbidden!r}"
+        )
+    if not cargo_nix_exists:
+        raise AssertionError("the repository must track a committed Cargo.nix")
 
     required_source = ('"Cargo.lock"', '"tree-sitter-chelis"')
     missing_source = [item for item in required_source if item not in source]
     if missing_source:
         raise AssertionError(
-            f"the crate2nix generator source is incomplete: {missing_source!r}"
+            f"the crate source filter is incomplete: {missing_source!r}"
         )
 
 
@@ -190,27 +191,11 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
         self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
 
-    def test_flake_pins_crate2nix_as_a_non_flake_input(self) -> None:
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        self.assertIn('url = "github:nix-community/crate2nix/0.15.0";', flake)
-        self.assertRegex(
-            flake,
-            r"crate2nix\s*=\s*\{[^}]*flake\s*=\s*false;",
-        )
-        lock = json.loads((REPO_ROOT / "flake.lock").read_text(encoding="utf-8"))
-        crate2nix = lock["nodes"]["crate2nix"]
-        self.assertFalse(crate2nix["flake"])
-        self.assertEqual(
-            crate2nix["locked"]["rev"],
-            "7c33e664668faecf7655fa53861d7a80c9e464a2",
-        )
-        self.assertEqual(crate2nix["original"]["ref"], "0.15.0")
-
-    def test_rust_builds_use_an_automatic_crate2nix_graph(self) -> None:
+    def test_rust_builds_use_a_committed_crate2nix_graph(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        assert_automatic_crate2nix_contract(
+        assert_committed_crate2nix_contract(
             flake,
             packages,
             source,
@@ -222,21 +207,58 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn('features = [ "smt" ];', packages)
         self.assertNotIn("buildRustPackage", packages)
 
-    def test_disabled_ifd_fails_the_automatic_graph_contract(self) -> None:
+    def test_missing_committed_import_fails_the_contract(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        mutated = flake.replace("allow-import-from-derivation = true;", "")
-        with self.assertRaisesRegex(AssertionError, "enable import from derivation"):
-            assert_automatic_crate2nix_contract(
+        mutated = packages.replace(
+            'import (root + "/Cargo.nix")', "import generatedCargoNix"
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "committed crate2nix contract is incomplete"
+        ):
+            assert_committed_crate2nix_contract(
+                flake,
                 mutated,
+                source,
+                cargo_nix_exists=True,
+            )
+
+    def test_reintroduced_ifd_fails_the_contract(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        mutated = flake.replace(
+            "  inputs = {",
+            "  nixConfig.allow-import-from-derivation = true;\n\n  inputs = {",
+            1,
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "must not enable import from derivation"
+        ):
+            assert_committed_crate2nix_contract(
+                mutated,
+                packages,
+                source,
+                cargo_nix_exists=True,
+            )
+
+    def test_untracked_graph_fails_the_contract(self) -> None:
+        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
+        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
+        with self.assertRaisesRegex(
+            AssertionError, "must track a committed Cargo.nix"
+        ):
+            assert_committed_crate2nix_contract(
+                flake,
                 packages,
                 source,
                 cargo_nix_exists=False,
             )
 
     @REQUIRES_NIX
-    def test_nix_evaluation_fails_when_ifd_is_disabled(self) -> None:
+    def test_nix_evaluation_succeeds_when_ifd_is_disabled(self) -> None:
         system = nix_raw(
             "eval",
             "--impure",
@@ -252,7 +274,7 @@ class NixFlakeContractTests(unittest.TestCase):
                 "allow-import-from-derivation",
                 "false",
                 "--raw",
-                f".#checks.{system}.crate2nixGeneration.drvPath",
+                f".#packages.{system}.default.drvPath",
             ],
             cwd=REPO_ROOT,
             text=True,
@@ -260,34 +282,20 @@ class NixFlakeContractTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("allow-import-from-derivation", completed.stderr)
-        self.assertIn("disabled", completed.stderr)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.strip().endswith(".drv"))
 
-    def test_online_generator_fails_the_automatic_graph_contract(self) -> None:
-        flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
-        packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
-        source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
-        mutated = packages.replace('      CARGO_NET_OFFLINE = "true";\n', "")
-        with self.assertRaisesRegex(AssertionError, "contract is incomplete"):
-            assert_automatic_crate2nix_contract(
-                flake,
-                mutated,
-                source,
-                cargo_nix_exists=False,
-            )
-
-    def test_missing_generator_source_fails_the_automatic_graph_contract(self) -> None:
+    def test_missing_source_filter_entry_fails_the_committed_contract(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
         source = (REPO_ROOT / "nix" / "source.nix").read_text(encoding="utf-8")
         mutated = source.replace('    "Cargo.lock"\n', "")
-        with self.assertRaisesRegex(AssertionError, "generator source is incomplete"):
-            assert_automatic_crate2nix_contract(
+        with self.assertRaisesRegex(AssertionError, "crate source filter is incomplete"):
+            assert_committed_crate2nix_contract(
                 flake,
                 packages,
                 mutated,
-                cargo_nix_exists=False,
+                cargo_nix_exists=True,
             )
 
     def test_cvc5_sys_override_uses_the_fixed_native_inputs(self) -> None:
@@ -324,14 +332,14 @@ class NixFlakeContractTests(unittest.TestCase):
         policy = (REPO_ROOT / "chelis-lint.toml").read_text(encoding="utf-8")
         self.assertNotIn('pattern = "Cargo.nix"', policy)
 
-    def test_native_checks_inspect_the_automatic_crate2nix_graph(self) -> None:
+    def test_native_checks_inspect_the_committed_crate2nix_graph(self) -> None:
         checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
-        self.assertIn("crate2nixGeneration", checks)
-        self.assertIn("built.generatedCargoNix", checks)
-        self.assertIn("Cargo-generated.nix", checks)
-        self.assertNotIn("crate2nixGraphSync", checks)
-        self.assertNotIn("crate2nixRegeneration", checks)
-        self.assertFalse((REPO_ROOT / "scripts/check_crate2nix_sync.py").exists())
+        self.assertIn("crate2nixCommittedGraph", checks)
+        self.assertIn("${root}/Cargo.nix", checks)
+        self.assertIn("@generated by crate2nix 0.15.0", checks)
+        self.assertNotIn("built.generatedCargoNix", checks)
+        self.assertNotIn("Cargo-generated.nix", checks)
+        self.assertNotIn("test ! -e", checks)
 
     def test_version_contract_requires_exact_cli_output(self) -> None:
         checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")

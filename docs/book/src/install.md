@@ -158,6 +158,18 @@ nix run .#chelisup -- --help
 nix flake check --print-build-logs
 ```
 
+If you use Devenv, build the same package derivations through its output
+interface:
+
+```sh
+devenv build outputs.chelis
+devenv build outputs.chelis-runtime
+devenv build outputs.chelisup
+```
+
+Run `devenv build` without an attribute to build all four outputs. The fourth
+output is the `default` alias of `chelis`.
+
 Nix is a source-build channel. It does not replace the release store or the version router.
 
 Before an install, the Nix wrapper creates `$CHELIS_HOME/nix-gcroots/chelisup.next`. After success, it promotes `$CHELIS_HOME/nix-gcroots/chelisup`.

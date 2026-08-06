@@ -25,6 +25,18 @@ in
       exec = runPython "scripts/gate.py";
     };
 
+    # Regenerate or `--check` the committed Cargo.nix graph. crate2nix comes
+    # from the ci consumer module (config.outputs.crate2nix); cargo is on the
+    # shell PATH from languages.rust.
+    "regenerate-crate2nix" = {
+      description = "Regenerate or freshness-check the committed Cargo.nix graph";
+      exec = ''
+        export PATH="${config.outputs.crate2nix}/bin:$PATH"
+        exec "${config.languages.python.package}/bin/python" \
+          "${config.devenv.root}/scripts/regenerate_cargo_nix.py" "$@"
+      '';
+    };
+
     "chelis-reap-orphans" = {
       description = "List or remove orphaned Chelis build processes";
       package = config.languages.python.package;

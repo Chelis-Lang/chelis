@@ -109,6 +109,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   Linux uses GCC, OpenBLAS, and Valgrind from Nixpkgs. macOS maps `gcc` and
   `g++` to the Nixpkgs clang wrapper from `pkgs.stdenv.cc`.
   `devenv test` runs separate toolchain, Python, C, and C++ tasks.
+  The shell provides rust-analyzer through the Devenv Rust LSP option.
+  `devenv build` exposes the canonical `chelis`, `chelis-runtime`, `chelisup`,
+  and `default` package derivations from the root flake.
   Native Nix CI uses the reviewed portable Devenv action and public cache.
   The Linux job runs per pull request with bounded parallelism, reclaimed runner disk, and a cached cvc5 toolchain closure.
   The macOS job is a documented manual dispatch gate with the identical check set.

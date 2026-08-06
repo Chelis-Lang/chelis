@@ -56,7 +56,7 @@ The rest of this README builds the Chelis compiler from a checkout.
 ### Devenv development shell
 
 Devenv is optional for local work. Native Nix CI requires Devenv. The shell
-supplies pinned Rust, Python, C, and contributor tools.
+supplies pinned Rust, rust-analyzer, Python, C, and contributor tools.
 
 The tracked environment supports `x86_64-linux` and Apple silicon macOS
 (`aarch64-darwin`). Other systems must use the manual setup below.
@@ -157,6 +157,9 @@ devenv shell -- chelis-gate --list
 
 # List orphaned Chelis build processes.
 devenv shell -- chelis-reap-orphans
+
+# Validate the active OpenSpec tree.
+devenv shell -- openspec validate --all --strict --no-interactive
 ```
 
 #### Shell behavior
@@ -164,7 +167,7 @@ devenv shell -- chelis-reap-orphans
 The repository pins the Devenv modules to release `v2.2`. The version of the
 local Devenv CLI must match this module version.
 
-`devenv.nix` imports five local configuration modules. `devenv.yaml` defines
+`devenv.nix` imports six local configuration modules. `devenv.yaml` defines
 the inputs and CLI options.
 
 `devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
@@ -180,11 +183,29 @@ On Linux, the shell supplies GCC, OpenBLAS, and Valgrind from Nixpkgs.
 Devenv creates and activates Python 3.11 at `.devenv/state/venv`. It sets
 `PYO3_PYTHON` to that interpreter.
 
+Devenv supplies OpenSpec 1.6.0 for local structural validation.
+
 Devenv does not modify the repository-root `.venv`. The manual setup path below
 owns that environment outside Devenv.
 
 `devenv test` initializes the managed files and Python. It then runs separate
 smoke tasks for the toolchain, Python, C, and C++.
+
+Devenv exposes the canonical root flake packages as build outputs. Build one
+output with its full attribute name:
+
+```sh
+devenv build outputs.chelis
+devenv build outputs.chelis-runtime
+devenv build outputs.chelisup
+```
+
+Run `devenv build` without an attribute to build all outputs, including the
+`default` alias. Each output uses the same derivation as its `nix build`
+counterpart.
+
+These builds use the local Git input. They include changes to tracked files.
+They exclude untracked files and ignored directories.
 
 The shell also supplies these platform commands:
 
@@ -251,6 +272,9 @@ nix build .#chelis          # compiler, runtime library, and five public headers
 nix build .#chelis-runtime  # runtime static library and five public headers
 nix build .#chelisup        # installer command and its internal Nix payload
 ```
+
+The equivalent Devenv outputs reuse these package derivations. Use the
+`devenv build outputs.<name>` commands in the Devenv section.
 
 Run an application from the repository root:
 

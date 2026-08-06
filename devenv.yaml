@@ -1,5 +1,14 @@
 require_version: true
 inputs:
+  # Shared ecosystem tool pins (crate2nix, openspec) consumed via the devenv
+  # polyrepo compose pattern (imports: ci/devenv/consumer). ci is private; nix
+  # uses the authenticated github: fetcher. CI mints a scoped token from the CI
+  # GitHub App (create-github-app-token) and passes it as nix access-tokens;
+  # locally add `access-tokens = github.com=$(gh auth token)` to
+  # ~/.config/nix/nix.conf. Bump with `devenv update ci`.
+  ci:
+    url: github:Chelis-Lang/ci/ef3a402c9284179b9a47671323a8bc5667bf69ff
+    flake: false
   devenv:
     url: github:cachix/devenv/v2.2?dir=src/modules
   git-hooks:
@@ -14,3 +23,5 @@ inputs:
     inputs:
       nixpkgs:
         follows: nixpkgs
+imports:
+  - ci/devenv/consumer

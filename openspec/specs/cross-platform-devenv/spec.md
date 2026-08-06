@@ -65,8 +65,9 @@ The root `devenv.nix` MUST import these local modules:
 - `./devenv/generated-files.nix`
 - `./devenv/git-hooks.nix`
 - `./devenv/smoke-tests.nix`
+- `./devenv/package-outputs.nix`
 
-`devenv.yaml` MUST NOT duplicate the local imports. It MUST remain the owner of Devenv inputs and CLI options.
+`devenv.yaml` MUST NOT declare local module imports; those belong in `devenv.nix`. It MAY declare remote imports for shared configuration (the ci consumer module), and it MUST remain the owner of Devenv inputs and CLI options.
 
 The root `devenv.nix` MUST contain only the module imports. Each local module MUST own one configuration concern.
 
@@ -74,18 +75,58 @@ The root `devenv.nix` MUST contain only the module imports. Each local module MU
 - **WHEN** a required local import is absent or duplicated in `devenv.nix`
 - **THEN** the static Devenv composition test fails
 
-#### Scenario: YAML duplicates the module composition
-- **WHEN** `devenv.yaml` declares a local imports section
+#### Scenario: YAML declares a local import
+- **WHEN** `devenv.yaml` lists a `./`, `../`, or `.nix` import entry
 - **THEN** the static Devenv composition test fails
 
 #### Scenario: An evaluator reads the root module
 - **WHEN** a Devenv evaluator reads `devenv.nix` without the root YAML imports
-- **THEN** it discovers all five local modules
+- **THEN** it discovers all six local modules
 
 #### Scenario: A contributor evaluates the composed shell
 - **WHEN** a contributor runs `devenv test`
-- **THEN** Devenv combines all five local modules
+- **THEN** Devenv combines all six local modules
 - **AND** the composed configuration passes the shell contract
+
+### Requirement: Devenv exposes the canonical Nix packages
+The `devenv/package-outputs.nix` module MUST define `outputs.chelis`, `outputs.chelis-runtime`, `outputs.chelisup`, and `outputs.default`.
+
+Each Devenv output MUST reuse the corresponding package from the root flake for the native system. `outputs.default` MUST remain the same derivation as `outputs.chelis`.
+
+The Devenv module MUST NOT define a second crate2nix graph or an independent package derivation. It MUST evaluate the root flake through a local Git input. It MUST NOT copy ignored build directories into the Nix store.
+
+#### Scenario: A contributor builds one Devenv output
+- **WHEN** a contributor runs `devenv build outputs.chelis`
+- **THEN** Devenv builds the same derivation as `nix build .#chelis`
+
+#### Scenario: A contributor builds all Devenv outputs
+- **WHEN** a contributor runs `devenv build`
+- **THEN** Devenv builds `chelis`, `chelis-runtime`, `chelisup`, and the default alias
+
+#### Scenario: A Devenv output selects another flake surface
+- **WHEN** the package-output module selects flake checks, apps, or an independent package graph
+- **THEN** the static Devenv composition test fails
+
+#### Scenario: A Devenv output imports the unfiltered repository
+- **WHEN** the package-output module passes the complete worktree to `builtins.getFlake`
+- **THEN** the static Devenv composition test fails before Nix copies ignored build directories
+
+### Requirement: The shell composes shared ecosystem tools from ci
+The shell MUST obtain crate2nix and OpenSpec from the shared ci consumer Devenv module, composed through `devenv.yaml` (a `ci` input plus the `ci/devenv/consumer` import). Neither tool may be pinned or built independently in this repository.
+
+The shell MUST expose `config.outputs.crate2nix` and `config.outputs.openspec`, built with the repository's own `pkgs`. It MUST provide a `regenerate-crate2nix` command that refreshes or `--check`s the committed `Cargo.nix` graph using `config.outputs.crate2nix`. The Devenv smoke check MUST run the freshness `--check` and MUST verify OpenSpec reports the pinned version.
+
+#### Scenario: The shell builds the shared tools
+- **WHEN** a contributor runs `devenv build outputs.crate2nix outputs.openspec`
+- **THEN** Devenv builds crate2nix and OpenSpec from the ci consumer module
+
+#### Scenario: The repository pins a shared tool independently
+- **WHEN** the shell builds or pins its own crate2nix or OpenSpec instead of composing ci
+- **THEN** the static Devenv composition test fails
+
+#### Scenario: The committed graph drifts
+- **WHEN** the committed `Cargo.nix` no longer matches a fresh crate2nix generation
+- **THEN** the `regenerate-crate2nix --check` smoke task fails
 
 ### Requirement: The repository catalogs inactive Git hooks
 The repository MUST declare the `git-hooks` input in `devenv.yaml`. The input MUST follow the configured `nixpkgs` input.
@@ -185,13 +226,19 @@ On Linux, the shell MUST provide GCC from Nixpkgs. Linux MUST NOT use the macOS 
 - **THEN** the command reports the GCC package from Nixpkgs
 
 ### Requirement: The shell provides the Chelis development tools
-The common shell MUST provide Rust from `rust-toolchain.toml`, Python 3.11, uv, `cargo-nextest`, `cargo-llvm-cov`, CMake, Git, and pkg-config.
+The common shell MUST provide Rust from `rust-toolchain.toml`, rust-analyzer, Python 3.11, uv, `cargo-nextest`, `cargo-llvm-cov`, CMake, Git, and pkg-config.
+
+The Rust module MUST set `languages.rust.toolchainFile`. It MUST provide rust-analyzer through `languages.rust.lsp.package`.
 
 The Linux shell MUST also provide GCC, OpenBLAS, and Valgrind. The macOS shell MUST use the system Accelerate framework instead of OpenBLAS.
 
 #### Scenario: Common tools are available
 - **WHEN** a contributor enters the shell on Linux or macOS
 - **THEN** each common tool responds to its version command
+
+#### Scenario: The Rust language server package is absent
+- **WHEN** the Rust module does not define `languages.rust.lsp.package`
+- **THEN** the static Devenv version test fails
 
 #### Scenario: Linux tools are available
 - **WHEN** a contributor enters the shell on Linux
@@ -297,7 +344,7 @@ Each job MUST use `devenv-ci bash --noprofile --norc -e -o pipefail {0}` as its 
 
 The workflow MUST NOT duplicate the direct Nix, Cachix, or Devenv bootstrap. The reviewed action supplies Nix 2.34.4 and Devenv v2.2.
 
-Each job MUST run `devenv test --no-tui`. The Devenv cache MUST NOT replace the complete native flake check.
+Each job MUST run `devenv test --no-tui` and `devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup`. The Devenv cache MUST NOT replace the complete native flake check.
 
 The public Devenv cache does not contain the custom Chelis cvc5 derivation. Each job MAY reuse the prebuilt cvc5 toolchain closure from the repository Actions cache, keyed by the closure derivation name.
 
@@ -306,6 +353,7 @@ The public Devenv cache does not contain the custom Chelis cvc5 derivation. Each
 - **THEN** the job invokes the reviewed portable Devenv action
 - **AND** each Nix and Devenv `run` step uses the portable shell
 - **AND** the job runs all four named Devenv tasks
+- **AND** the job builds all three named Devenv package outputs
 - **AND** the job runs the complete native flake check
 
 #### Scenario: Native CI bypasses the portable base
@@ -330,7 +378,7 @@ The change MUST NOT disable, ignore, or weaken a test to make this tier pass.
 - **THEN** the compiler smoke checks fail before the result can count as acceptance evidence
 
 ### Requirement: Contributor documentation describes the optional shell
-The contributor documentation MUST show the Devenv activation, smoke-check, and developer commands.
+The contributor documentation MUST show the Devenv activation, smoke-check, package-output, and developer commands.
 
 It MUST state that the macOS command shims invoke the Nixpkgs clang wrapper from `pkgs.stdenv.cc`, not host Apple clang.
 
@@ -340,7 +388,7 @@ It MUST NOT describe Devenv as a product requirement.
 
 #### Scenario: A contributor selects Devenv
 - **WHEN** a contributor reads the source-build prerequisites
-- **THEN** the documentation provides the Devenv activation, smoke-check, and backend-test commands
+- **THEN** the documentation provides the Devenv activation, smoke-check, package-output, and backend-test commands
 
 #### Scenario: A contributor selects manual setup
 - **WHEN** a contributor does not use Devenv

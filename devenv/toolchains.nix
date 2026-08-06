@@ -21,6 +21,7 @@ in
     rust = {
       enable = true;
       toolchainFile = ../rust-toolchain.toml;
+      lsp.package = pkgs.rust-analyzer;
     };
 
     python = {
@@ -43,6 +44,12 @@ in
       cmake
       git
       pkg-config
+    ]
+    # crate2nix and openspec come from the ci consumer module composed in
+    # devenv.yaml (config.outputs.*), so their pins live once in ci.
+    ++ [
+      config.outputs.crate2nix
+      config.outputs.openspec
     ]
     ++ lib.optionals stdenv.isLinux [
       gcc

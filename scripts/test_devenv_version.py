@@ -16,10 +16,12 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GIT_HOOKS_MODULE = REPO_ROOT / "devenv/git-hooks.nix"
 SMOKE_TEST_MODULE = REPO_ROOT / "devenv/smoke-tests.nix"
+TOOLCHAIN_MODULE = REPO_ROOT / "devenv/toolchains.nix"
 EXPECTED_URL = "github:cachix/devenv/v2.2?dir=src/modules"
 EXPECTED_REF = "v2.2"
 EXPECTED_REVISION = "ffce215a42d09c6375c3d60dd9c4110438fc4d87"
 EXPECTED_TEST_TASKS = (
+    "chelis:cargo-nix-fresh",
     "chelis:toolchain-test",
     "chelis:python-test",
     "chelis:c-compiler-test",
@@ -99,6 +101,29 @@ class SharedInputPin:
     revision: str
 
 
+@dataclass(frozen=True)
+class RustDevelopmentTools:
+    toolchain_file: str
+    lsp_package: str
+
+
+def parse_rust_development_tools(text: str) -> RustDevelopmentTools:
+    block_match = re.search(r"(?ms)^    rust = \{\n(?P<body>.*?)^    \};$", text)
+    if block_match is None:
+        raise ValueError("the Devenv Rust module must define one Rust block")
+    body = block_match.group("body")
+    toolchain_match = re.search(r"(?m)^      toolchainFile = ([^;]+);$", body)
+    lsp_match = re.search(r"(?m)^      lsp\.package = ([^;]+);$", body)
+    if toolchain_match is None or toolchain_match.group(1) != "../rust-toolchain.toml":
+        raise ValueError("the Devenv Rust module must use rust-toolchain.toml")
+    if lsp_match is None or lsp_match.group(1) != "pkgs.rust-analyzer":
+        raise ValueError("the Devenv Rust module must provide rust-analyzer")
+    return RustDevelopmentTools(
+        toolchain_file=toolchain_match.group(1),
+        lsp_package=lsp_match.group(1),
+    )
+
+
 def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
     raw_names = re.findall(r'(?m)^\s{2}tasks\."([^"]+)" = \{$', text)
     names = frozenset(raw_names)
@@ -114,6 +139,27 @@ def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
         raise ValueError("the smoke-test module must not define enterTest")
     if "processes." in text or "services." in text:
         raise ValueError("the Devenv smoke check must not define a service or process")
+
+    toolchain_contract = (
+        "rustc cargo rust-analyzer uv cmake git pkg-config openspec",
+        "rust-analyzer --version",
+    )
+    missing_tools = [fragment for fragment in toolchain_contract if fragment not in text]
+    if missing_tools:
+        raise ValueError(
+            f"the toolchain smoke contract is incomplete: {missing_tools!r}"
+        )
+    openspec_contract = (
+        'openspec_version="$(openspec --version)"',
+        'if [ "$openspec_version" != "1.6.0" ]; then',
+    )
+    missing_openspec = [
+        fragment for fragment in openspec_contract if fragment not in text
+    ]
+    if missing_openspec:
+        raise ValueError(
+            f"the OpenSpec smoke contract is incomplete: {missing_openspec!r}"
+        )
     return DevenvTestTasks(names=names)
 
 
@@ -408,6 +454,21 @@ class DevenvVersionTests(unittest.TestCase):
             frozenset(EXPECTED_TEST_TASKS),
         )
 
+    def test_repository_uses_the_devenv_rust_toolchain_options(self) -> None:
+        config = TOOLCHAIN_MODULE.read_text(encoding="utf-8")
+        tools = parse_rust_development_tools(config)
+        self.assertEqual(tools.toolchain_file, "../rust-toolchain.toml")
+        self.assertEqual(tools.lsp_package, "pkgs.rust-analyzer")
+
+    def test_missing_rust_analyzer_package_fails_at_the_parse_boundary(self) -> None:
+        config = TOOLCHAIN_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            "      lsp.package = pkgs.rust-analyzer;\n",
+            "      lsp.enable = false;\n",
+        )
+        with self.assertRaisesRegex(ValueError, "must provide rust-analyzer"):
+            parse_rust_development_tools(mutated)
+
     def test_repository_declares_the_git_hook_policy(self) -> None:
         config = GIT_HOOKS_MODULE.read_text(encoding="utf-8")
         catalog = parse_git_hook_catalog(config)
@@ -513,6 +574,21 @@ class DevenvVersionTests(unittest.TestCase):
     def test_missing_generated_git_hook_ignore_fails_at_parse_boundary(self) -> None:
         with self.assertRaisesRegex(ValueError, "must ignore"):
             parse_generated_git_hook_ignore("/target\n")
+
+    def test_missing_rust_analyzer_smoke_fails_at_the_parse_boundary(self) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(" cargo rust-analyzer uv", " cargo uv")
+        with self.assertRaisesRegex(ValueError, "toolchain smoke contract"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_wrong_openspec_smoke_version_fails_at_the_parse_boundary(self) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(
+            'if [ "$openspec_version" != "1.6.0" ]; then',
+            'if [ "$openspec_version" != "1.4.1" ]; then',
+        )
+        with self.assertRaisesRegex(ValueError, "OpenSpec smoke contract"):
+            parse_devenv_test_tasks(mutated)
 
     def test_missing_named_test_task_fails_at_the_parse_boundary(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")

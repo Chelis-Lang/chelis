@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "ci": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1786020619,
+        "narHash": "sha256-qcAsM4b1caurD7+kJKv4hGnG/u81ouhjU4KNujhP4Sg=",
+        "owner": "Chelis-Lang",
+        "repo": "ci",
+        "rev": "ef3a402c9284179b9a47671323a8bc5667bf69ff",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Chelis-Lang",
+        "repo": "ci",
+        "rev": "ef3a402c9284179b9a47671323a8bc5667bf69ff",
+        "type": "github"
+      }
+    },
     "devenv": {
       "locked": {
         "dir": "src/modules",
@@ -93,6 +110,7 @@
     },
     "root": {
       "inputs": {
+        "ci": "ci",
         "devenv": "devenv",
         "git-hooks": "git-hooks",
         "nixpkgs": "nixpkgs",
