@@ -27,10 +27,10 @@ Usage (an unmanaged launcher is automatically re-executed through uv):
 Local/CI stage split (chelis#360): the full developer gate runs
 `cargo nextest run --workspace --no-fail-fast` with the default profile, while the CI
 integration stage uses the `ci` profile and delegates its two census binaries
-to the required dtype oracle. The workspace execution stays out of `--local` --
-macOS Smoke is the authoritative
-workspace oracle, and on the macOS workstation the mass first-exec
-burst it triggers can wedge assessment entirely (see
+to the required dtype oracle. The workspace execution stays out of `--local`.
+The required `Integration Tests (Linux)` check is the authoritative CI
+workspace oracle. On the macOS workstation, a local workspace run can cause
+a mass first-exec burst. This burst can stop assessment entirely (see
 docs/local_macos_environment.md). `--local` is the pre-push
 checkpoint: workspace clippy (compile-only, no mass exec), fmt,
 `chelis lint`, plus `cargo nextest run -p <crate> --no-fail-fast` for each crate
@@ -221,10 +221,10 @@ STAGES: dict[str, list[list[str]]] = {
 
 STAGE_ORDER: list[str] = ["lint-and-unit", "integration"]
 
-# The static `--local` pre-push subset (chelis#360). Deliberately
-# excludes BUILD_WORKSPACE (clippy already compiles everything; no mass
-# first-exec burst) and NEXTEST_WORKSPACE (CI-owned; macOS Smoke is the
-# authoritative workspace oracle). `--local` appends a dynamic
+# The static `--local` pre-push subset (chelis#360) excludes BUILD_WORKSPACE.
+# Clippy already compiles everything without a mass first-exec burst.
+# It also excludes NEXTEST_WORKSPACE. Integration Tests (Linux) is the
+# authoritative CI workspace oracle. `--local` appends a dynamic
 # `cargo nextest run -p <crate> --no-fail-fast` stage per changed crate; see
 # `local_command_list`.
 LOCAL_STATIC_COMMANDS: list[list[str]] = [

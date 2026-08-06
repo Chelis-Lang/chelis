@@ -49,11 +49,29 @@ CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
+RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
+BUILD_CVC5_YML = REPO_ROOT / ".github" / "workflows" / "build-cvc5.yml"
 DEVENV_SETUP_ACTION = (
     "Chelis-Lang/ci/actions/setup-devenv@"
     "73f017c4d3179dc313844e9d5f08d17a7879c824"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
+DEVENV_COMMAND_PREFIX = "devenv shell --no-tui -- "
+DEVENV_WORKFLOW_JOBS = {
+    "ci.yml": (
+        "diagnostic-kind-oracle",
+        "lint-and-unit",
+        "workspace-tests",
+        "dtype-phase3-oracle",
+        "faithful-observation-phase2-oracle",
+        "macos-smoke",
+        "backend-sanitizers",
+        "docs",
+    ),
+    "conformance.yml": ("conformance",),
+    "conformance-nightly.yml": ("conformance-nightly",),
+    "heavy-e2e.yml": ("heavy-e2e",),
+}
 DOCS_ONLY_GATE_IF = (
     "if: ${{ !cancelled() && (needs.changes.result != 'success' "
     "|| needs.changes.outputs.docs_only != 'true') }}"
@@ -98,6 +116,24 @@ def _workflow_job_blocks(workflow: str) -> dict[str, str]:
         end = headers[index + 1].start() if index + 1 < len(headers) else len(workflow)
         blocks[header.group("name")] = workflow[header.start() : end]
     return blocks
+
+
+def _macos_manual_dispatch_errors(workflow: str) -> list[str]:
+    trigger = workflow[: workflow.index("\njobs:\n")]
+    has_manual_trigger = "workflow_dispatch:" in trigger
+    manual_if = re.compile(
+        r"(?m)^    if:\s*(?:\$\{\{\s*)?.*"
+        r"github\.event_name\s*==\s*'workflow_dispatch'.*$"
+    )
+    errors: list[str] = []
+    for job, block in _workflow_job_blocks(workflow).items():
+        if "runs-on: macos-latest" not in block:
+            continue
+        if not has_manual_trigger:
+            errors.append(f"{job}: missing workflow_dispatch trigger")
+        if manual_if.search(block) is None:
+            errors.append(f"{job}: missing manual-dispatch job condition")
+    return errors
 
 
 def _assert_carcara_full_suite_command(workflow: str) -> None:
@@ -426,21 +462,22 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
         self.assertIn("contents: read", block)
         _assert_executable_run_once(
             block,
-            ".venv/bin/python scripts/diagnostic_kind_oracle.py",
+            "python scripts/diagnostic_kind_oracle.py",
         )
-        self.assertIn("taiki-e/install-action@nextest", block)
+        self.assertIn(f"uses: {DEVENV_SETUP_ACTION}", block)
+        self.assertNotIn("taiki-e/install-action@nextest", block)
 
     def test_a_quoted_passing_noop_is_not_the_oracle_step(self):
         block = _ci_job_block("diagnostic-kind-oracle")
         mutated = block.replace(
-            "run: .venv/bin/python scripts/diagnostic_kind_oracle.py",
+            f"run: {DEVENV_COMMAND_PREFIX}python scripts/diagnostic_kind_oracle.py",
             'run: "true # scripts/diagnostic_kind_oracle.py"',
             1,
         )
         with self.assertRaises(AssertionError):
             _assert_executable_run_once(
                 mutated,
-                ".venv/bin/python scripts/diagnostic_kind_oracle.py",
+                "python scripts/diagnostic_kind_oracle.py",
             )
 
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
@@ -641,10 +678,20 @@ class ListOutputTests(unittest.TestCase):
 _GATE_COMMAND_PREFIXES = ("cargo ", "chelis ")
 
 
+def _unwrap_devenv_command(command: str) -> str:
+    """Return the command that runs inside a single Devenv shell wrapper."""
+    if command.startswith(DEVENV_COMMAND_PREFIX):
+        return command.removeprefix(DEVENV_COMMAND_PREFIX)
+    return command
+
+
 def _is_gate_relevant_command(command: str) -> bool:
     """True if `command` is a `cargo` or `chelis` invocation that a gate
     job must route through `gate.py` rather than hand-inline."""
-    return any(command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES)
+    logical_command = _unwrap_devenv_command(command)
+    return any(
+        logical_command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES
+    )
 
 
 def _parse_ci_gate_invocations() -> dict[str, list[str]]:
@@ -654,8 +701,9 @@ def _parse_ci_gate_invocations() -> dict[str, list[str]]:
 
     The parser is intentionally simple line-based YAML-shape matching:
     it tracks the current `<job>:` header (two-space indent under
-    `jobs:`) and collects single-line `run:` values whose command
+    `jobs:`) and collects single-line `run:` values whose logical command
     starts with `cargo ` or `chelis ` (see `_is_gate_relevant_command`).
+    It removes one project Devenv shell prefix before that classification.
     Multi-line `run: |` blocks in the gate jobs are not used today; if
     one is introduced the parity test will not see it, which the
     `test_no_multiline_run_in_gate_jobs` guard catches.
@@ -684,7 +732,7 @@ def _parse_ci_gate_invocations() -> dict[str, list[str]]:
             invocations[current_job].append("<multiline-run-block>")
             continue
         if _is_gate_relevant_command(command):
-            invocations[current_job].append(command)
+            invocations[current_job].append(_unwrap_devenv_command(command))
     return invocations
 
 
@@ -733,7 +781,7 @@ def _assert_executable_run_once(job_block: str, command: str) -> None:
             continue
         value = match.group("command")
         if value not in {"|", ">", "|-", ">-"}:
-            executable.append(value)
+            executable.append(_unwrap_devenv_command(value))
     count = executable.count(command)
     if count != 1:
         raise AssertionError(
@@ -758,6 +806,37 @@ def _workflow_job_block(path: Path, job: str) -> str:
             end = idx
             break
     return "\n".join(lines[start:end])
+
+
+def _assert_devenv_job_recipe(job_block: str) -> None:
+    """Require a converted job to use only the project Devenv toolchains."""
+    required = (
+        f"uses: {DEVENV_SETUP_ACTION}",
+        "uses: actions/create-github-app-token@",
+        "repositories: ci",
+        "NIX_CONFIG<<EOF\\n%s\\naccess-tokens = github.com=%s\\nEOF\\n",
+        '"$NIX_CONFIG" "$CI_TOKEN"',
+        f"shell: {PORTABLE_DEVENV_SHELL}",
+        f"run: {DEVENV_COMMAND_PREFIX}",
+    )
+    missing = [marker for marker in required if marker not in job_block]
+    if missing:
+        raise AssertionError(f"incomplete Devenv CI job recipe: {missing!r}")
+
+    forbidden = (
+        "dtolnay/rust-toolchain",
+        "taiki-e/install-action",
+        "astral-sh/setup-uv",
+        "scripts/ci_setup_uv_python.py",
+        ".venv/bin/python",
+        ".devenv/state/venv/bin/python",
+        "uv pip install",
+    )
+    found = [marker for marker in forbidden if marker in job_block]
+    if found:
+        raise AssertionError(
+            f"nonportable toolchain setup remains in Devenv job: {found!r}"
+        )
 
 
 def _rust_cache_inputs(job_block: str) -> dict[str, str]:
@@ -794,6 +873,36 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
     return inputs
 
 
+class DevenvWorkflowJobTests(unittest.TestCase):
+    def test_converted_jobs_use_the_project_devenv_toolchains(self) -> None:
+        for filename, jobs in DEVENV_WORKFLOW_JOBS.items():
+            path = WORKFLOWS_DIR / filename
+            for job in jobs:
+                with self.subTest(filename=filename, job=job):
+                    _assert_devenv_job_recipe(_workflow_job_block(path, job))
+
+    def test_host_uv_setup_fails_the_devenv_recipe(self) -> None:
+        block = _ci_job_block("lint-and-unit")
+        mutated = block.replace(
+            "      - name: Cache cargo registry and build",
+            "      - uses: astral-sh/setup-uv@v8.1.0\n\n"
+            "      - name: Cache cargo registry and build",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "nonportable toolchain setup"):
+            _assert_devenv_job_recipe(mutated)
+
+    def test_direct_devenv_python_path_fails_the_recipe(self) -> None:
+        block = _ci_job_block("lint-and-unit")
+        mutated = block.replace(
+            f"{DEVENV_COMMAND_PREFIX}python -m unittest discover",
+            ".devenv/state/venv/bin/python -m unittest discover",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "nonportable toolchain setup"):
+            _assert_devenv_job_recipe(mutated)
+
+
 class CiParityTests(unittest.TestCase):
     """The lock: every cargo/chelis gate invocation in the CI workflow
     must be produced by `gate.py`. If a future edit hand-inlines a
@@ -828,8 +937,8 @@ class CiParityTests(unittest.TestCase):
     def test_python_binding_ingress_suite_is_continuous(self):
         text = CI_YML.read_text()
         self.assertIn(
-            ".venv/bin/python -m unittest discover -s bindings/python/tests "
-            "-p 'test_*.py'",
+            f"{DEVENV_COMMAND_PREFIX}python -m unittest discover "
+            "-s bindings/python/tests -p 'test_*.py'",
             text,
             (
                 "bindings/python/tests contains the #729 Python-ingress oracle; "
@@ -845,23 +954,17 @@ class CiParityTests(unittest.TestCase):
         top_level_permissions = workflow[
             workflow.index("permissions:\n") : workflow.index("\nenv:\n")
         ]
-        numpy_command = "run: uv pip install --python .venv/bin/python 'numpy>=2.0'"
-        oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
-        authenticated_oracle = (
-            "env:\n"
-            "          GH_TOKEN: ${{ github.token }}\n"
-            f"        {oracle_command}"
+        oracle_command = (
+            f"run: {DEVENV_COMMAND_PREFIX}python scripts/dtype_phase3_oracle.py"
         )
         self.assertNotIn("  issues: read", top_level_permissions)
         self.assertNotIn(oracle_command, workspace_block)
         self.assertEqual(oracle_block.count("    contents: read"), 1)
         self.assertEqual(oracle_block.count("    issues: read"), 1)
-        self.assertEqual(oracle_block.count(numpy_command), 1)
-        _assert_executable_run_once(oracle_block, oracle_command.removeprefix("run: "))
-        self.assertEqual(oracle_block.count(authenticated_oracle), 1)
-        self.assertLess(
-            oracle_block.index(numpy_command),
-            oracle_block.index(oracle_command),
+        self.assertNotIn("uv pip install", oracle_block)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", oracle_block)
+        _assert_executable_run_once(
+            oracle_block, "python scripts/dtype_phase3_oracle.py"
         )
         self.assertIn("needs: [changes]", workspace_block)
         self.assertIn("needs: [changes]", oracle_block)
@@ -883,14 +986,15 @@ class CiParityTests(unittest.TestCase):
         dtype_block = _ci_job_block("dtype-phase3-oracle")
         oracle_block = _ci_job_block("faithful-observation-phase2-oracle")
         aggregate_block = _ci_job_block("integration")
-        command = ".venv/bin/python scripts/faithful_observation_phase2_oracle.py"
+        command = "python scripts/faithful_observation_phase2_oracle.py"
 
         self.assertIn("name: Faithful Observation Phase 2 Oracle", oracle_block)
         self.assertIn("needs: [changes]", oracle_block)
         self.assertIn("contents: read", oracle_block)
-        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
-        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
-        self.assertIn("taiki-e/install-action@nextest", oracle_block)
+        self.assertIn(f"uses: {DEVENV_SETUP_ACTION}", oracle_block)
+        self.assertNotIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertNotIn("scripts/ci_setup_uv_python.py", oracle_block)
+        self.assertNotIn("taiki-e/install-action@nextest", oracle_block)
         cache_inputs = _rust_cache_inputs(oracle_block)
         self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
         self.assertEqual(cache_inputs.get("save-if"), "false")
@@ -915,16 +1019,23 @@ class CiParityTests(unittest.TestCase):
         self.assertEqual(oracle_inputs.get("save-if"), "false")
 
     def test_profile_partition_set_math_runs_continuously(self):
+        lint_block = _ci_job_block("lint-and-unit")
         workspace_block = _ci_job_block("workspace-tests")
+        self.assertIn(
+            'CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH: "1"',
+            lint_block,
+        )
         _assert_executable_run_once(
             workspace_block,
-            ".venv/bin/python -m unittest "
+            "python -m unittest "
             "scripts.test_nextest_profile_partition.ProfilePartitionTests",
         )
 
     def test_quoted_oracle_name_is_not_an_executable_oracle_step(self):
         block = _ci_job_block("dtype-phase3-oracle")
-        oracle_command = "run: .venv/bin/python scripts/dtype_phase3_oracle.py"
+        oracle_command = (
+            f"run: {DEVENV_COMMAND_PREFIX}python scripts/dtype_phase3_oracle.py"
+        )
         mutated = block.replace(
             oracle_command,
             'run: "true # scripts/dtype_phase3_oracle.py"',
@@ -933,15 +1044,16 @@ class CiParityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             _assert_executable_run_once(
                 mutated,
-                oracle_command.removeprefix("run: "),
+                "python scripts/dtype_phase3_oracle.py",
             )
 
     def test_commented_oracle_plus_noop_is_not_an_executable_oracle_step(self):
         block = _ci_job_block("dtype-phase3-oracle")
-        command = ".venv/bin/python scripts/dtype_phase3_oracle.py"
+        command = "python scripts/dtype_phase3_oracle.py"
+        wrapped = f"{DEVENV_COMMAND_PREFIX}{command}"
         mutated = block.replace(
-            f"run: {command}",
-            f"# run: {command}\n        run: \"true\"",
+            f"run: {wrapped}",
+            f"# run: {wrapped}\n        run: \"true\"",
             1,
         )
         with self.assertRaises(AssertionError):
@@ -1416,6 +1528,57 @@ def _parse_job_attrs() -> dict[str, dict[str, str]]:
     return attrs
 
 
+class MacosManualOnlyTests(unittest.TestCase):
+    def test_every_macos_job_requires_manual_dispatch(self) -> None:
+        found: list[tuple[str, str]] = []
+        for path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(workflow=path.name):
+                self.assertEqual(_macos_manual_dispatch_errors(text), [])
+            for job, block in _workflow_job_blocks(text).items():
+                if "runs-on: macos-latest" in block:
+                    found.append((path.name, job))
+        self.assertEqual(
+            found,
+            [
+                ("build-cvc5.yml", "build-darwin-arm64"),
+                ("ci.yml", "smt-build-darwin-arm64"),
+                ("ci.yml", "macos-smoke"),
+                ("nix-packages.yml", "nix-darwin-arm64"),
+                ("release.yml", "build-darwin-arm64"),
+            ],
+        )
+
+    def test_macos_manual_guard_rejects_an_automatic_job(self) -> None:
+        text = CI_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "    if: github.event_name == 'workflow_dispatch'",
+            "    if: always()",
+            1,
+        )
+        self.assertIn(
+            "smt-build-darwin-arm64: missing manual-dispatch job condition",
+            _macos_manual_dispatch_errors(mutated),
+        )
+
+    def test_macos_manual_guard_rejects_a_missing_trigger(self) -> None:
+        text = CI_YML.read_text(encoding="utf-8")
+        mutated = text.replace("  workflow_dispatch:\n", "", 1)
+        self.assertIn(
+            "macos-smoke: missing workflow_dispatch trigger",
+            _macos_manual_dispatch_errors(mutated),
+        )
+
+    def test_release_runs_only_by_manual_dispatch(self) -> None:
+        text = RELEASE_YML.read_text(encoding="utf-8")
+        trigger = text[: text.index("\npermissions:\n")]
+        self.assertIn("workflow_dispatch:", trigger)
+        self.assertNotIn("push:", trigger)
+        publish = _workflow_job_blocks(text)["publish-release"]
+        self.assertIn("startsWith(github.ref, 'refs/tags/v')", publish)
+        self.assertNotIn("github.event_name == 'push'", publish)
+
+
 class DocsOnlySkipTests(unittest.TestCase):
     """chelis#419: heavy jobs skip on docs-only PRs via a JOB-LEVEL `if`
     keyed on the `changes` job output, never `paths-ignore` (a path-
@@ -1430,10 +1593,10 @@ class DocsOnlySkipTests(unittest.TestCase):
         "workspace-tests",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
-        "macos-smoke",
         "backend-sanitizers",
         "smt-build",
     }
+    MANUAL_ONLY_JOBS = {"macos-smoke", "smt-build-darwin-arm64"}
     # The stable required context aggregates the two parallel integration
     # legs, so it needs their results as well as the docs-only classification.
     HEAVY_AGGREGATOR_JOBS = {"integration"}
@@ -1444,18 +1607,12 @@ class DocsOnlySkipTests(unittest.TestCase):
         "diagnostic-kind-oracle",
     }
     # Jobs that must ALWAYS run (never gated on docs_only).
-    # smt-build-glibc231 / smt-build-darwin-arm64 were added by chelis#422
-    # (ship-smt) without a docs_only `if`, so today they run unconditionally
-    # and are classified here. Follow-up: give them the same docs-skip `if` +
-    # `needs: [changes]` as smt-build and move them to HEAVY_GATED_JOBS so the
-    # heavy from-source cvc5 builds also skip on docs-only PRs (chelis#419).
     ALWAYS_RUN_JOBS = {
         "lint-and-unit",
         "no-ai-authorship",
         "docs",
         "changes",
         "smt-build-glibc231",
-        "smt-build-darwin-arm64",
     }
 
     def test_changes_job_exists_and_is_ungated(self):
@@ -1514,6 +1671,16 @@ class DocsOnlySkipTests(unittest.TestCase):
                 f"'{job}' if must include !cancelled(): {cond!r}",
             )
 
+    def test_macos_jobs_run_only_by_manual_dispatch(self):
+        attrs = _parse_job_attrs()
+        for job in self.MANUAL_ONLY_JOBS:
+            self.assertIn(job, attrs, f"manual job '{job}' missing")
+            self.assertNotIn("needs", attrs[job])
+            self.assertEqual(
+                attrs[job].get("if"),
+                "github.event_name == 'workflow_dispatch'",
+            )
+
     def test_integration_aggregator_is_fail_closed_and_docs_gated(self):
         attrs = _parse_job_attrs()
         integration = attrs["integration"]
@@ -1557,6 +1724,7 @@ class DocsOnlySkipTests(unittest.TestCase):
             self.HEAVY_GATED_JOBS
             | self.HEAVY_AGGREGATOR_JOBS
             | self.CHANGE_GATED_JOBS
+            | self.MANUAL_ONLY_JOBS
             | self.ALWAYS_RUN_JOBS
         )
         unclassified = set(attrs) - classified

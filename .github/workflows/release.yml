@@ -1,9 +1,6 @@
 name: release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -301,6 +298,7 @@ jobs:
 
   build-darwin-arm64:
     name: Build chelis (darwin-arm64)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     # cvc5 builds from source under `--features smt` (chelis#422); the
     # 10-minute cap from the no-feature build is too tight for the cold
@@ -425,7 +423,8 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # Dispatch the workflow at a v* tag to publish its staged artifacts.
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
     runs-on: ubuntu-latest
     steps:

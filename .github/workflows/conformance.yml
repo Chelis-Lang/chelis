@@ -97,24 +97,28 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
 
-      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
-      # reset would otherwise flake this required gate with no code change.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # The Devenv shell composes the private Chelis-Lang/ci consumer module,
+      # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
+      - name: Mint a scoped token for the private ci input
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: ci
 
-      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; CI runners
-      # need a matching uv-managed venv before any cargo run (pyo3-build-config
-      # is a transitive build-dep that runs before main compilation). See
-      # ci.yml lint-and-unit for the same pattern and the v8.1.0 pin rationale.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+      - name: Authenticate Nix to the private ci devenv input
+        shell: bash
+        env:
+          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
 
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
+      # Devenv activates its Python virtual environment and sets
+      # PYO3_PYTHON before each cargo invocation.
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
@@ -122,15 +126,17 @@ jobs:
       # bare PATH name). A release build matches the Hull campaign profile (a
       # debug build's check pass is multi-minute per program).
       - name: Build chelis (release)
-        run: cargo build --release -p chelis-cli --bin chelis
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
 
       # The pure runner core (wire_to_canonical, derive_compiler_outcome,
       # classify_program, assert_acceptance_oracle), the wire-normalizer golden
       # tests, the corpus-integrity invariants, and the injected-unsound
       # self-test (the teeth). Binary-free; runs fast.
       - name: Conformance unit tests (pure core + teeth)
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
-          .venv/bin/python -m unittest \
+          devenv shell --no-tui -- python -m unittest \
             tests.conformance.hull.test_run_conformance \
             tests.conformance.hull.test_wire_canonical \
             tests.conformance.hull.test_corpus_integrity
@@ -138,16 +144,18 @@ jobs:
       # THE GATE. Run the frozen ~1,500-program slice against the just-built
       # binary. Fails on any CompilerUnsound / unexplained Disagree / EvalDisagree.
       - name: Conformance gate (frozen corpus vs live compiler)
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
-          .venv/bin/python tests/conformance/hull/run_conformance.py \
+          devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis"
 
       # E2E TEETH PROOF: an injected compiler-accepts-a-reject-sentinel
       # divergence MUST make the runner exit nonzero. This step EXPECTS failure;
       # if the runner exits 0, the gate has no teeth and this step fails.
       - name: Conformance teeth (injected-unsound must fail the gate)
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
-          if .venv/bin/python tests/conformance/hull/run_conformance.py \
+          if devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0; the gate did not catch the injected CompilerUnsound" >&2

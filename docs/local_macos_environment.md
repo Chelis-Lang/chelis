@@ -120,8 +120,9 @@ In order of preference:
    ```
 
 3. **Avoid mass first-exec bursts.** Do not run full-workspace nextest
-   locally during heavy agent sessions on this machine; the macOS Smoke CI
-   job is the workspace oracle (next section). Single-binary work
+   locally during heavy agent sessions on this machine. The required Linux
+   integration check is the CI workspace oracle. Dispatch macOS Smoke manually
+   when macOS platform evidence is necessary. Single-binary work
    (`chelis` CLI on an already-assessed build, clippy, fmt, lint) is
    unaffected.
 4. **Reboot.** Clears the current backlog, but is a reprieve, not a fix:
@@ -184,13 +185,13 @@ In order of preference:
    (degradation caused by anything else on the machine, or by a
    discipline slip, no longer stalls this workflow).
 
-## CI Is the Fallback Oracle
+## Manual macOS CI Is the Fallback Signal
 
-When local exec is wedged, do not block on the local run: the
-`macos-smoke` CI job (`.github/workflows/ci.yml`) runs the full workspace
-test suite on macOS and serves as the macOS signal. Push the branch and
-let CI serve as the oracle, noting in the PR or phase docs that local
-validation was blocked by this failure mode.
+If local execution stops, do not wait for the local run.
+
+Run `gh workflow run ci.yml --ref <branch>`. Confirm that the `macos-smoke` job runs the workspace suite on macOS.
+
+Record the manual result in the PR or phase document. Also record that the local run stopped because of this host failure.
 
 ## Preflight Probe Details
 

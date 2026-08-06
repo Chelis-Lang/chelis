@@ -141,8 +141,9 @@ def parse_devenv_test_tasks(text: str) -> DevenvTestTasks:
         raise ValueError("the Devenv smoke check must not define a service or process")
 
     toolchain_contract = (
-        "rustc cargo rust-analyzer uv cmake git pkg-config openspec",
+        "rustc cargo rust-analyzer uv cmake git pkg-config mdbook openspec",
         "rust-analyzer --version",
+        "mdbook --version",
     )
     missing_tools = [fragment for fragment in toolchain_contract if fragment not in text]
     if missing_tools:
@@ -578,6 +579,12 @@ class DevenvVersionTests(unittest.TestCase):
     def test_missing_rust_analyzer_smoke_fails_at_the_parse_boundary(self) -> None:
         config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
         mutated = config.replace(" cargo rust-analyzer uv", " cargo uv")
+        with self.assertRaisesRegex(ValueError, "toolchain smoke contract"):
+            parse_devenv_test_tasks(mutated)
+
+    def test_missing_mdbook_smoke_fails_at_the_parse_boundary(self) -> None:
+        config = SMOKE_TEST_MODULE.read_text(encoding="utf-8")
+        mutated = config.replace(" pkg-config mdbook openspec", " pkg-config openspec")
         with self.assertRaisesRegex(ValueError, "toolchain smoke contract"):
             parse_devenv_test_tasks(mutated)
 

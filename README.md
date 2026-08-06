@@ -472,9 +472,9 @@ chelis-gate --local             # active Devenv shell
 
 `--local` runs workspace clippy, `cargo fmt --check`,
 `chelis lint --check .`, and per-crate nextest for the crates changed vs
-`origin/main`. The full workspace nextest stage is CI-owned: open a
-draft PR early and let CI (macOS Smoke is the authoritative workspace
-oracle) run the full suite; see
+`origin/main`. The full workspace nextest stage is CI-owned. Open a
+draft PR early. The required `Integration Tests (Linux)` check is the
+authoritative CI workspace oracle. See
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why that suite does not belong in the local loop on macOS.
 

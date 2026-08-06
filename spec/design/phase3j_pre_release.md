@@ -42,7 +42,7 @@ limitations section).
 
 Release is driven by `.github/workflows/release.yml`:
 
-- **Trigger:** pushing a tag matching `v*` to `origin/main`.
+- **Trigger:** a manual workflow dispatch at a pushed tag that matches `v*`.
 - **Platforms:** `ubuntu-latest` for `linux-x86_64`, a `debian:11` container on
   `ubuntu-latest` for `linux-x86_64-glibc2.31`, and `macos-latest` for
   `darwin-arm64`.
@@ -62,9 +62,9 @@ Release is driven by `.github/workflows/release.yml`:
 - **Publish:** build jobs upload artifacts and a final `softprops/action-gh-release@v2`
   step attaches them to the tag.
 
-The workflow also exposes a `workflow_dispatch` trigger so the build path
-can be exercised on a branch without publishing. Dispatch runs upload the
-tarball as a workflow artifact and do NOT create a Release.
+The workflow uses only `workflow_dispatch`. A dispatch at a branch builds workflow artifacts without a release.
+
+A dispatch at a `v*` tag builds all platforms and publishes the release artifacts for that tag.
 
 This is a hand-rolled workflow. Chelis does not use `cargo-dist` in
 3j-pre; if multi-platform matrix support becomes a priority in a later
@@ -141,7 +141,7 @@ For each new tag:
 2. Workspace version in root `Cargo.toml` matches the intended tag.
 3. The owning phase plan lists a concrete acceptance oracle that is
    green.
-4. `git tag -a vX.Y.Z -m "<phase> release"` and `git push origin
-   vX.Y.Z`.
-5. Confirm `gh release view vX.Y.Z` shows the tarball and checksum
-   attached.
+4. Run `git tag -a vX.Y.Z -m "<phase> release"`.
+5. Run `git push origin vX.Y.Z`.
+6. Run `gh workflow run release.yml --ref vX.Y.Z`.
+7. Confirm that `gh release view vX.Y.Z` shows each tarball and checksum.

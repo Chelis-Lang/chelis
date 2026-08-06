@@ -53,31 +53,30 @@ jobs:
       - name: Free disk space (Ubuntu)
         uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
 
-      # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
-      # reset would otherwise flake this nightly with no code change.
-      - name: Install C dependencies
-        run: python3 scripts/ci_apt_get.py gcc libopenblas-dev libasan8 libubsan1
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # The Devenv shell composes the private Chelis-Lang/ci consumer module,
+      # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
+      - name: Mint a scoped token for the private ci input
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: ci
 
-      # `.cargo/config.toml` sets `PYO3_PYTHON=.venv/bin/python`; CI
-      # runners need a matching uv-managed venv before any cargo run
-      # (pyo3-build-config is a transitive build-dep that runs before
-      # main compilation). See ci.yml lint-and-unit job for the same
-      # pattern and for why the version is pinned to v8.1.0 rather
-      # than @v8.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+      - name: Authenticate Nix to the private ci devenv input
+        shell: bash
+        env:
+          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
 
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
+      # Devenv activates its Python virtual environment and sets
+      # PYO3_PYTHON before each cargo invocation.
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
 
       # The `nightly` nextest profile (.config/nextest.toml) selects
       # exactly the heavy e2e suite via its default-filter and sets
@@ -85,7 +84,8 @@ jobs:
       # fail the run. This is the only place the `nightly` profile is
       # used.
       - name: Heavy e2e suite
-        run: cargo nextest run --workspace --profile nightly
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- cargo nextest run --workspace --profile nightly
 
       # The chelis-std in-language self-test corpus (packages/chelis-std/tests/,
       # run via `chelis test tests/`). Its integration test is #[ignore] (a
@@ -96,7 +96,8 @@ jobs:
       # the heavy e2e suite above fails (independent signal).
       - name: chelis-std self-test corpus
         if: always()
-        run: cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
   # Surface a nightly failure as a tracking issue (opens on failure, closes on
   # green) so a red nightly is impossible to miss — scheduled-run failures do

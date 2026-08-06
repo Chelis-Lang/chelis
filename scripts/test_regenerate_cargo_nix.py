@@ -103,7 +103,7 @@ class CheckTests(unittest.TestCase):
 
 
 class ContractParityTests(unittest.TestCase):
-    """The canonical command must agree with the Nix package path and app."""
+    """The canonical command must agree with the Nix and Devenv paths."""
 
     def test_packages_nix_documents_the_same_command(self) -> None:
         text = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
@@ -115,6 +115,13 @@ class ContractParityTests(unittest.TestCase):
         self.assertIn("regenerate_cargo_nix.py", text)
         self.assertIn('"regenerate-crate2nix"', text)
         self.assertIn("config.outputs.crate2nix", text)
+
+    def test_worker_guidance_uses_the_devenv_command(self) -> None:
+        text = (REPO_ROOT / "scripts" / "regenerate_cargo_nix.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("devenv shell -- regenerate-crate2nix", text)
+        self.assertNotIn("nix run .#regenerate-crate2nix", text)
 
     def test_devenv_composes_ci_for_shared_tools(self) -> None:
         yaml = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")

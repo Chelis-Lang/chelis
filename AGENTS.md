@@ -526,9 +526,9 @@ crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the
 directory name). The derived crate list is always printed; "no crate
 changes detected" means the per-crate stage was skipped, not silently
-empty. The workspace nextest stage is CI-owned: run `--local` before
-pushing, open a draft PR early, and let CI (macOS Smoke is the
-authoritative workspace oracle) run the full suite. See
+empty. The workspace nextest stage is CI-owned. Run `--local` before
+pushing. Open a draft PR early. The required `Integration Tests (Linux)`
+check is the authoritative CI workspace oracle. See
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on
 macOS.
@@ -597,8 +597,8 @@ default workspace run.
   fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
   slow). Inside Devenv, use `chelis-exec-preflight`. Run the probe before the
-  local workspace nextest stage. If the probe reports degradation, use the
-  macOS Smoke CI stage per
+  local workspace nextest stage. If the probe reports degradation, dispatch the
+  macOS Smoke CI stage manually per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
 
 ## Local HIP Environment

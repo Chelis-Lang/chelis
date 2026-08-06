@@ -935,10 +935,9 @@ init + SDPA import, was removed when the `Std.Nn`/`Std.Loss`/`Std.Optim` ML surf
 to the downstream School library in chelis-std 0.4.0, #331. RMSNorm/GELU/SDPA now live in
 School; Kaiming init (`Std.Init`) stayed and is covered by the surviving suites.)
 
-Release infrastructure is also in place as of 3j-pre Batch 6: the
-hand-rolled `.github/workflows/release.yml` builds and publishes a
-Linux x86_64 `chelis` tarball to the GitHub Releases page on any `v*`
-tag push. Release history:
+Release infrastructure is also in place as of 3j-pre Batch 6. The
+hand-rolled `.github/workflows/release.yml` builds all release targets after a
+manual dispatch. A dispatch at a `v*` tag publishes the artifacts to GitHub Releases. Release history:
 
 - `v0.1.0` — marked prerelease; cut before the Batch 5b/7b red-team
   findings were resolved, so the C backend silent-seed-drop and the

@@ -109,7 +109,7 @@ before reaching its proof steps.
 
 Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must
 never pay that on the per-PR path, so every SMT lane (the required `smt-build`,
-the `smt-build-glibc231` and `smt-build-darwin-arm64` prove-in-CI lanes, and
+the `smt-build-glibc231` lane, the manual `smt-build-darwin-arm64` lane, and
 `smt-full-prove.yml`) LINKS a prebuilt cvc5 instead of rebuilding it. The
 prebuilt tree is held in TWO stores, tried in order, driven by
 `scripts/ci_cvc5_cache.py`:
@@ -117,8 +117,8 @@ prebuilt tree is held in TWO stores, tried in order, driven by
 1. **Durable Release asset (primary).** `.github/workflows/build-cvc5.yml`
    builds cvc5 from source once per (cvc5-sys version, namespace) and publishes
    `<store-key>.tar.gz` + a `.sha256` sidecar to a
-   `cvc5-prebuilt-cvc5sys<version>` **prerelease** tag (deliberately not `v*`,
-   so it never triggers `release.yml`). Each SMT lane's **`fetch`** step
+   `cvc5-prebuilt-cvc5sys<version>` **prerelease** tag. This tag stays separate
+   from the `v*` product release tags. Each SMT lane's **`fetch`** step
    downloads the asset, verifies the sha256 BEFORE extraction, rejects unsafe
    tar members, and re-checks every required path. A Release asset has **no
    10GB Actions-cache LRU budget, no 7-day idle TTL, and no branch scope**, so
@@ -157,35 +157,25 @@ additionally hard-fails a wrong-version link. `scripts/test_ci_cvc5_cache.py`
 covers the key, asset naming, harvest/pack/fetch round-trip, and activate logic
 that cannot be exercised in CI without a real ~22m cvc5 build.
 
-Bump `CACHE_SCHEMA` in `scripts/ci_cvc5_cache.py` if the harvested artifact set
-ever changes shape (it rotates the store key AND the asset filename, and the
-`scripts/ci_cvc5_cache.py` path trigger republishes `build-cvc5.yml`).
+If the harvested artifact set changes shape, increase `CACHE_SCHEMA` in `scripts/ci_cvc5_cache.py`.
+
+The path trigger builds missing Linux assets. Dispatch `build-cvc5.yml` manually to build the Darwin asset.
 
 #### cvc5-sys version-bump runbook
 
-A cvc5-sys bump is the ONLY event that legitimately puts a cold from-source
-cvc5 build back on the per-PR path, because the new version's Release asset
-does not exist until `build-cvc5.yml` republishes it (which happens on push to
-`main`, i.e. after merge). To keep the bump PR itself warm, publish the new
-assets first:
+A cvc5-sys bump can put a cold source build on the per-PR path. The new release asset does not exist before the producer runs.
 
-1. On the bump branch, run `build-cvc5.yml` via **workflow_dispatch** (it must
-   already exist on `main`; the very first landing of this workflow bootstraps
-   itself on merge — see below). `plan` finds the new-version assets missing
-   and builds + publishes all three namespaces.
-2. Re-run the bump PR's CI; each SMT lane's `fetch` now links the freshly
-   published asset and stays warm.
+Publish the new assets before the bump PR runs its SMT jobs:
+
+1. Run `gh workflow run build-cvc5.yml --ref <bump-branch>`.
+2. Wait for all three namespace jobs and the publication job to pass.
+3. Rerun the CI jobs for the bump PR.
 
 If step 1 is skipped, the bump PR's `smt-build` builds cvc5 cold and will
 exceed its 25-minute timeout — a loud, deliberate failure that points here,
 not a silent per-PR tax.
 
-**Bootstrap (first landing of `build-cvc5.yml`):** no asset exists yet for the
-current cvc5-sys version, so this PR's `smt-build` links cvc5 from the warm
-`Swatinem` `target/` cache instead (unchanged `Cargo.lock`/rustc → cache hit,
-~3m). On merge, the push-to-`main` trigger (paths include
-`scripts/ci_cvc5_cache.py` and `build-cvc5.yml`) runs `build-cvc5.yml`, which
-publishes the durable assets; every subsequent run links them.
+Automatic producer runs publish the two Linux namespaces. A manual dispatch publishes the Darwin namespace.
 
 ### Cache-pool pruning
 
@@ -199,8 +189,8 @@ caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete
 on error); manual dispatch is dry-run unless `apply` is set.
 `scripts/test_ci_cache_prune.py` covers the deletion policy.
 
-Two companion prove-in-CI lanes, `smt-build-glibc231` (a `debian:11`
-container) and `smt-build-darwin-arm64` (`macos-latest`), build
+Two companion CI lanes, `smt-build-glibc231` (a `debian:11` container)
+and the manual `smt-build-darwin-arm64` (`macos-latest`) job, build
 `chelis-cli --features smt` on the other two release targets and run
 the post-build verifier. They prove cvc5 builds on those toolchains
 before `release.yml` ships the feature there (chelis#422). The
@@ -209,6 +199,8 @@ tomli`, because cvc5's build-time TOML codegen imports `tomli` on
 Python < 3.11 and `python3-tomli` is not in the main bullseye suite.
 
 ## Release builds (chelis#422)
+
+A manual dispatch starts `release.yml`. A dispatch at a `v*` tag publishes the release assets.
 
 `release.yml` builds all three release artifacts (linux-x86_64,
 linux-x86_64-glibc2.31, darwin-arm64) with `cargo build --release -p
@@ -244,13 +236,11 @@ even when the per-PR SMT lanes are green off the asset.
 
 ### The cold build's fetch is retried; its compile is not (chelis#1004)
 
-Building cvc5 cold begins by pulling the cvc5 source and its dependencies
-over the network, so the release jobs are the only lanes exposed to a
-transient GitHub refusal there. Because `publish-release` has `needs:` on all
-three build jobs, one such failure skips the publish and leaves a pushed tag
-with no GitHub Release: the v0.18.0 release (run 30673030685) needed three
-attempts, failing at `cvc5-sys` `build.rs:231` (dependency downloads, HTTP
-403) and then at `build.rs:276` (the source clone) with no change to the tree.
+The cold cvc5 build downloads the cvc5 source and its dependencies. Thus, the release jobs can receive a transient GitHub refusal.
+
+`publish-release` depends on all three build jobs. One build failure stops publication for the manually dispatched tag.
+
+The v0.18.0 release run 30673030685 required three attempts. The first two attempts failed during dependency and source downloads.
 
 Each `Build chelis-cli (release, smt)` step therefore runs through
 `scripts/ci_cvc5_build.py`, which retries **only** when the failing attempt's

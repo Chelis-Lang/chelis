@@ -601,8 +601,7 @@ For every dtype and every storable value:
 3. The probe corpus (`docs/investigations/probes/`) holds the byte-decode
    evidence for [#716]/[#723] if you need to re-derive what "faithful" must
    produce for those cells.
-4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
-   oracle.
+4. Run `scripts/gate.py --local`. The required `Integration Tests (Linux)` check is the CI workspace oracle.
 
 ---
 
@@ -910,8 +909,8 @@ name: no CI workflow and no `scripts/gate.py` stage invokes it directly, and it
 reaches CI as a nested leg of
 `.venv/bin/python scripts/dtype_phase3_oracle.py`, which the Linux
 `Dtype Phase 0-3 Oracle` job runs on every non-docs-only PR (verified
-2026-08-04; that job skips when `changes.outputs.docs_only` is true, as does
-macOS Smoke). The nesting is not incidental:
+2026-08-04). That job skips when `changes.outputs.docs_only` is true. `macOS
+Smoke` runs only after a manual dispatch. The nesting is not incidental:
 `scripts/test_nextest_profile_partition.py` fails with "Phase 3 no longer
 inherits faithful_observation_phase3_oracle.py" if it is removed, and it reads
 this oracle's `SUITE_COMMANDS` as the executable manifest of what the dtype

@@ -488,8 +488,7 @@ The exact Deep grammar and binder rules are normative in spec/03 §2.5.1/§2.6.
 3. The probe corpus (`docs/investigations/probes/`, `checker_holes.py`)
    regenerates the wrapper battery's evidence from scratch if you need to
    re-derive current behavior.
-4. Gate with `scripts/gate.py --local`; the workspace oracle is CI's
-   macOS Smoke.
+4. Run `scripts/gate.py --local`. The required `Integration Tests (Linux)` check is the CI workspace oracle.
 
 ---
 

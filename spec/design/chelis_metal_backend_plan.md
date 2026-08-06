@@ -664,13 +664,13 @@ M2: Elementwise emission + structural test surface (default-gate)
 ├── memory.rs initial copy of HIP's plan (track hoist as follow-up)
 └── Oracle: cargo test -p chelis-backend-metal --test codegen_structure
 
-M3: Compile-and-link smoke on macOS CI (default-gate, macOS only)
+M3: Compile-and-link smoke on macOS CI (manual gate, macOS only)
 ├── .github/scripts/smoke_macos_metal.py (Python, not shell)
 ├── Drives chelis build --target metal then clang++ -framework Metal/Foundation
 ├── Compile-and-link only, NO execution — MTLCreateSystemDefaultDevice may
 │   return null on macos-latest VMs (Apple's CI GPU policy oscillates)
 ├── Append step to .github/workflows/ci.yml macos-smoke job
-└── Oracle: the new CI step passes on macos-latest
+└── Oracle: after a manual workflow dispatch, the CI step passes on macos-latest
 
 M4: Reductions + fused-elementwise-into-reduction (default-gate)
 ├── kernels.rs reduction templates (sum/max/min) — threadgroup memory + tree reduce

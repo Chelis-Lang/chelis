@@ -53,6 +53,7 @@ class DevenvPython:
     uses_uv: bool
     manages_venv: bool
     pyo3_uses_venv: bool
+    supplies_numpy: bool
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,8 @@ def parse_package_outputs_module(text: str) -> DevenvPackageOutputs:
 
 def parse_python_module(text: str) -> DevenvPython:
     required = (
-        "package = pkgs.python311;",
+        "package = pkgs.python311.withPackages",
+        "ps.numpy",
         "venv.enable = true;",
         "uv.enable = true;",
         'PYO3_PYTHON = "${config.env.DEVENV_STATE}/venv/bin/python";',
@@ -151,7 +153,20 @@ def parse_python_module(text: str) -> DevenvPython:
         uses_uv=True,
         manages_venv=True,
         pyo3_uses_venv=True,
+        supplies_numpy=True,
     )
+
+
+def parse_python_smoke_tests(text: str) -> None:
+    required = (
+        "pkg-config mdbook openspec",
+        "mdbook --version",
+        "import os, pathlib, sys, numpy",
+        'numpy.__version__.split(".")[0] == "2"',
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    if missing:
+        raise ValueError(f"the Devenv Python smoke contract is incomplete: {missing!r}")
 
 
 def parse_openspec_composition(toolchains_text: str, yaml_text: str) -> None:
@@ -274,6 +289,17 @@ class DevenvCompositionTests(unittest.TestCase):
         self.assertTrue(parsed.uses_uv)
         self.assertTrue(parsed.manages_venv)
         self.assertTrue(parsed.pyo3_uses_venv)
+        self.assertTrue(parsed.supplies_numpy)
+
+    def test_devenv_smoke_tests_cover_the_ci_python_tools(self) -> None:
+        text = (REPO_ROOT / "devenv/smoke-tests.nix").read_text(encoding="utf-8")
+        parse_python_smoke_tests(text)
+
+    def test_missing_numpy_smoke_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/smoke-tests.nix").read_text(encoding="utf-8")
+        mutated = text.replace("import os, pathlib, sys, numpy", "import os, pathlib, sys")
+        with self.assertRaisesRegex(ValueError, "Python smoke contract is incomplete"):
+            parse_python_smoke_tests(mutated)
 
     def test_devenv_composes_openspec_from_ci(self) -> None:
         toolchains = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
@@ -358,6 +384,12 @@ class DevenvCompositionTests(unittest.TestCase):
     def test_disabled_python_venv_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         mutated = text.replace("venv.enable = true;", "venv.enable = false;")
+        with self.assertRaisesRegex(ValueError, "Python contract is incomplete"):
+            parse_python_module(mutated)
+
+    def test_missing_numpy_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        mutated = text.replace("ps.numpy", "ps.pytest")
         with self.assertRaisesRegex(ValueError, "Python contract is incomplete"):
             parse_python_module(mutated)
 

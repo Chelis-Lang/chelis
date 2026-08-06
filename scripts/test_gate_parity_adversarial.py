@@ -101,6 +101,23 @@ class GateParityAdversarialTests(unittest.TestCase):
             "theater",
         )
 
+    def test_devenv_wrapped_cargo_command_is_caught(self):
+        mutated = self.ci_text.replace(
+            ANCHOR,
+            "      - name: Sneaky Devenv-wrapped cargo step\n"
+            "        run: devenv shell --no-tui -- cargo test --workspace --doc\n\n"
+            + ANCHOR,
+            1,
+        )
+        self.assertNotEqual(mutated, self.ci_text, "mutation did not apply")
+        result = _run_parity_against(mutated)
+        self.assertGreater(
+            len(result.failures) + len(result.errors),
+            0,
+            "the parity lock did NOT inspect a cargo command inside the "
+            "Devenv shell wrapper",
+        )
+
     def test_cargo_inside_multiline_run_block_is_caught(self):
         # A `run: |` multiline block would hide its commands from the
         # line-based parser; `test_no_multiline_run_in_gate_jobs` is the

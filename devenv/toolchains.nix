@@ -26,7 +26,7 @@ in
 
     python = {
       enable = true;
-      package = pkgs.python311;
+      package = pkgs.python311.withPackages (ps: [ ps.numpy ]);
       venv.enable = true;
       uv.enable = true;
     };
@@ -43,6 +43,7 @@ in
       cargo-nextest
       cmake
       git
+      mdbook
       pkg-config
     ]
     # crate2nix and openspec come from the ci consumer module composed in

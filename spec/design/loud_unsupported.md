@@ -1564,8 +1564,7 @@ gated job is a canary mislabeled as prevention.
 3. Conversions are per-site PR-reviewable units; the plumbing refactor
    (Phase 1 item 1) is one PR that changes signatures with zero behavior
    change, so review is mechanical.
-4. Gate with `scripts/gate.py --local`; macOS Smoke is the workspace
-   oracle.
+4. Run `scripts/gate.py --local`. The required `Integration Tests (Linux)` check is the CI workspace oracle.
 
 ---
 

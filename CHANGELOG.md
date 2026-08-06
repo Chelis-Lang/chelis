@@ -6,6 +6,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Nix consumes shared crate2nix and OpenSpec pins from `Chelis-Lang/ci` through Devenv composition.
+  The repository tracks `Cargo.nix`, so package evaluation does not use import from derivation.
+- Selected Linux CI jobs run in the portable Devenv environment. Devenv supplies Rust, Python, mdBook, cargo-nextest, and common build tools.
+- Hosted macOS jobs run only after manual dispatch. Release publication now requires a manual dispatch at the pushed `v*` tag.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C

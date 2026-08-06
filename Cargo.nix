@@ -183,6 +183,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "chelis-pipeline-core" = rec {
+      packageId = "chelis-pipeline-core";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "chelis-pipeline-core";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "chelis-pred" = rec {
       packageId = "chelis-pred";
       build = internal.buildRustCrateWithFeatures {
@@ -1459,7 +1469,7 @@ rec {
       };
       "chelis-backend-c" = rec {
         crateName = "chelis-backend-c";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-backend-c; };
         libName = "chelis_backend_c";
@@ -1507,7 +1517,7 @@ rec {
       };
       "chelis-backend-hip" = rec {
         crateName = "chelis-backend-hip";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-backend-hip; };
         libName = "chelis_backend_hip";
@@ -1547,7 +1557,7 @@ rec {
       };
       "chelis-backend-metal" = rec {
         crateName = "chelis-backend-metal";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-backend-metal; };
         libName = "chelis_backend_metal";
@@ -1588,7 +1598,7 @@ rec {
       };
       "chelis-cli" = rec {
         crateName = "chelis-cli";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         crateBin = [
           {
@@ -1790,7 +1800,7 @@ rec {
       };
       "chelis-compiler-api" = rec {
         crateName = "chelis-compiler-api";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-compiler-api; };
         libName = "chelis_compiler_api";
@@ -1822,6 +1832,10 @@ rec {
           {
             name = "chelis-macros";
             packageId = "chelis-macros";
+          }
+          {
+            name = "chelis-pipeline-core";
+            packageId = "chelis-pipeline-core";
           }
           {
             name = "chelis-reef";
@@ -1898,7 +1912,7 @@ rec {
       };
       "chelis-conformance" = rec {
         crateName = "chelis-conformance";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-conformance; };
         libName = "chelis_conformance";
@@ -1922,7 +1936,7 @@ rec {
       };
       "chelis-cove" = rec {
         crateName = "chelis-cove";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-cove; };
         libName = "chelis_cove";
@@ -1964,7 +1978,7 @@ rec {
       };
       "chelis-deep" = rec {
         crateName = "chelis-deep";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-deep; };
         libName = "chelis_deep";
@@ -2002,7 +2016,7 @@ rec {
       };
       "chelis-e2e" = rec {
         crateName = "chelis-e2e";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         crateBin = [
           {
@@ -2093,7 +2107,7 @@ rec {
       };
       "chelis-effects" = rec {
         crateName = "chelis-effects";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-effects; };
         libName = "chelis_effects";
@@ -2125,7 +2139,7 @@ rec {
       };
       "chelis-ir" = rec {
         crateName = "chelis-ir";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-ir; };
         libName = "chelis_ir";
@@ -2182,7 +2196,7 @@ rec {
       };
       "chelis-lint" = rec {
         crateName = "chelis-lint";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-lint; };
         libName = "chelis_lint";
@@ -2235,7 +2249,7 @@ rec {
       };
       "chelis-lsp" = rec {
         crateName = "chelis-lsp";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-lsp; };
         libName = "chelis_lsp";
@@ -2285,7 +2299,7 @@ rec {
       };
       "chelis-macros" = rec {
         crateName = "chelis-macros";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-macros; };
         libName = "chelis_macros";
@@ -2319,9 +2333,35 @@ rec {
         ];
 
       };
+      "chelis-pipeline-core" = rec {
+        crateName = "chelis-pipeline-core";
+        version = "0.18.4";
+        edition = "2024";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-pipeline-core; };
+        libName = "chelis_pipeline_core";
+        dependencies = [
+          {
+            name = "chelis-deep";
+            packageId = "chelis-deep";
+          }
+          {
+            name = "chelis-effects";
+            packageId = "chelis-effects";
+          }
+          {
+            name = "chelis-ir";
+            packageId = "chelis-ir";
+          }
+          {
+            name = "chelis-types";
+            packageId = "chelis-types";
+          }
+        ];
+
+      };
       "chelis-pred" = rec {
         crateName = "chelis-pred";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-pred; };
         libName = "chelis_pred";
@@ -2339,7 +2379,7 @@ rec {
       };
       "chelis-prove" = rec {
         crateName = "chelis-prove";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         crateBin = [
           {
@@ -2441,7 +2481,7 @@ rec {
       };
       "chelis-python" = rec {
         crateName = "chelis-python";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-python; };
         libName = "chelis_python";type = [ "cdylib" "rlib" ];
@@ -2501,7 +2541,7 @@ rec {
       };
       "chelis-reef" = rec {
         crateName = "chelis-reef";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-reef; };
         libName = "chelis_reef";
@@ -2521,6 +2561,10 @@ rec {
           {
             name = "chelis-macros";
             packageId = "chelis-macros";
+          }
+          {
+            name = "chelis-pipeline-core";
+            packageId = "chelis-pipeline-core";
           }
           {
             name = "chelis-shell";
@@ -2602,7 +2646,7 @@ rec {
       };
       "chelis-runtime" = rec {
         crateName = "chelis-runtime";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2021";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-runtime; };
         libName = "chelis_runtime";type = [ "staticlib" "rlib" ];
@@ -2635,7 +2679,7 @@ rec {
       };
       "chelis-shell" = rec {
         crateName = "chelis-shell";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-shell; };
         libName = "chelis_shell";
@@ -2658,7 +2702,7 @@ rec {
       };
       "chelis-std-bundle" = rec {
         crateName = "chelis-std-bundle";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-std-bundle; };
         libName = "chelis_std_bundle";
@@ -2690,7 +2734,7 @@ rec {
       };
       "chelis-surf" = rec {
         crateName = "chelis-surf";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-surf; };
         libName = "chelis_surf";
@@ -2736,7 +2780,7 @@ rec {
       };
       "chelis-tide" = rec {
         crateName = "chelis-tide";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-tide; };
         libName = "chelis_tide";
@@ -2807,7 +2851,7 @@ rec {
       };
       "chelis-types" = rec {
         crateName = "chelis-types";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-types; };
         libName = "chelis_types";
@@ -2833,6 +2877,10 @@ rec {
             name = "serde";
             packageId = "serde";
             features = [ "derive" "rc" ];
+          }
+          {
+            name = "sha2";
+            packageId = "sha2";
           }
           {
             name = "stacker";
@@ -2871,7 +2919,7 @@ rec {
       };
       "chelis-validate" = rec {
         crateName = "chelis-validate";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-validate; };
         libName = "chelis_validate";
@@ -2911,7 +2959,7 @@ rec {
       };
       "chelis-version" = rec {
         crateName = "chelis-version";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-version; };
         libName = "chelis_version";
@@ -2919,7 +2967,7 @@ rec {
       };
       "chelis-vocab" = rec {
         crateName = "chelis-vocab";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/chelis-vocab; };
         libName = "chelis_vocab";
@@ -2927,7 +2975,7 @@ rec {
       };
       "chelisup" = rec {
         crateName = "chelisup";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         crateBin = [
           {
@@ -11391,7 +11439,7 @@ rec {
       };
       "tree-sitter-chelis" = rec {
         crateName = "tree-sitter-chelis";
-        version = "0.18.3";
+        version = "0.18.4";
         edition = "2024";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./tree-sitter-chelis; };
         libName = "tree_sitter_chelis";

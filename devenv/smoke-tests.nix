@@ -27,7 +27,7 @@
         fi
       }
 
-      for command_name in rustc cargo rust-analyzer uv cmake git pkg-config openspec; do
+      for command_name in rustc cargo rust-analyzer uv cmake git pkg-config mdbook openspec; do
         require_command "$command_name"
       done
 
@@ -46,6 +46,7 @@
       cmake --version
       git --version
       pkg-config --version
+      mdbook --version
     '';
   };
 
@@ -65,7 +66,7 @@
         exit 1
       fi
       "$VIRTUAL_ENV/bin/python" -c \
-        'import os, pathlib, sys; assert sys.version_info[:2] == (3, 11); assert pathlib.Path(os.environ["PYO3_PYTHON"]).samefile(sys.executable)'
+        'import os, pathlib, sys, numpy; assert sys.version_info[:2] == (3, 11); assert numpy.__version__.split(".")[0] == "2"; assert pathlib.Path(os.environ["PYO3_PYTHON"]).samefile(sys.executable)'
     '';
   };
 

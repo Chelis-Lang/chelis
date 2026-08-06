@@ -323,7 +323,7 @@ on the emitted `.mm`. Smoke is intentionally compile-and-link only;
 `MTLCreateSystemDefaultDevice` may return null on macos-latest VMs, so kernel
 dispatch is gated to the workstation (Phase M6), not CI.
 
-Authoritative oracle: the `macos-smoke` GitHub Actions job exits 0.
+Authoritative oracle: after a manual workflow dispatch, the `macos-smoke` GitHub Actions job exits 0.
 
 ### Phase M4: Reductions + fused-elementwise-into-reduction
 
@@ -380,9 +380,8 @@ against) within the Metal f32 tolerance (`ABS_TOL`/`REL_TOL` in
 `assert_close` in that file is the agreement check.
 
 This gate is **manual and workstation-only** — it is NOT part of default CI,
-because `MTLCreateSystemDefaultDevice` returns null on the macos-latest CI VMs
-(only the compile-and-link `macos-smoke` job, Phase M3, runs in CI). Mirrors
-how the HIP `gpu_correctness` oracle is gated (manual, requires a HIP GPU).
+because `MTLCreateSystemDefaultDevice` returns null on the macos-latest CI VMs.
+The manual `macos-smoke` job only compiles and links. This gate mirrors the manual HIP `gpu_correctness` oracle.
 
 - Owning phase: Phase M6.
 - Command (Apple Silicon Mac with a usable Metal device):

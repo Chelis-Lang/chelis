@@ -218,6 +218,38 @@ class FilterTextTests(unittest.TestCase):
         )
 
 
+def _profile_set_math_disabled(
+    environ: dict[str, str] | None = None,
+) -> bool:
+    environment = os.environ if environ is None else environ
+    raw = environment.get("CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH")
+    if raw is None:
+        return False
+    if raw == "1":
+        return True
+    raise ValueError(
+        "CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH must be unset or equal to '1'"
+    )
+
+
+class ProfileSetMathControlTests(unittest.TestCase):
+    def test_oracle_runs_by_default(self):
+        self.assertFalse(_profile_set_math_disabled({}))
+
+    def test_explicit_ci_split_disables_the_duplicate_oracle(self):
+        self.assertTrue(
+            _profile_set_math_disabled(
+                {"CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH": "1"}
+            )
+        )
+
+    def test_invalid_control_value_fails_at_the_boundary(self):
+        with self.assertRaisesRegex(ValueError, "must be unset or equal to '1'"):
+            _profile_set_math_disabled(
+                {"CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH": "true"}
+            )
+
+
 def _have_nextest() -> bool:
     if shutil.which("cargo") is None:
         return False
@@ -270,7 +302,8 @@ def _list_profile(profile: str | None) -> dict[str, tuple[str, bool]]:
 
 
 @unittest.skipUnless(
-    _have_nextest(), "cargo nextest unavailable; skipping set-math oracle"
+    not _profile_set_math_disabled() and _have_nextest(),
+    "profile set-math oracle disabled here or cargo nextest unavailable",
 )
 class ProfilePartitionTests(unittest.TestCase):
     """The real oracle: `cargo nextest list` set math across profiles.

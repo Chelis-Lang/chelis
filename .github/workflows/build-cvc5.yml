@@ -8,9 +8,9 @@ name: Build cvc5 prebuilt
 # Cargo.lock churn never invalidates it. A Release asset has no Actions-cache
 # LRU budget, no 7-day TTL, and no branch scope, so the smt lanes stay warm
 # across the conditions that used to force a cold cvc5 rebuild onto the per-PR
-# path (chelis#583 follow-up). The `plan` job only spends the ~22m build on
-# namespaces whose asset does not yet exist -- i.e. only on a genuine cvc5-sys
-# bump (or a manual `force`). See docs/smt_build_setup.md.
+# path (chelis#583 follow-up). Automatic runs build missing Linux assets only.
+# A manual dispatch builds a missing Darwin asset. A manual `force` rebuilds
+# every namespace. See docs/smt_build_setup.md.
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ on:
       - "scripts/ci_cvc5_cache.py"
       - "scripts/ci_publish_cvc5_release.py"
   schedule:
-    # Weekly safety net: republish if a tag/asset was ever manually deleted.
+    # Weekly safety net for deleted Linux assets. Darwin remains manual.
     - cron: "0 7 * * 1"
 
 permissions:
@@ -183,7 +183,7 @@ jobs:
   build-darwin-arm64:
     name: Build cvc5 (darwin-arm64)
     needs: [plan]
-    if: needs.plan.outputs.missing_darwin_arm64 == 'true'
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.missing_darwin_arm64 == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
     steps:

@@ -215,8 +215,7 @@ cargo run -p chelis-cli --bin chelis --quiet -- lint --check .   # runs AFTER cl
 cargo nextest run --workspace --profile ci
 ```
 
-`macOS Smoke` is the authoritative full-workspace oracle in CI; the Linux
-Integration/Lint jobs can flake on disk-full (`os error 28` / `ld signal 7`).
+The required `Integration Tests (Linux)` check is the authoritative full-workspace CI oracle. `macOS Smoke` is a manual platform gate.
 Per `CLAUDE.md`, each of these reopens the soundness surface or the backend, so
 each deserves: spec-first test stubs, a **fresh-context** red-team pass
 (`redteam-exec`) and a fresh-context code review, then the full gate green.

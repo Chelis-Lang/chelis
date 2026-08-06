@@ -1329,8 +1329,7 @@ protocol, not a failure.
 3. `docs/investigations/probes/` has the raw probe drivers if you need to
    re-derive any cell's current behavior from scratch; do not trust
    comments, including this document's - the oracle tests are the truth.
-4. Land against the gate (`scripts/gate.py --local`), open the PR early,
-   let CI's macOS Smoke run the workspace suite.
+4. Run `scripts/gate.py --local`. Open the PR early. The required `Integration Tests (Linux)` check is the CI workspace oracle.
 
 ---
 

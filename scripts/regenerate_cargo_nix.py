@@ -6,10 +6,9 @@ graph through import-from-derivation. This worker regenerates that file with the
 pinned crate2nix and, in ``--check`` mode, fails when the committed bytes drift
 from a fresh generation.
 
-It assumes ``crate2nix`` and ``cargo`` are already on ``PATH``; the
-``regenerate-crate2nix`` flake app supplies both from the pinned crate2nix input
-and the pinned Rust toolchain, so ``nix run .#regenerate-crate2nix`` is
-self-contained.
+It requires ``crate2nix`` and ``cargo`` on ``PATH``. The
+``regenerate-crate2nix`` Devenv command provides both tools from the shared
+crate2nix output and the pinned Rust toolchain.
 """
 
 from __future__ import annotations
@@ -79,8 +78,8 @@ def check(repo_root: Path, run: Runner = _run) -> int:
         n=1,
     )
     sys.stderr.write(
-        f"error: {CARGO_NIX} is stale. Run `nix run .#regenerate-crate2nix` and "
-        "commit the result.\n"
+        f"error: {CARGO_NIX} is stale. Run "
+        "`devenv shell -- regenerate-crate2nix` and commit the result.\n"
     )
     for line in diff:
         sys.stderr.write(line if line.endswith("\n") else line + "\n")

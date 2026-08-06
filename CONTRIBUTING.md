@@ -89,8 +89,8 @@ subset (chelis#360) before opening or updating a PR:
 .venv/bin/python scripts/gate.py --local
 ```
 
-The full workspace test suite is CI-owned: open a draft PR early and
-let CI (macOS Smoke is the authoritative workspace oracle) run it.
+The full workspace test suite is CI-owned. Open a draft PR early.
+The required `Integration Tests (Linux)` check is the authoritative CI workspace oracle.
 See the README Prerequisites for the toolchain the gate needs (rustup,
 cargo-nextest, and the uv-managed Python venv).
 
