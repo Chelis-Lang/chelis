@@ -5,6 +5,7 @@ members = [
     "crates/chelis-prove",
     "crates/chelis-runtime",
     "crates/chelis-compiler-api",
+    "crates/chelis-pipeline-core",
     "crates/chelis-version",
     "crates/chelis-python",
     "crates/chelis-shell",
@@ -34,7 +35,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.18.3"
+version = "0.18.4"
 license = "MIT"
 repository = "https://github.com/Chelis-Lang/chelis"
 
@@ -44,6 +45,7 @@ chelis-deep = { path = "crates/chelis-deep" }
 chelis-pred = { path = "crates/chelis-pred" }
 chelis-runtime = { path = "crates/chelis-runtime" }
 chelis-compiler-api = { path = "crates/chelis-compiler-api" }
+chelis-pipeline-core = { path = "crates/chelis-pipeline-core" }
 chelis-shell = { path = "crates/chelis-shell" }
 chelis-std-bundle = { path = "crates/chelis-std-bundle" }
 chelis-conformance = { path = "crates/chelis-conformance" }

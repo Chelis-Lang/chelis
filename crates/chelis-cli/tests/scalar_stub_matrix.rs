@@ -100,6 +100,30 @@ fn c_lane(program: &str, name: &str) -> Result<(String, String), String> {
     Ok((emitted, line))
 }
 
+fn assert_check_rejects(program: &str, op: &str, rejected_dtype: &str) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("reject_{op}_{rejected_dtype}.ch"));
+    write_file(&path, program);
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("chelis check should run");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() || !stdout.contains("\"score\": 1"),
+        "`{op}` must reject scalar {rejected_dtype} at check time; \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(op) || stderr.contains(op) || stdout.contains("PrecisionMismatch"),
+        "the rejection should identify `{op}` or its precision contract; \
+         stdout={stdout} stderr={stderr}"
+    );
+}
+
 fn scalar_program(op_expr: &str, ret_ty: &str) -> String {
     format!("module M.Main\ndef run() -> {ret_ty} = {op_expr}\nout = print(run())\n")
 }
@@ -141,6 +165,147 @@ fn assert_scalar_parity(
         c_got, c_expected,
         "{name}: LANE DIVERGENCE for `{op_expr}`: eval={eval_got}, C={c_got}"
     );
+}
+
+fn scalar_number(line: &str, context: &str) -> f64 {
+    line.parse::<f64>().unwrap_or_else(|error| {
+        panic!("{context}: expected a scalar number, got `{line}`: {error}")
+    })
+}
+
+/// The scalar activation surface decided on chelis#712: every active float
+/// width is admitted, eval and compiled C both execute it, and each lane
+/// follows the Tier-2 composition. The non-zero input makes the former C stub
+/// observable for every operation (including silu/gelu, whose value at zero
+/// would not distinguish a stub). The f64 input also distinguishes every f64
+/// helper call from an f32 detour.
+fn assert_activation_width_matrix(op: &str) {
+    for dtype in ["f16", "bf16", "f32", "f64"] {
+        let input = if dtype == "f64" {
+            "1.0000000000000002"
+        } else {
+            "1.0"
+        };
+        let expr = format!("{op}(cast({input}, {dtype}))");
+        let name = format!("scalar_{op}_{dtype}");
+        let program = scalar_program(&expr, dtype);
+        let eval = eval_first_line(&program)
+            .unwrap_or_else(|error| panic!("{name}: eval rejected a supported scalar: {error}"));
+        common::assert_elements_in_domain(dtype, &eval, &name);
+        let eval_number = scalar_number(&eval, &name);
+        let (emitted, compiled) = c_lane(&program, &name)
+            .unwrap_or_else(|error| panic!("{name}: C lane failed: {error}"));
+        assert!(
+            !emitted.contains(STUB_MARKER),
+            "{name}: emitted the historical unsupported-builtin stub"
+        );
+        let run_body = emitted
+            .rfind(" run() {")
+            .and_then(|start| emitted.get(start..))
+            .unwrap_or_else(|| panic!("{name}: emitted C has no `run` definition:\n{emitted}"));
+        let helper_call = format!("chelis_host_{op}_{dtype}(");
+        assert!(
+            run_body.contains(&helper_call),
+            "{name}: no call site selects `{helper_call}`:\n{emitted}"
+        );
+        for wrong_width in ["f16", "bf16", "f32", "f64"]
+            .into_iter()
+            .filter(|width| *width != dtype)
+        {
+            let wrong_call = format!("chelis_host_{op}_{wrong_width}(");
+            assert!(
+                !run_body.contains(&wrong_call),
+                "{name}: a call site incorrectly selects `{wrong_call}`:\n{emitted}"
+            );
+        }
+        common::assert_elements_in_domain(dtype, &compiled, &name);
+        assert_eq!(
+            compiled, eval,
+            "{name}: scalar activation differs between eval and compiled C"
+        );
+
+        match op {
+            "relu" => assert_eq!(
+                eval_number,
+                input.parse::<f64>().unwrap(),
+                "{name}: relu of a positive input must be exact"
+            ),
+            "sigmoid" | "tanh" | "silu" => assert!(
+                (0.7..0.8).contains(&eval_number),
+                "{name}: {op}({input}) must lie in (0.7, 0.8), got {eval_number}"
+            ),
+            "gelu" => assert!(
+                (0.8..0.9).contains(&eval_number),
+                "{name}: gelu({input}) must lie in (0.8, 0.9), got {eval_number}"
+            ),
+            _ => unreachable!("activation matrix called for `{op}`"),
+        }
+    }
+}
+
+fn tier2_sigmoid_expr(x: &str, dtype: &str) -> String {
+    format!("recip(add(cast(1.0, {dtype}), exp(neg({x}))))")
+}
+
+fn tier2_tanh_expr(x: &str, dtype: &str) -> String {
+    let sigmoid = tier2_sigmoid_expr(&format!("mul(cast(2.0, {dtype}), {x})"), dtype);
+    format!("add(mul(cast(2.0, {dtype}), {sigmoid}), cast(-1.0, {dtype}))")
+}
+
+fn tier2_activation_expr(op: &str, x: &str, dtype: &str) -> String {
+    match op {
+        "sigmoid" => tier2_sigmoid_expr(x, dtype),
+        "tanh" => tier2_tanh_expr(x, dtype),
+        "silu" => format!("mul({x}, {})", tier2_sigmoid_expr(x, dtype)),
+        "gelu" => {
+            let x_sq = format!("mul({x}, {x})");
+            let x_cu = format!("mul({x_sq}, {x})");
+            let k_x_cu = format!("mul(cast(0.044715, {dtype}), {x_cu})");
+            let sum_inner = format!("add({x}, {k_x_cu})");
+            let inner = format!("mul(cast(0.7978845608028654, {dtype}), {sum_inner})");
+            let tanh_inner = tier2_tanh_expr(&inner, dtype);
+            let one_plus_tanh = format!("add(cast(1.0, {dtype}), {tanh_inner})");
+            format!("mul(cast(0.5, {dtype}), mul({x}, {one_plus_tanh}))")
+        }
+        _ => unreachable!("no Tier-2 activation expression for `{op}`"),
+    }
+}
+
+#[test]
+fn reduced_float_scalar_activations_match_tier2_node_finalization() {
+    for (dtype, op, input) in [
+        ("f16", "sigmoid", "0.0007328987121582031"),
+        ("f16", "tanh", "5.960464477539063e-8"),
+        ("f16", "silu", "2.9802322387695313e-7"),
+        ("f16", "gelu", "2.9802322387695313e-7"),
+        ("bf16", "sigmoid", "0.005889892578125"),
+        ("bf16", "tanh", "9.183549615799121e-41"),
+        ("bf16", "silu", "0.00555419921875"),
+        ("bf16", "gelu", "0.0030975341796875"),
+    ] {
+        let x = format!("cast({input}, {dtype})");
+        let activation = format!("{op}({x})");
+        let tier2 = tier2_activation_expr(op, &x, dtype);
+        let name = format!("{dtype}_{op}_tier2_finalization");
+        let expected = eval_first_line(&scalar_program(&tier2, dtype))
+            .unwrap_or_else(|error| panic!("{name}: Tier-2 expression failed: {error}"));
+        let scalar = eval_first_line(&scalar_program(&activation, dtype))
+            .unwrap_or_else(|error| panic!("{name}: scalar activation failed: {error}"));
+        assert_eq!(
+            scalar, expected,
+            "{name}: scalar activation must equal its Tier-2 composition"
+        );
+        let (emitted, compiled) = c_lane(&scalar_program(&activation, dtype), &name)
+            .unwrap_or_else(|error| panic!("{name}: C lane failed: {error}"));
+        assert!(
+            !emitted.contains(STUB_MARKER),
+            "{name}: emitted the historical unsupported-builtin stub"
+        );
+        assert_eq!(
+            compiled, expected,
+            "{name}: compiled scalar activation must equal its Tier-2 composition"
+        );
+    }
 }
 
 /// [05-OBS-3] parity for an f64 transcendental whose libm result may differ
@@ -278,11 +443,98 @@ fn i64_scalar_max_elem_agrees_across_lanes() {
 /// absent from TRANSCENDENTAL_FLOAT_ONLY_OPS, per chelis#699), so the
 /// correct behavior is identity.
 #[test]
-#[ignore = "chelis#715 Phase 4: the capability-table cell for integer scalar floor is \
-            not ratified end-to-end; eval still rejects it. Run with \
-            `cargo test -p chelis-cli --test scalar_stub_matrix -- --ignored`."]
-fn i64_scalar_floor_is_identity_in_all_lanes() {
-    assert_scalar_parity("floor(cast(5, int64))", "int64", "5", "5", "i64_floor");
+fn integer_scalar_floor_ceil_round_are_identity_in_all_lanes() {
+    for dtype in ["int8", "int16", "int32", "int64"] {
+        for (op, input) in [("floor", "5"), ("ceil", "-5"), ("round", "5")] {
+            let name = format!("{dtype}_{op}_identity");
+            let expected = input;
+            assert_scalar_parity(
+                &format!("{op}(cast({input}, {dtype}))"),
+                dtype,
+                expected,
+                expected,
+                &name,
+            );
+        }
+    }
+}
+
+#[test]
+fn scalar_activation_family_agrees_at_every_float_width() {
+    for op in ["relu", "sigmoid", "tanh", "silu", "gelu"] {
+        assert_activation_width_matrix(op);
+    }
+}
+
+#[test]
+fn scalar_transcendental_and_rounding_families_cover_reduced_float_widths() {
+    for dtype in ["f16", "bf16"] {
+        for (op, input) in [
+            ("tan", "1.0"),
+            ("atan", "1.0"),
+            ("recip", "4.0"),
+            ("floor", "1.5"),
+            ("ceil", "1.5"),
+            ("round", "2.5"),
+        ] {
+            let name = format!("{dtype}_{op}");
+            let program = scalar_program(&format!("{op}(cast({input}, {dtype}))"), dtype);
+            let eval = eval_first_line(&program)
+                .unwrap_or_else(|error| panic!("{name}: eval failed: {error}"));
+            let (emitted, compiled) = c_lane(&program, &name)
+                .unwrap_or_else(|error| panic!("{name}: C lane failed: {error}"));
+            assert!(!emitted.contains(STUB_MARKER), "{name}: emitted a stub");
+            assert_eq!(compiled, eval, "{name}: reduced-float lane divergence");
+        }
+    }
+}
+
+#[test]
+fn scalar_max_min_cover_all_admitted_widths() {
+    for dtype in ["int8", "int16", "int32", "int64"] {
+        for (op, expected) in [("max_elem", "7"), ("min_elem", "-3")] {
+            let name = format!("{dtype}_{op}");
+            assert_scalar_parity(
+                &format!("{op}(cast(7, {dtype}), cast(-3, {dtype}))"),
+                dtype,
+                expected,
+                expected,
+                &name,
+            );
+        }
+    }
+    for dtype in ["f16", "bf16"] {
+        for (op, expected) in [("max_elem", "1.5"), ("min_elem", "-0.25")] {
+            let name = format!("{dtype}_{op}");
+            assert_scalar_parity(
+                &format!("{op}(cast(1.5, {dtype}), cast(-0.25, {dtype}))"),
+                dtype,
+                expected,
+                expected,
+                &name,
+            );
+        }
+    }
+}
+
+#[test]
+fn float_only_scalar_families_reject_integer_and_bool_at_check_time() {
+    for op in [
+        "relu", "sigmoid", "tanh", "silu", "gelu", "tan", "atan", "recip",
+    ] {
+        assert_check_rejects(
+            &format!(
+                "module M.Main\ndef run() -> int64 = {op}(cast(1, int64))\nout = print(run())\n"
+            ),
+            op,
+            "int64",
+        );
+        assert_check_rejects(
+            &format!("module M.Main\ndef run() -> bool = {op}(true)\nout = print(run())\n"),
+            op,
+            "bool",
+        );
+    }
 }
 
 /// The f64 rows of the stub family, distilled from the probe battery

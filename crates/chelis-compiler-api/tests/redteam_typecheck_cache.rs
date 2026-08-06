@@ -20,10 +20,10 @@
 //!   the running binary; a mismatch is a clean miss (`Ok(None)`), never a
 //!   stale hit. A belt-and-braces inner-vs-envelope check rejects a
 //!   tampered identity as `CacheError::IdentityMismatch`.
-//! - The cache format version and magic bumped to 5 (the W1 opaque-types
-//!   registry change added `AdtDef::opaque`/`defining_module` and
-//!   `TypeEnvInner::opacity`); a stale V4-shaped
-//!   file is rejected, never decoded.
+//! - The cache format version and magic are now 8. The current format
+//!   merges the branch library proof identities with the chelis#878 typed
+//!   `Pad::fill` and chelis#942 positional-expand changes. A stale V7-shaped
+//!   file from either predecessor is rejected, never decoded.
 //! - `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a binary
 //!   built from different compiler source does not stale-hit an older
 //!   binary's `StdLibContext`.
@@ -38,8 +38,8 @@
 //! canonicalization equivalence (a wrong-canonicalization regression
 //! would be a NEW collision class), the `IdentityMismatch`
 //! envelope-vs-inner tamper guard, fingerprint sensitivity to every
-//! identity component, the format-version-4 magic rejection of a forged
-//! V4 file, and adversarial corruption shapes against the recompute
+//! identity component, the format-version-8 magic rejection of a forged
+//! V7 file, and adversarial corruption shapes against the recompute
 //! fall-through.
 //!
 //! Kept on the per-PR `ci` profile: every test is cache-key / identity /
@@ -425,15 +425,15 @@ fn load_if_fresh_never_panics_on_adversarial_byte_patterns() {
 
     let patterns: Vec<Vec<u8>> = vec![
         vec![],                                               // empty
-        b"CHELIS_CTX_V8\n".to_vec(),                          // current magic only, no envelope
-        b"CHELIS_CTX_V7\n".to_vec(),                          // stale-version magic only
+        b"CHELIS_CTX_V9\n".to_vec(),                          // current magic only, no envelope
+        b"CHELIS_CTX_V8\n".to_vec(),                          // stale-version magic only
         b"not a cache file at all".to_vec(),                  // no magic
         vec![0u8; 4096],                                      // all zeros
         vec![0xffu8; 4096],                                   // all ones
         (0..4096).map(|i| ((i * 31) ^ 0x5a) as u8).collect(), // pseudo-random
         {
             // valid (current) magic followed by garbage
-            let mut v = b"CHELIS_CTX_V8\n".to_vec();
+            let mut v = b"CHELIS_CTX_V9\n".to_vec();
             v.extend((0..512).map(|i| (i % 256) as u8));
             v
         },
@@ -479,28 +479,31 @@ fn truncation_at_every_prefix_length_never_silently_loads() {
 }
 
 // ---------------------------------------------------------------------
-// Current format bump: `RiscOp::Pad::fill` is now a typed scalar, so a
-// stale V6-shaped file must be rejected, never decoded.
+// Format-version-9 bump. Both predecessors independently used V8 for their
+// own shape: the branch V8 sealed the pipeline-core library proof IDs, and
+// the main V8 carried the chelis#878 typed `RiscOp::Pad::fill`, chelis#942
+// positional-expand constraints, and the chelis#1182 root-module decl order
+// (released in 0.18.4). The unified format takes V9; a V8- or V7-shaped file
+// from either predecessor must be rejected, never decoded.
 // ---------------------------------------------------------------------
 
 #[test]
 fn a_forged_stale_magic_file_is_rejected_not_decoded() {
-    // The current magic is `CHELIS_CTX_V8\n` (chelis#1182 decl-order bump, on
-    // top of chelis#878's V7). A leftover file written by a pre-bump binary
-    // carries `CHELIS_CTX_V7\n`. Forge one by taking a real V8 file and
-    // rewriting the magic's version digit. load_if_fresh must reject it (the
-    // magic no longer matches), never attempt to decode the stale-shaped
-    // envelope.
+    // The current magic is `CHELIS_CTX_V9\n`. A leftover file from either
+    // predecessor carries a `CHELIS_CTX_V8\n` (or older) magic. Forge one by
+    // taking a real V9 file and rewriting the magic's version digit.
+    // load_if_fresh must reject it (the magic no longer matches), never
+    // attempt to decode the stale-shaped envelope.
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-stale-magic", TRIVIAL_MAIN);
     assert!(
-        bytes.starts_with(b"CHELIS_CTX_V8\n"),
-        "fixture must be written with the current V8 magic"
+        bytes.starts_with(b"CHELIS_CTX_V9\n"),
+        "fixture must be written with the current V9 magic"
     );
 
     let mut forged = bytes.clone();
-    // `CHELIS_CTX_V8\n` -> `CHELIS_CTX_V7\n`: the version digit is at
+    // `CHELIS_CTX_V9\n` -> `CHELIS_CTX_V8\n`: the version digit is at
     // index 12 ("CHELIS_CTX_V" is 12 chars).
-    forged[12] = b'7';
+    forged[12] = b'8';
     fs::write(&cache_path, &forged).expect("write forged stale-magic file");
 
     let outcome =
@@ -528,11 +531,11 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
     // envelope `version` field is the first field after the magic, so it
     // sits at bytes [magic.len() .. magic.len()+4].
     let (_dir, cache_path, _ctx, bytes) = save_ctx("rt-envver", TRIVIAL_MAIN);
-    let magic_len = b"CHELIS_CTX_V8\n".len();
+    let magic_len = b"CHELIS_CTX_V9\n".len();
     assert!(bytes.len() > magic_len + 4);
 
     let mut forged = bytes.clone();
-    // bincode encodes a u32 little-endian; bump the low byte well past 8.
+    // bincode encodes a u32 little-endian; bump the low byte well past 9.
     forged[magic_len] = forged[magic_len].wrapping_add(99);
     fs::write(&cache_path, &forged).expect("write bumped-version file");
 
@@ -542,8 +545,8 @@ fn a_bumped_envelope_version_byte_is_rejected_as_unsupported() {
         Ok(Some(_)) => panic!("a bumped envelope version must NEVER load as Ok(Some(_))"),
         Ok(None) => { /* tolerated: the envelope may fail to decode first */ }
         Err(CacheError::UnsupportedVersion { stored, expected }) => {
-            assert_eq!(expected, 8, "the running binary expects format version 8");
-            assert_ne!(stored, 8, "the forged version must differ from 8");
+            assert_eq!(expected, 9, "the running binary expects format version 9");
+            assert_ne!(stored, 9, "the forged version must differ from 9");
         }
         Err(CacheError::Corrupt(_) | CacheError::Decode(_)) => {
             // Also acceptable: bumping a byte can break the bincode shape
@@ -622,14 +625,15 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     let real = stdlib_cache_key(&decls);
 
     // Byte-for-byte mirror of `stdlib_cache_key`, parameterized on the
-    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 4 (the
-    // chelis#878 typed-Pad bincode bump); the
+    // compiler-version string. STDLIB_CACHE_FORMAT_VERSION is 5 (the merged
+    // bump unifying the branch proof-identity products and chelis#942's
+    // positional-expand obligations); the
     // mirror is only valid while that holds, which assertion (a) below
     // verifies.
     let recompute = |compiler_version: &str| -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"chelis_std_typecheck_v");
-        hasher.update(4u32.to_le_bytes());
+        hasher.update(5u32.to_le_bytes());
         hasher.update(b"compiler_version");
         hasher.update((compiler_version.len() as u64).to_le_bytes());
         hasher.update(compiler_version.as_bytes());

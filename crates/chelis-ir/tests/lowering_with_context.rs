@@ -248,7 +248,7 @@ fn node_id_disjointness_new_code_above_library_max() {
     let (_, ctx, lib_checked) = check_lib(library_src);
     let library = lower_program_to_library(&lib_checked);
     let library_max_id = library
-        .dag
+        .dag()
         .nodes()
         .iter()
         .map(|node| node.id.0)
@@ -259,7 +259,7 @@ fn node_id_disjointness_new_code_above_library_max() {
     let composed_dag = lower_program_with_context(&library, &new_checked);
 
     // All library NodeIds appear unchanged in the composed DAG.
-    for lib_node in library.dag.nodes() {
+    for lib_node in library.dag().nodes() {
         let in_composed = composed_dag.get(lib_node.id).expect("library node present");
         assert_eq!(
             in_composed.op, lib_node.op,
@@ -290,7 +290,7 @@ fn node_id_disjointness_new_code_above_library_max() {
     let new_code_min_id = composed_dag
         .nodes()
         .iter()
-        .skip(library.dag.len())
+        .skip(library.dag().len())
         .map(|node| node.id.0)
         .min()
         .expect("composed has new-code nodes beyond library");
@@ -321,10 +321,10 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     let (_, ctx, lib_checked) = check_lib(library_src);
     let library = lower_program_to_library(&lib_checked);
 
-    let library_len_before = library.dag.len();
-    let library_roots_before = library.dag.roots().to_vec();
+    let library_len_before = library.dag().len();
+    let library_roots_before = library.dag().roots().to_vec();
     let library_node_ops_before: Vec<_> = library
-        .dag
+        .dag()
         .nodes()
         .iter()
         .map(|n| (n.id, n.op.clone(), n.inputs.clone()))
@@ -334,10 +334,10 @@ fn library_dag_is_not_mutated_by_lower_program_with_context() {
     let _composed_dag = lower_program_with_context(&library, &new_checked);
 
     // Library carrier must be untouched after composition.
-    assert_eq!(library.dag.len(), library_len_before);
-    assert_eq!(library.dag.roots(), &library_roots_before[..]);
+    assert_eq!(library.dag().len(), library_len_before);
+    assert_eq!(library.dag().roots(), &library_roots_before[..]);
     let after: Vec<_> = library
-        .dag
+        .dag()
         .nodes()
         .iter()
         .map(|n| (n.id, n.op.clone(), n.inputs.clone()))
@@ -382,7 +382,7 @@ fn library_value_def_is_referenced_not_duplicated() {
     let (_, ctx, lib_checked) = check_lib(library_src);
     let library = lower_program_to_library(&lib_checked);
     let lib_v_id = *library
-        .symbol_table
+        .symbol_table()
         .get("lib_v")
         .expect("library symbol_table holds top-level def `lib_v`");
 
@@ -391,7 +391,7 @@ fn library_value_def_is_referenced_not_duplicated() {
 
     // `lib_v` occupies the same NodeId in the composed DAG as in the library.
     let lib_v_in_composed = composed_dag.get(lib_v_id).expect("lib_v present");
-    let lib_v_in_library = library.dag.get(lib_v_id).expect("lib_v in library");
+    let lib_v_in_library = library.dag().get(lib_v_id).expect("lib_v in library");
     assert_eq!(lib_v_in_composed.op, lib_v_in_library.op);
 
     // At least one new-code node has `lib_v_id` as an input — i.e. the
@@ -400,7 +400,7 @@ fn library_value_def_is_referenced_not_duplicated() {
     let referenced = composed_dag
         .nodes()
         .iter()
-        .skip(library.dag.len())
+        .skip(library.dag().len())
         .any(|node| node.inputs.contains(&lib_v_id));
     assert!(
         referenced,
@@ -409,7 +409,7 @@ fn library_value_def_is_referenced_not_duplicated() {
         composed_dag
             .nodes()
             .iter()
-            .skip(library.dag.len())
+            .skip(library.dag().len())
             .map(|n| (n.id, n.op.clone(), n.inputs.clone()))
             .collect::<Vec<_>>(),
     );
@@ -435,9 +435,9 @@ fn lowered_library_dag_matches_lower_program() {
     let (_, _, lib_checked) = check_lib(library_src);
     let dag_a = lower_program(&lib_checked);
     let library = lower_program_to_library(&lib_checked);
-    assert_eq!(dag_a.len(), library.dag.len());
-    assert_eq!(dag_a.roots(), library.dag.roots());
-    for (na, nb) in dag_a.nodes().iter().zip(library.dag.nodes().iter()) {
+    assert_eq!(dag_a.len(), library.dag().len());
+    assert_eq!(dag_a.roots(), library.dag().roots());
+    for (na, nb) in dag_a.nodes().iter().zip(library.dag().nodes().iter()) {
         assert_eq!(na.id, nb.id);
         assert_eq!(na.op, nb.op);
         assert_eq!(na.inputs, nb.inputs);

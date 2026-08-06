@@ -560,6 +560,9 @@ impl ElementwiseUnOp {
         match self {
             Self::Neg => Some(IntUnOp::Neg),
             Self::Abs => Some(IntUnOp::Abs),
+            Self::Floor => Some(IntUnOp::Floor),
+            Self::Ceil => Some(IntUnOp::Ceil),
+            Self::Round => Some(IntUnOp::Round),
             Self::Recip
             | Self::Exp
             | Self::Log
@@ -567,10 +570,7 @@ impl ElementwiseUnOp {
             | Self::Sqrt
             | Self::Cos
             | Self::Tan
-            | Self::Atan
-            | Self::Floor
-            | Self::Ceil
-            | Self::Round => None,
+            | Self::Atan => None,
         }
     }
 

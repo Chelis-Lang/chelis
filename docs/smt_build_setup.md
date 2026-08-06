@@ -42,6 +42,36 @@ cvc5-rs = { version = "0.3", optional = true }
 Default builds (`cargo build`) do NOT pull cvc5. Only `cargo build --features smt`
 triggers the cvc5 source build (~2-5 minutes on first compile, cached thereafter).
 
+### Carcara audit gate
+
+The optional `carcara` feature re-checks cvc5 Alethe proofs. The pinned
+Carcara dependency enables only Rug's integer and rational support, so this
+gate needs GMP but not MPFR or MPC. Install `libgmp-dev` on Debian/Ubuntu or
+`brew install gmp` on macOS.
+
+Run the complete suite serially. A nightly parallel process exited with
+SIGSEGV after tests, while the same unit, integration, and doctest set passed
+with one test thread. Serialization contains that nondeterministic failure
+without narrowing the corpus; it does not establish the upstream root cause:
+
+```bash
+cargo test -p chelis-prove --features carcara -- --test-threads=1
+```
+
+Homebrew's GMP is keg-only, so its headers and library may not be on Clang's
+default paths. `gmp-mpfr-sys` invokes the compiler directly for its
+system-library probe; use `CPATH` and `LIBRARY_PATH` so that probe sees the
+Homebrew installation. `CVC5_DIR` reuses the durable local cvc5 artifacts
+when that cache has already been populated:
+
+```bash
+GMP_PREFIX="$(brew --prefix gmp)"
+CPATH="${GMP_PREFIX}/include${CPATH:+:${CPATH}}" \
+LIBRARY_PATH="${GMP_PREFIX}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}" \
+CVC5_DIR="${HOME}/.cache/chelis-cvc5/darwin-arm64" \
+cargo test -p chelis-prove --features carcara -- --test-threads=1
+```
+
 ## CI Configuration
 
 The required `smt-build` job in `.github/workflows/ci.yml` keeps the branch

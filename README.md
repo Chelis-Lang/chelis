@@ -383,13 +383,30 @@ chelis-tools CLI in `py/`, and the `chelis-python` PyO3 link step):
 # Install uv once
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Create the project-local venv (from the repo root)
+# Start a new shell if the installer changed PATH, then verify the install
+uv --version
+
+# Install the project Python and create the primary checkout's local venv
+uv python install 3.11
 uv venv --python 3.11
 ```
 
 The project pins Python 3.11 (`py/pyproject.toml` requires `>=3.11`).
-Outside Devenv, always use the uv-managed interpreter at `.venv/bin/python`.
-`.cargo/config.toml` sets `PYO3_PYTHON` to that manual environment.
+Outside Devenv, use a uv-managed interpreter. `.cargo/config.toml` defaults
+direct Cargo commands to `.venv/bin/python`, so the primary checkout normally
+has the environment created above.
+
+Dedicated git worktrees do not need to copy or symlink that ignored `.venv`.
+For direct Cargo commands in a worktree, point PyO3 at uv's managed Python:
+
+```sh
+PYO3_PYTHON="$(uv python find 3.11)" cargo build --workspace
+PYO3_PYTHON="$(uv python find 3.11)" cargo nextest run -p chelis-compiler-api
+```
+
+An explicit `PYO3_PYTHON` is authoritative. A missing configured path fails
+with setup guidance instead of silently falling back. Creating a separate
+worktree-local environment with `uv venv --python 3.11` remains supported.
 
 Inside Devenv, use the activated environment at `.devenv/state/venv`.
 Devenv overrides `PYO3_PYTHON` with its managed interpreter.
@@ -403,16 +420,27 @@ uv pip install -e py            # chelis-tools (loc-report, skill-eval, ...)
 uv pip install -e bindings/python # chelis Python bindings (optional)
 ```
 
-`scripts/gate.py` itself is stdlib-only: it needs the 3.11+ interpreter
-but no pip installs.
+`scripts/gate.py` itself is stdlib-only. Launch it with `python3`; when that is
+not already a uv or Devenv runtime, it re-executes itself as:
+
+```sh
+uv run --managed-python --python 3.11 --no-project python scripts/gate.py
+```
+
+The gate then exports its selected interpreter as `PYO3_PYTHON` to every child
+command. It does not install project dependencies or require a checkout-local
+`.venv`. The cargo-husky commit-message hook uses the same uv fallback when a
+worktree has neither Devenv nor `.venv`.
 
 ## Build
 
-Outside Devenv, the root uv environment is a hard prerequisite for `cargo build` on every platform.
+Outside Devenv, a managed Python is a hard prerequisite for `cargo build` on every platform.
 
 Inside Devenv, the activated `.devenv/state/venv` environment satisfies the same PyO3 requirement.
 
-`chelis-python` links against `libpython`. Run `uv venv --python 3.11` before a manual build if `.venv/` does not exist.
+`chelis-python` links against `libpython`. Run `uv venv --python 3.11`
+before a direct manual build if `.venv/` does not exist, or set
+`PYO3_PYTHON="$(uv python find 3.11)"` as shown above.
 
 ```sh
 cargo build --workspace
@@ -437,9 +465,9 @@ is the single source of truth for the per-PR gate; CI runs the same
 commands:
 
 ```sh
-.venv/bin/python scripts/gate.py --list   # manual environment
-.venv/bin/python scripts/gate.py --local  # manual environment
-chelis-gate --local                       # active Devenv shell
+python3 scripts/gate.py --list  # auto-routes through uv when needed
+python3 scripts/gate.py --local
+chelis-gate --local             # active Devenv shell
 ```
 
 `--local` runs workspace clippy, `cargo fmt --check`,
@@ -448,10 +476,21 @@ chelis-gate --local                       # active Devenv shell
 draft PR early and let CI (macOS Smoke is the authoritative workspace
 oracle) run the full suite; see
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
-for why that suite does not belong in the local loop on macOS. The gate
-needs Python 3.11+ (it uses `tomllib`), which is why the examples use
-`.venv/bin/python`: the stock macOS `python3` is 3.9 and fails with
-`ModuleNotFoundError: No module named 'tomllib'`.
+for why that suite does not belong in the local loop on macOS.
+
+Child stdout and stderr stream live. On failure, the gate prints the stage and
+command index, duration, exit code or signal, host and toolchain environment,
+the exact rerun command, and the final 200 output lines. The complete combined
+transcript is retained under `target/gate-failures/`; successful-command
+transcripts are deleted.
+
+Gate Cargo artifacts are forced into the current worktree. An inherited
+`CARGO_TARGET_DIR` that resolves outside it is rejected, and cargo-husky's
+build-time hook installer is disabled for gate children so sibling worktrees
+cannot overwrite shared Git hook state. Every nextest profile runs without
+fail-fast, allowing one run to report all failing tests. Parallel worktrees may
+run more slowly from CPU contention, but they do not share writable build
+artifacts.
 
 Documentation-only changes are exempt from the local gate: push and
 require green CI instead (the lint stage and the Docs job cover

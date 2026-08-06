@@ -462,6 +462,9 @@ impl IntBinOp {
 pub enum IntUnOp {
     Neg,
     Abs,
+    Floor,
+    Ceil,
+    Round,
 }
 
 impl IntUnOp {
@@ -469,6 +472,9 @@ impl IntUnOp {
         match self {
             Self::Neg => "neg",
             Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
         }
     }
 }
@@ -544,6 +550,13 @@ impl FloatUnOp {
             Self::Silu => "silu",
             Self::Gelu => "gelu",
         }
+    }
+
+    const fn is_activation(self) -> bool {
+        matches!(
+            self,
+            Self::Relu | Self::Sigmoid | Self::Tanh | Self::Silu | Self::Gelu
+        )
     }
 }
 
@@ -866,6 +879,7 @@ macro_rules! int_unop_at_width {
         let value = match $op {
             IntUnOp::Neg => $value.checked_neg(),
             IntUnOp::Abs => $value.checked_abs(),
+            IntUnOp::Floor | IntUnOp::Ceil | IntUnOp::Round => Some($value),
         }
         .ok_or(NumericTrap::Overflow {
             op: $op.name(),
@@ -954,22 +968,12 @@ fn apply_float_unop_f32(op: FloatUnOp, value: f32) -> f32 {
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
-        FloatUnOp::Relu => {
-            if value > 0.0 {
-                value
-            } else {
-                0.0
-            }
-        }
-        FloatUnOp::Sigmoid => 1.0 / (1.0 + (-value).exp()),
-        FloatUnOp::Tanh => value.tanh(),
-        FloatUnOp::Silu => value * (1.0 / (1.0 + (-value).exp())),
-        FloatUnOp::Gelu => {
-            #[allow(clippy::excessive_precision)]
-            const C: f32 = 0.7978845608028654_f32;
-            const K: f32 = 0.044715_f32;
-            let inner = C * (value + K * value * value * value);
-            0.5 * value * (1.0 + inner.tanh())
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Tanh
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu => {
+            unreachable!("derived activations decompose before the unary primitive kernel")
         }
     }
 }
@@ -989,29 +993,101 @@ fn apply_float_unop_f64(op: FloatUnOp, value: f64) -> f64 {
         FloatUnOp::Floor => value.floor(),
         FloatUnOp::Ceil => value.ceil(),
         FloatUnOp::Round => value.round_ties_even(),
-        FloatUnOp::Relu => {
-            if value > 0.0 {
-                value
-            } else {
-                0.0
-            }
-        }
-        FloatUnOp::Sigmoid => 1.0 / (1.0 + (-value).exp()),
-        FloatUnOp::Tanh => value.tanh(),
-        FloatUnOp::Silu => value * (1.0 / (1.0 + (-value).exp())),
-        FloatUnOp::Gelu => {
-            const C: f64 = 0.7978845608028654;
-            const K: f64 = 0.044715;
-            let inner = C * (value + K * value * value * value);
-            0.5 * value * (1.0 + inner.tanh())
+        FloatUnOp::Relu
+        | FloatUnOp::Sigmoid
+        | FloatUnOp::Tanh
+        | FloatUnOp::Silu
+        | FloatUnOp::Gelu => {
+            unreachable!("derived activations decompose before the unary primitive kernel")
         }
     }
 }
 
-/// Perform one float unary operation at the dtype's arithmetic width and
-/// finalize once into its storage width.
+fn activation_constant(
+    op: FloatUnOp,
+    prim: Prim,
+    value: f64,
+) -> Result<ScalarValue, NumericKernelError> {
+    scalar_from_f64(op.name(), prim, value).map_err(Into::into)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCALAR_ACTIVATION_CALL_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+fn float_activation(op: FloatUnOp, value: ScalarValue) -> Result<ScalarValue, NumericKernelError> {
+    #[cfg(test)]
+    SCALAR_ACTIVATION_CALL_COUNT.with(|count| count.set(count.get() + 1));
+
+    let prim = value.prim();
+    match op {
+        FloatUnOp::Relu => float_binop(FloatBinOp::Max, value, activation_constant(op, prim, 0.0)?),
+        FloatUnOp::Sigmoid => {
+            let neg_x = float_unop(FloatUnOp::Neg, value)?;
+            let exp_neg_x = float_unop(FloatUnOp::Exp, neg_x)?;
+            let denominator = float_binop(
+                FloatBinOp::Add,
+                activation_constant(op, prim, 1.0)?,
+                exp_neg_x,
+            )?;
+            float_unop(FloatUnOp::Recip, denominator)
+        }
+        FloatUnOp::Tanh => {
+            let two_x = float_binop(FloatBinOp::Mul, activation_constant(op, prim, 2.0)?, value)?;
+            let sigmoid = float_activation(FloatUnOp::Sigmoid, two_x)?;
+            let twice_sigmoid = float_binop(
+                FloatBinOp::Mul,
+                activation_constant(op, prim, 2.0)?,
+                sigmoid,
+            )?;
+            float_binop(
+                FloatBinOp::Add,
+                twice_sigmoid,
+                activation_constant(op, prim, -1.0)?,
+            )
+        }
+        FloatUnOp::Silu => {
+            let sigmoid = float_activation(FloatUnOp::Sigmoid, value)?;
+            float_binop(FloatBinOp::Mul, value, sigmoid)
+        }
+        FloatUnOp::Gelu => {
+            let x_squared = float_binop(FloatBinOp::Mul, value, value)?;
+            let x_cubed = float_binop(FloatBinOp::Mul, x_squared, value)?;
+            let scaled_cube = float_binop(
+                FloatBinOp::Mul,
+                activation_constant(op, prim, 0.044715)?,
+                x_cubed,
+            )?;
+            let sum_inner = float_binop(FloatBinOp::Add, value, scaled_cube)?;
+            let inner = float_binop(
+                FloatBinOp::Mul,
+                activation_constant(op, prim, 0.7978845608028654)?,
+                sum_inner,
+            )?;
+            let tanh_inner = float_activation(FloatUnOp::Tanh, inner)?;
+            let one_plus_tanh = float_binop(
+                FloatBinOp::Add,
+                activation_constant(op, prim, 1.0)?,
+                tanh_inner,
+            )?;
+            let x_mul = float_binop(FloatBinOp::Mul, value, one_plus_tanh)?;
+            float_binop(FloatBinOp::Mul, activation_constant(op, prim, 0.5)?, x_mul)
+        }
+        _ => unreachable!("float_activation requires an activation selector"),
+    }
+}
+
+/// Perform one float unary primitive at the dtype's arithmetic width and
+/// finalize once into its storage width. Derived activations execute their
+/// specified Tier-2 composition, finalizing each constituent primitive.
 pub fn float_unop(op: FloatUnOp, value: ScalarValue) -> Result<ScalarValue, NumericKernelError> {
     require_family(op.name(), value, NumericFamily::Float)?;
+    if op.is_activation() {
+        return float_activation(op, value);
+    }
     let bits = match value.bits {
         Bits::F64(value) => Bits::F64(apply_float_unop_f64(op, value)),
         Bits::F32(value) => Bits::F32(apply_float_unop_f32(op, value)),
@@ -1633,6 +1709,7 @@ macro_rules! int_tensor_unop_at_width {
                 .copied()
                 .map(|value| value.checked_abs().ok_or_else(overflow))
                 .collect(),
+            IntUnOp::Floor | IntUnOp::Ceil | IntUnOp::Round => Ok($values.to_vec()),
         };
         Ok(TensorStorage {
             buf: Buf::$variant(values?),
@@ -1770,11 +1847,9 @@ fn float_vec_unop_f32<T: Copy>(
         | FloatUnOp::Sigmoid
         | FloatUnOp::Tanh
         | FloatUnOp::Silu
-        | FloatUnOp::Gelu => values
-            .iter()
-            .copied()
-            .map(|value| from_f32(apply_float_unop_f32(op, to_f32(value))))
-            .collect(),
+        | FloatUnOp::Gelu => {
+            unreachable!("derived activations decompose before the unary tensor kernel")
+        }
     }
 }
 
@@ -1802,11 +1877,162 @@ fn float_vec_unop_f64(op: FloatUnOp, values: &[f64]) -> Vec<f64> {
         | FloatUnOp::Sigmoid
         | FloatUnOp::Tanh
         | FloatUnOp::Silu
-        | FloatUnOp::Gelu => values
-            .iter()
-            .copied()
-            .map(|value| apply_float_unop_f64(op, value))
-            .collect(),
+        | FloatUnOp::Gelu => {
+            unreachable!("derived activations decompose before the unary tensor kernel")
+        }
+    }
+}
+
+trait ActivationElement: Copy {
+    fn constant(value: f64) -> Self;
+    fn neg(self) -> Self;
+    fn exp(self) -> Self;
+    fn recip(self) -> Self;
+    fn add(self, rhs: Self) -> Self;
+    fn mul(self, rhs: Self) -> Self;
+    fn max(self, rhs: Self) -> Self;
+}
+
+macro_rules! impl_native_activation_element {
+    ($ty:ty) => {
+        impl ActivationElement for $ty {
+            fn constant(value: f64) -> Self {
+                value as Self
+            }
+
+            fn neg(self) -> Self {
+                -self
+            }
+
+            fn exp(self) -> Self {
+                self.exp()
+            }
+
+            fn recip(self) -> Self {
+                self.recip()
+            }
+
+            fn add(self, rhs: Self) -> Self {
+                self + rhs
+            }
+
+            fn mul(self, rhs: Self) -> Self {
+                self * rhs
+            }
+
+            fn max(self, rhs: Self) -> Self {
+                self.max(rhs)
+            }
+        }
+    };
+}
+
+impl_native_activation_element!(f32);
+impl_native_activation_element!(f64);
+
+macro_rules! impl_reduced_activation_element {
+    ($ty:ty) => {
+        impl ActivationElement for $ty {
+            fn constant(value: f64) -> Self {
+                Self::from_f64(value)
+            }
+
+            fn neg(self) -> Self {
+                Self::from_f32(-self.to_f32())
+            }
+
+            fn exp(self) -> Self {
+                Self::from_f32(self.to_f32().exp())
+            }
+
+            fn recip(self) -> Self {
+                Self::from_f32(self.to_f32().recip())
+            }
+
+            fn add(self, rhs: Self) -> Self {
+                Self::from_f32(self.to_f32() + rhs.to_f32())
+            }
+
+            fn mul(self, rhs: Self) -> Self {
+                Self::from_f32(self.to_f32() * rhs.to_f32())
+            }
+
+            fn max(self, rhs: Self) -> Self {
+                Self::from_f32(self.to_f32().max(rhs.to_f32()))
+            }
+        }
+    };
+}
+
+impl_reduced_activation_element!(half::f16);
+impl_reduced_activation_element!(half::bf16);
+
+fn activation_sigmoid<T: ActivationElement>(value: T, one: T) -> T {
+    one.add(value.neg().exp()).recip()
+}
+
+fn activation_tanh<T: ActivationElement>(value: T, one: T, two: T, neg_one: T) -> T {
+    two.mul(activation_sigmoid(two.mul(value), one))
+        .add(neg_one)
+}
+
+fn float_vec_activation<T: ActivationElement>(op: FloatUnOp, values: &[T]) -> Vec<T> {
+    match op {
+        FloatUnOp::Relu => {
+            let zero = T::constant(0.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| value.max(zero))
+                .collect()
+        }
+        FloatUnOp::Sigmoid => {
+            let one = T::constant(1.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| activation_sigmoid(value, one))
+                .collect()
+        }
+        FloatUnOp::Tanh => {
+            let one = T::constant(1.0);
+            let two = T::constant(2.0);
+            let neg_one = T::constant(-1.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| activation_tanh(value, one, two, neg_one))
+                .collect()
+        }
+        FloatUnOp::Silu => {
+            let one = T::constant(1.0);
+            values
+                .iter()
+                .copied()
+                .map(|value| value.mul(activation_sigmoid(value, one)))
+                .collect()
+        }
+        FloatUnOp::Gelu => {
+            let one = T::constant(1.0);
+            let two = T::constant(2.0);
+            let neg_one = T::constant(-1.0);
+            let cubic_scale = T::constant(0.044715);
+            let tanh_scale = T::constant(0.7978845608028654);
+            let half = T::constant(0.5);
+            values
+                .iter()
+                .copied()
+                .map(|value| {
+                    let squared = value.mul(value);
+                    let cubed = squared.mul(value);
+                    let scaled_cube = cubic_scale.mul(cubed);
+                    let inner = tanh_scale.mul(value.add(scaled_cube));
+                    let tanh_inner = activation_tanh(inner, one, two, neg_one);
+                    half.mul(value.mul(one.add(tanh_inner)))
+                })
+                .collect()
+        }
+        _ => unreachable!("float_vec_activation requires an activation selector"),
     }
 }
 
@@ -1821,6 +2047,16 @@ pub fn float_tensor_unop(
             expected: NumericFamily::Float,
             actual: value.prim(),
         });
+    }
+    if op.is_activation() {
+        let buf = match &value.buf {
+            Buf::F64(values) => Buf::F64(float_vec_activation(op, values)),
+            Buf::F32(values) => Buf::F32(float_vec_activation(op, values)),
+            Buf::F16(values) => Buf::F16(float_vec_activation(op, values)),
+            Buf::Bf16(values) => Buf::Bf16(float_vec_activation(op, values)),
+            _ => unreachable!("family check makes the float buffer exhaustive"),
+        };
+        return Ok(TensorStorage { buf });
     }
     let buf = match &value.buf {
         Buf::F64(values) => Buf::F64(float_vec_unop_f64(op, values)),
@@ -4127,6 +4363,35 @@ mod tests {
     }
 
     #[test]
+    fn integer_floor_ceil_round_are_storage_exact_identities() {
+        for prim in [Prim::Int8, Prim::Int16, Prim::Int32, Prim::Int64] {
+            let (lo, hi) = prim.integer_range().expect("integer range");
+            for op in [IntUnOp::Floor, IntUnOp::Ceil, IntUnOp::Round] {
+                for value in [lo, -1, 0, 1, hi] {
+                    let scalar = scalar_from_i64("test", prim, value).unwrap();
+                    assert_eq!(
+                        int_unop(op, scalar).unwrap(),
+                        scalar,
+                        "{} must preserve {} at {}",
+                        op.name(),
+                        value,
+                        prim.name()
+                    );
+                }
+                let storage =
+                    finalize_tensor("test", prim, RawTensor::Int(vec![lo, -1, 0, 1, hi])).unwrap();
+                assert_eq!(
+                    int_tensor_unop(op, &storage).unwrap(),
+                    storage,
+                    "{} tensor kernel must be identity at {}",
+                    op.name(),
+                    prim.name()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn float_kernels_compute_at_declared_arithmetic_width() {
         // This f32 input is a one-ulp witness on macOS: native expf and
         // f64-exp-then-narrow differ. The contract assertion is against the
@@ -4265,6 +4530,30 @@ mod tests {
                 .to_i64_exact_vec(),
             Some(vec![0])
         );
+    }
+
+    #[test]
+    fn tensor_activations_do_not_dispatch_through_the_scalar_kernel_per_element() {
+        let scalar = scalar_from_f64("test", Prim::F32, 0.5).unwrap();
+        SCALAR_ACTIVATION_CALL_COUNT.with(|count| count.set(0));
+        float_unop(FloatUnOp::Gelu, scalar).unwrap();
+        SCALAR_ACTIVATION_CALL_COUNT.with(|count| {
+            assert!(
+                count.get() > 0,
+                "the scalar control must exercise the instrumented dispatcher"
+            );
+            count.set(0);
+        });
+
+        let input = finalize_tensor("test", Prim::F32, RawTensor::Float(vec![0.5; 4])).unwrap();
+        float_tensor_unop(FloatUnOp::Gelu, &input).unwrap();
+        SCALAR_ACTIVATION_CALL_COUNT.with(|count| {
+            assert_eq!(
+                count.get(),
+                0,
+                "the tensor kernel must dispatch once per buffer, not once per element"
+            );
+        });
     }
 
     fn one_group(len: usize) -> Vec<Vec<usize>> {

@@ -4,6 +4,7 @@
 //! The extraction preserves control flow and diagnostic order.
 
 use super::*;
+use crate::context::LibraryProofId;
 
 /// Front-end cancellation gate for a check unit (chelis#930).
 ///
@@ -17,6 +18,18 @@ use super::*;
 /// Same covered-or-rejected discipline as `StackExhaustionScope::drain_into` —
 /// a check unit that stopped early must fail, never return a partial `Ok`.
 #[must_use = "a tripped cancellation gate must end the check unit"]
+fn bind_library_products(
+    mut type_env: TypeEnv,
+    mut checked: CheckedProgram,
+    context_library_proof_id: Option<LibraryProofId>,
+) -> (TypeEnv, CheckedProgram) {
+    let proof_id = LibraryProofId::for_library(checked.exprs(), context_library_proof_id);
+    type_env.bind_library_proof(proof_id);
+    checked.bind_library_proof(proof_id);
+    checked.bind_context_library_proof(context_library_proof_id);
+    (type_env, checked)
+}
+
 fn cancellation_gate(errors: &mut DiagnosticSink<'_>) -> bool {
     if crate::cancel::cancellation_requested() {
         errors.push(crate::cancel::cancellation_check_error());
@@ -465,7 +478,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         return Err(stats);
     }
 
-    Ok((type_env, checked))
+    Ok(bind_library_products(type_env, checked, None))
 }
 
 /// Layered sibling of [`build_compiled_library_context`]: build a library
@@ -637,7 +650,11 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         return Err(stats);
     }
 
-    Ok((type_env, checked))
+    Ok(bind_library_products(
+        type_env,
+        checked,
+        base.library_proof_id(),
+    ))
 }
 
 /// Type-check `new_exprs` against an outer-scope `context`. New-code
@@ -675,7 +692,10 @@ pub fn check_ir_with_signature_context(
     signature_context: &SignatureInferenceMetadata,
     new_exprs: &[deep::Expr],
 ) -> Result<CheckedProgram, InferResult> {
-    crate::session::check_ir_with_signature_context(context, signature_context, new_exprs)
+    let mut checked =
+        crate::session::check_ir_with_signature_context(context, signature_context, new_exprs)?;
+    checked.bind_context_library_proof(context.library_proof_id());
+    Ok(checked)
 }
 
 pub(crate) fn check_ir_with_signature_context_in_session(

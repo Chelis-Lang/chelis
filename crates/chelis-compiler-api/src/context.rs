@@ -19,23 +19,21 @@
 //!
 //! ## Checker-state deserialization boundary
 //!
-//! `CompiledContext` contains only checker-success artifacts: construction
-//! fails before a `TypeEnv`/`CheckedProgram` is returned when diagnostics are
-//! non-empty, and the checker totality invariant forbids `Type::Error` in a
-//! successful result. Decode verifies the cache format/build identity and
-//! payload integrity, but it does not rerun semantic checking. The ADT
-//! registry's provisional `TypeResolutionEnv` is serde-skipped; a later
-//! stacked check reconstructs it from validated ADT/alias definitions plus
-//! that check unit's declarations. Rejected declaration headers therefore
-//! cannot persist in either the reef context or the stdlib sub-context.
+//! `CompiledContext` contains only checker-success artifacts. Construction
+//! rejects diagnostics before it creates a library proof. Decode verifies the
+//! cache identity and payload integrity. It also checks the type-environment
+//! relationship. It reruns the remaining semantic checks and the lower phase.
+//! Then, it restores that proof. The provisional `TypeResolutionEnv` is serde-skipped.
+//! A later stacked check reconstructs it from validated ADT and alias definitions.
+//! Rejected declaration headers cannot persist in either compiler cache.
 //!
 //! See `/home/jeff/.claude/plans/now-plan-out-the-shimmying-wand.md`
 //! for the full plan.
 
 use chelis_deep::DeepTag;
-use chelis_ir::lower::LoweredLibrary;
+use chelis_ir::lower::LoweredLibrary as IrLoweredLibrary;
 use chelis_reef::{PreparedReefGraph, SourceDigest, prepare_reef_graph_cached};
-use chelis_types::{CheckedProgram, TypeEnv, build_compiled_library_context};
+use chelis_types::{CheckedProgram, TypeEnv};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -139,18 +137,15 @@ impl ContextHash {
 /// Phase G composes the result of every pipeline stage:
 /// - `source_hash`: content hash for disk-cache invalidation (Phase I).
 /// - `reef_state`: linked library decls + reef metadata (Phase B).
-/// - `type_env`: IR type-checker snapshot. Used by
-///   `check_ir_with_context` for new-code type checking.
-/// - `library_checked`: monolithic IR + effects + linearity result
-///   over the library decls (Phases C/D/E). Used by
-///   `check_effects_with_context` and `check_linearity_with_context`.
+/// - `library`: bound type environment and accepted program. Contextual
+///   checks retain this proof through type, effect, and linearity stages.
 /// - `library_dag`: lowered library DAG carrier (Phase F). Used by
 ///   `lower_program_with_context`.
 ///
 /// All five fields are populated once by `compile_reef_context` and
 /// thereafter treated as immutable. Cheap to clone (the heavy state is
 /// `Arc`-shared inside `TypeEnv`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CompiledContext {
     /// Content hash of every backed source file. Stable across calls
     /// on unchanged sources; changes when ANY source byte changes.
@@ -165,17 +160,85 @@ pub struct CompiledContext {
     /// The reef state (lockfile-backed package graph + linked library
     /// decls + internal-name maps + dep shells).
     pub(crate) reef_state: PreparedReefGraph,
-    /// IR type-checker snapshot — the outer scope for new-code
-    /// type checking via `check_ir_with_context`.
-    pub(crate) type_env: TypeEnv,
-    /// Library IR + effects + linearity result. Feeds the
-    /// `_with_context` variants of effects and linearity.
-    pub(crate) library_checked: CheckedProgram,
+    /// Bound type environment and semantically accepted library program.
+    pub(crate) library: crate::pipeline::CheckedLibrary,
     /// Lowered library carrier. Feeds `lower_program_with_context`.
-    pub(crate) library_dag: LoweredLibrary,
+    pub(crate) library_dag: crate::pipeline::LoweredLibrary,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CompiledContextWire {
+    source_hash: ContextHash,
+    identity: CacheIdentity,
+    reef_state: PreparedReefGraph,
+    type_env: TypeEnv,
+    library_checked: CheckedProgram,
+    library_dag: IrLoweredLibrary,
+}
+
+impl Serialize for CompiledContext {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        CompiledContextWire {
+            source_hash: self.source_hash,
+            identity: self.identity.clone(),
+            reef_state: self.reef_state.clone(),
+            type_env: self.library.type_env().clone(),
+            library_checked: self.library.program().clone(),
+            library_dag: self.library_dag.raw().clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompiledContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = CompiledContextWire::deserialize(deserializer)?;
+        let _linked = chelis_types::install_linked_program_guard();
+        let library =
+            chelis_pipeline_core::validate_cached_library(wire.type_env, wire.library_checked)
+                .map_err(serde::de::Error::custom)?;
+        if wire.library_dag.library_proof_id() != library.program().library_proof_id() {
+            return Err(serde::de::Error::custom(
+                "the lowered library does not match the checked library",
+            ));
+        }
+        let library_dag =
+            crate::pipeline::lower_library(&library).map_err(serde::de::Error::custom)?;
+        if !crate::cache_envelope::lowered_library_payload_matches(
+            &wire.library_dag,
+            library_dag.raw(),
+        )
+        .map_err(serde::de::Error::custom)?
+        {
+            return Err(serde::de::Error::custom(
+                "the lowered library payload does not match the checked library",
+            ));
+        }
+        Ok(Self {
+            source_hash: wire.source_hash,
+            identity: wire.identity,
+            reef_state: wire.reef_state,
+            library,
+            library_dag,
+        })
+    }
 }
 
 impl CompiledContext {
+    pub(crate) fn checked_library(&self) -> &crate::pipeline::CheckedLibrary {
+        &self.library
+    }
+
+    pub(crate) fn library_checked(&self) -> &CheckedProgram {
+        self.library.program()
+    }
+
     /// Bincode round-trip for the Phase H worker handoff and the
     /// Phase I disk cache. Phases C/F will add new fields; the
     /// encoder must continue to round-trip then.
@@ -703,23 +766,25 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
-/// V7: chelis#878 changed `RiscOp::Pad::fill` to the sealed dtype-tagged
-/// scalar, and chelis#942 made deferred positional-expand constraints part of
-/// the serialized checker context. Both alter cached bincode shapes; V6 files
-/// are stale.
-/// V8: chelis#1182 emits the root package's modules LAST in the linker
-/// assembly, so the `reef_state` (`PreparedReefGraph`) decl order serialized
-/// in this cache changed. Without the bump a V7 file written by a pre-#1182
-/// binary would replay the old decl order to a post-#1182 binary at the same
-/// compiler version -- the same stale-order hazard the
-/// `PREPARED_GRAPH_CACHE_VERSION` bump closes for the graph cache.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V8\n";
+/// V9: two independent V8 formats are unified here. The pipeline-core
+/// extraction sealed the lowered-library proof identity into the cached
+/// context (branch V8). On main (main V8), chelis#878 (`RiscOp::Pad::fill`
+/// sealed dtype-tagged scalar), chelis#942 (deferred positional-expand
+/// constraints in the serialized checker context), and chelis#1182 (root
+/// package modules emitted LAST, changing the serialized `reef_state`
+/// (`PreparedReefGraph`) decl order) all landed. Both predecessors used V8
+/// for their own shape at the same compiler version, and released 0.18.4
+/// carries the main V8. The merged struct carries every field from both, so
+/// bincode is positional and a V8 file of either lineage would decode to a
+/// wrong shape; the magic check rejects it before any decode. A V6, V7, or
+/// either V8 file is stale.
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V9\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 8;
+const CACHE_FORMAT_VERSION: u32 = 9;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -937,24 +1002,29 @@ pub fn compile_reef_context(
     let source_hash = ContextHash::from_digests(&digests);
     log_phase("hash_digests", &mut t);
 
-    // Phase C+0e / chelis#451: build the `(TypeEnv, library CheckedProgram,
-    // LoweredLibrary)` triple. The layered path reuses the cross-process
+    // Phase C+0e / chelis#451: build the checked library and its lowered DAG.
+    // The layered path reuses the cross-process
     // chelis-std typecheck cache so the chelis-std half of the library is
     // never re-walked here; only the package's own (non-chelis-std) decls
     // are desugared + inferred + checked. On any miss (cache disabled, no
     // chelis-std in the graph, or the non-chelis-std decls don't compose
     // cleanly) it falls back to the monolithic whole-library build below,
-    // which is byte-identical. See `build_library_triple_layered`.
+    // which is byte-identical. See `build_checked_library_layered`.
     //
     // The full-library Surf → Deep desugar + macro expand is deferred to
     // the monolithic fallback so the layered path does NOT re-desugar
     // chelis-std (the layered helper desugars only the package's own decls).
-    let (type_env, library_checked) = match build_library_triple_layered(&reef_state, &mut t) {
-        Some(Ok(triple)) => triple,
+    let library = match build_checked_library_layered(&reef_state, &mut t) {
+        Some(Ok(library)) => library,
         Some(Err(err)) => return Err(err),
         None => {
-            // chelis#930: the layered path folds ANY failure into `None` so
-            // the monolithic path can produce the byte-identical diagnostic.
+            // chelis#930: the layered path folds a semantic rejection (type,
+            // effect, or linearity) or an upstream build failure into `None`
+            // so the monolithic path produces the byte-identical diagnostic.
+            // A `LibraryRejection::ContextMismatch` is the one exception: it
+            // is an internal proof-bind invariant failure, so
+            // `build_checked_library_layered` returns it as `Some(Err(..))`
+            // and it never reaches this fallback (see the carve-out there).
             // An abandoned compile must not take that route: it would rerun
             // the entire library check it just abandoned, so a cancelled
             // library-context build would cost MORE than an uncancelled one.
@@ -979,29 +1049,19 @@ pub fn compile_reef_context(
                 );
             }
 
-            // Monolithic fallback: build the type-env snapshot AND the
-            // library `CheckedProgram` in a single inference session.
-            let (type_env, checked) = build_compiled_library_context(prepared.expanded_deep())
-                .map_err(|report| CompilerError {
-                    stage: "check".to_string(),
-                    errors: report.errors.iter().map(check_error_diagnostic).collect(),
-                })
+            // Build both type products in one session. Keep facade cancellation
+            // checks between type analysis and the semantic suffix.
+            let analysis = crate::pipeline::analyze_prepared_library(prepared)
+                .map_err(library_rejection_to_compiler_error)
                 .map_err(|error| cancelled_or("check", error))?;
             log_phase("build_compiled_library_context", &mut t);
-            let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, checked);
             bail_if_cancelled("effects")?;
-            let checked = crate::pipeline::complete_checks(
-                analysis,
-                crate::pipeline::SemanticContext::Isolated,
-            )
-            .map_err(|rejection| {
-                crate::compiler::pipeline_rejection_to_compiler_error(rejection.into())
-            })
-            .map_err(|error| cancelled_or("effects", error))?;
+            let library = crate::pipeline::complete_library_checks(analysis)
+                .map_err(library_rejection_to_compiler_error)
+                .map_err(|error| cancelled_or("effects", error))?;
             bail_if_cancelled("linearity")?;
             log_phase("semantic_checks", &mut t);
-            let (_, _, library_checked, _) = checked.into_parts();
-            (type_env, library_checked)
+            library
         }
     };
 
@@ -1012,7 +1072,7 @@ pub fn compile_reef_context(
     // chelis-std ++ package annotated bodies), so the layered path does not
     // need to reuse the cached chelis-std `library_dag` here.
     bail_if_cancelled("lower")?;
-    let library_dag = crate::pipeline::lower_library(&library_checked)
+    let library_dag = crate::pipeline::lower_library(&library)
         .map_err(crate::compiler::pipeline_rejection_to_compiler_error)
         .map_err(|error| cancelled_or("lower", error))?;
     log_phase("lower_program_to_library", &mut t);
@@ -1027,14 +1087,42 @@ pub fn compile_reef_context(
         source_hash,
         identity,
         reef_state,
-        type_env,
-        library_checked,
+        library,
         library_dag,
     })
 }
 
-/// chelis#451 — build the `(whole-library TypeEnv, whole-library
-/// CheckedProgram)` half of a `CompiledContext` while reusing the
+pub(crate) fn library_rejection_to_compiler_error(
+    rejection: crate::pipeline::LibraryRejection,
+) -> CompilerError {
+    match rejection {
+        crate::pipeline::LibraryRejection::Type { report } => CompilerError {
+            stage: "check".to_string(),
+            errors: report.errors.iter().map(check_error_diagnostic).collect(),
+        },
+        crate::pipeline::LibraryRejection::ContextMismatch => CompilerError {
+            stage: "check".to_string(),
+            errors: vec![Diagnostic::general(
+                GeneralKind::Other,
+                "the library type environment does not match its checked program".to_string(),
+                1.0,
+            )],
+        },
+        crate::pipeline::LibraryRejection::Effects { errors } => {
+            crate::compiler::pipeline_rejection_to_compiler_error(
+                crate::pipeline::PipelineRejection::Effects { errors },
+            )
+        }
+        crate::pipeline::LibraryRejection::Linearity { errors } => {
+            crate::compiler::pipeline_rejection_to_compiler_error(
+                crate::pipeline::PipelineRejection::Linearity { errors },
+            )
+        }
+    }
+}
+
+/// chelis#451 — build the `CheckedLibrary` half of a `CompiledContext`
+/// while reusing the
 /// cross-process chelis-std typecheck cache, so the chelis-std library is
 /// not re-walked here.
 ///
@@ -1075,10 +1163,10 @@ pub fn compile_reef_context(
 /// `build_compiled_library_context(whole_library)` path yields for every
 /// `CompiledContext` consumer. The lowering step (run by the caller on
 /// this composed program) is therefore byte-identical too.
-fn build_library_triple_layered(
+fn build_checked_library_layered(
     reef_state: &PreparedReefGraph,
     t: &mut std::time::Instant,
-) -> Option<Result<(TypeEnv, CheckedProgram), CompilerError>> {
+) -> Option<Result<crate::pipeline::CheckedLibrary, CompilerError>> {
     // Escape hatch: the disable seam routes the whole library build through
     // the monolithic path so the acceptance oracle's monolithic-vs-layered
     // comparison has a real monolithic leg, and so an operator can always
@@ -1115,30 +1203,30 @@ fn build_library_triple_layered(
         Err(_) => return None,
     };
 
-    // Type-check + annotate the non-chelis-std decls stacked on the cached
-    // chelis-std sub-context. Returns the union `TypeEnv` and one type product.
-    let (type_env, package_checked) = match chelis_types::build_compiled_library_context_with_base(
-        &stdlib_ctx.type_env,
-        prepared.expanded_deep(),
+    // Type-check + annotate the non-chelis-std declarations against the exact
+    // checked chelis-std proof. The analysis retains that proof for later checks.
+    let analysis = match crate::pipeline::analyze_prepared_library_with_base(
+        prepared,
+        stdlib_ctx.checked_library(),
     ) {
-        Ok(pair) => pair,
+        Ok(analysis) => analysis,
         Err(_) => return None,
     };
-    let analysis = crate::pipeline::prepared_analysis_from_checked(prepared, package_checked);
-    let package_checked = match crate::pipeline::complete_checks(
-        analysis,
-        crate::pipeline::SemanticContext::Library(&stdlib_ctx.library_checked),
-    ) {
-        Ok(checked) => checked,
-        Err(crate::pipeline::SemanticRejection::Effects { .. })
-        | Err(crate::pipeline::SemanticRejection::Linearity { .. }) => return None,
+    let library = match crate::pipeline::complete_context_library_checks(analysis) {
+        Ok(library) => library,
+        // chelis#930: a real semantic rejection folds into `None` so the
+        // monolithic path reproduces the byte-identical diagnostic.
+        Err(crate::pipeline::LibraryRejection::Effects { .. })
+        | Err(crate::pipeline::LibraryRejection::Linearity { .. }) => return None,
+        // A proof-bind mismatch (`ContextMismatch`) is NOT a user-program
+        // rejection -- it means the freshly composed library and its type
+        // environment disagree on the proof identity, reachable only through
+        // an internal proof-threading bug. Folding it into the monolithic
+        // fallback would yield a correct user result while permanently hiding
+        // the invariant failure, which is the silent-fallback class the core
+        // extraction exists to eliminate. Surface it loudly instead.
+        Err(rejection) => return Some(Err(library_rejection_to_compiler_error(rejection))),
     };
-
-    // Compose the cached chelis-std half with the freshly-checked package
-    // half into the one whole-library `CheckedProgram` the rest of
-    // `compile_reef_context` (and every `_with_context` consumer) expects.
-    let library_checked =
-        CheckedProgram::compose(&stdlib_ctx.library_checked, package_checked.program());
 
     if std::env::var_os("CHELIS_PROFILE_COMPILE_CONTEXT").map(|v| v == "1") == Some(true) {
         eprintln!(
@@ -1148,7 +1236,7 @@ fn build_library_triple_layered(
         );
     }
     *t = std::time::Instant::now();
-    Some(Ok((type_env, library_checked)))
+    Some(Ok(library))
 }
 
 /// Profile-only: count modules and top-level decls in a library expr
@@ -1209,6 +1297,12 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn cache_format_version_tracks_deferred_reshape_relations() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V9\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 9);
+    }
 
     /// Mirrors the chelis-reef `shared_graph_fixture` shape: a root
     /// package with one `Path` dep called `mylib`. The path-dep is
@@ -1314,6 +1408,81 @@ mod tests {
     // a string match over the upstream diagnostic; these lock it in both
     // directions so wording drift cannot silently reroute genuine failures
     // into the uncached-recompile fallback (or vice versa).
+    #[test]
+    fn context_decode_rejects_a_foreign_type_environment() {
+        let (_dir, root) = path_dep_fixture();
+        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let wire = CompiledContextWire {
+            source_hash: context.source_hash,
+            identity: context.identity.clone(),
+            reef_state: context.reef_state.clone(),
+            type_env: TypeEnv::empty(),
+            library_checked: context.library_checked().clone(),
+            library_dag: context.library_dag.raw().clone(),
+        };
+        let bytes = bincode::serialize(&wire).expect("the invalid cache wire must encode");
+        let error = CompiledContext::decode(&bytes)
+            .expect_err("the cache parser must reject mismatched library fields");
+
+        assert!(error.contains("type environment"));
+    }
+
+    #[test]
+    fn context_decode_rejects_a_foreign_lowered_library() {
+        let (_first_dir, first_root) = path_dep_fixture();
+        let first = compile_reef_context(Path::new("/tmp/x"), &first_root).expect("first context");
+        let (_second_dir, second_root) = path_dep_fixture();
+        fs::write(
+            second_root.join("src/main.ch"),
+            "module App.Main\n\ndef main_value() -> int32 = cast(8, int32)\n",
+        )
+        .expect("rewrite second main.ch");
+        let second =
+            compile_reef_context(Path::new("/tmp/x"), &second_root).expect("second context");
+        let wire = CompiledContextWire {
+            source_hash: first.source_hash,
+            identity: first.identity.clone(),
+            reef_state: first.reef_state.clone(),
+            type_env: first.checked_library().type_env().clone(),
+            library_checked: first.library_checked().clone(),
+            library_dag: second.library_dag.raw().clone(),
+        };
+        let bytes = bincode::serialize(&wire).expect("the invalid cache wire must encode");
+        let error = CompiledContext::decode(&bytes)
+            .expect_err("the cache parser must reject a foreign lowered library");
+
+        assert!(error.contains("lowered library"));
+    }
+
+    #[test]
+    fn context_decode_rejects_a_changed_lowered_payload_with_the_same_identity() {
+        let (_dir, root) = path_dep_fixture();
+        let context = compile_reef_context(Path::new("/tmp/x"), &root).expect("context");
+        let mut lowered_value =
+            serde_json::to_value(context.library_dag.raw()).expect("lowered library must encode");
+        lowered_value["rootless_defs"] = serde_json::json!(["forged_rootless_def"]);
+        let changed_lowering: IrLoweredLibrary =
+            serde_json::from_value(lowered_value).expect("changed lowering must decode");
+        assert_eq!(
+            changed_lowering.library_proof_id(),
+            context.library_checked().library_proof_id(),
+            "the negative control must retain the checked-library identity",
+        );
+        let wire = CompiledContextWire {
+            source_hash: context.source_hash,
+            identity: context.identity.clone(),
+            reef_state: context.reef_state.clone(),
+            type_env: context.checked_library().type_env().clone(),
+            library_checked: context.library_checked().clone(),
+            library_dag: changed_lowering,
+        };
+        let bytes = bincode::serialize(&wire).expect("the invalid cache wire must encode");
+        let error = CompiledContext::decode(&bytes)
+            .expect_err("the cache parser must reject a changed lowered payload");
+
+        assert!(error.contains("lowered library payload"));
+    }
+
     #[test]
     fn local_registry_hash_gap_predicate_matches_the_gap_shape() {
         let gap = stage_error(

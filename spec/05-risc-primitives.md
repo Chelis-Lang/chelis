@@ -143,6 +143,13 @@ target.
 
 **Precision rule:** Both inputs must have the same precision `p`. Output has the same precision. Exception: `cmplt` returns `bool` regardless of input precision. Additional restrictions: `div` admits only float precisions (integer operands are a type error citing this section); `trunc_div` admits only integer precisions (float operands are a type error); `floor_div` admits both integer and float precisions.
 
+**Scalar `max_elem`/`min_elem`.** The element-wise maximum and its §3.4
+`min_elem` lowering also admit two scalar operands of the same numeric dtype
+and return a scalar of that dtype. This is the rank-zero instance of the
+tensor rule, not scalar/tensor broadcasting: a scalar and a non-scalar tensor
+remain a dimension mismatch. The scalar forms admit the same signed-integer
+and float precisions as their tensor forms and use the same adjoint rule.
+
 ### 2.2 Elementwise Unary
 
 | Name | Signature | Semantics | AD Adjoint |
@@ -175,6 +182,14 @@ minimum-value case according to [04-NUM-9]. `floor`, `ceil`, and `round` admit
 both float and signed-integer types; each is exactly the identity on an
 integer operand, with no float conversion. No unary numeric primitive admits
 `bool`, `string`, or the deferred `f8e4m3` dtype.
+
+**Scalar unary forms.** `recip`, `tan`, `atan`, `floor`, `ceil`, and `round`
+admit a scalar operand wherever the precision rule above admits the tensor
+form and return a scalar of the same dtype. A scalar is the rank-zero instance
+of the element-wise operation: it uses [04-NUM-8]'s arithmetic width and is
+finalized once at its declared storage width. In particular, scalar integer
+`floor`, `ceil`, and `round` are exact identity operations and never convert
+through a float dtype.
 
 ### 2.3 Reduction
 
@@ -820,6 +835,18 @@ Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b
 |---|---|
 | `relu(x)` | `max_elem(x, const(0.0, x.shape))` |
 | `sigmoid(x)` | `recip(add(const(1.0), exp(neg(x))))` |
+| `tanh(x)` | Hyperbolic tangent, equivalently `sub(mul(const(2.0), sigmoid(mul(const(2.0), x))), const(1.0))` |
+| `silu(x)` | `mul(x, sigmoid(x))` |
+| `gelu(x)` | The tanh approximation `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))` |
+
+All five activation functions admit float tensors and float scalars at f16,
+bf16, f32, and f64. The scalar form returns the same scalar dtype and is the
+rank-zero instance of the tensor operation; non-float operands are type
+errors. Each RISC primitive in the lowering computes at [04-NUM-8]'s declared
+arithmetic width and finalizes to the operand's storage width before the next
+primitive observes it, as required by [04-NUM-1]. The adjoint is the
+derivative of the lowering above, with `relu` using §2.1's `max_elem`
+subgradient convention.
 
 ### 3.4 Higher-Level Operations
 

@@ -410,11 +410,21 @@ When a public surface has an implicit invariant, make it explicit and test it.
   Each artifact MUST use minimal POSIX `sh`. Each artifact MUST pass `sh -n` and
   `shellcheck` when available. All other scripts remain Python.
 - Existing `scripts/` directory uses Python; follow that convention.
-- **Use a managed Python**, not the system Python. Inside Devenv, use the activated
-  environment at `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python`.
-  Create the manual environment once with `uv venv --python 3.11` from the repo root.
-  `py/pyproject.toml` pins `requires-python = ">=3.11"`. See [`README.md`](README.md)
-  for the full setup.
+- **Use a uv-managed Python**, not the system Python. Install uv from
+  <https://docs.astral.sh/uv/getting-started/installation/>, verify it with
+  `uv --version`, and provision the project version with
+  `uv python install 3.11`. Inside Devenv, use the activated environment at
+  `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python` or
+  `uv run --managed-python --python 3.11 --no-project python`.
+  `scripts/gate.py` is the one allowed `python3` bootstrap: it automatically
+  re-executes through that uv command before running gate logic.
+- Create a primary checkout's manual environment once with
+  `uv venv --python 3.11`. A dedicated git worktree does not need to copy or
+  symlink another checkout's `.venv`; for direct Cargo commands there, export
+  `PYO3_PYTHON="$(uv python find 3.11)"`. An explicit `PYO3_PYTHON` is
+  authoritative and an invalid path must fail rather than fall back.
+  `py/pyproject.toml` pins `requires-python = ">=3.11"`. See
+  [`README.md`](README.md) for the full setup.
 
 ## Build Toolchain
 
@@ -423,9 +433,12 @@ sets `PYO3_PYTHON` to `.venv/bin/python`. Devenv overrides that variable with
 `.devenv/state/venv/bin/python` and activates the same environment.
 
 A managed Python is a hard prerequisite on every platform. Outside Devenv,
-`cargo build` for a crate that pulls pyo3 will fail without `.venv/`. On macOS,
-Apple's bundled Python reports a stale `sysconfig.LIBDIR` path. A managed
-interpreter avoids that path. Run `uv venv --python 3.11` before a manual build.
+direct `cargo build` for a crate that pulls pyo3 uses `.venv/` by default.
+Create it with `uv venv --python 3.11`, or set
+`PYO3_PYTHON="$(uv python find 3.11)"` in a dedicated worktree. On macOS,
+Apple's bundled Python reports a stale `sysconfig.LIBDIR` path; do not route
+PyO3 to it. `scripts/gate.py` sets `PYO3_PYTHON` to its uv-selected interpreter
+for every child command.
 
 ## Local Git Hook
 
@@ -433,8 +446,10 @@ Devenv installs the `no-ai-authorship` hook at the `commit-msg` stage. The hook
 runs `scripts/check_commit_message.py`.
 
 Cargo-husky remains the fallback for the manual setup. `cargo test` installs its
-POSIX wrapper, which runs the same Python checker. All formatting and lint hooks
-remain disabled. CI remains the remote enforcement boundary.
+POSIX wrapper, which runs the same Python checker through Devenv, `.venv`, or
+`uv run --managed-python --python 3.11 --no-project` in that precedence order.
+All formatting and lint hooks remain disabled. CI remains the remote
+enforcement boundary.
 
 ## Build And Gate Commands
 
@@ -458,27 +473,38 @@ python3 scripts/gate.py --list
 # cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
 # cargo test -p chelis-types --doc  # local + ci
 # cargo test -p chelis-compiler-api --doc  # local + ci
-# .venv/bin/python scripts/check_checkpoint_compile_fail.py  # local + ci
-# cargo nextest run --workspace --profile ci  # ci-owned
-# # --local also runs: cargo nextest run -p <crate> for each crate changed vs origin/main
+# cargo test -p chelis-pipeline-core --doc  # local + ci
+# <managed-python> scripts/check_checkpoint_compile_fail.py  # local + ci
+# <managed-python> scripts/pipeline_core_dependency_guard.py  # local + ci
+# <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
+# <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
+# cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
+# # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
 
-The gate runs `cargo nextest run` (CI's actual runner), not `cargo test
---workspace`, and includes `chelis lint --check .` (the §8.6 / §12
-naming gate). The sanitizer, macOS-smoke, LOC-report, no-AI-authorship,
-docs, and smt-build CI jobs are out of scope for this script by design.
+`python3` is only the gate bootstrap. An unmanaged invocation re-executes via
+`uv run --managed-python --python 3.11 --no-project`; an active Devenv or
+uv-created environment is preserved. If uv is missing, the gate exits with
+installation and Python-provisioning commands.
 
-The two explicit rustdoc stages exist because `cargo nextest` does not
+The gate runs `cargo nextest run --no-fail-fast` (CI's actual runner), not
+`cargo test --workspace`, and includes `chelis lint --check .` (the §8.6 /
+§12 naming gate). All nextest profiles also set `fail-fast = false`, so direct
+and non-gate CI nextest runs expose every failure instead of cancelling the
+remainder. The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
+smt-build CI jobs are out of scope for this script by design.
+
+The three explicit rustdoc stages exist because `cargo nextest` does not
 execute doctests. The `chelis-types` command runs the chelis#731
-`ErrorWitness` contracts. The `chelis-compiler-api` command runs the
-compiler-pipeline artifact contracts.
+`ErrorWitness` contracts. The other commands run the compiler pipeline
+artifact contracts.
 
 The gate does not use `--workspace --doc`. That command makes every
 workspace doc example part of the gate without a reviewed scope change.
 
 **Doctests only run where something invokes them.** The canonical gate
-invokes doctests for `chelis-types` and `chelis-compiler-api`. The
-C-backend job also runs `cargo test -p chelis-backend-c` without a
+invokes doctests for `chelis-types`, `chelis-compiler-api`, and
+`chelis-pipeline-core`. The C-backend job also runs `cargo test -p chelis-backend-c` without a
 filter. A `compile_fail` oracle in another crate runs nowhere until that
 crate gains an equivalent invocation in the same change set.
 
@@ -494,8 +520,8 @@ python3 scripts/gate.py --local
 
 `--local` runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
---check .`, both explicit rustdoc commands, the checkpoint fixture, and
-`cargo nextest run -p <crate>` for each
+--check .`, all three explicit rustdoc commands, the checkpoint fixture, and
+`cargo nextest run -p <crate> --no-fail-fast` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the
 directory name). The derived crate list is always printed; "no crate
@@ -506,6 +532,19 @@ authoritative workspace oracle) run the full suite. See
 [`docs/local_macos_environment.md`](docs/local_macos_environment.md)
 for why the workspace suite does not belong in the local loop on
 macOS.
+
+Every command's combined stdout and stderr streams live. On failure the gate
+retains the complete transcript under `target/gate-failures/`, replays the
+final 200 lines, and prints the stage/index, duration, exit code or signal,
+relevant environment, exact rerun command, and transcript path. Successful
+command transcripts are removed.
+
+The gate normalizes `CARGO_TARGET_DIR` to an absolute path inside the current
+worktree and rejects paths outside it. It also sets
+`CARGO_HUSKY_DONT_INSTALL_HOOKS=1` for child builds, preventing cargo-husky
+from mutating the clone's shared `.git/hooks` while sibling worktrees run.
+These controls isolate writable state; concurrent agents may still contend
+for CPU and make each other slower.
 
 Documentation-only changes (Markdown/prose with no code, fixture, or
 example edits) are exempt from `--local`: skip the local gate, push,
@@ -535,6 +574,9 @@ default workspace run.
   repo root or use an absolute path. Never share the primary `target/` with a
   session that may be building concurrently; cargo's target-dir lock serializes
   the builds and feature/profile differences invalidate each other's caches.
+- `scripts/gate.py` enforces this for gate runs: its target directory must
+  resolve inside the current worktree. An inherited absolute target in another
+  checkout fails before any command runs.
 - Before building, list orphaned cargo/rustc/cargo-nextest/chelis processes with
   `python3 scripts/reap_orphans.py` and reap them with
   `python3 scripts/reap_orphans.py --kill`. Inside Devenv, use
@@ -659,6 +701,58 @@ When writing or rewriting Surf in this repository:
 - functions carrying the `Test` effect are named `test_*` or `example_*`
   (`surf-test-name-prefix`, §10.1)
 
+### Canonical Surf v0.19 (chelis#1031, shipped 0.18.4)
+
+**The grammar changed, and the style gate enforces it.** `chelis fmt
+--check` runs ahead of `build`, `check`, `validate`, and `eval --file`,
+so Surf that was canonical under 0.18.3 can now fail before the
+front-end pipeline runs. The authority is `spec/02-surf-syntax.md` §0.1
+(canonical forms and the bidirectional contract); §P10-P12 define the
+wider set of input spellings the parser still *accepts* but the
+formatter rewrites.
+
+Read that section before authoring Surf or debugging a parse error that
+"should" work. The forms that most often bite:
+
+- **A nullary definition needs `()`: `def name() -> T`, not `def name ->
+  T`.** This is the highest-frequency breakage — it turned every fixture
+  in chelis#1176 into a hard parse error (`expected function parameter
+  list `()`, found Arrow`) on rebase. Expect it on any branch predating
+  #1031.
+- Applying a returned value needs explicit grouping: `(f(x))(y)`.
+  Ungrouped `f(x)(y)` is rejected — Chelis has flat multi-argument
+  application and no implicit currying. Juxtaposition stays rejected.
+- Zero-arity decoration is dropped in *types*, kept in *expressions*:
+  `Ctor()` is a Deep `app`, bare `Ctor` is a Deep `var`, and a zero-field
+  record keeps `{}` to distinguish `record`/`pat-record`. `! {}` is a
+  declared-pure upper bound, semantically distinct from an omitted
+  effect clause.
+- The unit value is `()`, the unit type is `unit`, and a singleton tuple
+  is `(x,)` — that comma is semantic, not cosmetic.
+- Effects carry exact casing: `Diff`, `Random`, `Accum`, `IO`, `Test`,
+  `Resource(...)`.
+- Non-primary transform arguments are named: `grad(f, wrt=x)`,
+  `vmap(f, axis=n)`; axis zero is bare `vmap(f)`.
+- Canonical output omits trailing separators and prints the canonical
+  literal spelling (shortest round-trippable float, no digit separators
+  or redundant zeroes).
+
+**Migrating an existing tree:** `chelis migrate surf --from 0.18 --check
+<paths>...` reports, `--inplace` rewrites as a preflighted batch
+transaction (whole batch validated before any write; atomic replacement
+with rollback; symlinks and multiply-hard-linked files rejected).
+`--from 0.18` is the only accepted value. Identifiers that became
+reserved words are **not** guessed — the migrator stops and names the
+byte offset, and the rename is yours to author. Semantic boundaries are
+not migrated for you: suffix adoption, overflow, non-finite values,
+literal patterns, raw controls, invalid escapes, and structurally
+ambiguous legacy forms still reject.
+
+Do not reach for `--allow-style-violations` or
+`CHELIS_STYLE_GATE_DISABLE=1` to get past a v0.19 failure. Those exist
+for emergency local builds and the ad-hoc integration corpus
+respectively; migrate the source instead.
+
 ## Chelis-Specific Rules
 
 ### Deep AST
@@ -668,6 +762,17 @@ When writing or rewriting Surf in this repository:
 - 62-tag closed vocabulary; see `spec/03-deep-syntax.md`
 - Function application is `app`, names are `var`, literals are `lit`
 - RISC primitives are built-in functions, not tags
+- **Decompilation routes through a typed Deep-to-Surf resugaring
+  boundary** (chelis#1031) with a total disposition for every public
+  Deep tag, printed by the shared Surf printer. It fails closed on
+  malformed Deep, invalid surface identifiers, unknown `surf_*`
+  metadata, incompatible literal metadata, and non-finite constructed
+  values — a resugaring failure is a real defect, not output to work
+  around. Canonical Deep and canonical Surf are two representations of
+  one public language, bound by the three executable laws in
+  `spec/02-surf-syntax.md` §0.1 (`desugar(resugar(·))`, formatter
+  idempotence, and the semantic retraction). If you change either
+  printer or the desugarer, those laws are the oracle.
 
 ### Type System
 
