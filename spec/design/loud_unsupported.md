@@ -964,17 +964,17 @@ checker-admitted shapes remain on the loud, artifact-free boundary, citing
 chelis#1158: an outer call whose type application never resolves concrete,
 and a mutually recursive cross-member edge whose argument leaves the callee
 parameter unconstrained (host lowering has no positional correspondence
-across different defs' parameters). Specialized symbols are
-compiler-internal (`<def>__mono_<16-hex>`): the published header does not
-declare them and tensor-entry selection never chooses one. Speculative
-summary probes are state-isolated (snapshot/restore) and probed in sorted
-order, so repeated builds emit byte-identical C and a probe failure never
-fails a build. Specializations intern by the definition's own name under a
-purpose-built canonical signature key; a hash collision between distinct
-signatures is a loud internal error, never a shared definition. A
-specialization's parameter types are the call site's own checked types, so
-tensor-dimension spellings — symbolic or literal — specialize alike and no
-dimension disagreement can be deferred to a later stage. The delivered
+across different defs' parameters). Each host function carries explicit
+authored or monomorphized provenance through C-ABI projection. The published
+header and tensor-entry selectors use that provenance, not symbol text.
+Specializations use translation-unit-local C linkage in binary and object mode.
+Speculative summary probes use state snapshot and restore plus sorted order.
+Thus, repeated builds emit byte-identical C and a probe failure cannot fail the
+build. Specializations intern by exact package definition identity under a
+canonical signature key. Exact identity lookup precedes unique terminal-name
+fallback. A hash collision between distinct signatures produces a loud internal
+error. A specialization's parameter types are the call site's checked types.
+Thus, symbolic and literal tensor dimensions use the same specialization path. The delivered
 behavior's acceptance oracle is `cargo nextest run -p chelis-cli --test
 recursive_generic_monomorphization --no-fail-fast`.
 

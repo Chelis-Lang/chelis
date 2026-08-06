@@ -29,14 +29,16 @@ site references.
 ### Requirement: Specialized symbols are compiler-internal
 
 A monomorphized specialization is an implementation detail of one generic
-definition: its name is derived from an interned signature and changes whenever
-the program's instantiation set does. The published host header SHALL NOT
-declare a specialized symbol. Entry selection SHALL NOT choose a specialized
-symbol as the preferred tensor entry, and tensor-signature classification SHALL
-NOT count one, so the presence of a tensor-typed specialization SHALL NOT
-change the authored entry's compiled ABI. Emitted C SHALL retain whatever
-internal prototypes are needed for specializations to reference definitions
-emitted later.
+definition. The host program SHALL carry explicit provenance for each function
+through concrete-type and C-ABI projection. Symbol spelling SHALL NOT determine
+that provenance. The published host header SHALL NOT declare a specialization.
+Entry selection SHALL NOT choose a specialization as the preferred tensor
+entry, and tensor-signature classification SHALL NOT count one. An authored
+function whose valid name matches the specialization mangling grammar SHALL
+remain authored surface. Every specialization declaration and definition SHALL
+have translation-unit-local C linkage in binary mode and object mode. Authored
+object-mode exports SHALL keep external linkage. Emitted C SHALL retain the
+internal prototypes that specializations need for forward references.
 
 #### Scenario: Published header omits specializations
 
@@ -51,6 +53,20 @@ emitted later.
   specialization whose signature is also tensor-shaped
 - **THEN** the compiled entry ABI is the authored entry's, unchanged from the
   same program with the generic calls removed
+
+#### Scenario: Authored mangling-shaped name stays public
+
+- **WHEN** an authored function has a valid snake_case name that ends in
+  `__mono_` plus 16 lowercase hexadecimal digits
+- **THEN** the published header declares that function and entry selection
+  treats it as authored
+
+#### Scenario: Specializations do not collide across objects
+
+- **WHEN** two generated object-mode C files contain the same specialization
+  symbol
+- **THEN** each specialization has translation-unit-local linkage and the two
+  object files link into one relocatable object without a duplicate symbol
 
 ### Requirement: Symbolic tensor dimensions specialize from the call site
 
@@ -80,12 +96,14 @@ symbolic-dimension tensor payload compiles and runs.
 ### Requirement: One specialization per callee identity and instantiation
 
 Specializations SHALL be interned by the callee's canonical definition
-identity, not its source spelling: distinct spellings that resolve to one
-definition (a package-qualified and a short reference to the same reef'd def)
-SHALL share one specialization per instantiation. Distinct instantiations SHALL
-NOT share an emitted symbol; if symbol derivation would assign one symbol to
-two distinct canonical signatures, lowering SHALL fail loudly rather than emit
-a definition that serves either.
+identity, not its source spelling. Resolution SHALL prefer an exact canonical
+identity before a terminal-name fallback. A terminal-name fallback SHALL
+succeed only when exactly one definition matches. Distinct spellings that
+resolve to one definition SHALL share one specialization per instantiation.
+Distinct definitions with one terminal name SHALL retain separate identities.
+Distinct instantiations SHALL NOT share an emitted symbol. If symbol derivation
+assigns one symbol to two distinct canonical signatures, lowering SHALL fail
+loudly rather than emit a definition that serves either.
 
 #### Scenario: Qualified and short spellings intern one symbol
 
@@ -94,6 +112,13 @@ a definition that serves either.
   program
 - **THEN** the emitted C contains exactly one specialized definition for that
   instantiation
+
+#### Scenario: Package definitions with one terminal name stay distinct
+
+- **WHEN** two package modules define recursive generic functions with one
+  terminal name and callers use both canonical identities
+- **THEN** native output matches eval and emitted C contains one distinct
+  specialization for each definition
 
 #### Scenario: Symbol collision fails loudly
 

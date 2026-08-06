@@ -10,8 +10,8 @@ accrete into `state.functions`, which `lower_host_program` appends to
 `host.functions` before the refinement fixpoint.
 
 PR #1202 solved the same issue independently and ran an adversarial review over
-the same architecture shape. Each confirmed finding was checked against our
-tree; all four apply:
+the same architecture shape. Its applicable findings started this change. A
+fresh local red team then found three more defects in this implementation:
 
 - **Probe reachability.** `top_level_fn_helper_summary_rejects` (host.rs)
   early-returns for a *type-polymorphic* callee, but fully lowers every
@@ -37,17 +37,19 @@ tree; all four apply:
 - **Published header.** `emit_host_header` declares every function in
   `host.functions`, so `<def>__mono_<hash>` internals land in the user-facing
   `.h`.
-- **Symbolic dims.** Concreteness gating is `HostTypeTerm::is_unresolved`;
-  `tensor[n, f32]` is a resolved *term*, dims are not term slots, and nothing
-  substitutes them, so a dim disagreement reaches C ABI projection as an
-  internal error. The agreeing symbolic-dim payload case (coral's `Hamt` at
-  `tensor[n, f32]`) is unexercised.
-- **Key and identity hygiene.** The interning key is
-  `format!("{name}\u{1}{param_tys:?}\u{1}{ret_ty:?}")` — Rust `Debug` output,
-  stable only by accident of derive shape. The symbol is a 16-hex FNV-1a of that
-  key with no collision detection. The key's `name` is the program's spelling,
-  so a reef'd qualified spelling and a short spelling of one def could mint
-  duplicate specializations.
+- **Symbolic dims.** `tensor[n, f32]` is a resolved term. The specialization
+  receives its types from the checked call site, so no separate dimension
+  signature exists. The positive coral-shaped payload case was untested.
+- **Key and identity hygiene.** The key used Rust `Debug` text and the call-site
+  name. The symbol used a 16-hex FNV-1a hash without collision detection.
+  Definition lookup also returned the first terminal-name match before an exact
+  package match. Two package definitions named `depth` then shared one symbol.
+- **Surface provenance.** A suffix test treated valid authored names as
+  specializations. Such an authored function disappeared from its header and
+  from entry selection.
+- **C linkage.** Object-mode specializations had external linkage. Two generated
+  objects with one specialization name failed to link because of a duplicate
+  symbol.
 
 ## Goals / Non-Goals
 
@@ -56,12 +58,15 @@ tree; all four apply:
 - Byte-identical emitted C across repeated builds of one program, including
   under the probe-trigger shape; speculative lowering leaves no trace on
   specialization state.
-- Specialized symbols are compiler-internal: absent from the published header,
-  never eligible as the preferred tensor entry.
-- Symbolic-dim disagreement rejects loudly at the call site under the existing
-  `[05-UNS-1]` brand; agreeing symbolic-dim payloads compile and match eval.
-- One specialization per (canonical callee identity, canonical instantiation);
-  hash collisions are loud; the canonical key is purpose-built, not `Debug`.
+- Specialized symbols are compiler-internal. They stay absent from the header,
+  entry selection, and the external object symbol table.
+- Valid authored names remain authored surface even when their text matches the
+  specialization mangling grammar.
+- Symbolic-dimension payloads compile and match eval because call-site checked
+  types are the specialization types.
+- One specialization exists per canonical callee identity and instantiation.
+  Exact package identities win before unique terminal-name fallback.
+- Hash collisions fail loudly. The canonical key does not use `Debug` text.
 
 **Non-Goals:**
 
@@ -86,49 +91,46 @@ fidelity exact. The guard must restore, not clear: a probe can run while a
 specialization body is itself being lowered, and that outer in-progress frame
 must survive.
 
-### D2: Recognition by symbol form at the existing chokepoints
+### D2: Explicit provenance and local C linkage
 
-A predicate `is_monomorphized_specialization(name)` matches the exact minted
-form (`__mono_` followed by 16 lowercase hex digits, suffix-anchored) — strict
-enough that user-authored snake_case Surf identifiers cannot collide with it.
-It is applied at exactly the surfaces where a specialization must be invisible:
-`preferred_tensor_entry_name`, `function_has_tensor_signature`, and the
-published-header emission in `host_emit.rs`. The `.c`-internal prototype pass
-stays unfiltered so a specialization may call a function declared later.
-**Alternative considered:** a structured flag on `HostFunction` instead of name
-recognition. Cleaner in principle, but the header emitter consumes the
-ABI-projected program where provenance is already erased; threading a flag
-through projection is a wider change for the same observable behavior. The
-mangling scheme and the predicate are locked to each other by a unit test.
+`HostFunctionOrigin` records `Authored` or `Monomorphized`. Both host type
+projections preserve this value. Header filters and entry selectors inspect the
+value instead of the function name. Thus, an authored name can match the private
+mangling grammar without loss of public surface.
 
-### D3: Call-site shape comparison for symbolic dims
+The C emitter gives each specialization `static inline` linkage in binary mode
+and object mode. Authored object-mode functions keep external linkage. The
+internal prototype pass includes specializations, so forward references still
+compile.
 
-Before interning, compare each instantiated parameter type and the result type
-against the types the call actually supplies, tensor shapes included. The first
-disagreement rejects with the branded `[05-UNS-1]` diagnostic naming the
-instantiated type and the supplied type (the chelis#730 unresolved-term shape's
-tensor-shaped sibling: the terms resolved, so the diagnostic names two types
-rather than a free variable). Dim *equality* — literal or symbolic — proceeds,
-so a `tensor[n, f32]` payload monomorphizes; the specialization simply carries
-the symbolic dim the way every non-generic host function already does.
-**Alternative considered:** substituting dims through specialization (making
-dims term slots). That is real machinery for a case the comparison handles by
-construction, and it would fork the dim story from the rest of host lowering.
+**Alternative rejected:** infer provenance from the symbol suffix. Surf permits
+that suffix in authored snake_case identifiers, so text cannot represent the
+provenance state.
+
+### D3: Call-site checked types own symbolic dimensions
+
+The specializer derives each parameter type from the checked argument expression.
+It derives the result from the checked application. No second instantiated
+signature exists at this boundary. Thus, a dimension disagreement is not a
+representable specialization state. Symbolic and literal dimensions follow the
+same path.
+
+The checker remains the boundary for dimension mismatches that source can
+express. A symbolic `tensor[n, f32]` payload specializes and runs with eval
+parity. No redundant comparison guard exists in host lowering.
 
 ### D4: Canonical key, canonical identity, loud collisions
 
-The interning key becomes a purpose-built canonical rendering of
-`(callee identity, param types, ret type)` with a stability test, replacing
-`{:?}`. The callee identity component is the package-internal name (the
-`pkg__<pkg>__<Module>__<def>` form reef lowering already uses), so qualified
-and short spellings intern the same specialization and the minted symbol is
-`<package-internal-def>__mono_<hash>`. A reverse map `symbol → canonical key`
-is consulted at minting: the same symbol arriving for a different key is an
-internal error (an FNV-1a collision would otherwise collapse two
-instantiations into one C definition, invisible to the emitter's
-duplicate-name check). **Alternative considered:** widening the hash or using
-a cryptographic hash. The collision map is exact, free at this scale, and
-keeps symbols short.
+The interning key uses a purpose-built canonical representation of
+`(callee identity, param types, ret type)`. Definition lookup first searches
+for the exact package identity. It accepts terminal-name fallback only when one
+definition matches. This order keeps two package definitions named `depth`
+distinct and lets short and qualified references to one definition share a
+specialization.
+
+A reverse map from symbol to canonical key detects a hash collision. A second
+key for one symbol produces an internal error before C emission. The exact map
+keeps the short FNV-1a symbol format without silent aliasing.
 
 ### D5: Oracle stays singular
 
@@ -148,37 +150,33 @@ test fails on the trigger shape.
 - [Snapshot cost] → the state is small (a map, a vec, a stack) and probes are
   per-callee-name, already memoized upstream; clone cost is noise against the
   lowering it wraps.
-- [Header filtering breaks a consumer] → nothing outside the translation unit
-  can legitimately name a hash-suffixed internal; the filter is
-  behavior-preserving for every documented consumer. The link-clean scenario
-  guards the `.c`-internal forward-reference path.
-- [Identity normalization changes emitted symbol names] → symbol names for
-  reef'd programs change once (they were per-spelling before); CHANGELOG notes
-  it; no stability promise existed for internal symbols.
+- [Header filtering breaks a consumer] → explicit provenance filters only
+  generated specializations. An authored mangling-shaped name remains public.
+- [Local linkage breaks an internal call] → the unfiltered C prototype pass
+  uses the same local linkage as each specialized definition. The object-link
+  scenario also checks two generated translation units.
+- [Identity normalization changes emitted symbol names] → internal symbol names
+  have no stability contract. Package parity tests lock semantic identity.
 - [Two active changes delta one capability] → this change declares the
   dependency on `add-bounded-monomorphization` and must archive after it;
   `openspec validate --all --strict` is run with both active.
 
 ## Migration Plan
 
-1. Failing tests first: byte-determinism (trigger shape), entry-selection
-   minimal pair, header exclusion, symbolic-dim negative + positive, reef
-   one-symbol-per-type, key/collision unit tests.
-2. D1 probe isolation → determinism scenarios green.
-3. D2 surface hygiene → entry/header scenarios green.
-4. D3 symbolic-dim guard → both dim scenarios green.
-5. D4 key/identity/collision → reef and unit scenarios green.
-6. Docs (`loud_unsupported.md`, CHANGELOG), gate, red team per protocol.
+1. Add red tests for determinism, surface hygiene, symbolic dimensions,
+   canonical package identity, collision detection, and object linkage.
+2. Add D1 probe isolation and run its mutation control.
+3. Add D2 provenance filters and local specialization linkage.
+4. Lock D3 with symbolic-dimension native and eval parity.
+5. Add D4 exact identity resolution, canonical keys, and collision detection.
+6. Update the docs, run the gate, and run a fresh local red team.
 
 Rollback: each decision is independently revertible; reverting D1–D4 restores
 current behavior with the known defects, never a new silent path.
 
-## Open Questions
+## Resolved Questions
 
-- Whether the reef package-internal identity is already available at the
-  interning site or must be resolved through the existing reef lowering tables
-  (task verifies; expected: available, since the call site lowers a resolved
-  program).
-- Whether PR #1202's `MonoProbeGuard` implementation can be adapted directly
-  (same-repository code, review credit recorded) or is re-derived here; either
-  satisfies D1.
+- Reef lowering supplies the exact package-internal callee identity at the
+  interning site. Exact identity lookup must precede terminal fallback.
+- The probe guard uses a repository-local snapshot and restore implementation.
+  PR #1202 retains credit for the adversarial finding.

@@ -4,9 +4,9 @@
 
 PR #1202 is a parallel, independently built implementation of chelis#1158 (bounded
 memoized monomorphization for recursive generic host calls). Its adversarial review
-pass confirmed four defect classes in that architecture — and our implementation
-(`add-bounded-monomorphization`) shares the code shapes that produce every one of
-them, unguarded and untested:
+pass confirmed several defect classes in that architecture. Our implementation
+(`add-bounded-monomorphization`) shared the applicable code shapes without
+guards or tests:
 
 1. **Probe-driven nondeterminism and probe pollution.** The speculative
    summary-rejection probe (`top_level_fn_helper_summary_rejects`) fully lowers
@@ -25,14 +25,16 @@ them, unguarded and untested:
    emission, so hash-named compiler internals (`<def>__mono_<hash>`) are declared
    in the user-facing `.h`. Their names change whenever the instantiation set
    does; nothing outside the translation unit may call them.
-4. **Symbolic-dimension blind spot.** Concreteness is decided by
-   `HostTypeTerm::is_unresolved`, a question about type *terms*: `tensor[n, f32]`
-   is a resolved term however its dims are spelled, dims are not type-term slots,
-   and nothing substitutes them. A dim disagreement between the interned signature
-   and the caller survives to C ABI projection as an internal error instead of a
-   diagnosis — and the passing case (a recursive generic instantiated at a
-   symbolic-dim tensor payload, the exact coral#26 `Hamt` shape) has no coverage
-   at all.
+4. **Symbolic-dimension coverage gap.** `tensor[n, f32]` is a resolved host
+   type term. A specialization takes its parameter types from the checked call
+   site, so no separate dimension signature exists. The positive recursive ADT
+   case had no native parity test.
+5. **Canonical-identity ambiguity.** The definition resolver accepted the first
+   terminal-name match before it searched for an exact package identity. Two
+   package definitions named `depth` silently shared one specialization.
+6. **Provenance and linkage gaps.** A name suffix acted as function provenance,
+   although authored snake_case permits that suffix. Object-mode specializations
+   also kept external linkage and collided across generated object files.
 
 This change adopts those findings — the good parts of PR #1202 — into our
 architecture, which keeps the check-time uniform-recursive-instantiation rule
@@ -46,26 +48,20 @@ architecture, which keeps the check-time uniform-recursive-instantiation rule
   byte-identical C, asserted on the probe-trigger shape (a probing caller
   preceding its wrappers in source) across repeated builds, with a
   mutation-verified test (guard disabled ⇒ the test fails).
-- **Surface hygiene:** monomorphized specializations are recognized by their
-  symbol form and excluded from (a) the published host header and (b) preferred
-  tensor-entry selection and tensor-signature classification. In-`.c` prototypes
-  remain emitted over the unfiltered function list so forward references still
-  resolve.
-- **Symbolic-dimension guard:** before interning, the call site compares the
-  instantiated parameter and result types against the types the call actually
-  supplies; a tensor-shape disagreement rejects with the branded `[05-UNS-1]`
-  diagnostic naming both types instead of dying at C ABI projection. Agreement —
-  including a symbolic-dim payload such as `tensor[n, f32]` — monomorphizes and
-  runs, with eval/build value parity asserted on a coral-shaped recursive-trie
-  fixture.
-- **Canonical identity and collision safety:** the interning key becomes a
-  purpose-built canonical rendering of the checked signature (replacing Rust
-  `Debug` formatting); a reverse map from emitted symbol to canonical key makes
-  an FNV-1a hash collision a loud internal error rather than two instantiations
-  silently collapsing into one C definition; and the callee identity is
-  normalized to the package-internal name so reef'd qualified-vs-short spellings
-  of one def intern one specialization per instantiation
-  (`pkg__<pkg>__<Module>__<def>__mono_<hash>`).
+- **Surface hygiene:** each host function carries explicit authored or
+  monomorphized provenance through both type projections. The header and entry
+  selectors use that provenance, not symbol text. Each specialization receives
+  translation-unit-local C linkage in binary mode and object mode. Internal C
+  prototypes remain available for forward references.
+- **Symbolic-dimension contract:** specialization parameter and result types
+  come from the checked call site. Symbolic and literal dimensions use the same
+  path. A recursive ADT with a `tensor[n, f32]` payload now has native and eval
+  parity coverage.
+- **Canonical identity and collision safety:** the interning key uses a
+  purpose-built canonical signature format. Definition lookup prefers an exact
+  package identity and accepts a terminal-name fallback only when it is unique.
+  A reverse symbol map detects FNV-1a collisions and fails loudly. Qualified and
+  short references to one definition share one specialization.
 
 Non-goals:
 
@@ -94,21 +90,17 @@ Non-goals:
 
 ## Impact
 
-- `crates/chelis-ir/src/host.rs` — probe snapshot/restore guard; sorted probe
-  iteration; entry-selection and tensor-signature exclusion; symbolic-dim
-  call-site comparison; canonical key + collision map; callee-identity
-  normalization.
-- `crates/chelis-backend-c/src/host_emit.rs` — published-header filtering
-  (specializations omitted from the `.h`; `.c` prototypes unfiltered).
+- `crates/chelis-ir/src/host.rs` — probe isolation, explicit function
+  provenance, exact identity resolution, a canonical key, and collision checks.
+- `crates/chelis-backend-c/src/host_abi.rs` — preservation of function
+  provenance through C-ABI projection.
+- `crates/chelis-backend-c/src/host_emit.rs` — provenance-based header filters
+  and translation-unit-local linkage for specializations.
 - `crates/chelis-cli/tests/recursive_generic_monomorphization.rs` — the owning
-  oracle suite grows byte-determinism, entry-selection minimal-pair,
-  header-exclusion, symbolic-dim negative/positive, and reef one-symbol-per-type
-  scenarios; the weak set-equality determinism test is superseded.
-- `spec/design/loud_unsupported.md` — the delivered-behavior record gains the
-  symbolic-dim residue description.
-- `CHANGELOG.md` — behavior notes (header no longer declares `__mono_` symbols;
-  symbolic-dim recursion now rejects cleanly instead of ICEing). Credit the
-  PR #1202 review findings.
+  oracle adds determinism, surface, linkage, symbolic-dimension, and package
+  identity scenarios.
+- `spec/design/loud_unsupported.md` and `CHANGELOG.md` — delivered behavior and
+  PR #1202 review credit.
 - Coordination: PR #1202 edits the same `host.rs` call-site region; the
   disposition of that PR (merge, close in favor, or split) is a maintainer
   decision recorded on chelis#1158, outside this change.

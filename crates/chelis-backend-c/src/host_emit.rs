@@ -1,6 +1,6 @@
 use chelis_ir::host::{
     ConcreteHostProgram, HostBlasMatmulSummary, HostFunctionSpecialization, HostSparseOpSummary,
-    HostTensorHelper, HostTensorSpecialization, is_monomorphized_specialization,
+    HostTensorHelper, HostTensorSpecialization,
 };
 
 /// Sparse-op kind discriminator for the C summary-derived emission path.
@@ -524,7 +524,7 @@ pub(crate) fn emit_host_abi_program(
             &emitted_names,
             &function_specializations,
             &returns_arg,
-            internal_linkage,
+            internal_linkage || function.is_monomorphized_specialization(),
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -536,7 +536,7 @@ pub(crate) fn emit_host_abi_program(
                     &mut function_bodies,
                     function,
                     emitted_name,
-                    internal_linkage,
+                    internal_linkage || function.is_monomorphized_specialization(),
                     &unsupported,
                 )?;
                 function_bodies.push(String::new());
@@ -1528,18 +1528,16 @@ fn emit_host_declarations(
     internal_linkage: bool,
     include_specializations: bool,
 ) -> Result<String, Unsupported> {
-    let prefix = if internal_linkage {
-        "static inline "
-    } else {
-        ""
-    };
     program
         .functions
         .iter()
-        .filter(|function| {
-            include_specializations || !is_monomorphized_specialization(&function.name)
-        })
+        .filter(|function| include_specializations || !function.is_monomorphized_specialization())
         .map(|function| {
+            let prefix = if internal_linkage || function.is_monomorphized_specialization() {
+                "static inline "
+            } else {
+                ""
+            };
             let params = function
                 .params
                 .iter()

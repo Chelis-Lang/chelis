@@ -51,7 +51,15 @@
 //!   byte-determinism test (exactly the two referenced specializations)
 //! - Published header omits specializations ->
 //!   `published_header_omits_specialized_symbols`
-//! - Authored-entry ABI protection and predicate/key/collision locks ->
+//! - An authored specialization-shaped name stays public ->
+//!   `authored_mono_shaped_name_stays_in_the_published_surface`
+//! - Specializations have translation-unit-local linkage ->
+//!   `specializations_link_cleanly_across_generated_objects`
+//! - Canonical package identities with one terminal name stay distinct ->
+//!   `package_defs_with_one_terminal_name_keep_distinct_specializations`
+//! - Symbolic dimensions specialize from the call site ->
+//!   `symbolic_dim_payload_specializes_with_eval_parity`
+//! - Authored-entry ABI protection and key/collision locks ->
 //!   `chelis-ir` unit tests in `host.rs`
 
 #![allow(clippy::uninlined_format_args)]
@@ -340,6 +348,62 @@ fn identifiers_with_prefix(text: &str, prefix: &str) -> BTreeSet<String> {
 
 fn count_occurrences(text: &str, needle: &str) -> usize {
     text.match_indices(needle).count()
+}
+
+fn write_qualified_collision_package(root: &std::path::Path) -> PathBuf {
+    write_file(
+        &root.join("reef.toml"),
+        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.4\"\nmodule_prefix = \"Demo\"\n",
+    );
+    write_file(
+        &root.join("reef.lock"),
+        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"0.4.0\"\ncompiler = \"=0.18.4\"\narchive_sha256 = \"c12eb890eb09451e8e8e3ae647d7072ec29c6c0c3737d1264526e7b05b722049\"\nshell_sha256 = \"5bd235c779ca0e49b026d383634c31331c124d0f02a4f8563a64aabca23d6d2a\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"0.18.4\"\n",
+    );
+    write_file(
+        &root.join("src/a.ch"),
+        "module Demo.A\nexport (depth)\ndef depth[a](x: a, n: int32) -> int32 = if n <= 0 then 0 else depth(x, n - 1) + 1\n",
+    );
+    write_file(
+        &root.join("src/b.ch"),
+        "module Demo.B\nexport (depth)\ndef depth[a](x: a, n: int32) -> int32 = if n <= 0 then 0 else depth(x, n - 1) + 10\n",
+    );
+    write_file(
+        &root.join("src/use_a.ch"),
+        "module Demo.Use_A\nimport Demo.A (depth)\nexport (call_a)\ndef call_a() -> int32 = depth(true, 2)\n",
+    );
+    write_file(
+        &root.join("src/use_b.ch"),
+        "module Demo.Use_B\nimport Demo.B (depth)\nexport (call_b)\ndef call_b() -> int32 = depth(true, 3)\n",
+    );
+    let main = root.join("src/main.ch");
+    write_file(
+        &main,
+        "module Demo.Main\nimport Demo.Use_A (call_a)\nimport Demo.Use_B (call_b)\ndef concrete() -> int32 = call_a() + call_b()\nout = print(concrete())\n",
+    );
+    main
+}
+
+fn compile_generated_object(out_dir: &std::path::Path, stem: &str) -> PathBuf {
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        },
+    );
+    let object = out_dir.join(format!("{stem}.o"));
+    let output = StdCommand::new(&toolchain.compiler)
+        .current_dir(out_dir)
+        .args(&toolchain.compile_flags)
+        .args(["-I.", "-c", &format!("{stem}.c"), "-o"])
+        .arg(&object)
+        .output()
+        .expect("invoke C compiler");
+    assert!(
+        output.status.success(),
+        "generated object must compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    object
 }
 
 // ---------------------------------------------------------------------------
@@ -725,6 +789,107 @@ fn published_header_omits_specialized_symbols() {
     // The `.c` keeps its internal prototypes: it still compiles, links, and
     // runs with the specializations resolved inside the translation unit.
     assert_eq!(run_first_line(&out_dir, "header_probe"), "5");
+}
+
+#[test]
+fn authored_mono_shaped_name_stays_in_the_published_surface() {
+    const SOURCE: &str = "\
+def authored__mono_0123456789abcdef(x: tensor[2, f32]) -> tensor[2, f32] = x
+out = authored__mono_0123456789abcdef(to_tensor([1.0, 2.0]))
+";
+    let (_dir, out_dir) = build_ok(SOURCE, "authored_mono_name");
+    let header = fs::read_to_string(out_dir.join("authored_mono_name.h"))
+        .expect("build writes the published header");
+    assert!(
+        header.contains("authored__mono_0123456789abcdef"),
+        "a valid authored name must not be mistaken for compiler provenance:\n{header}"
+    );
+}
+
+#[test]
+fn specializations_link_cleanly_across_generated_objects() {
+    const OBJECT_A: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def loop[a](box: Box[a], n: int32) -> int32 =
+  if n <= 0 then 0 else loop(box, n - 1) + 1
+def entry_a() -> int32 = loop(Full { value: cast(1, int32) }, 2)
+";
+    const OBJECT_B: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def loop[a](box: Box[a], n: int32) -> int32 =
+  if n <= 0 then 0 else loop(box, n - 1) + 1
+def entry_b() -> int32 = loop(Full { value: cast(1, int32) }, 3)
+";
+    let (_dir_a, out_a) = build_ok(OBJECT_A, "linkage_a");
+    let (_dir_b, out_b) = build_ok(OBJECT_B, "linkage_b");
+    let object_a = compile_generated_object(&out_a, "linkage_a");
+    let object_b = compile_generated_object(&out_b, "linkage_b");
+    let linked = out_a.join("combined.o");
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        },
+    );
+    let output = StdCommand::new(&toolchain.compiler)
+        .args(["-r"])
+        .arg(&object_a)
+        .arg(&object_b)
+        .args(["-o"])
+        .arg(&linked)
+        .output()
+        .expect("invoke relocatable linker");
+    assert!(
+        output.status.success(),
+        "compiler-internal specializations must not collide across objects: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn package_defs_with_one_terminal_name_keep_distinct_specializations() {
+    let dir = tempdir().expect("tempdir");
+    let main = write_qualified_collision_package(dir.path());
+    let out_dir = dir.path().join("out");
+    chelis()
+        .current_dir(dir.path())
+        .args([
+            "build",
+            main.strip_prefix(dir.path()).unwrap().to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            "out",
+        ])
+        .assert()
+        .success();
+    let eval = chelis()
+        .current_dir(dir.path())
+        .args([
+            "eval",
+            "--file",
+            main.strip_prefix(dir.path()).unwrap().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let eval = String::from_utf8_lossy(&eval)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let c_source = read_generated_c(&out_dir, "main");
+    assert!(c_source.contains("Demo__A__depth__mono_"));
+    assert!(c_source.contains("Demo__B__depth__mono_"));
+    let compiled = run_first_line(&out_dir, "main");
+    assert_eq!(eval, "32");
+    assert_eq!(compiled, eval, "native and eval package results must match");
 }
 
 /// The coral-shaped positive (harden-bounded-monomorphization D3): a
