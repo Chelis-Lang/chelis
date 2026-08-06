@@ -129,6 +129,22 @@ struct DesugarCtx {
     /// (chelis#285). Stored even for an empty `! {}` (which declares "no
     /// effects" and is distinct from no annotation at all).
     def_effects: HashMap<String, Vec<EffectExpr>>,
+    /// Monotonic counter behind every `__chelis_tmpN` this context
+    /// synthesizes for destructuring `let` patterns (chelis#1200).
+    ///
+    /// It lives on the context, not on `desugar_let_bindings`, because a
+    /// per-call counter restarts at 0 for every nested block. Two
+    /// destructures in nested blocks then both mint `__chelis_tmp0..2`,
+    /// and the inner names SHADOW the outer ones in the linearity
+    /// checker's scope. Since a component is an alias of its temp, an
+    /// outer component's consume resolved to the inner block's temp
+    /// entry: it either blamed the wrong binding or, when the inner temp
+    /// was still `Live`, left the outer carrier unconsumed so a genuine
+    /// double consume was silently accepted. The names are internal, so
+    /// the fix is simply to never reuse one within a context.
+    ///
+    /// A `Cell` because the desugar walk takes `&self` throughout.
+    next_destructure_temp: std::cell::Cell<usize>,
 }
 
 impl DesugarCtx {
@@ -150,6 +166,7 @@ impl DesugarCtx {
             top_level_fn_tensor_param_prec,
             explicit_sig_names,
             def_effects,
+            next_destructure_temp: std::cell::Cell::new(0),
         }
     }
 }
@@ -1893,7 +1910,7 @@ fn destructure_pattern(
     pattern: &LetPattern,
     source_name: &str,
     body: deep::Expr,
-    next_tmp: &mut usize,
+    next_tmp: &std::cell::Cell<usize>,
     bindings: &[LetBinding],
     authored_body: &Expr,
 ) -> deep::Expr {
@@ -1913,10 +1930,22 @@ fn destructure_pattern(
     }
 }
 
-fn fresh_destructure_temp(bindings: &[LetBinding], body: &Expr, next_tmp: &mut usize) -> String {
+/// Mint a `__chelis_tmpN` that has not been minted before by this
+/// `DesugarCtx` and that the authored source does not already mention.
+///
+/// `next_tmp` is the context-wide counter, read and written on every
+/// mint rather than snapshotted, because `desugar_let_bindings` recurses
+/// into nested blocks mid-loop: a snapshot would let the inner block
+/// re-mint names the outer block had already taken. See
+/// `DesugarCtx::next_destructure_temp` for what the collision cost.
+fn fresh_destructure_temp(
+    bindings: &[LetBinding],
+    body: &Expr,
+    next_tmp: &std::cell::Cell<usize>,
+) -> String {
     loop {
-        let candidate = format!("__chelis_tmp{}", *next_tmp);
-        *next_tmp += 1;
+        let candidate = format!("__chelis_tmp{}", next_tmp.get());
+        next_tmp.set(next_tmp.get() + 1);
         let mentioned = bindings.iter().any(|binding| {
             let_pattern_mentions_name(&binding.pattern, &candidate)
                 || binding
@@ -1939,7 +1968,7 @@ impl DesugarCtx {
         body: deep::Expr,
     ) -> deep::Expr {
         let mut out = body;
-        let mut next_tmp = 0usize;
+        let next_tmp = &self.next_destructure_temp;
         for binding in bindings.iter().rev() {
             match &binding.pattern {
                 LetPattern::Var(name, _) => {
@@ -1973,13 +2002,13 @@ impl DesugarCtx {
                     }
                 }
                 pattern => {
-                    let temp_name = fresh_destructure_temp(bindings, authored_body, &mut next_tmp);
+                    let temp_name = fresh_destructure_temp(bindings, authored_body, next_tmp);
                     let value = self.desugar_expr(&binding.value);
                     out = destructure_pattern(
                         pattern,
                         &temp_name,
                         out,
-                        &mut next_tmp,
+                        next_tmp,
                         bindings,
                         authored_body,
                     );
@@ -3299,6 +3328,7 @@ mod tests {
             top_level_fn_tensor_param_prec: HashMap::new(),
             explicit_sig_names: HashSet::new(),
             def_effects: HashMap::new(),
+            next_destructure_temp: std::cell::Cell::new(0),
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
             .split_whitespace()
