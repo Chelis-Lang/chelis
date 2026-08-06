@@ -14,10 +14,10 @@ use chelis_vocab::EffectKind;
 
 use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_mono::{
-    MonoRejection, PendingSpecialization, apply_type_var_bindings, collect_free_type_vars,
-    collect_type_var_bindings, enclosing_binding, encode_host_type, intern_specialization,
-    pop_mono_frame, pop_pending_specialization, push_mono_frame, render_host_type_term,
-    reset_mono_state, substitute_type_vars_in_deep,
+    MonoProbeGuard, MonoRejection, PendingSpecialization, apply_type_var_bindings,
+    collect_free_type_vars, collect_type_var_bindings, enclosing_binding, encode_host_type,
+    intern_specialization, pop_mono_frame, pop_pending_specialization, push_mono_frame,
+    render_host_type_term, reset_mono_state, substitute_type_vars_in_deep,
 };
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeTerm, HostTensorTypeTerm,
@@ -7861,6 +7861,14 @@ fn top_level_fn_helper_summary_rejects(
     if !matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)) {
         return Ok(false);
     }
+    // chelis#1158: this probe FULLY lowers `name`'s body and throws the result
+    // away, so anything it interns is a side effect of a question, not of the
+    // program. Left in place it fixes the FIFO position of every specialization
+    // the probe reached — and probe order varies per run — which made the
+    // emitted `.c` nondeterministic in violation of chelis#1002. The guard
+    // restores the interner when this scope ends, including on the `?` below,
+    // so only the real lowering pass interns.
+    let _mono_probe = MonoProbeGuard::begin();
     let pushed = push_inlining(name);
     let lowered = lower_host_function(name, body, None, program);
     if pushed {
@@ -7912,7 +7920,17 @@ fn expr_calls_summary_rejecting_top_level_fn(
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
     let graph = top_level_fn_call_graph(program);
     let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
-    for name in collect_called_top_level_fns(expr, &fn_names) {
+    // Belt-and-braces for chelis#1002: each probe below lowers a whole callee
+    // body, and `collect_called_top_level_fns` returns a `HashSet` whose
+    // iteration order varies per run. `MonoProbeGuard` already makes the probes
+    // side-effect-free, so order can no longer reach the emitted `.c` through
+    // the interner — but a probe is still observable through the first
+    // `Err` it returns, and that should not be run-dependent either.
+    let mut probes = collect_called_top_level_fns(expr, &fn_names)
+        .into_iter()
+        .collect::<Vec<_>>();
+    probes.sort_unstable();
+    for name in probes {
         if top_level_fn_helper_summary_rejects(program, &name)? {
             return Ok(true);
         }

@@ -135,6 +135,35 @@ def total() -> f32 =
 out = print(total())
 ";
 
+/// The adversarial-review trigger for emitted-C nondeterminism.
+///
+/// `driver` is lowered FIRST and its body calls both wrappers, so the
+/// summary-rejection probe runs over a two-element `HashSet` before either
+/// wrapper is really lowered. Each probe fully lowers a wrapper, and each
+/// wrapper interns a different `count` specialization, so pre-fix whichever
+/// probe ran first won the FIFO slot and the two specializations swapped
+/// places between runs. Measured on the unfixed tree: 25 builds produced two
+/// distinct `.c` hashes, 11 and 14.
+///
+/// The source ORDER is the trigger and must not be "tidied": moving `driver`
+/// below the wrappers makes them intern in deterministic source order and the
+/// probe becomes a memo hit, which is exactly why the original determinism
+/// test missed this.
+const PROBE_ORDER_DETERMINISM: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def count[a](box: Box[a], acc: int64) -> int64 =
+  match box with {
+    | Empty => acc
+    | Full { value: item } => count(Empty, add(acc, cast(1, int64)))
+  }
+def driver(t: tensor[2, f32]) -> tensor[2, f32] = mul(wa(copy(t)), wb(t))
+def wa(t: tensor[2, f32]) -> tensor[2, f32] = if eq(count(Full { value: cast(1.0, f32) }, cast(0, int64)), cast(1, int64)) then t else mul(t, t)
+def wb(t: tensor[2, f32]) -> tensor[2, f32] = if eq(count(Full { value: \"x\" }, cast(0, int64)), cast(1, int64)) then t else mul(t, t)
+r = driver(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
+";
+
 /// Build `source` to C under a fresh temp dir. Returns the temp dir (kept
 /// alive by the caller) and the output directory.
 fn build(source: &str, stem: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -312,6 +341,35 @@ fn non_concretizable_generic_call_reports_the_other_cause() {
 #[test]
 fn mini_hamt_reproduces_the_coral_frame_shape() {
     assert_build_lane_matches_eval(MINI_HAMT, "mini_hamt", "30.0");
+}
+
+#[test]
+fn probe_order_does_not_reach_the_emitted_c() {
+    // chelis#1002 determinism, at the trigger the original test lacked. Eight
+    // runs is enough: the unfixed tree split 25 runs 11/14, so the chance of
+    // eight agreeing by luck is under 1%.
+    let stem = "probe_order_determinism";
+    let mut digests = BTreeSet::new();
+    for _ in 0..8 {
+        let (_dir, out_dir) = build(PROBE_ORDER_DETERMINISM, stem);
+        let emitted = std::fs::read(out_dir.join(format!("{stem}.c"))).expect("emitted C");
+        digests.insert(emitted);
+    }
+    assert_eq!(
+        digests.len(),
+        1,
+        "probe iteration order must not reach the emitted C; got {} distinct outputs",
+        digests.len()
+    );
+    // Guard the precondition: if the program ever stops minting two
+    // specializations, this test still passes but no longer tests anything.
+    let (_dir, out_dir) = build(PROBE_ORDER_DETERMINISM, stem);
+    let emitted = std::fs::read_to_string(out_dir.join(format!("{stem}.c"))).expect("emitted C");
+    assert_eq!(
+        mono_symbols(&emitted, "count").len(),
+        2,
+        "trigger precondition: two specializations must be in flight"
+    );
 }
 
 #[test]

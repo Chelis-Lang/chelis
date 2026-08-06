@@ -60,6 +60,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   type nodes in one signature. Both remain fail-loud and prompt; neither
   hangs.
 
+### Fixed
+
+- **Emitted C is deterministic again for programs with recursive
+  generics (chelis#1158, chelis#1002).** Host lowering decides some
+  questions by *probing* — fully lowering a callee body only to ask
+  whether its tensor helper would register a summary rejection, then
+  discarding the result. The discarded lowering still interned its
+  specializations, so the probe order (a `HashSet` iteration) fixed
+  their position in the emission worklist: 25 builds of one program
+  produced two distinct `.c` files, differing only by two
+  specializations swapping places. Probes are now side-effect-free on
+  the interner, so only the real lowering pass interns, in its
+  deterministic traversal order. The same root cause could let a
+  discarded probe consume the per-callee specialization cap or enqueue a
+  specialization that aborts the build; both are closed by the same fix.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C

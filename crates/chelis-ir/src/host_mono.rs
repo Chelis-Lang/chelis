@@ -118,6 +118,66 @@ thread_local! {
     static MONO_FRAMES: RefCell<Vec<MonoFrame>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Makes a speculative lowering side-effect-free on the interner.
+///
+/// Several lowering decisions are taken by *probing*: `top_level_fn_helper_
+/// summary_rejects` fully lowers a callee body only to ask whether its tensor
+/// helper would register a summary rejection, then throws the result away. The
+/// lowering is discarded; the interning it performed was not. Three
+/// consequences, all real:
+///
+/// 1. **Nondeterministic emitted C (chelis#1002).** The probe set is iterated
+///    from a `HashSet`, so probe order varies per run. Whichever probe ran
+///    first fixed that specialization's position in the FIFO worklist, and the
+///    drain preserves worklist order into emission order. Measured: 25 builds
+///    of one file produced two distinct `.c` hashes, differing only by two
+///    `count__mono_*` definitions swapping places.
+/// 2. **Cap budget consumed by discarded work.** `intern_specialization`
+///    increments the per-callee count at intern time, so a probe could push a
+///    program over [`MONO_SPECIALIZATION_CAP`] without any surviving call site.
+/// 3. **Unconditional emission of probe-only specializations.** The drain
+///    lowers every enqueued pair and propagates failure with `?`, so a
+///    specialization that only ever existed inside a discarded probe can abort
+///    the whole build.
+///
+/// Restoring the snapshot on scope exit removes all three at the root: after a
+/// probe the interner is byte-for-byte what it was before, and every surviving
+/// specialization was interned by the real lowering pass, in that pass's
+/// deterministic traversal order.
+pub(crate) struct MonoProbeGuard {
+    intern: HashMap<(String, String), String>,
+    worklist: VecDeque<PendingSpecialization>,
+    counts: HashMap<String, usize>,
+    symbol_origins: HashMap<String, String>,
+    frames: Vec<MonoFrame>,
+}
+
+impl MonoProbeGuard {
+    pub(crate) fn begin() -> Self {
+        Self {
+            intern: MONO_INTERN.with(|state| state.borrow().clone()),
+            worklist: MONO_WORKLIST.with(|state| state.borrow().clone()),
+            counts: MONO_SPECIALIZATION_COUNTS.with(|state| state.borrow().clone()),
+            symbol_origins: MONO_SYMBOL_ORIGINS.with(|state| state.borrow().clone()),
+            frames: MONO_FRAMES.with(|state| state.borrow().clone()),
+        }
+    }
+}
+
+impl Drop for MonoProbeGuard {
+    fn drop(&mut self) {
+        // Restore rather than clear: a probe can run while a specialization
+        // body is being drained, and that outer frame must survive.
+        MONO_INTERN.with(|state| *state.borrow_mut() = std::mem::take(&mut self.intern));
+        MONO_WORKLIST.with(|state| *state.borrow_mut() = std::mem::take(&mut self.worklist));
+        MONO_SPECIALIZATION_COUNTS
+            .with(|state| *state.borrow_mut() = std::mem::take(&mut self.counts));
+        MONO_SYMBOL_ORIGINS
+            .with(|state| *state.borrow_mut() = std::mem::take(&mut self.symbol_origins));
+        MONO_FRAMES.with(|state| *state.borrow_mut() = std::mem::take(&mut self.frames));
+    }
+}
+
 /// Clear every interner cache. Called from the host-lowering cache guard so
 /// one process may lower many programs without leaking symbols between them.
 pub(crate) fn reset_mono_state() {
@@ -1061,6 +1121,31 @@ mod tests {
             let decoded = decode_host_type(&encoded).expect("encoded term decodes");
             assert_eq!(decoded, case, "round trip for {case:?}");
         }
+    }
+
+    #[test]
+    fn a_probe_leaves_the_interner_untouched() {
+        // chelis#1158 Findings 1 and 4: a speculative lowering must not fix a
+        // specialization's FIFO position, consume cap budget, or enqueue work
+        // for emission.
+        reset_mono_state();
+        let params = [scalar(Prim::F32)];
+        let ret = scalar(Prim::Bool);
+        intern_specialization("real", &params, &ret).expect("real intern");
+        {
+            let _probe = MonoProbeGuard::begin();
+            intern_specialization("probe_only", &[scalar(Prim::Int64)], &ret)
+                .expect("probe intern");
+            intern_specialization("real", &[scalar(Prim::Int32)], &ret).expect("probe intern");
+        }
+        // Only the pre-probe pending specialization survives, and the cap
+        // budget the probe spent is returned.
+        let mut drained = Vec::new();
+        while let Some(pending) = pop_pending_specialization() {
+            drained.push(pending.callee);
+        }
+        assert_eq!(drained, vec!["real".to_string()]);
+        reset_mono_state();
     }
 
     #[test]
