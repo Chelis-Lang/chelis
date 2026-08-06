@@ -190,6 +190,20 @@ def mixed[a](box: Box[a], t: tensor[2, f32], c: int64) -> bool = if lt(c, cast(1
 out = print(mixed(Full { value: cast(1, int64) }, to_tensor([cast(1.0, f32), cast(2.0, f32)]), cast(2, int64)))
 ";
 
+/// A generic whose specialization has a pure-tensor signature, so it competes
+/// with the authored entry. `run` is the author's entry; `spin[a]` at
+/// `a := tensor[2, f32]` produces `spin__mono_*(chelis_tensor*) ->
+/// chelis_tensor*`, which the drain appends AFTER `run`. Entry selection takes
+/// the LAST pure-tensor function, so pre-fix the specialization displaced
+/// `run` and the build silently fell back to the whole-program kernel — the
+/// HIP entry went from 1-in/1-out to 1-in/4-out.
+const ENTRY_DISPLACEMENT: &str = "\
+def stop() -> bool = true
+def spin[a](x: a, n: int64) -> a = if stop() then x else spin(x, n)
+def run(flag: bool) -> tensor[2, f32] = spin(to_tensor([cast(1.0, f32), cast(2.0, f32)]), cast(0, int64))
+def scale(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)
+";
+
 /// Build `source` to C under a fresh temp dir. Returns the temp dir (kept
 /// alive by the caller) and the output directory.
 fn build(source: &str, stem: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -428,6 +442,49 @@ fn mixed_type_var_and_symbolic_dim_rejects_instead_of_ice() {
 #[test]
 fn mixed_type_var_and_literal_dim_still_builds() {
     assert_build_lane_matches_eval(MIXED_TYPEVAR_AND_LITERAL_DIM, "mixed_literal_dim", "true");
+}
+
+#[test]
+fn a_specialization_never_displaces_the_authored_entry() {
+    // The symptom is in the entry ABI, which the HIP target makes visible as
+    // an explicit arity check in the emitted entry.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("entry_displacement.ch");
+    let out_dir = dir.path().join("out");
+    write_file(&path, ENTRY_DISPLACEMENT);
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let emitted = std::fs::read_to_string(out_dir.join("entry_displacement_hip.cpp"))
+        .expect("emitted HIP source");
+    assert!(
+        emitted.contains("expected %d outputs, got %d\\n\", 1,"),
+        "the authored single-output entry must survive; a displaced entry falls \
+         back to the 4-output whole-program kernel:\n{}",
+        emitted
+            .lines()
+            .filter(|line| line.contains("expected %d"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // The compiler-owned specialization must not appear in the published
+    // header either.
+    let header = std::fs::read_to_string(out_dir.join("entry_displacement_hip.h"))
+        .expect("emitted HIP header");
+    assert!(
+        !header.contains("__mono_"),
+        "published header must not declare specializations:\n{header}"
+    );
 }
 
 #[test]

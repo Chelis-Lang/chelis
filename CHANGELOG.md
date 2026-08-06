@@ -79,6 +79,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   discarded probe consume the per-callee specialization cap or enqueue a
   specialization that aborts the build; both are closed by the same fix.
 
+- **A monomorphized specialization can no longer displace the authored
+  entry point (chelis#1158).** Specializations are appended after the
+  authored functions and entry selection takes the last pure-tensor
+  signature, so a generic like `spin[a](x: a) -> a` instantiated at a
+  tensor silently took over the entry — the named-entry lane vanished
+  and the build fell back to the whole-program kernel, changing the
+  kernel ABI from 1-in/1-out to 1-in/4-out under the consumer.
+  Specializations are now excluded from entry selection, and their
+  hashed internal names no longer appear in "ambiguous entry" errors.
+
 - **A recursive generic mixing a type variable with a symbolic tensor
   dimension no longer aborts the build with an internal compiler error
   (chelis#1158).** It reached C ABI projection with the declared

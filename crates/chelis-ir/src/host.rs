@@ -16,9 +16,9 @@ use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_mono::{
     MonoProbeGuard, MonoRejection, PendingSpecialization, apply_type_var_bindings,
     collect_free_type_vars, collect_type_var_bindings, enclosing_binding, encode_host_type,
-    first_tensor_shape_disagreement, intern_specialization, pop_mono_frame,
-    pop_pending_specialization, push_mono_frame, render_host_type_term, reset_mono_state,
-    substitute_type_vars_in_deep,
+    first_tensor_shape_disagreement, intern_specialization, is_monomorphized_specialization,
+    pop_mono_frame, pop_pending_specialization, push_mono_frame, render_host_type_term,
+    reset_mono_state, substitute_type_vars_in_deep,
 };
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeTerm, HostTensorTypeTerm,
@@ -1361,7 +1361,16 @@ fn host_expr_stays_on_tensor_path(
 
 pub fn preferred_tensor_entry_name(program: &ConcreteHostProgram) -> Option<&str> {
     fn tensor_signature(function: &ConcreteHostFunction) -> bool {
-        matches!(function.ret_ty, ConcreteHostType::Tensor(_))
+        // chelis#1158: a monomorphized specialization is never an entry. It is
+        // compiler-owned, its name is a hash, and it can trivially have a
+        // pure-tensor signature (`spin[a](x: a) -> a` at `a := tensor[2, f32]`
+        // does). Because the drain appends specializations AFTER the authored
+        // functions and this selection takes the LAST match, an unfiltered
+        // specialization silently displaces the author's entry — the named
+        // entry lane disappears and the whole-program fallback kernel takes
+        // over, flipping the kernel ABI under the consumer.
+        !is_monomorphized_specialization(&function.name)
+            && matches!(function.ret_ty, ConcreteHostType::Tensor(_))
             && function
                 .params
                 .iter()
@@ -1443,8 +1452,14 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
 /// scalar/record/ADT-returning def selected by name must stay on the
 /// host lane.
 pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) -> bool {
+    // chelis#1158: same exclusion as `preferred_tensor_entry_name`. This is the
+    // predicate `chelis-compiler-api`'s `tensor_signature_defs` builds its
+    // entry-candidate list from, so an unfiltered specialization would both
+    // compete for entry selection and surface its hashed internal name to the
+    // user in the strict-mode "ambiguous entry" error.
     program.functions.iter().any(|function| {
         function.name == name
+            && !is_monomorphized_specialization(&function.name)
             && matches!(function.ret_ty, ConcreteHostType::Tensor(_))
             && function
                 .params
