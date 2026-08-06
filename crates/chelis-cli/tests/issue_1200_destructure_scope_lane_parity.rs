@@ -19,10 +19,17 @@
 //! * **D** — a fully NAMED tuple destructure, no `_` anywhere, poisoning
 //!   the destructure's own source.
 //!
-//! The last two tests pin the two places where moving from a block-scoped
-//! depth counter to a per-name mark restores 0.18.3 behavior that stock
-//! 0.18.4 rejected: closure-captured components and match-arm binders.
-//! See the comment above them for the mechanism.
+//! The rest of the file pins the review pass on that fix (the addendum to
+//! the plan, and the reviewer's rulings on the issue), in two groups:
+//!
+//! * shapes stock 0.18.4 rejected and that are ACCEPTED again — a
+//!   component double-consumed inside a closure body, a match arm, an
+//!   `if` branch, or under a re-bound pattern binder;
+//! * shapes that were SILENTLY ACCEPTED and are now compile errors —
+//!   consumed in a branch then again after the join, captured then reused,
+//!   and an outer double consume hidden by a nested destructure's
+//!   colliding `__chelis_tmpN`. Plus a determinism guard on
+//!   closure-capture classification, which used to flip run to run.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -144,26 +151,32 @@ out = run(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([10.0, 20.0, 30.0, 40.0]))
 }
 
 // ============================================================
-// Two restored-0.18.3 deltas, pinned
+// Restored-0.18.3 deltas, pinned
 //
-// Both shapes below double-consume a genuine destructured component,
-// and both are ACCEPTED. That is not the per-name gate leaking: it is
-// the pre-existing re-declaration discipline in `check_fn` and
-// `check_match`. Each clones the enclosing `LinearScope` and then calls
-// `declare` for every captured name / pattern binder, and `declare`
-// pushes a fresh UNMARKED entry that shadows whatever the clone carried
-// — the same shadowing the ordinary-rebinding test in
+// Every shape below double-consumes a genuine destructured component and
+// is ACCEPTED. That is the reviewer's Q1 ruling on chelis#1200: "match
+// arms should work like closures. New declarations shadow the destructure
+// mark."
+//
+// A closure body got this for free — `check_fn` `declare`s every capture
+// in the closure's own scope, and `declare` pushes a fresh UNMARKED entry
+// over the clone, the same shadowing the ordinary-rebinding test in
 // `crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`
-// pins. So the component mark does not reach inside a closure body or a
-// match arm, and a consume-after-consume there falls through to
-// implicit Copy insertion like any other binding.
+// pins. Branch scopes clone WITHOUT re-declaring the outer names an arm
+// merely mentions, so a component double-consumed in an arm rejected
+// while the identical closure body compiled. `check_if` / `check_match`
+// now drop the inherited marks on entry
+// (`LinearScope::clear_destructured_marks`), which makes the three agree.
+// Marks are all that is dropped: a destructure authored INSIDE the arm
+// still gates its own components, and `join_branch_states` still carries
+// the arm's consume out to the enclosing scope.
 //
-// Stock 0.18.4 rejected both, because `destructure_scope_depth` lived on
-// `Checker` rather than on the scope: it survived the clone-and-declare
-// that shadows a per-name mark, so it kept gating lexically inside the
-// closure/arm. That rejection was collateral from the over-broad gate,
-// not a contract — 0.18.3 accepted both and produced these values.
-// Verified across all three binaries while closing chelis#1200.
+// Stock 0.18.4 rejected all of these, because `destructure_scope_depth`
+// lived on `Checker` rather than on the scope: it survived every scope
+// clone and kept gating lexically. That rejection was collateral from the
+// over-broad gate, not a contract — 0.18.3 accepted them and produced
+// these values. Verified across all three binaries while closing
+// chelis#1200.
 // ============================================================
 
 /// A destructured component captured by a closure whose body consumes it
@@ -247,5 +260,226 @@ out = run((to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([5.0, 6.0, 7.0, 8.0])))
     assert!(
         stderr.contains("variable `a` (from a destructured binding)"),
         "expected the unchanged Linearity-F2 diagnostic; got:\n{stderr}"
+    );
+}
+
+/// Q1, direct form: the component itself — not a re-bound pattern binder
+/// — consumed twice inside a match arm. This is the shape that rejected
+/// while the closure body above compiled.
+#[test]
+fn component_double_consume_in_a_match_arm_is_accepted_in_both_lanes() {
+    assert_lane_parity(
+        r#"
+type Flag =
+  | On
+  | Off
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run(c: Flag) -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  match c with {
+    | On => add(realize(p), realize(p))
+    | Off => to_tensor([0.0f32, 0.0f32])
+  }
+}
+out = run(On)
+"#,
+        "issue1200_match_arm_component",
+        &[2.0, 4.0],
+    );
+}
+
+/// Same for an `if` branch: `check_if` clones without re-declaring for
+/// the same reason `check_match` does.
+#[test]
+fn component_double_consume_in_an_if_branch_is_accepted_in_both_lanes() {
+    assert_lane_parity(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run(c: bool) -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  if c then add(realize(p), realize(p)) else to_tensor([0.0f32, 0.0f32])
+}
+out = run(true)
+"#,
+        "issue1200_if_branch_component",
+        &[2.0, 4.0],
+    );
+}
+
+// ============================================================
+// Pass A rejections — shapes that were SILENTLY ACCEPTED
+//
+// These three reached the back end and produced a value before this pass.
+// Each is a real double consume of a destructured component, so each must
+// now be a compile error: an accepted program here means F2's own true
+// positive is falsifiable.
+// ============================================================
+
+/// Assert `source` fails the front end, and that the message names
+/// `expect_name` without leaking a desugarer temp.
+fn assert_rejects_naming(source: &str, name: &str, expect_name: &str) {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.ch"));
+    write_file(&path, &fixture(source));
+    let out = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["eval", "--file", path.to_str().unwrap()])
+        .output()
+        .expect("chelis eval should run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "{name}: expected a compile error; stdout:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains(expect_name),
+        "{name}: expected the diagnostic to name {expect_name}; got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("__chelis_tmp"),
+        "{name}: diagnostic leaks a desugarer temp:\n{stderr}"
+    );
+}
+
+/// Q2: consumed in one branch, then again after the join. The component's
+/// carrier temp is never `Live` — the component's own bind records an
+/// `Aliasing` consume on it — so a join gated on `Live` dropped the
+/// branch's Structural consume and this compiled.
+#[test]
+fn component_consumed_in_a_branch_then_after_the_join_fails_the_cli() {
+    assert_rejects_naming(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run(c: bool) -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  r: tensor[2, f32] = if c then realize(p) else to_tensor([0.0f32, 0.0f32])
+  add(r, realize(p))
+}
+out = run(true)
+"#,
+        "issue1200_join_consume",
+        "variable `p`",
+    );
+}
+
+/// Capture-then-reuse. The capture consume landed on the component's own
+/// entry rather than forwarding to its carrier, so the carrier stayed
+/// `Live` and the reuse outside the closure was accepted — while the same
+/// reuse without the closure errored.
+#[test]
+fn component_captured_then_reused_fails_the_cli() {
+    assert_rejects_naming(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run() -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  f = fn () -> realize(p)
+  add(f(), realize(p))
+}
+out = run()
+"#,
+        "issue1200_capture_reuse",
+        "variable `p`",
+    );
+}
+
+/// Nested-destructure temp collision. The inner block's `__chelis_tmpN`
+/// used to shadow the outer's, so the outer component's first consume
+/// landed on the inner block's temp and the outer carrier stayed `Live` —
+/// the second consume was then silently accepted. Removing the inner
+/// destructure (and nothing else) made the identical program error, which
+/// is what made this a collision rather than a semantics question.
+#[test]
+fn nested_destructure_does_not_hide_an_outer_double_consume() {
+    assert_rejects_naming(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run() -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (a, b) = two(v)
+  r: tensor[2, f32] = {
+    w = to_tensor([3.0f32, 4.0f32])
+    (c, d) = two(w)
+    realize(a)
+  }
+  add(r, realize(a))
+}
+out = run()
+"#,
+        "issue1200_nested_collision",
+        "variable `a`",
+    );
+}
+
+/// The control for the collision test: the same program without the inner
+/// destructure always errored. If this ever stops erroring, the test above
+/// is passing for the wrong reason.
+#[test]
+fn the_nested_collision_control_without_an_inner_destructure_also_fails() {
+    assert_rejects_naming(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run() -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (a, b) = two(v)
+  r: tensor[2, f32] = {
+    w = to_tensor([3.0f32, 4.0f32])
+    realize(a)
+  }
+  add(r, realize(a))
+}
+out = run()
+"#,
+        "issue1200_nested_control",
+        "variable `a`",
+    );
+}
+
+/// Closure-capture classification must be DETERMINISTIC.
+///
+/// `check_fn` walks the capture list mutating the outer scope as it goes,
+/// so when two captures sit on one alias chain the verdict depends on
+/// visit order — and the list came from a `HashSet`. Measured on stock
+/// 0.18.4, this exact program rejected 11 times in 12 and compiled once.
+/// `free_vars` now sorts, and the capture consume forwards through the
+/// alias chain so both orders agree anyway.
+#[test]
+fn closure_capture_verdict_is_stable_across_repeated_runs() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("capture_determinism.ch");
+    write_file(
+        &path,
+        &fixture(
+            r#"
+def run() -> tensor[2, f32] = {
+  x = to_tensor([1.0f32, 2.0f32])
+  y: tensor[2, f32] = x
+  f = fn () -> add(realize(x), realize(y))
+  f()
+}
+out = run()
+"#,
+        ),
+    );
+
+    let mut verdicts = Vec::new();
+    for _ in 0..24 {
+        let out = Command::cargo_bin("chelis")
+            .expect("binary")
+            .args(["eval", "--file", path.to_str().unwrap()])
+            .output()
+            .expect("chelis eval should run");
+        verdicts.push(out.status.success());
+    }
+    let accepted = verdicts.iter().filter(|ok| **ok).count();
+    assert!(
+        accepted == 0 || accepted == verdicts.len(),
+        "closure-capture verdict is order-dependent: {accepted} of {} runs accepted",
+        verdicts.len()
     );
 }
