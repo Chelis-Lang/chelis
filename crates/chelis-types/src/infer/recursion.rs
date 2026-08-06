@@ -276,22 +276,48 @@ pub(super) fn finish_group(subst: &Subst, errors: &mut DiagnosticSink<'_>) {
         } else {
             occ.caller_binder_names.join(", ")
         };
-        let mut err = CheckError::new(
-            CheckErrorKind::TypeMismatch,
-            format!(
-                "polymorphic recursion: `{caller}` makes an in-group recursive call to \
-                 `{callee}` instantiated at `[{got}]`, but every recursive call in a \
-                 recursive binding group must be typed at the caller's own instantiation \
-                 `[{expected}]` (spec/04-type-system.md \u{a7}3.1.1 [04-INF-3])",
-                caller = occ.caller,
-                callee = occ.callee,
-            ),
-            vec![
-                "make the recursive call reuse the caller's own type parameters".to_string(),
-                "hoist the changed-instantiation call into a separate non-recursive helper `def`"
-                    .to_string(),
-            ],
-        );
+        // A caller with no type parameters cannot supply an instantiation
+        // at all, so "reuse the caller's own parameters" would be
+        // unactionable advice; name the actual constraint instead.
+        let caller_is_monomorphic =
+            occ.caller_binder_names.is_empty() && occ.caller_own_tvars.is_empty();
+        let (message, suggestions) = if caller_is_monomorphic {
+            (
+                format!(
+                    "polymorphic recursion: `{caller}` makes an in-group recursive call to \
+                     `{callee}` instantiated at `[{got}]`, but `{caller}` declares no type \
+                     parameters, so a call inside this recursive binding group cannot \
+                     instantiate `{callee}`'s type parameters afresh \
+                     (spec/04-type-system.md \u{a7}3.1.1 [04-INF-3])",
+                    caller = occ.caller,
+                    callee = occ.callee,
+                ),
+                vec![format!(
+                    "hoist the call to `{callee}` into a separate non-recursive helper `def`, \
+                     or give `{caller}` matching type parameters",
+                    callee = occ.callee,
+                    caller = occ.caller,
+                )],
+            )
+        } else {
+            (
+                format!(
+                    "polymorphic recursion: `{caller}` makes an in-group recursive call to \
+                     `{callee}` instantiated at `[{got}]`, but every recursive call in a \
+                     recursive binding group must be typed at the caller's own instantiation \
+                     `[{expected}]` (spec/04-type-system.md \u{a7}3.1.1 [04-INF-3])",
+                    caller = occ.caller,
+                    callee = occ.callee,
+                ),
+                vec![
+                    "make the recursive call reuse the caller's own type parameters".to_string(),
+                    "hoist the changed-instantiation call into a separate non-recursive helper \
+                     `def`"
+                        .to_string(),
+                ],
+            )
+        };
+        let mut err = CheckError::new(CheckErrorKind::TypeMismatch, message, suggestions);
         err.expected = Some(format!("[{expected}]"));
         err.got = Some(format!("[{got}]"));
         err.span_id = occ.span_id;

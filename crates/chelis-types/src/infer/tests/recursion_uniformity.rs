@@ -184,6 +184,47 @@ def main() -> int32 = f(Full { value: cast(1, int32) }, 3)
 }
 
 #[test]
+fn monomorphic_caller_in_group_names_the_missing_type_parameters() {
+    // Red-team NIT (2026-08-06): a monomorphic group member calling an
+    // authored generic at a concrete instantiation is rejected by the
+    // strict authored-binder rule, and the diagnostic must not advise
+    // reusing type parameters the caller does not have.
+    let errors = surf_errors(
+        "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def mono(n: int32) -> int32 =
+  if n <= 0 then 0 else gen(Full { value: true }, n)
+def gen[a](box: Box[a], n: int32) -> int32 =
+  if n <= 0 then 1 else mono(n - 1)
+def main() -> int32 = mono(3)
+",
+    );
+    let poly = polymorphic_recursion_errors(&errors);
+    assert_eq!(poly.len(), 1, "exactly one rejection expected: {errors:?}");
+    let error = poly[0];
+    assert!(
+        error.message.contains("`mono`") && error.message.contains("`gen`"),
+        "must name caller and callee: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("declares no type parameters"),
+        "must name the actual constraint instead of an empty instantiation: {}",
+        error.message
+    );
+    assert!(
+        !error
+            .suggestions
+            .iter()
+            .any(|s| s.contains("reuse the caller's own type parameters")),
+        "must not advise reusing parameters the caller does not have: {:?}",
+        error.suggestions
+    );
+}
+
+#[test]
 fn out_of_group_calls_at_fresh_instantiations_are_unrestricted() {
     // `main` is not a member of `depth`'s recursive group, so its call may
     // instantiate freely — twice at different types.

@@ -57,7 +57,6 @@ struct MonoSpecializationState {
 #[derive(Clone)]
 struct InProgressMonoSpecialization {
     def_name: String,
-    symbol: String,
     param_tys: Vec<HostTypeTerm>,
     ret_ty: HostTypeTerm,
 }
@@ -7246,7 +7245,39 @@ fn lower_recursive_generic_call(
     } else {
         inferred_ret_ty.clone()
     };
-    let ret_ty = canonicalize_representation_erased_adt_args(ret_ty, &definitions);
+    let mut ret_ty = canonicalize_representation_erased_adt_args(ret_ty, &definitions);
+
+    // Per-slot completion for a self-recursive edge with unconstrained
+    // arguments (e.g. `loop(Empty)`, or a permuted edge whose third slot is
+    // `Empty`): [04-INF-2] types an unconstrained argument at the caller's
+    // own instantiation, and for a same-def edge callee slot i corresponds
+    // to caller slot i, so each still-unresolved slot fills from the
+    // innermost in-progress specialization's matching parameter. The
+    // derived (possibly permuted) slots are KEPT — the merged application
+    // then goes through the ordinary memo, never a blind whole-vector
+    // reuse, so a permuted orbit member still gets its own symbol.
+    if param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved() {
+        let in_progress = MONO_SPECIALIZATIONS.with(|state| {
+            state
+                .borrow()
+                .in_progress
+                .iter()
+                .rev()
+                .find(|spec| spec.def_name == name && spec.param_tys.len() == args.len())
+                .cloned()
+        });
+        if let Some(spec) = in_progress {
+            for (slot, param_ty) in param_tys.iter_mut().enumerate() {
+                if param_ty.is_unresolved() {
+                    *param_ty = spec.param_tys[slot].clone();
+                }
+            }
+            if ret_ty.is_unresolved() {
+                ret_ty = spec.ret_ty.clone();
+            }
+        }
+    }
+
     let derived_concrete =
         !param_tys.iter().any(HostTypeTerm::is_unresolved) && !ret_ty.is_unresolved();
     if derived_concrete {
@@ -7267,39 +7298,13 @@ fn lower_recursive_generic_call(
         }));
     }
 
-    // An underived (unconstrained) recursive edge — e.g. `loop(Empty)`,
-    // whose argument never pins the type parameter: [04-INF-2] types the
-    // unconstrained argument at the caller's own instantiation, which is the
-    // innermost in-progress specialization of the same def.
-    let in_progress = MONO_SPECIALIZATIONS.with(|state| {
-        state
-            .borrow()
-            .in_progress
-            .iter()
-            .rev()
-            .find(|spec| spec.def_name == name && spec.param_tys.len() == args.len())
-            .cloned()
-    });
-    if let Some(spec) = in_progress {
-        let lowered_args = args
-            .iter()
-            .zip(spec.param_tys.iter())
-            .map(|(arg, param_ty)| {
-                lower_host_expr_with_expected(arg, program, scope, tensor_helpers, Some(param_ty))
-                    .map(|lowered| force_host_expr_type(lowered, param_ty.clone()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(HostExpr::new(HostExprKind::Call {
-            function: spec.symbol.clone(),
-            args: lowered_args,
-            arg_tys: spec.param_tys.clone(),
-            ty: spec.ret_ty.clone(),
-        }));
-    }
-
     // Fail-closed residue: no concrete checked instantiation to key a
-    // specialized definition on, and emitting a reference to the omitted
-    // generic definition is never legal.
+    // specialized definition on — an outer call that never pins the type
+    // parameter, or a mutually-recursive cross-member edge whose argument
+    // leaves the callee parameter unconstrained (no positional
+    // correspondence exists across different defs' parameters in host
+    // lowering). Emitting a reference to the omitted generic definition is
+    // never legal, so reject loud instead.
     Err(host_expr_lowering_error(
         app_expr,
         format!(
@@ -7404,7 +7409,6 @@ fn ensure_mono_specialization(
         state.memo.insert(canonical_key, symbol.clone());
         state.in_progress.push(InProgressMonoSpecialization {
             def_name: name.to_string(),
-            symbol: symbol.clone(),
             param_tys: param_tys.to_vec(),
             ret_ty: ret_ty.clone(),
         });

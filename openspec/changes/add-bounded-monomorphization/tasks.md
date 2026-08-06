@@ -172,8 +172,35 @@ change is done while that oracle is red.
         underived (unconstrained) edges such as `loop(Empty)`. Locked by
         `permuted_recursive_instantiation_specializes_per_orbit_member`
         (two orbit symbols, native compile, run output matches eval).
-      Round 2 (fresh subagent against the fixed tree) still owed for the
-      full report deliverable.
+      **Round 2 (2026-08-06, fresh local subagent in herdr pane w36:pE,
+      completed with report at `target/redteam/report.md`):** ran the
+      oracle (14/14 at the time), issue_935 + parity, and 18 adversarial
+      probes (3-def SCC, 3-param rotation, permutation+narrowing,
+      alias/argument-passed/sig-authored polymorphic recursion, determinism
+      byte-comparison, docs-claims audit). Verdict REDTEAM-FINDINGS:
+      - **MAJOR (fixed):** permuted edge carrying an unconstrained argument
+        (`tri[a, b, c]` recursing at `(b, a, Empty)`) — the round-1 fix's
+        all-or-nothing derivation dropped the derived permuted slots and
+        blind-reused the caller's own symbol; silent build success,
+        uncompilable C. Fixed by per-slot completion: unresolved slots fill
+        from the innermost in-progress same-def specialization's
+        corresponding parameter, derived slots are kept, and the merged
+        application goes through the ordinary memo. Locked by
+        `permuted_edge_with_unconstrained_argument_specializes_correctly`.
+      - **MINOR (documented residue):** a mutually recursive cross-member
+        edge whose argument leaves the callee parameter unconstrained
+        (`even2[a]` → `odd2(Empty, ...)`) is checker-admitted and
+        eval-executable but fails closed at build (branded, chelis#1158, no
+        artifact) — host lowering has no positional correspondence across
+        different defs' parameters. Recorded in
+        `spec/design/loud_unsupported.md` and locked by
+        `mutual_unconstrained_cross_edge_fails_closed`.
+      - **NIT (fixed):** the monomorphic-caller rejection named an empty
+        instantiation `[]` and suggested reusing nonexistent type
+        parameters; the diagnostic now names the actual constraint. Locked
+        by `monomorphic_caller_in_group_names_the_missing_type_parameters`.
+      Round 3 (focused confirmation of the round-2 MAJOR fix by a fresh
+      subagent) recorded below when complete.
 - [ ] 6.4 Full CI green including macOS Smoke (authoritative workspace oracle);
       chelis#1158 closes on the merged green oracle with a comment naming the
       suite; notify coral to re-cite/retire its 6 citation sites on the next

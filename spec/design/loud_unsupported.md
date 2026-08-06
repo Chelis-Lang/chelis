@@ -956,9 +956,16 @@ specialized symbol, with the uniform-recursive-instantiation rule
 (`spec/04-type-system.md` §3.1.1, [04-INF-2]/[04-INF-3]) supplying the
 boundedness precondition at check time. Lowering still never emits a
 reference to an omitted generic symbol and never expands recursive source
-without a bound: a surviving call whose checked type application is not
-concrete stays on this loud boundary, citing chelis#1158. The delivered
-behavior's acceptance oracle is `cargo nextest run -p chelis-cli --test
+without a bound. A self-recursive edge completes unconstrained argument
+slots from the caller's own instantiation (callee slot i corresponds to
+caller slot i on the same def) while keeping derived — possibly permuted —
+slots, so every renaming-orbit member gets its own specialized symbol. Two
+checker-admitted shapes remain on the loud, artifact-free boundary, citing
+chelis#1158: an outer call whose type application never resolves concrete,
+and a mutually recursive cross-member edge whose argument leaves the callee
+parameter unconstrained (host lowering has no positional correspondence
+across different defs' parameters). The delivered behavior's acceptance
+oracle is `cargo nextest run -p chelis-cli --test
 recursive_generic_monomorphization --no-fail-fast`.
 
 For `fold`, the checked callback's first parameter is the authoritative

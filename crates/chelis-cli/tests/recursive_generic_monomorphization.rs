@@ -36,8 +36,10 @@
 //! Named regression (chelis#941 body's minimized reproducer):
 //! - `issue_941_minimized_reproducer_compiles`
 //!
-//! Red-team regression (permuted in-group instantiation, 2026-08-06):
+//! Red-team regressions (2026-08-06):
 //! - `permuted_recursive_instantiation_specializes_per_orbit_member`
+//! - `permuted_edge_with_unconstrained_argument_specializes_correctly`
+//! - `mutual_unconstrained_cross_edge_fails_closed` (documented residue)
 //!
 //! Determinism golden (change task 4.2):
 //! - `specialized_symbol_set_is_deterministic_across_builds`
@@ -120,6 +122,39 @@ def swap[a, b](x: a, y: b, n: int32) -> int32 =
   if n <= 0 then 0 else swap(y, x, n - 1) + 1
 def concrete() -> int32 = swap(Full { value: cast(1, int32) }, true, 3)
 out = print(concrete())
+";
+
+/// Permuted edge carrying an unconstrained argument (red-team round 2,
+/// 2026-08-06): slots `a`/`b` swap while slot `c` is an unconstrained
+/// `Empty`. Per-slot completion must keep the derived (permuted) slots and
+/// fill only the unconstrained one from the caller's own instantiation — an
+/// all-or-nothing fallback would wire the edge to the caller's own symbol
+/// with the wrong parameter order. Prints `3`.
+const PERMUTED_WITH_UNCONSTRAINED: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def tri[a, b, c](x: a, y: b, z: Box[c], n: int32) -> int32 =
+  if n <= 0 then 0 else tri(y, x, Empty, n - 1) + 1
+def concrete() -> int32 =
+  tri(Full { value: cast(1, int32) }, true, Full { value: cast(1.5, f32) }, 3)
+out = print(concrete())
+";
+
+/// A mutually recursive cross-member edge whose argument leaves the callee
+/// parameter unconstrained. The checker admits it ([04-INF-2]: unconstrained
+/// is chosen as the caller's own), and eval executes it; host lowering has
+/// no positional correspondence across different defs' parameters, so the
+/// build stays on the documented fail-closed chelis#1158 residue.
+const MUTUAL_UNCONSTRAINED_CROSS_EDGE: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def even2[a](box: Box[a], n: int32) -> bool =
+  if n <= 0 then true else odd2(Empty, n - 1)
+def odd2[b](box: Box[b], n: int32) -> bool =
+  if n <= 0 then false else even2(Empty, n - 1)
+def main() -> bool = even2(Full { value: cast(1, int32) }, 3)
 ";
 
 /// Polymorphic recursion: `f` over `a` recursively calls `f` at `Box[a]`.
@@ -533,6 +568,41 @@ fn permuted_recursive_instantiation_specializes_per_orbit_member() {
     let compiled = run_first_line(&out_dir, "permuted");
     assert_eq!(eval, "3");
     assert_eq!(compiled, eval, "compiled output must match the eval lane");
+}
+
+#[test]
+fn permuted_edge_with_unconstrained_argument_specializes_correctly() {
+    let eval = eval_first_line(PERMUTED_WITH_UNCONSTRAINED, "tri_eval");
+    let (_dir, out_dir) = build_ok(PERMUTED_WITH_UNCONSTRAINED, "tri");
+    let c_source = read_generated_c(&out_dir, "tri");
+    let specialized = identifiers_with_prefix(&c_source, "tri");
+    assert_eq!(
+        specialized.len(),
+        2,
+        "the swap orbit has two members even with an unconstrained third \
+         slot, found: {specialized:?}"
+    );
+    // The orbit members' C parameter types differ (`chelis_adt*` vs
+    // `bool`), so the native compile+run step proves the permuted slots
+    // were kept and only the unconstrained slot was completed.
+    let compiled = run_first_line(&out_dir, "tri");
+    assert_eq!(eval, "3");
+    assert_eq!(compiled, eval, "compiled output must match the eval lane");
+}
+
+#[test]
+fn mutual_unconstrained_cross_edge_fails_closed() {
+    let (_dir, c_artifact, stderr) = build_err(MUTUAL_UNCONSTRAINED_CROSS_EDGE, "mutual_empty");
+    assert!(
+        stderr.contains("unsupported") && stderr.contains("chelis#1158"),
+        "the cross-member unconstrained edge stays on the branded chelis#1158 \
+         residue, got:\n{stderr}"
+    );
+    assert!(
+        !c_artifact.exists(),
+        "no C artifact may be written on rejection: {}",
+        c_artifact.display()
+    );
 }
 
 // ---------------------------------------------------------------------------
