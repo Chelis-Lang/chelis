@@ -946,11 +946,20 @@ checked constructor-field types rather than by source spelling
 ([chelis#940](https://github.com/Chelis-Lang/chelis/issues/940)); parameters
 that reach only tensor dimensions stay on the existing rank-specialization
 path, while stored value parameters remain ordinary type polymorphism.
-Invoked recursive ordinary-generic functions remain a loud unsupported
-boundary until the compiler has memoized monomorphized symbols
-([chelis#941](https://github.com/Chelis-Lang/chelis/issues/941)); lowering must
-not emit a reference to an omitted generic symbol or expand recursive source
-without a bound.
+Invoked recursive ordinary-generic functions compile through bounded
+memoized monomorphization
+([chelis#1158](https://github.com/Chelis-Lang/chelis/issues/1158), successor
+to the closed [chelis#941](https://github.com/Chelis-Lang/chelis/issues/941)):
+one specialized definition per distinct checked type application, memoized so
+direct and mutual recursive edges lower to ordinary calls to the owning
+specialized symbol, with the uniform-recursive-instantiation rule
+(`spec/04-type-system.md` §3.1.1, [04-INF-2]/[04-INF-3]) supplying the
+boundedness precondition at check time. Lowering still never emits a
+reference to an omitted generic symbol and never expands recursive source
+without a bound: a surviving call whose checked type application is not
+concrete stays on this loud boundary, citing chelis#1158. The delivered
+behavior's acceptance oracle is `cargo nextest run -p chelis-cli --test
+recursive_generic_monomorphization --no-fail-fast`.
 
 For `fold`, the checked callback's first parameter is the authoritative
 accumulator type. Host lowering materializes that type onto an unresolved

@@ -31,6 +31,35 @@ thread_local! {
         RefCell<HashMap<usize, HashMap<String, HashSet<String>>>> =
         RefCell::new(HashMap::new());
     static HOST_LOWERING_CACHE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    // chelis#1158: bounded memoized monomorphization of recursive generic
+    // host calls. Keyed by the callee's canonical checked type application;
+    // one specialized definition per key, with in-progress entries visible
+    // so a recursive edge lowers to an ordinary call to the (possibly
+    // still-lowering) specialized symbol. Lifetime: one `lower_host_program`
+    // invocation (cleared at its entry, drained into the emitted program at
+    // its exit).
+    static MONO_SPECIALIZATIONS: RefCell<MonoSpecializationState> =
+        RefCell::new(MonoSpecializationState::default());
+}
+
+#[derive(Default)]
+struct MonoSpecializationState {
+    /// Canonical `(def name, type application)` key -> specialized symbol.
+    memo: HashMap<String, String>,
+    /// Completed specialized definitions, in completion order.
+    functions: Vec<HostFunction>,
+    /// Stack of specializations currently being lowered. A recursive edge
+    /// into one of these reuses its symbol instead of expanding again — the
+    /// memoization that terminates mutual recursion.
+    in_progress: Vec<InProgressMonoSpecialization>,
+}
+
+#[derive(Clone)]
+struct InProgressMonoSpecialization {
+    def_name: String,
+    symbol: String,
+    param_tys: Vec<HostTypeTerm>,
+    ret_ty: HostTypeTerm,
 }
 
 static NEXT_HOST_INFERENCE_VAR: AtomicU32 = AtomicU32::new(0);
@@ -1493,6 +1522,10 @@ fn lower_host_program(
     program: &CheckedProgram,
     lowered_names: &HashMap<String, bool>,
 ) -> Result<HostProgram, crate::lower::LowerDiagnostic> {
+    // chelis#1158: specialization state is per-invocation; a fresh program
+    // lowering must rebuild every specialization (and must not inherit a
+    // failed run's partial memo).
+    MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
     let mut host = HostProgram::default();
     let mut global_scope = HashMap::new();
     // Count pure-tensor `fn`-body top-level defs in the program. When there
@@ -1835,6 +1868,14 @@ fn lower_host_program(
             global_scope.insert(name.to_string(), ty);
         }
     }
+    // chelis#1158: append the monomorphized specializations produced while
+    // lowering the program's functions and globals. They join before the
+    // refinement fixpoint below so signature refinement and type
+    // conformance treat them like any other definition, and the emitted C
+    // therefore contains no reference to an omitted generic definition.
+    host.functions.extend(
+        MONO_SPECIALIZATIONS.with(|state| std::mem::take(&mut state.borrow_mut().functions)),
+    );
     loop {
         let mut changed = false;
         changed |= refine_host_function_signatures(&mut host.functions);
@@ -6984,19 +7025,24 @@ fn lower_app_host_expr(
         }
         return lowered;
     }
-    // chelis#941: a recursive ordinary-generic function has no standalone C
-    // symbol, and eager inlining would expand without a bound. Until checked
-    // type-application monomorphs are memoized as real symbols, reject a
-    // surviving call here rather than emitting a reference to the omitted
-    // generic definition.
+    // chelis#1158: a recursive ordinary-generic function has no standalone
+    // C symbol and cannot be inlined (the call graph has a cycle). Compile
+    // it through bounded memoized monomorphization: one specialized
+    // definition per distinct checked type application, recursive edges
+    // preserved as calls to the owning specialized symbol. A call whose
+    // instantiation never resolves stays on the fail-closed [05-UNS]
+    // boundary below.
     if top_level_fn_is_type_polymorphic(program, &name) {
-        return Err(host_expr_lowering_error(
+        return lower_recursive_generic_call(
             &app_expr,
-            format!(
-                "recursive generic host call `{name}` requires bounded monomorphized symbols \
-                 (chelis#941; [05-UNS-1])"
-            ),
-        ));
+            &name,
+            &kids[1..],
+            &explicit_ty,
+            &inferred_ret_ty,
+            program,
+            scope,
+            tensor_helpers,
+        );
     }
     let args = kids[1..]
         .iter()
@@ -7161,6 +7207,254 @@ fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<E
         &substitutions,
         &HashSet::new(),
     )))
+}
+
+/// Lower a call to a recursive type-polymorphic top-level function through
+/// bounded memoized monomorphization (chelis#1158; spec/04 §3.1.1 supplies
+/// the boundedness precondition, which this stage assumes and does not
+/// re-litigate).
+#[allow(clippy::too_many_arguments)]
+fn lower_recursive_generic_call(
+    app_expr: &Expr,
+    name: &str,
+    args: &[Expr],
+    explicit_ty: &HostTypeTerm,
+    inferred_ret_ty: &HostTypeTerm,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    // A recursive edge inside a specialization currently being lowered:
+    // spec/04 §3.1.1 guarantees the call is at the caller's own
+    // instantiation, so it reuses the in-progress symbol instead of
+    // expanding again.
+    let in_progress = MONO_SPECIALIZATIONS.with(|state| {
+        state
+            .borrow()
+            .in_progress
+            .iter()
+            .rev()
+            .find(|spec| spec.def_name == name && spec.param_tys.len() == args.len())
+            .cloned()
+    });
+    if let Some(spec) = in_progress {
+        let lowered_args = args
+            .iter()
+            .zip(spec.param_tys.iter())
+            .map(|(arg, param_ty)| {
+                lower_host_expr_with_expected(arg, program, scope, tensor_helpers, Some(param_ty))
+                    .map(|lowered| force_host_expr_type(lowered, param_ty.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(HostExpr::new(HostExprKind::Call {
+            function: spec.symbol.clone(),
+            args: lowered_args,
+            arg_tys: spec.param_tys.clone(),
+            ty: spec.ret_ty.clone(),
+        }));
+    }
+
+    // Derive the checked type application from the call site. Every entry
+    // must be concrete; specialization is driven by checked call-site type
+    // applications only, never by eager expansion.
+    let definitions = adt_constructor_definitions(program);
+    let mut param_tys = Vec::with_capacity(args.len());
+    for arg in args {
+        let ty = canonicalize_representation_erased_adt_args(
+            expr_host_type(arg, program, scope),
+            &definitions,
+        );
+        param_tys.push(ty);
+    }
+    let ret_ty = if !explicit_ty.is_unresolved() {
+        explicit_ty.clone()
+    } else {
+        inferred_ret_ty.clone()
+    };
+    let ret_ty = canonicalize_representation_erased_adt_args(ret_ty, &definitions);
+    if param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved() {
+        // Fail-closed residue: no concrete checked instantiation to key a
+        // specialized definition on, and emitting a reference to the
+        // omitted generic definition is never legal.
+        return Err(host_expr_lowering_error(
+            app_expr,
+            format!(
+                "recursive generic host call `{name}` has no concrete checked type \
+                 application to specialize (chelis#1158; [05-UNS-1])"
+            ),
+        ));
+    }
+    let symbol = ensure_mono_specialization(app_expr, name, &param_tys, &ret_ty, program)?;
+    let lowered_args = args
+        .iter()
+        .zip(param_tys.iter())
+        .map(|(arg, param_ty)| {
+            lower_host_expr_with_expected(arg, program, scope, tensor_helpers, Some(param_ty))
+                .map(|lowered| force_host_expr_type(lowered, param_ty.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(HostExpr::new(HostExprKind::Call {
+        function: symbol,
+        args: lowered_args,
+        arg_tys: param_tys,
+        ty: ret_ty,
+    }))
+}
+
+/// Deterministic specialized-symbol name: the def name plus an FNV-1a hash
+/// of the canonical type-application key. No randomized hasher may be used
+/// here — the emitted symbol set must be identical across builds.
+fn mono_specialization_symbol(name: &str, canonical_key: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in canonical_key.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{name}__mono_{hash:016x}")
+}
+
+/// Return the specialized symbol for `(name, param_tys, ret_ty)`, lowering
+/// the specialized definition first if this is the key's first request. The
+/// memo and in-progress entries are registered before the body is lowered,
+/// so recursive edges encountered mid-emission resolve to this symbol.
+fn ensure_mono_specialization(
+    app_expr: &Expr,
+    name: &str,
+    param_tys: &[HostTypeTerm],
+    ret_ty: &HostTypeTerm,
+    program: &CheckedProgram,
+) -> Result<String, crate::lower::LowerDiagnostic> {
+    let canonical_key = format!("{name}\u{1}{param_tys:?}\u{1}{ret_ty:?}");
+    if let Some(symbol) =
+        MONO_SPECIALIZATIONS.with(|state| state.borrow().memo.get(&canonical_key).cloned())
+    {
+        return Ok(symbol);
+    }
+    let symbol = mono_specialization_symbol(name, &canonical_key);
+
+    let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
+        return Err(host_expr_lowering_error(
+            app_expr,
+            format!(
+                "recursive generic host call `{name}` has no top-level definition to \
+                 specialize (chelis#1158; [05-UNS-1])"
+            ),
+        ));
+    };
+    let params = as_list(body)
+        .filter(|fn_list| tag(fn_list) == Some(DeepTag::Fn))
+        .and_then(|fn_list| {
+            let fn_kids = children(fn_list);
+            let params_list = fn_kids.first().and_then(as_list)?;
+            if tag(params_list) != Some(DeepTag::Params) {
+                return None;
+            }
+            let body_expr = fn_kids.get(1)?.clone();
+            Some((children(params_list).to_vec(), body_expr))
+        });
+    let Some((param_exprs, body_expr)) = params else {
+        return Err(host_expr_lowering_error(
+            app_expr,
+            format!(
+                "recursive generic host call `{name}` does not name a function-bodied \
+                 definition (chelis#1158; [05-UNS-1])"
+            ),
+        ));
+    };
+    if param_exprs.len() != param_tys.len() {
+        return Err(host_expr_lowering_error(
+            app_expr,
+            format!(
+                "recursive generic host call `{name}` supplies {} argument(s) for {} \
+                 parameter(s) (chelis#1158; [05-UNS-1])",
+                param_tys.len(),
+                param_exprs.len()
+            ),
+        ));
+    }
+    let mut spec_scope = HashMap::new();
+    let mut spec_params = Vec::with_capacity(param_exprs.len());
+    for (param, param_ty) in param_exprs.iter().zip(param_tys.iter()) {
+        let Some(pname) = param_name(param) else {
+            return Err(host_expr_lowering_error(
+                app_expr,
+                format!(
+                    "recursive generic host call `{name}` has an unnameable parameter \
+                     (chelis#1158; [05-UNS-1])"
+                ),
+            ));
+        };
+        spec_scope.insert(pname.clone(), param_ty.clone());
+        spec_params.push(HostParam {
+            name: pname,
+            ty: param_ty.clone(),
+        });
+    }
+
+    MONO_SPECIALIZATIONS.with(|state| {
+        let mut state = state.borrow_mut();
+        state.memo.insert(canonical_key, symbol.clone());
+        state.in_progress.push(InProgressMonoSpecialization {
+            def_name: name.to_string(),
+            symbol: symbol.clone(),
+            param_tys: param_tys.to_vec(),
+            ret_ty: ret_ty.clone(),
+        });
+    });
+    let lowered = lower_mono_specialized_function(
+        &symbol,
+        spec_params,
+        ret_ty,
+        &body_expr,
+        body,
+        program,
+        &spec_scope,
+    );
+    MONO_SPECIALIZATIONS.with(|state| {
+        state.borrow_mut().in_progress.pop();
+    });
+    let function = lowered?;
+    MONO_SPECIALIZATIONS.with(|state| state.borrow_mut().functions.push(function));
+    Ok(symbol)
+}
+
+fn lower_mono_specialized_function(
+    symbol: &str,
+    mut params: Vec<HostParam>,
+    ret_ty: &HostTypeTerm,
+    body_expr: &Expr,
+    fn_expr: &Expr,
+    program: &CheckedProgram,
+    spec_scope: &HashMap<String, HostTypeTerm>,
+) -> Result<HostFunction, crate::lower::LowerDiagnostic> {
+    let body_expr = inline_local_callable_lets(body_expr);
+    let mut fn_tensor_helpers = Vec::new();
+    let mut host_body = lower_host_expr_with_expected(
+        &body_expr,
+        program,
+        spec_scope,
+        &mut fn_tensor_helpers,
+        Some(ret_ty),
+    )?;
+    // Span survival (spec/design/chelis_span_survival.md §2.3): the fn
+    // form's and body's source regions surface on the specialized body.
+    host_body.append_merged_span(body_expr.span_id());
+    host_body.append_merged_span(fn_expr.span_id());
+    refine_function_params_from_body(&mut params, &host_body);
+    let ret_ty = if ret_ty.is_unresolved() {
+        host_expr_type(&host_body)
+    } else {
+        ret_ty.clone()
+    };
+    Ok(HostFunction {
+        name: symbol.to_string(),
+        params,
+        ret_ty,
+        body: host_body,
+        tensor_helpers: fn_tensor_helpers,
+        specialization: None,
+        summary_rejections: Vec::new(),
+    })
 }
 
 /// Whether `name` has the narrow chelis#935 specialization shape: a

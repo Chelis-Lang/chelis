@@ -611,6 +611,18 @@ pub(super) fn collect_top_level_calls(
                     collect_top_level_calls(child, def_names, bound, calls);
                 }
             }
+            // A bare reference (alias binding, argument position, returned
+            // value) is a dependency edge too: an aliased in-group call is
+            // still recursion, and the §3.1.1 uniformity check only sees a
+            // group the SCC planner reports (spec/04 §3.1.1).
+            Some(DeepTag::Var) => {
+                if let Some(name) = children(list).first().and_then(symbol_name)
+                    && def_names.contains(name)
+                    && !is_bound_name(name, bound)
+                {
+                    calls.insert(name.to_string());
+                }
+            }
             Some(DeepTag::Fn) => {
                 let kids = children(list);
                 if kids.len() >= 2 {

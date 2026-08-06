@@ -7,8 +7,12 @@
 A top-level generic function — a `def` whose checker-recorded signature carries a type
 variable — MAY recurse, directly or through a mutually recursive group. Every recursive
 call inside the recursive binding group SHALL be typed at the caller's own instantiation
-of the group's type parameters. A recursive call whose type application differs from the
-caller's instantiation (polymorphic recursion) SHALL be a type error, reported by the
+of the group's type parameters: a type argument satisfies the requirement when it
+resolves to the caller's own type parameter or remains unconstrained (and is thereby
+chosen as it), and — for signature type variables introduced by inference rather than
+authored binders — when it is fully concrete, since a variable-free argument cannot grow
+the instantiation set. A recursive call whose type application is not so admitted
+(polymorphic recursion) SHALL be a type error, reported by the
 checker as the earliest competent stage per `spec/05-risc-primitives.md` [05-UNS-2],
 naming the function and the two disagreeing instantiations, and citing its deciding
 `spec/04-type-system.md` §3.1 atom per [05-UNS-5]. The rule is lane-uniform: a program

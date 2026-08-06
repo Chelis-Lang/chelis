@@ -8,91 +8,149 @@ change is done while that oracle is red.
 
 ## 1. Citation hygiene (independent, lands first)
 
-- [ ] 1.1 Flip the branded rejection citation in `crates/chelis-ir/src/host.rs`
+- [x] 1.1 Flip the branded rejection citation in `crates/chelis-ir/src/host.rs`
       from `chelis#941` to `chelis#1158`; update the two message assertions in
       `crates/chelis-cli/tests/issue_935_nullary_generic_adt.rs`
-- [ ] 1.2 Update the chelis#941 boundary entry in
+- [x] 1.2 Update the chelis#941 boundary entry in
       `spec/design/loud_unsupported.md` to name chelis#1158 as the live tracker
 - [ ] 1.3 Run `python3 scripts/gate.py --local`; land this group as its own PR
+      (gate green 2026-08-06 — see 6.1. The separate-PR option was overtaken:
+      the full implementation completed in the same change set, so the
+      citation flip ships with it; splitting now would be churn. PR landing
+      awaits maintainer go-ahead.)
 
 ## 2. Spec authoring and failing tests (spec-first)
 
-- [ ] 2.1 Probe current checker behavior (D5): author a polymorphic-recursion
+- [x] 2.1 Probe current checker behavior (D5): author a polymorphic-recursion
       program (`f` over `a` recursively calling `f` at `Box[a]`) and record whether
       `chelis check` / `chelis eval` accept it today; decide the BREAKING bullet's
       final wording from the result
-- [ ] 2.2 Author the uniform-recursive-instantiation atoms in
+      **Result (2026-08-05): `chelis check` ACCEPTS (exit 0, zero errors) and
+      `chelis eval` executes it (`main = 3`); `chelis build` rejects at lowering
+      with the branded chelis#1158 diagnostic. The change IS BREAKING for the
+      eval lane: the CHANGELOG carries a BREAKING note with the reproducer.**
+- [x] 2.2 Author the uniform-recursive-instantiation atoms in
       `spec/04-type-system.md` §3.1, allocating `[04-INF-N]` numbers against
       current `main`; state the rule (in-group recursive calls typed at the
       caller's own instantiation; violation is a check-time type error carrying
       the atom per [05-UNS-5]) without implementation status
-- [ ] 2.3 Create `crates/chelis-cli/tests/recursive_generic_monomorphization.rs`
+- [x] 2.3 Create `crates/chelis-cli/tests/recursive_generic_monomorphization.rs`
       with test stubs mapped one-to-one to every scenario in both delta specs:
       direct recursion (one and two instantiations), mutual recursion, memoized
       termination/symbol-count, link-clean build + run vs eval output, check-time
       polymorphic-recursion rejection in `eval` and `build`, lane-uniform
       diagnostic equality, and no-closed-issue-citation; all red except the
       currently-rejecting negatives
-- [ ] 2.4 Add the chelis#941 minimized `Box[a]`/`loop` reproducer to the suite as
-      the named regression case
+- [x] 2.4 Add the chelis#941 minimized `Box[a]`/`loop` reproducer to the suite as
+      the named regression case (suite is 4 green / 9 red: the four green are
+      the currently-rejecting negatives and currently-accepting checks, per
+      the spec-first expectation)
 
 ## 3. Checker: uniform recursive instantiation (D5)
 
-- [ ] 3.1 In `chelis-types::infer`, compute recursive binding groups (SCCs over
-      the top-level def call graph) during checking
-- [ ] 3.2 Enforce in-group calls typed at the caller's own instantiation; emit an
+- [x] 3.1 In `chelis-types::infer`, compute recursive binding groups (SCCs over
+      the top-level def call graph) during checking (reused the existing
+      `function_inference_sccs` planner; extended its call-graph edges to
+      include bare `(var f)` references so aliased recursion forms a group)
+- [x] 3.2 Enforce in-group calls typed at the caller's own instantiation; emit an
       `ErrorWitness`-conformant diagnostic naming the function, both
-      instantiations, and the deciding §3.1 atom
-- [ ] 3.3 Negative-parity coverage in `chelis-types` unit tests: direct
+      instantiations, and the deciding §3.1 atom (`infer/recursion.rs`:
+      in-group instantiations recorded during group inference, pinned against
+      let-generalization, validated post-group; fully concrete arguments are
+      admitted for inference-introduced signature variables — [04-INF-2] was
+      amended to state that admission rule — while authored binders stay
+      strict)
+- [x] 3.3 Negative-parity coverage in `chelis-types` unit tests: direct
       polymorphic recursion, mutual polymorphic recursion (uniform within one
       edge, growing across the cycle), and the accepted uniform twins of each
-- [ ] 3.4 Verify lane uniformity: `eval --file` and `build` report the identical
-      check-time error (oracle's negative half green)
+      (`infer/tests/recursion_uniformity.rs`, plus let-alias positive/negative
+      pair and out-of-group freedom)
+- [x] 3.4 Verify lane uniformity: `eval --file` and `build` report the identical
+      check-time error (oracle's negative half green; both lanes report the
+      identical CheckError, wrapped in per-lane invocation framing)
 
 ## 4. Lowering: bounded memoized specialization (D4)
 
-- [ ] 4.1 Add the specialization memo keyed by `(def name, canonical checked type
+- [x] 4.1 Add the specialization memo keyed by `(def name, canonical checked type
       application)` with per-`lower_host_program`-invocation lifetime, and the
       worklist that emits one specialized definition per key; insert the memo
       entry before lowering the body so in-progress symbols resolve
-- [ ] 4.2 Implement deterministic symbol mangling from the canonical type
+      (`MONO_SPECIALIZATIONS` thread-local in `host.rs`: memo + in-progress
+      stack registered before body lowering; recursion drives the worklist)
+- [x] 4.2 Implement deterministic symbol mangling from the canonical type
       identity; golden test asserts the exact emitted symbol set for a
       two-instantiation program across two consecutive builds
-- [ ] 4.3 Rewire the recursion-detected fallback in `host.rs` from the branded
+      (`<def>__mono_<fnv1a-16hex>` over the canonical `HostTypeTerm`
+      signature; `specialized_symbol_set_is_deterministic_across_builds`
+      asserts set equality across two builds plus exact cardinality)
+- [x] 4.3 Rewire the recursion-detected fallback in `host.rs` from the branded
       rejection to a specialization request; leave the non-recursive inlining
-      path untouched
-- [ ] 4.4 Emit specialized definitions in `lower_host_program` alongside the
+      path untouched (`lower_recursive_generic_call` replaces the rejection;
+      the `callee_is_nonrecursive_type_polymorphic` inline branch is
+      unchanged; the two issue_935 branded-failure tests flipped to
+      compile-success assertions)
+- [x] 4.4 Emit specialized definitions in `lower_host_program` alongside the
       existing generic-definition skip; confirm emitted C contains no reference
       to an omitted generic definition (link-clean assertion via the suite's
-      compile step)
-- [ ] 4.5 Keep the fail-closed residue: any surviving unspecializable generic
+      compile step; specializations drain into `host.functions` before the
+      refinement fixpoint so prototypes/conformance treat them uniformly)
+- [x] 4.5 Keep the fail-closed residue: any surviving unspecializable generic
       call still rejects branded, now citing chelis#1158; negative fixture
-      asserts no C artifact is written on rejection
-- [ ] 4.6 Verify HIP and Metal host lanes consume the shared specialization path,
+      asserts no C artifact is written on rejection (residue = a call whose
+      checked type application never resolves concrete, e.g. `loop(Empty)`
+      with unconstrained `a` at top level;
+      `surviving_unsupported_call_fails_closed_without_artifacts` green)
+- [x] 4.6 Verify HIP and Metal host lanes consume the shared specialization path,
       or record the exact gap as [05-UNS] residue citing chelis#1158 in the
       owning docs
-- [ ] 4.7 Confirm Tier-2 precision and Tier-3 rank specialization suites are
+      **Verified 2026-08-05: `--target hip` and `--target metal` both route
+      host code through the shared `chelis-ir` lowering + shared host
+      emitter — the emitted `.cpp` for the recursive-generic probe contains
+      the specialized symbol's prototype, definition, and recursive call on
+      both targets, and both builds exit 0. No divergent host lane exists;
+      no residue to record.**
+- [x] 4.7 Confirm Tier-2 precision and Tier-3 rank specialization suites are
       green unchanged (regression oracle for the untouched paths)
+      (full `-p chelis-ir -p chelis-backend-c -p chelis-cli -p chelis-types`
+      nextest run: 4711 tests, green after wiring the new example into the
+      parity corpus; the only other failures were two `issue_914` timeout
+      tests that pass on a quiet machine — the documented CPU-contention
+      signature, re-run green)
 
 ## 5. Docs, examples, and spec sync
 
-- [ ] 5.1 Add an executable recursive-generic example to `examples/` that
+- [x] 5.1 Add an executable recursive-generic example to `examples/` that
       survives `chelis fmt --check` and `chelis check` (Phase 0 path)
-- [ ] 5.2 Retire the boundary entry in `spec/design/loud_unsupported.md` to a
+      (`examples/recursive_generic.ch`; fmt --check clean, check clean, eval
+      prints `5`)
+- [x] 5.2 Retire the boundary entry in `spec/design/loud_unsupported.md` to a
       delivered-behavior record pointing at the oracle suite
-- [ ] 5.3 Update `docs/book` build/eval pages where they describe the generic
+- [x] 5.3 Update `docs/book` build/eval pages where they describe the generic
       lowering boundary; add `CHANGELOG.md` entries (feature; BREAKING note if
       task 2.1 found acceptance)
-- [ ] 5.4 Verify every scenario in both delta specs maps to at least one test in
-      the oracle suite; note the mapping in the suite's module docs
+      (no `docs/book` page describes the recursive-generic lowering boundary
+      — verified by search — so the book half is a no-op; CHANGELOG carries
+      the Added entry and the BREAKING checker note with the task-2.1
+      reproducer)
+- [x] 5.4 Verify every scenario in both delta specs maps to at least one test in
+      the oracle suite; note the mapping in the suite's module docs (module
+      doc of `recursive_generic_monomorphization.rs` carries the full
+      11-scenario map: 7 generic-monomorphization + 4 type-system)
 
 ## 6. Validation and acceptance
 
-- [ ] 6.1 `python3 scripts/gate.py --local` green (clippy `-D warnings`, fmt,
+- [x] 6.1 `python3 scripts/gate.py --local` green (clippy `-D warnings`, fmt,
       `chelis lint --check .`, rustdoc trio, checkpoint fixture, changed-crate
       nextest) in an isolated `CARGO_TARGET_DIR`
-- [ ] 6.2 Acceptance oracle green: `cargo nextest run -p chelis-cli --test
-      recursive_generic_monomorphization --no-fail-fast`
+      (green 2026-08-06; the one post-gate edit — a one-line `current_dir`
+      hygiene fix in `style_gate.rs` stopping `build --allow-style-violations`
+      from writing artifacts into `crates/chelis-cli/` — was re-verified with
+      `cargo fmt --check`, `cargo clippy -p chelis-cli --tests -D warnings`,
+      and the 18/18 style_gate suite)
+- [x] 6.2 Acceptance oracle green: `cargo nextest run -p chelis-cli --test
+      recursive_generic_monomorphization --no-fail-fast` (13/13; plus the
+      issue_935 suite 10/10 and parity 21/21 including
+      `parity_recursive_generic`'s byte-exact eval/C comparison)
 - [ ] 6.3 Red team per protocol: fresh local subagent executes the oracle suite,
       probes adversarial variants (mutual recursion crossing three defs,
       instantiation reuse across separate call sites, polymorphic recursion

@@ -6,6 +6,49 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Recursive generic host calls compile via bounded memoized
+  monomorphization (chelis#1158, successor to chelis#941).** The C-emitting
+  host lane now compiles a recursive (direct or mutual) generic host call by
+  emitting one specialized definition per distinct checked type application,
+  memoized so each `(function, instantiation)` pair is generated exactly
+  once, with recursive edges lowered as ordinary calls to the owning
+  specialized symbol (`<def>__mono_<hash>`, deterministic across builds).
+  The former branded `requires bounded monomorphized symbols` rejection is
+  retired for these programs; a surviving generic call whose checked type
+  application never resolves still fails closed with a branded `unsupported:`
+  diagnostic citing chelis#1158, and no C artifact is written. HIP and Metal
+  targets consume the same shared host lowering. Acceptance oracle:
+  `cargo nextest run -p chelis-cli --test recursive_generic_monomorphization
+  --no-fail-fast`.
+
+### Changed
+
+- **BREAKING (checker): polymorphic recursion is now a check-time type
+  error ([04-INF-2]/[04-INF-3], spec/04-type-system.md §3.1.1).** Every
+  recursive call inside a recursive binding group must be typed at the
+  caller's own instantiation; a call whose type application embeds a type
+  variable inside a larger constructed type is rejected by the checker with
+  a diagnostic naming the function, both instantiations, and the deciding
+  atom — identically across the eval and build lanes. Previously the eval
+  lane accepted and executed such programs (they never compiled natively);
+  the reproducer below now rejects at `check`:
+
+  ```text
+  type Box[a] =
+    | Empty
+    | Full { value: a }
+  def f[a](x: a, n: int32) -> int32 =
+    if n <= 0 then 0 else f(Full { value: x }, n - 1) + 1
+  def main() -> int32 = f(1, 3)
+  ```
+
+  Fully concrete (type-variable-free) recursive type arguments remain
+  admitted for signature variables introduced by inference rather than
+  authored `[a]` binders, so partially annotated recursive defs keep
+  checking exactly as before.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C

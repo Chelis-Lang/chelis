@@ -86,6 +86,7 @@ pub(super) fn infer_program_with_product_in_session(
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let metadata_prebound_names = HashSet::new();
     let inference_groups = primary_inference_groups(exprs, &items);
+    super::recursion::reset();
     for group in inference_groups {
         let provisional_types = if group.recursive {
             prebind_recursive_function_schemes(
@@ -99,6 +100,22 @@ pub(super) fn infer_program_with_product_in_session(
         } else {
             HashMap::new()
         };
+        // spec/04 §3.1.1: record in-group instantiations while this
+        // recursive group's bodies are inferred; validated in
+        // `finish_group` below.
+        if group.recursive {
+            super::recursion::begin_group(
+                group.indices.iter().filter_map(|&index| {
+                    top_level_decl_name(items[index].1).map(|name| {
+                        let authored = declared_signatures
+                            .get(name)
+                            .is_some_and(|metadata| !metadata.binders.is_empty());
+                        (name, authored)
+                    })
+                }),
+                &env,
+            );
+        }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
             let (module, expr) = &items[declaration_index];
@@ -134,6 +151,10 @@ pub(super) fn infer_program_with_product_in_session(
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
         }
         if group.recursive {
+            // Uniform-recursive-instantiation validation must run before the
+            // deferred generalization: it clears the instantiation-variable
+            // pins, which would otherwise block quantification here.
+            super::recursion::finish_group(&subst, errors);
             for (name, _) in &deferred_bindings {
                 env.remove_binding(name);
             }
@@ -1034,6 +1055,7 @@ pub(super) fn infer_ir_program_with_state(
     // many orders of magnitude more often — untouched.
     let cancel = crate::cancel::current_cancel_token();
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
+    super::recursion::reset();
     'schedule: for group in inference_groups {
         let provisional_types = if group.recursive {
             prebind_recursive_function_schemes(
@@ -1047,6 +1069,22 @@ pub(super) fn infer_ir_program_with_state(
         } else {
             HashMap::new()
         };
+        // spec/04 §3.1.1: record in-group instantiations while this
+        // recursive group's bodies are inferred; validated in
+        // `finish_group` below.
+        if group.recursive {
+            super::recursion::begin_group(
+                group.indices.iter().filter_map(|&index| {
+                    top_level_decl_name(items[index].1).map(|name| {
+                        let authored = declared_signatures
+                            .get(name)
+                            .is_some_and(|metadata| !metadata.binders.is_empty());
+                        (name, authored)
+                    })
+                }),
+                &state.env,
+            );
+        }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
             if cancelled() {
@@ -1097,6 +1135,10 @@ pub(super) fn infer_ir_program_with_state(
             validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
         if group.recursive {
+            // Uniform-recursive-instantiation validation must run before the
+            // deferred generalization: it clears the instantiation-variable
+            // pins, which would otherwise block quantification here.
+            super::recursion::finish_group(&state.subst, errors);
             for (name, _) in &deferred_bindings {
                 state.env.remove_binding(name);
             }

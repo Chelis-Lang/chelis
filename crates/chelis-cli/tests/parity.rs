@@ -393,6 +393,13 @@ fn parity_list_foundation() {
 }
 
 #[test]
+fn parity_recursive_generic() {
+    // chelis#1158: recursive generic host calls compile via bounded
+    // memoized monomorphization; both lanes print the same value.
+    drive_parity(&examples_root().join("recursive_generic.ch"), true);
+}
+
+#[test]
 fn parity_scalar_string_foundation() {
     drive_parity(&examples_root().join("scalar_string_foundation.ch"), true);
 }
@@ -490,6 +497,7 @@ fn parity_corpus_is_complete() {
         "opaque_invariants.ch",
         "opaque_invariants_simplex.ch",
         "rank_poly_borrow.ch",
+        "recursive_generic.ch",
         "scalar_string_foundation.ch",
         "tensor_structural_ops.ch",
         "transformer_block.ch",

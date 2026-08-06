@@ -178,9 +178,25 @@ impl Env {
 
     /// Instantiate a polymorphic scheme with fresh variables.
     pub fn instantiate(&self, scheme: &Scheme, var_gen: &mut VarGen) -> Type {
+        self.instantiate_with_tvar_mapping(scheme, var_gen).0
+    }
+
+    /// Instantiate a scheme and return the fresh type minted for each
+    /// quantified type variable, in quantifier order. The uniform recursive
+    /// instantiation check (spec/04 §3.1.1) records this mapping for
+    /// in-group references so the group's final substitution can be
+    /// compared against the caller's own instantiation.
+    pub fn instantiate_with_tvar_mapping(
+        &self,
+        scheme: &Scheme,
+        var_gen: &mut VarGen,
+    ) -> (Type, Vec<(TypeVar, Type)>) {
         let mut subst = Subst::new();
+        let mut mapping = Vec::with_capacity(scheme.tvars.len());
         for &tv in &scheme.tvars {
-            subst.insert_type(tv, var_gen.fresh_type());
+            let fresh = var_gen.fresh_type();
+            subst.insert_type(tv, fresh.clone());
+            mapping.push((tv, fresh));
         }
         for &dv in &scheme.dvars {
             subst.insert_dim(dv, var_gen.fresh_dim());
@@ -190,7 +206,7 @@ impl Env {
             // call site gets its own rank (Tier-2 rank polymorphism).
             subst.insert_rank(rv, vec![Dim::Rank(var_gen.fresh_rvar())]);
         }
-        subst.apply(&scheme.body)
+        (subst.apply(&scheme.body), mapping)
     }
 
     /// Collect all free type variables across all bindings in the environment.
@@ -249,7 +265,15 @@ impl Env {
         Scheme {
             tvars: ty_tvars
                 .into_iter()
-                .filter(|v| !env_tvars.contains(v) && !subst.has_deferred_expand_constraint(*v))
+                .filter(|v| {
+                    !env_tvars.contains(v)
+                        && !subst.has_deferred_expand_constraint(*v)
+                        // spec/04 §3.1.1: a variable minted for an in-group
+                        // recursive instantiation stays monomorphic while its
+                        // group is inferred, so a let-bound alias of a group
+                        // member cannot smuggle in polymorphic recursion.
+                        && !crate::infer::recursion::tvar_pinned(*v)
+                })
                 .collect(),
             dvars: ty_dvars
                 .into_iter()
