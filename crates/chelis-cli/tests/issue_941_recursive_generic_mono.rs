@@ -190,14 +190,35 @@ def mixed[a](box: Box[a], t: tensor[2, f32], c: int64) -> bool = if lt(c, cast(1
 out = print(mixed(Full { value: cast(1, int64) }, to_tensor([cast(1.0, f32), cast(2.0, f32)]), cast(2, int64)))
 ";
 
-/// A generic whose specialization has a pure-tensor signature, so it competes
-/// with the authored entry. `run` is the author's entry; `spin[a]` at
-/// `a := tensor[2, f32]` produces `spin__mono_*(chelis_tensor*) ->
-/// chelis_tensor*`, which the drain appends AFTER `run`. Entry selection takes
-/// the LAST pure-tensor function, so pre-fix the specialization displaced
-/// `run` and the build silently fell back to the whole-program kernel — the
-/// HIP entry went from 1-in/1-out to 1-in/4-out.
+/// A generic whose specialization has a PURE-tensor signature, so it competes
+/// with the authored entry. `scale` is the author's entry; `spin[a](x: a) -> a`
+/// at `a := tensor[2, f32]` produces `spin__mono_*(chelis_tensor*) ->
+/// chelis_tensor*`, which the drain appends AFTER `scale`. Entry selection
+/// takes the LAST pure-tensor function, so pre-fix the specialization displaced
+/// `scale`; `lower_named_tensor_entry_dag` then found no such def in the
+/// CHECKED program (the symbol is compiler-minted), returned `None`, and the
+/// build fell back to the whole-program kernel — the HIP entry went from
+/// 1-in/1-out to 1-in/4-out.
+///
+/// `spin` takes exactly one parameter, and that is the whole trigger: see the
+/// control below.
 const ENTRY_DISPLACEMENT: &str = "\
+def stop() -> bool = true
+def spin[a](x: a) -> a = if stop() then x else spin(x)
+def run(flag: bool) -> tensor[2, f32] = spin(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
+def scale(x: tensor[2, f32]) -> tensor[2, f32] = mul(x, x)
+";
+
+/// The control half of the minimal pair: the same program with one extra
+/// `int64` parameter on the generic. Its specialization is
+/// `(chelis_tensor*, int64) -> chelis_tensor*`, which is NOT a pure-tensor
+/// signature, so entry selection rejects it on the parameter test and the
+/// specialization filter is never consulted.
+///
+/// This half must be here and must be labelled, because it is the shape a
+/// finding-3 test most easily degenerates into — it passes identically with
+/// the fix reverted, and on its own would prove nothing.
+const ENTRY_DISPLACEMENT_EXTRA_PARAM: &str = "\
 def stop() -> bool = true
 def spin[a](x: a, n: int64) -> a = if stop() then x else spin(x, n)
 def run(flag: bool) -> tensor[2, f32] = spin(to_tensor([cast(1.0, f32), cast(2.0, f32)]), cast(0, int64))
@@ -444,14 +465,12 @@ fn mixed_type_var_and_literal_dim_still_builds() {
     assert_build_lane_matches_eval(MIXED_TYPEVAR_AND_LITERAL_DIM, "mixed_literal_dim", "true");
 }
 
-#[test]
-fn a_specialization_never_displaces_the_authored_entry() {
-    // The symptom is in the entry ABI, which the HIP target makes visible as
-    // an explicit arity check in the emitted entry.
+/// Build `source` to HIP and return `(emitted .cpp, emitted .h)`.
+fn build_hip(source: &str, stem: &str) -> (String, String) {
     let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("entry_displacement.ch");
+    let path = dir.path().join(format!("{stem}.ch"));
     let out_dir = dir.path().join("out");
-    write_file(&path, ENTRY_DISPLACEMENT);
+    write_file(&path, source);
     Command::cargo_bin("chelis")
         .expect("chelis binary")
         .env("CHELIS_STYLE_GATE_DISABLE", "1")
@@ -465,8 +484,19 @@ fn a_specialization_never_displaces_the_authored_entry() {
         ])
         .assert()
         .success();
-    let emitted = std::fs::read_to_string(out_dir.join("entry_displacement_hip.cpp"))
+    let emitted = std::fs::read_to_string(out_dir.join(format!("{stem}_hip.cpp")))
         .expect("emitted HIP source");
+    let header =
+        std::fs::read_to_string(out_dir.join(format!("{stem}_hip.h"))).expect("emitted HIP header");
+    (emitted, header)
+}
+
+fn assert_authored_entry_survives(source: &str, stem: &str) {
+    // The symptom is in the entry ABI, which the HIP target makes visible as
+    // an explicit arity check in the emitted entry: the authored `scale` is
+    // 1-in/1-out, while the whole-program fallback kernel a displaced entry
+    // falls back to is 1-in/4-out.
+    let (emitted, header) = build_hip(source, stem);
     assert!(
         emitted.contains("expected %d outputs, got %d\\n\", 1,"),
         "the authored single-output entry must survive; a displaced entry falls \
@@ -479,11 +509,29 @@ fn a_specialization_never_displaces_the_authored_entry() {
     );
     // The compiler-owned specialization must not appear in the published
     // header either.
-    let header = std::fs::read_to_string(out_dir.join("entry_displacement_hip.h"))
-        .expect("emitted HIP header");
     assert!(
         !header.contains("__mono_"),
         "published header must not declare specializations:\n{header}"
+    );
+}
+
+#[test]
+fn a_specialization_never_displaces_the_authored_entry() {
+    // The trigger: the specialization's signature is pure-tensor, so it IS a
+    // candidate and the filter under test is what excludes it.
+    assert_authored_entry_survives(ENTRY_DISPLACEMENT, "entry_displacement");
+}
+
+#[test]
+fn an_extra_parameter_keeps_the_specialization_out_of_entry_selection() {
+    // The control half of the minimal pair. This one passes with the fix
+    // reverted — entry selection rejects the specialization on the parameter
+    // test long before the specialization filter is consulted. It is here to
+    // keep the pair honest about which half carries the proof, and to catch a
+    // future widening of `tensor_signature` that would make it a candidate.
+    assert_authored_entry_survives(
+        ENTRY_DISPLACEMENT_EXTRA_PARAM,
+        "entry_displacement_extra_param",
     );
 }
 

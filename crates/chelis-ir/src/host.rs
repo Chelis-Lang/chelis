@@ -12653,4 +12653,74 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         try_lower_compiled_program(&checked)
             .expect("the bounded generic match must lower through its concrete caller");
     }
+
+    /// chelis#1158 Finding 3, at the shape that actually triggers it.
+    ///
+    /// `spin[a](x: a) -> a` at `a := tensor[2, f32]` specializes to
+    /// `(tensor) -> tensor` — a PURE-tensor signature, which is what makes it a
+    /// candidate at all. The extra-parameter variant below is the control: its
+    /// specialization takes an `int64`, so `tensor_signature` rejects it on the
+    /// parameter test and the filter under test is never consulted. A test
+    /// written only in that shape passes with the fix reverted.
+    ///
+    /// The preconditions are asserted, not assumed, because every one of them
+    /// is load-bearing: if the specialization stopped having a pure-tensor
+    /// signature, or stopped being positioned after the authored entry, this
+    /// test would still pass while testing nothing.
+    #[test]
+    fn a_specialization_never_wins_entry_selection() {
+        let checked = surf_check(
+            "def stop() -> bool = true\n\
+             def spin[a](x: a) -> a = if stop() then x else spin(x)\n\
+             def run(x: tensor[2, f32]) -> tensor[2, f32] = spin(x)\n",
+        );
+        let host = try_lower_compiled_program(&checked)
+            .expect("the recursive generic must lower")
+            .host
+            .expect("a host program");
+
+        let specialization = host
+            .functions
+            .iter()
+            .find(|function| is_monomorphized_specialization(&function.name))
+            .expect("trigger precondition: the generic must have been outlined");
+        assert!(
+            matches!(specialization.ret_ty, ConcreteHostType::Tensor(_))
+                && specialization
+                    .params
+                    .iter()
+                    .all(|param| matches!(param.ty, ConcreteHostType::Tensor(_))),
+            "trigger precondition: the specialization must have a pure-tensor \
+             signature, or it is not a candidate and this test proves nothing"
+        );
+        let authored = host
+            .functions
+            .iter()
+            .position(|function| function.name == "run")
+            .expect("the authored entry");
+        let specialized = host
+            .functions
+            .iter()
+            .position(|function| function.name == specialization.name)
+            .expect("the specialization");
+        assert!(
+            specialized > authored,
+            "trigger precondition: the drain appends specializations after the \
+             authored functions, so the LAST-match selection is what picks them"
+        );
+
+        assert_eq!(
+            preferred_tensor_entry_name(&host),
+            Some("run"),
+            "a compiler-owned specialization must never displace the authored entry"
+        );
+        // The second chokepoint: `chelis-compiler-api` builds its entry-candidate
+        // list from this predicate, so an unfiltered specialization would also
+        // surface its hashed internal name in the strict-mode ambiguity error.
+        assert!(
+            !function_has_tensor_signature(&host, &specialization.name),
+            "a specialization must not be an entry candidate by name either"
+        );
+        assert!(function_has_tensor_signature(&host, "run"));
+    }
 }
