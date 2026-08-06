@@ -1868,12 +1868,15 @@ fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Exp
 
 /// Synthesized destructure bind (Linearity-F2).  Marks the `bind`
 /// node with `destructure: true` in its meta-map so the linearity
-/// checker can distinguish synthesized-tmp scopes from regular
-/// `let` scopes.  Linearity-F2 W2 cascade (this PR) treats
-/// use-after-consume inside a destructure-marked scope as an
-/// error: implicit Copy insertion does not apply to destructured
-/// components because tuple-get produces a fresh owned value, not
-/// an aliased borrow.
+/// checker can distinguish destructure components (and the
+/// synthesized `__chelis_tmpN` intermediates that carry them) from
+/// regular `let` bindings.  Each such bind introduces exactly one
+/// name, and the checker marks that name as a destructured component
+/// (`LinearScope::mark_destructured`): use-after-consume on a
+/// component is an error because implicit Copy insertion does not
+/// apply to it — tuple-get produces a fresh owned value, not an
+/// aliased borrow.  Per chelis#1200 the marker scopes to the names
+/// it introduces, never to the enclosing block.
 fn bind_destructure_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
     let bind_node = node_meta(
         DeepTag::Bind,

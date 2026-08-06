@@ -65,6 +65,25 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   authored `[a]` binders, so partially annotated recursive defs keep
   checking exactly as before.
 
+### Fixed
+
+- **chelis#1200: a destructuring `let` no longer poisons the rest of its
+  block.** The Linearity-F2 use-after-consume gate was scoped to the
+  destructuring let's *body*, and in a block every later statement is
+  nested inside that body — so one `_ = f(x)` discard (or any
+  non-`Var` let pattern) turned every subsequent consume-after-consume
+  in the block into a hard error, on ANY variable, including ordinary
+  bindings unrelated to the destructure and the destructure's own
+  source. The gate is now membership on the consumed name: only a name
+  actually introduced by a destructure component is subject to F2, and
+  the mark rides the binding's scope entry so shadowing and scope exit
+  behave like every other per-name property. The diagnostic text is
+  unchanged — under the new guard its "(from a destructured binding)"
+  claim is finally accurate, because it only fires for genuine
+  destructured components. Reuse of a component without `copy()` is
+  still an error; downstream, coral's suite returns from 17 passed / 7
+  failed to 74 passed / 0 failed with no source edits.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C
