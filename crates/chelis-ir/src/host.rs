@@ -16,8 +16,9 @@ use crate::dag::{DimExpr, DimInfo, RiscOp, TensorType};
 use crate::host_mono::{
     MonoProbeGuard, MonoRejection, PendingSpecialization, apply_type_var_bindings,
     collect_free_type_vars, collect_type_var_bindings, enclosing_binding, encode_host_type,
-    intern_specialization, pop_mono_frame, pop_pending_specialization, push_mono_frame,
-    render_host_type_term, reset_mono_state, substitute_type_vars_in_deep,
+    first_tensor_shape_disagreement, intern_specialization, pop_mono_frame,
+    pop_pending_specialization, push_mono_frame, render_host_type_term, reset_mono_state,
+    substitute_type_vars_in_deep,
 };
 use crate::host_type_state::{
     ConcreteHostType, HostInferenceVar, HostPrecisionTerm, HostShapeTerm, HostTensorTypeTerm,
@@ -7326,6 +7327,36 @@ fn resolve_concrete_call_signature(
             ),
         });
     }
+    // chelis#1158: a signature can be "concrete" by `is_unresolved()` and still
+    // not be a faithful monomorphization of THIS call, because dimension names
+    // are not substituted. Catch that here, where it is a diagnosable call
+    // site, rather than at C ABI projection, where it is an internal compiler
+    // error.
+    for (index, (param, arg_ty)) in params.iter().zip(&arg_tys).enumerate() {
+        if let Some((instantiated, actual)) = first_tensor_shape_disagreement(param, arg_ty) {
+            return Err(MonoRejection::NotConcrete {
+                detail: format!(
+                    "parameter {index} monomorphizes to `{instantiated}` but the call \
+                     passes `{actual}`; monomorphization substitutes type variables, \
+                     not tensor dimension names, so this signature has no faithful \
+                     monomorphic form"
+                ),
+            });
+        }
+    }
+    if let Some((instantiated, actual)) = first_tensor_shape_disagreement(
+        &ret,
+        &canonicalize_representation_erased_adt_args(expected_ty.clone(), &definitions),
+    ) {
+        return Err(MonoRejection::NotConcrete {
+            detail: format!(
+                "the return type monomorphizes to `{instantiated}` but the call site \
+                 expects `{actual}`; monomorphization substitutes type variables, not \
+                 tensor dimension names, so this signature has no faithful monomorphic \
+                 form"
+            ),
+        });
+    }
     Ok((params, ret))
 }
 
@@ -9368,7 +9399,10 @@ fn lookup_program_def<'a>(defs: &'a HashMap<String, Expr>, name: &str) -> Option
     })
 }
 
-fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
+/// Whether two spellings denote the same entity, tolerating a module-qualified
+/// name against its short form. `host_mono` uses this so its ADT-name matching
+/// and the def-table lookup agree on one rule instead of two.
+pub(crate) fn terminal_name_matches(full_name: &str, short_name: &str) -> bool {
     full_name == short_name || terminal_name(full_name) == terminal_name(short_name)
 }
 

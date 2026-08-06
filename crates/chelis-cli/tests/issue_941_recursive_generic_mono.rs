@@ -164,6 +164,32 @@ def wb(t: tensor[2, f32]) -> tensor[2, f32] = if eq(count(Full { value: \"x\" },
 r = driver(to_tensor([cast(1.0, f32), cast(2.0, f32)]))
 ";
 
+/// A recursive generic mixing a type variable with a SYMBOLIC tensor dim.
+///
+/// Monomorphization substitutes type variables, not dimension names, so the
+/// specialization interns with the declared `n` while the caller passes
+/// `tensor[2, f32]`. Pre-fix that pair reached C ABI projection and aborted the
+/// build with an internal compiler error `[04-TOT-2]`; it must be a clean
+/// `[05-UNS-1]` call-site rejection instead.
+const MIXED_TYPEVAR_AND_SYMBOLIC_DIM: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def mixed[a](box: Box[a], t: tensor[n, f32], c: int64) -> bool = if lt(c, cast(1, int64)) then true else mixed(box, t, sub(c, cast(1, int64)))
+out = print(mixed(Full { value: cast(1, int64) }, to_tensor([cast(1.0, f32), cast(2.0, f32)]), cast(2, int64)))
+";
+
+/// The same signature with a LITERAL dim. Dims agree with the caller, so this
+/// is a faithful monomorphization and must keep building — the control that
+/// stops the fix above from degenerating into "reject anything with a tensor".
+const MIXED_TYPEVAR_AND_LITERAL_DIM: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def mixed[a](box: Box[a], t: tensor[2, f32], c: int64) -> bool = if lt(c, cast(1, int64)) then true else mixed(box, t, sub(c, cast(1, int64)))
+out = print(mixed(Full { value: cast(1, int64) }, to_tensor([cast(1.0, f32), cast(2.0, f32)]), cast(2, int64)))
+";
+
 /// Build `source` to C under a fresh temp dir. Returns the temp dir (kept
 /// alive by the caller) and the output directory.
 fn build(source: &str, stem: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -370,6 +396,38 @@ fn probe_order_does_not_reach_the_emitted_c() {
         2,
         "trigger precondition: two specializations must be in flight"
     );
+}
+
+#[test]
+fn mixed_type_var_and_symbolic_dim_rejects_instead_of_ice() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("mixed_symbolic_dim.ch");
+    write_file(&path, MIXED_TYPEVAR_AND_SYMBOLIC_DIM);
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            dir.path().join("out").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        // The clean call-site boundary, naming the disagreement...
+        .stderr(predicates::str::contains("[05-UNS-1]"))
+        .stderr(predicates::str::contains("chelis#1158"))
+        .stderr(predicates::str::contains("not tensor dimension names"))
+        // ...and NOT the internal compiler error it used to be.
+        .stderr(predicates::str::contains("[04-TOT-2]").not())
+        .stderr(predicates::str::contains("internal compiler error").not());
+}
+
+#[test]
+fn mixed_type_var_and_literal_dim_still_builds() {
+    assert_build_lane_matches_eval(MIXED_TYPEVAR_AND_LITERAL_DIM, "mixed_literal_dim", "true");
 }
 
 #[test]

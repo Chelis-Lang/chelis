@@ -43,6 +43,18 @@
 //! through to the pre-existing inline/rejection paths untouched, so this
 //! module never interacts with the precision- and rank-polymorphism
 //! machinery.
+//!
+//! **A free tensor *dimension name* is not in that list and does not fall
+//! through**, which is why it needs its own guard. `is_unresolved()` answers a
+//! question about type *terms*: `tensor[n, f32]` is `HostTypeTerm::Tensor`, a
+//! resolved variant, no matter how its dims are spelled. So a signature mixing
+//! a type variable with a symbolic dim reaches the interner looking concrete,
+//! monomorphizes the type variable, leaves `n` untouched — dims are not
+//! `HostTypeTerm` slots and nothing substitutes them — and only disagrees with
+//! the caller at C ABI projection, as an internal compiler error rather than a
+//! diagnosis. [`first_tensor_shape_disagreement`] catches that at the call
+//! site and routes it to the same `[05-UNS-1]` rejection the other
+//! non-concretizable shapes take.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -674,6 +686,76 @@ pub(crate) fn collect_type_var_bindings(
     }
 }
 
+/// The first tensor-shape disagreement between an instantiated type and the
+/// type the call site actually supplies, rendered as `(instantiated, actual)`.
+///
+/// Monomorphization substitutes *type* variables. It does not substitute
+/// tensor *dimension* names, and it cannot: a dim is not a `HostTypeTerm`
+/// slot, and `is_unresolved()` reports `tensor[n, f32]` concrete because
+/// `HostTypeTerm::Tensor` is a resolved variant regardless of how its dims are
+/// spelled. So a signature like
+/// `mixed[a](box: Box[a], t: tensor[n, f32], c: int64)` interns with the
+/// declared `n` still in the parameter while the caller passes `tensor[2, f32]`.
+/// Nothing downstream reconciles them, and the pair survives to C ABI
+/// projection, which aborts the build with an internal-compiler-error
+/// `[04-TOT-2]` rather than a diagnosis — a strictly worse outcome than the
+/// clean `[05-UNS-1]` rejection this shape got before monomorphization existed.
+///
+/// Comparing dims for equality is what separates the two empirically-observed
+/// cases: a literal-dim signature agrees with its caller (`Lit(2)` both sides)
+/// and still builds, while a symbolic-dim signature disagrees
+/// (`Named("n")` vs `Lit(2)`) and is refused here.
+pub(crate) fn first_tensor_shape_disagreement(
+    instantiated: &HostTypeTerm,
+    actual: &HostTypeTerm,
+) -> Option<(String, String)> {
+    match (instantiated, actual) {
+        (HostTypeTerm::Tensor(want), HostTypeTerm::Tensor(got)) if want.dims != got.dims => Some((
+            render_host_type_term(instantiated),
+            render_host_type_term(actual),
+        )),
+        (HostTypeTerm::Fn(want_params, want_ret), HostTypeTerm::Fn(got_params, got_ret)) => {
+            want_params
+                .iter()
+                .zip(got_params)
+                .find_map(|(want, got)| first_tensor_shape_disagreement(want, got))
+                .or_else(|| first_tensor_shape_disagreement(want_ret, got_ret))
+        }
+        (HostTypeTerm::Adt(want_name, want_args), HostTypeTerm::Adt(got_name, got_args))
+            if adt_names_match(want_name, got_name) =>
+        {
+            want_args
+                .iter()
+                .zip(got_args)
+                .find_map(|(want, got)| first_tensor_shape_disagreement(want, got))
+        }
+        (HostTypeTerm::Tuple(want), HostTypeTerm::Tuple(got)) => want
+            .iter()
+            .zip(got)
+            .find_map(|(want, got)| first_tensor_shape_disagreement(want, got)),
+        (HostTypeTerm::List(want), HostTypeTerm::List(got))
+        | (HostTypeTerm::Option(want), HostTypeTerm::Option(got)) => {
+            first_tensor_shape_disagreement(want, got)
+        }
+        (HostTypeTerm::Dict(want_key, want_value), HostTypeTerm::Dict(got_key, got_value)) => {
+            first_tensor_shape_disagreement(want_key, got_key)
+                .or_else(|| first_tensor_shape_disagreement(want_value, got_value))
+        }
+        _ => None,
+    }
+}
+
+/// Whether two ADT names denote the same type.
+///
+/// A reef'd program can spell one ADT qualified in a declared signature and
+/// short in a checked node annotation; `lookup_program_def`'s terminal-name
+/// fallback exists for exactly that divergence. Requiring exact equality here
+/// silently dropped the whole arm — no bindings collected, so a call that was
+/// perfectly concretizable read as non-concretizable.
+pub(crate) fn adt_names_match(left: &str, right: &str) -> bool {
+    crate::host::terminal_name_matches(left, right)
+}
+
 /// Every type-variable name still free in `ty`.
 pub(crate) fn collect_free_type_vars(ty: &HostTypeTerm, out: &mut HashSet<String>) {
     match ty {
@@ -1146,6 +1228,39 @@ mod tests {
         }
         assert_eq!(drained, vec!["real".to_string()]);
         reset_mono_state();
+    }
+
+    #[test]
+    fn tensor_shape_disagreement_is_found_through_nesting() {
+        let symbolic = HostTypeTerm::Adt(
+            "Box".into(),
+            vec![HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            })],
+        );
+        let literal = HostTypeTerm::Adt(
+            "Box".into(),
+            vec![HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            })],
+        );
+        assert_eq!(
+            first_tensor_shape_disagreement(&symbolic, &literal),
+            Some(("tensor[n,f32]".to_string(), "tensor[2,f32]".to_string()))
+        );
+        // Agreement is silence, including through a qualified/short ADT
+        // spelling pair.
+        assert!(first_tensor_shape_disagreement(&literal, &literal).is_none());
+        let qualified = HostTypeTerm::Adt(
+            "Demo.Tree.Box".into(),
+            vec![HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(2)],
+                precision: Prim::F32,
+            })],
+        );
+        assert!(first_tensor_shape_disagreement(&qualified, &literal).is_none());
     }
 
     #[test]

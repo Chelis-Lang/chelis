@@ -57,8 +57,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   mints a new instantiation at every level, as in `f[a]` calling
   `f[(a, a)]` — reports the instantiation chain and which of the two
   bounds it exceeded: 64 distinct specializations per callee, or 512
-  type nodes in one signature. Both remain fail-loud and prompt; neither
-  hangs.
+  type nodes in one signature. A signature that mixes a type variable
+  with a **symbolic tensor dimension** (`f[a](x: a, t: tensor[n, f32])`)
+  is also non-concretizable and reports the dimension disagreement:
+  monomorphization substitutes type variables, not dimension names. All
+  remain fail-loud and prompt; none hangs.
 
 ### Fixed
 
@@ -75,6 +78,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   deterministic traversal order. The same root cause could let a
   discarded probe consume the per-callee specialization cap or enqueue a
   specialization that aborts the build; both are closed by the same fix.
+
+- **A recursive generic mixing a type variable with a symbolic tensor
+  dimension no longer aborts the build with an internal compiler error
+  (chelis#1158).** It reached C ABI projection with the declared
+  `tensor[n, f32]` against the caller's `tensor[2, f32]` and failed
+  `[04-TOT-2]`; it is now the clean `[05-UNS-1]` call-site rejection it
+  was before monomorphization existed. Literal-dimension signatures,
+  which do agree with their callers, still build.
 
 ## [0.18.4] — 2026-08-05
 
