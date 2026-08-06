@@ -2424,6 +2424,19 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
 - Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases outside the v1 inference scope.
+- **Destructured components are excepted from copy insertion.** A binding introduced by
+  a destructuring `let` — any `let` whose pattern is not a single name — is a
+  *component*. A component projects a fresh owned value out of the destructured value
+  rather than aliasing it, so consuming fan-out on a component is not copyable and is a
+  hard error. Write `copy(x)` on the earlier consuming use to fan out a component.
+  The exception is scoped to the component itself: it does not extend to the value that
+  was destructured, to bindings that merely follow the destructuring `let`, or to
+  a component's name after an ordinary `let` re-binds it.
+- A binding introduced inside a new declaration region is an ordinary binding, whatever
+  the name denoted outside. Closure captures, `match` arm binders, and `if` / `match`
+  branch bodies each open such a region, so a component's fan-out inside one is copied
+  like any other value. A destructuring `let` written inside the region introduces
+  components of that region and is excepted there as above.
 
 ### 8.4 Tensor-carrying ADTs
 
