@@ -46,12 +46,12 @@ jobs:
       - uses: actions/checkout@v6
 
       # Free ~25-30 GB before the cargo build; see
-      # .github/actions/free-disk-space (scripts/ci_free_disk.py). This is
+      # Chelis-Lang/ci reclaim-ubuntu-runner-disk. This is
       # the in-repo free-disk step every ci.yml build job already runs; the
       # heavy-e2e job was the only build job missing it, which is why its
       # workspace build exhausted the runner disk.
       - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
 
       # apt-get under retry (scripts/ci_apt_get.py): a transient apt mirror
       # reset would otherwise flake this nightly with no code change.

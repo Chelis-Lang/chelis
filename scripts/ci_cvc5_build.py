@@ -40,7 +40,7 @@ build green on a flaky-compile day, which is precisely the property the
 cold-build proof exists to deny.
 
 Usage (single-line `run:` step, mirroring the `ci_apt_get.py` /
-`ci_free_disk.py` convention so the step stays Python, not shell, per repo
+`ci_setup_uv_python.py` convention so the step stays Python, not shell, per repo
 policy):
 
     python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt

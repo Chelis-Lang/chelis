@@ -62,7 +62,7 @@ interrupted, you must manually run 'dpkg --configure -a'". That window is
 seconds wide for these few small packages, so it is knowingly out of scope;
 if it ever bites, add a `dpkg --configure -a` recovery before the retry.
 
-Usage (single-line `run:` step, mirroring the ci_free_disk.py /
+Usage (single-line `run:` step, mirroring the ci_cvc5_build.py /
 ci_setup_uv_python.py convention so the gate's no-hand-inlined-command lock
 is satisfied and the step stays Python, not shell, per repo policy):
 

@@ -79,7 +79,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: ./.github/actions/free-disk-space
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
 
       - name: Install C dependencies
         run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
