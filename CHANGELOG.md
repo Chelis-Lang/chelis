@@ -25,6 +25,23 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Monomorphized specializations are compiler-internal symbols
+  (chelis#1158 hardening; findings credited to the PR #1202 adversarial
+  review).** The published `.h` no longer declares `<def>__mono_<hash>`
+  specializations — they are implementation details whose names change with
+  the program's instantiation set — and tensor-entry selection never
+  chooses one, so a tensor-shaped specialization cannot displace the
+  authored entry's compiled ABI. Speculative summary probes are
+  state-isolated and probed in sorted order: repeated builds of one program
+  emit byte-identical C, no probe-only definition is emitted, and a failed
+  probe no longer fails the build (a genuine defect resurfaces when the
+  definition is lowered for real). Specializations intern by the
+  definition's own name under a purpose-built canonical signature key, so
+  qualified and short spellings of one def share one specialization per
+  instantiation, and a symbol-hash collision between distinct signatures
+  fails loudly instead of collapsing two instantiations into one C
+  definition.
+
 - **BREAKING (checker): polymorphic recursion is now a check-time type
   error ([04-INF-2]/[04-INF-3], spec/04-type-system.md §3.1.1).** Every
   recursive call inside a recursive binding group must be typed at the

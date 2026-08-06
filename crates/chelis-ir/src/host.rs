@@ -42,16 +42,62 @@ thread_local! {
         RefCell::new(MonoSpecializationState::default());
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct MonoSpecializationState {
-    /// Canonical `(def name, type application)` key -> specialized symbol.
+    /// Canonical `(def identity, type application)` key -> specialized symbol.
     memo: HashMap<String, String>,
+    /// Minted symbol -> the canonical key it was minted from. A second key
+    /// arriving at an existing symbol is a hash collision and fails loudly
+    /// (harden-bounded-monomorphization D4).
+    symbol_keys: HashMap<String, String>,
     /// Completed specialized definitions, in completion order.
     functions: Vec<HostFunction>,
     /// Stack of specializations currently being lowered. A recursive edge
     /// into one of these reuses its symbol instead of expanding again — the
     /// memoization that terminates mutual recursion.
     in_progress: Vec<InProgressMonoSpecialization>,
+}
+
+/// RAII guard making speculative lowering side-effect-free on the
+/// specialization state (harden-bounded-monomorphization D1): the state is
+/// snapshotted at probe entry and restored on drop, so a probe can neither
+/// add emitted definitions, reorder them, nor leave a memo entry whose
+/// definition was never pushed. Restore (not clear) semantics preserve an
+/// outer in-progress frame when a probe runs while a specialization body is
+/// itself being lowered.
+struct MonoProbeGuard {
+    snapshot: MonoSpecializationState,
+}
+
+impl MonoProbeGuard {
+    fn begin() -> Self {
+        MonoProbeGuard {
+            snapshot: MONO_SPECIALIZATIONS.with(|state| state.borrow().clone()),
+        }
+    }
+}
+
+impl Drop for MonoProbeGuard {
+    fn drop(&mut self) {
+        MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = std::mem::take(&mut self.snapshot));
+    }
+}
+
+/// Whether `name` is a minted monomorphization symbol: `__mono_` followed by
+/// exactly 16 lowercase hex digits, suffix-anchored. Locked to the mangler
+/// (`mono_specialization_symbol`) by unit test; strict enough that authored
+/// snake_case Surf identifiers cannot match. Specialized symbols are
+/// compiler-internal: excluded from the published host header and from
+/// preferred-tensor-entry selection (harden-bounded-monomorphization D2).
+pub fn is_monomorphized_specialization(name: &str) -> bool {
+    let Some(index) = name.rfind("__mono_") else {
+        return false;
+    };
+    let suffix = &name[index + "__mono_".len()..];
+    suffix.len() == 16
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Clone)]
@@ -1389,11 +1435,16 @@ pub fn preferred_tensor_entry_name(program: &ConcreteHostProgram) -> Option<&str
         return Some(function.name.as_str());
     }
 
+    // A monomorphized specialization is compiler-internal and must never
+    // displace the authored entry, however tensor-shaped its signature
+    // (harden-bounded-monomorphization D2).
     program
         .functions
         .iter()
         .rev()
-        .find(|function| tensor_signature(function))
+        .find(|function| {
+            !is_monomorphized_specialization(&function.name) && tensor_signature(function)
+        })
         .map(|function| function.name.as_str())
 }
 
@@ -1456,6 +1507,12 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
 /// scalar/record/ADT-returning def selected by name must stay on the
 /// host lane.
 pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) -> bool {
+    // Specializations are compiler-internal; they never claim the
+    // entry-scoped tensor-signature lane (harden-bounded-monomorphization
+    // D2).
+    if is_monomorphized_specialization(name) {
+        return false;
+    }
     program.functions.iter().any(|function| {
         function.name == name
             && matches!(function.ret_ty, ConcreteHostType::Tensor(_))
@@ -7223,6 +7280,22 @@ fn lower_recursive_generic_call(
     scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    // Resolve the callee to its defining declaration first: the interned
+    // identity is the definition's own name, never the call site's spelling,
+    // so a qualified and a short reference to one def intern one
+    // specialization per instantiation (harden-bounded-monomorphization D4).
+    let Some((canonical_name, def_body)) = find_top_level_def_named(program.exprs(), name) else {
+        return Err(host_expr_lowering_error(
+            app_expr,
+            format!(
+                "recursive generic host call `{name}` has no top-level definition to \
+                 specialize (chelis#1158; [05-UNS-1])"
+            ),
+        ));
+    };
+    let canonical_name = canonical_name.to_string();
+    let def_body = def_body.clone();
+
     // Derive the checked type application from the call site FIRST. Inside a
     // specialization the enclosing scope carries concrete parameter types,
     // so a recursive edge derives its own key even when it permutes or
@@ -7263,7 +7336,7 @@ fn lower_recursive_generic_call(
                 .in_progress
                 .iter()
                 .rev()
-                .find(|spec| spec.def_name == name && spec.param_tys.len() == args.len())
+                .find(|spec| spec.def_name == canonical_name && spec.param_tys.len() == args.len())
                 .cloned()
         });
         if let Some(spec) = in_progress {
@@ -7281,7 +7354,14 @@ fn lower_recursive_generic_call(
     let derived_concrete =
         !param_tys.iter().any(HostTypeTerm::is_unresolved) && !ret_ty.is_unresolved();
     if derived_concrete {
-        let symbol = ensure_mono_specialization(app_expr, name, &param_tys, &ret_ty, program)?;
+        let symbol = ensure_mono_specialization(
+            app_expr,
+            &canonical_name,
+            &def_body,
+            &param_tys,
+            &ret_ty,
+            program,
+        )?;
         let lowered_args = args
             .iter()
             .zip(param_tys.iter())
@@ -7314,9 +7394,10 @@ fn lower_recursive_generic_call(
     ))
 }
 
-/// Deterministic specialized-symbol name: the def name plus an FNV-1a hash
-/// of the canonical type-application key. No randomized hasher may be used
-/// here — the emitted symbol set must be identical across builds.
+/// Deterministic specialized-symbol name: the def's canonical name plus an
+/// FNV-1a hash of the canonical type-application key. No randomized hasher
+/// may be used here — the emitted symbol set must be identical across
+/// builds.
 fn mono_specialization_symbol(name: &str, canonical_key: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in canonical_key.bytes() {
@@ -7326,34 +7407,174 @@ fn mono_specialization_symbol(name: &str, canonical_key: &str) -> String {
     format!("{name}__mono_{hash:016x}")
 }
 
-/// Return the specialized symbol for `(name, param_tys, ret_ty)`, lowering
-/// the specialized definition first if this is the key's first request. The
-/// memo and in-progress entries are registered before the body is lowered,
-/// so recursive edges encountered mid-emission resolve to this symbol.
+/// Purpose-built canonical rendering of one host type term for the
+/// specialization interning key (harden-bounded-monomorphization D4).
+/// Every variant has an explicit, stable spelling — the key must not depend
+/// on `derive(Debug)` output shape.
+fn write_canonical_host_type_key(ty: &HostTypeTerm, out: &mut String) {
+    use std::fmt::Write;
+    match ty {
+        HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(prim)) => {
+            out.push_str("s:");
+            out.push_str(prim.name());
+        }
+        HostTypeTerm::Scalar(HostPrecisionTerm::Variable(name)) => {
+            out.push_str("sv:");
+            out.push_str(name);
+        }
+        HostTypeTerm::Fn(params, ret) => {
+            out.push_str("fn(");
+            for param in params {
+                write_canonical_host_type_key(param, out);
+                out.push(',');
+            }
+            out.push_str(")->");
+            write_canonical_host_type_key(ret, out);
+        }
+        HostTypeTerm::Adt(name, args) => {
+            out.push_str("adt:");
+            out.push_str(name);
+            out.push('[');
+            for arg in args {
+                write_canonical_host_type_key(arg, out);
+                out.push(',');
+            }
+            out.push(']');
+        }
+        HostTypeTerm::List(inner) => {
+            out.push_str("list[");
+            write_canonical_host_type_key(inner, out);
+            out.push(']');
+        }
+        HostTypeTerm::Dict(key, value) => {
+            out.push_str("dict[");
+            write_canonical_host_type_key(key, out);
+            out.push(',');
+            write_canonical_host_type_key(value, out);
+            out.push(']');
+        }
+        HostTypeTerm::Tuple(items) => {
+            out.push_str("tuple(");
+            for item in items {
+                write_canonical_host_type_key(item, out);
+                out.push(',');
+            }
+            out.push(')');
+        }
+        HostTypeTerm::Tensor(tensor) => {
+            out.push_str("tensor[");
+            for dim in &tensor.dims {
+                match dim {
+                    crate::dag::DimInfo::Lit(extent) => {
+                        let _ = write!(out, "{extent}");
+                    }
+                    crate::dag::DimInfo::Named(name, Some(extent)) => {
+                        let _ = write!(out, "{name}={extent}");
+                    }
+                    crate::dag::DimInfo::Named(name, None) => out.push_str(name),
+                }
+                out.push(',');
+            }
+            out.push(';');
+            out.push_str(tensor.precision.name());
+            out.push(']');
+        }
+        // Unresolved states cannot reach an interning key (the concreteness
+        // gate rejects them first), but the writer stays total with stable
+        // spellings so a future caller cannot silently fall back to `Debug`.
+        HostTypeTerm::PolymorphicTensor(tensor) => {
+            let _ = write!(out, "ptensor:{tensor:?}");
+        }
+        HostTypeTerm::TypeVariable(name) => {
+            out.push_str("tv:");
+            out.push_str(name);
+        }
+        HostTypeTerm::InferenceVariable(var) => {
+            let _ = write!(out, "iv:{var:?}");
+        }
+        HostTypeTerm::Option(inner) => {
+            out.push_str("option[");
+            write_canonical_host_type_key(inner, out);
+            out.push(']');
+        }
+        HostTypeTerm::MappedFile => out.push_str("mappedfile"),
+        HostTypeTerm::Unit => out.push_str("unit"),
+        HostTypeTerm::Never => out.push_str("never"),
+    }
+}
+
+/// The canonical interning key for `(def identity, type application)`.
+fn mono_specialization_key(
+    canonical_name: &str,
+    param_tys: &[HostTypeTerm],
+    ret_ty: &HostTypeTerm,
+) -> String {
+    let mut key = String::new();
+    key.push_str(canonical_name);
+    key.push('\u{1}');
+    for param_ty in param_tys {
+        write_canonical_host_type_key(param_ty, &mut key);
+        key.push('\u{1}');
+    }
+    key.push('\u{1}');
+    write_canonical_host_type_key(ret_ty, &mut key);
+    key
+}
+
+/// Register `symbol` as minted from `canonical_key`. `Err` carries the
+/// previously registered key when the same symbol arrives for a different
+/// key — an FNV-1a collision that would otherwise silently collapse two
+/// instantiations into one C definition.
+fn register_mono_symbol_key(
+    state: &mut MonoSpecializationState,
+    symbol: &str,
+    canonical_key: &str,
+) -> Result<(), String> {
+    match state.symbol_keys.get(symbol) {
+        Some(existing) if existing != canonical_key => Err(existing.clone()),
+        Some(_) => Ok(()),
+        None => {
+            state
+                .symbol_keys
+                .insert(symbol.to_string(), canonical_key.to_string());
+            Ok(())
+        }
+    }
+}
+
+/// Return the specialized symbol for `(canonical def, param_tys, ret_ty)`,
+/// lowering the specialized definition first if this is the key's first
+/// request. The memo and in-progress entries are registered before the body
+/// is lowered, so recursive edges encountered mid-emission resolve to this
+/// symbol.
 fn ensure_mono_specialization(
     app_expr: &Expr,
     name: &str,
+    body: &Expr,
     param_tys: &[HostTypeTerm],
     ret_ty: &HostTypeTerm,
     program: &CheckedProgram,
 ) -> Result<String, crate::lower::LowerDiagnostic> {
-    let canonical_key = format!("{name}\u{1}{param_tys:?}\u{1}{ret_ty:?}");
+    let canonical_key = mono_specialization_key(name, param_tys, ret_ty);
     if let Some(symbol) =
         MONO_SPECIALIZATIONS.with(|state| state.borrow().memo.get(&canonical_key).cloned())
     {
         return Ok(symbol);
     }
     let symbol = mono_specialization_symbol(name, &canonical_key);
-
-    let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
+    let collision = MONO_SPECIALIZATIONS
+        .with(|state| register_mono_symbol_key(&mut state.borrow_mut(), &symbol, &canonical_key));
+    if let Err(existing_key) = collision {
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
-                "recursive generic host call `{name}` has no top-level definition to \
-                 specialize (chelis#1158; [05-UNS-1])"
+                "internal: specialized symbol `{symbol}` collides across two distinct \
+                 canonical signatures (`{existing_key}` vs `{canonical_key}`); refusing to \
+                 emit a definition that serves either (chelis#1158; [05-UNS-1])"
             ),
         ));
-    };
+    }
+
     let params = as_list(body)
         .filter(|fn_list| tag(fn_list) == Some(DeepTag::Fn))
         .and_then(|fn_list| {
@@ -7778,11 +7999,21 @@ fn top_level_fn_helper_summary_rejects(
         return Ok(false);
     }
     let pushed = push_inlining(name);
+    // This lowering is a probe: its result is inspected and discarded, so
+    // it must leave no trace on specialization state
+    // (harden-bounded-monomorphization D1).
+    let probe_guard = MonoProbeGuard::begin();
     let lowered = lower_host_function(name, body, None, program);
+    drop(probe_guard);
     if pushed {
         pop_inlining(name);
     }
-    let rejects = lowered?.is_some_and(|mut function| {
+    // A probe failure is not a build failure
+    // (harden-bounded-monomorphization D1): this lowering was speculative,
+    // and a genuine defect in the callee resurfaces — with call-free
+    // attribution — when the callee is lowered for real. A failed probe
+    // simply reports "no summary rejection".
+    let rejects = lowered.ok().flatten().is_some_and(|mut function| {
         collect_function_summary_rejections(&mut function);
         !function.summary_rejections.is_empty()
     });
@@ -7828,7 +8059,14 @@ fn expr_calls_summary_rejecting_top_level_fn(
 ) -> Result<bool, crate::lower::LowerDiagnostic> {
     let graph = top_level_fn_call_graph(program);
     let fn_names = graph.keys().cloned().collect::<HashSet<_>>();
-    for name in collect_called_top_level_fns(expr, &fn_names) {
+    // Sorted, not HashSet order: each probe is state-isolated by
+    // `MonoProbeGuard`, but probe ORDER must not vary per process either
+    // (harden-bounded-monomorphization D1).
+    let mut called: Vec<String> = collect_called_top_level_fns(expr, &fn_names)
+        .into_iter()
+        .collect();
+    called.sort_unstable();
+    for name in called {
         if top_level_fn_helper_summary_rejects(program, &name)? {
             return Ok(true);
         }
@@ -9278,6 +9516,14 @@ fn terminal_name(name: &str) -> &str {
 }
 
 fn find_top_level_def_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr> {
+    find_top_level_def_named(exprs, name).map(|(_, body)| body)
+}
+
+/// Resolve a (possibly short-spelled) reference to its defining top-level
+/// declaration, returning the declaration's own name alongside the body.
+/// The declaration's name is the canonical identity for specialization
+/// interning (harden-bounded-monomorphization D4).
+fn find_top_level_def_named<'a>(exprs: &'a [Expr], name: &str) -> Option<(&'a str, &'a Expr)> {
     for expr in top_level_items(exprs) {
         let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
             continue;
@@ -9286,7 +9532,7 @@ fn find_top_level_def_expr<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Expr
             continue;
         };
         if terminal_name_matches(def_name, name) {
-            return kids.get(1);
+            return kids.get(1).map(|body| (def_name, body));
         }
     }
     None
@@ -11095,6 +11341,124 @@ mod tests {
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
 
+    // ── harden-bounded-monomorphization D2/D4 unit locks ──
+
+    /// The predicate and the mangler are locked to each other: everything
+    /// the mangler mints matches; user-plausible snake_case names do not.
+    #[test]
+    fn mono_specialization_predicate_matches_only_minted_symbols() {
+        let minted = mono_specialization_symbol(
+            "depth",
+            &mono_specialization_key("depth", &[HostTypeTerm::Int64], &HostTypeTerm::Int64),
+        );
+        assert!(is_monomorphized_specialization(&minted), "minted: {minted}");
+        assert!(is_monomorphized_specialization(
+            "pkg__demo__Main__depth__mono_0123456789abcdef"
+        ));
+        for non_specialization in [
+            "depth",
+            "depth__mono_",
+            "depth__mono_0123456789abcde",   // 15 hex digits
+            "depth__mono_0123456789abcdef0", // 17 hex digits
+            "depth__mono_0123456789ABCDEF",  // uppercase
+            "depth__mono_0123456789ghijkl",  // non-hex
+            "depth__mono_helper",
+            "my__mono_thing",
+        ] {
+            assert!(
+                !is_monomorphized_specialization(non_specialization),
+                "must not match: {non_specialization}"
+            );
+        }
+    }
+
+    /// The interning key is a purpose-built canonical rendering with a
+    /// golden spelling — never `derive(Debug)` output, whose shape is stable
+    /// only by accident.
+    #[test]
+    fn mono_specialization_key_is_stable() {
+        let box_int32 = HostTypeTerm::Adt(
+            "Box".to_string(),
+            vec![HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(
+                Prim::Int32,
+            ))],
+        );
+        let int32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
+        let key = mono_specialization_key("depth", &[box_int32, int32.clone()], &int32);
+        assert_eq!(
+            key,
+            "depth\u{1}adt:Box[s:int32,]\u{1}s:int32\u{1}\u{1}s:int32"
+        );
+        let tensor = HostTypeTerm::Tensor(TensorType {
+            dims: vec![DimInfo::Lit(4), DimInfo::Named("n".to_string(), None)],
+            precision: Prim::F32,
+        });
+        let mut rendered = String::new();
+        write_canonical_host_type_key(&tensor, &mut rendered);
+        assert_eq!(rendered, "tensor[4,n,;f32]");
+    }
+
+    /// An FNV-1a collision must fail loudly, never collapse two
+    /// instantiations into one C definition.
+    #[test]
+    fn mono_symbol_collision_is_loud() {
+        let mut state = MonoSpecializationState::default();
+        register_mono_symbol_key(&mut state, "depth__mono_0123456789abcdef", "key-a")
+            .expect("first registration succeeds");
+        register_mono_symbol_key(&mut state, "depth__mono_0123456789abcdef", "key-a")
+            .expect("re-registration of the same key is a no-op");
+        let collision =
+            register_mono_symbol_key(&mut state, "depth__mono_0123456789abcdef", "key-b");
+        assert_eq!(collision, Err("key-a".to_string()));
+    }
+
+    fn synthetic_tensor_function(name: &str) -> ConcreteHostFunction {
+        let tensor = || {
+            ConcreteHostType::Tensor(TensorType {
+                dims: vec![DimInfo::Lit(4)],
+                precision: Prim::F32,
+            })
+        };
+        HostFunction {
+            name: name.to_string(),
+            params: vec![HostParam {
+                name: "x".to_string(),
+                ty: tensor(),
+            }],
+            ret_ty: tensor(),
+            body: HostExpr::new(HostExprKind::Unit),
+            tensor_helpers: Vec::new(),
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }
+    }
+
+    /// A tensor-shaped specialization must not displace the authored
+    /// preferred tensor entry (the PR #1202-measured ABI flip).
+    #[test]
+    fn preferred_tensor_entry_ignores_specializations() {
+        let mut program = ConcreteHostProgram::default();
+        program.functions.push(synthetic_tensor_function("entry"));
+        program
+            .functions
+            .push(synthetic_tensor_function("tloop__mono_0123456789abcdef"));
+        assert_eq!(preferred_tensor_entry_name(&program), Some("entry"));
+    }
+
+    #[test]
+    fn tensor_signature_classification_ignores_specializations() {
+        let mut program = ConcreteHostProgram::default();
+        program.functions.push(synthetic_tensor_function("entry"));
+        program
+            .functions
+            .push(synthetic_tensor_function("tloop__mono_0123456789abcdef"));
+        assert!(function_has_tensor_signature(&program, "entry"));
+        assert!(!function_has_tensor_signature(
+            &program,
+            "tloop__mono_0123456789abcdef"
+        ));
+    }
+
     fn parse_and_check(src: &str) -> CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
         let checked = chelis_types::check_ir_program(&exprs)
@@ -11110,6 +11474,34 @@ mod tests {
         let deep = chelis_surf::desugar::desugar_program(&decls);
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    /// harden-bounded-monomorphization D4: the interning identity is the
+    /// definition's own name, so a short and a qualified spelling of one def
+    /// produce one canonical key and one minted symbol per instantiation.
+    #[test]
+    fn mono_interning_identity_is_the_definitions_own_name() {
+        let checked = parse_and_check(
+            "(defsig {} Demo.depth (t-fn {} (t-var {} a) (t-prim {} int32)))\n\
+             (def {} Demo.depth\n\
+               (fn {} (params {} (x {type: (t-var {} a)}))\n\
+                 (lit {type: (t-prim {} int32)} 1)))\n",
+        );
+        let (canonical_short, _) = find_top_level_def_named(checked.exprs(), "depth")
+            .expect("short spelling resolves to the def");
+        let (canonical_qualified, _) = find_top_level_def_named(checked.exprs(), "Demo.depth")
+            .expect("qualified spelling resolves to the def");
+        assert_eq!(canonical_short, "Demo.depth");
+        assert_eq!(canonical_qualified, "Demo.depth");
+        let int32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
+        let key = mono_specialization_key(canonical_short, std::slice::from_ref(&int32), &int32);
+        assert_eq!(
+            key,
+            mono_specialization_key(canonical_qualified, std::slice::from_ref(&int32), &int32)
+        );
+        assert!(is_monomorphized_specialization(
+            &mono_specialization_symbol(canonical_short, &key)
+        ));
     }
 
     #[test]

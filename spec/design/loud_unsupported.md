@@ -964,8 +964,18 @@ checker-admitted shapes remain on the loud, artifact-free boundary, citing
 chelis#1158: an outer call whose type application never resolves concrete,
 and a mutually recursive cross-member edge whose argument leaves the callee
 parameter unconstrained (host lowering has no positional correspondence
-across different defs' parameters). The delivered behavior's acceptance
-oracle is `cargo nextest run -p chelis-cli --test
+across different defs' parameters). Specialized symbols are
+compiler-internal (`<def>__mono_<16-hex>`): the published header does not
+declare them and tensor-entry selection never chooses one. Speculative
+summary probes are state-isolated (snapshot/restore) and probed in sorted
+order, so repeated builds emit byte-identical C and a probe failure never
+fails a build. Specializations intern by the definition's own name under a
+purpose-built canonical signature key; a hash collision between distinct
+signatures is a loud internal error, never a shared definition. A
+specialization's parameter types are the call site's own checked types, so
+tensor-dimension spellings — symbolic or literal — specialize alike and no
+dimension disagreement can be deferred to a later stage. The delivered
+behavior's acceptance oracle is `cargo nextest run -p chelis-cli --test
 recursive_generic_monomorphization --no-fail-fast`.
 
 For `fold`, the checked callback's first parameter is the authoritative

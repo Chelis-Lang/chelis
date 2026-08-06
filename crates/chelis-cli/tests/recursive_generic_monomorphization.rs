@@ -43,6 +43,16 @@
 //!
 //! Determinism golden (change task 4.2):
 //! - `specialized_symbol_set_is_deterministic_across_builds`
+//!
+//! Hardening (`harden-bounded-monomorphization`):
+//! - Byte-identical emitted C across repeated builds (probe-trigger shape) ->
+//!   `emitted_c_is_byte_identical_across_repeated_builds`
+//! - Probe-only specializations are not emitted -> asserted inside the
+//!   byte-determinism test (exactly the two referenced specializations)
+//! - Published header omits specializations ->
+//!   `published_header_omits_specialized_symbols`
+//! - Authored-entry ABI protection and predicate/key/collision locks ->
+//!   `chelis-ir` unit tests in `host.rs`
 
 #![allow(clippy::uninlined_format_args)]
 
@@ -121,6 +131,25 @@ type Box[a] =
 def swap[a, b](x: a, y: b, n: int32) -> int32 =
   if n <= 0 then 0 else swap(y, x, n - 1) + 1
 def concrete() -> int32 = swap(Full { value: cast(1, int32) }, true, 3)
+out = print(concrete())
+";
+
+/// Probe-trigger shape (harden-bounded-monomorphization D1): `caller`
+/// precedes the wrappers it calls in source order, so lowering `caller`
+/// probes `wrap_int`/`wrap_bool` speculatively — each probe lowers a body
+/// containing a recursive generic call. Without probe isolation, the
+/// probes' HashSet order leaks into specialization emission order and the
+/// emitted C differs across builds. Prints `4`.
+const PROBE_TRIGGER: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def caller(n: int32) -> int32 = wrap_int(n) + wrap_bool(n)
+def wrap_int(n: int32) -> int32 = depth(Full { value: cast(7, int32) }, n)
+def wrap_bool(n: int32) -> int32 = depth(Full { value: true }, n)
+def depth[a](box: Box[a], n: int32) -> int32 =
+  if n <= 0 then 0 else depth(box, n - 1) + 1
+def concrete() -> int32 = caller(2)
 out = print(concrete())
 ";
 
@@ -645,6 +674,90 @@ fn issue_941_minimized_reproducer_compiles() {
         "the chelis#941 reproducer must compile: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Hardening: probe isolation and surface hygiene
+// (harden-bounded-monomorphization)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn emitted_c_is_byte_identical_across_repeated_builds() {
+    // Ten separate `chelis` processes: each gets its own HashSet seed, so a
+    // probe-order leak into emission order shows up as byte divergence.
+    let first = {
+        let (_dir, out_dir) = build_ok(PROBE_TRIGGER, "probe_trigger");
+        read_generated_c(&out_dir, "probe_trigger")
+    };
+    let specialized = identifiers_with_prefix(&first, "depth");
+    assert_eq!(
+        specialized.len(),
+        2,
+        "exactly the two call-site-referenced specializations may be \
+         emitted (no probe-only definitions), found: {specialized:?}"
+    );
+    for build_index in 1..10 {
+        let (_dir, out_dir) = build_ok(PROBE_TRIGGER, "probe_trigger");
+        let rebuilt = read_generated_c(&out_dir, "probe_trigger");
+        assert_eq!(
+            rebuilt, first,
+            "emitted C must be byte-identical across builds (diverged on \
+             rebuild {build_index})"
+        );
+    }
+    assert_eq!(eval_first_line(PROBE_TRIGGER, "probe_trigger_eval"), "4");
+}
+
+#[test]
+fn published_header_omits_specialized_symbols() {
+    let (_dir, out_dir) = build_ok(DIRECT_TWO_INSTANTIATIONS, "header_probe");
+    let header = fs::read_to_string(out_dir.join("header_probe.h"))
+        .expect("build writes the published header");
+    assert!(
+        !header.contains("__mono_"),
+        "the published header must not declare compiler-internal \
+         specializations:\n{header}"
+    );
+    assert!(
+        header.contains("concrete"),
+        "the authored surface stays declared:\n{header}"
+    );
+    // The `.c` keeps its internal prototypes: it still compiles, links, and
+    // runs with the specializations resolved inside the translation unit.
+    assert_eq!(run_first_line(&out_dir, "header_probe"), "5");
+}
+
+/// The coral-shaped positive (harden-bounded-monomorphization D3): a
+/// recursive generic instantiated at a symbolic-dimension tensor payload
+/// (`tensor[n, f32]` through a dim-generic caller) specializes, compiles,
+/// and matches eval. There is no separate instantiated signature to
+/// disagree with the call: a specialization's parameter types ARE the call
+/// site's checked types.
+const SYMBOLIC_DIM_PAYLOAD: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def depth[a](box: Box[a], n: int32) -> int32 =
+  if n <= 0 then 0 else depth(box, n - 1) + 1
+def measure[n](t: tensor[n, f32]) -> int32 = depth(Full { value: t }, 2)
+def concrete() -> int32 = measure(to_tensor([1.0, 2.0]))
+out = print(concrete())
+";
+
+#[test]
+fn symbolic_dim_payload_specializes_with_eval_parity() {
+    let eval = eval_first_line(SYMBOLIC_DIM_PAYLOAD, "symdim_eval");
+    let (_dir, out_dir) = build_ok(SYMBOLIC_DIM_PAYLOAD, "symdim");
+    let c_source = read_generated_c(&out_dir, "symdim");
+    let specialized = identifiers_with_prefix(&c_source, "depth");
+    assert_eq!(
+        specialized.len(),
+        1,
+        "one specialization at the tensor payload expected: {specialized:?}"
+    );
+    let compiled = run_first_line(&out_dir, "symdim");
+    assert_eq!(eval, "2");
+    assert_eq!(compiled, eval, "compiled output must match the eval lane");
 }
 
 // ---------------------------------------------------------------------------

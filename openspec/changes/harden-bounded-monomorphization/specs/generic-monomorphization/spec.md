@@ -52,18 +52,15 @@ emitted later.
 - **THEN** the compiled entry ABI is the authored entry's, unchanged from the
   same program with the generic calls removed
 
-### Requirement: Symbolic tensor dimensions are diagnosed, not deferred
+### Requirement: Symbolic tensor dimensions specialize from the call site
 
-A checked type application whose terms are concrete may still disagree with its
-call site in tensor dimensions, because dimension spellings are not type-term
-slots. Before emitting a specialization, lowering SHALL compare the
-instantiated parameter and result types against the types the call supplies,
-tensor shapes included. A disagreement SHALL reject through the
-unsupported-case response contract (`spec/05-risc-primitives.md` §7,
-[05-UNS-1..5]), naming the instantiated type and the supplied type, and SHALL
-NOT surface as an internal error at a later stage. Agreement — literal or
-symbolic dimension spellings alike — SHALL specialize: a recursive generic
-instantiated at a symbolic-dimension tensor payload compiles and runs.
+A specialization's parameter and result types SHALL be the call site's own
+checked types: no separately instantiated signature exists for tensor
+dimensions to disagree with, so a dimension disagreement SHALL NOT be
+representable at the specialization boundary, and none may surface as an
+internal error at a later stage. Symbolic and literal dimension spellings
+SHALL specialize alike: a recursive generic instantiated at a
+symbolic-dimension tensor payload compiles and runs.
 
 #### Scenario: Symbolic-dim payload compiles with eval parity
 
@@ -72,12 +69,13 @@ instantiated at a symbolic-dimension tensor payload compiles and runs.
 - **THEN** the build succeeds, the binary links and runs, and its output
   matches the eval lane on the same program
 
-#### Scenario: Dimension disagreement rejects cleanly
+#### Scenario: Dimension spellings do not fork specializations
 
-- **WHEN** a recursive generic call's instantiated signature disagrees with the
-  call's supplied tensor dimensions
-- **THEN** the build fails with a branded `unsupported:` diagnostic naming both
-  types, no internal-error text is emitted, and no C artifact is written
+- **WHEN** one recursive generic instantiation's payload tensor reaches the
+  call with its dimensions spelled symbolically
+- **THEN** the emitted C contains exactly one specialized definition for that
+  instantiation, and no dimension-related internal error is emitted at any
+  stage
 
 ### Requirement: One specialization per callee identity and instantiation
 
