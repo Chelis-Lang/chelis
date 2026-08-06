@@ -199,8 +199,21 @@ change is done while that oracle is red.
         instantiation `[]` and suggested reusing nonexistent type
         parameters; the diagnostic now names the actual constraint. Locked
         by `monomorphic_caller_in_group_names_the_missing_type_parameters`.
-      Round 3 (focused confirmation of the round-2 MAJOR fix by a fresh
-      subagent) recorded below when complete.
+      Beyond the probe findings, round 2 also audited this implementation
+      against the adversarial review of PR #1202 (a parallel, independently
+      built implementation of chelis#1158 that surfaced the same day) and
+      confirmed four shared defect classes in our architecture: probe-driven
+      specialization-state pollution/nondeterminism, specialized symbols
+      leaking into the published header and tensor-entry selection, the
+      symbolic-dimension blind spot in `is_unresolved` concreteness gating,
+      and the `Debug`-formatted interning key with undetected hash
+      collisions. Those findings are recorded as their own follow-up
+      OpenSpec change, `openspec/changes/harden-bounded-monomorphization`
+      (proposal + design + delta on `generic-monomorphization` + spec-first
+      tasks), which depends on this change and archives after it; its task
+      6.6 carries the residual adversarial validation for that surface. The
+      disposition of PR #1202 itself (merge, close in favor, or split) is a
+      maintainer decision recorded on chelis#1158.
 - [ ] 6.4 Full CI green including macOS Smoke (authoritative workspace oracle);
       chelis#1158 closes on the merged green oracle with a comment naming the
       suite; notify coral to re-cite/retire its 6 citation sites on the next
