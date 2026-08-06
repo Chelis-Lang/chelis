@@ -960,11 +960,28 @@ a depth budget. Only fully concrete signatures are interned; a call site
 carrying a free type, precision, or rank variable falls through to the existing
 inline and rejection paths unchanged.
 
-Two residues keep the `[05-UNS-1]` brand, and the diagnostic distinguishes
+A free tensor **dimension name** is not in that list and does not fall through.
+Concreteness there is a question about type TERMS: `tensor[n, f32]` is a
+resolved term however its dims are spelled, so a signature mixing a type
+variable with a symbolic dim — `f[a](x: a, t: tensor[n, f32])` — reaches the
+interner looking concrete, monomorphizes `a`, and leaves `n` untouched, because
+dims are not type-term slots and nothing substitutes them. The disagreement
+with the caller's `tensor[2, f32]` would otherwise survive to C ABI projection
+and abort the build as an internal error rather than a diagnosis, so the call
+site compares the instantiated parameter and result types against the types the
+call actually supplies and rejects a dimension disagreement under this same
+brand. Dimension equality is what keeps that narrow rather than a ban on
+tensors in generic signatures: a literal-dim signature agrees with its caller
+and still monomorphizes.
+
+Three residues keep the `[05-UNS-1]` brand, and the diagnostic distinguishes
 them. A call site whose type arguments do not resolve to a concrete signature
 names the term that still carries a free variable — this is the ordinary
 chelis#730 unresolved-term shape reached through a generic call rather than a
-new class. Polymorphic recursion — a cycle that mints a NEW instantiation at
+new class. The dimension disagreement above is that residue's tensor-shaped
+sibling: the terms did resolve, so the diagnostic names the instantiated type
+and the type the call passes rather than a free variable.
+Polymorphic recursion — a cycle that mints a NEW instantiation at
 every level, as in `f[a]` calling `f[(a, a)]` — has no finite family of
 monomorphic symbols at all, so it is rejected under two named bounds: a
 per-callee specialization cap and a per-signature type-node cap. Both are
