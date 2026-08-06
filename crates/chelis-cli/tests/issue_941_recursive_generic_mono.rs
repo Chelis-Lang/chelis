@@ -385,12 +385,12 @@ fn mini_hamt_reproduces_the_coral_frame_shape() {
 
 #[test]
 fn probe_order_does_not_reach_the_emitted_c() {
-    // chelis#1002 determinism, at the trigger the original test lacked. Eight
-    // runs is enough: the unfixed tree split 25 runs 11/14, so the chance of
-    // eight agreeing by luck is under 1%.
+    // chelis#1002 determinism, at the trigger the original test lacked. Ten
+    // runs: the unfixed tree split 25 runs 11/14, so the chance of ten
+    // agreeing by luck is under 0.2%.
     let stem = "probe_order_determinism";
     let mut digests = BTreeSet::new();
-    for _ in 0..8 {
+    for _ in 0..10 {
         let (_dir, out_dir) = build(PROBE_ORDER_DETERMINISM, stem);
         let emitted = std::fs::read(out_dir.join(format!("{stem}.c"))).expect("emitted C");
         digests.insert(emitted);
