@@ -21,17 +21,15 @@ change layers on its lowering machinery and archives after it.
       (`emitted_c_is_byte_identical_across_repeated_builds`: 10 builds of the
       `caller` → `wrap_int`/`wrap_bool` → `depth` fixture; mutation-verified
       red per task 2.2)
-- [x] 1.2 Probe-pollution test: a probe-only instantiation (reachable only
-      through a body the real lowering never takes through the mono path) must
-      not appear in the emitted C; a probe-only specialization that cannot
-      lower must not fail the build
-      (folded into 1.1's exactly-two-specializations assertion — a genuinely
-      probe-only instantiation was not constructible from source because the
-      real pass lowers every probed def with the same memo; the guard makes
-      probe-only emission structurally impossible regardless. Probe failures
-      no longer fail the build: `top_level_fn_helper_summary_rejects` treats
-      a failed speculative lowering as "no rejection", and a genuine callee
-      defect resurfaces when the callee lowers for real)
+- [x] 1.2 Probe-pollution test: a probe-only instantiation must not appear in
+      the emitted C. A probe-only specialization that cannot lower must not
+      fail the build
+      (`emitted_c_is_byte_identical_across_repeated_builds` locks the emitted
+      specialization set. The `chelis-ir` seam test
+      `failed_mono_probe_restores_state_and_defers_the_real_error` forces
+      `lower_host_function` to fail inside `MonoProbeGuard`. It verifies
+      `Ok(false)`, exact restoration of all four state fields, and the exact
+      genuine error from later real lowering)
 - [x] 1.3 Entry-selection minimal pair: a program whose authored tensor entry
       coexists with a tensor-shaped specialization; assert the compiled entry
       ABI equals the generic-free twin's. Expected red (ABI flip) pre-fix
@@ -70,9 +68,10 @@ change layers on its lowering machinery and archives after it.
       `package_defs_with_one_terminal_name_keep_distinct_specializations`;
       the package test reproduced a silent `32` versus `5` miscompile before
       exact identity lookup won over terminal fallback)
-- [x] 1.7 Unit tests in `chelis-ir`: canonical-key stability, explicit function
-      provenance, and collision-map rejection
-      (`mono_specialization_key_is_stable`,
+- [x] 1.7 Unit tests in `chelis-ir`: failed-probe restoration, canonical-key
+      stability, explicit function provenance, and collision-map rejection
+      (`failed_mono_probe_restores_state_and_defers_the_real_error`,
+      `mono_specialization_key_is_stable`,
       `mono_specialization_provenance_is_explicit`,
       `mono_symbol_collision_is_loud`)
 
@@ -96,12 +95,10 @@ change layers on its lowering machinery and archives after it.
       specialization emission order across processes. Both defenses
       restored; test green.**
 - [x] 2.3 Confirm the memo-without-definition residue is closed by restore
-      semantics (a failed probe leaves no memo entry); add the regression
-      assertion to the 1.2 test
-      (closed structurally: the guard restores the WHOLE state — memo,
-      symbol map, functions, in-progress stack — so a failed probe leaves
-      neither a memo entry nor a definition; and a probe failure no longer
-      propagates as a build failure)
+      semantics. Add the regression assertion to the 1.2 test
+      (`failed_mono_probe_restores_state_and_defers_the_real_error` seeds the
+      memo, symbol map, function list, and in-progress stack. It forces the
+      probe error, then compares every field with the pre-probe snapshot)
 
 ## 3. Surface hygiene (D2)
 
@@ -182,4 +179,8 @@ change layers on its lowering machinery and archives after it.
       and collided across translation units. MAJOR: proposal, design, tasks,
       and oracle coverage disagreed. Each code defect now has a red-before-fix
       test in the owning oracle. The planning artifacts now describe the
-      delivered architecture. A second fresh local pass remains required.)
+      delivered architecture. Round 2, `target/redteam/hardening-round2/report.md`:
+      REJECT. All exercised behavior passed, but direct executable evidence for
+      failed-probe restoration was absent. The new `chelis-ir` seam test forces
+      that error and locks `Ok(false)`, complete state restoration, and later
+      real-error attribution. A third fresh local pass remains required.)

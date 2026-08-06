@@ -11401,7 +11401,7 @@ mod tests {
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
 
-    // ── harden-bounded-monomorphization D2/D4 unit locks ──
+    // ── harden-bounded-monomorphization D1/D2/D4 unit locks ──
 
     /// Provenance, not symbol spelling, identifies an internal
     /// specialization. A valid authored snake_case name can exactly match the
@@ -11479,6 +11479,82 @@ mod tests {
         let collision =
             register_mono_symbol_key(&mut state, "depth__mono_0123456789abcdef", "key-b");
         assert_eq!(collision, Err("key-a".to_string()));
+    }
+
+    /// A speculative lowering error reports no summary rejection and restores
+    /// every field in the specialization state. The same error must surface
+    /// when the function lowers outside the probe.
+    #[test]
+    fn failed_mono_probe_restores_state_and_defers_the_real_error() {
+        let checked = surf_check(
+            r#"
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def bad_wrap() -> bool = bad(Empty)
+def bad[b](box: Box[b]) -> bool =
+  match box with {
+    | Empty => true
+    | Full { value: item } => bad(Empty)
+  }
+"#,
+        );
+        let int32 = HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(Prim::Int32));
+        let seeded = MonoSpecializationState {
+            memo: HashMap::from([("seed-key".to_string(), "seed-symbol".to_string())]),
+            symbol_keys: HashMap::from([("seed-symbol".to_string(), "seed-key".to_string())]),
+            functions: vec![HostFunction {
+                name: "seeded__mono_0123456789abcdef".to_string(),
+                params: Vec::new(),
+                ret_ty: HostTypeTerm::Unit,
+                body: HostExpr::new(HostExprKind::Unit),
+                tensor_helpers: Vec::new(),
+                origin: HostFunctionOrigin::Monomorphized,
+                specialization: None,
+                summary_rejections: Vec::new(),
+            }],
+            in_progress: vec![InProgressMonoSpecialization {
+                def_name: "seeded".to_string(),
+                param_tys: vec![int32.clone()],
+                ret_ty: int32,
+            }],
+        };
+        MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = seeded.clone());
+
+        assert_eq!(
+            top_level_fn_helper_summary_rejects(&checked, "bad_wrap"),
+            Ok(false),
+            "a speculative lowering error is not a summary rejection"
+        );
+        MONO_SPECIALIZATIONS.with(|state| {
+            let restored = state.borrow();
+            assert_eq!(restored.memo, seeded.memo);
+            assert_eq!(restored.symbol_keys, seeded.symbol_keys);
+            assert_eq!(
+                format!("{:#?}", restored.functions),
+                format!("{:#?}", seeded.functions),
+                "the complete emitted-function state must be restored"
+            );
+            assert_eq!(restored.in_progress.len(), seeded.in_progress.len());
+            for (restored, expected) in restored.in_progress.iter().zip(&seeded.in_progress) {
+                assert_eq!(restored.def_name, expected.def_name);
+                assert_eq!(restored.param_tys, expected.param_tys);
+                assert_eq!(restored.ret_ty, expected.ret_ty);
+            }
+        });
+
+        let body = find_top_level_def_expr(checked.exprs(), "bad_wrap")
+            .expect("the checked program contains bad_wrap");
+        let error = lower_host_function("bad_wrap", body, None, &checked)
+            .expect_err("real lowering must report the genuine bad call");
+        assert_eq!(
+            error.message,
+            "unsupported: Deep expression `app` on host expression lowering: recursive generic \
+             host call `bad` has no concrete checked type application to specialize \
+             (chelis#1158; [05-UNS-1]) (lowering); deliberate [04-TOT-3]: a malformed or \
+             unhandled Deep form cannot lower to a substitute host value"
+        );
+        MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
     }
 
     fn synthetic_tensor_function(name: &str, origin: HostFunctionOrigin) -> ConcreteHostFunction {

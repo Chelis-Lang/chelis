@@ -26,6 +26,14 @@ site references.
 - **THEN** the emitted C contains no specialized definition for that
   instantiation
 
+#### Scenario: A failed probe restores the specialization state
+
+- **WHEN** a speculative probe encounters a lowering error after specialization
+  state already exists
+- **THEN** the probe reports no summary rejection and restores every state field
+  to its pre-probe value
+- **AND** later real lowering reports the genuine lowering error
+
 ### Requirement: Specialized symbols are compiler-internal
 
 A monomorphized specialization is an implementation detail of one generic

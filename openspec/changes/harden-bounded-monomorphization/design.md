@@ -134,12 +134,14 @@ keeps the short FNV-1a symbol format without silent aliasing.
 
 ### D5: Oracle stays singular
 
-All new scenarios join the existing owning suite
-(`cargo nextest run -p chelis-cli --test recursive_generic_monomorphization
---no-fail-fast`), which remains the one acceptance oracle. The byte-determinism
-test supersedes the set-equality test (the latter is strictly weaker) and must
-be mutation-verified once during development: with D1's guard disabled, the
-test fails on the trigger shape.
+All user-visible scenarios join the existing owning suite:
+`cargo nextest run -p chelis-cli --test recursive_generic_monomorphization
+--no-fail-fast`. This suite remains the one acceptance oracle. A supporting
+`chelis-ir` seam test forces a lowering error inside `MonoProbeGuard`. It locks
+`Ok(false)`, complete specialization-state restoration, and later attribution
+of the genuine error. The byte-determinism test supersedes the weaker
+set-equality test. A development mutation disables D1's guard and makes the
+test fail on the trigger shape.
 
 ## Risks / Trade-offs
 
