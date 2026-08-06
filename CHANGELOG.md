@@ -84,6 +84,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   still an error; downstream, coral's suite returns from 17 passed / 7
   failed to 74 passed / 0 failed with no source edits.
 
+  Two further shapes 0.18.4 rejected are accepted again, both matching
+  0.18.3: **a destructured component captured by a closure and consumed
+  twice inside the body**, and **a match-arm binder consumed twice
+  inside the arm**. Neither is the per-name gate leaking. `check_fn` and
+  `check_match` each clone the enclosing scope and then re-`declare`
+  every captured name and pattern binder, and a `declare` pushes a fresh
+  unmarked entry that shadows the component mark — so the mark does not
+  reach inside a closure body or a match arm, and the double consume
+  falls through to implicit Copy insertion like any other binding. The
+  old counter lived on the checker rather than on the scope, so it
+  survived that re-declaration and kept gating lexically; those two
+  rejections were collateral from the over-broad gate, not a contract.
+  Both are pinned by tests in
+  `crates/chelis-cli/tests/issue_1200_destructure_scope_lane_parity.rs`.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C

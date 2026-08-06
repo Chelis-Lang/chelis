@@ -18,6 +18,11 @@
 //!   of an ordinary binding.
 //! * **D** — a fully NAMED tuple destructure, no `_` anywhere, poisoning
 //!   the destructure's own source.
+//!
+//! The last two tests pin the two places where moving from a block-scoped
+//! depth counter to a per-name mark restores 0.18.3 behavior that stock
+//! 0.18.4 rejected: closure-captured components and match-arm binders.
+//! See the comment above them for the mechanism.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -135,6 +140,76 @@ out = run(to_tensor([1.0, 2.0, 3.0, 4.0]), to_tensor([10.0, 20.0, 30.0, 40.0]))
 "#,
         "issue1200_shape_d",
         &[12.0, 24.0, 36.0, 48.0],
+    );
+}
+
+// ============================================================
+// Two restored-0.18.3 deltas, pinned
+//
+// Both shapes below double-consume a genuine destructured component,
+// and both are ACCEPTED. That is not the per-name gate leaking: it is
+// the pre-existing re-declaration discipline in `check_fn` and
+// `check_match`. Each clones the enclosing `LinearScope` and then calls
+// `declare` for every captured name / pattern binder, and `declare`
+// pushes a fresh UNMARKED entry that shadows whatever the clone carried
+// — the same shadowing the ordinary-rebinding test in
+// `crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`
+// pins. So the component mark does not reach inside a closure body or a
+// match arm, and a consume-after-consume there falls through to
+// implicit Copy insertion like any other binding.
+//
+// Stock 0.18.4 rejected both, because `destructure_scope_depth` lived on
+// `Checker` rather than on the scope: it survived the clone-and-declare
+// that shadows a per-name mark, so it kept gating lexically inside the
+// closure/arm. That rejection was collateral from the over-broad gate,
+// not a contract — 0.18.3 accepted both and produced these values.
+// Verified across all three binaries while closing chelis#1200.
+// ============================================================
+
+/// A destructured component captured by a closure whose body consumes it
+/// twice. Accepted, value restored to the 0.18.3 answer.
+#[test]
+fn closure_captured_component_double_consume_is_accepted_in_both_lanes() {
+    assert_lane_parity(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run() -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  f = fn () -> add(realize(p), realize(p))
+  f()
+}
+out = run()
+"#,
+        "issue1200_closure_capture",
+        &[2.0, 4.0],
+    );
+}
+
+/// A match-arm binder consumed twice inside the arm, where the scrutinee
+/// was built from a destructured component. Accepted, value restored to
+/// the 0.18.3 answer.
+#[test]
+fn match_arm_binder_double_consume_is_accepted_in_both_lanes() {
+    assert_lane_parity(
+        r#"
+type Box =
+  | Wrap(tensor[2, f32])
+  | Empty
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run() -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  b = Wrap(p)
+  match b with {
+    | Wrap(w) => add(realize(w), realize(w))
+    | Empty => to_tensor([0.0f32, 0.0f32])
+  }
+}
+out = run()
+"#,
+        "issue1200_match_arm_binder",
+        &[2.0, 4.0],
     );
 }
 
