@@ -652,7 +652,7 @@ pub(crate) fn collect_type_var_bindings(
             collect_type_var_bindings(pattern_ret, ret, out);
         }
         (HostTypeTerm::Adt(pattern_name, pattern_args), HostTypeTerm::Adt(name, args))
-            if pattern_name == name =>
+            if adt_names_match(pattern_name, name) =>
         {
             for (pattern_arg, arg) in pattern_args.iter().zip(args) {
                 collect_type_var_bindings(pattern_arg, arg, out);
@@ -968,9 +968,18 @@ pub(crate) fn encode_host_type(ty: &HostTypeTerm) -> Option<Expr> {
     })
 }
 
-/// Encode one dimension. A literal extent wider than the Deep integer atom
-/// has no spelling; report that rather than clamping it to a different
-/// tensor shape.
+/// Encode one dimension. A literal extent wider than the Deep integer atom has
+/// no spelling; report that rather than clamping it to a different tensor
+/// shape.
+///
+/// `Named(_, Some(extent))` — a symbolic dim that also carries a known size —
+/// likewise has no faithful Deep spelling: `d-name` records the name only, so
+/// encoding one would silently drop the extent and let two distinct types
+/// (`n`, and `n` known to be 4) share an encoding. `render_dim` keeps them
+/// apart in the canonical signature key, so conflating them here would break
+/// the encode/decode round trip the specialization body rewrite depends on.
+/// No producer reaches this today; returning `None` keeps it fail-loud if one
+/// ever does, rather than fail-silent.
 fn encode_dim(dim: &DimInfo) -> Option<Expr> {
     let span = chelis_deep::Span::new(0, 0);
     Some(match dim {
@@ -980,12 +989,13 @@ fn encode_dim(dim: &DimInfo) -> Option<Expr> {
             vec![Expr::Atom(Atom::Int(i64::try_from(*value).ok()?), span)],
             span,
         ),
-        DimInfo::Named(name, _) => Expr::node(
+        DimInfo::Named(name, None) => Expr::node(
             DeepTag::DName,
             MetaMap::default(),
             vec![Expr::Atom(Atom::Name(name.clone()), span)],
             span,
         ),
+        DimInfo::Named(_, Some(_)) => return None,
     })
 }
 
@@ -1206,28 +1216,26 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_leaves_the_interner_untouched() {
-        // chelis#1158 Findings 1 and 4: a speculative lowering must not fix a
-        // specialization's FIFO position, consume cap budget, or enqueue work
-        // for emission.
-        reset_mono_state();
-        let params = [scalar(Prim::F32)];
-        let ret = scalar(Prim::Bool);
-        intern_specialization("real", &params, &ret).expect("real intern");
-        {
-            let _probe = MonoProbeGuard::begin();
-            intern_specialization("probe_only", &[scalar(Prim::Int64)], &ret)
-                .expect("probe intern");
-            intern_specialization("real", &[scalar(Prim::Int32)], &ret).expect("probe intern");
-        }
-        // Only the pre-probe pending specialization survives, and the cap
-        // budget the probe spent is returned.
-        let mut drained = Vec::new();
-        while let Some(pending) = pop_pending_specialization() {
-            drained.push(pending.callee);
-        }
-        assert_eq!(drained, vec!["real".to_string()]);
-        reset_mono_state();
+    fn a_named_dim_with_a_known_extent_has_no_deep_spelling() {
+        // `d-name` records the name only, so encoding this would silently drop
+        // the extent and let `n` and `n`-known-to-be-4 share one encoding while
+        // `render_dim` keeps them apart in the memo key. Fail-loud instead.
+        let ty = HostTypeTerm::Tensor(TensorType {
+            dims: vec![DimInfo::Named("n".into(), Some(4))],
+            precision: Prim::F32,
+        });
+        assert!(encode_host_type(&ty).is_none());
+        // And the canonical key does distinguish the two, which is what makes
+        // silently conflating them a real defect rather than a cosmetic one.
+        let sized = canonical_signature_key(&[ty], &scalar(Prim::Bool));
+        let unsized_dim = canonical_signature_key(
+            &[HostTypeTerm::Tensor(TensorType {
+                dims: vec![DimInfo::Named("n".into(), None)],
+                precision: Prim::F32,
+            })],
+            &scalar(Prim::Bool),
+        );
+        assert_ne!(sized, unsized_dim);
     }
 
     #[test]
@@ -1261,6 +1269,49 @@ mod tests {
             })],
         );
         assert!(first_tensor_shape_disagreement(&qualified, &literal).is_none());
+    }
+
+    #[test]
+    fn adt_bindings_tolerate_a_qualified_spelling() {
+        // chelis#1158 Finding 5: exact-name matching silently dropped the whole
+        // arm when one side arrived qualified, turning a concretizable call
+        // into a non-concretizable one.
+        let pattern = HostTypeTerm::Adt(
+            "Demo.Tree.Box".into(),
+            vec![HostTypeTerm::TypeVariable("a".into())],
+        );
+        let mut env = HashMap::new();
+        collect_type_var_bindings(
+            &pattern,
+            &HostTypeTerm::Adt("Box".into(), vec![scalar(Prim::F32)]),
+            &mut env,
+        );
+        assert_eq!(env.get("a"), Some(&scalar(Prim::F32)));
+    }
+
+    #[test]
+    fn a_probe_leaves_the_interner_untouched() {
+        // chelis#1158 Findings 1 and 4: a speculative lowering must not fix a
+        // specialization's FIFO position, consume cap budget, or enqueue work
+        // for emission.
+        reset_mono_state();
+        let params = [scalar(Prim::F32)];
+        let ret = scalar(Prim::Bool);
+        intern_specialization("real", &params, &ret).expect("real intern");
+        {
+            let _probe = MonoProbeGuard::begin();
+            intern_specialization("probe_only", &[scalar(Prim::Int64)], &ret)
+                .expect("probe intern");
+            intern_specialization("real", &[scalar(Prim::Int32)], &ret).expect("probe intern");
+        }
+        // Only the pre-probe pending specialization survives, and the cap
+        // budget the probe spent is returned.
+        let mut drained = Vec::new();
+        while let Some(pending) = pop_pending_specialization() {
+            drained.push(pending.callee);
+        }
+        assert_eq!(drained, vec!["real".to_string()]);
+        reset_mono_state();
     }
 
     #[test]

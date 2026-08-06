@@ -488,6 +488,63 @@ fn a_specialization_never_displaces_the_authored_entry() {
 }
 
 #[test]
+fn reef_package_recursive_generic_interns_one_symbol_per_type() {
+    // chelis#1158 Finding 5: the interner keys the memo, the per-callee cap,
+    // and the self-recursion frame gate by callee NAME, and `lookup_program_def`
+    // carries a terminal-name fallback precisely because a reef'd program can
+    // reach one def by more than one spelling. This exercises the shape that
+    // would expose a split: one generic reached by a recursive self-call inside
+    // its own module AND by a cross-module call from the entry. If the two call
+    // sites ever keyed differently, one type would mint two symbols.
+    //
+    // HONEST SCOPE: this pins the behaviour, it does not reproduce a pre-fix
+    // failure. On the current linker both spellings arrive as the same internal
+    // name, so the normalization is defensive; see the commit message.
+    let (_dir, reef_home, app) = common::make_app("mono-spelling");
+    write_file(
+        &app.join("src/tree.ch"),
+        "module Demo.Tree\n\
+         export (Box, Empty, Full, count, local_use)\n\
+         type Box[a] =\n  | Empty\n  | Full { value: a }\n\
+         def count[a](box: Box[a], acc: int64) -> int64 =\n\
+         \x20 match box with {\n\
+         \x20   | Empty => acc\n\
+         \x20   | Full { value: item } => count(Empty, add(acc, cast(1, int64)))\n\
+         \x20 }\n\
+         def local_use() -> int64 = count(Full { value: cast(1.0, f32) }, cast(0, int64))\n",
+    );
+    write_file(
+        &app.join("src/main.ch"),
+        "module Demo.Main\n\
+         import Demo.Tree (Box, Empty, Full, count, local_use)\n\
+         out = print(add(local_use(), count(Full { value: cast(1.0, f32) }, cast(0, int64))))\n",
+    );
+    let out_dir = app.join("out");
+    Command::cargo_bin("chelis")
+        .expect("chelis binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app)
+        .args([
+            "build",
+            app.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let emitted = std::fs::read_to_string(out_dir.join("main.c")).expect("emitted C");
+    let symbols = mono_symbols(&emitted, "count");
+    assert_eq!(
+        symbols.len(),
+        1,
+        "one instantiation reached by two call sites must intern one symbol; found {symbols:?}"
+    );
+}
+
+#[test]
 fn lowering_the_same_program_twice_is_byte_identical() {
     // chelis#1002 made emitted-C determinism a repo-level sensitivity: a
     // specialization worklist drained in hash-map order would reorder

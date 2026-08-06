@@ -51,7 +51,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **The `[05-UNS-1]` recursive-generic boundary narrows to polymorphic
   recursion and non-concretizable call sites (chelis#1158).** The
-  diagnostic now distinguishes the two causes. A call whose type
+  diagnostic now distinguishes the causes. A call whose type
   arguments do not resolve to a concrete signature reports which term
   still carries a free variable. Polymorphic recursion — a cycle that
   mints a new instantiation at every level, as in `f[a]` calling

@@ -7200,10 +7200,14 @@ fn lower_monomorphized_generic_call(
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: &HostTypeTerm,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    // chelis#1158: intern under the program's own spelling of the callee, not
+    // the call site's, so the memo, the cap, and the self-recursion frame gate
+    // all agree across a reef'd program's qualified/short spellings.
+    let callee = canonical_mono_callee_name(program, name);
     let (param_tys, ret_ty) =
-        resolve_concrete_call_signature(name, args, program, scope, expected_ty)
+        resolve_concrete_call_signature(&callee, args, program, scope, expected_ty)
             .map_err(|rejection| host_expr_lowering_error(app_expr, rejection.describe(name)))?;
-    let symbol = intern_specialization(name, &param_tys, &ret_ty)
+    let symbol = intern_specialization(&callee, &param_tys, &ret_ty)
         .map_err(|rejection| host_expr_lowering_error(app_expr, rejection.describe(name)))?;
     let lowered_args = args
         .iter()
@@ -7373,6 +7377,35 @@ fn resolve_concrete_call_signature(
         });
     }
     Ok((params, ret))
+}
+
+/// The program's own spelling of a monomorphization callee.
+///
+/// Everything the interner keys on — the memo, the per-callee cap, and the
+/// frame gate `enclosing_binding` uses to decide whether a call is
+/// self-recursive — is keyed by name. A reef'd program reaches one def by more
+/// than one spelling (that is why `lookup_program_def` carries a terminal-name
+/// fallback at all), so keying on the raw call-site spelling would let one def
+/// hold two memo entries, consume the cap twice, and — worse — fail the
+/// `frame.callee == callee` self-recursion test on a genuinely recursive call,
+/// dropping the enclosing-instantiation recovery that chelis#941's
+/// `loop(Empty)` shape depends on. Resolve to the def-table spelling once, at
+/// the call site, so every downstream key agrees.
+fn canonical_mono_callee_name(program: &CheckedProgram, name: &str) -> String {
+    let defs = collect_program_defs(program.exprs());
+    if defs.contains_key(name) {
+        return name.to_string();
+    }
+    let mut matches = defs
+        .keys()
+        .filter(|candidate| terminal_name_matches(candidate, name));
+    match (matches.next(), matches.next()) {
+        // Exactly one def answers to this spelling: that is the canonical key.
+        // An ambiguous terminal match keeps the call-site spelling rather than
+        // guessing, which preserves today's behaviour for that case.
+        (Some(resolved), None) => resolved.clone(),
+        _ => name.to_string(),
+    }
 }
 
 /// Emit one interned `(callee, signature)` pair as a standalone host function
