@@ -36,6 +36,9 @@
 //! Named regression (chelis#941 body's minimized reproducer):
 //! - `issue_941_minimized_reproducer_compiles`
 //!
+//! Red-team regression (permuted in-group instantiation, 2026-08-06):
+//! - `permuted_recursive_instantiation_specializes_per_orbit_member`
+//!
 //! Determinism golden (change task 4.2):
 //! - `specialized_symbol_set_is_deterministic_across_builds`
 
@@ -101,6 +104,21 @@ def ping[a](box: Box[a], n: int32) -> int32 =
 def pong[a](box: Box[a], n: int32) -> int32 =
   if n <= 0 then 100 else ping(box, n - 1) + 1
 def concrete() -> int32 = ping(Full { value: cast(1.0, f32) }, 4)
+out = print(concrete())
+";
+
+/// Permuted recursive instantiation (red-team probe, 2026-08-06): `swap`
+/// recurses at `(b, a)` — a renaming of the caller's own parameters, which
+/// [04-INF-2] admits. The orbit has two members whose C parameter types
+/// differ (`chelis_adt*` vs `bool`), so wiring the permuted edge back to the
+/// caller's own symbol emits uncompilable C. Prints `3`.
+const PERMUTED_INSTANTIATION: &str = "\
+type Box[a] =
+  | Empty
+  | Full { value: a }
+def swap[a, b](x: a, y: b, n: int32) -> int32 =
+  if n <= 0 then 0 else swap(y, x, n - 1) + 1
+def concrete() -> int32 = swap(Full { value: cast(1, int32) }, true, 3)
 out = print(concrete())
 ";
 
@@ -489,6 +507,32 @@ fn polymorphic_recursion_rejection_is_lane_uniform() {
         !build_stderr.contains("Lowering error"),
         "rejection must happen at check time, before any lane-specific stage:\n{build_stderr}"
     );
+}
+
+#[test]
+fn permuted_recursive_instantiation_specializes_per_orbit_member() {
+    let eval = eval_first_line(PERMUTED_INSTANTIATION, "permuted_eval");
+    let (_dir, out_dir) = build_ok(PERMUTED_INSTANTIATION, "permuted");
+    let c_source = read_generated_c(&out_dir, "permuted");
+    let specialized = identifiers_with_prefix(&c_source, "swap");
+    assert_eq!(
+        specialized.len(),
+        2,
+        "the permutation orbit has two members, each with its own \
+         specialization, found: {specialized:?}"
+    );
+    for symbol in &specialized {
+        assert!(
+            count_occurrences(&c_source, symbol) >= 2,
+            "each orbit member must be defined and called: `{symbol}`"
+        );
+    }
+    // The two orbit members have different C parameter types, so the native
+    // compile step is the assertion that no edge was wired to a
+    // wrong-typed definition.
+    let compiled = run_first_line(&out_dir, "permuted");
+    assert_eq!(eval, "3");
+    assert_eq!(compiled, eval, "compiled output must match the eval lane");
 }
 
 // ---------------------------------------------------------------------------

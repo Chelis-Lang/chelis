@@ -156,6 +156,24 @@ change is done while that oracle is red.
       instantiation reuse across separate call sites, polymorphic recursion
       hidden behind a local alias), and checks docs claims against shipped
       behavior; record findings here
+      **Round 1 (2026-08-06, fresh local subagent in herdr pane w36:pD):**
+      confirmed one MAJOR finding before stalling mid-run (agent hung after
+      ~30 min of work; handle closed per protocol):
+      - **Permuted in-group instantiation miscompiled.** `swap[a, b]`
+        recursing at `(b, a)` — admitted by [04-INF-2] as a renaming of the
+        caller's own parameters — was wired by the lowering's in-progress
+        reuse branch back to the caller's own symbol, emitting C that passes
+        `bool` where `chelis_adt*` is expected (clang: incompatible integer
+        to pointer conversion) while `chelis build` reported success.
+        **Fixed** in the same session: `lower_recursive_generic_call` now
+        derives the edge's own checked type application first (each orbit
+        member gets its own memoized specialization; renaming orbits are
+        finite) and reuses the innermost in-progress symbol only for
+        underived (unconstrained) edges such as `loop(Empty)`. Locked by
+        `permuted_recursive_instantiation_specializes_per_orbit_member`
+        (two orbit symbols, native compile, run output matches eval).
+      Round 2 (fresh subagent against the fixed tree) still owed for the
+      full report deliverable.
 - [ ] 6.4 Full CI green including macOS Smoke (authoritative workspace oracle);
       chelis#1158 closes on the merged green oracle with a comment naming the
       suite; notify coral to re-cite/retire its 6 citation sites on the next

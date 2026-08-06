@@ -7224,10 +7224,53 @@ fn lower_recursive_generic_call(
     scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-    // A recursive edge inside a specialization currently being lowered:
-    // spec/04 §3.1.1 guarantees the call is at the caller's own
-    // instantiation, so it reuses the in-progress symbol instead of
-    // expanding again.
+    // Derive the checked type application from the call site FIRST. Inside a
+    // specialization the enclosing scope carries concrete parameter types,
+    // so a recursive edge derives its own key even when it permutes or
+    // narrows the caller's instantiation — [04-INF-2] admits any renaming of
+    // the caller's own type parameters, and the renaming orbit is finite, so
+    // each orbit member gets (and memoizes) its own specialized symbol.
+    // Reusing the innermost in-progress symbol without checking the
+    // instantiation would wire a permuted edge to a wrong-typed definition.
+    let definitions = adt_constructor_definitions(program);
+    let mut param_tys = Vec::with_capacity(args.len());
+    for arg in args {
+        let ty = canonicalize_representation_erased_adt_args(
+            expr_host_type(arg, program, scope),
+            &definitions,
+        );
+        param_tys.push(ty);
+    }
+    let ret_ty = if !explicit_ty.is_unresolved() {
+        explicit_ty.clone()
+    } else {
+        inferred_ret_ty.clone()
+    };
+    let ret_ty = canonicalize_representation_erased_adt_args(ret_ty, &definitions);
+    let derived_concrete =
+        !param_tys.iter().any(HostTypeTerm::is_unresolved) && !ret_ty.is_unresolved();
+    if derived_concrete {
+        let symbol = ensure_mono_specialization(app_expr, name, &param_tys, &ret_ty, program)?;
+        let lowered_args = args
+            .iter()
+            .zip(param_tys.iter())
+            .map(|(arg, param_ty)| {
+                lower_host_expr_with_expected(arg, program, scope, tensor_helpers, Some(param_ty))
+                    .map(|lowered| force_host_expr_type(lowered, param_ty.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(HostExpr::new(HostExprKind::Call {
+            function: symbol,
+            args: lowered_args,
+            arg_tys: param_tys,
+            ty: ret_ty,
+        }));
+    }
+
+    // An underived (unconstrained) recursive edge — e.g. `loop(Empty)`,
+    // whose argument never pins the type parameter: [04-INF-2] types the
+    // unconstrained argument at the caller's own instantiation, which is the
+    // innermost in-progress specialization of the same def.
     let in_progress = MONO_SPECIALIZATIONS.with(|state| {
         state
             .borrow()
@@ -7254,51 +7297,16 @@ fn lower_recursive_generic_call(
         }));
     }
 
-    // Derive the checked type application from the call site. Every entry
-    // must be concrete; specialization is driven by checked call-site type
-    // applications only, never by eager expansion.
-    let definitions = adt_constructor_definitions(program);
-    let mut param_tys = Vec::with_capacity(args.len());
-    for arg in args {
-        let ty = canonicalize_representation_erased_adt_args(
-            expr_host_type(arg, program, scope),
-            &definitions,
-        );
-        param_tys.push(ty);
-    }
-    let ret_ty = if !explicit_ty.is_unresolved() {
-        explicit_ty.clone()
-    } else {
-        inferred_ret_ty.clone()
-    };
-    let ret_ty = canonicalize_representation_erased_adt_args(ret_ty, &definitions);
-    if param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved() {
-        // Fail-closed residue: no concrete checked instantiation to key a
-        // specialized definition on, and emitting a reference to the
-        // omitted generic definition is never legal.
-        return Err(host_expr_lowering_error(
-            app_expr,
-            format!(
-                "recursive generic host call `{name}` has no concrete checked type \
-                 application to specialize (chelis#1158; [05-UNS-1])"
-            ),
-        ));
-    }
-    let symbol = ensure_mono_specialization(app_expr, name, &param_tys, &ret_ty, program)?;
-    let lowered_args = args
-        .iter()
-        .zip(param_tys.iter())
-        .map(|(arg, param_ty)| {
-            lower_host_expr_with_expected(arg, program, scope, tensor_helpers, Some(param_ty))
-                .map(|lowered| force_host_expr_type(lowered, param_ty.clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(HostExpr::new(HostExprKind::Call {
-        function: symbol,
-        args: lowered_args,
-        arg_tys: param_tys,
-        ty: ret_ty,
-    }))
+    // Fail-closed residue: no concrete checked instantiation to key a
+    // specialized definition on, and emitting a reference to the omitted
+    // generic definition is never legal.
+    Err(host_expr_lowering_error(
+        app_expr,
+        format!(
+            "recursive generic host call `{name}` has no concrete checked type \
+             application to specialize (chelis#1158; [05-UNS-1])"
+        ),
+    ))
 }
 
 /// Deterministic specialized-symbol name: the def name plus an FNV-1a hash
