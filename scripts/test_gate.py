@@ -1532,6 +1532,36 @@ def _parse_job_attrs() -> dict[str, dict[str, str]]:
     return attrs
 
 
+def _backend_sanitizer_optimization_errors(text: str) -> list[str]:
+    block = _workflow_job_blocks(text).get("backend-sanitizers", "")
+    flags = next(
+        (
+            line
+            for line in block.splitlines()
+            if line.strip().startswith("CHELIS_C_TEST_EXTRA_FLAGS:")
+        ),
+        "",
+    )
+    if re.search(r"(?:^|\s)-O(?:1|2)(?:\s|$)", flags) is None:
+        return ["backend-sanitizers: C sanitizer flags need -O1 or -O2"]
+    return []
+
+
+class BackendSanitizerWorkflowTests(unittest.TestCase):
+    def test_c_sanitizer_flags_satisfy_nix_fortify(self) -> None:
+        self.assertEqual(
+            _backend_sanitizer_optimization_errors(CI_YML.read_text()), []
+        )
+
+    def test_c_sanitizer_guard_rejects_missing_optimization(self) -> None:
+        text = CI_YML.read_text()
+        mutated = text.replace("-O1 ", "", 1)
+        self.assertEqual(
+            _backend_sanitizer_optimization_errors(mutated),
+            ["backend-sanitizers: C sanitizer flags need -O1 or -O2"],
+        )
+
+
 class MacosManualOnlyTests(unittest.TestCase):
     def test_every_macos_job_requires_manual_dispatch(self) -> None:
         found: list[tuple[str, str]] = []
