@@ -66,8 +66,11 @@ The root `devenv.nix` MUST import these local modules:
 - `./devenv/git-hooks.nix`
 - `./devenv/smoke-tests.nix`
 - `./devenv/package-outputs.nix`
+- `./devenv/release-outputs.nix`
 
-`devenv.yaml` MUST NOT declare local module imports; those belong in `devenv.nix`. It MAY declare remote imports for shared configuration (the ci consumer module), and it MUST remain the owner of Devenv inputs and CLI options.
+`devenv.yaml` MUST NOT declare local module imports. Those imports belong in `devenv.nix`.
+
+`devenv.yaml` can declare remote imports for shared configuration. It MUST remain the owner of Devenv inputs and CLI options.
 
 The root `devenv.nix` MUST contain only the module imports. Each local module MUST own one configuration concern.
 
@@ -81,11 +84,11 @@ The root `devenv.nix` MUST contain only the module imports. Each local module MU
 
 #### Scenario: An evaluator reads the root module
 - **WHEN** a Devenv evaluator reads `devenv.nix` without the root YAML imports
-- **THEN** it discovers all six local modules
+- **THEN** it discovers all seven local modules
 
 #### Scenario: A contributor evaluates the composed shell
 - **WHEN** a contributor runs `devenv test`
-- **THEN** Devenv combines all six local modules
+- **THEN** Devenv combines all seven local modules
 - **AND** the composed configuration passes the shell contract
 
 ### Requirement: Devenv exposes the canonical Nix packages

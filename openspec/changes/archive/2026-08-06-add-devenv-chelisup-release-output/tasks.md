@@ -35,4 +35,4 @@
 - [x] 5.2 Run the complete Python script discovery suite.
 - [x] 5.3 Run `devenv build --no-tui outputs.release-chelisup` on the current native host.
 - [x] 5.4 Run `devenv test --no-tui`, the Nix format check, actionlint, pre-commit, and `git diff --check`.
-- [ ] 5.5 Run the manual `Build portable chelisup` release workflow matrix. Both platform legs must pass as the authoritative completion oracle.
+- [x] 5.5 Run the manual `Build portable chelisup` release workflow matrix. Both platform legs must pass as the authoritative completion oracle.
