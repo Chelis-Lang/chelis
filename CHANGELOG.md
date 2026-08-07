@@ -92,7 +92,38 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   monomorphized at all, so a generic ADT parameterised by its dimension
   variable still fails at the code-generation boundary with an unresolved
   host type variable. That is a distinct defect in the dimension/rank
-  lowering path rather than a residue of this one.
+  lowering path rather than a residue of this one. Closed separately by
+  chelis#1216, below.
+
+- **A recursive function generic over an erased ADT dimension is
+  monomorphized (chelis#1216).** Such a callee — chelis#940's
+  `Frame[n] -> Column[n] -> tensor[n, _]` shape, where `n` is reachable only
+  through the ADT — already satisfies the rank-polymorphic predicate, so the
+  inline path claimed it and then refused the recursive edge on its
+  `is_inlining` guard. That edge fell through to a plain call to a symbol the
+  emitter had elided, carrying the ADT definition's own parameter variable
+  (`t0` — a third namespace, distinct from both source `n` and inference
+  `t376`) into the code-generation boundary, where it surfaced as
+  `unresolved host type variable t0`. Recursive erased-dimension calls now
+  route to the same bounded monomorphization chelis#1158 and chelis#1201
+  use. A NON-recursive such call is still consumed by the inline path above
+  and is unaffected, as is a true `d-var` rank, which continues to
+  monomorphize through the DAG `tensor_rank_substitutions` route.
+
+  Routing alone is not sufficient, and the two halves fail differently: with
+  only the routing change the call reaches specialization but has no key,
+  because the structural walk does not reconstruct a list literal's type (it
+  lowers through `Cons` applications and returns a fresh inference
+  variable), so the application sinks into `has no concrete checked type
+  application to specialize`. The call site therefore falls back to the
+  checker's stamp on the node, adopting it only after canonicalization has
+  erased the representation-irrelevant ADT arguments — an argument whose
+  sole unresolved part is an erased dimension then yields a concrete key,
+  while one still unresolved after erasure is genuinely underconstrained and
+  stays on the fail-closed residue. This unblocks `Coral.Frame.from_pairs`
+  on the build lane (coral#26), which reaches the defect through
+  `column_lengths_match` -> `all_eq_len`. Acceptance oracle: `cargo nextest
+  run -p chelis-ir --no-fail-fast`.
 
 ## [0.18.4] — 2026-08-05
 
