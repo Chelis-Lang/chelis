@@ -885,6 +885,8 @@ fn bf16_matmul_routes_through_convert_then_sgemm() {
     let dag = build_bf16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "bf16_matmul_routing").unwrap();
+    assert!(result.requirements.needs_blas);
+    assert!(result.c_source.contains("#include \"chelis_blas.h\""));
     assert!(
         result.c_source.contains("chelis_bf16_buffer_to_f32"),
         "emitted C must convert bf16 operands to f32: {}",
@@ -907,6 +909,8 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
     let dag = build_f16_matmul_dag();
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "f16_matmul_routing").unwrap();
+    assert!(result.requirements.needs_blas);
+    assert!(result.c_source.contains("#include \"chelis_blas.h\""));
     assert!(
         result.c_source.contains("chelis_f16_buffer_to_f32"),
         "emitted C must convert f16 operands to f32: {}",

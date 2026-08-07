@@ -149,15 +149,19 @@ pub fn codegen_with_options(
     } else {
         dag
     };
-    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, options)?;
+    // The input option requests specialization. The emitted DAG decides whether the C program needs BLAS.
+    let needs_blas = dag
+        .nodes()
+        .iter()
+        .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. }));
+    let emission_options = CodegenOptions {
+        use_blas: needs_blas,
+        ..options
+    };
+    let c_source = emit::CEmitter::emit_dag_with_options(dag, func_name, emission_options)?;
     let h_header = format!(
         "void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);"
     );
-    let needs_blas = options.use_blas
-        && dag
-            .nodes()
-            .iter()
-            .any(|node| matches!(node.op, chelis_ir::dag::RiscOp::BlasMatmul { .. }));
     let input_labels = emit::CEmitter::input_labels(dag);
     let output_labels = emit::CEmitter::output_labels(dag);
     let symbolic_dims = chelis_ir::dag::symbolic_params(dag);
@@ -727,6 +731,7 @@ mod tests {
         );
         let result = codegen(&dag, "test_fn").unwrap();
         assert!(!result.requirements.needs_blas);
+        assert!(!result.c_source.contains("#include \"chelis_blas.h\""));
         assert!(!result.c_source.contains("cblas_sgemm("));
     }
 
@@ -799,6 +804,16 @@ mod tests {
         assert!(result.requirements.needs_blas);
         assert!(result.c_source.contains("#include \"chelis_blas.h\""));
         assert!(result.c_source.contains("cblas_sgemm("));
+
+        let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
+        let pre_specialized = codegen(&specialized, "pre_specialized_fn").unwrap();
+        assert!(pre_specialized.requirements.needs_blas);
+        assert!(
+            pre_specialized
+                .c_source
+                .contains("#include \"chelis_blas.h\"")
+        );
+        assert!(pre_specialized.c_source.contains("cblas_sgemm("));
     }
 
     // ---- Compilation tests ----
