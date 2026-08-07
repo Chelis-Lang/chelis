@@ -7407,14 +7407,18 @@ fn lower_recursive_generic_call(
     // to discard by substituting the argument expression over the parameter
     // name and dropping the parameter's declared type.
     if param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved() {
-        let declared: Vec<Option<Expr>> = params_list_of(&def_body)
-            .map(|params| {
-                children(params)
-                    .iter()
-                    .map(param_declared_type_expr)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        // A def with no `params` list contributes no declared types to solve
+        // against. Spelled out rather than defaulted, so the empty case is a
+        // stated outcome and not a swallowed one: those slots simply stay
+        // unresolved and reach the residue below
+        // (spec/design/loud_unsupported.md C4.3).
+        let declared: Vec<Option<Expr>> = match params_list_of(&def_body) {
+            Some(params) => children(params)
+                .iter()
+                .map(param_declared_type_expr)
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
         let mut subst: HashMap<String, HostTypeTerm> = HashMap::new();
         for (slot, declared_expr) in declared.iter().enumerate() {
             if let Some(declared_expr) = declared_expr
@@ -11600,8 +11604,17 @@ thread_local! {
 }
 
 /// The substitution in force for the innermost specialization, if any.
+///
+/// Outside every specialization the answer is an empty substitution, and
+/// that is a real answer rather than a missing one: no type variable is
+/// bound there, so applying it is the identity. Spelled as an explicit
+/// branch instead of a default so the empty map is visibly the stated
+/// outcome (spec/design/loud_unsupported.md C4.3).
 fn active_type_subst() -> HashMap<String, HostTypeTerm> {
-    ACTIVE_TYPE_SUBST.with(|stack| stack.borrow().last().cloned().unwrap_or_default())
+    ACTIVE_TYPE_SUBST.with(|stack| match stack.borrow().last() {
+        Some(subst) => subst.clone(),
+        None => HashMap::new(),
+    })
 }
 
 /// RAII scope for a specialization's type bindings (chelis#1201).
