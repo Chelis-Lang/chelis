@@ -888,6 +888,9 @@ edit is not a repair. This makes an emptied parity row, an emptied rejected-cell
 driver, or an eval test that emits a forged producer-authored receipt fail
 before its suite runs. Eval/C receipts remain runtime-entry and multiplicity
 evidence; they are not trusted as evidence of their own free-form detail.
+
+PR #1204 adds `parity_recursive_generic` to this frozen inventory. Its independent evidence is the 22-case `recursive_generic_monomorphization` suite. Fresh-context red-team round 3 accepted its implementation and boundary controls. The corpus guard adds only `recursive_generic.ch`.
+
 Three digest-locked behavioral canaries perturb the compiled observation before
 the shared comparator, drive the shared `assert_expected` helper with a
 known-wrong expected value, and present an adjacent f32 result while the
