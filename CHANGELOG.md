@@ -173,11 +173,36 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   reach it — citing the open chelis#1226 rather than the closed
   chelis#1158 ([05-UNS-5]).
 
-  Not fixed here: a **recursive dimension-generic** function is never
+  Not fixed there: a **recursive dimension-generic** function is never
   monomorphized at all, so a generic ADT parameterised by its dimension
   variable still fails at the code-generation boundary with an unresolved
   host type variable. That is a distinct defect in the dimension/rank
-  lowering path rather than a residue of this one.
+  lowering path rather than a residue of this one; see chelis#1216 below.
+
+- **A recursive function generic over an erased ADT dimension is
+  monomorphized (chelis#1216).** chelis#940's `Frame[n] -> Column[n] ->
+  tensor[n, _]` shape has no stored ABI field, so its standalone definition
+  is elided and the call is normally specialized by inlining. On a recursive
+  callee that inline refuses the recursive edge (the call graph has a cycle),
+  and the edge fell through to a plain call to the elided symbol, carrying
+  the ADT's own parameter variable to the code-generation boundary and
+  failing with `unresolved host type variable`. Such a callee now reaches the
+  same bounded monomorphization chelis#1158 uses on the type axis, so the
+  recursive edge has an in-progress specialization to complete its slots
+  from. A true rank variable is deliberately not routed there: variable rank
+  is monomorphized through the DAG `tensor_rank_substitutions` path.
+
+  Deriving that specialization key also needed the checker's stamped type as
+  a fallback. The structural walk does not reconstruct every node's type — a
+  list literal lowers through `Cons` applications and comes back as a fresh
+  inference variable — so an argument whose only unresolved part was a
+  representation-erased ADT dimension sank the whole application. The stamp
+  is adopted only once canonicalization has erased those arguments; a stamp
+  still unresolved after erasure is genuinely underconstrained and is left to
+  the existing residue. Acceptance oracle: `cargo nextest run -p chelis-ir
+  --no-fail-fast`.
+
+  With this, `Coral.Frame` compiles and runs on the build lane (coral#26).
 
 ## [0.18.4] — 2026-08-05
 
