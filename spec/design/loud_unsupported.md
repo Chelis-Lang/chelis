@@ -946,11 +946,37 @@ checked constructor-field types rather than by source spelling
 ([chelis#940](https://github.com/Chelis-Lang/chelis/issues/940)); parameters
 that reach only tensor dimensions stay on the existing rank-specialization
 path, while stored value parameters remain ordinary type polymorphism.
-Invoked recursive ordinary-generic functions remain a loud unsupported
-boundary until the compiler has memoized monomorphized symbols
-([chelis#941](https://github.com/Chelis-Lang/chelis/issues/941)); lowering must
-not emit a reference to an omitted generic symbol or expand recursive source
-without a bound.
+Invoked recursive ordinary-generic functions compile through bounded
+memoized monomorphization
+([chelis#1158](https://github.com/Chelis-Lang/chelis/issues/1158), successor
+to the closed [chelis#941](https://github.com/Chelis-Lang/chelis/issues/941)):
+one specialized definition per distinct checked type application, memoized so
+direct and mutual recursive edges lower to ordinary calls to the owning
+specialized symbol, with the uniform-recursive-instantiation rule
+(`spec/04-type-system.md` §3.1.1, [04-INF-2]/[04-INF-3]) supplying the
+boundedness precondition at check time. Lowering still never emits a
+reference to an omitted generic symbol and never expands recursive source
+without a bound. A self-recursive edge completes unconstrained argument
+slots from the caller's own instantiation (callee slot i corresponds to
+caller slot i on the same def) while keeping derived — possibly permuted —
+slots, so every renaming-orbit member gets its own specialized symbol. Two
+checker-admitted shapes remain on the loud, artifact-free boundary, citing
+chelis#1158: an outer call whose type application never resolves concrete,
+and a mutually recursive cross-member edge whose argument leaves the callee
+parameter unconstrained (host lowering has no positional correspondence
+across different defs' parameters). Each host function carries explicit
+authored or monomorphized provenance through C-ABI projection. The published
+header and tensor-entry selectors use that provenance, not symbol text.
+Specializations use translation-unit-local C linkage in binary and object mode.
+Speculative summary probes use state snapshot and restore plus sorted order.
+Thus, repeated builds emit byte-identical C and a probe failure cannot fail the
+build. Specializations intern by exact package definition identity under a
+canonical signature key. Exact identity lookup precedes unique terminal-name
+fallback. A hash collision between distinct signatures produces a loud internal
+error. A specialization's parameter types are the call site's checked types.
+Thus, symbolic and literal tensor dimensions use the same specialization path. The delivered
+behavior's acceptance oracle is `cargo nextest run -p chelis-cli --test
+recursive_generic_monomorphization --no-fail-fast`.
 
 For `fold`, the checked callback's first parameter is the authoritative
 accumulator type. Host lowering materializes that type onto an unresolved

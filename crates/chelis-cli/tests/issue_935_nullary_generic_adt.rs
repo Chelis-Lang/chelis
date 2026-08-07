@@ -318,12 +318,12 @@ out = print(concrete())
 }
 
 #[test]
-fn invoked_recursive_generic_fails_before_emitting_an_undefined_symbol() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("recursive_generic.ch");
-    write_file(
-        &path,
-        "\
+fn invoked_recursive_generic_compiles_via_bounded_monomorphization() {
+    // chelis#1158 (successor to chelis#941): a recursive generic host call
+    // now compiles through bounded memoized specialization instead of the
+    // former branded rejection. The full compile-link-run oracle lives in
+    // `recursive_generic_monomorphization.rs`; this locks the flip.
+    let source = "\
 type Box[a] =
   | Empty
   | Full { value: a }
@@ -333,35 +333,30 @@ def loop[a](box: Box[a]) -> bool =
     | Full { value: item } => loop(Empty)
   }
 def main() -> bool = loop(Full { value: cast(1.0, f32) })
-",
+";
+    let (_dir, out_dir) = build(source, "recursive_generic");
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        },
     );
-    Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            dir.path().join("out").to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("chelis#941"))
-        .stderr(predicates::str::contains(
-            "requires bounded monomorphized symbols",
-        ))
-        .stderr(predicates::str::contains("[05-UNS-1]"));
+    let output = StdCommand::new(&toolchain.compiler)
+        .current_dir(&out_dir)
+        .args(&toolchain.compile_flags)
+        .args(["-I.", "-c", "recursive_generic.c"])
+        .output()
+        .expect("invoke C compiler");
+    assert!(
+        output.status.success(),
+        "specialized recursive generic must compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
-fn invoked_mutual_recursive_generic_cycle_fails_loudly() {
-    let dir = tempdir().expect("tempdir");
-    let path = dir.path().join("mutual_recursive_generic.ch");
-    write_file(
-        &path,
-        "\
+fn invoked_mutual_recursive_generic_cycle_compiles_via_bounded_monomorphization() {
+    let source = "\
 type Box[a] =
   | Empty
   | Full { value: a }
@@ -370,26 +365,25 @@ def ping[a](box: Box[a], again: bool) -> bool =
 def pong[a](box: Box[a], again: bool) -> bool =
   if again then ping(box, false) else true
 def main() -> bool = ping(Full { value: cast(1.0, f32) }, true)
-",
+";
+    let (_dir, out_dir) = build(source, "mutual_recursive_generic");
+    let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+        chelis_backend_c::toolchain::CodegenRequirements {
+            wants_openmp: true,
+            needs_blas: false,
+        },
     );
-    Command::cargo_bin("chelis")
-        .expect("chelis binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .args([
-            "build",
-            path.to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            dir.path().join("out").to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("chelis#941"))
-        .stderr(predicates::str::contains(
-            "requires bounded monomorphized symbols",
-        ))
-        .stderr(predicates::str::contains("[05-UNS-1]"));
+    let output = StdCommand::new(&toolchain.compiler)
+        .current_dir(&out_dir)
+        .args(&toolchain.compile_flags)
+        .args(["-I.", "-c", "mutual_recursive_generic.c"])
+        .output()
+        .expect("invoke C compiler");
+    assert!(
+        output.status.success(),
+        "specialized mutual recursive generics must compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

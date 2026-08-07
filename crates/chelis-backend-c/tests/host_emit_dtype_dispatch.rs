@@ -37,7 +37,7 @@ use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::host::{
     ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
     ConcreteHostExprKind as HostExprKind, ConcreteHostFunction as HostFunction,
-    ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram,
+    ConcreteHostParam as HostParam, ConcreteHostProgram as HostProgram, HostFunctionOrigin,
 };
 use chelis_types::types::Prim;
 
@@ -82,6 +82,7 @@ fn make_binary_program(op_name: &str, prim: Prim) -> HostProgram {
             ret_ty: HostType::Tensor(tt),
             body,
             tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],
@@ -111,6 +112,7 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
             ret_ty: HostType::Tensor(tt),
             body,
             tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],
@@ -141,6 +143,7 @@ fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
             ret_ty: HostType::Tensor(target_ty),
             body,
             tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],

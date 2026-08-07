@@ -35,6 +35,7 @@ fn make_program(body: HostExpr) -> HostProgram {
             ret_ty: HostType::Float64,
             body,
             tensor_helpers: Vec::new(),
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],

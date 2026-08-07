@@ -1621,14 +1621,33 @@ pub(super) fn infer_top_level(
         let name = symbol_name(&kids[0])?.to_string();
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
+        // spec/04 §3.1.1: when this def is a member of the active recursive
+        // binding group, remember which fresh tvars its own body was
+        // instantiated at, so in-group recursive calls can be validated
+        // against the caller's own instantiation.
+        let mut recursion_caller_guard = recursion::CallerGuard::inactive();
         let declared_ty = if provisional_recursive_type.is_none() {
             env.lookup(&name).map(|s| {
                 let s = s.clone();
-                env.instantiate(&s, vg)
+                if recursion::group_member(&name) {
+                    let (ty, mapping) = env.instantiate_with_tvar_mapping(&s, vg);
+                    recursion_caller_guard = recursion::begin_caller(
+                        &name,
+                        declared_signatures.get(&name).map(|m| &m.binders),
+                        &mapping,
+                    );
+                    ty
+                } else {
+                    env.instantiate(&s, vg)
+                }
             })
         } else {
+            if recursion::group_member(&name) {
+                recursion_caller_guard = recursion::begin_caller(&name, None, &[]);
+            }
             None
         };
+        let _recursion_caller_guard = recursion_caller_guard;
         // A declaration's signature owns the only named binders legal in its
         // nested source annotations. Infer against a lexical clone so the
         // scope follows nested env clones but cannot leak to the next `def`

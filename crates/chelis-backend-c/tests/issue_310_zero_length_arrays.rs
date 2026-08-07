@@ -42,6 +42,7 @@ fn program_with_body(ret_ty: HostType, body: HostExpr) -> HostProgram {
             ret_ty,
             body,
             tensor_helpers: Vec::new(),
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         }],
