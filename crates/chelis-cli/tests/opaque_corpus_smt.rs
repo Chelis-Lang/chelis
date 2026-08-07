@@ -26,7 +26,9 @@ fn repo_root() -> PathBuf {
 }
 
 fn venv_python() -> PathBuf {
-    repo_root().join(".venv/bin/python")
+    std::env::var_os("PYO3_PYTHON")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join(".venv/bin/python"))
 }
 
 fn corpus_dir() -> PathBuf {
@@ -42,7 +44,8 @@ fn require_venv() -> PathBuf {
     let py = venv_python();
     assert!(
         py.exists(),
-        "the uv-managed .venv is a documented build prerequisite (AGENTS.md): {}",
+        "the configured managed Python is a documented build prerequisite (AGENTS.md); \
+         set valid `PYO3_PYTHON` or create `.venv` with `uv venv --python 3.11`. Missing: {}",
         py.display()
     );
     py

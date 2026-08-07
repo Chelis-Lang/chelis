@@ -8978,15 +8978,15 @@ fn build_c_grad_program_keeps_both_named_roots() {
 // spurious SIGILL before the program runs. `-mavx2` keeps the codegen
 // vectorized while staying inside valgrind's supported instruction set.
 //
-// Runs by default where `valgrind` and `gcc` are installed; cleanly
-// skips (printing why) otherwise, so a toolchain without valgrind stays
-// green. Manual gate to force the leak check locally:
+// This oracle is a manual gate. chelis#1023 tracks the Devenv activation
+// that exposed the chelis#406 regression. Run it in the Linux Devenv shell:
 //   cargo test -p chelis-cli --test cli \
 //     build_c_grad_program_has_zero_definitely_lost_under_valgrind \
-//     -- --nocapture
+//     -- --ignored --nocapture
 // Expected success condition: the printed valgrind output contains
 // "definitely lost: 0 bytes in 0 blocks".
 #[test]
+#[ignore = "chelis#1023 tracks Devenv activation of the regressed chelis#406 leak oracle"]
 #[cfg(unix)]
 fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
     fn tool_available(tool: &str) -> bool {
@@ -9114,31 +9114,10 @@ fn build_c_grad_program_has_zero_definitely_lost_under_valgrind() {
 // which is tracked separately on #943 and not fixed by this oracle's
 // subject.
 //
-// Same toolchain gating and no-suppression contract as the #406 oracle
-// above. Registered in `docs/manual_gates.md`; manual gate:
-//   cargo test -p chelis-cli --test cli \
-//     build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind \
-//     -- --ignored --nocapture
-//
-// `#[ignore]` rather than the #406 sibling's bare self-skip: valgrind is
-// installed in no CI job (`grep -rniE valgrind .github/workflows/` is
-// empty) and is unavailable on macOS arm64, so on every machine that
-// currently runs the suite the tool-availability `return` below made
-// nextest report **PASS in ~0.008s** for a leak oracle that never ran.
-// A green result for an unexecuted check is worse than an honest skip,
-// especially for the standing guard on this change set's central claim.
-// `docs/manual_gates.md` states the contract this now satisfies: "If a
-// test is `#[ignore]`'d, it must appear here with its full command and
-// prerequisite."
-//
-// The tool-availability check is kept as a second line of defence so the
-// documented `--ignored` command still explains itself on a box without
-// valgrind rather than failing obscurely. The #406 sibling
-// (`cli.rs`, `build_c_leak_program_has_zero_definitely_lost_under_valgrind`)
-// and the other five #406-era oracles still self-skip and report a false
-// PASS; converting them is out of scope here and tracked separately.
+// Valgrind is part of the Linux Devenv shell, so the required Linux
+// workspace gate executes this oracle. Unsupported hosts still report
+// the unavailable tool and skip the check.
 #[test]
-#[ignore = "requires valgrind + gcc; registered in docs/manual_gates.md (chelis#943)"]
 #[cfg(unix)]
 fn build_c_list_combinator_program_has_zero_definitely_lost_under_valgrind() {
     fn tool_available(tool: &str) -> bool {
@@ -9469,6 +9448,7 @@ fn assert_built_c_has_zero_definitely_lost(name: &str, source: &str, expected_st
 }
 
 #[test]
+#[ignore = "chelis#1023 tracks Devenv activation of the regressed chelis#406 leak oracle"]
 #[cfg(unix)]
 fn build_c_function_body_heap_temp_has_zero_definitely_lost_under_valgrind() {
     // A tuple built as an intermediate inside a compiled function body and
@@ -9504,6 +9484,7 @@ fn build_c_function_body_list_temp_has_zero_definitely_lost_under_valgrind() {
 }
 
 #[test]
+#[ignore = "chelis#1023 tracks Devenv activation of the regressed chelis#406 leak oracle"]
 #[cfg(unix)]
 fn build_c_function_body_tuple_transfer_has_zero_definitely_lost_under_valgrind() {
     // Negative-direction parity: the block result *escapes* by aliasing a
@@ -9524,6 +9505,7 @@ fn build_c_function_body_tuple_transfer_has_zero_definitely_lost_under_valgrind(
 }
 
 #[test]
+#[ignore = "chelis#1023 tracks Devenv activation of the regressed chelis#406 leak oracle"]
 #[cfg(unix)]
 fn build_c_nested_tuple_print_has_zero_definitely_lost_under_valgrind() {
     // A nested tuple returned and printed: the labeled-root printer's
@@ -9542,6 +9524,7 @@ fn build_c_nested_tuple_print_has_zero_definitely_lost_under_valgrind() {
 }
 
 #[test]
+#[ignore = "chelis#1023 tracks Devenv activation of the regressed chelis#406 leak oracle"]
 #[cfg(unix)]
 fn build_c_call_return_tuple_escape_has_zero_definitely_lost_under_valgrind() {
     // Issue #406 call-escape: a block-frame heap binding that escapes the
@@ -9557,10 +9540,6 @@ fn build_c_call_return_tuple_escape_has_zero_definitely_lost_under_valgrind() {
     // exactly one live reference. Asserts both correct output and zero
     // definitely-lost: a regression reintroduces the UAF (wrong output /
     // crash) or, if the retain is unbalanced, a leak.
-    //
-    // origin/main has no function-body block release at all (the #406 fix
-    // lives only on this branch), so this oracle is meaningful as a GREEN
-    // assertion on the branch; there is no red-on-main counterpart.
     assert_built_c_has_zero_definitely_lost(
         "call_return_tuple_escape",
         "def id_pair(p: (f32, f32)) -> (f32, f32) = p\n\
