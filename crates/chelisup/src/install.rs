@@ -42,16 +42,14 @@ pub enum InstallOutcome {
     AlreadyInstalled { version: String },
 }
 
-/// Detect the release-asset platform slug for the host. The slugs match
-/// `install_chelis_toolchain.py` exactly.
+/// Detect the published release-asset platform slug for the host.
 pub fn detect_slug() -> Result<&'static str, String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok("darwin-arm64"),
-        ("macos", "x86_64") => Ok("darwin-x86_64"),
         ("linux", "x86_64") => Ok("linux-x86_64"),
         (os, arch) => Err(format!(
             "unsupported host platform {os}/{arch}; \
-             chelis releases ship darwin-arm64, darwin-x86_64, and linux-x86_64"
+             chelis releases ship darwin-arm64 and linux-x86_64"
         )),
     }
 }

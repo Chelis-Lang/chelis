@@ -19,6 +19,7 @@ EXPECTED_IMPORTS = (
     "./devenv/git-hooks.nix",
     "./devenv/smoke-tests.nix",
     "./devenv/package-outputs.nix",
+    "./devenv/release-outputs.nix",
 )
 EXPECTED_COMMANDS = {
     "chelis-gate": "scripts/gate.py",
@@ -256,6 +257,7 @@ def parse_contributor_docs(text: str) -> None:
         "devenv build outputs.chelis",
         "devenv build outputs.chelis-runtime",
         "devenv build outputs.chelisup",
+        "devenv build --no-tui outputs.release-chelisup",
     )
     missing = [fragment for fragment in required if fragment not in text]
     if missing:

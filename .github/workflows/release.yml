@@ -197,17 +197,6 @@ jobs:
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
 
-      # WS-B (chelis#164): the bootstrap installer
-      # (crates/chelisup/bootstrap/chelisup.sh) downloads a BARE executable
-      # asset `chelisup-<slug>` (no version in the name, no tarball) from
-      # the latest release. The linux chelisup ships from THIS glibc-2.31
-      # job, not the ubuntu-latest one: chelisup is the first binary a bare
-      # machine runs, so it must load on the oldest supported glibc (#330).
-      # (The bootstrap also knows a darwin-x86_64 slug; no release job
-      # builds it, matching the toolchain tarballs.)
-      - name: Build chelisup (release)
-        run: cargo build --release -p chelisup
-
       # Run before strip so the prove path exercises a functional
       # binary; the strip below only removes symbols.
       - name: Verify cvc5 discharge path (smt feature live)
@@ -271,16 +260,9 @@ jobs:
           python3 .github/scripts/verify_release_smt.py \
             --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31.tar.gz"
 
-      - name: Stage chelisup asset (bare executable + sha256 + bootstrap script)
+      - name: Stage chelisup bootstrap script
         run: |
           set -euo pipefail
-          strip target/release/chelisup
-          max_req="$(objdump -T target/release/chelisup | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-          echo "chelisup max glibc requirement: ${max_req}"
-          test "$(printf 'GLIBC_2.31\n%s\n' "${max_req}" | sort -V | tail -1)" = "GLIBC_2.31"
-          ./target/release/chelisup --help >/dev/null
-          cp target/release/chelisup chelisup-linux-x86_64
-          sha256sum chelisup-linux-x86_64 > chelisup-linux-x86_64.sha256
           # Publishing the bootstrap script as an asset gives the one-liner
           # a canonical URL: <repo>/releases/latest/download/chelisup.sh
           cp crates/chelisup/bootstrap/chelisup.sh chelisup.sh
@@ -292,8 +274,6 @@ jobs:
           path: |
             chelis-*-linux-x86_64-glibc2.31.tar.gz
             chelis-*-linux-x86_64-glibc2.31.tar.gz.sha256
-            chelisup-linux-x86_64
-            chelisup-linux-x86_64.sha256
             chelisup.sh
 
   build-darwin-arm64:
@@ -334,11 +314,6 @@ jobs:
 
       - name: Build chelis-runtime staticlib (release)
         run: cargo build --release -p chelis-runtime
-
-      # WS-B (chelis#164): darwin half of the bare `chelisup-<slug>`
-      # bootstrap asset — see the glibc-2.31 job for the convention.
-      - name: Build chelisup (release)
-        run: cargo build --release -p chelisup
 
       - name: Verify cvc5 discharge path (smt feature live)
         run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
@@ -402,15 +377,6 @@ jobs:
           python3 .github/scripts/verify_release_smt.py \
             --tarball "chelis-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz"
 
-      - name: Stage chelisup asset (bare executable + sha256)
-        run: |
-          set -euo pipefail
-          strip -x target/release/chelisup || true
-          file target/release/chelisup | grep -E 'arm64|aarch64'
-          ./target/release/chelisup --help >/dev/null
-          cp target/release/chelisup chelisup-darwin-arm64
-          shasum -a 256 chelisup-darwin-arm64 > chelisup-darwin-arm64.sha256
-
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
@@ -418,14 +384,81 @@ jobs:
           path: |
             chelis-*-darwin-arm64.tar.gz
             chelis-*-darwin-arm64.tar.gz.sha256
-            chelisup-darwin-arm64
-            chelisup-darwin-arm64.sha256
+
+  build-chelisup-release:
+    name: Build portable chelisup (${{ matrix.slug }})
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            slug: linux-x86_64
+          - os: macos-latest
+            slug: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      NIX_CONFIG: |
+        sandbox = true
+        max-jobs = 2
+        cores = 0
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+
+      - name: Mint a scoped token for the private ci input
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: ci
+
+      - name: Authenticate Nix to the private ci devenv input
+        shell: bash
+        env:
+          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: |
+          {
+            echo "NIX_CONFIG<<EOF"
+            printf '%s\n' "$NIX_CONFIG"
+            echo "access-tokens = github.com=$CI_TOKEN"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and verify portable chelisup output
+        id: build
+        run: |
+          devenv build --no-tui --quiet outputs.release-chelisup > release-chelisup-build.json
+          python scripts/verify_release_chelisup.py \
+            --build-json release-chelisup-build.json \
+            --stage-root release-chelisup \
+            --platform ${{ matrix.slug }}
+
+      - name: Upload portable chelisup artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: chelisup-${{ matrix.slug }}
+          path: |
+            ${{ steps.build.outputs.path }}/chelisup-${{ matrix.slug }}
+            ${{ steps.build.outputs.path }}/chelisup-${{ matrix.slug }}.sha256
+          if-no-files-found: error
 
   publish-release:
     name: Publish GitHub Release
     # Dispatch the workflow at a v* tag to publish its staged artifacts.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64]
+    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64, build-chelisup-release]
     runs-on: ubuntu-latest
     steps:
       - name: Download staged artifacts

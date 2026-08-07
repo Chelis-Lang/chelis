@@ -12,6 +12,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   The repository tracks `Cargo.nix`, so package evaluation does not use import from derivation.
 - Selected Linux CI jobs run in the portable Devenv environment. Devenv supplies Rust, Python, mdBook, cargo-nextest, and common build tools.
 - Hosted macOS jobs run only after manual dispatch. Release publication now requires a manual dispatch at the pushed `v*` tag.
+- Devenv builds portable `chelisup` release files with `outputs.release-chelisup`. The output includes one native executable and its SHA-256 sidecar.
+  Releases support static Linux x86-64 and Apple Silicon macOS. Intel macOS now fails as unsupported instead of requesting an absent asset.
 
 ## [0.18.4] — 2026-08-05
 

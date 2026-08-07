@@ -12,7 +12,7 @@
 #
 # Release asset-name convention (published by the chelis release tooling,
 # matching crates/chelisup slugs): a BARE executable named
-#   chelisup-<slug>   with slug in { darwin-arm64, darwin-x86_64, linux-x86_64 }
+#   chelisup-<slug>   with slug in { darwin-arm64, linux-x86_64 }
 # attached to each GitHub release (no version in the name, no tarball).
 #
 # Private-repo era (chelis#164): while Chelis-Lang/chelis is private the
@@ -27,10 +27,9 @@ os="$(uname -s)"
 arch="$(uname -m)"
 case "$os/$arch" in
   Darwin/arm64) slug="darwin-arm64" ;;
-  Darwin/x86_64) slug="darwin-x86_64" ;;
   Linux/x86_64) slug="linux-x86_64" ;;
   *)
-    printf 'chelisup bootstrap: unsupported host %s/%s; chelis ships darwin-arm64, darwin-x86_64, linux-x86_64\n' "$os" "$arch" >&2
+    printf 'chelisup bootstrap: unsupported host %s/%s; chelis ships darwin-arm64 and linux-x86_64\n' "$os" "$arch" >&2
     exit 1
     ;;
 esac

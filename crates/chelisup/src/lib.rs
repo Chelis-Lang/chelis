@@ -38,8 +38,8 @@
 //! AGENTS.md) is the `curl -fsSL .../chelisup.sh | sh` one-liner. It
 //! fetches the prebuilt `chelisup` for the host from the latest
 //! `Chelis-Lang/chelis` release. The published asset is a bare
-//! executable named `chelisup-<slug>` (slug in `darwin-arm64`,
-//! `darwin-x86_64`, `linux-x86_64`): no version in the name and no
+//! executable named `chelisup-<slug>` (slug in `darwin-arm64` or
+//! `linux-x86_64`): no version in the name and no
 //! tarball, distinct from the toolchain tarball
 //! `chelis-v<ver>-<slug>.tar.gz` that `install` downloads.
 

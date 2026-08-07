@@ -8,5 +8,6 @@
     ./devenv/git-hooks.nix
     ./devenv/smoke-tests.nix
     ./devenv/package-outputs.nix
+    ./devenv/release-outputs.nix
   ];
 }

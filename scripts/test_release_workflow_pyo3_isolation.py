@@ -1,7 +1,8 @@
 """Guard that release.yml's `cargo build -p <target>` lines don't pull pyo3.
 
-`release.yml` (the tag-triggered release workflow) builds `chelis-cli` and
-`chelis-runtime` as release binaries. PR #184 added `.cargo/config.toml`'s
+`release.yml` builds `chelis-cli` and `chelis-runtime` as release binaries.
+The portable `chelisup` path uses the Devenv output instead of host Cargo.
+PR #184 added `.cargo/config.toml`'s
 `PYO3_PYTHON=.venv/bin/python` setting and the per-job `Install uv` +
 `scripts/ci_setup_uv_python.py` steps in `ci.yml` / `heavy-e2e.yml`, but
 **not** in `release.yml`. The argument for keeping `release.yml` uv-free
@@ -68,15 +69,11 @@ class ReleaseWorkflowPyo3IsolationTest(unittest.TestCase):
         self.assertTrue(RELEASE_WORKFLOW.is_file(), f"{RELEASE_WORKFLOW} not found")
 
     def test_extract_release_targets_finds_expected_set(self) -> None:
-        # Sanity check the parser: release.yml builds chelis-cli +
-        # chelis-runtime (the toolchain tarball) and chelisup (the bare
-        # `chelisup-<slug>` bootstrap asset, WS-B / chelis#164). If a
-        # target is added, this test will fail and the new target must be
-        # vetted for pyo3 by the no-pyo3 test below.
+        # The full toolchain jobs build chelis-cli and chelis-runtime.
+        # Devenv builds the portable chelisup output from committed Cargo.nix.
+        # If a host Cargo target appears, the no-pyo3 test covers that target.
         targets = extract_release_targets(RELEASE_WORKFLOW)
-        self.assertIn("chelis-cli", targets)
-        self.assertIn("chelis-runtime", targets)
-        self.assertIn("chelisup", targets)
+        self.assertEqual(targets, {"chelis-cli", "chelis-runtime"})
 
     @unittest.skipUnless(
         shutil.which("cargo") is not None,

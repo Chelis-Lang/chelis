@@ -127,7 +127,11 @@ def _macos_manual_dispatch_errors(workflow: str) -> list[str]:
     )
     errors: list[str] = []
     for job, block in _workflow_job_blocks(workflow).items():
-        if "runs-on: macos-latest" not in block:
+        direct_macos = "runs-on: macos-latest" in block
+        matrix_macos = (
+            "runs-on: ${{ matrix.os }}" in block and "os: macos-latest" in block
+        )
+        if not direct_macos and not matrix_macos:
             continue
         if not has_manual_trigger:
             errors.append(f"{job}: missing workflow_dispatch trigger")
@@ -1536,7 +1540,12 @@ class MacosManualOnlyTests(unittest.TestCase):
             with self.subTest(workflow=path.name):
                 self.assertEqual(_macos_manual_dispatch_errors(text), [])
             for job, block in _workflow_job_blocks(text).items():
-                if "runs-on: macos-latest" in block:
+                direct_macos = "runs-on: macos-latest" in block
+                matrix_macos = (
+                    "runs-on: ${{ matrix.os }}" in block
+                    and "os: macos-latest" in block
+                )
+                if direct_macos or matrix_macos:
                     found.append((path.name, job))
         self.assertEqual(
             found,
@@ -1546,6 +1555,7 @@ class MacosManualOnlyTests(unittest.TestCase):
                 ("ci.yml", "macos-smoke"),
                 ("nix-packages.yml", "nix-darwin-arm64"),
                 ("release.yml", "build-darwin-arm64"),
+                ("release.yml", "build-chelisup-release"),
             ],
         )
 

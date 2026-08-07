@@ -167,7 +167,7 @@ devenv shell -- openspec validate --all --strict --no-interactive
 The repository pins the Devenv modules to release `v2.2`. The version of the
 local Devenv CLI must match this module version.
 
-`devenv.nix` imports six local configuration modules. `devenv.yaml` defines
+`devenv.nix` imports seven local configuration modules. `devenv.yaml` defines
 the inputs and CLI options.
 
 `devenv.yaml` pins the shared `nixpkgs` and `rust-overlay` inputs to exact
@@ -191,8 +191,9 @@ owns that environment outside Devenv.
 `devenv test` initializes the managed files and Python. It then runs separate
 smoke tasks for the toolchain, Python, C, and C++.
 
-Devenv exposes the canonical root flake packages as build outputs. Build one
-output with its full attribute name:
+Devenv exposes the canonical root flake packages as build outputs.
+
+Use the full attribute name to build one package:
 
 ```sh
 devenv build outputs.chelis
@@ -200,12 +201,23 @@ devenv build outputs.chelis-runtime
 devenv build outputs.chelisup
 ```
 
-Run `devenv build` without an attribute to build all outputs, including the
-`default` alias. Each output uses the same derivation as its `nix build`
-counterpart.
+Each package output uses the same derivation as its `nix build` counterpart.
+These builds include changes to tracked files and exclude ignored directories.
 
-These builds use the local Git input. They include changes to tracked files.
-They exclude untracked files and ignored directories.
+Build the portable `chelisup` publication files with this command:
+
+```sh
+devenv build --no-tui outputs.release-chelisup
+```
+
+The result contains one platform executable and its SHA-256 sidecar. Linux uses
+a static x86-64 binary. macOS uses an Apple Silicon binary with system libraries.
+
+`outputs.release-chelisup` is separate from the Nix-oriented `outputs.chelisup`.
+The portable output does not include the Nix launcher or a Nix runtime dependency.
+
+`devenv build` without an attribute builds every configured output. This set
+includes the package outputs, shared tools, and the portable release output.
 
 The shell also supplies these platform commands:
 
