@@ -260,6 +260,7 @@ fn project_function(
         ret_ty: HostAbiType::try_from_concrete(&function.ret_ty)?,
         body: project_expr(function.body, &allowed_callbacks)?,
         tensor_helpers: function.tensor_helpers,
+        origin: function.origin,
         specialization: function.specialization,
         summary_rejections: function.summary_rejections,
     })

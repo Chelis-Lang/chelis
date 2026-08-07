@@ -504,6 +504,7 @@ mod tests {
             // but the helper must still be emitted into the file.
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -606,6 +607,7 @@ mod tests {
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -3502,6 +3504,7 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };
@@ -3580,6 +3583,7 @@ int main(void) {{
             ret_ty: HostType::Float64,
             body: HostExpr::new(HostExprKind::Float(0.0)),
             tensor_helpers: vec![helper],
+            origin: chelis_ir::host::HostFunctionOrigin::Authored,
             specialization: None,
             summary_rejections: Vec::new(),
         };

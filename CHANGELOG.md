@@ -6,7 +6,64 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Recursive generic host calls compile via bounded memoized
+  monomorphization (chelis#1158, successor to chelis#941).** The C-emitting
+  host lane now compiles a recursive (direct or mutual) generic host call by
+  emitting one specialized definition per distinct checked type application,
+  memoized so each `(function, instantiation)` pair is generated exactly
+  once, with recursive edges lowered as ordinary calls to the owning
+  specialized symbol (`<def>__mono_<hash>`, deterministic across builds).
+  The former branded `requires bounded monomorphized symbols` rejection is
+  retired for these programs; a surviving generic call whose checked type
+  application never resolves still fails closed with a branded `unsupported:`
+  diagnostic citing chelis#1158, and no C artifact is written. HIP and Metal
+  targets consume the same shared host lowering. Acceptance oracle:
+  `cargo nextest run -p chelis-cli --test recursive_generic_monomorphization
+  --no-fail-fast`.
+
 ### Changed
+
+- **Monomorphized specializations are compiler-internal symbols
+  (chelis#1158 hardening; findings credited to the PR #1202 adversarial
+  review).** Each host function now carries explicit authored or
+  monomorphized provenance through C-ABI projection. The published `.h` and
+  tensor-entry selection use that provenance, so a valid authored name that
+  matches `<def>__mono_<hash>` remains public. Specializations stay out of the
+  header and use translation-unit-local C linkage in binary and object mode.
+  Thus, two generated objects with one specialization name link without a
+  duplicate symbol. Speculative summary probes are state-isolated and use a
+  sorted order. Repeated builds emit byte-identical C, probe-only definitions
+  do not escape, and a failed probe does not fail the build. Specializations
+  intern by exact package definition identity under a canonical signature key.
+  Exact identity lookup precedes unique terminal-name fallback, so separate
+  package definitions named `depth` remain separate. A hash collision between
+  two canonical signatures fails loudly.
+
+- **BREAKING (checker): polymorphic recursion is now a check-time type
+  error ([04-INF-2]/[04-INF-3], spec/04-type-system.md §3.1.1).** Every
+  recursive call inside a recursive binding group must be typed at the
+  caller's own instantiation; a call whose type application embeds a type
+  variable inside a larger constructed type is rejected by the checker with
+  a diagnostic naming the function, both instantiations, and the deciding
+  atom — identically across the eval and build lanes. Previously the eval
+  lane accepted and executed such programs (they never compiled natively);
+  the reproducer below now rejects at `check`:
+
+  ```text
+  type Box[a] =
+    | Empty
+    | Full { value: a }
+  def f[a](x: a, n: int32) -> int32 =
+    if n <= 0 then 0 else f(Full { value: x }, n - 1) + 1
+  def main() -> int32 = f(1, 3)
+  ```
+
+  Fully concrete (type-variable-free) recursive type arguments remain
+  admitted for signature variables introduced by inference rather than
+  authored `[a]` binders, so partially annotated recursive defs keep
+  checking exactly as before.
 
 - Nix consumes shared crate2nix and OpenSpec pins from `Chelis-Lang/ci` through Devenv composition.
   The repository tracks `Cargo.nix`, so package evaluation does not use import from derivation.

@@ -781,6 +781,39 @@ checked again after the parameter binds. The check used on replay is the
 operation's ordinary typing rule, so immediate and deferred applications
 cannot acquire different semantics.
 
+#### 3.1.1 Uniform Recursive Instantiation
+
+A recursive binding group is a strongly connected component of the top-level
+`def` call graph. A top-level generic function — a `def` whose
+checker-recorded signature carries a type variable — may be a member of a
+recursive binding group, whether the recursion is direct or mutual.
+
+> **[04-INF-2]** Every recursive call inside a recursive binding group SHALL
+> be typed at the caller's own instantiation of the group's type parameters.
+> A type argument of the recursive call satisfies this requirement when it
+> resolves to the caller's own type parameter, or remains unconstrained and
+> is thereby chosen as it. For a group member whose signature type variables
+> are introduced by inference rather than authored binders, a fully concrete
+> type argument — one containing no type variable — is also admitted: a
+> variable-free argument cannot grow the instantiation set. An authored type
+> binder admits no such substitute; its recursive arguments are the caller's
+> own parameters. The instantiation set of every accepted program is
+> therefore finite: every in-group edge maps the group's type parameters
+> into the caller's own parameters or into a fixed set of concrete types, so
+> an application of a group member at a concrete type application reaches
+> only finitely many instantiations.
+
+> **[04-INF-3]** A recursive call whose type application is not admitted by
+> [04-INF-2] — in particular one that embeds a type variable inside a larger
+> constructed type (polymorphic recursion) — SHALL be a type error. The
+> checker is the earliest competent stage for this question per [05-UNS-2]
+> (`spec/05-risc-primitives.md` §7); the diagnostic SHALL name the function,
+> the caller's instantiation, and the differing recursive instantiation, and
+> SHALL carry this atom as its deciding authority per [05-UNS-5]. The rule
+> is lane-uniform: because the rejection happens at check time, the eval, C,
+> HIP, and Metal paths reject an offending program identically, before any
+> lane-specific stage runs.
+
 ### 3.2 Inference Rules
 
 Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type τ."

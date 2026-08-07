@@ -524,7 +524,7 @@ pub(crate) fn emit_host_abi_program(
             &emitted_names,
             &function_specializations,
             &returns_arg,
-            internal_linkage,
+            internal_linkage || function.is_monomorphized_specialization(),
         ) {
             Ok(()) => {
                 function_bodies.extend(fn_buf);
@@ -536,7 +536,7 @@ pub(crate) fn emit_host_abi_program(
                     &mut function_bodies,
                     function,
                     emitted_name,
-                    internal_linkage,
+                    internal_linkage || function.is_monomorphized_specialization(),
                     &unsupported,
                 )?;
                 function_bodies.push(String::new());
@@ -1497,14 +1497,14 @@ pub fn emit_host_header(
     program_name: &str,
 ) -> Result<String, Unsupported> {
     let abi_program = project_program(program)?;
-    emit_host_header_with_linkage(&abi_program, program_name, false)
+    emit_host_declarations(&abi_program, program_name, false, false)
 }
 
 pub(crate) fn emit_host_abi_header(
     program: &HostProgram,
     program_name: &str,
 ) -> Result<String, Unsupported> {
-    emit_host_header_with_linkage(program, program_name, false)
+    emit_host_declarations(program, program_name, false, false)
 }
 
 fn emit_host_header_with_linkage(
@@ -1512,15 +1512,32 @@ fn emit_host_header_with_linkage(
     program_name: &str,
     internal_linkage: bool,
 ) -> Result<String, Unsupported> {
-    let prefix = if internal_linkage {
-        "static inline "
-    } else {
-        ""
-    };
+    // The in-`.c` prototype block: unfiltered, so a specialization may call
+    // a definition emitted later in the translation unit.
+    emit_host_declarations(program, program_name, internal_linkage, true)
+}
+
+/// Emit function declarations. The published `.h` legs pass
+/// `include_specializations = false`: a monomorphized specialization is a
+/// compiler-internal symbol whose name changes with the program's
+/// instantiation set, and nothing outside the translation unit may call it
+/// (harden-bounded-monomorphization D2).
+fn emit_host_declarations(
+    program: &HostProgram,
+    program_name: &str,
+    internal_linkage: bool,
+    include_specializations: bool,
+) -> Result<String, Unsupported> {
     program
         .functions
         .iter()
+        .filter(|function| include_specializations || !function.is_monomorphized_specialization())
         .map(|function| {
+            let prefix = if internal_linkage || function.is_monomorphized_specialization() {
+                "static inline "
+            } else {
+                ""
+            };
             let params = function
                 .params
                 .iter()
