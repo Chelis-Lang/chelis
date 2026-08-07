@@ -528,11 +528,18 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 // ------------------------------------------------------------
 
 /// Capture-then-reuse of a COMPONENT. A component is an alias of a
-/// `__chelis_tmpN` the user cannot name, and that carrier is the
-/// component's only identity — so consuming the component's own entry at
-/// capture time left the carrier `Live` and the later reuse was silently
-/// accepted, while the same reuse without the closure errored. Distinct
-/// from Q1, which is about a double consume INSIDE the body.
+/// `__chelis_tmpN` carrier, and that carrier is the component's only
+/// identity — so consuming the component's own entry at capture time left
+/// the carrier `Live` and the later reuse was silently accepted, while the
+/// same reuse without the closure errored. Distinct from Q1, which is
+/// about a double consume INSIDE the body.
+///
+/// The carrier name is *synthesized*, not unforgeable: authored source can
+/// spell `__chelis_tmp0`, and `fresh_destructure_temp` only screens the
+/// block it is desugaring, so an authored name in an ENCLOSING block still
+/// collides. That is chelis#1212 — pre-existing, pinned `#[ignore]`d at the
+/// bottom of this file. Do not read this test as proving whole-context
+/// uniqueness of carrier names; it proves carrier *forwarding*.
 #[test]
 fn component_captured_then_reused_outside_the_closure_errors() {
     let errors = linearity_errors(
@@ -701,5 +708,49 @@ def f(t: (tensor[4, f32], tensor[4, f32]), s: tensor[4, f32]) -> tensor[4, f32] 
   add(add(r1, r2), x)
 }
 "#,
+    );
+}
+
+// ------------------------------------------------------------
+// chelis#1212 — authored/synthesized carrier-name collision
+//
+// `fresh_destructure_temp` screens a candidate against the block it is
+// desugaring only, so an authored `__chelis_tmpN` in an ENCLOSING block is
+// invisible and the mint collides with it. The authored binding and the
+// synthesized carrier then share a name and a genuine use-after-consume on
+// the authored name is silently accepted.
+//
+// Pre-existing (the chelis#1200 counter fix closes synthesized-vs-
+// synthesized collisions, not synthesized-vs-authored). Closing it needs
+// either a context-wide authored-name reservation built from a single
+// linear name-visitor pass, or a carrier spelling `is_ident_continue`
+// cannot produce. `#[ignore]`d rather than deleted so the gap stays
+// visible in the suite.
+// ------------------------------------------------------------
+
+/// The authored name is the ONLY difference from a program that correctly
+/// errors: renaming `__chelis_tmp0` to `user_temp` reports `y`'s
+/// use-after-consume. With the colliding spelling the error disappears.
+#[test]
+#[ignore = "chelis#1212: authored __chelis_tmpN collides with a synthesized carrier"]
+fn authored_destructure_temp_name_does_not_hide_an_outer_double_consume() {
+    let errors = linearity_errors(
+        r#"
+def two(t: tensor[4, f32]) -> (tensor[4, f32], tensor[4, f32]) = (t, t)
+def f(x: tensor[4, f32], w: tensor[4, f32]) -> tensor[4, f32] = {
+  __chelis_tmp0 = x
+  y = __chelis_tmp0
+  r: tensor[4, f32] = {
+    (a, b) = two(w)
+    add(realize(y), add(a, b))
+  }
+  add(r, add(y, y))
+}
+"#,
+    );
+    assert!(
+        errors.iter().any(|error| error.message.contains("`y`")),
+        "the authored/synthesized collision must not hide `y`'s \
+         use-after-consume; got {errors:?}"
     );
 }
