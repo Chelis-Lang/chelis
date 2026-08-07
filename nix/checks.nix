@@ -86,6 +86,8 @@ let
     test -d ${cvc5.dir}/build/include
     test -f ${cvc5.dir}/build/src/libcvc5.a
     test -d ${cvc5.dir}/build/deps/lib
+    test -f ${cvc5.dir}/build/deps/lib/libpicpoly.a
+    test -f ${cvc5.dir}/build/deps/lib/libpicpolyxx.a
     touch "$out"
   '';
 

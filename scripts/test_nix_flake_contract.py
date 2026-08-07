@@ -191,6 +191,26 @@ class NixFlakeContractTests(unittest.TestCase):
         self.assertIn('"-DBUILD_SHARED_LIBS=OFF"', cvc5)
         self.assertIn('"-DSTATIC_BINARY=OFF"', cvc5)
 
+    def test_nix_cvc5_matches_the_cargo_solver_capability(self) -> None:
+        # cvc5-sys builds cvc5 with USE_POLY on (its default) and links the
+        # v0.2.0 position-independent poly archives from build/deps/lib. The Nix
+        # build must reproduce that exact capability, or `nix run .#chelis`
+        # ships a weaker NRA solver than the release binary. Lock the match.
+        cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")
+        self.assertIn('"-DUSE_POLY=ON"', cvc5)
+        self.assertNotIn('"-DUSE_POLY=OFF"', cvc5)
+        # The pinned poly version and hash are cvc5 1.3.1's FindPoly.cmake pins.
+        self.assertIn("libpoly/archive/refs/tags/v0.2.0.tar.gz", cvc5)
+        self.assertIn("sha256-FGrcDT9v6AOK22uLad0WEUpL4S9SDVwfszPzdG0jOr4=", cvc5)
+        # The CVC5_DIR handed to cvc5-sys must carry the archives its build.rs
+        # links (libpicpoly / libpicpolyxx), beside cadical and gmp.
+        self.assertIn('libpicpoly.a "$out/build/deps/lib/libpicpoly.a"', cvc5)
+        self.assertIn('libpicpolyxx.a "$out/build/deps/lib/libpicpolyxx.a"', cvc5)
+
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        self.assertIn("build/deps/lib/libpicpoly.a", checks)
+        self.assertIn("build/deps/lib/libpicpolyxx.a", checks)
+
     def test_rust_builds_use_a_committed_crate2nix_graph(self) -> None:
         flake = (REPO_ROOT / "flake.nix").read_text(encoding="utf-8")
         packages = (REPO_ROOT / "nix" / "packages.nix").read_text(encoding="utf-8")
