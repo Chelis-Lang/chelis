@@ -124,16 +124,10 @@ fn compile_kernel_only(test_name: &str, c_source: &str) -> Result<(), String> {
     let _ = runtime_lib_path();
 
     let obj = dir.join("kernel.o");
-    // Nix's GCC wrapper enables `_FORTIFY_SOURCE`. Disable its fortify flags because glibc rejects them with this test's required `-O0 -Werror` combination.
-    let mut hardening_disable = std::env::var_os("NIX_HARDENING_DISABLE").unwrap_or_default();
-    if !hardening_disable.is_empty() {
-        hardening_disable.push(" ");
-    }
-    hardening_disable.push("fortify fortify3");
+    // Nix's GCC wrapper enables `_FORTIFY_SOURCE`. Glibc rejects fortify without optimization when `-Werror` is active.
     let compile = Command::new("gcc")
-        .env("NIX_HARDENING_DISABLE", hardening_disable)
         .args([
-            "-O0",
+            "-O1",
             "-std=c11",
             "-c",
             "-Werror",

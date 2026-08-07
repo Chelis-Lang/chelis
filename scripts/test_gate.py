@@ -46,6 +46,7 @@ def _load_module():
 gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+SPAN_COMMENTS_RS = REPO_ROOT / "crates" / "chelis-backend-c" / "tests" / "span_comments.rs"
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
@@ -1547,6 +1548,16 @@ def _backend_sanitizer_optimization_errors(text: str) -> list[str]:
     return []
 
 
+def _backend_span_compile_optimization_errors(text: str) -> list[str]:
+    marker = "fn compile_kernel_only"
+    start = text.find(marker)
+    end = text.find("\n}\n", start)
+    block = text[start:end] if start >= 0 and end >= 0 else ""
+    if re.search(r'"-O(?:1|2)"', block) is None or '"-Werror"' not in block:
+        return ["span_comments: compile_kernel_only needs -O1 or -O2 with -Werror"]
+    return []
+
+
 class BackendSanitizerWorkflowTests(unittest.TestCase):
     def test_c_sanitizer_flags_satisfy_nix_fortify(self) -> None:
         self.assertEqual(
@@ -1559,6 +1570,19 @@ class BackendSanitizerWorkflowTests(unittest.TestCase):
         self.assertEqual(
             _backend_sanitizer_optimization_errors(mutated),
             ["backend-sanitizers: C sanitizer flags need -O1 or -O2"],
+        )
+
+    def test_span_comment_compile_satisfies_nix_fortify(self) -> None:
+        self.assertEqual(
+            _backend_span_compile_optimization_errors(SPAN_COMMENTS_RS.read_text()), []
+        )
+
+    def test_span_comment_guard_rejects_unoptimized_compile(self) -> None:
+        text = SPAN_COMMENTS_RS.read_text()
+        mutated = text.replace('"-O1"', '"-O0"', 1)
+        self.assertEqual(
+            _backend_span_compile_optimization_errors(mutated),
+            ["span_comments: compile_kernel_only needs -O1 or -O2 with -Werror"],
         )
 
 
