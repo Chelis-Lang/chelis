@@ -440,14 +440,25 @@ out = run()
     );
 }
 
-/// Closure-capture classification must be DETERMINISTIC.
+/// Closure-capture classification must be DETERMINISTIC, and the verdict
+/// it settles on is REJECTION.
 ///
 /// `check_fn` walks the capture list mutating the outer scope as it goes,
 /// so when two captures sit on one alias chain the verdict depends on
 /// visit order — and the list came from a `HashSet`. Measured on stock
 /// 0.18.4, this exact program rejected 11 times in 12 and compiled once.
-/// `free_vars` now sorts, and the capture consume forwards through the
-/// alias chain so both orders agree anyway.
+/// `free_vars` now sorts, which is what makes the verdict stable.
+///
+/// The determinism is the sort's doing ALONE. An earlier version of this
+/// comment claimed the capture consume also "forwards through the alias
+/// chain so both orders agree anyway" — that is false for the fixture
+/// below, and deliberately so: `check_fn` forwards a capture to a carrier
+/// only for destructured components, never for an ordinary `y = x` alias
+/// (see the carve-out comment on `capture_target` in `linearity.rs`).
+/// Here `y = x` is an ordinary alias, so the first capture consumes and
+/// the second is a use-after-consume. Asserting "0 or all" let that
+/// mistaken reading pass unchallenged; the test now pins the rejection and
+/// the name it must blame (chelis#1200 review finding 3).
 #[test]
 fn closure_capture_verdict_is_stable_across_repeated_runs() {
     let dir = tempdir().expect("tempdir");
@@ -467,19 +478,132 @@ out = run()
         ),
     );
 
-    let mut verdicts = Vec::new();
-    for _ in 0..24 {
+    let mut accepted = 0usize;
+    let mut blamed_y = 0usize;
+    const RUNS: usize = 24;
+    for _ in 0..RUNS {
         let out = Command::cargo_bin("chelis")
             .expect("binary")
             .args(["eval", "--file", path.to_str().unwrap()])
             .output()
             .expect("chelis eval should run");
-        verdicts.push(out.status.success());
+        if out.status.success() {
+            accepted += 1;
+        } else if String::from_utf8_lossy(&out.stderr).contains("variable `y`") {
+            blamed_y += 1;
+        }
     }
-    let accepted = verdicts.iter().filter(|ok| **ok).count();
-    assert!(
-        accepted == 0 || accepted == verdicts.len(),
-        "closure-capture verdict is order-dependent: {accepted} of {} runs accepted",
-        verdicts.len()
+    assert_eq!(
+        accepted, 0,
+        "the sorted capture order rejects this program; {accepted} of {RUNS} runs accepted"
+    );
+    assert_eq!(
+        blamed_y, RUNS,
+        "every run must reject naming `y` (the second capture on the alias chain); \
+         {blamed_y} of {RUNS} runs did"
+    );
+}
+
+/// chelis#1200 review finding 1: a component consumed by a closure capture
+/// INSIDE a branch must still be consumed after the join.
+///
+/// `check_if`/`check_match` clear the region-relative destructured mark on
+/// branch entry (Q1). The capture path read that mark to find the carrier,
+/// so inside a branch it lost the carrier, consumed the component's own
+/// entry, and left the carrier `Consumed(Aliasing)`. The later `realize(p)`
+/// then upgraded the carrier to `Structural` with no diagnostic and this
+/// program returned `[2.0, 4.0]`. Carrier resolution now asks the permanent
+/// `is_component` identity instead.
+#[test]
+fn component_captured_in_a_branch_then_reused_after_the_join_fails_the_cli() {
+    assert_rejects_naming(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run(c: bool) -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  r: tensor[2, f32] = if c then {
+    f = fn () -> realize(p)
+    f()
+  } else q
+  add(r, realize(p))
+}
+out = run(true)
+"#,
+        "issue1200_branch_capture_component",
+        "variable `p`",
+    );
+}
+
+/// chelis#1200 review finding 2, the negative half: the branch join's
+/// `Aliasing` -> `Structural` upgrade must NOT reach ordinary aliases.
+///
+/// `y = x` records the same `Aliasing` shape a component carrier does, for
+/// an unrelated reason. Upgrading it made a later BORROW of `y` reject
+/// after one branch consumed `x`. Released 0.18.4 accepts this program, so
+/// rejecting it would be exactly the ecosystem-breaking tightening
+/// chelis#1200 exists to undo.
+#[test]
+fn ordinary_alias_survives_a_branch_consume_of_its_source_in_both_lanes() {
+    assert_lane_parity(
+        r#"
+def run(c: bool) -> tensor[2, f32] = {
+  x = to_tensor([1.0f32, 2.0f32])
+  t = to_tensor([3.0f32, 4.0f32])
+  y = x
+  r: tensor[2, f32] = if c then {
+    f = fn () -> realize(x)
+    f()
+  } else t
+  add(r, add(y, y))
+}
+out = run(false)
+"#,
+        "issue1200_ordinary_alias_branch_join",
+        &[5.0, 8.0],
+    );
+}
+
+/// chelis#1200 review finding 3: two closures each capturing the SAME
+/// component. The first capture consumes the carrier, so the second is a
+/// use-after-consume and must be blamed on the component's own name.
+#[test]
+fn two_closures_capturing_one_component_fails_the_cli() {
+    assert_rejects_naming(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run() -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  f = fn () -> realize(p)
+  g = fn () -> realize(p)
+  add(add(f(), g()), realize(q))
+}
+out = run()
+"#,
+        "issue1200_two_closures_one_component",
+        "variable `p`",
+    );
+}
+
+/// chelis#1200 review finding 3: a component consumed BEFORE a closure
+/// captures it. The capture is the second consume and must reject; the
+/// ordering is the mirror of `component_captured_then_reused_fails_the_cli`.
+#[test]
+fn component_consumed_before_a_closure_captures_it_fails_the_cli() {
+    assert_rejects_naming(
+        r#"
+def two[n](t: tensor[n, f32]) -> (tensor[n, f32], tensor[n, f32]) = (t, t)
+def run() -> tensor[2, f32] = {
+  v = to_tensor([1.0f32, 2.0f32])
+  (p, q) = two(v)
+  a = realize(p)
+  f = fn () -> realize(p)
+  add(add(a, f()), realize(q))
+}
+out = run()
+"#,
+        "issue1200_component_consumed_before_capture",
+        "variable `p`",
     );
 }

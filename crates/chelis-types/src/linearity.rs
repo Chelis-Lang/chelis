@@ -117,7 +117,28 @@ struct BindingOrigin {
     /// inside that body, so the gate fired for every variable in the rest
     /// of the block — including ordinary bindings with no relationship to
     /// the destructure (chelis#1200).
+    ///
+    /// This field is the *active F2 gate*, and it is region-relative:
+    /// `clear_destructured_marks` drops it on branch entry because a
+    /// branch body is a new declaration region.  It must never be used to
+    /// answer "which binding carries this value" — see `component`.
     destructured: bool,
+    /// Permanent destructured-component identity (chelis#1200 review
+    /// finding 1).  Set with `destructured` when the bind is recorded, and
+    /// *never* cleared by region entry.
+    ///
+    /// The two facts are genuinely different.  Whether F2 is armed for a
+    /// name depends on where you are (a branch body is a fresh region);
+    /// whether the name denotes a tuple component whose value lives in a
+    /// `__chelis_tmpN` carrier is a property of the binding itself and is
+    /// true everywhere the binding is visible.  Reading the region-relative
+    /// mark to answer the identity question silently loses the carrier
+    /// inside any branch: the closure-capture path then consumed the
+    /// component's own entry, left the carrier `Consumed(Aliasing)`, and a
+    /// later `realize` of the component upgraded that to `Structural`
+    /// without a diagnostic — a consume inside a branch failed to survive
+    /// the join, contradicting `spec/design/implicit_linearity.md`.
+    component: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -149,6 +170,7 @@ impl LinearScope {
         self.origins.entry(name).or_default().push(BindingOrigin {
             alias: None,
             destructured: false,
+            component: false,
         });
     }
 
@@ -244,6 +266,7 @@ impl LinearScope {
     fn mark_destructured(&mut self, name: &str) {
         if let Some(origin) = self.origin_mut(name) {
             origin.destructured = true;
+            origin.component = true;
         }
     }
 
@@ -253,6 +276,20 @@ impl LinearScope {
     /// behavior for anything outside a destructure.
     fn is_destructured(&self, name: &str) -> bool {
         self.origin(name).is_some_and(|origin| origin.destructured)
+    }
+
+    /// Whether the currently-visible binding for `name` was introduced by a
+    /// destructure, regardless of declaration region (chelis#1200 review
+    /// finding 1).
+    ///
+    /// This is the identity question, and it is the one every
+    /// *carrier-resolution* site must ask.  `is_destructured` answers the
+    /// different, region-relative question of whether the F2 gate is armed
+    /// here, and a branch body clears that.  Asking the armed-here question
+    /// when you meant the identity question drops the carrier inside every
+    /// branch.
+    fn is_component(&self, name: &str) -> bool {
+        self.origin(name).is_some_and(|origin| origin.component)
     }
 
     /// Drop the destructured-component marks on every currently-visible
@@ -1009,8 +1046,12 @@ impl Checker {
                 // the component misroute needs. A direct (unaliased)
                 // capture-then-reuse of an ordinary binding still errors,
                 // unchanged, through `read_or_error`.
+                // Identity, not the region-relative F2 gate: a branch body
+                // clears `destructured`, so reading it here lost the carrier
+                // for every capture inside an `if`/`match` arm (chelis#1200
+                // review finding 1).
                 let capture_target = match outer_scope.resolve_alias_chain(&name) {
-                    Some(carrier) if outer_scope.is_destructured(&carrier) => carrier,
+                    Some(carrier) if outer_scope.is_component(&carrier) => carrier,
                     _ => name.clone(),
                 };
                 outer_scope.consume(
@@ -1178,11 +1219,33 @@ impl Checker {
             // `Structural` consume from a branch legitimately replaces it,
             // exactly as `consume_var_expr`'s Aliasing-then-Structural arm does
             // on the straight-line path.
+            // The rule (chelis#1200 review finding 2):
+            //
+            //   Live                      -> a branch consume always wins.
+            //   Consumed(Aliasing), and
+            //     the name is a component
+            //     carrier                 -> a branch Structural consume wins.
+            //   Consumed(Aliasing), and
+            //     the name is an ordinary
+            //     binding                 -> unchanged.
+            //
+            // The carve-out is deliberately narrow. The justification above
+            // is entirely about carriers: a component's `Aliasing` record is
+            // bookkeeping for `p = (var __chelis_tmpN)`, never a destruction,
+            // so a branch's real consume must replace it. An ordinary `y = x`
+            // alias records the same `Aliasing` shape for a completely
+            // different reason, and upgrading it there rejects
+            // `y = x; if c then { f = fn () -> realize(x) f() } else t;
+            // add(y, y)` — which released 0.18.4 accepts. Tightening ordinary
+            // aliases is exactly the class of ecosystem-breaking change
+            // chelis#1200 exists to undo, so the upgrade asks for component
+            // identity (permanent) rather than the region-relative F2 mark.
             let replaces_outer = match scope.top(name) {
                 Some(BindingState::Live { .. }) => true,
                 Some(BindingState::Consumed(outer)) => {
                     matches!(outer.kind, ConsumeKind::Aliasing)
                         && matches!(site.kind, ConsumeKind::Structural)
+                        && scope.is_component(name)
                 }
                 None => false,
             };

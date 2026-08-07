@@ -92,6 +92,22 @@ on one binding: the branch's consume survives the join, and the later use is the
 the carve-out describes. The region boundary governs which bindings are components, not
 whether consumes propagate out of it.
 
+Two things follow, and they are easy to conflate:
+
+- *Which* binding a region-crossing consume lands on is fixed by the binding's
+  identity, and identity does not belong to a region. A component's value lives in a
+  synthesized carrier, and that stays true inside a branch even though the region has
+  cleared the component *exception* for the names it re-declares. Resolving a carrier by
+  asking the region-relative question loses the carrier inside every branch, which lets a
+  branch consume fail to survive the join — the opposite of the rule above.
+- The join carries a branch's consume out onto a binding whose outer record is an
+  **alias**, and it does so only for a **component carrier**. An alias record is
+  bookkeeping, never a destruction, so for a carrier the branch's real consume must
+  replace it. An ordinary `let y = x` records the same shape for an unrelated reason,
+  and promoting it there would make a later *borrow* of `y` fail after one branch
+  consumed `x`. Ordinary aliases keep their existing behavior; the promotion is
+  carrier-only.
+
 ### Aliases
 
 `let y = p` where `p` is a component records an alias, not a destruction: both names
