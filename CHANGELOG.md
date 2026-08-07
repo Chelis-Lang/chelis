@@ -65,6 +65,35 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   authored `[a]` binders, so partially annotated recursive defs keep
   checking exactly as before.
 
+### Fixed
+
+- **A non-recursive generic host call is specialized, not inlined
+  (chelis#1201).** Value-level inlining substituted the argument expression
+  over the parameter name and dropped the parameter's declared type, so a
+  generic ADT whose instantiation was only recoverable from that annotation
+  reached lowering unresolved and failed closed with `constructor ... is not
+  concretely instantiated`. Such a call now falls through to the same bounded
+  monomorphization chelis#1158 uses for the recursive case, which keys on the
+  checked type application instead of pasting syntax. Two further gaps are
+  closed with it: an `if` branch and a `match` arm are result positions and
+  now receive the caller's expected type, and a specialized body's own
+  constructors resolve through the specialization's type substitution.
+
+  That substitution is solved against the `fn` node's **recorded** type, not
+  the declared `defsig`. The two name their variables in different spaces — a
+  signature says `a` (and, for a dimension parameter, the source dimension
+  name), while every node the checker stamped inside the body names the same
+  variable in inference space (`t376`). A substitution built from the
+  declared signature installs correctly and then matches nothing, because no
+  body node ever mentions `a`. Acceptance oracle: `cargo nextest run
+  -p chelis-ir --no-fail-fast`.
+
+  Not fixed here: a **recursive dimension-generic** function is never
+  monomorphized at all, so a generic ADT parameterised by its dimension
+  variable still fails at the code-generation boundary with an unresolved
+  host type variable. That is a distinct defect in the dimension/rank
+  lowering path rather than a residue of this one.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C
