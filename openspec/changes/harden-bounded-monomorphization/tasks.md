@@ -160,8 +160,10 @@ change layers on its lowering machinery and archives after it.
       (34 passed, 0 failed)
 - [x] 6.4 `python3 scripts/gate.py --local` green in an isolated
       `CARGO_TARGET_DIR`
-      (green on 2026-08-06; the gate assigned a target directory inside this
-      worktree; final `chelis-types` stage: 1,289/1,289)
+      (final run on 2026-08-06 used `NEXTEST_TEST_THREADS=4` after two
+      concurrent-gate runs missed only the two watchdog timing tests. The
+      focused timeout suite passed 6/6. Final gate stages passed 415/415,
+      2,083/2,083, 942/942, and 1,289/1,289)
 - [x] 6.5 Acceptance oracle green: `cargo nextest run -p chelis-cli --test
       recursive_generic_monomorphization --no-fail-fast`
       (22/22 after symbolic dimensions, authored-name provenance, object
