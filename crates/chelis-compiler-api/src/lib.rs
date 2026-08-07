@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub(crate) mod cache_envelope;
 pub mod compiler;
 pub mod context;

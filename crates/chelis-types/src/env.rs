@@ -267,7 +267,7 @@ impl Env {
                 .into_iter()
                 .filter(|v| {
                     !env_tvars.contains(v)
-                        && !subst.has_deferred_expand_constraint(*v)
+                        && !subst.has_deferred_shape_constraint(*v)
                         // spec/04 §3.1.1: a variable minted for an in-group
                         // recursive instantiation stays monomorphic while its
                         // group is inferred, so a let-bound alias of a group

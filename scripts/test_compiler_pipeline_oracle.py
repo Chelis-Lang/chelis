@@ -31,6 +31,17 @@ class CompilerPipelineOracleTests(unittest.TestCase):
             oracle.command_text(command) for command in oracle.FOCUSED_COMMANDS
         )
         for required in (
+            "-p chelis-pipeline-core",
+            "cargo test -p chelis-pipeline-core --doc",
+            "scripts/test_pipeline_core_dependency_guard.py",
+            "scripts/pipeline_core_dependency_guard.py",
+            "scripts/test_pipeline_core_documentation_guard.py",
+            "scripts/pipeline_core_documentation_guard.py",
+            "scripts/test_pipeline_core_compile_fail.py",
+            "scripts/check_pipeline_core_compile_fail.py",
+            "-p chelis-reef --lib",
+            "-p chelis-reef --test pipeline_parity",
+            "pipeline_facade_imports",
             "-p chelis-types --test type_analysis_outcome",
             "analysis_uses_one_type_session",
             "diagnostic_checkpoint_tests",

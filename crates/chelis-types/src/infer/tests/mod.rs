@@ -193,8 +193,10 @@ def identity[a](value: Boxed[a]) -> Boxed[a] = value
     let linearity_checked = crate::linearity::check_linearity(&effects_reannotated)
         .expect("linearity preserves checked metadata");
     assert_checker_metadata("linearity", &linearity_checked);
-    let composed = CheckedProgram::compose(&checked, &effects_reannotated);
-    assert_checker_metadata("composition", &composed);
+    assert!(
+        CheckedProgram::compose(&checked, &effects_reannotated).is_none(),
+        "independent checked programs must not compose"
+    );
 
     let dimensional = checked_surf(
         r#"

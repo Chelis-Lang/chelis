@@ -473,7 +473,11 @@ python3 scripts/gate.py --list
 # cargo run -p chelis-cli --bin chelis --quiet -- lint --check .  # local + ci
 # cargo test -p chelis-types --doc  # local + ci
 # cargo test -p chelis-compiler-api --doc  # local + ci
+# cargo test -p chelis-pipeline-core --doc  # local + ci
 # <managed-python> scripts/check_checkpoint_compile_fail.py  # local + ci
+# <managed-python> scripts/pipeline_core_dependency_guard.py  # local + ci
+# <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
+# <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
 # cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
 # # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
@@ -490,17 +494,17 @@ and non-gate CI nextest runs expose every failure instead of cancelling the
 remainder. The sanitizer, macOS-smoke, LOC-report, no-AI-authorship, docs, and
 smt-build CI jobs are out of scope for this script by design.
 
-The two explicit rustdoc stages exist because `cargo nextest` does not
+The three explicit rustdoc stages exist because `cargo nextest` does not
 execute doctests. The `chelis-types` command runs the chelis#731
-`ErrorWitness` contracts. The `chelis-compiler-api` command runs the
-compiler-pipeline artifact contracts.
+`ErrorWitness` contracts. The other commands run the compiler pipeline
+artifact contracts.
 
 The gate does not use `--workspace --doc`. That command makes every
 workspace doc example part of the gate without a reviewed scope change.
 
 **Doctests only run where something invokes them.** The canonical gate
-invokes doctests for `chelis-types` and `chelis-compiler-api`. The
-C-backend job also runs `cargo test -p chelis-backend-c` without a
+invokes doctests for `chelis-types`, `chelis-compiler-api`, and
+`chelis-pipeline-core`. The C-backend job also runs `cargo test -p chelis-backend-c` without a
 filter. A `compile_fail` oracle in another crate runs nowhere until that
 crate gains an equivalent invocation in the same change set.
 
@@ -516,7 +520,7 @@ python3 scripts/gate.py --local
 
 `--local` runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
---check .`, both explicit rustdoc commands, the checkpoint fixture, and
+--check .`, all three explicit rustdoc commands, the checkpoint fixture, and
 `cargo nextest run -p <crate> --no-fail-fast` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the

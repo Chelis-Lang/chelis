@@ -38,10 +38,10 @@ issue that took it:
 
 | what one of the five cannot deliver | handled at |
 |---|---|
-| [#731] makes a silent `Type::Error` unconstructible by gating its constructor. The same move is unavailable for `Type::Unit`, which is an ordinary type with no constructor to gate (its own section C3 says so), and `DeepTag` exhaustiveness forces *a* disposition, not a correct one. Neither reaches the `Atom` / list-head domain | [#908] ([#885], [#887] Tier 2). [#887] Tier 1 stays with [#731], which does deliver *diagnosed* |
-| [#730] makes callable rejections loud and explicitly non-goals making them WORK ("that is [#729]'s or an op-owner's work"), so a C-host function-value ABI has no owner anywhere in the five | [#909] ([#866], [#867], [#879]). [#868] keeps its [#730] parent - span threading IS section C2's contract |
+| [#731] makes a silent `Type::Error` unconstructible by gating its constructor. The same move is unavailable for `Type::Unit`, which is an ordinary type with no constructor to gate (its own section C3 says so), and `DeepTag` exhaustiveness forces *a* disposition, not a correct one. Neither reaches the `Atom` / list-head domain | [#908] ([#885], [#887] Tier 2). [#887] Tier 1 stays with [#731], which does deliver *diagnosed*: the sub-issue link puts it under [#874], inside the [#731] subtree |
+| [#730] makes callable rejections loud and explicitly non-goals making them WORK ("that is [#729]'s or an op-owner's work"), so a C-host function-value ABI has no owner anywhere in the five | [#909] ([#866], [#867], [#879]). [#868] sits in [#883]'s subtree with the rest of the span work; section C2 remains [#730]'s contract, and the parent link records where the fix lands |
 | [#729] seals numeric construction behind private Rust constructors. It has no reach into the C runtime, where `chelis_tensor.data` is a `pub` untyped `*mut u8`; Phases 0-4 never touch it | [#893] ([#899], [#889]). [#892]'s bool storage still rides [#729]'s v0.19 cut |
-| [#730] section C2 declares the diagnostic span normative and [#731] owns checker diagnostics, but neither has a phase that threads one: `Unsupported::with_span` and `CheckError::with_span_id` both have zero call sites | [#883] ([#868], [#886] keep their [#730] parent) |
+| [#730] section C2 declares the diagnostic span normative and [#731] owns checker diagnostics, but neither has a phase that threads one: `Unsupported::with_span` has zero call sites and `CheckError::with_span_id` has none outside its own builder test | [#883] ([#868], [#886], [#916], [#1172]). [#730] section C2 keeps the span *contract*; the sub-issue links say where the *fix* lands |
 | [05-OBS-1..5] were each conditioned on a stored numeric value reaching an exit, so root existence, naming, order, and the `build` artifact obligation were outside [#732]. [05-OBS-6] now authors the always-labelled manifest-order envelope and the unavailable-root [05-UNS-1] requirement; complete manifested observation/build consumption is still not delivered by the formatter plan | [#912] ([#820], [#862]), with the post-[#1003] integration/acceptance residue tracked at [#1023]. [#775]'s shape half remains [05-OBS-4] under [#732] |
 | no numeric plan touches `chelis reef conform`'s audit surface, which the four bump waves below keep regenerating gaps in | [#788] ([#814], [#825], [#845]) |
 
@@ -357,9 +357,11 @@ once is cheap; a break they make and later unmake is the expensive kind. Like
 the sequencing above, this ordering is advice, not law; a cut may move if a
 cell becomes urgent.
 
-Current baseline (2026-08-04): **v0.18.3 is shipped**. Two further patch cuts
-landed on the v0.18 line after v0.18.1, and the second of them is a real
-migration cut - do not read the patch-level version as "mechanical".
+Current baseline (2026-08-05): **v0.18.4 is shipped**. Three further patch cuts
+landed on the v0.18 line after v0.18.1, and the last two of them are real
+migration cuts - do not read the patch-level version as "mechanical". v0.18.4
+in particular is breaking on four boundaries at once, two of which land on the
+anti-churn invariants below in ways those invariants do not settle.
 
 **v0.18.2** (2026-08-03) was additive: the `chelis-std` CSV/JSON serializers
 (chelis#928), the eval-lane JSON/CSV builtin families (chelis#890, chelis#903),
@@ -388,6 +390,55 @@ migration**, per its own release record:
 - [#732] Phase 3 shipped its tolerance table, shared comparator, [#687]
   handshake, and continuously nested oracle (PRs #1099/#1115/#1118). This was
   behavior-preserving guard work and adds no shell migration.
+
+**v0.18.4** (2026-08-05) is a **source migration**, an **ABI break**, and a
+**wire break** in one patch cut, per its own release record. Four boundaries
+move:
+
+- **The published C ABI carries extents as `int64_t`** (chelis#1149, part of
+  [#1112]): `chelis_tensor`'s `shape`/`strides`/`size`, `chelis_alloc`, and
+  `chelis_alloc_view` widen, while `chelis_tensor_shape`'s `axis` parameter
+  NARROWS to `int32_t` as [05-DIM-1]'s axis-domain half. `ndim` and `dtype`
+  stay `int`. Anything linking against `chelis_runtime.h`, or compiling or
+  consuming emitted C, rebuilds. `ChelisGpuTensor` deliberately does not
+  move, which is why [#1112]'s GPU half stays open.
+- **The Surf grammar moves to canonical v0.19** (PR #1031, the [#1024] track):
+  one canonical repository and producer spelling, a strictly wider accepted
+  input set, and decompilation routed through a typed Deep-to-Surf resugaring
+  boundary. Because the style gate runs `chelis fmt --check` ahead of `build`,
+  `check`, `validate`, and `eval --file`, source that was canonical under
+  0.18.3 can now fail before the front end runs. Migration is
+  `chelis migrate surf --from 0.18 --inplace`; identifiers that became
+  reserved words are named, not guessed, and the rename is authored.
+- **`defsig` is a same-unit annotation and deferred inference must resolve at
+  its declaration** ([04-INF-1], PR #1178): an orphan `defsig` no longer
+  checks, and an unknown-constructor obligation still unresolved at its
+  declaration boundary rejects. Programs leaning on an under-constrained
+  signature hole or a cross-unit `defsig` need authored annotations.
+- **WireDag payload schema 4 -> 5** (PR #1181): `Pad` fill values are sealed
+  in `ScalarValue` end to end. Schema-4 payloads migrate on read; 0.18.4
+  artifacts are not readable by older compilers.
+
+Also user-visible without a migration: integer overflow in `scatter`,
+`cumsum`, `trace`, and `einsum` now traps in release builds as well as debug
+(PR #1181); checked `cast` is exhaustive over all 81 active dtype pairs and
+elementwise traps select the lowest row-major flat index (PR #1189
+implementing [04-NUM-15], closing [#1150] and [#1152]); a warm `chelis build`
+against a library stops re-typechecking it (PR #1176), which invalidates
+0.18.3 on-disk caches by design and reorders emitted C for multi-package reef
+builds.
+
+**Two of those four boundaries land on the anti-churn invariants below, in two
+different ways, and neither is settled by the invariant text as written.** The
+ABI widening is the exported-signature change invariant 7 makes v0.19 payload
+*by default*; 0.18.4 was not a cut promised "mechanical", so the absolute
+clause held and only the default was overridden - by a release decision, not by
+an amendment here. The schema 4 -> 5 step is a scope question rather than an
+override: invariant 1 governs [#729] §C3's storage decision, and schema 5
+sealed the `Pad` carrier, a different surface that §C3's storage has still not
+followed. Either way a binding consumer adapts twice. Record both as open
+maintainer calls rather than reading either invariant as satisfied or as
+violated.
 
 The v0.17 and v0.18 rows
 below are therefore historical records, while v0.19 and v0.20 remain planned
@@ -426,21 +477,26 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 | **v0.18.0 - checker totality, DeepTag, host-type/ABI boundary, compiled rendering** (SHIPPED) | [#731] P2 (PR #800) + [#731] P3 (DeepTag) + [#730] P2 (PR #799 vocab + host-type/ABI state) + [#732] P2 (compiled render) | **mechanical** for shells | no wire break ([#730] P2 preserves the `CHELIS_*` ids); the added loudness lands on already-broken code, so no *expected* source migration. Completes byte-identical payload rendering. The release-hygiene requirement is that the tarball ships `chelis_runtime_dtype.h`, which public `chelis_runtime.h` includes |
 | **v0.18.1 - always-labelled root prefix** (SHIPPED) | [05-OBS-6]'s `name = value` prefix from #994, with the stale repo expectations synchronized in #1011 | **exact-output migration** | shipped the prefix once without changing payload digits or value shape; it did not prove manifest completeness, dotted expansion/order, unavailable-root diagnostics, or artifact routing |
 | **v0.18.3 - extent/cast migration + faithful-observation guards** (SHIPPED) | [05-DIM-1/2] extent migration + `round` parity + `cast_trunc` + [#732] P3 (PRs #1099/#1115/#1118) | **source + exact-output migration** for the extent/round/cast changes; [#732] P3 itself is behavior-preserving | Phase 3's tolerance table and shared comparator shipped here and must not be scheduled again in v0.20 |
-| **v0.19.0 - grounded dtype storage/wire break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells, and the cells seeded 2026-08-04: [#704]'s scalar activation c-host B-cell, the scalar `tan`/`atan`/`recip` row, [#937]'s per-dtype `uniform_like` emission, and [#722]'s integer-unary B-cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the one wire break and one root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Bindings adapt to the per-dtype payload once; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
+| **v0.18.4 - canonical Surf + int64 C ABI + declaration contracts + WireDag 5** (SHIPPED) | PR #1031's canonical Surf v0.19 grammar and total Deep resugaring ([#1024]) + chelis#1149's int64 extent ABI (part of [#1112]) + PR #1178's [04-INF-1] declaration contracts + PR #1181's WireDag schema 5, with PR #1189's exhaustive checked cast ([#1150], [#1152]) and PR #1176's dependency typecheck cache riding along | **source migration + ABI break + wire break** | four boundaries in one patch cut. Migration: `chelis migrate surf --from 0.18 --inplace`, rebuild against the new `chelis_runtime.h`, author annotations for orphan `defsig` and unresolved deferred inference; WireDag payloads migrate on read one way only. The ABI widening overrode invariant 7's default and the schema step raises a scope question invariant 1 does not answer, so the "bindings adapt once" promise needs re-adjudicating before v0.19 |
+| **v0.19.0 - grounded dtype storage break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells, and the cells seeded 2026-08-04: [#704]'s scalar activation c-host B-cell, the scalar `tan`/`atan`/`recip` row, [#937]'s per-dtype `uniform_like` emission, and [#722]'s integer-unary B-cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the storage break and the root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Canonical Surf and the int64 ABI already shipped at 0.18.4, so this cut no longer carries them. Bindings adapt to the per-dtype payload once *from here*; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
 | **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#732] P3 already shipped in v0.18.3. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
 Net downstream shape: the original four-cut `conform` model assumed one bump,
-probe re-run, and inventory refresh per minor cut. Actual history inserted two
-additional shipped contract patches: **v0.18.1** changed exact root-output
-expectations by adding the [05-OBS-6] prefix, and **v0.18.3** changed both
-source (int64 extents) and exact output (compiled `round` half-ties). The
+probe re-run, and inventory refresh per minor cut. Actual history inserted
+three additional shipped contract patches: **v0.18.1** changed exact
+root-output expectations by adding the [05-OBS-6] prefix, **v0.18.3** changed
+both source (int64 extents) and exact output (compiled `round` half-ties), and
+**v0.18.4** changed source (canonical Surf, `defsig`/deferred-inference
+rejection), the published C ABI, and the WireDag schema at once. The
 source-visible waves are now shipped **v0.17** (seed suffix + fixing
 loud-rejected code), shipped **v0.18.1** (root label prefix), shipped
 **v0.18.3** (int64 extents, `round` half-ties, the `cast_trunc` reserved word),
-and planned **v0.19** (wire/capability behavior
-+ manifested root topology). v0.20 remains mechanical. No later wave may undo
-or restyle an earlier one - and a patch-level version number is not by itself
-evidence that a cut is mechanical.
+shipped **v0.18.4** (canonical Surf v0.19, the int64 C ABI, the declaration
+contracts, WireDag 5), and planned **v0.19** (the remaining
+capability behavior + [#729] §C3 storage + manifested root topology). v0.20
+remains mechanical. No later wave may undo or restyle an earlier one - and a
+patch-level version number is not by itself evidence that a cut is mechanical,
+which four consecutive patch cuts have now demonstrated rather than predicted.
 
 Cadence for non-contract work: an **internal-only** change (a refactor, a
 checker-internal fix, doc-only work) normally **rides the next planned cut**
@@ -453,7 +509,13 @@ patch.
 ### The anti-churn invariants
 
 1. **Atomic wire break.** [#729] §C3 is all-layers-or-nothing; never split the
-   storage decision across releases or binding consumers adapt N times.
+   storage decision across releases or binding consumers adapt N times. The
+   invariant is intact on its own terms - §C3's per-dtype storage has not
+   shipped - but v0.18.4 moved a DIFFERENT wire surface first (WireDag payload
+   schema 4 -> 5, sealing the `Pad` carrier), so a consumer now adapts at
+   0.18.4 and again at the storage break. Decide whether this invariant governs
+   the WireDag schema at all, or only §C3's storage layout, before the next cut
+   has to rely on the answer.
 2. **Payload grammar once; own-width completion once; root-prefix once;
    root-topology once.** [#732] froze the numeric grammar and
    container/scalar shape for eval at P1 and C at P2. [#729] Phase 1 is the
@@ -495,15 +557,29 @@ patch.
    `packages/chelis-std/src/io/json.ch` carries `JsonInt(int64)` beside
    `JsonFloat(f64)`.
 
+   **v0.18.4 shipped an exported-signature change ahead of the 0.19 storage
+   break** (chelis#1149: `chelis_tensor`'s extent fields, `chelis_alloc`,
+   `chelis_alloc_view`, and `chelis_tensor_shape`'s `axis`). The cut was not
+   promised mechanical and named the rebuild in its release note, so no shell
+   was misled - but the invariant's stated default ("0.19 payload by default")
+   did not hold, and it was overridden by a release decision rather than by an
+   amendment here. Either amend the invariant to say what actually governs an
+   ABI change in a breaking patch cut, or record why 0.18.4 was the exception;
+   leaving it as written invites the next reader to treat the freeze as
+   binding when it is not.
+
 ### Per-cut conform checklist
 
 Every minor cut gets a mechanical `conform bump` PR wave across the shells;
 the 0.17 and 0.19 source-migration cuts additionally carry real source edits.
-The shipped v0.18.1 patch was an extra exact-output expectation migration, and
-the shipped v0.18.3 patch carried both a source migration (int64 extents) and
-an exact-output one (compiled `round` half-ties); each owed the same probe and
-inventory refresh, and 0.18.3 owed real source edits as well. Each wave
-carries:
+The shipped v0.18.1 patch was an extra exact-output expectation migration, the
+shipped v0.18.3 patch carried both a source migration (int64 extents) and an
+exact-output one (compiled `round` half-ties), and the shipped v0.18.4 patch
+carried a source migration (canonical Surf, the declaration contracts), an ABI
+break, and a wire break together. Each owed the same probe and inventory
+refresh, and 0.18.3 and 0.18.4 owed real source edits as well - 0.18.4's are
+tool-assisted (`chelis migrate surf --from 0.18 --inplace`) except for the
+reserved-word renames it deliberately refuses to guess. Each wave carries:
 
 - a migration note as the **breaking-change summary** (the delta below), the
   `chelis#NNN` refs it closes, and the exact surface that changed - not the full
@@ -515,8 +591,8 @@ carries:
 - a published-artifact smoke that compiles a trivial C unit against the shipped
   `chelis_runtime.h`, so a header the release forgot to package (0.18's
   `chelis_runtime_dtype.h`) fails the release, not the downstream build;
-- at 0.19 only: the wire-schema version bump acknowledged at each Python
-  consumer.
+- at a wire-schema bump: acknowledgement at each Python consumer. This was
+  written as "0.19 only"; 0.18.4's WireDag 4 -> 5 already owed it.
 
 Migration-note stubs (the breaking delta per cut):
 
@@ -555,6 +631,21 @@ Migration-note stubs (the breaking delta per cut):
   migrate sites blocked by [04-NUM-14]'s fractional-cast trap onto it. This cut
   also retires 0.18.2's recorded int32-`shape` divergence, so do not migrate
   onto 0.18.2's shape return."
+- **0.18.4** (source migration + ABI break + wire break, shipped) - "four
+  boundaries move at once. Run `chelis migrate surf --from 0.18 --inplace`
+  across the tree: Surf's canonical form changed and `chelis fmt --check` runs
+  ahead of `build`/`check`/`validate`/`eval --file`, so previously canonical
+  source now fails the gate. Identifiers that became reserved words are named
+  by the migrator, not rewritten - author those renames. Rebuild anything that
+  links `chelis_runtime.h` or consumes emitted C: `chelis_tensor`'s extents,
+  `chelis_alloc`, and `chelis_alloc_view` are `int64_t`, while
+  `chelis_tensor_shape`'s `axis` narrows to `int32_t`. An orphan `defsig` no
+  longer checks and an unresolved deferred-inference obligation rejects at its
+  declaration boundary; add authored annotations. WireDag payloads move to
+  schema 5 and migrate on read - 0.18.4 artifacts are not readable by older
+  compilers. Integer overflow in `scatter`/`cumsum`/`trace`/`einsum` now traps
+  in release as well as debug, and on-disk typecheck caches from 0.18.3 are
+  invalidated by design (the first build after upgrading is cold)."
 - **0.19** (source migration) - "dtype semantics are grounded: integer overflow
   traps instead of wrapping, per-dtype tensor storage (wire-format v2, Python
   payload shape changed), narrow dtypes preserved end-to-end. Eval float tensor
@@ -570,7 +661,9 @@ Migration-note stubs (the breaking delta per cut):
   The v0.18.1 root prefix is unchanged; the complete manifested root set now
   appears in manifest order in both lanes. Update expectations for added or
   reordered dotted roots, and treat an unavailable owed root as a named
-  diagnostic rather than a missing line or missing `main`."
+  diagnostic rather than a missing line or missing `main`. Surf's canonical
+  form and the int64 C ABI are NOT part of this cut - both shipped at 0.18.4
+  and must not be migrated twice."
 - **0.20** (mechanical) - "pin bump only: the capability table, gates-as-UX,
   and [#733] Phase 3 blocking provenance ratchet land; [#732]'s cross-lane
   oracle already shipped in v0.18.3. Phase 0 landed independently and Phases
@@ -892,3 +985,8 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#1170]: https://github.com/Chelis-Lang/chelis/issues/1170
 [#1192]: https://github.com/Chelis-Lang/chelis/issues/1192
+[#874]: https://github.com/Chelis-Lang/chelis/issues/874
+[#916]: https://github.com/Chelis-Lang/chelis/issues/916
+[#1024]: https://github.com/Chelis-Lang/chelis/issues/1024
+[#1112]: https://github.com/Chelis-Lang/chelis/issues/1112
+[#1172]: https://github.com/Chelis-Lang/chelis/issues/1172

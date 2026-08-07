@@ -548,6 +548,7 @@ dependencies = [
  "chelis-effects",
  "chelis-ir",
  "chelis-macros",
+ "chelis-pipeline-core",
  "chelis-reef",
  "chelis-std-bundle",
  "chelis-surf",
@@ -689,6 +690,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chelis-pipeline-core"
+version = "0.18.4"
+dependencies = [
+ "chelis-deep",
+ "chelis-effects",
+ "chelis-ir",
+ "chelis-types",
+]
+
+[[package]]
 name = "chelis-pred"
 version = "0.18.4"
 dependencies = [
@@ -749,6 +760,7 @@ dependencies = [
  "chelis-deep",
  "chelis-effects",
  "chelis-macros",
+ "chelis-pipeline-core",
  "chelis-shell",
  "chelis-std-bundle",
  "chelis-surf",
@@ -845,6 +857,7 @@ dependencies = [
  "half",
  "quote",
  "serde",
+ "sha2",
  "stacker",
  "syn 2.0.117",
  "thiserror 2.0.18",

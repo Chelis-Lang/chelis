@@ -64,7 +64,10 @@ it necessary.
 
 ### Canonical Pipeline Owner
 
-`chelis_compiler_api::pipeline` owns front-end stage order for compiler API, CLI, and E2E production code.
+`chelis-pipeline-core` owns type analysis, effect checks, linearity checks, root metadata, and lowering.
+
+`chelis_compiler_api::pipeline` remains the public facade. It owns source preparation, dynamic goals, cancellation, host policy, and backend policy.
+
 Consumers select one closed goal:
 
 - `TypeAnalysis` returns fitness and one type-inference product.
@@ -72,16 +75,32 @@ Consumers select one closed goal:
 - `Lower` adds DAG lowering and canonical root metadata.
 
 `CheckedCompilation` exists only after all semantic checks accept the program.
+`CheckedLibrary` binds one type environment to its semantically accepted program.
+A composable contextual analysis retains the exact checked library that produced it.
+A library-extension analysis also retains the combined type environment from its type session.
+Contextual composition consumes the bound product and accepts no replacement library or environment.
+Contextual lowering accepts only a core-bound lowered library. It rejects a library with another proof identity.
+The core exports no function that adopts separate prepared, environment, or checked products.
+Public semantic completion accepts only `SemanticContext::Isolated`.
+Contextual completion requires an analysis that already retains its checked library.
+Library type products share one opaque identity derived from accepted checked source.
+A lowered library retains the same identity in an immutable core artifact.
+Only `lower_library(&CheckedLibrary)` constructs that artifact.
+Cache parsing requires the identities and the declared-type map to match.
+It reruns semantic checks without another type-inference session.
+It reruns the lower phase and compares the canonical payload with the cache payload.
 `LoweredCompilation` contains one checked compilation and its DAG products.
 A rejection does not contain a checked or lowered success product.
+The core and compiler API crates forbid unsafe code.
 
 The CLI retains style policy, Reef preparation, JSON, exit codes, target selection, and backend emission.
 Backend emitters remain final target-specific correctness boundaries.
 
-`chelis-reef` package artifact construction remains one dependency exception. Issue #1012 owns the lower-core extraction that will remove it.
+`chelis-reef` passes linked expanded Deep to the core. It retains package links, name policy, archives, and schemas.
 
-The source guard checks compiler API, CLI, and E2E production code. It does not claim coverage for all workspace crates.
-The detailed baseline is in `docs/investigations/compiler_pipeline_inventory.md`.
+The source guard checks five production roots. It does not claim coverage for all workspace crates.
+The detailed inventory is in `docs/investigations/compiler_pipeline_inventory.md`.
+The `std` blocker inventory is in `docs/investigations/pipeline_core_std_blockers.md`.
 
 ## Crate Dependency Graph
 
@@ -90,17 +109,21 @@ chelis-cli ───────────────┐
 chelis-e2e ───────────────┤
 chelis-tide ──────────────┼──> chelis-compiler-api
 chelis-python ────────────┘          │
-                                     ├── chelis-surf ──> chelis-deep
-                                     ├── chelis-types ─> chelis-deep
-                                     ├── chelis-effects
-                                     ├── chelis-ir ─────> chelis-types
-                                     ├── chelis-backend-c
-                                     ├── chelis-backend-hip
-                                     └── chelis-reef
+                                     ├──> chelis-pipeline-core
+                                     ├──> chelis-reef ──> chelis-pipeline-core
+                                     ├──> chelis-surf and chelis-macros
+                                     └──> target backends
+
+chelis-pipeline-core
+    ├──> chelis-deep
+    ├──> chelis-types
+    ├──> chelis-effects
+    └──> chelis-ir
 ```
 
 The dependency graph is a strict DAG.
-`chelis-deep` is the foundation. Upper consumer crates delegate shared compiler orchestration to `chelis-compiler-api`.
+The compiler API and Reef use the dependency-bottom semantic core.
+The core has exactly four direct production dependencies.
 
 ## Crates
 

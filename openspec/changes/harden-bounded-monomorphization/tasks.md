@@ -157,7 +157,7 @@ change layers on its lowering machinery and archives after it.
       adversarial review as the source of the findings
 - [x] 6.3 `openspec validate --all --strict --no-interactive` green with both
       this change and `add-bounded-monomorphization` active
-      (34 passed, 0 failed)
+      (38 passed, 0 failed after the final merge from `origin/main`)
 - [x] 6.4 `python3 scripts/gate.py --local` green in an isolated
       `CARGO_TARGET_DIR`
       (final run on 2026-08-06 used `NEXTEST_TEST_THREADS=4` after two

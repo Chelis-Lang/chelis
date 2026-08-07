@@ -2214,23 +2214,17 @@ fn compile_new_source_in_context(
 
     // Type-check the new code once against the library context, then run the
     // shared effect and linearity transitions.
-    let analysis = crate::pipeline::analyze_prepared_with_context(
-        prepared,
-        &context.type_env,
-        context.library_checked.signature_inference(),
-    )
-    .map_err(|report| CompilerError {
-        stage: "check".to_string(),
-        errors: report.errors.iter().map(check_error_diagnostic).collect(),
-    })
-    .map_err(|error| cancelled_or("check", error))?;
+    let analysis =
+        crate::pipeline::analyze_prepared_with_library(prepared, context.checked_library())
+            .map_err(|report| CompilerError {
+                stage: "check".to_string(),
+                errors: report.errors.iter().map(check_error_diagnostic).collect(),
+            })
+            .map_err(|error| cancelled_or("check", error))?;
     bail_if_cancelled("effects")?;
-    let checked = crate::pipeline::complete_checks(
-        analysis,
-        crate::pipeline::SemanticContext::Library(&context.library_checked),
-    )
-    .map_err(|rejection| pipeline_rejection_to_compiler_error(rejection.into()))
-    .map_err(|error| cancelled_or("effects", error))?;
+    let checked = crate::pipeline::complete_context_checks(analysis)
+        .map_err(|rejection| pipeline_rejection_to_compiler_error(rejection.into()))
+        .map_err(|error| cancelled_or("effects", error))?;
     bail_if_cancelled("linearity")?;
     bail_if_cancelled("lower")?;
     let lowered = crate::pipeline::lower_checked_with_context(
@@ -2251,11 +2245,11 @@ fn compile_new_source_in_context(
     // `unknown runtime name pkg__chelis__std__Std__Time__is_leap_year`
     // on any new-code call into a library function.
     let library_runtime = LibraryRuntime {
-        exprs: context.library_checked.annotated_exprs().to_vec(),
-        type_env: context.library_checked.type_env().clone(),
+        exprs: context.library_checked().annotated_exprs().to_vec(),
+        type_env: context.library_checked().type_env().clone(),
         lowered_names: crate::runtime::library_lowered_names(
-            context.library_checked.annotated_exprs(),
-            context.library_checked.type_env(),
+            context.library_checked().annotated_exprs(),
+            context.library_checked().type_env(),
         ),
     };
 

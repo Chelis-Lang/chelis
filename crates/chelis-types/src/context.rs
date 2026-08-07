@@ -59,20 +59,47 @@
 //! check. Serde can structurally decode the private `ErrorWitness` carried by
 //! `Type::Error`, but successful context construction rejects all checker
 //! errors and the totality invariant forbids error types in emitted snapshots.
-//! Cache decoding verifies its envelope and build identity but does not rerun
-//! semantic type checking, so cache bytes are a trusted internal artifact.
+//! Compiler API cache decoding verifies the envelope and build identity.
+//! It requires one opaque identity on both type products.
+//! It reruns effect and linearity checks before it creates a library proof.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chelis_deep::ast as deep;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::adt::AdtRegistry;
 use crate::builtins;
 use crate::env::Env;
 use crate::types::VarGen;
 use crate::unify::Subst;
+
+/// Opaque identity derived from an accepted checked library and its base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryProofId {
+    digest: [u8; 32],
+}
+
+impl LibraryProofId {
+    pub(crate) fn for_library(annotated_exprs: &[deep::Expr], context: Option<Self>) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"chelis-library-proof-v1");
+        if let Some(context) = context {
+            hasher.update([1]);
+            hasher.update(context.digest);
+        } else {
+            hasher.update([0]);
+        }
+        let canonical = chelis_deep::printer::print_canonical_flat(annotated_exprs);
+        hasher.update((canonical.len() as u64).to_le_bytes());
+        hasher.update(canonical.as_bytes());
+        Self {
+            digest: hasher.finalize().into(),
+        }
+    }
+}
 
 /// Outer-scope snapshot for stacked IR type checking.
 ///
@@ -82,6 +109,8 @@ use crate::unify::Subst;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeEnv {
     inner: Arc<TypeEnvInner>,
+    #[serde(default)]
+    library_proof_id: Option<LibraryProofId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +165,7 @@ impl TypeEnv {
                 library_def_names: HashSet::new(),
                 opacity: crate::opacity::OpacityModuleMeta::default(),
             }),
+            library_proof_id: None,
         }
     }
 
@@ -144,7 +174,16 @@ impl TypeEnv {
     pub(crate) fn from_inner(inner: TypeEnvInner) -> Self {
         Self {
             inner: Arc::new(inner),
+            library_proof_id: None,
         }
+    }
+
+    pub(crate) fn bind_library_proof(&mut self, proof_id: LibraryProofId) {
+        self.library_proof_id = Some(proof_id);
+    }
+
+    pub(crate) fn library_proof_id(&self) -> Option<LibraryProofId> {
+        self.library_proof_id
     }
 
     pub(crate) fn inner(&self) -> &TypeEnvInner {
@@ -160,5 +199,15 @@ impl TypeEnv {
     /// from. Diagnostic helper — does NOT walk builtins or prelude.
     pub fn has_library_def(&self, name: &str) -> bool {
         self.inner.library_def_names.contains(name)
+    }
+
+    /// Confirm that this context and a checked program are one library product pair.
+    ///
+    /// The library builders derive one opaque identity from accepted checked source.
+    /// Cache parsing requires that identity and the declared-type map to match.
+    pub fn matches_checked_program(&self, program: &crate::CheckedProgram) -> bool {
+        self.library_proof_id.is_some()
+            && self.library_proof_id == program.library_proof_id()
+            && self.inner.ir_types.eq(program.type_env())
     }
 }

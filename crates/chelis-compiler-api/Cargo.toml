@@ -13,6 +13,7 @@ chelis-deep.workspace = true
 chelis-effects.workspace = true
 chelis-ir.workspace = true
 chelis-macros.workspace = true
+chelis-pipeline-core.workspace = true
 chelis-reef.workspace = true
 chelis-std-bundle.workspace = true
 chelis-surf.workspace = true

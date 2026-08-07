@@ -13,6 +13,29 @@ from typing import Callable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("cargo", "nextest", "run", "-p", "chelis-pipeline-core"),
+    ("cargo", "test", "-p", "chelis-pipeline-core", "--doc"),
+    (
+        sys.executable,
+        "-m",
+        "unittest",
+        "scripts/test_pipeline_core_dependency_guard.py",
+        "scripts/test_pipeline_core_documentation_guard.py",
+        "scripts/test_pipeline_core_compile_fail.py",
+    ),
+    (sys.executable, "scripts/pipeline_core_dependency_guard.py"),
+    (sys.executable, "scripts/pipeline_core_documentation_guard.py"),
+    (sys.executable, "scripts/check_pipeline_core_compile_fail.py"),
+    ("cargo", "nextest", "run", "-p", "chelis-reef", "--lib"),
+    (
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "chelis-reef",
+        "--test",
+        "pipeline_parity",
+    ),
     (
         "cargo",
         "nextest",
@@ -61,6 +84,8 @@ FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
         "chelis-compiler-api",
         "--test",
         "pipeline_contract",
+        "--test",
+        "pipeline_facade_imports",
         "--test",
         "fragment_parity",
         "--test",
