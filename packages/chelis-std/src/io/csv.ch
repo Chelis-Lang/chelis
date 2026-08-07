@@ -11,7 +11,7 @@ def try_read_csv(path: string) -> Option[List[Dict[string, string]]] =
     raw_lines = read_lines(path)
     lines = filter(fn (line: string) -> gt(string_len(line), cast(0, int64)), raw_lines)
     if eq(len(lines), cast(0, int64)) then Some([]) else match parse_line(index(lines, cast(0, int64))) with {
-      | Some(headers) => parse_rows(headers, drop(lines, cast(1, int64)), [])
+      | Some(headers) => parse_rows(headers, drop(lines, cast(1, int64)))
       | None => None
     }
   }
@@ -63,14 +63,45 @@ def first_invalid_row(rows: List[Dict[string, string]]) -> int64 =
       scan.1
     }
   }
-def parse_rows(headers: List[string], lines: List[string], rows: List[Dict[string, string]]) -> Option[List[Dict[string, string]]] =
-  if eq(len(lines), cast(0, int64)) then Some(rows) else {
-    line = index(lines, cast(0, int64))
-    match parse_line(line) with {
-      | Some(fields) => if neq(len(headers), len(fields)) then None else parse_rows(headers, drop(lines, cast(1, int64)), append(rows, dict_of(zip(headers, fields))))
-      | None => None
-    }
+-- Row parsing runs on the linear combinator lane. The previous shape
+-- recursed one line at a time through `append(rows, ...)` and
+-- `drop(lines, 1)`; both deep-clone their list argument, so reading r
+-- rows allocated O(r^2) list bytes and every intermediate generation
+-- stayed live until the recursion bottomed out. `map` and `fold` lower
+-- to a capacity-reserved list plus in-place pushes (chelis#943/#949),
+-- so the same read is O(r).
+--
+-- `map` cannot short-circuit, so the None contract needs three passes
+-- rather than one: parse every line once, decide validity with a `fold`
+-- over the parsed rows, and only build the dicts once every row is known
+-- good. The intermediate holds retained handles to the very field strings
+-- the dicts will hold, so it costs one pointer per field, not a second
+-- copy of the text.
+--
+-- The intermediate is `List[List[string]]`, not `List[Option[List[string]]]`,
+-- because the C backend refuses to box an ADT as a list element
+-- ("unresolved host type `Option(List(String))` on boxing a resolved host
+-- value"), which the eval lane accepts. `[]` stands in for a line that did
+-- not parse, and it is unambiguous rather than merely convenient:
+-- `parse_line_chars` always appends its final `current` field, so a
+-- successful parse returns at least one field and can never be empty.
+def parse_rows(headers: List[string], lines: List[string]) -> Option[List[Dict[string, string]]] = {
+  parsed = map(fn (line: string) -> fields_of(line), lines)
+  if parsed_ok(len(headers), parsed) then Some(map(fn (fields: List[string]) -> dict_of(zip(headers, fields)), parsed)) else None
+}
+def fields_of(line: string) -> List[string] =
+  match parse_line(line) with {
+    | Some(fields) => fields
+    | None => []
   }
+-- One test rejects both failure modes, and it is complete rather than
+-- merely convenient. `width` is `len(headers)`, and `headers` came from a
+-- `parse_line` that returned `Some`, so `width` is at least 1; the `[]`
+-- standing for a line that did not parse has length 0 and can therefore
+-- never equal it. An explicit `len(fields) > 0` conjunct alongside this
+-- would be unfalsifiable -- no input can make it the deciding term -- so it
+-- is left out rather than shipped as a guard no test can fire.
+def parsed_ok(width: int64, parsed: List[List[string]]) -> bool = fold(fn (acc: bool, fields: List[string]) -> and(acc, eq(len(fields), width)), true, parsed)
 def parse_line(line: string) -> Option[List[string]] = parse_line_chars(line, cast(0, int64), false, "", [])
 def parse_line_chars(line: string, idx: int64, in_quotes: bool, current: string, fields: List[string]) -> Option[List[string]] =
   if gte(idx, string_len(line)) then if in_quotes then None else Some(append(fields, current)) else {

@@ -453,6 +453,18 @@ struct RuntimeString {
     refcount: usize,
     value: String,
     cstring: CString,
+    /// Unicode scalar values in `value`, counted once at construction.
+    ///
+    /// `chelis_string_len` is character-indexed, so serving it from
+    /// `value.chars().count()` made every length query O(bytes) and any loop
+    /// that tests `string_len` in its condition quadratic in time. This field
+    /// is not a cache that can go stale: `RuntimeString` is immutable after
+    /// `new_runtime_string` builds it.
+    ///
+    /// It also decides the slicing strategy. A UTF-8 char occupies one byte
+    /// exactly when it is ASCII, so `char_count == value.len()` is an O(1)
+    /// all-ASCII test, and in that case character indices are byte indices.
+    char_count: usize,
 }
 
 unsafe fn retain_string_handle(handle: *mut RuntimeString) {
@@ -561,10 +573,15 @@ fn cstr_to_string(ptr_: *const c_char) -> String {
 
 fn new_runtime_string(value: String) -> chelis_string {
     let cstring = CString::new(value.clone()).unwrap_or_else(|_| CString::new("").unwrap());
+    // One extra linear pass over bytes the constructor already copies once
+    // (`value.clone()`) and scans once (`CString::new`), in exchange for O(1)
+    // `chelis_string_len` and O(1) ASCII detection in `chelis_string_slice`.
+    let char_count = value.chars().count();
     let inner = Box::new(RuntimeString {
         refcount: 1,
         value,
         cstring,
+        char_count,
     });
     chelis_string {
         handle: Box::into_raw(inner),
@@ -579,7 +596,26 @@ unsafe fn string_value(value: chelis_string) -> &'static RuntimeString {
 }
 
 unsafe fn clone_items(items: &[chelis_value]) -> Vec<chelis_value> {
-    let mut out = Vec::with_capacity(items.len());
+    clone_items_reserving(items, 0)
+}
+
+/// `clone_items` with room for `extra` further elements reserved up front.
+///
+/// `clone_items` returns a `Vec` that is exactly full, so a caller that
+/// pushes even one more element immediately pays `RawVec`'s doubling
+/// growth: the clone allocates `16 * n` bytes and the push then allocates
+/// `16 * 2n` and frees the clone -- `48 * n` bytes of allocator traffic to
+/// end up holding `32 * n`. `chelis_list_append` is exactly that caller,
+/// and it is the O(n^2) accumulator `Std.Io.Csv.read_csv`'s `parse_rows`
+/// drives once per input row.
+///
+/// The allocation stays exactly sized for `items.len() + extra`, so a
+/// caller that reserves precisely what it is about to push wastes nothing.
+/// This is a better allocation plan, not spare-capacity slack: the clone
+/// is still an independent, exactly-sized copy, so it does not weaken the
+/// immutability `chelis_list_append`'s `*const chelis_list` encodes.
+unsafe fn clone_items_reserving(items: &[chelis_value], extra: usize) -> Vec<chelis_value> {
+    let mut out = Vec::with_capacity(items.len() + extra);
     for item in items {
         chelis_value_retain(*item);
         out.push(*item);
@@ -1179,13 +1215,45 @@ pub unsafe extern "C" fn chelis_string_slice(
     if start < 0 || len < 0 {
         return new_runtime_string(String::new());
     }
-    let chars: Vec<char> = string_value(value).value.chars().collect();
-    if start as usize >= chars.len() {
+    let inner = string_value(value);
+    let text = inner.value.as_str();
+    let char_count = inner.char_count;
+    let start = start as usize;
+    if start >= char_count {
         return new_runtime_string(String::new());
     }
-    let end = ((start + len) as usize).min(chars.len());
-    let out: String = chars[start as usize..end].iter().collect();
-    new_runtime_string(out)
+    // `start` and `len` are both non-negative i64, so the sum fits usize on
+    // every supported target; saturate rather than wrap on the pathological
+    // input instead of relying on i64 addition not overflowing.
+    let end = start.saturating_add(len as usize).min(char_count);
+    if end <= start {
+        return new_runtime_string(String::new());
+    }
+    if char_count == text.len() {
+        // All-ASCII: character indices are byte indices, so this is a direct
+        // O(len) copy with no scan of the source at all.
+        return new_runtime_string(text[start..end].to_owned());
+    }
+    // Multi-byte: walk char boundaries once to convert the character range
+    // into a byte range. O(end) time and O(len) allocated bytes.
+    //
+    // The previous implementation collected the WHOLE string into a
+    // `Vec<char>` on every call -- 4 bytes per character regardless of how
+    // few were requested -- so a scanner taking one character at a time
+    // across a string of length L allocated O(L^2) bytes.
+    let mut offsets = text.char_indices().map(|(offset, _)| offset).skip(start);
+    let begin = match offsets.next() {
+        Some(offset) => offset,
+        None => return new_runtime_string(String::new()),
+    };
+    // `offsets` now sits just past character `start`, so the character at
+    // index `end` is `end - start - 1` further along. Running off the end
+    // means the requested range reaches the last character.
+    let stop = match offsets.nth(end - start - 1) {
+        Some(offset) => offset,
+        None => text.len(),
+    };
+    new_runtime_string(text[begin..stop].to_owned())
 }
 
 #[no_mangle]
@@ -1225,7 +1293,10 @@ pub unsafe extern "C" fn chelis_string_ends_with(
 
 #[no_mangle]
 pub unsafe extern "C" fn chelis_string_len(value: chelis_string) -> i64 {
-    string_value(value).value.chars().count() as i64
+    // Character count, not byte length -- served from the count taken at
+    // construction so this is O(1). It used to re-decode the whole string on
+    // every call, which made `while i < string_len(s)` scanners quadratic.
+    string_value(value).char_count as i64
 }
 
 #[no_mangle]
@@ -1643,10 +1714,19 @@ pub unsafe extern "C" fn chelis_list_append(
     list: *const chelis_list,
     value: chelis_value,
 ) -> *mut chelis_list {
+    // Reserve the one slot the push below needs. A bare `clone_items`
+    // hands back an exactly-full `Vec`, so the push reallocates to double
+    // capacity: `16 * n` cloned, then `16 * 2n` allocated and `16 * n`
+    // freed. Reserving makes the append allocate `16 * (n + 1)` once and
+    // keeps every surviving generation exactly sized. Still a clone, so
+    // the `*const chelis_list` input is untouched -- the exact-capacity
+    // claim is locked by `append_reserves_exactly_one_slot` below and the
+    // clone-not-mutate and refcount-ledger parity by the two tests after
+    // it.
     let mut items = if list.is_null() {
-        Vec::new()
+        Vec::with_capacity(1)
     } else {
-        clone_items(&(*list).items)
+        clone_items_reserving(&(*list).items, 1)
     };
     chelis_value_retain(value);
     items.push(value);
@@ -4372,6 +4452,136 @@ mod tests {
                 "f64 store must not collapse to the f32-truncated value"
             );
             chelis_free(tensor);
+        }
+    }
+
+    /// `chelis_list_append` must hand back a `Vec` whose capacity is
+    /// exactly the new length.
+    ///
+    /// The append path clones then pushes. Cloning to an exactly-full
+    /// `Vec` makes that push reallocate to `2 * n`, so a single append on
+    /// an `n`-element list costs `16 * n + 16 * 2n` bytes of allocation to
+    /// end up holding `16 * 2n`. `read_csv` appends once per row, so the
+    /// wasted half is `O(n^2)`: 2119 MB of the 3233 MB a 9588-row parse
+    /// allocated, and 1470 MB of the 2219 MB still live at exit.
+    ///
+    /// Asserting capacity (not just length) is the point: length is
+    /// identical either way, so a length-only test cannot tell the two
+    /// allocation plans apart and would keep passing if the reservation
+    /// were dropped.
+    #[test]
+    fn append_reserves_exactly_one_slot() {
+        unsafe {
+            let mut list = chelis_list_empty();
+            assert_eq!((*list).items.capacity(), 0, "empty list holds no buffer");
+            for expected_len in 1..=8usize {
+                let grown = chelis_list_append(list, chelis_value_from_int64(1));
+                chelis_list_release(list);
+                list = grown;
+                assert_eq!((*list).items.len(), expected_len);
+                assert_eq!(
+                    (*list).items.capacity(),
+                    expected_len,
+                    "append must reserve exactly one slot; capacity {} at length {} \
+                     means the push reallocated to double capacity",
+                    (*list).items.capacity(),
+                    expected_len
+                );
+            }
+            chelis_list_release(list);
+        }
+    }
+
+    /// The negative half of `append_reserves_exactly_one_slot`: reserving
+    /// must not become an in-place push.
+    ///
+    /// `chelis_list_append` takes `*const chelis_list` precisely because
+    /// `List[T]` is immutable, and `chelis_list_push` (chelis#943) is the
+    /// separate in-place mutator that is only sound at `refcount == 1`.
+    /// A reservation that grew the *source* buffer instead of a fresh one
+    /// would still satisfy every length assertion above while silently
+    /// mutating a list other owners can see.
+    #[test]
+    fn append_leaves_the_source_list_untouched() {
+        unsafe {
+            let source = chelis_list_empty();
+            chelis_list_push(source, chelis_value_from_int64(10));
+            chelis_list_push(source, chelis_value_from_int64(20));
+            let source_len_before = chelis_list_len(source);
+            let source_buffer_before = (*source).items.as_ptr();
+
+            let appended = chelis_list_append(source, chelis_value_from_int64(30));
+
+            assert_ne!(
+                appended as *const chelis_list, source,
+                "append returns a fresh list"
+            );
+            assert_eq!(
+                chelis_list_len(source),
+                source_len_before,
+                "append must not grow the list it was handed"
+            );
+            assert_eq!(
+                (*source).items.as_ptr(),
+                source_buffer_before,
+                "append must not reallocate the source's buffer"
+            );
+            assert_eq!(chelis_list_len(appended), source_len_before + 1);
+            chelis_list_release(appended);
+            // The source must survive the appended list's release: its
+            // elements were retained into the clone, not moved out of it.
+            assert_eq!(chelis_list_len(source), source_len_before);
+            chelis_list_release(source);
+        }
+    }
+
+    /// The refcount ledger the reservation must not disturb: a heap
+    /// element that is still live after the append must not be released,
+    /// and an element the clone retained must not be released twice.
+    ///
+    /// Reading `refcount` directly is deliberate. A premature free or a
+    /// double free through a raw pointer is not reliably observable as a
+    /// crash, so a test that merely re-reads the value after the release
+    /// can pass while the allocation is already gone. The counts are the
+    /// only deterministic witness.
+    #[test]
+    fn append_retains_elements_and_release_balances() {
+        unsafe {
+            let element = chelis_list_empty();
+            chelis_list_push(element, chelis_value_from_int64(7));
+            assert_eq!((*element).refcount, 1, "sole owner at construction");
+
+            let source = chelis_list_append(std::ptr::null(), chelis_value_from_list(element));
+            assert_eq!(
+                (*element).refcount,
+                2,
+                "append retains the value it stores; the caller still owns its reference"
+            );
+
+            let grown = chelis_list_append(source, chelis_value_from_int64(1));
+            assert_eq!(
+                (*element).refcount,
+                3,
+                "cloning the source into the grown list retains every element it copied"
+            );
+
+            // Releasing one owner must drop exactly one reference. Under a
+            // clone that aliased the source buffer this would double-free
+            // the element; under a clone that skipped the retain it would
+            // free it outright while `source` still points at it.
+            chelis_list_release(grown);
+            assert_eq!(
+                (*element).refcount,
+                2,
+                "one release drops exactly one reference"
+            );
+            chelis_list_release(source);
+            assert_eq!(
+                (*element).refcount,
+                1,
+                "the caller's own reference survives"
+            );
+            chelis_list_release(element);
         }
     }
 

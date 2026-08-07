@@ -46,6 +46,46 @@ def test_mismatched_column_count_returns_none() -> unit ! { Test, IO } = {
     | None => assert_true(true, "mismatched col count -> None")
   }
 }
+def test_extra_column_count_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_too_many.csv"
+  _ = write_file(path, "a,b\nx,y,z")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a row with MORE fields than the header must yield None, got Some")
+    | None => assert_true(true, "wider-than-header row -> None")
+  }
+}
+def test_short_row_in_last_position_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_ragged_tail.csv"
+  _ = write_file(path, "a,b\n1,2\n3,4\n5")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a short row in the LAST position must yield None, got Some")
+    | None => assert_true(true, "trailing short row -> None (validity is not decided by the first data row alone)")
+  }
+}
+def test_short_row_in_first_position_followed_by_valid_rows_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_ragged_head.csv"
+  _ = write_file(path, "a,b\n1\n2,3\n4,5")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a short FIRST data row must yield None even when later rows are well-formed, got Some")
+    | None => assert_true(true, "leading short row -> None (a later valid row does not clear the verdict)")
+  }
+}
+def test_wide_row_in_middle_position_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_ragged_middle.csv"
+  _ = write_file(path, "a,b\n1,2\n3,4,5\n6,7")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a wide row between two well-formed rows must yield None, got Some")
+    | None => assert_true(true, "interior wide row -> None")
+  }
+}
+def test_unterminated_quote_in_last_row_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_unterm_tail.csv"
+  _ = write_file(path, "k\nok\n\"dangling")
+  match try_read_csv(path) with {
+    | Some(_) => fail("an unterminated quote in a NON-first data row must yield None, got Some")
+    | None => assert_true(true, "trailing unterminated quote -> None (an unparsable line is not a placeholder row)")
+  }
+}
 def test_quoted_field_with_embedded_comma() -> unit ! { Test, IO } = {
   path = "/tmp/chelis_std_test_csv_quoted.csv"
   _ = write_file(path, "k,v\n\"a,b\",x")
