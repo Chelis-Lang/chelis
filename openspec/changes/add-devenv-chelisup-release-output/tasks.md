@@ -9,7 +9,7 @@
 ## 2. Implement the Devenv release output
 
 - [x] 2.1 Add the focused Nix helper that selects `workspaceMembers."chelisup"` from committed `Cargo.nix`.
-- [x] 2.2 Use the configured Rust toolchain and the musl target with the static package set on Linux.
+- [x] 2.2 Use the configured Rust toolchain and the musl target with the musl cross package set on Linux.
 - [x] 2.3 Rewrite Darwin `libiconv` to the Apple system path before executable verification.
 - [x] 2.4 Add exact inventory, version, help, architecture, runtime dependency, and SHA-256 checks.
 - [x] 2.5 Add `devenv/release-outputs.nix` and import it from `devenv.nix`.

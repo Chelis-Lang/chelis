@@ -14,7 +14,7 @@ let
   supported = isLinux || isDarwin;
   platformSlug = if isLinux then "linux-x86_64" else "darwin-arm64";
   assetName = if isLinux then "chelisup-linux-x86_64" else "chelisup-darwin-arm64";
-  releasePkgs = if isLinux then pkgs.pkgsStatic else pkgs;
+  releasePkgs = if isLinux then pkgs.pkgsCross.musl64 else pkgs;
   releaseToolchain =
     if isLinux then
       rustToolchain.override {

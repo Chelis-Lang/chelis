@@ -84,7 +84,7 @@ The derivation MUST read the version from `[workspace.package]` in `Cargo.toml`.
 - **THEN** the derivation fails before publication
 
 ### Requirement: The portable executable has no Nix runtime dependency
-The Linux executable MUST use the `x86_64-unknown-linux-musl` target and the static Nix package set. Its ELF metadata MUST contain no interpreter segment and no dynamic `NEEDED` entry.
+The Linux executable MUST use the `x86_64-unknown-linux-musl` target and the musl cross package set. Its ELF metadata MUST contain no interpreter segment and no dynamic `NEEDED` entry.
 
 The Darwin executable MUST link only paths under `/usr/lib/` or `/System/Library/Frameworks/`. Its Mach-O metadata MUST contain no `/nix/store/` load path.
 

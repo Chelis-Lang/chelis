@@ -29,7 +29,7 @@ MODULE_REQUIRED_MARKERS = (
 HELPER_REQUIRED_MARKERS = (
     'root + "/Cargo.nix"',
     'workspaceMembers."chelisup"',
-    "pkgs.pkgsStatic",
+    "pkgs.pkgsCross.musl64",
     "x86_64-unknown-linux-musl",
     "chelisup-linux-x86_64",
     "chelisup-darwin-arm64",
@@ -86,6 +86,7 @@ def release_source_contract_errors(
         "buildRustPackage",
         "cargo build",
         "fromRustupToolchainFile",
+        "pkgs.pkgsStatic",
     )
     combined = release_module + "\n" + release_helper
     for marker in forbidden:
@@ -182,6 +183,17 @@ class ReleaseSourceContractTests(unittest.TestCase):
             release_helper=RELEASE_HELPER.read_text(encoding="utf-8"),
         )
         self.assertIn("release output uses forbidden path outputs.chelisup", errors)
+
+    def test_native_static_package_set_fails(self) -> None:
+        helper = RELEASE_HELPER.read_text(encoding="utf-8").replace(
+            "pkgs.pkgsCross.musl64", "pkgs.pkgsStatic"
+        )
+        errors = release_source_contract_errors(
+            root_devenv=ROOT_DEVENV.read_text(encoding="utf-8"),
+            release_module=RELEASE_MODULE.read_text(encoding="utf-8"),
+            release_helper=helper,
+        )
+        self.assertIn("release output uses forbidden path pkgs.pkgsStatic", errors)
 
     def test_intel_macos_slug_fails(self) -> None:
         helper = RELEASE_HELPER.read_text(encoding="utf-8") + "\n# darwin-x86_64\n"

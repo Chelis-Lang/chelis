@@ -47,7 +47,9 @@ Add a focused helper under `nix/` that imports the filtered source and committed
 
 The helper receives `config.languages.rust.toolchainPackage`. It does not create a second Rust version or fetch a crate graph during evaluation.
 
-The Linux path extends that toolchain with `x86_64-unknown-linux-musl`. It uses the static Nix package set as the crate build package set.
+The Linux path extends that toolchain with `x86_64-unknown-linux-musl`. It uses `pkgs.pkgsCross.musl64` as the crate build package set.
+
+Do not use `pkgs.pkgsStatic`. The hosted Ubuntu oracle ran the static `crc32fast` build script, which exited with signal 11.
 
 The Darwin path uses the native package set and the configured toolchain. Both paths use the lock data already captured in `Cargo.nix` and `Cargo.lock`.
 
@@ -96,7 +98,7 @@ The authoritative completion oracle is the `Build portable chelisup` release wor
 
 ## Risks / Trade-offs
 
-- **The musl crate graph fails under the static package set** → Keep the target explicit and fail before publication.
+- **The musl cross crate graph fails** → Keep the target explicit and fail before publication.
 - **A Darwin dependency enters the Nix store** → Reject every non-Apple load path during the derivation.
 - **The system `libiconv` ABI differs** → Run the rewritten executable before the output succeeds.
 - **A checksum describes the pre-fixup binary** → Generate it only after all binary edits.
