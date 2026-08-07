@@ -77,8 +77,8 @@ fresh local red team then found three more defects in this implementation:
 
 ### D1: Probe isolation by snapshot/restore, not by skipping
 
-A RAII guard snapshots the whole `MonoSpecializationState` (memo, functions,
-in-progress stack) at probe entry and restores it on drop, and the probe
+A RAII guard snapshots the whole `MonoSpecializationState` (memo, symbol map,
+functions, in-progress stack) at probe entry and restores it on drop. The probe
 name-set is iterated in sorted order. After a probe the state is byte-for-byte
 what it was before, so every surviving specialization was interned by the real
 lowering pass in that pass's deterministic traversal order — which also fixes
@@ -140,15 +140,15 @@ All user-visible scenarios join the existing owning suite:
 `chelis-ir` seam test forces a lowering error inside `MonoProbeGuard`. It locks
 `Ok(false)`, complete specialization-state restoration, and later attribution
 of the genuine error. The byte-determinism test supersedes the weaker
-set-equality test. A development mutation disables D1's guard and makes the
-test fail on the trigger shape.
+set-equality test. With only the guard disabled, sorted iteration kept the test
+green. With both defenses disabled, the mutation made the test fail.
 
 ## Risks / Trade-offs
 
 - [Determinism test passes coincidentally] → construct the fixture from the
-  measured trigger (probing caller preceding its wrapper defs in source);
-  verify by mutation (guard off ⇒ red) before trusting green; compare whole
-  emitted `.c` bytes across ≥10 builds, not symbol sets.
+  measured trigger, with the probing caller before its wrapper defs. Disable
+  both the guard and sorted iteration for the mutation control. Compare whole
+  emitted `.c` bytes across at least 10 builds, not symbol sets.
 - [Snapshot cost] → the state is small (a map, a vec, a stack) and probes are
   per-callee-name, already memoized upstream; clone cost is noise against the
   lowering it wraps.

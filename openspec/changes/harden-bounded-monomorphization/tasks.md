@@ -166,7 +166,7 @@ change layers on its lowering machinery and archives after it.
       recursive_generic_monomorphization --no-fail-fast`
       (22/22 after symbolic dimensions, authored-name provenance, object
       linkage, and package identity joined the suite)
-- [ ] 6.6 Red team per protocol: fresh local subagent runs the oracle, then
+- [x] 6.6 Red team per protocol: fresh local subagent runs the oracle, then
       probes adversarially — probe-trigger permutations (wrapper order, nested
       probes during specialization lowering), a specialization named like a
       user def, symbolic-dim disagreement through mutual recursion, reef
@@ -183,4 +183,8 @@ change layers on its lowering machinery and archives after it.
       REJECT. All exercised behavior passed, but direct executable evidence for
       failed-probe restoration was absent. The new `chelis-ir` seam test forces
       that error and locks `Ok(false)`, complete state restoration, and later
-      real-error attribution. A third fresh local pass remains required.)
+      real-error attribution. Round 3,
+      `target/redteam/hardening-round3/report.md`: ACCEPT. The oracle passed
+      22/22, the failed-probe seam passed, six hardening locks passed, and an
+      independent symbolic-dimension probe had native/eval parity. The one
+      minor mutation-record inconsistency in the proposal and design is fixed.)

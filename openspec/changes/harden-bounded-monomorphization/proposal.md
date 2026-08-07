@@ -46,8 +46,9 @@ architecture, which keeps the check-time uniform-recursive-instantiation rule
   specialization state (snapshot/restore guard around every probe) and probe
   iteration becomes deterministic (sorted). Repeated builds of one program emit
   byte-identical C, asserted on the probe-trigger shape (a probing caller
-  preceding its wrappers in source) across repeated builds, with a
-  mutation-verified test (guard disabled ⇒ the test fails).
+  preceding its wrappers in source) across repeated builds. With only the
+  guard disabled, sorted iteration kept the test green. With both defenses
+  disabled, the mutation made the test fail.
 - **Surface hygiene:** each host function carries explicit authored or
   monomorphized provenance through both type projections. The header and entry
   selectors use that provenance, not symbol text. Each specialization receives
