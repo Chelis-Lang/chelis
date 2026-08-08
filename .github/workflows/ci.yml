@@ -232,135 +232,117 @@ jobs:
   smt-build:
     name: SMT Feature Build (Linux)
     runs-on: ubuntu-latest
-    # In steady state this job LINKS a durable prebuilt cvc5 (a GitHub Release
-    # asset published by build-cvc5.yml, rustc-independent, no cache TTL/LRU),
-    # so it runs ~3m warm. The from-source cvc5 compile (~22m) is off the
-    # per-PR path: it only recurs on a cvc5-sys version bump before
-    # build-cvc5.yml republishes the asset (see docs/smt_build_setup.md for the
-    # bump runbook). 25m covers a warm link plus a fully cold Rust workspace
-    # recompile (e.g. after a stable-toolchain bump) with margin, and fails
-    # fast instead of silently absorbing a stray from-source cvc5 build.
-    timeout-minutes: 25
+    # The lane links the flake's pinned cvc5 tree (nix/cvc5.nix) through
+    # CVC5_DIR and builds inside the Devenv shell -- the same rustc and the
+    # same cvc5 the shipped Linux binary uses (openspec
+    # converge-smt-lanes-on-nix-cvc5). The closure cache below is shared with
+    # nix-packages.yml, so warm runs link in minutes. A cold closure (a cvc5
+    # or nixpkgs pin bump) pays one ~30m Nix cvc5 build; the ceiling covers
+    # that cold case plus a cold workspace recompile.
+    timeout-minutes: 75
     # Skip on docs-only PRs (chelis#419); a skipped required job reports
     # success. Runs on every code PR and push.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # cvc5 builds from source into target/ on top of the workspace build —
-    # the heaviest disk consumer of any Linux job — so it gets both the
-    # free-disk reclaim and the debuginfo strip (chelis#392). It was the
-    # only Linux build job missing the free-disk step.
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
-      # Free ~25-30 GB before the cargo + cvc5 build; see
+      # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
         uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
 
-      - name: Install C dependencies
-        # apt-get under retry (scripts/ci_apt_get.py) so a transient
-        # mirror reset does not flake the cvc5 smoke job. This fast lane
-        # does not install Z3, Gappa, or Arb-only tools; those live in
-        # the non-required full prove workflow.
-        run: python3 scripts/ci_apt_get.py gcc g++ cmake libclang-dev libgmp-dev libmpfr-dev
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-
-      - name: Create uv-managed venv + wire libpython rpath
-        run: python3 scripts/ci_setup_uv_python.py
-
-      # cvc5 (cvc5-sys) builds from source via CMake+make (~22m cold). To keep
-      # that off the per-PR path we LINK a prebuilt cvc5, tried in two layers
-      # (see docs/smt_build_setup.md and scripts/ci_cvc5_cache.py):
-      #   1. DURABLE (primary): a GitHub Release asset published by
-      #      build-cvc5.yml, keyed on the cvc5-sys version + namespace (NOT
-      #      Cargo.lock, NOT rustc). A Release asset has no 10GB LRU budget, no
-      #      7-day TTL, and no branch scope, so a stable-toolchain bump or a
-      #      quiet stretch no longer forces a cold rebuild. `fetch`
-      #      sha256-verifies and extracts it; on ANY miss it exits 0 with
-      #      warm=false.
-      #   2. FALLBACK (secondary): the stable-key Actions cache, restored only
-      #      when the durable fetch missed (the cvc5-sys-bump window before
-      #      build-cvc5.yml republishes). Best-effort; a hiccup degrades to
-      #      from-source, never fails the job.
-      # `activate` exports CVC5_DIR only when the store is complete (verified by
-      # ci_cvc5_cache.py's sentinel); otherwise the normal from-source path
-      # runs. (A PR branch DOES inherit main's caches/assets; only a PR's own
-      # cache SAVE is branch-scoped.)
-      - name: Compute cvc5 cache key
-        id: cvc5key
-        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-x86_64
-
-      - name: Fetch durable prebuilt cvc5 (Release asset)
-        id: cvc5fetch
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_cvc5_cache.py fetch --namespace linux-x86_64 --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Restore prebuilt cvc5 (Actions cache fallback)
-        id: cvc5restore
-        if: steps.cvc5fetch.outputs.warm != 'true'
-        uses: actions/cache/restore@v4
-        # Best-effort: a cache-service hiccup must degrade to a from-source
-        # build, never fail this job (chelis#583).
-        continue-on-error: true
+      # The Devenv shell composes the private Chelis-Lang/ci consumer module,
+      # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
+      - name: Mint a scoped token for the private ci input
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: ci
 
-      - name: Activate prebuilt cvc5 (link instead of rebuild)
-        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+      - name: Authenticate Nix to the private ci devenv input
+        shell: bash
+        env:
+          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+
+      # cvc5 closure cache: the same key derivation and import/export pattern
+      # as nix-packages.yml, so both jobs share one cached closure.
+      - name: Compute the cvc5 toolchain cache key
+        id: cvc5-key
+        run: python3 -c 'import os, pathlib, subprocess; drv = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
+
+      - name: Restore the cvc5 toolchain closure
+        id: cvc5-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
+
+      - name: Import the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit == 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'
+
+      # cvc5-sys links the prebuilt archives from CVC5_DIR and never runs
+      # CMake, so this lane needs no apt C dependencies.
+      - name: Build the pinned cvc5 tree and export CVC5_DIR
+        run: |
+          set -euo pipefail
+          nix build .#legacyPackages.x86_64-linux.cvc5-dir --out-link .cvc5-dir
+          printf 'CVC5_DIR=%s\n' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          # cvc5 builds from source into target/; share the former
-          # smt-build cache namespace with the optional full-prove lane
-          # while keeping the gate jobs lean.
+          # Keep the former smt-build cache namespace shared with the
+          # optional full-prove lane.
           shared-key: smt-smt-build
           # Persist a warm workspace cache even if a later step fails, so a
           # slow cold run is not re-paid on the next attempt (chelis#583).
           cache-on-failure: true
 
       - name: Build smt feature
-        run: cargo build -p chelis-cli --features smt
-
-      # Cold runs only (no CVC5_DIR active): copy the freshly built cvc5
-      # artifacts into the stable-key cache dir so the next Cargo.lock churn
-      # links them instead of rebuilding. `complete=true` is emitted only
-      # after a fully-verified harvest; the save step below is gated on it,
-      # so a partial/failed build never poisons the stable-key cache.
-      - name: Harvest cvc5 build for cache
-        id: cvc5harvest
-        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Save prebuilt cvc5
-        if: always() && steps.cvc5harvest.outputs.complete == 'true'
-        uses: actions/cache/save@v4
-        # Best-effort: saving the cvc5 cache must never fail the build.
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- cargo build -p chelis-cli --features smt
 
       - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/debug/chelis
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- python .github/scripts/verify_release_smt.py ./target/debug/chelis
 
       - name: Run cvc5 engine smoke tests
-        run: cargo test -p chelis-prove --features smt --lib cvc5_engine_
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- cargo test -p chelis-prove --features smt --lib cvc5_engine_
+
+      - name: Export the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--to", "file:///tmp/chelis-cvc5-cache", out], check=True)'
+
+      - name: Save the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        # Best-effort: saving the closure cache must never fail the build.
+        continue-on-error: true
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
 
   smt-build-darwin-arm64:
     name: SMT Feature Build (darwin-arm64)
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
-    timeout-minutes: 30
+    # Warm closure + warm cargo cache runs in minutes; a cold cvc5 closure
+    # pays one ~30m Nix build. See the smt-build job for the lane design
+    # (openspec converge-smt-lanes-on-nix-cvc5).
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v6
 
@@ -369,64 +351,44 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = "arm64"
 
-      # CMake, Python (3.11+, so cvc5's TOML codegen uses stdlib
-      # tomllib), and libclang ship in the macos-latest image and Xcode
-      # CLT; cvc5 auto-downloads and builds its own static GMP, so no
-      # brew installs are required for the cvc5 source build. `cmake` is
-      # installed defensively in case a future image drops it from PATH.
-      - name: Install build prerequisites
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+
+      - name: Mint a scoped token for the private ci input
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: ci
+
+      - name: Authenticate Nix to the private ci devenv input
+        shell: bash
+        env:
+          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+
+      - name: Compute the cvc5 toolchain cache key
+        id: cvc5-key
+        run: python3 -c 'import os, pathlib, subprocess; drv = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.aarch64-darwin.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
+
+      - name: Restore the cvc5 toolchain closure
+        id: cvc5-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
+
+      - name: Import the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit == 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.aarch64-darwin.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'
+
+      - name: Build the pinned cvc5 tree and export CVC5_DIR
         run: |
           set -euo pipefail
-          brew list cmake >/dev/null 2>&1 || brew install cmake
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # ROBUSTNESS NOTE (darwin SMT warm-cache masks cold build): Swatinem's
-      # cache restores a previously-built cvc5 from target/, AND the
-      # chelis#583 cvc5 cache below restores a prebuilt libcvc5.a, so on a
-      # warm cache this job can pass WITHOUT ever re-running the cold cvc5
-      # source build (cmake configure + the C++ compile). A break that only
-      # manifests on a cold compile -- a cvc5/cvc5-sys bump, a new flag, a
-      # toolchain change on the macos-latest image -- would then stay green
-      # here until a cache-key change or a cache eviction forces the cold
-      # path. The release.yml darwin job uses a DIFFERENT cache key (no `key:`
-      # override) and no cvc5 cache, so it does not share either cache and is
-      # the authoritative cold-build proof for the SHIPPED artifact; treat a
-      # release-job cvc5 failure as real even when this per-PR lane is green.
-      # If a cvc5/toolchain bump is in the diff, force a cold build by bumping
-      # this `key:` (e.g. `smt-darwin-arm64-v2`) AND the cvc5 CACHE_SCHEMA in
-      # the same PR so both cold paths are proven before release relies on it.
-      #
-      # chelis#583: dedicated stable-key cvc5 cache in the `darwin-arm64`
-      # namespace, decoupled from Cargo.lock churn (the Swatinem cache keys on
-      # Cargo.lock, so an unrelated bump would otherwise re-pay the ~30m cvc5
-      # build). On a warm hit cvc5-sys links the prebuilt lib. See smt-build.
-      - name: Compute cvc5 cache key
-        id: cvc5key
-        run: python3 scripts/ci_cvc5_cache.py key --namespace darwin-arm64
-
-      # Durable Release asset first, Actions cache fallback second; see the
-      # smt-build job for the full rationale.
-      - name: Fetch durable prebuilt cvc5 (Release asset)
-        id: cvc5fetch
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci_cvc5_cache.py fetch --namespace darwin-arm64 --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Restore prebuilt cvc5 (Actions cache fallback)
-        id: cvc5restore
-        if: steps.cvc5fetch.outputs.warm != 'true'
-        uses: actions/cache/restore@v4
-        # Best-effort: a cache-service hiccup must degrade to a from-source
-        # build, never fail this job (chelis#583).
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
-
-      - name: Activate prebuilt cvc5 (link instead of rebuild)
-        run: python3 scripts/ci_cvc5_cache.py activate --dir "${{ steps.cvc5key.outputs.dir }}"
+          nix build .#legacyPackages.aarch64-darwin.cvc5-dir --out-link .cvc5-dir
+          printf 'CVC5_DIR=%s\n' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -435,20 +397,8 @@ jobs:
           cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
-        run: cargo build --release -p chelis-cli --features smt
-
-      - name: Harvest cvc5 build for cache
-        id: cvc5harvest
-        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Save prebuilt cvc5
-        if: always() && steps.cvc5harvest.outputs.complete == 'true'
-        uses: actions/cache/save@v4
-        # Best-effort: saving the cvc5 cache must never fail the build.
-        continue-on-error: true
-        with:
-          path: ${{ steps.cvc5key.outputs.dir }}
-          key: ${{ steps.cvc5key.outputs.key }}
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- cargo build --release -p chelis-cli --features smt
 
       - name: Verify packaged binary architecture
         run: |
@@ -456,7 +406,21 @@ jobs:
           file target/release/chelis | grep -E 'arm64|aarch64'
 
       - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- python .github/scripts/verify_release_smt.py ./target/release/chelis
+
+      - name: Export the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.aarch64-darwin.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--to", "file:///tmp/chelis-cvc5-cache", out], check=True)'
+
+      - name: Save the cvc5 toolchain closure
+        if: steps.cvc5-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        # Best-effort: saving the closure cache must never fail the build.
+        continue-on-error: true
+        with:
+          path: /tmp/chelis-cvc5-cache
+          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
 
   workspace-tests:
     name: Workspace Tests (Linux)

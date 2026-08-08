@@ -17,18 +17,14 @@ build-script `OUT_DIR` the first time the `smt` feature is compiled.
   the bindgen bindings. This mirrors the z3-sys prebuilt-link precedent
   (`docs/local_z3_environment.md`): build the heavy solver ONCE, then LINK it.
 
-Two stores hold that prebuilt tree, tried in order by the CI jobs:
-
-1. DURABLE (primary): a GitHub Release asset published by
-   `.github/workflows/build-cvc5.yml`, one per (cvc5-sys version, namespace).
-   A Release asset has no 10GB Actions-cache LRU budget, no 7-day idle TTL, and
-   no branch scope, so it is NOT evicted by a rustc-stable bump, a quiet
-   stretch, or cache-pool pressure -- the three conditions that used to force a
-   cold cvc5 rebuild onto the per-PR path. `fetch` downloads + sha256-verifies +
-   extracts it.
-2. FALLBACK (secondary): the Actions cache keyed by `compute_key`. Covers the
-   window between a cvc5-sys bump and `build-cvc5.yml` republishing the asset,
-   and any run where the Release lookup fails.
+One consumer remains: `smt-full-prove.yml`'s self-sufficient Actions-cache
+harvest cycle (`key`/`restore`/`activate`/`harvest`/`save`), keyed by
+`compute_key`. The per-PR SMT smoke lanes link the flake's pinned `cvc5-dir`
+tree through `CVC5_DIR` instead, and the durable Release-asset producer
+(`build-cvc5.yml`) retired with them (openspec
+`converge-smt-lanes-on-nix-cvc5`). The `fetch`, `pack`, and `plan`
+subcommands are the retired producer/consumer halves; they leave with the
+full-prove follow-up.
 
 The cache/asset key depends on the cvc5 version (proxied by the pinned
 `cvc5-sys` crate version, which moves with the bundled cvc5 release) + the
@@ -85,12 +81,12 @@ CLI
 
     pack --namespace <ns> --dir <dir> --out-dir <out>
         Tar+gzip a harvested <dir> into <out>/<asset> (+ a `.sha256` sidecar)
-        for `build-cvc5.yml` to upload. Emits `tag=`, `asset=`, `sha256=`.
+        for the retired producer to upload. Emits `tag=`, `asset=`, `sha256=`.
 
     plan --namespace ... (repeatable)
         Query the Release for the current cvc5-sys tag and emit `tag=` plus
-        `missing_<ns>=true|false` per namespace, so `build-cvc5.yml` only spends
-        the ~22m from-source build on namespaces whose asset does not yet exist.
+        `missing_<ns>=true|false` per namespace. The retired producer used
+        this to skip namespaces whose asset already existed.
         `CVC5_FORCE_REBUILD=1` marks every namespace missing.
 """
 

@@ -51,7 +51,6 @@ SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
-BUILD_CVC5_YML = REPO_ROOT / ".github" / "workflows" / "build-cvc5.yml"
 DEVENV_SETUP_ACTION = (
     "Chelis-Lang/ci/actions/setup-devenv@"
     "73f017c4d3179dc313844e9d5f08d17a7879c824"
@@ -68,6 +67,8 @@ DEVENV_WORKFLOW_JOBS = {
         "macos-smoke",
         "backend-sanitizers",
         "docs",
+        "smt-build",
+        "smt-build-darwin-arm64",
     ),
     "conformance.yml": ("conformance",),
     "conformance-nightly.yml": ("conformance-nightly",),
@@ -508,11 +509,6 @@ NON_GATE_WORKFLOWS = {
     # scheduled workflow; it commits a docs/loc_report.md bot commit and runs
     # nothing the per-PR gate owns, so it is out of gate.py scope by design.
     "loc-report.yml",
-    # Producer for the durable prebuilt-cvc5 Release asset the smt lanes LINK
-    # (scripts/ci_cvc5_cache.py). Builds cvc5 from source and publishes a
-    # Release; it runs no cargo/chelis command the per-PR gate owns, only on a
-    # cvc5-sys bump / dispatch / weekly schedule. Out of gate.py scope.
-    "build-cvc5.yml",
     # Native Nix package jobs build the complete flake check set on Linux and
     # macOS. These jobs prove a separate source-build channel and do not run
     # commands from the canonical Cargo gate.
@@ -1603,7 +1599,6 @@ class MacosManualOnlyTests(unittest.TestCase):
         self.assertEqual(
             found,
             [
-                ("build-cvc5.yml", "build-darwin-arm64"),
                 ("ci.yml", "smt-build-darwin-arm64"),
                 ("ci.yml", "macos-smoke"),
                 ("nix-packages.yml", "nix-darwin-arm64"),

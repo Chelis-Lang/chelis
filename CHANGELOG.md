@@ -26,7 +26,32 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `scripts/test_release_chelis_output.py` and
   `scripts/test_verify_release_chelis.py`.
 
+### Changed
+
+- **The SMT smoke lanes build on the Devenv toolchain and link the
+  flake's pinned cvc5 (openspec `converge-smt-lanes-on-nix-cvc5`).**
+  `smt-build` and `smt-build-darwin-arm64` now run their cargo commands
+  inside `devenv shell` and export `CVC5_DIR` from the flake's
+  `cvc5-dir` tree -- the same pinned cvc5 1.3.1 the shipped Linux binary
+  links -- restored through the Actions closure cache shared with
+  `nix-packages.yml`. The floating `dtolnay/rust-toolchain@stable`, apt
+  C dependencies, and host uv setup leave those jobs; the required
+  context name `SMT Feature Build (Linux)` is unchanged.
+  `smt-full-prove.yml` deliberately keeps its host toolchain and its
+  self-sufficient Actions-cache harvest cycle (a host cargo link
+  against a Nix-gcc-compiled archive risks a libstdc++ ABI mismatch);
+  its cold path remains the cargo-from-source cvc5 recipe proof.
+  Contract suite: `scripts/test_smt_lane_workflows.py`.
+
 ### Removed
+
+- **The durable prebuilt-cvc5 producer.** `build-cvc5.yml`,
+  `scripts/ci_publish_cvc5_release.py`, and its tests are retired: the
+  smoke lanes no longer consume harvested assets, and the full-prove
+  lane's Actions-cache cycle is self-sufficient.
+  `scripts/ci_cvc5_cache.py` stays for that cycle; its `fetch`, `pack`,
+  and `plan` subcommands lose their callers and leave with the
+  full-prove follow-up.
 
 - **The Cargo Linux release jobs and every glibc-2.31 compatibility
   lane.** `build-linux-x86_64` and `build-linux-x86_64-glibc231`

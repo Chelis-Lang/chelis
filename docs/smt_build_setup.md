@@ -76,14 +76,15 @@ cargo test -p chelis-prove --features carcara -- --test-threads=1
 
 The required `smt-build` job in `.github/workflows/ci.yml` keeps the branch
 protection context name `SMT Feature Build (Linux)`, but it is now the fast
-SMT smoke lane. It installs the cvc5 build prerequisites, runs
-`cargo build -p chelis-cli --features smt`, verifies the built binary discharges
-a real obligation through cvc5 with `.github/scripts/verify_release_smt.py`, and
-runs a narrow cvc5 engine smoke (`cargo test -p chelis-prove --features smt
---lib cvc5_engine_`). It is a non-gate job (rule-id GATE-SCOPE-SMT in
-`scripts/test_gate.py`): out of `scripts/gate.py` scope by design, like the
-sanitizer job, because cvc5 builds from source and is not a per-PR
-developer-loop prerequisite.
+SMT smoke lane. It builds on the Devenv toolchain, links the flake's pinned
+cvc5 tree through `CVC5_DIR` (see "The pinned cvc5 supply" below), runs
+`cargo build -p chelis-cli --features smt` inside `devenv shell`, verifies
+the built binary discharges a real obligation through cvc5 with
+`.github/scripts/verify_release_smt.py`, and runs a narrow cvc5 engine smoke
+(`cargo test -p chelis-prove --features smt --lib cvc5_engine_`). It is a
+non-gate job (rule-id GATE-SCOPE-SMT in `scripts/test_gate.py`): out of
+`scripts/gate.py` scope by design, like the sanitizer job, because the smt
+feature is not a per-PR developer-loop prerequisite.
 
 The full solver/proof corpus moved to `.github/workflows/smt-full-prove.yml`.
 That workflow runs on a nightly schedule and on manual dispatch only -- NOT on
@@ -105,77 +106,42 @@ across the smoke and full-prove jobs. The split removes the full proof corpus
 from the required context; it must not make the optional lane cold-build cvc5
 before reaching its proof steps.
 
-### Durable prebuilt cvc5 (chelis#583 + follow-up)
+### The pinned cvc5 supply (openspec `converge-smt-lanes-on-nix-cvc5`)
 
-Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must
-never pay that on the per-PR path, so every SMT lane (the required `smt-build`,
-the manual `smt-build-darwin-arm64` lane, and
-`smt-full-prove.yml`) LINKS a prebuilt cvc5 instead of rebuilding it. The
-prebuilt tree is held in TWO stores, tried in order, driven by
-`scripts/ci_cvc5_cache.py`:
+Building cvc5 from source is ~22 minutes of CMake/make. The lanes keep that
+off the per-PR path in two different ways:
 
-1. **Durable Release asset (primary).** `.github/workflows/build-cvc5.yml`
-   builds cvc5 from source once per (cvc5-sys version, namespace) and publishes
-   `<store-key>.tar.gz` + a `.sha256` sidecar to a
-   `cvc5-prebuilt-cvc5sys<version>` **prerelease** tag. This tag stays separate
-   from the `v*` product release tags. Each SMT lane's **`fetch`** step
-   downloads the asset, verifies the sha256 BEFORE extraction, rejects unsafe
-   tar members, and re-checks every required path. A Release asset has **no
-   10GB Actions-cache LRU budget, no 7-day idle TTL, and no branch scope**, so
-   it survives the three conditions that used to force a cold rebuild onto the
-   per-PR path: a rustc-stable bump, a quiet/docs-only stretch, and cache-pool
-   pressure.
-2. **Actions cache (fallback).** The stable-key `actions/cache` restore runs
-   only when `fetch` reported `warm=false` (`if: steps.cvc5fetch.outputs.warm
-   != 'true'`). It covers the window between a cvc5-sys bump and
-   `build-cvc5.yml` republishing, and any run where the Release lookup fails.
-   The dir lives OUTSIDE `target/` (`~/.cache/chelis-cvc5/<namespace>`), so it
-   never contends with rust-cache's `target/` domain.
+1. **The smoke lanes link the flake's pinned tree.** `smt-build` and the
+   manual `smt-build-darwin-arm64` build the flake's `cvc5-dir`
+   (`nix/cvc5.nix` — the same pinned cvc5 1.3.1 the shipped Linux binary
+   links) and export it as `CVC5_DIR`. `cvc5-sys` sees
+   `build/src/libcvc5.a` and LINKS it instead of running CMake/make. The
+   closure is cached in the GitHub Actions cache with the same key
+   derivation `nix-packages.yml` uses, so both jobs share one cached
+   closure. A cvc5 or nixpkgs pin bump changes the derivation key and pays
+   one ~30m Nix build; there is no separate publish step and no runbook.
+   Both lanes build inside `devenv shell`, so the rustc, cc, and libclang
+   match the repository pin.
+2. **The full-prove lane self-harvests.** `smt-full-prove.yml` keeps its
+   host toolchain (its z3/Gappa/Arb system dependencies are host-installed,
+   and a host cargo link against a Nix-gcc-compiled `libcvc5.a` would risk a
+   libstdc++ ABI mismatch). It restores the stable-key Actions cache, and
+   after a genuine from-source build, **`harvest`** copies the cvc5
+   link/bindgen inputs into the store dir and writes a completeness
+   sentinel; **`activate`** exports `CVC5_DIR` only when the store is
+   present AND sentinel-complete. A missing or partial cache falls back to
+   from-source (worst case is "no speedup", never a mislinked build), and
+   cvc5-sys's own `check_cvc5_version` hard-fails a wrong-version link.
+   This cold path is also the standing proof of the cargo-from-source cvc5
+   recipe on Linux; the Darwin release job proves it on macOS.
 
-The store key — `cvc5-prebuilt-<namespace>-cvc5sys<version>-<schema>` — depends
-on the pinned `cvc5-sys` crate version (which moves with the bundled cvc5
-release), the os/arch namespace (`linux-x86_64`,
-`darwin-arm64`), and the cache schema, but **NOT** on `Cargo.lock` and **NOT**
-on the rustc version. The harvested payload is 100% cvc5 C++/CMake output
-(`bindings.rs` is regenerated per build in `OUT_DIR` and is not harvested), so
-rustc is provably irrelevant to the cached bytes; the earlier `-rustc<version>`
-component only forced needless cold rebuilds on every ~6-week stable bump and
-was dropped (schema `v2`).
-
-After a genuine from-source build (the fallback/bootstrap path), **`harvest`**
-copies the cvc5 link/bindgen inputs into the store dir and writes a
-completeness sentinel; **`activate`** exports `CVC5_DIR` only when the store is
-present AND sentinel-complete, so `cvc5-sys`'s build script sees
-`build/src/libcvc5.a` and LINKS it instead of running CMake/make (the same
-prebuilt-link path the `z3` feature uses; `docs/local_z3_environment.md`). This
-is an optimization, never a correctness risk: a missing asset, a network error,
-a sha256 mismatch, an unsafe/incomplete archive, or a partial cache all leave
-no sentinel, so the build falls back to from-source (worst case is "no
-speedup", never a broken or mislinked build). cvc5-sys's own
-`check_cvc5_version` (reads the harvested `cmake/version-base.cmake`)
-additionally hard-fails a wrong-version link. `scripts/test_ci_cvc5_cache.py`
-covers the key, asset naming, harvest/pack/fetch round-trip, and activate logic
-that cannot be exercised in CI without a real ~22m cvc5 build.
-
-If the harvested artifact set changes shape, increase `CACHE_SCHEMA` in `scripts/ci_cvc5_cache.py`.
-
-The path trigger builds missing Linux assets. Dispatch `build-cvc5.yml` manually to build the Darwin asset.
-
-#### cvc5-sys version-bump runbook
-
-A cvc5-sys bump can put a cold source build on the per-PR path. The new release asset does not exist before the producer runs.
-
-Publish the new assets before the bump PR runs its SMT jobs:
-
-1. Run `gh workflow run build-cvc5.yml --ref <bump-branch>`.
-2. Wait for the namespace jobs and the publication job to pass.
-3. Rerun the CI jobs for the bump PR.
-
-If step 1 is skipped, the bump PR's `smt-build` builds cvc5 cold and will
-exceed its 25-minute timeout — a loud, deliberate failure that points here,
-not a silent per-PR tax.
-
-Automatic producer runs publish the two Linux namespaces. A manual dispatch publishes the Darwin namespace.
+The former durable Release-asset producer (`build-cvc5.yml`) and its publish
+script retired with this split: the smoke lanes no longer consume harvested
+artifacts, and the full-prove Actions-cache cycle is self-sufficient.
+`scripts/ci_cvc5_cache.py` remains for the full-prove cycle;
+`scripts/test_ci_cvc5_cache.py` covers its key, harvest, and activate logic.
+If the harvested artifact set changes shape, increase `CACHE_SCHEMA` in
+`scripts/ci_cvc5_cache.py`.
 
 ### Cache-pool pruning
 
@@ -190,14 +156,14 @@ on error); manual dispatch is dry-run unless `apply` is set.
 `scripts/test_ci_cache_prune.py` covers the deletion policy.
 
 One companion CI lane, the manual `smt-build-darwin-arm64`
-(`macos-latest`) job, builds `chelis-cli --features smt` on the Darwin
-release target and runs the post-build verifier. It proves cvc5 builds
-on that toolchain before `release.yml` ships the feature there
-(chelis#422). The former `smt-build-glibc231` lane (a `debian:11`
-container) retired with the Cargo Linux release jobs when the Linux
-toolchain moved to the Nix release output (openspec
-`switch-linux-release-to-nix`); the Nix package CI now proves the
-Linux cvc5 build.
+(`macos-latest`) job, builds `chelis-cli --features smt` on Darwin with
+the Devenv toolchain and the flake's pinned cvc5 tree, and runs the
+post-build verifier (chelis#422). The Darwin release job remains the
+cold cargo-from-source cvc5 proof on macOS. The former
+`smt-build-glibc231` lane (a `debian:11` container) retired with the
+Cargo Linux release jobs when the Linux toolchain moved to the Nix
+release output (openspec `switch-linux-release-to-nix`); the Nix
+package CI now proves the Linux cvc5 build.
 
 ## Release builds (chelis#422)
 

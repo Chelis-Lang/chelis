@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Run a cvc5-linked release build, retrying ONLY a transient source fetch.
 
-`release.yml` builds cvc5 cold from source in all three release jobs. That
+`release.yml` builds cvc5 cold from source in the Darwin release job. That
 is deliberate and must stay that way: `docs/smt_build_setup.md` records that
 the shipped binary is an INDEPENDENT, license-safe proof of the exact recipe
-(WI-11: `ENABLE_GPL=OFF`, `USE_CLN=OFF`) rather than trusting an asset
-produced by `build-cvc5.yml`, and `ci.yml`'s darwin SMT lane names the
-release job "the authoritative cold-build proof for the SHIPPED artifact".
-The per-PR SMT lanes link the durable prebuilt via `ci_cvc5_cache.py`, so
-they never exercise this path at all. This wrapper does not weaken any of
-that -- it never links a prebuilt and never skips a compile.
+(WI-11: `ENABLE_GPL=OFF`, `USE_CLN=OFF`), and the Darwin job is the
+authoritative cold cargo-recipe proof for the shipped artifact. The Linux
+release builds cvc5 from the pinned source inside the Nix sandbox, and the
+per-PR SMT smoke lanes link the flake's `cvc5-dir` tree, so they never
+exercise this path at all. This wrapper does not weaken any of that -- it
+never links a prebuilt and never skips a compile.
 
 What it does fix (chelis#1004): the cold build begins by pulling cvc5 and
 its dependencies over the network, and a transient GitHub refusal there
-fails the release job. Because `publish-release` has `needs:` on all three
-build jobs, ONE such failure skips the publish and leaves a pushed tag with
+fails the release job. Because `publish-release` has `needs:` on every
+build job, ONE such failure skips the publish and leaves a pushed tag with
 no GitHub Release. The v0.18.0 release (run 30673030685) needed three
 attempts for exactly this reason, failing at two different fetch sites with
 no change to the tree in between:
