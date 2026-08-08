@@ -44,6 +44,21 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The full-prove lane joins the Devenv/Nix cvc5 convergence (openspec
+  `converge-full-prove-on-devenv`).** `smt-full-prove.yml` now builds on
+  the Devenv toolchain with `CVC5_DIR` from the flake's `cvc5-dir`
+  closure, and the Devenv shell gains the solver stack (`z3`, `gappa`,
+  `gmp`, `m4`, `make`) with the `Z3_SYS_Z3_HEADER`,
+  `Z3_LIBRARY_PATH_OVERRIDE`, and GMP `CPATH`/`LIBRARY_PATH` wiring the
+  z3 and carcara features need -- replacing the per-machine apt/brew
+  recipes. The Actions-cache harvest cycle retired with its last caller:
+  `scripts/ci_cvc5_cache.py` and its tests are deleted, and no CI lane
+  compiles cvc5 through `cvc5-sys` any more (the cargo-from-source
+  recipe stays documented for contributors outside Devenv). Local
+  validation: smt, z3 (390 tests), carcara, clarabel, and arb feature
+  builds plus the Gappa `--check-only` re-validation, all inside
+  `devenv shell`.
+
 - **The SMT smoke lanes build on the Devenv toolchain and link the
   flake's pinned cvc5 (openspec `converge-smt-lanes-on-nix-cvc5`).**
   `smt-build` and `smt-build-darwin-arm64` now run their cargo commands

@@ -58,17 +58,21 @@ without narrowing the corpus; it does not establish the upstream root cause:
 cargo test -p chelis-prove --features carcara -- --test-threads=1
 ```
 
-Homebrew's GMP is keg-only, so its headers and library may not be on Clang's
-default paths. `gmp-mpfr-sys` invokes the compiler directly for its
-system-library probe; use `CPATH` and `LIBRARY_PATH` so that probe sees the
-Homebrew installation. `CVC5_DIR` reuses the durable local cvc5 artifacts
-when that cache has already been populated:
+Inside the Devenv shell no extra setup is needed: `devenv/toolchains.nix`
+provides GMP with the `CPATH`/`LIBRARY_PATH` wiring, and `CVC5_DIR` can
+point at the flake's pinned tree
+(`nix build .#legacyPackages.<system>.cvc5-dir`).
+
+Outside Devenv with Homebrew, GMP is keg-only, so its headers and library
+may not be on Clang's default paths. `gmp-mpfr-sys` invokes the compiler
+directly for its system-library probe; use `CPATH` and `LIBRARY_PATH` so
+that probe sees the Homebrew installation, and point `CVC5_DIR` at any
+previously built cvc5 tree to skip the source build:
 
 ```bash
 GMP_PREFIX="$(brew --prefix gmp)"
 CPATH="${GMP_PREFIX}/include${CPATH:+:${CPATH}}" \
 LIBRARY_PATH="${GMP_PREFIX}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}" \
-CVC5_DIR="${HOME}/.cache/chelis-cvc5/darwin-arm64" \
 cargo test -p chelis-prove --features carcara -- --test-threads=1
 ```
 
@@ -106,42 +110,31 @@ across the smoke and full-prove jobs. The split removes the full proof corpus
 from the required context; it must not make the optional lane cold-build cvc5
 before reaching its proof steps.
 
-### The pinned cvc5 supply (openspec `converge-smt-lanes-on-nix-cvc5`)
+### The pinned cvc5 supply (openspec `converge-smt-lanes-on-nix-cvc5` + `converge-full-prove-on-devenv`)
 
-Building cvc5 from source is ~22 minutes of CMake/make. The lanes keep that
-off the per-PR path in two different ways:
+Building cvc5 from source is ~22 minutes of CMake/make. Every SMT lane
+(`smt-build`, the manual `smt-build-darwin-arm64`, and `full-smt-prove`)
+keeps that off CI the same way: the lane builds the flake's `cvc5-dir`
+(`nix/cvc5.nix` — the same pinned cvc5 1.3.1 the shipped binaries link) and
+exports it as `CVC5_DIR`. `cvc5-sys` sees `build/src/libcvc5.a` and LINKS it
+instead of running CMake/make. The closure is cached in the GitHub Actions
+cache with the same key derivation `nix-packages.yml` uses, so all four jobs
+share one cached closure. A cvc5 or nixpkgs pin bump changes the derivation
+key and pays one ~30m Nix build; there is no separate publish step and no
+runbook. Every lane builds inside `devenv shell`, so the rustc, cc, and
+libclang match the repository pin, and the full-prove solver stack (z3,
+Gappa, GMP, m4, make) comes from the Devenv shell
+(`devenv/toolchains.nix`), which also exports `Z3_SYS_Z3_HEADER`,
+`Z3_LIBRARY_PATH_OVERRIDE`, and the GMP `CPATH`/`LIBRARY_PATH` wiring for
+the z3 and carcara features.
 
-1. **The smoke lanes link the flake's pinned tree.** `smt-build` and the
-   manual `smt-build-darwin-arm64` build the flake's `cvc5-dir`
-   (`nix/cvc5.nix` — the same pinned cvc5 1.3.1 the shipped Linux binary
-   links) and export it as `CVC5_DIR`. `cvc5-sys` sees
-   `build/src/libcvc5.a` and LINKS it instead of running CMake/make. The
-   closure is cached in the GitHub Actions cache with the same key
-   derivation `nix-packages.yml` uses, so both jobs share one cached
-   closure. A cvc5 or nixpkgs pin bump changes the derivation key and pays
-   one ~30m Nix build; there is no separate publish step and no runbook.
-   Both lanes build inside `devenv shell`, so the rustc, cc, and libclang
-   match the repository pin.
-2. **The full-prove lane self-harvests.** `smt-full-prove.yml` keeps its
-   host toolchain (its z3/Gappa/Arb system dependencies are host-installed,
-   and a host cargo link against a Nix-gcc-compiled `libcvc5.a` would risk a
-   libstdc++ ABI mismatch). It restores the stable-key Actions cache, and
-   after a genuine from-source build, **`harvest`** copies the cvc5
-   link/bindgen inputs into the store dir and writes a completeness
-   sentinel; **`activate`** exports `CVC5_DIR` only when the store is
-   present AND sentinel-complete. A missing or partial cache falls back to
-   from-source (worst case is "no speedup", never a mislinked build), and
-   cvc5-sys's own `check_cvc5_version` hard-fails a wrong-version link.
-   This cold path is also the standing proof of the cargo-from-source cvc5
-   recipe.
-
-The former durable Release-asset producer (`build-cvc5.yml`) and its publish
-script retired with this split: the smoke lanes no longer consume harvested
-artifacts, and the full-prove Actions-cache cycle is self-sufficient.
-`scripts/ci_cvc5_cache.py` remains for the full-prove cycle;
-`scripts/test_ci_cvc5_cache.py` covers its key, harvest, and activate logic.
-If the harvested artifact set changes shape, increase `CACHE_SCHEMA` in
-`scripts/ci_cvc5_cache.py`.
+The former harvested-prebuilt machinery retired in two steps: the durable
+Release-asset producer (`build-cvc5.yml`) and its publish script left with
+the smoke-lane conversion, and the Actions-cache harvest cycle
+(`scripts/ci_cvc5_cache.py`) left when the full-prove lane converged. No CI
+lane compiles cvc5 through `cvc5-sys` any more; the cargo-from-source recipe
+in "Build Prerequisites" above remains the documented path for contributors
+outside Devenv, exercised locally rather than in CI.
 
 ### Cache-pool pruning
 

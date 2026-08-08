@@ -19,12 +19,17 @@ SMOKE_JOBS = {
     "smt-build": "x86_64-linux",
     "smt-build-darwin-arm64": "aarch64-darwin",
 }
-SMOKE_FORBIDDEN_MARKERS = (
+LANE_FORBIDDEN_MARKERS = (
     "dtolnay/rust-toolchain",
     "astral-sh/setup-uv",
     "scripts/ci_apt_get.py",
     "ci_cvc5_cache.py",
     "brew install",
+)
+RETIRED_SCRIPTS = (
+    "ci_publish_cvc5_release.py",
+    "ci_cvc5_cache.py",
+    "ci_cvc5_build.py",
 )
 
 
@@ -36,62 +41,72 @@ def _job_block(workflow: str, job_name: str) -> str:
     return "" if match is None else match.group(0)
 
 
+def _lane_errors(workflow: str, job_name: str, system: str) -> list[str]:
+    block = _job_block(workflow, job_name)
+    if not block:
+        return [f"missing SMT lane job {job_name}"]
+    errors: list[str] = []
+    required = (
+        SETUP_DEVENV_ACTION,
+        "actions/create-github-app-token@",
+        "repositories: ci",
+        f".#legacyPackages.{system}.cvc5-dir.drvPath",
+        f"nix build .#legacyPackages.{system}.cvc5-dir --out-link .cvc5-dir",
+        'printf \'CVC5_DIR=%s\\n\' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"',
+        "actions/cache/restore@",
+        "actions/cache/save@",
+        "devenv shell --no-tui -- cargo build",
+        "verify_release_smt.py",
+    )
+    for marker in required:
+        if marker not in block:
+            errors.append(f"{job_name} is missing {marker}")
+    for marker in LANE_FORBIDDEN_MARKERS:
+        if marker in block:
+            errors.append(f"{job_name} uses forbidden marker {marker}")
+    return errors
+
+
 def smoke_lane_contract_errors(workflow: str) -> list[str]:
     """Return every SMT smoke-lane supply and toolchain contract error."""
     errors: list[str] = []
     for job_name, system in SMOKE_JOBS.items():
-        block = _job_block(workflow, job_name)
-        if not block:
-            errors.append(f"ci.yml is missing {job_name}")
-            continue
-        required = (
-            SETUP_DEVENV_ACTION,
-            "actions/create-github-app-token@",
-            "repositories: ci",
-            f".#legacyPackages.{system}.cvc5-dir.drvPath",
-            f"nix build .#legacyPackages.{system}.cvc5-dir --out-link .cvc5-dir",
-            'printf \'CVC5_DIR=%s\\n\' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"',
-            "actions/cache/restore@",
-            "actions/cache/save@",
-            "devenv shell --no-tui -- cargo build",
-            "verify_release_smt.py",
-        )
-        for marker in required:
-            if marker not in block:
-                errors.append(f"{job_name} is missing {marker}")
-        for marker in SMOKE_FORBIDDEN_MARKERS:
-            if marker in block:
-                errors.append(f"{job_name} uses forbidden marker {marker}")
+        errors.extend(_lane_errors(workflow, job_name, system))
     return errors
 
 
 def full_prove_contract_errors(full_prove: str) -> list[str]:
-    """Return every full-prove toolchain-mixing contract error."""
-    errors: list[str] = []
-    if "legacyPackages" in full_prove or "cvc5-dir" in full_prove:
-        errors.append(
-            "smt-full-prove must not export a Nix store CVC5_DIR while its "
-            "cargo commands run on the host toolchain"
-        )
-    if "ci_cvc5_cache.py fetch" in full_prove:
-        errors.append("smt-full-prove must not fetch a durable Release asset")
-    for marker in ("ci_cvc5_cache.py key", "ci_cvc5_cache.py activate", "ci_cvc5_cache.py harvest"):
+    """Return every full-prove supply and toolchain contract error.
+
+    The lane joined the smoke-lane contract with openspec
+    converge-full-prove-on-devenv; its smt discharge proof is the smt test
+    suite rather than the release verifier, so the verifier marker is
+    replaced by the corpus markers.
+    """
+    errors = [
+        error
+        for error in _lane_errors(full_prove, "full-smt-prove", "x86_64-linux")
+        if not error.endswith("verify_release_smt.py")
+    ]
+    for marker in (
+        "devenv shell --no-tui -- cargo test -p chelis-prove --features smt",
+        'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"',
+        "devenv shell --no-tui -- python scripts/generate_erf_proof.py --check-only",
+    ):
         if marker not in full_prove:
-            errors.append(f"smt-full-prove is missing its harvest cycle: {marker}")
+            errors.append(f"full-smt-prove is missing {marker}")
     return errors
 
 
 def producer_retirement_errors(workflow_texts: dict[str, str]) -> list[str]:
-    """Return every retired-producer reference error."""
+    """Return every retired-machinery reference error."""
     errors: list[str] = []
     if "build-cvc5.yml" in workflow_texts:
         errors.append("the retired producer workflow build-cvc5.yml exists")
     for name, text in workflow_texts.items():
-        for marker in ("ci_publish_cvc5_release", "build-cvc5.yml"):
+        for marker in RETIRED_SCRIPTS + ("build-cvc5.yml",):
             if marker in text:
-                errors.append(f"{name} references the retired producer: {marker}")
-        if "ci_cvc5_cache.py fetch" in text:
-            errors.append(f"{name} fetches a durable prebuilt cvc5 asset")
+                errors.append(f"{name} references retired machinery: {marker}")
     return errors
 
 
@@ -132,7 +147,7 @@ class SmokeLaneContractTests(unittest.TestCase):
             "smt-build uses forbidden marker dtolnay/rust-toolchain", errors
         )
 
-    def test_a_harvested_prebuilt_fetch_fails(self) -> None:
+    def test_a_harvested_prebuilt_reference_fails(self) -> None:
         block = _job_block(self.workflow, "smt-build")
         mutated = self.workflow.replace(
             block,
@@ -154,31 +169,49 @@ class FullProveContractTests(unittest.TestCase):
     def test_full_prove_contract(self) -> None:
         self.assertEqual(full_prove_contract_errors(self.full_prove), [])
 
-    def test_nix_cvc5_with_host_cargo_fails(self) -> None:
-        mutated = self.full_prove + "\n# nix build .#legacyPackages.x86_64-linux.cvc5-dir\n"
+    def test_a_host_toolchain_step_fails(self) -> None:
+        block = _job_block(self.full_prove, "full-smt-prove")
+        mutated = self.full_prove.replace(
+            block,
+            block + "      - uses: dtolnay/rust-toolchain@stable\n",
+            1,
+        )
         errors = full_prove_contract_errors(mutated)
         self.assertIn(
-            "smt-full-prove must not export a Nix store CVC5_DIR while its "
-            "cargo commands run on the host toolchain",
-            errors,
+            "full-smt-prove uses forbidden marker dtolnay/rust-toolchain", errors
         )
 
-    def test_durable_fetch_fails(self) -> None:
-        mutated = self.full_prove + "\n# python3 scripts/ci_cvc5_cache.py fetch\n"
-        errors = full_prove_contract_errors(mutated)
-        self.assertIn("smt-full-prove must not fetch a durable Release asset", errors)
-
-    def test_removing_the_harvest_cycle_fails(self) -> None:
-        mutated = self.full_prove.replace("ci_cvc5_cache.py harvest", "removed", 1)
+    def test_a_harvest_cycle_reference_fails(self) -> None:
+        block = _job_block(self.full_prove, "full-smt-prove")
+        mutated = self.full_prove.replace(
+            block,
+            block + "      - run: python3 scripts/ci_cvc5_cache.py harvest\n",
+            1,
+        )
         errors = full_prove_contract_errors(mutated)
         self.assertIn(
-            "smt-full-prove is missing its harvest cycle: ci_cvc5_cache.py harvest",
+            "full-smt-prove uses forbidden marker ci_cvc5_cache.py", errors
+        )
+
+    def test_removing_the_cvc5_supply_fails(self) -> None:
+        marker = "nix build .#legacyPackages.x86_64-linux.cvc5-dir --out-link .cvc5-dir"
+        mutated = self.full_prove.replace(marker, "removed-marker", 1)
+        errors = full_prove_contract_errors(mutated)
+        self.assertIn(f"full-smt-prove is missing {marker}", errors)
+
+    def test_removing_the_z3_loader_path_fails(self) -> None:
+        mutated = self.full_prove.replace(
+            'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"', "removed"
+        )
+        errors = full_prove_contract_errors(mutated)
+        self.assertIn(
+            'full-smt-prove is missing export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"',
             errors,
         )
 
 
 class ProducerRetirementTests(unittest.TestCase):
-    def test_producer_is_retired(self) -> None:
+    def test_retired_machinery_stays_retired(self) -> None:
         self.assertEqual(producer_retirement_errors(_workflow_texts()), [])
 
     def test_a_returning_producer_fails(self) -> None:
@@ -187,19 +220,21 @@ class ProducerRetirementTests(unittest.TestCase):
         errors = producer_retirement_errors(texts)
         self.assertIn("the retired producer workflow build-cvc5.yml exists", errors)
 
-    def test_a_publish_reference_fails(self) -> None:
+    def test_a_cache_script_reference_fails(self) -> None:
         texts = _workflow_texts()
-        texts["ci.yml"] += "\n# scripts/ci_publish_cvc5_release.py\n"
+        texts["ci.yml"] += "\n# scripts/ci_cvc5_cache.py\n"
         errors = producer_retirement_errors(texts)
         self.assertIn(
-            "ci.yml references the retired producer: ci_publish_cvc5_release", errors
+            "ci.yml references retired machinery: ci_cvc5_cache.py", errors
         )
 
-    def test_publish_script_files_are_gone(self) -> None:
-        self.assertFalse((REPO_ROOT / "scripts" / "ci_publish_cvc5_release.py").exists())
-        self.assertFalse(
-            (REPO_ROOT / "scripts" / "test_ci_publish_cvc5_release.py").exists()
-        )
+    def test_retired_script_files_are_gone(self) -> None:
+        for name in RETIRED_SCRIPTS:
+            with self.subTest(script=name):
+                self.assertFalse((REPO_ROOT / "scripts" / name).exists())
+                self.assertFalse(
+                    (REPO_ROOT / "scripts" / f"test_{name}").exists()
+                )
         self.assertFalse((WORKFLOWS_DIR / "build-cvc5.yml").exists())
 
 

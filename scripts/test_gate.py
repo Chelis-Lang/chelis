@@ -73,6 +73,7 @@ DEVENV_WORKFLOW_JOBS = {
     "conformance.yml": ("conformance",),
     "conformance-nightly.yml": ("conformance-nightly",),
     "heavy-e2e.yml": ("heavy-e2e",),
+    "smt-full-prove.yml": ("full-smt-prove",),
 }
 DOCS_ONLY_GATE_IF = (
     "if: ${{ !cancelled() && (needs.changes.result != 'success' "
@@ -80,6 +81,7 @@ DOCS_ONLY_GATE_IF = (
 )
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
+    "devenv shell --no-tui -- "
     "cargo test -p chelis-prove --features carcara -- --test-threads=1"
 )
 

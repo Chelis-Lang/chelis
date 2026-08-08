@@ -35,8 +35,11 @@ import subprocess
 import sys
 
 
-# cvc5 fallback caches are protected: they are the secondary prebuilt link
-# layer (scripts/ci_cvc5_cache.py) and cost ~0.02GB each.
+# The cvc5-prebuilt prefix is protected as pinned data
+# (adopt-shared-ci-actions). Its producer machinery retired with the
+# SMT-lane Nix convergence, so no key under it is created any more;
+# protecting the absent family is harmless and keeps the shared-action
+# input stable.
 PROTECTED_PREFIXES = ("cvc5-prebuilt-",)
 
 # Strip one-or-more trailing "-<hex6+>" generation segments so all Cargo.lock/
