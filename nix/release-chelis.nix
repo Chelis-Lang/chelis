@@ -20,17 +20,26 @@ let
   cvc5 = import ./cvc5.nix {
     inherit pkgs lib root;
   };
-  # cvc5-sys emits `cargo:rustc-link-lib=stdc++`, and the zstd crate resolves
+  system = pkgs.stdenv.hostPlatform.system;
+  isLinux = system == "x86_64-linux";
+  isDarwin = system == "aarch64-darwin";
+  supported = isLinux || isDarwin;
+  platformSlug = if isLinux then "linux-x86_64" else "darwin-arm64";
+  # cvc5-sys emits an explicit C++ runtime link, and the zstd crate resolves
   # libzstd dynamically. A driver flag such as -static-libstdc++ cannot
-  # override an explicit -l, but GNU ld searches command-line -L directories
-  # before the driver defaults for every -l. A directory holding ONLY the
-  # static archives therefore forces static resolution (the manylinux
-  # pattern). libgcc_s.so.1 stays dynamic: Rust std references the shared
-  # unwinder explicitly, and every supported consumer system carries it.
+  # override an explicit -l, but the linker searches command-line -L
+  # directories before the driver defaults for every -l. A directory holding
+  # ONLY the static archives therefore forces static resolution (the
+  # manylinux pattern). On Linux, libgcc_s.so.1 stays dynamic: Rust std
+  # references the shared unwinder explicitly, and every supported consumer
+  # system carries it. On Darwin, the Nix clang already links the system
+  # /usr/lib/libc++.1.dylib, so only libzstd needs the static archive.
   zstdStatic = pkgs.zstd.override { static = true; };
   staticLibDir = pkgs.runCommand "chelis-release-static-lib-dir" { } ''
     mkdir -p $out/lib
-    ln -s ${pkgs.stdenv.cc.cc}/lib/libstdc++.a $out/lib/libstdc++.a
+    ${lib.optionalString isLinux ''
+      ln -s ${pkgs.stdenv.cc.cc}/lib/libstdc++.a $out/lib/libstdc++.a
+    ''}
     ln -s ${zstdStatic.out}/lib/libzstd.a $out/lib/libzstd.a
   '';
   # Mirror of the defaultCrateOverrides set in nix/packages.nix, plus the
@@ -80,7 +89,7 @@ let
   runtimeCrate = cargoGraph.workspaceMembers."chelis-runtime".build.override {
     features = [ ];
   };
-  stagingName = "chelis-v${version}-linux-x86_64";
+  stagingName = "chelis-v${version}-${platformSlug}";
   assetName = "${stagingName}.tar.gz";
   allowedNeeded = [
     "ld-linux-x86-64.so.2"
@@ -91,65 +100,7 @@ let
     "libpthread.so.0"
     "librt.so.1"
   ];
-in
-assert lib.assertMsg (
-  pkgs.stdenv.hostPlatform.system == "x86_64-linux"
-) "release-chelis supports only x86_64-linux";
-pkgs.runCommand "chelis-release-${version}-linux-x86_64"
-  {
-    nativeBuildInputs = [
-      pkgs.binutils
-      pkgs.coreutils
-      pkgs.file
-      pkgs.patchelf
-      pkgs.python311
-    ];
-    meta = {
-      description = "Portable Chelis ${version} Linux toolchain tarball";
-      license = lib.licenses.mit;
-      platforms = [ "x86_64-linux" ];
-    };
-  }
-  ''
-    export HOME="$TMPDIR/home"
-    mkdir -p "$HOME"
-
-    prebuilt=${compilerCrate}/bin/chelis
-    test -x "$prebuilt"
-
-    # Behavior probes run before the interpreter rewrite: the sandbox has no
-    # /lib64, so the rewritten binary cannot start here.
-    actual_version="$("$prebuilt" --version)"
-    expected_version=${lib.escapeShellArg "chelis ${version}"}
-    if [ "$actual_version" != "$expected_version" ]; then
-      echo "release-chelis: expected '$expected_version', got '$actual_version'" >&2
-      exit 1
-    fi
-    "$prebuilt" --help >/dev/null
-
-    cp -R ${source}/crates/chelis-cli/tests/fixtures/release_pipe_stage \
-      "$TMPDIR/release-fixture"
-    chmod -R u+w "$TMPDIR/release-fixture"
-    artifact="$(find ${runtimeCrate.lib}/lib -type f -name 'libchelis_runtime-*.a' -print -quit)"
-    test -n "$artifact"
-    mkdir -p "$TMPDIR/runtime-lib"
-    cp "$artifact" "$TMPDIR/runtime-lib/libchelis_runtime.a"
-    export CHELIS_RUNTIME_DIR="$TMPDIR/runtime-lib"
-    (cd "$TMPDIR/release-fixture" && "$prebuilt" test tests)
-
-    (cd "$TMPDIR" && python3 ${root}/.github/scripts/verify_release_smt.py "$prebuilt")
-
-    # The runtime archive must stay a glibc-consumer archive: a bundled libc
-    # (the musl staticlib failure mode) defines the allocator symbols.
-    if nm --defined-only "$TMPDIR/runtime-lib/libchelis_runtime.a" 2>/dev/null \
-      | grep -wE 'T (malloc|free|calloc|realloc)'; then
-      echo "release-chelis: runtime archive defines libc allocator symbols" >&2
-      exit 1
-    fi
-
-    staging="$TMPDIR/${stagingName}"
-    mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
-    cp "$prebuilt" "$staging/bin/chelis"
+  linuxRewrite = ''
     chmod +w "$staging/bin/chelis"
     strip "$staging/bin/chelis"
     patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 \
@@ -204,6 +155,103 @@ pkgs.runCommand "chelis-release-${version}-linux-x86_64"
       echo "release-chelis: rewritten binary failed the loader run: $loader_version" >&2
       exit 1
     fi
+  '';
+  darwinRewrite = ''
+    chmod +w "$staging/bin/chelis"
+    nix_iconv="$(otool -L "$staging/bin/chelis" | awk '
+      NR > 1 && $1 ~ /^\/nix\/store\/.*\/libiconv\.2\.dylib$/ { print $1; exit }
+    ')"
+    if [ -n "$nix_iconv" ]; then
+      install_name_tool -change "$nix_iconv" \
+        /usr/lib/libiconv.2.dylib "$staging/bin/chelis"
+    fi
+    chmod 555 "$staging/bin/chelis"
+
+    file "$staging/bin/chelis" | grep -E 'arm64|aarch64'
+    if otool -L "$staging/bin/chelis" | tail -n +2 | grep -F '/nix/store/'; then
+      echo "release-chelis: a Nix store load path remains" >&2
+      exit 1
+    fi
+    otool -L "$staging/bin/chelis" | awk '
+      NR > 1 && index($1, "/usr/lib/") != 1 \
+        && index($1, "/System/Library/Frameworks/") != 1 {
+        print "release-chelis: non-Apple runtime dependency: " $1 > "/dev/stderr"
+        bad = 1
+      }
+      END { exit bad }
+    '
+
+    # The Darwin sandbox can execute the rewritten binary, so the behavior
+    # probes run on the exact staged artifact.
+    run_probes "$staging/bin/chelis"
+  '';
+in
+assert lib.assertMsg supported "release-chelis supports only x86_64-linux and aarch64-darwin";
+pkgs.runCommand "chelis-release-${version}-${platformSlug}"
+  {
+    nativeBuildInputs = [
+      pkgs.coreutils
+      pkgs.file
+      pkgs.python311
+    ]
+    ++ lib.optionals isLinux [
+      pkgs.binutils
+      pkgs.patchelf
+    ]
+    ++ lib.optionals isDarwin [ pkgs.cctools ];
+    meta = {
+      description = "Portable Chelis ${version} toolchain tarball for ${platformSlug}";
+      license = lib.licenses.mit;
+      platforms = [ system ];
+    };
+  }
+  ''
+    export HOME="$TMPDIR/home"
+    mkdir -p "$HOME"
+
+    prebuilt=${compilerCrate}/bin/chelis
+    test -x "$prebuilt"
+    expected_version=${lib.escapeShellArg "chelis ${version}"}
+
+    cp -R ${source}/crates/chelis-cli/tests/fixtures/release_pipe_stage \
+      "$TMPDIR/release-fixture"
+    chmod -R u+w "$TMPDIR/release-fixture"
+    artifact="$(find ${runtimeCrate.lib}/lib -type f -name 'libchelis_runtime-*.a' -print -quit)"
+    test -n "$artifact"
+    mkdir -p "$TMPDIR/runtime-lib"
+    cp "$artifact" "$TMPDIR/runtime-lib/libchelis_runtime.a"
+    export CHELIS_RUNTIME_DIR="$TMPDIR/runtime-lib"
+
+    run_probes() {
+      probe_bin="$1"
+      actual_version="$("$probe_bin" --version)"
+      if [ "$actual_version" != "$expected_version" ]; then
+        echo "release-chelis: expected '$expected_version', got '$actual_version'" >&2
+        exit 1
+      fi
+      "$probe_bin" --help >/dev/null
+      (cd "$TMPDIR/release-fixture" && "$probe_bin" test tests)
+      (cd "$TMPDIR" && python3 ${root}/.github/scripts/verify_release_smt.py "$probe_bin")
+    }
+
+    # Behavior probes on the crate output. On Linux they cannot rerun after
+    # the interpreter rewrite (the sandbox has no /lib64); on Darwin the
+    # rewrite block reruns them on the staged binary.
+    run_probes "$prebuilt"
+
+    # The runtime archive must stay a glibc-consumer archive: a bundled libc
+    # (the musl staticlib failure mode) defines the allocator symbols.
+    if nm --defined-only "$TMPDIR/runtime-lib/libchelis_runtime.a" 2>/dev/null \
+      | grep -wE 'T (malloc|free|calloc|realloc)'; then
+      echo "release-chelis: runtime archive defines libc allocator symbols" >&2
+      exit 1
+    fi
+
+    staging="$TMPDIR/${stagingName}"
+    mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
+    cp "$prebuilt" "$staging/bin/chelis"
+
+    ${if isLinux then linuxRewrite else darwinRewrite}
 
     cp "$TMPDIR/runtime-lib/libchelis_runtime.a" "$staging/lib/libchelis_runtime.a"
     ${lib.concatMapStringsSep "\n" (header: ''
@@ -217,7 +265,7 @@ pkgs.runCommand "chelis-release-${version}-linux-x86_64"
       bin bin/chelis lib lib/libchelis_runtime.a include \
       ${lib.concatMapStringsSep " " (header: "include/${header}") contracts.publicRuntimeHeaders} \
       README.md LICENSE | sort)"
-    actual_tree="$(cd "$staging" && find . -mindepth 1 -printf '%P\n' | sort)"
+    actual_tree="$(cd "$staging" && find . -mindepth 1 | sed 's|^\./||' | sort)"
     if [ "$actual_tree" != "$expected_tree" ]; then
       echo "release-chelis: staged tree differs from its exact contract" >&2
       printf 'expected:\n%s\nactual:\n%s\n' "$expected_tree" "$actual_tree" >&2
@@ -232,14 +280,14 @@ pkgs.runCommand "chelis-release-${version}-linux-x86_64"
       sha256sum -c ${assetName}.sha256
     )
 
-    actual_inventory="$(find "$out" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+    actual_inventory="$(cd "$out" && find . -mindepth 1 -maxdepth 1 -type f | sed 's|^\./||' | sort)"
     expected_inventory="$(printf '%s\n%s\n' ${assetName} ${assetName}.sha256 | sort)"
     if [ "$actual_inventory" != "$expected_inventory" ]; then
       echo "release-chelis: unexpected output inventory" >&2
       printf 'expected:\n%s\nactual:\n%s\n' "$expected_inventory" "$actual_inventory" >&2
       exit 1
     fi
-    if [ -n "$(find "$out" -mindepth 1 -maxdepth 1 ! -type f -print)" ]; then
+    if [ -n "$(find "$out" -mindepth 1 -maxdepth 1 ! -type f)" ]; then
       echo "release-chelis: output root contains a non-file entry" >&2
       exit 1
     fi

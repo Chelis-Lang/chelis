@@ -100,21 +100,18 @@ class NixFlakeContractTests(unittest.TestCase):
         contracts = nix_json("eval", "--json", "--file", "nix/contracts.nix")
         self.assertEqual(contracts["publicRuntimeHeaders"], EXPECTED_HEADERS)
 
+        # Both release tarballs are staged by nix/release-chelis.nix from
+        # this contract list; release.yml must retain no shell staging block
+        # (openspec ship-darwin-release-from-nix).
         release = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        staged_headers = set(
-            re.findall(
-                r"cp crates/chelis-runtime/include/(chelis_[^\s/]+\.h) "
-                r'"\$staging/include/"',
-                release,
-            )
+        self.assertNotIn("$staging/include/", release)
+        self.assertNotIn("cargo build", release)
+        helper = (REPO_ROOT / "nix" / "release-chelis.nix").read_text(
+            encoding="utf-8"
         )
-        self.assertEqual(staged_headers, set(EXPECTED_HEADERS))
-        self.assertIn('cp target/release/chelis "$staging/bin/"', release)
-        self.assertIn(
-            'cp target/release/libchelis_runtime.a "$staging/lib/"', release
-        )
+        self.assertIn("contracts.publicRuntimeHeaders", helper)
         self.assertEqual(
             contracts["runtimeConsumers"],
             {"aarch64-darwin": "Accelerate", "x86_64-linux": "OpenBLAS"},

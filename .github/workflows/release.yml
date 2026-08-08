@@ -7,18 +7,28 @@ permissions:
   contents: write
 
 jobs:
-  # The Linux toolchain tarball comes from the pinned, sandboxed Devenv
-  # release output (nix/release-chelis.nix): the committed Cargo.nix graph,
-  # the pinned cvc5 1.3.1 tree, a statically linked libstdc++/libzstd, and a
-  # patchelf interpreter rewrite off the Nix store. The derivation verifies
-  # behavior (version/help, the release fixture, the chelis#422 cvc5
-  # discharge) before the rewrite, then enforces the ELF portability
-  # postconditions and the recorded glibc floor from nix/contracts.nix.
+  # Both toolchain tarballs come from the pinned, sandboxed Devenv release
+  # output (nix/release-chelis.nix): the committed Cargo.nix graph, the
+  # pinned cvc5 1.3.1 tree, a statically linked libzstd (plus libstdc++ on
+  # Linux), and a portability rewrite off the Nix store (patchelf on Linux,
+  # install_name_tool on Darwin). The derivation verifies behavior (version,
+  # help, the release fixture, the chelis#422 cvc5 discharge) and enforces
+  # the platform portability postconditions; Linux additionally enforces the
+  # recorded glibc floor from nix/contracts.nix.
   build-chelis-release:
-    name: Build portable chelis toolchain (linux-x86_64)
-    runs-on: ubuntu-latest
+    name: Build portable chelis toolchain (${{ matrix.slug }})
+    if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            slug: linux-x86_64
+          - os: macos-latest
+            slug: darwin-arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       NIX_CONFIG: |
@@ -65,9 +75,11 @@ jobs:
           devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
           python scripts/verify_release_chelis.py \
             --build-json release-chelis-build.json \
-            --stage-root release-chelis
+            --stage-root release-chelis \
+            --platform ${{ matrix.slug }}
 
       - name: Stage chelisup bootstrap script
+        if: matrix.slug == 'linux-x86_64'
         run: |
           # Publishing the bootstrap script as an asset gives the one-liner
           # a canonical URL: <repo>/releases/latest/download/chelisup.sh
@@ -76,19 +88,13 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: chelis-linux-x86_64
+          name: chelis-${{ matrix.slug }}
           path: |
-            ${{ steps.build.outputs.path }}/chelis-v*-linux-x86_64.tar.gz
-            ${{ steps.build.outputs.path }}/chelis-v*-linux-x86_64.tar.gz.sha256
+            ${{ steps.build.outputs.path }}/chelis-v*-${{ matrix.slug }}.tar.gz
+            ${{ steps.build.outputs.path }}/chelis-v*-${{ matrix.slug }}.tar.gz.sha256
             chelisup.sh
           if-no-files-found: error
 
-  # Off-Nix consumption proof: a clean, digest-pinned Ubuntu 24.04
-  # container (glibc 2.39 -- must equal linuxReleaseConsumptionGlibc in
-  # nix/contracts.nix, which must stay at or above the recorded binary
-  # floor). The container has no Nix; it runs the exact staged tarball,
-  # proves the cvc5 discharge on the shipped binary, and compiles emitted C
-  # against the shipped runtime archive with the system gcc and OpenBLAS.
   consume-chelis-release:
     name: Consume chelis release off Nix (linux-x86_64)
     needs: [build-chelis-release]
@@ -145,114 +151,52 @@ jobs:
       - name: Compile and run emitted C against the shipped runtime
         run: python3 .github/scripts/smoke_linux_openblas.py "$unpacked/bin/chelis"
 
-  build-darwin-arm64:
-    name: Build chelis (darwin-arm64)
+  # Off-Nix consumption proof for Darwin: macos-latest runners carry no
+  # Nix, so the stock runner is the clean consumption environment. It runs
+  # the exact staged tarball, proves the cvc5 discharge on the shipped
+  # binary, and compiles emitted C against the shipped runtime archive with
+  # the system clang and Accelerate (.github/scripts/smoke_macos_accelerate.py).
+  consume-chelis-release-darwin:
+    name: Consume chelis release off Nix (darwin-arm64)
+    needs: [build-chelis-release]
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
-    # cvc5 builds from source under `--features smt` (chelis#422); the
-    # 10-minute cap from the no-feature build is too tight for the cold
-    # cvc5 compile on a cache miss. Raised from 30 for chelis#1004: a
-    # measured cold build is ~14m here, and a fetch failure aborts in ~3m,
-    # so three attempts fit in ~21m -- but 30 left no margin for a slow
-    # runner on top of that.
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      # cvc5 builds from source for `--features smt`. CMake, Python
-      # (3.11+, so cvc5's TOML codegen uses stdlib tomllib), and
-      # libclang ship in the macos-latest image and Xcode CLT; cvc5
-      # auto-downloads and builds its own static GMP. cmake is installed
-      # defensively in case a future image drops it from PATH.
-      - name: Install SMT build dependencies (cvc5)
-        run: |
-          set -euo pipefail
-          brew list cmake >/dev/null 2>&1 || brew install cmake
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
-      # chelis#1004 fetch-retry rationale.
-      - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
-
-      - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
-
-      - name: Release binary test fixture
-        run: |
-          set -euo pipefail
-          (cd crates/chelis-cli/tests/fixtures/release_pipe_stage && ../../../../../target/release/chelis test tests)
 
       - name: Assert Apple Silicon runner
         run: |
           set -euo pipefail
           test "$(uname -m)" = "arm64"
 
-      - name: Strip binary
-        run: strip -x target/release/chelis || true
-
-      - name: Verify binary runs
-        run: ./target/release/chelis --help || ./target/release/chelis help || true
-
-      - name: Verify packaged binary architecture
-        run: |
-          set -euo pipefail
-          file target/release/chelis | grep -E 'arm64|aarch64'
-
-      - name: Smoke test generated C with Accelerate
-        run: python3 .github/scripts/smoke_macos_accelerate.py ./target/release/chelis
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Stage tarball contents
-        run: |
-          set -euo pipefail
-          staging="chelis-${{ steps.version.outputs.version }}-darwin-arm64"
-          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
-          cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
-          cp README.md "$staging/"
-          cp LICENSE "$staging/"
-          tar czf "${staging}.tar.gz" "$staging"
-          shasum -a 256 "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
-          ls -la "${staging}.tar.gz"*
-
-      # Verify the SHIPPED artifact (the binary inside the tarball)
-      # discharges via cvc5 -- see the linux-x86_64 job.
-      - name: Verify shipped tarball discharges via cvc5
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/verify_release_smt.py \
-            --tarball "chelis-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v7
+      - name: Download the staged release artifact
+        uses: actions/download-artifact@v7
         with:
           name: chelis-darwin-arm64
-          path: |
-            chelis-*-darwin-arm64.tar.gz
-            chelis-*-darwin-arm64.tar.gz.sha256
+          path: release-download
+
+      - name: Unpack and run the shipped compiler
+        run: |
+          set -euo pipefail
+          tarball="$(find release-download -name 'chelis-v*-darwin-arm64.tar.gz' -print -quit)"
+          test -n "$tarball"
+          mkdir -p consume
+          tar -xzf "$tarball" -C consume
+          unpacked="$(find consume -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          echo "unpacked=$unpacked" >> "$GITHUB_ENV"
+          "$unpacked/bin/chelis" --version
+          "$unpacked/bin/chelis" --help >/dev/null
+
+      - name: Verify the shipped tarball discharges via cvc5
+        run: |
+          set -euo pipefail
+          tarball="$(find release-download -name 'chelis-v*-darwin-arm64.tar.gz' -print -quit)"
+          python3 .github/scripts/verify_release_smt.py --tarball "$tarball"
+
+      - name: Compile and run emitted C against the shipped runtime
+        run: python3 .github/scripts/smoke_macos_accelerate.py "$unpacked/bin/chelis"
 
   build-chelisup-release:
     name: Build portable chelisup (${{ matrix.slug }})
@@ -327,7 +271,7 @@ jobs:
     name: Publish GitHub Release
     # Dispatch the workflow at a v* tag to publish its staged artifacts.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-chelis-release, consume-chelis-release, build-darwin-arm64, build-chelisup-release]
+    needs: [build-chelis-release, consume-chelis-release, consume-chelis-release-darwin, build-chelisup-release]
     runs-on: ubuntu-latest
     steps:
       - name: Download staged artifacts

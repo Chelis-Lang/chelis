@@ -133,7 +133,7 @@ off the per-PR path in two different ways:
    from-source (worst case is "no speedup", never a mislinked build), and
    cvc5-sys's own `check_cvc5_version` hard-fails a wrong-version link.
    This cold path is also the standing proof of the cargo-from-source cvc5
-   recipe on Linux; the Darwin release job proves it on macOS.
+   recipe.
 
 The former durable Release-asset producer (`build-cvc5.yml`) and its publish
 script retired with this split: the smoke lanes no longer consume harvested
@@ -158,12 +158,11 @@ on error); manual dispatch is dry-run unless `apply` is set.
 One companion CI lane, the manual `smt-build-darwin-arm64`
 (`macos-latest`) job, builds `chelis-cli --features smt` on Darwin with
 the Devenv toolchain and the flake's pinned cvc5 tree, and runs the
-post-build verifier (chelis#422). The Darwin release job remains the
-cold cargo-from-source cvc5 proof on macOS. The former
-`smt-build-glibc231` lane (a `debian:11` container) retired with the
-Cargo Linux release jobs when the Linux toolchain moved to the Nix
-release output (openspec `switch-linux-release-to-nix`); the Nix
-package CI now proves the Linux cvc5 build.
+post-build verifier (chelis#422). The former `smt-build-glibc231` lane
+(a `debian:11` container) retired with the Cargo Linux release jobs
+when the Linux toolchain moved to the Nix release output (openspec
+`switch-linux-release-to-nix`); the Nix package CI now proves the cvc5
+build on both systems.
 
 ## Release builds (chelis#422)
 
@@ -182,62 +181,34 @@ digest-pinned Ubuntu container without Nix, re-runs the cvc5 discharge
 verifier in `--tarball` mode, and compiles emitted C against the
 shipped runtime archive with the system `gcc` and OpenBLAS.
 
-The Darwin artifact (darwin-arm64) still builds with `cargo build
---release -p chelis-cli --features smt`, so the shipped `chelis` binary
-discharges property obligations through cvc5 instead of degrading to
-the solver-free fuzz path. The Darwin release job:
+The Darwin artifact (darwin-arm64) ships from the same Devenv release
+output: the derivation builds the compiler with the `smt` feature from
+the committed graph and the pinned cvc5 tree, statically links
+`libzstd`, rewrites the `libiconv` load path to `/usr/lib`, asserts
+every load command is an Apple system path, and runs the behavior
+probes (including the cvc5 discharge) on the REWRITTEN binary -- the
+Darwin sandbox can execute it, so Darwin gets the strongest
+in-derivation proof. A `consume-chelis-release-darwin` job then unpacks
+the exact staged tarball on a stock macOS runner (no Nix), re-runs the
+cvc5 discharge verifier in `--tarball` mode, and compiles emitted C
+against the shipped runtime archive with the system clang and
+Accelerate.
 
-- installs the cvc5 build prerequisites for its platform (macOS relies
-  on the image's CMake/Python/Xcode CLT plus an idempotent `brew
-  install cmake`), and
-- runs `.github/scripts/verify_release_smt.py` against the freshly
-  built binary, which proves a known producer obligation discharges
-  via cvc5 (`proof_tier=smt`, `discharge_tier.engine=cvc5`). A binary
-  accidentally built without `--features smt` fails this step (the
-  feature-inert regression that motivated chelis#422), and
-- after staging the `.tar.gz`, runs the verifier once more in
-  `--tarball` mode against the EXTRACTED (stripped) `bin/chelis` inside
-  the packaged artifact. This is the most faithful guard: it checks the
-  exact binary users download, not a pre-staging proxy, and would also
-  catch a staging step that packaged the wrong binary.
+WI-11 (license): the cvc5 build forces GMP and disables the GPL CLN
+path (`nix/cvc5.nix` passes `ENABLE_GPL=OFF` and `USE_CLN=OFF`; only
+`libgmp.a` is linked, never `libcln.a`), so the shipped artifact is
+distributable.
 
-WI-11 (license): the `cvc5-sys` build forces GMP and disables the GPL
-CLN path (the cvc5 CMake cache records `ENABLE_GPL=OFF` and
-`USE_CLN=OFF`; only `libgmp.a` is linked, never `libcln.a`), so the
-shipped artifact is distributable.
+Both release legs build cvc5 from the pinned source tree inside the Nix
+sandbox with content-addressed inputs, so there is no release-time
+network fetch to retry and no trust in a harvested asset. The former
+`scripts/ci_cvc5_build.py` fetch-retry wrapper (chelis#1004) retired
+with the last host-Cargo release job. The standing cold
+cargo-from-source cvc5 proof is `smt-full-prove.yml`'s cold-cache path.
 
-`release.yml` deliberately does NOT link the durable prebuilt asset: the
-Darwin job builds cvc5 cold from source, and the Linux job builds cvc5 from
-the pinned source tree inside the Nix sandbox, so the shipped binaries are
-INDEPENDENT, license-safe proofs of the exact recipe rather than trusting an
-asset produced by `build-cvc5.yml`. A `build-cvc5.yml` bug therefore can never
-silently reach a shipped artifact. Treat a `release.yml` cvc5 failure as real
-even when the per-PR SMT lanes are green off the asset.
-
-### The cold build's fetch is retried; its compile is not (chelis#1004)
-
-The cold cvc5 build downloads the cvc5 source and its dependencies. Thus, the release jobs can receive a transient GitHub refusal.
-
-`publish-release` depends on every build job and on the off-Nix consumption job. One failure stops publication for the manually dispatched tag.
-
-The v0.18.0 release run 30673030685 required three attempts. The first two attempts failed during dependency and source downloads.
-
-Each `Build chelis-cli (release, smt)` step therefore runs through
-`scripts/ci_cvc5_build.py`, which retries **only** when the failing attempt's
-output carried a transient-fetch signature. This does not weaken anything
-above: no prebuilt is linked, no compile is skipped, and a compile, CMake
-configure, or link failure is **not** retried at all -- it fails on the first
-attempt exactly as before. "Treat a `release.yml` cvc5 failure as real" still
-holds, because the only failures the wrapper absorbs are ones that never
-reached the compiler. A sustained outage still fails the job once the bounded
-attempts are exhausted.
-
-The signature list is deliberately narrow, and
-`scripts/test_ci_cvc5_build.py` pins both directions: the observed 403 and
-clone-failure lines classify as transient, while an `error[E0308]`, a
-`CMake Error`, a linker failure, and a bare `build.rs` panic with no fetch
-diagnostic above it do not. Widening that list is a decision to retry
-something new; make it deliberately.
+`publish-release` depends on every build job and on both off-Nix
+consumption jobs. One failure stops publication for the manually
+dispatched tag.
 
 ## Downstream Impact
 

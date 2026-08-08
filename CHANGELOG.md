@@ -8,6 +8,22 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The Darwin release toolchain builds from Nix (openspec
+  `ship-darwin-release-from-nix`).** `nix/release-chelis.nix` now covers
+  both supported systems: the `aarch64-darwin` leg statically links
+  `libzstd`, rewrites the `libiconv` load path to `/usr/lib`, asserts
+  every Mach-O load command is an Apple system path, and runs the
+  behavior probes (version, help, the release fixture, the cvc5
+  discharge) on the rewritten binary inside the sandbox. `release.yml`'s
+  `build-chelis-release` is now a two-platform matrix, a
+  `consume-chelis-release-darwin` job proves the exact staged tarball on
+  a stock macOS runner including the Accelerate smoke, and the Cargo
+  `build-darwin-arm64` job retired together with the
+  `scripts/ci_cvc5_build.py` fetch-retry wrapper and the
+  release-workflow pyo3-isolation guard (release.yml runs no host Cargo
+  at all). The cold cargo-from-source cvc5 proof now lives solely in
+  `smt-full-prove.yml`'s cold path.
+
 - **The Linux release toolchain builds from Nix (openspec
   `switch-linux-release-to-nix`).** `release.yml` now produces
   `chelis-v<ver>-linux-x86_64.tar.gz` from the Devenv release output

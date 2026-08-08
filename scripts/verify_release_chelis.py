@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the portable Linux chelis toolchain Devenv release output."""
+"""Verify a portable chelis toolchain Devenv release output."""
 
 from __future__ import annotations
 
@@ -23,6 +23,8 @@ PUBLIC_RUNTIME_HEADERS = (
     "chelis_simd.h",
     "chelis_math.h",
 )
+
+SUPPORTED_PLATFORMS = ("linux-x86_64", "darwin-arm64")
 
 
 class VerificationError(RuntimeError):
@@ -56,14 +58,14 @@ def output_path_from_build_json(path: Path) -> Path:
     return Path(raw_output)
 
 
-def asset_name(version: str) -> str:
+def asset_name(version: str, platform: str) -> str:
     """Return the exact tarball name the chelisup installer requests."""
-    return f"chelis-v{version}-linux-x86_64.tar.gz"
+    return f"chelis-v{version}-{platform}.tar.gz"
 
 
-def expected_members(version: str) -> set[str]:
+def expected_members(version: str, platform: str) -> set[str]:
     """Return the exact member set of the release tarball."""
-    stem = f"chelis-v{version}-linux-x86_64"
+    stem = f"chelis-v{version}-{platform}"
     members = {
         stem,
         f"{stem}/bin",
@@ -78,8 +80,8 @@ def expected_members(version: str) -> set[str]:
     return members
 
 
-def _verify_inventory(root: Path, version: str) -> tuple[Path, Path]:
-    name = asset_name(version)
+def _verify_inventory(root: Path, version: str, platform: str) -> tuple[Path, Path]:
+    name = asset_name(version, platform)
     expected = [name, f"{name}.sha256"]
     try:
         entries = sorted(root.iterdir(), key=lambda path: path.name)
@@ -113,13 +115,13 @@ def _verify_checksum(tarball: Path, checksum: Path) -> None:
         raise VerificationError("checksum does not match the release tarball")
 
 
-def _verify_members(tarball: Path, version: str) -> None:
+def _verify_members(tarball: Path, version: str, platform: str) -> None:
     try:
         with tarfile.open(tarball, "r:gz") as archive:
             actual = {member.name.rstrip("/") for member in archive.getmembers()}
     except (OSError, tarfile.TarError) as error:
         raise VerificationError(f"cannot read release tarball: {error}") from error
-    expected = expected_members(version)
+    expected = expected_members(version, platform)
     if actual != expected:
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
@@ -140,16 +142,20 @@ def verify_tag_parity(version: str, ref_type: str | None, ref_name: str | None) 
         )
 
 
-def verify_release_output(root: Path, version: str) -> None:
+def verify_release_output(root: Path, version: str, platform: str) -> None:
     """Verify the complete release output or raise VerificationError."""
-    tarball, checksum = _verify_inventory(root, version)
+    if platform not in SUPPORTED_PLATFORMS:
+        raise VerificationError(f"unsupported chelis release platform: {platform}")
+    tarball, checksum = _verify_inventory(root, version, platform)
     _verify_checksum(tarball, checksum)
-    _verify_members(tarball, version)
+    _verify_members(tarball, version, platform)
 
 
-def stage_release_output(source: Path, destination: Path, version: str) -> None:
+def stage_release_output(
+    source: Path, destination: Path, version: str, platform: str
+) -> None:
     """Copy the exact release files into a new workspace directory."""
-    tarball, checksum = _verify_inventory(source, version)
+    tarball, checksum = _verify_inventory(source, version, platform)
     try:
         destination.mkdir(parents=True, exist_ok=False)
         shutil.copy2(tarball, destination / tarball.name)
@@ -166,6 +172,9 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--root", type=Path)
     source.add_argument("--build-json", type=Path)
     parser.add_argument("--stage-root", type=Path)
+    parser.add_argument(
+        "--platform", choices=sorted(SUPPORTED_PLATFORMS), required=True
+    )
     parser.add_argument("--manifest", type=Path, default=Path("Cargo.toml"))
     return parser
 
@@ -180,11 +189,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             os.environ.get("GITHUB_REF_TYPE"),
             os.environ.get("GITHUB_REF_NAME"),
         )
-        verify_release_output(root, version)
+        verify_release_output(root, version, args.platform)
         if args.stage_root is not None:
-            stage_release_output(root, args.stage_root, version)
+            stage_release_output(root, args.stage_root, version, args.platform)
             root = args.stage_root
-            verify_release_output(root, version)
+            verify_release_output(root, version, args.platform)
         github_output = os.environ.get("GITHUB_OUTPUT")
         if github_output:
             with Path(github_output).open("a", encoding="utf-8") as handle:
@@ -192,7 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, VerificationError) as error:
         print(f"verify_release_chelis: {error}", file=sys.stderr)
         return 1
-    print("verify_release_chelis: linux-x86_64 output is valid")
+    print(f"verify_release_chelis: {args.platform} output is valid")
     return 0
 
 

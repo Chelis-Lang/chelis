@@ -24,15 +24,28 @@ BUILD_JOB_REQUIRED_MARKERS = (
     "actions/create-github-app-token@",
     "repositories: ci",
     "access-tokens = github.com=$CI_TOKEN",
+    "os: ubuntu-latest",
+    "slug: linux-x86_64",
+    "os: macos-latest",
+    "slug: darwin-arm64",
     "devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json",
     "python scripts/verify_release_chelis.py",
     "--build-json release-chelis-build.json",
     "--stage-root release-chelis",
+    "--platform ${{ matrix.slug }}",
+    "if: matrix.slug == 'linux-x86_64'",
     "cp crates/chelisup/bootstrap/chelisup.sh chelisup.sh",
-    "name: chelis-linux-x86_64",
-    "${{ steps.build.outputs.path }}/chelis-v*-linux-x86_64.tar.gz",
-    "${{ steps.build.outputs.path }}/chelis-v*-linux-x86_64.tar.gz.sha256",
+    "name: chelis-${{ matrix.slug }}",
+    "${{ steps.build.outputs.path }}/chelis-v*-${{ matrix.slug }}.tar.gz",
+    "${{ steps.build.outputs.path }}/chelis-v*-${{ matrix.slug }}.tar.gz.sha256",
     "if-no-files-found: error",
+)
+DARWIN_CONSUME_JOB_REQUIRED_MARKERS = (
+    "needs: [build-chelis-release]",
+    "runs-on: macos-latest",
+    "chelis-v*-darwin-arm64.tar.gz",
+    "verify_release_smt.py --tarball",
+    "smoke_macos_accelerate.py",
 )
 CONSUME_JOB_REQUIRED_MARKERS = (
     "needs: [build-chelis-release]",
@@ -51,7 +64,6 @@ WORKFLOW_FORBIDDEN_MARKERS = (
 MODULE_REQUIRED_MARKERS = (
     "outputs.release-chelis ",
     "../nix/release-chelis.nix",
-    'pkgs.stdenv.hostPlatform.system == "x86_64-linux"',
 )
 HELPER_REQUIRED_MARKERS = (
     'root + "/Cargo.nix"',
@@ -72,7 +84,12 @@ HELPER_REQUIRED_MARKERS = (
     "libgcc_s.so.1",
     "ld-linux-x86-64.so.2",
     "--library-path",
-    "chelis-v${version}-linux-x86_64",
+    "chelis-v${version}-${platformSlug}",
+    '"linux-x86_64"',
+    '"darwin-arm64"',
+    "install_name_tool -change",
+    "/usr/lib/libiconv.2.dylib",
+    "otool -L",
     "--version",
     "--help",
     "sha256sum",
@@ -206,7 +223,9 @@ class ReleaseChelisSourceContractTests(unittest.TestCase):
         helper = RELEASE_HELPER.read_text(encoding="utf-8")
         self.assertIn('chelis-v{version}-{slug}.tar.gz', install)
         self.assertIn('("linux", "x86_64") => Ok("linux-x86_64")', install)
-        self.assertIn('chelis-v${version}-linux-x86_64', helper)
+        self.assertIn('chelis-v${version}-${platformSlug}', helper)
+        self.assertIn('"linux-x86_64"', helper)
+        self.assertIn('"darwin-arm64"', helper)
 
 
 def _job_block(workflow: str, job_name: str) -> str:
@@ -241,24 +260,32 @@ def release_workflow_contract_errors(workflow: str) -> list[str]:
             if marker not in consume_job:
                 errors.append(f"consume-chelis-release is missing {marker}")
 
+    darwin_consume = _job_block(workflow, "consume-chelis-release-darwin")
+    if not darwin_consume:
+        errors.append("release workflow is missing consume-chelis-release-darwin")
+    else:
+        for marker in DARWIN_CONSUME_JOB_REQUIRED_MARKERS:
+            if marker not in darwin_consume:
+                errors.append(f"consume-chelis-release-darwin is missing {marker}")
+
     for marker in WORKFLOW_FORBIDDEN_MARKERS:
         if marker in workflow:
             errors.append(f"release workflow uses forbidden marker {marker}")
 
     for job_name in _job_names(workflow):
-        if job_name == "build-darwin-arm64":
-            continue
         if "cargo build" in _job_block(workflow, job_name):
-            errors.append(
-                f"job {job_name} builds a published Linux artifact with Cargo"
-            )
+            errors.append(f"job {job_name} builds a published artifact with Cargo")
 
     publish = _job_block(workflow, "publish-release")
     needs_line = next(
         (line for line in publish.splitlines() if line.strip().startswith("needs:")),
         "",
     )
-    for dependency in ("build-chelis-release", "consume-chelis-release"):
+    for dependency in (
+        "build-chelis-release",
+        "consume-chelis-release",
+        "consume-chelis-release-darwin",
+    ):
         if dependency not in needs_line:
             errors.append(f"publish-release must depend on {dependency}")
     if "release-assets/**/*.tar.gz" not in publish:
@@ -304,7 +331,7 @@ class ReleaseChelisWorkflowContractTests(unittest.TestCase):
         errors = release_workflow_contract_errors(mutated)
         self.assertIn("release workflow uses forbidden marker glibc2.31", errors)
 
-    def test_cargo_build_outside_darwin_fails(self) -> None:
+    def test_any_cargo_build_fails(self) -> None:
         job = _job_block(self.workflow, "consume-chelis-release")
         mutated = self.workflow.replace(
             job,
@@ -314,24 +341,35 @@ class ReleaseChelisWorkflowContractTests(unittest.TestCase):
         )
         errors = release_workflow_contract_errors(mutated)
         self.assertIn(
-            "job consume-chelis-release builds a published Linux artifact with Cargo",
+            "job consume-chelis-release builds a published artifact with Cargo",
             errors,
         )
 
-    def test_darwin_job_keeps_its_cargo_evidence(self) -> None:
-        darwin = _job_block(self.workflow, "build-darwin-arm64")
-        self.assertIn("cargo build --release -p chelis-cli --features smt", darwin)
-        self.assertIn("cargo build --release -p chelis-runtime", darwin)
+    def test_each_darwin_consume_marker_has_a_negative_mutation(self) -> None:
+        job = _job_block(self.workflow, "consume-chelis-release-darwin")
+        for marker in DARWIN_CONSUME_JOB_REQUIRED_MARKERS:
+            with self.subTest(marker=marker):
+                mutated = self.workflow.replace(
+                    job, job.replace(marker, "removed-marker"), 1
+                )
+                errors = release_workflow_contract_errors(mutated)
+                self.assertIn(
+                    f"consume-chelis-release-darwin is missing {marker}", errors
+                )
 
     def test_missing_publish_dependency_fails(self) -> None:
         mutated = self.workflow.replace(
-            "needs: [build-chelis-release, consume-chelis-release, ",
+            "needs: [build-chelis-release, consume-chelis-release, "
+            "consume-chelis-release-darwin, ",
             "needs: [",
             1,
         )
         errors = release_workflow_contract_errors(mutated)
         self.assertIn("publish-release must depend on build-chelis-release", errors)
         self.assertIn("publish-release must depend on consume-chelis-release", errors)
+        self.assertIn(
+            "publish-release must depend on consume-chelis-release-darwin", errors
+        )
 
     def test_ci_workflow_has_no_glibc231_lane(self) -> None:
         ci = CI_WORKFLOW.read_text(encoding="utf-8")

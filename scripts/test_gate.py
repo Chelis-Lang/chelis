@@ -1602,7 +1602,8 @@ class MacosManualOnlyTests(unittest.TestCase):
                 ("ci.yml", "smt-build-darwin-arm64"),
                 ("ci.yml", "macos-smoke"),
                 ("nix-packages.yml", "nix-darwin-arm64"),
-                ("release.yml", "build-darwin-arm64"),
+                ("release.yml", "build-chelis-release"),
+                ("release.yml", "consume-chelis-release-darwin"),
                 ("release.yml", "build-chelisup-release"),
             ],
         )
