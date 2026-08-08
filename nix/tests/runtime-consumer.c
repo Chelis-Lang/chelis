@@ -2,8 +2,10 @@
 #include "chelis_blas.h"
 #include "chelis_math.h"
 
+#include <stdint.h>
+
 int main(void) {
-    int shape[1] = {1};
+    int64_t shape[1] = {1};
     chelis_tensor *tensor = chelis_alloc(1, shape, CHELIS_F32);
     if (tensor == NULL) {
         return 1;

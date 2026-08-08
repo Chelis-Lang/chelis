@@ -5,7 +5,8 @@
 Local spikes (2026-08-08, this workstation, inside `devenv shell`) resolved both:
 
 - `cargo build -p chelis-cli --features smt` with `CVC5_DIR` pointing at the flake's `cvc5-dir` completes in ~90 seconds. bindgen finds libclang from the Devenv Rust module. The mixing hazard disappears when cargo itself runs inside the Devenv shell.
-- `cargo build`/`cargo test -p chelis-prove --features z3` (390 tests) passes against the Nix `z3` with `Z3_SYS_Z3_HEADER=${z3.dev}/include/z3.h` and `Z3_LIBRARY_PATH_OVERRIDE=${z3.lib}/lib`.
+- `cargo build`/`cargo test -p chelis-prove --features z3` (390 tests) passes against the Nix `z3` with `Z3_SYS_Z3_HEADER=${z3.dev}/include/z3.h` and `Z3_LIBRARY_PATH_OVERRIDE=${z3.lib}/lib`. On Darwin the Nix `libz3.dylib` carries an absolute install name, so the tests also pass with no loader variable.
+- The full corpus mirror on this workstation: the smt suite, the serialized carcara suite, z3, the cross-engine oracle, clarabel, the combined `smt clarabel` config, and the Gappa `--check-only` re-validation (69 proofs) all pass inside `devenv shell`. The vendored GMP/MPFR/FLINT C stack compiles; the `arb` feature itself is Darwin-incapable upstream (see Decisions), so the two Arb steps are Linux-only evidence.
 
 ## Goals / Non-Goals
 
@@ -37,6 +38,10 @@ Runtime resolution: on Darwin the Nix `libz3.dylib` carries an absolute install 
 
 `full-smt-prove` adopts the exact converted block: pinned `setup-devenv`, private-ci authentication, the `cvc5-dir` closure cache shared with `nix-packages.yml` and the smoke lanes, `nix build` + `CVC5_DIR` export, `Swatinem/rust-cache` with the existing `smt-smt-build` shared key, and every build/test/certify command through `devenv shell`. The Gappa re-validation runs the Devenv Python (`devenv shell -- python scripts/generate_erf_proof.py --check-only`) with the `gappa` binary on the shell PATH.
 
+### The arb feature is Linux-only, upstream
+
+`arb-sys` 0.3.6 invokes the vendored Arb `configure` with only `--with-gmp` and `--with-flint`. The configure script's MPFR check then tests `${MPFR_DIR}/lib` with an empty `MPFR_DIR`: on Linux `-d /lib` accidentally passes and MPFR resolves from the gmp-mpfr-sys output directory through the GMP flags, while macOS has no `/lib`, so the check always fails (`Invalid MPFR directory`). This predates the conversion - the arb lane has only ever run on Linux CI - and the converted Linux lane keeps the same accidental-pass shape with MPFR supplied by the vendored gmp-mpfr-sys build. A pinned upstream fix (passing `--with-mpfr`) is the clean remedy if Darwin arb ever matters.
+
 ### The cargo-from-source cvc5 proof retires deliberately
 
 After this change no CI lane compiles cvc5 through `cvc5-sys`. The recipe remains documented in `docs/smt_build_setup.md` for contributors outside Devenv, and `cvc5-sys` itself is unchanged, but CI proves only the pinned Nix supply. Accepted on the zero-users footing: the from-source path is a contributor convenience, not a shipped artifact, and a regression in it is discoverable locally. Recorded in the docs; revisit if a non-Devenv contributor path becomes supported.
@@ -51,6 +56,7 @@ After this change no CI lane compiles cvc5 through `cvc5-sys`. The recipe remain
 - **The lane's cold path now depends on the cvc5 closure cache** → A cold run pays one ~30m Nix cvc5 build inside the 75m ceiling; the cache is shared with three other jobs, so cold runs are rare.
 - **`generate_erf_proof.py --check-only` under the Devenv Python** → Validated locally before landing; its imports are stdlib plus the repository.
 - **carcara's GMP probe under the Nix cc** → Validated locally via the `CPATH`/`LIBRARY_PATH` wiring before landing; the serial-run SIGSEGV containment (`--test-threads=1`) is unchanged.
+- **The Arb configure on the converted Linux lane** → The accidental-pass shape (empty `MPFR_DIR` against an existing `/lib`, MPFR from the gmp-mpfr-sys output) is unchanged from the host lane; the hosted dispatch is the executable proof, and a failure is loud at the configure step.
 
 ## Migration Plan
 

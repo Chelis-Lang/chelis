@@ -1,7 +1,7 @@
 ## 1. Wire the solver stack into Devenv
 
 - [x] 1.1 Add `z3`, `gappa`, `gmp`, `gnum4`, and `gnumake` to the Devenv package set; add `Z3_SYS_Z3_HEADER`, `Z3_LIBRARY_PATH_OVERRIDE`, and the GMP `CPATH`/`LIBRARY_PATH` wiring.
-- [x] 1.2 Validate locally inside the shell: smt build with `CVC5_DIR` (1m28s, no CMake), `--features z3` tests (390 passed), `--features carcara` build, `--features clarabel` build, `--features arb` build (vendored FLINT/Arb), and `python scripts/generate_erf_proof.py --check-only` with the shell's `gappa`. All green, 2026-08-08.
+- [x] 1.2 Validate locally inside the shell (2026-08-08): smt build with `CVC5_DIR` (1m28s, no CMake); the full corpus mirror - smt suite, carcara serial suite, z3 (390 tests, and green with no loader variable on Darwin), cross-engine oracle, clarabel, combined `smt clarabel`, and the Gappa `--check-only` re-validation (69 proofs). The vendored GMP/MPFR/FLINT stack compiles; the `arb` feature itself cannot configure on macOS (upstream arb-sys 0.3.6, see design.md §The arb feature is Linux-only), so the two Arb steps remain Linux-only and land with the hosted dispatch. An earlier claim that the arb build passed locally was a pipe-masked false green; corrected here.
 - [x] 1.3 Run `nixfmt` on every touched Nix file.
 
 ## 2. Convert the lane

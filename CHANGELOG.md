@@ -55,9 +55,12 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `scripts/ci_cvc5_cache.py` and its tests are deleted, and no CI lane
   compiles cvc5 through `cvc5-sys` any more (the cargo-from-source
   recipe stays documented for contributors outside Devenv). Local
-  validation: smt, z3 (390 tests), carcara, clarabel, and arb feature
-  builds plus the Gappa `--check-only` re-validation, all inside
-  `devenv shell`.
+  validation inside `devenv shell`: the smt suite, the serialized
+  carcara suite, z3 (390 tests), the cross-engine oracle, clarabel, the
+  combined `smt clarabel` config, and the Gappa `--check-only`
+  re-validation (69 proofs). The `arb` feature stays Linux-only: its
+  vendored configure (arb-sys 0.3.6) cannot locate MPFR on macOS, a
+  pre-existing upstream limitation recorded in the change design.
 
 - **The SMT smoke lanes build on the Devenv toolchain and link the
   flake's pinned cvc5 (openspec `converge-smt-lanes-on-nix-cvc5`).**
