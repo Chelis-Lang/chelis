@@ -325,7 +325,7 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
 def _assert_nix_docs_only_gate(workflow: str) -> None:
     blocks = _workflow_job_blocks(workflow)
     changes = blocks.get("changes", "")
-    if "scripts/ci_detect_docs_only.py" not in changes:
+    if "uses: ./.github/actions/detect-docs-only" not in changes:
         raise AssertionError(
             "the Nix workflow must compute docs_only with the shared detector"
         )
@@ -376,6 +376,11 @@ def _assert_runner_resource_bounds(workflow: str) -> None:
 
 
 def _assert_cvc5_closure_cache(workflow: str) -> None:
+    # The key derivation, archive import/export, and actions/cache calls
+    # live in the shared composite pair under .github/actions/; the
+    # workflow-side contract is that each native job consumes both halves
+    # for its own system, restore-before / save-after the flake check.
+    # test_smt_lane_workflows.py locks the composite action internals.
     blocks = _workflow_job_blocks(workflow)
     jobs = (
         ("nix-linux-x86-64", "x86_64-linux"),
@@ -384,11 +389,9 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
     for job, system in jobs:
         block = blocks.get(job, "")
         markers = (
-            "uses: actions/cache/restore@v4",
-            "uses: actions/cache/save@v4",
-            f".#legacyPackages.{system}.cvc5-dir.drvPath",
-            f".#legacyPackages.{system}.cvc5-dir.outPath",
-            "--no-check-sigs",
+            "uses: ./.github/actions/cvc5-cache-restore",
+            "uses: ./.github/actions/cvc5-cache-save",
+            f"system: {system}",
         )
         for marker in markers:
             if marker not in block:
@@ -396,11 +399,11 @@ def _assert_cvc5_closure_cache(workflow: str) -> None:
                     f"{job!r} must cache the cvc5 closure: missing {marker!r}"
                 )
         check_index = block.index("run: nix flake check")
-        if block.index("uses: actions/cache/restore@v4") > check_index:
+        if block.index("uses: ./.github/actions/cvc5-cache-restore") > check_index:
             raise AssertionError(
                 f"{job!r} must restore the cvc5 closure before the flake check"
             )
-        if block.index("uses: actions/cache/save@v4") < check_index:
+        if block.index("uses: ./.github/actions/cvc5-cache-save") < check_index:
             raise AssertionError(
                 f"{job!r} must save the cvc5 closure after the flake check"
             )
@@ -1239,7 +1242,9 @@ class NixPackagesWorkflowTests(unittest.TestCase):
 
     def test_missing_docs_only_detector_fails_the_skip_lock(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace("scripts/ci_detect_docs_only.py", "omitted.py", 1)
+        mutated = text.replace(
+            "uses: ./.github/actions/detect-docs-only", "uses: omitted", 1
+        )
         with self.assertRaisesRegex(AssertionError, "shared detector"):
             _assert_nix_docs_only_gate(mutated)
 
@@ -1288,7 +1293,9 @@ class NixPackagesWorkflowTests(unittest.TestCase):
 
     def test_missing_cvc5_restore_fails_the_cache_lock(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace("uses: actions/cache/restore@v4", "uses: omitted", 1)
+        mutated = text.replace(
+            "uses: ./.github/actions/cvc5-cache-restore", "uses: omitted", 1
+        )
         with self.assertRaisesRegex(AssertionError, "cvc5 closure"):
             _assert_cvc5_closure_cache(mutated)
 
@@ -1687,6 +1694,26 @@ class DocsOnlySkipTests(unittest.TestCase):
         # must always run so its result/output are well-defined.
         self.assertNotIn("if", attrs["changes"])
         self.assertNotIn("needs", attrs["changes"])
+
+    def test_changes_jobs_consume_the_shared_detector_action(self):
+        # The diff-range logic lives once, in the local composite action;
+        # every workflow with a changes job consumes that single copy, and
+        # the action itself pipes the diff through the shared Python
+        # detector. A checkout must precede the local action reference.
+        action = (
+            WORKFLOWS_DIR.parent / "actions" / "detect-docs-only" / "action.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("scripts/ci_detect_docs_only.py", action)
+        self.assertIn("git diff --name-only", action)
+        for path in (CI_YML, NIX_PACKAGES_YML, WORKFLOWS_DIR / "conformance.yml"):
+            with self.subTest(workflow=path.name):
+                block = _workflow_job_block(path, "changes")
+                self.assertIn("uses: ./.github/actions/detect-docs-only", block)
+                self.assertLess(
+                    block.index("uses: actions/checkout@"),
+                    block.index("uses: ./.github/actions/detect-docs-only"),
+                    "the local action needs the repository checked out first",
+                )
 
     def test_no_paths_ignore_in_workflow(self):
         # paths-ignore / paths on a required check deadlocks branch

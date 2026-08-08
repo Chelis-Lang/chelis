@@ -62,6 +62,9 @@ jobs:
         sandbox = true
         max-jobs = 2
         cores = 0
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       - name: Checkout chelis (HEAD)
         uses: actions/checkout@v6
@@ -91,30 +94,20 @@ jobs:
           CI_TOKEN: ${{ steps.ci-token.outputs.token }}
         run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
 
-      # cvc5 closure cache: the same key derivation and import/export pattern
-      # as nix-packages.yml, the SMT lanes, and release.yml, so all lanes
-      # share one cached closure.
-      - name: Compute the cvc5 toolchain cache key
-        id: cvc5-key
-        run: python3 -c 'import os, pathlib, subprocess; drv = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
-
+      # cvc5 closure cache: the shared composite pair derives one key from
+      # the cvc5-dir drvPath, so all lanes (SMT, full-prove, release, Nix
+      # packages) share one cached closure.
       - name: Restore the cvc5 toolchain closure
         id: cvc5-cache
-        uses: actions/cache/restore@v4
+        uses: ./.github/actions/cvc5-cache-restore
         with:
-          path: /tmp/chelis-cvc5-cache
-          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
-
-      - name: Import the cvc5 toolchain closure
-        if: steps.cvc5-cache.outputs.cache-hit == 'true'
-        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'
+          system: x86_64-linux
 
       # The portable release output (nix/release-chelis.nix): built from the
       # committed Cargo.nix graph with the pinned Devenv rustc, verified
       # (version, help, release fixture, cvc5 discharge), and rewritten off
       # the Nix store so the raw drift runners and the docker leg can run it.
       - name: Build and verify the portable chelis toolchain output
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
           python scripts/verify_release_chelis.py \
@@ -122,20 +115,14 @@ jobs:
             --stage-root release-chelis \
             --platform linux-x86_64
 
-      # Export and save immediately after the closure exists, so a later
-      # staging failure does not lose the ~30m cold cvc5 build.
-      - name: Export the cvc5 toolchain closure
-        if: steps.cvc5-cache.outputs.cache-hit != 'true'
-        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--to", "file:///tmp/chelis-cvc5-cache", out], check=True)'
-
+      # Save immediately after the closure exists, so a later staging
+      # failure does not lose the ~30m cold cvc5 build.
       - name: Save the cvc5 toolchain closure
-        if: steps.cvc5-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        # Best-effort: saving the closure cache must never fail the build.
-        continue-on-error: true
+        uses: ./.github/actions/cvc5-cache-save
         with:
-          path: /tmp/chelis-cvc5-cache
-          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
+          system: x86_64-linux
+          cache-hit: ${{ steps.cvc5-cache.outputs.cache-hit }}
+          key: ${{ steps.cvc5-cache.outputs.key }}
 
       - name: Unpack the portable toolchain
         run: |
@@ -153,6 +140,9 @@ jobs:
       # the same way every drift leg runs it.
       - name: Record HEAD chelis version
         id: version
+        # Explicit bash: the point of this step is running the portable
+        # binary on the raw runner host, outside the Devenv shell.
+        shell: bash
         run: |
           set -euo pipefail
           ver="$("$HEAD_TOOLCHAIN/bin/chelis" --version | awk '{print $2}')"
@@ -164,7 +154,6 @@ jobs:
       # that breaks chelis-std's own lowering — a nautilus-#11-class bug).
       # Emits packages/chelis-std/dist/chelis-std-<ver>.{chb,tar.zst}.
       - name: Rebuild HEAD chelis-std bundle
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- "$HEAD_TOOLCHAIN/bin/chelis" reef build packages/chelis-std
 
       # Stage release.yml's tarball content plus the freshly built
@@ -568,10 +557,17 @@ jobs:
           ref: ${{ github.sha }}
           path: chelis
 
+      # Pin the canary's Rust toolchain to the version the chelis Devenv
+      # shell resolves (rust-toolchain.toml's stable, as pinned by the
+      # Devenv lock), instead of floating on the upstream stable channel:
+      # an upstream Rust release must not be able to flip a drift leg red
+      # independently of chelis HEAD. Bump the version together with the
+      # Devenv nixpkgs/rust pin.
       - name: Install Rust toolchain
         if: matrix.type == 'cargo'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-05
         with:
+          toolchain: 1.95.0
           components: clippy, rustfmt
 
       - name: Install uv

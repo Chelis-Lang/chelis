@@ -78,6 +78,7 @@ EXECUTABLE_DOC_PATHS: frozenset[str] = frozenset(
 # job is exercised by the job in the same pull request.
 REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
     {
+        ".github/actions/detect-docs-only/action.yml",
         ".github/workflows/ci.yml",
         "crates/chelis-types/src/lib.rs",
         "crates/chelis-types/src/rejection_registry_generated.rs",
@@ -99,6 +100,7 @@ REJECTION_AUTHORITY_PATHS: frozenset[str] = frozenset(
 # self-triggering.
 DIAGNOSTIC_KIND_PATHS: frozenset[str] = frozenset(
     {
+        ".github/actions/detect-docs-only/action.yml",
         ".github/workflows/ci.yml",
         "crates/chelis-compiler-api/src/context.rs",
         "crates/chelis-compiler-api/src/lib.rs",

@@ -20,6 +20,9 @@ jobs:
   loc-report:
     name: LOC Report
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       - uses: actions/checkout@v6
 
@@ -46,7 +49,6 @@ jobs:
       # The Devenv shell supplies uv and the managed Python; the report
       # anchors its output to the repo root, so the cwd stays here.
       - name: Generate LOC report
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- uv run --project py loc-report
 
       - name: Commit LOC report

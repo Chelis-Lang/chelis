@@ -45,6 +45,9 @@ jobs:
     # The lightened sharded campaign wall (~3-5 min at check-n 2000) plus build
     # + checkout head room; the release build dominates. 30 min stays generous.
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       # Mint a short-lived token scoped to the private `hull` repo so the
       # cross-repo Hull checkout can read it. The default GITHUB_TOKEN only
@@ -71,7 +74,10 @@ jobs:
         id: hull
         # Single-field JSON read with the runner's system python3.
         # The frozen corpus manifest records
-        # the exact Hull commit it was produced from.
+        # the exact Hull commit it was produced from. Explicit bash:
+        # this step runs before setup-devenv installs the devenv-ci
+        # launcher the job default names.
+        shell: bash
         run: |
           commit=$(python3 -c 'import json;print(json.load(open("chelis/tests/conformance/hull/manifest.json"))["hull_commit"])')
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -111,7 +117,6 @@ jobs:
 
       - name: Build chelis (release)
         working-directory: chelis
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
 
       # FAIL FAST on a cross-repo cascade lag (chelis#341/#335). The fresh
@@ -126,7 +131,6 @@ jobs:
       # lockstep -- it just replaces four cryptic shard crashes with the cause.
       - name: Check Hull pin vs live chelis version (cascade-skew guard)
         working-directory: chelis
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           devenv shell --no-tui -- python scripts/ci_check_hull_pin_skew.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \
@@ -144,7 +148,6 @@ jobs:
       # sequence.
       - name: Fresh campaign (live Hull reference)
         working-directory: chelis
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         # The pinned Hull driver spawns `chelis` by name. Run from the Hull
         # checkout, and prepend the release directory inside the Devenv shell.
         run: |
@@ -166,14 +169,12 @@ jobs:
       # semantics change must refresh the corpus (a reviewable diff).
       - name: Re-validate the frozen corpus
         working-directory: chelis
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis"
 
       - name: Conformance teeth (injected-unsound must fail the gate)
         working-directory: chelis
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           if devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \

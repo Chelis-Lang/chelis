@@ -114,6 +114,7 @@ class RejectionAuthorityChangeTests(unittest.TestCase):
             "crates/chelis-types/src/rejection_registry_generated.rs",
             "crates/chelis-types/src/unsupported.rs",
             "crates/chelis-types/src/lib.rs",
+            ".github/actions/detect-docs-only/action.yml",
             ".github/workflows/ci.yml",
         ):
             self.assertTrue(m.rejection_authority_changed([path]), path)
@@ -132,6 +133,7 @@ class RejectionAuthorityChangeTests(unittest.TestCase):
 class DiagnosticKindChangeTests(unittest.TestCase):
     def test_every_oracle_owner_and_control_triggers_the_mutation_job(self):
         for path in (
+            ".github/actions/detect-docs-only/action.yml",
             ".github/workflows/ci.yml",
             "crates/chelis-compiler-api/src/context.rs",
             "crates/chelis-compiler-api/src/lib.rs",

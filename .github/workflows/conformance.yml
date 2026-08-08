@@ -44,30 +44,16 @@ jobs:
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
     steps:
-      # Shallow checkout (depth 1); deepen in bash since GitHub Actions
-      # expressions have no arithmetic. See ci.yml's changes job.
+      # Shallow checkout (depth 1) on every event: the local
+      # detect-docs-only action needs the repo on disk. See ci.yml's
+      # changes job.
       - name: Checkout
-        if: github.event_name == 'pull_request'
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
       - name: Compute docs_only
         id: detect
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-          COMMITS: ${{ github.event.pull_request.commits }}
-        run: |
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
-            exit 0
-          fi
-          git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
-          git diff --name-only "$BASE..$HEAD" \
-            | python3 scripts/ci_detect_docs_only.py
+        uses: ./.github/actions/detect-docs-only
 
   conformance:
     name: Hull Conformance Gate (Linux)
@@ -87,6 +73,9 @@ jobs:
     # so a future profile tweak cannot silently reintroduce the bloat.
     env:
       CARGO_PROFILE_RELEASE_DEBUG: 0
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       - uses: actions/checkout@v6
 
@@ -126,7 +115,6 @@ jobs:
       # bare PATH name). A release build matches the Hull campaign profile (a
       # debug build's check pass is multi-minute per program).
       - name: Build chelis (release)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
 
       # The pure runner core (wire_to_canonical, derive_compiler_outcome,
@@ -134,7 +122,6 @@ jobs:
       # tests, the corpus-integrity invariants, and the injected-unsound
       # self-test (the teeth). Binary-free; runs fast.
       - name: Conformance unit tests (pure core + teeth)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           devenv shell --no-tui -- python -m unittest \
             tests.conformance.hull.test_run_conformance \
@@ -144,7 +131,6 @@ jobs:
       # THE GATE. Run the frozen ~1,500-program slice against the just-built
       # binary. Fails on any CompilerUnsound / unexplained Disagree / EvalDisagree.
       - name: Conformance gate (frozen corpus vs live compiler)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis"
@@ -153,7 +139,6 @@ jobs:
       # divergence MUST make the runner exit nonzero. This step EXPECTS failure;
       # if the runner exits 0, the gate has no teeth and this step fails.
       - name: Conformance teeth (injected-unsound must fail the gate)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           if devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \

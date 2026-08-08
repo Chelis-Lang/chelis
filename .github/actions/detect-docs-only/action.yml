@@ -1,0 +1,55 @@
+# The shared docs-only detector (chelis#419). Three workflows gate their
+# heavy jobs on this classification (ci.yml, conformance.yml,
+# nix-packages.yml); this action is the single copy of the diff-range
+# logic that feeds scripts/ci_detect_docs_only.py. The caller must check
+# the repository out first (fetch-depth 1 is enough; the detect step
+# deepens to the PR commit range itself).
+#
+# On a non-pull_request event (push to main, dispatch) every output is
+# 'false' so the full suite runs, per the WS-7 spend-trim scope.
+name: Detect docs-only changes
+description: >-
+  Classify the pull request diff with scripts/ci_detect_docs_only.py.
+  Non-PR events always report docs_only=false so push-to-main runs the
+  full suite.
+outputs:
+  docs_only:
+    description: Whether every changed path is documentation/prose
+    value: ${{ steps.detect.outputs.docs_only }}
+  rejection_authority_changed:
+    description: Whether the diff touches a rejection-authority admission path
+    value: ${{ steps.detect.outputs.rejection_authority_changed }}
+  diagnostic_kind_changed:
+    description: Whether the diff touches a Diagnostic.kind oracle owner or control
+    value: ${{ steps.detect.outputs.diagnostic_kind_changed }}
+runs:
+  using: composite
+  steps:
+    - name: Compute docs_only
+      id: detect
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE: ${{ github.event.pull_request.base.sha }}
+        HEAD: ${{ github.event.pull_request.head.sha }}
+        COMMITS: ${{ github.event.pull_request.commits }}
+      run: |
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          # push-to-main (or any non-PR event) always runs the full
+          # suite; do not skip heavy jobs off a PR diff.
+          echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          echo "rejection_authority_changed=false" >> "$GITHUB_OUTPUT"
+          echo "diagnostic_kind_changed=false" >> "$GITHUB_OUTPUT"
+          echo "non-PR event ($EVENT_NAME): docs_only=false (full suite)"
+          exit 0
+        fi
+        # Deepen head to the PR commit count + 1 (the +1 reaches the
+        # base tip's parent so base..head resolves), then backstop-fetch
+        # the base commit so it is present as an object even on a stale
+        # count (force-push between the event and the run). GitHub
+        # Actions expressions have no arithmetic, so the depth is
+        # computed here in bash.
+        git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
+        git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+        git diff --name-only "$BASE..$HEAD" \
+          | python3 scripts/ci_detect_docs_only.py

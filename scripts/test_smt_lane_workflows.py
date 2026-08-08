@@ -11,6 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 FULL_PROVE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+CVC5_RESTORE_ACTION = (
+    REPO_ROOT / ".github" / "actions" / "cvc5-cache-restore" / "action.yml"
+)
+CVC5_SAVE_ACTION = (
+    REPO_ROOT / ".github" / "actions" / "cvc5-cache-save" / "action.yml"
+)
 
 SETUP_DEVENV_ACTION = (
     "Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824"
@@ -50,11 +56,11 @@ def _lane_errors(workflow: str, job_name: str, system: str) -> list[str]:
         SETUP_DEVENV_ACTION,
         "actions/create-github-app-token@",
         "repositories: ci",
-        f".#legacyPackages.{system}.cvc5-dir.drvPath",
+        "uses: ./.github/actions/cvc5-cache-restore",
+        "uses: ./.github/actions/cvc5-cache-save",
+        f"system: {system}",
         f"nix build .#legacyPackages.{system}.cvc5-dir --out-link .cvc5-dir",
         'printf \'CVC5_DIR=%s\\n\' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"',
-        "actions/cache/restore@",
-        "actions/cache/save@",
         "devenv shell --no-tui -- cargo build",
         "verify_release_smt.py",
     )
@@ -95,6 +101,36 @@ def full_prove_contract_errors(full_prove: str) -> list[str]:
     ):
         if marker not in full_prove:
             errors.append(f"full-smt-prove is missing {marker}")
+    return errors
+
+
+def cvc5_cache_action_errors(restore: str, save: str) -> list[str]:
+    """Return every contract error in the shared cvc5 closure cache pair.
+
+    The key derivation, archive import/export, and actions/cache calls
+    moved into the composite pair, so their supply markers are locked
+    here instead of per-workflow.
+    """
+    errors: list[str] = []
+    for marker in (
+        "cvc5-dir.drvPath",
+        "uses: actions/cache/restore@v4",
+        "cvc5-dir.outPath",
+        "--no-check-sigs",
+        "/tmp/chelis-cvc5-cache",
+        "nix-cvc5-",
+    ):
+        if marker not in restore:
+            errors.append(f"cvc5-cache-restore is missing {marker}")
+    for marker in (
+        "cvc5-dir.outPath",
+        "uses: actions/cache/save@v4",
+        "continue-on-error: true",
+        "/tmp/chelis-cvc5-cache",
+        "nix-cvc5-",
+    ):
+        if marker not in save:
+            errors.append(f"cvc5-cache-save is missing {marker}")
     return errors
 
 
@@ -207,6 +243,27 @@ class FullProveContractTests(unittest.TestCase):
         self.assertIn(
             'full-smt-prove is missing export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"',
             errors,
+        )
+
+
+class Cvc5CacheActionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.restore = CVC5_RESTORE_ACTION.read_text(encoding="utf-8")
+        self.save = CVC5_SAVE_ACTION.read_text(encoding="utf-8")
+
+    def test_composite_pair_carries_the_supply_contract(self) -> None:
+        self.assertEqual(cvc5_cache_action_errors(self.restore, self.save), [])
+
+    def test_a_missing_key_derivation_fails(self) -> None:
+        mutated = self.restore.replace("cvc5-dir.drvPath", "removed", 1)
+        errors = cvc5_cache_action_errors(mutated, self.save)
+        self.assertIn("cvc5-cache-restore is missing cvc5-dir.drvPath", errors)
+
+    def test_a_failing_cache_save_must_stay_best_effort(self) -> None:
+        mutated = self.save.replace("continue-on-error: true", "", 1)
+        errors = cvc5_cache_action_errors(self.restore, mutated)
+        self.assertIn(
+            "cvc5-cache-save is missing continue-on-error: true", errors
         )
 
 

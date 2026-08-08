@@ -42,6 +42,9 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       - uses: actions/checkout@v6
 
@@ -84,7 +87,6 @@ jobs:
       # fail the run. This is the only place the `nightly` profile is
       # used.
       - name: Heavy e2e suite
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo nextest run --workspace --profile nightly
 
       # The chelis-std in-language self-test corpus (packages/chelis-std/tests/,
@@ -96,7 +98,6 @@ jobs:
       # the heavy e2e suite above fails (independent signal).
       - name: chelis-std self-test corpus
         if: always()
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
   # Surface a nightly failure as a tracking issue (opens on failure, closes on

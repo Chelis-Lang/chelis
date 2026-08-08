@@ -118,8 +118,10 @@ keeps that off CI the same way: the lane builds the flake's `cvc5-dir`
 (`nix/cvc5.nix` — the same pinned cvc5 1.3.1 the shipped binaries link) and
 exports it as `CVC5_DIR`. `cvc5-sys` sees `build/src/libcvc5.a` and LINKS it
 instead of running CMake/make. The closure is cached in the GitHub Actions
-cache with the same key derivation `nix-packages.yml` uses, so all four jobs
-share one cached closure. A cvc5 or nixpkgs pin bump changes the derivation
+cache through the shared `.github/actions/cvc5-cache-restore` and
+`.github/actions/cvc5-cache-save` composite pair (one key derivation for
+every lane, including `nix-packages.yml`, `release.yml`, and the drift
+canary), so all jobs share one cached closure. A cvc5 or nixpkgs pin bump changes the derivation
 key and pays one ~30m Nix build; there is no separate publish step and no
 runbook. Every lane builds inside `devenv shell`, so the rustc, cc, and
 libclang match the repository pin, and the full-prove solver stack (z3,

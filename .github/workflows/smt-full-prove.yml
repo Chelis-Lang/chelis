@@ -44,6 +44,9 @@ jobs:
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       - uses: actions/checkout@v6
 
@@ -70,25 +73,16 @@ jobs:
           CI_TOKEN: ${{ steps.ci-token.outputs.token }}
         run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
 
-      # cvc5 closure cache: the same key derivation and import/export pattern
-      # as nix-packages.yml and the smoke lanes, so all four jobs share one
-      # cached closure. The lane builds with the Devenv toolchain and the
-      # flake's pinned cvc5 (openspec converge-full-prove-on-devenv); the
-      # solver stack (z3, gappa, gmp, m4, make) comes from the Devenv shell.
-      - name: Compute the cvc5 toolchain cache key
-        id: cvc5-key
-        run: python3 -c 'import os, pathlib, subprocess; drv = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
-
+      # cvc5 closure cache: the shared composite pair derives one key from
+      # the cvc5-dir drvPath, so all lanes share one cached closure. The
+      # lane builds with the Devenv toolchain and the flake's pinned cvc5
+      # (openspec converge-full-prove-on-devenv); the solver stack (z3,
+      # gappa, gmp, m4, make) comes from the Devenv shell.
       - name: Restore the cvc5 toolchain closure
         id: cvc5-cache
-        uses: actions/cache/restore@v4
+        uses: ./.github/actions/cvc5-cache-restore
         with:
-          path: /tmp/chelis-cvc5-cache
-          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
-
-      - name: Import the cvc5 toolchain closure
-        if: steps.cvc5-cache.outputs.cache-hit == 'true'
-        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'
+          system: x86_64-linux
 
       - name: Build the pinned cvc5 tree and export CVC5_DIR
         run: |
@@ -96,20 +90,14 @@ jobs:
           nix build .#legacyPackages.x86_64-linux.cvc5-dir --out-link .cvc5-dir
           printf 'CVC5_DIR=%s\n' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"
 
-      # Export and save immediately after the closure exists, so a later
-      # prove failure does not lose the ~30m cold cvc5 build.
-      - name: Export the cvc5 toolchain closure
-        if: steps.cvc5-cache.outputs.cache-hit != 'true'
-        run: python3 -c 'import subprocess; out = subprocess.check_output(["nix", "eval", "--raw", ".#legacyPackages.x86_64-linux.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--to", "file:///tmp/chelis-cvc5-cache", out], check=True)'
-
+      # Save immediately after the closure exists, so a later prove
+      # failure does not lose the ~30m cold cvc5 build.
       - name: Save the cvc5 toolchain closure
-        if: steps.cvc5-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        # Best-effort: saving the closure cache must never fail the build.
-        continue-on-error: true
+        uses: ./.github/actions/cvc5-cache-save
         with:
-          path: /tmp/chelis-cvc5-cache
-          key: nix-cvc5-${{ steps.cvc5-key.outputs.key }}
+          system: x86_64-linux
+          cache-hit: ${{ steps.cvc5-cache.outputs.cache-hit }}
+          key: ${{ steps.cvc5-cache.outputs.key }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -125,44 +113,35 @@ jobs:
           cache-on-failure: true
 
       - name: Build smt feature
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo build -p chelis-cli --features smt
 
       - name: Run smt-gated chelis-prove tests
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo test -p chelis-prove --features smt
 
       - name: Run carcara-gated chelis-prove tests
         # The nightly parallel process exited with SIGSEGV after tests; the
         # same complete suite passed serially. Retain the full corpus while
         # containing that nondeterministic failure in this optional lane.
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo test -p chelis-prove --features carcara -- --test-threads=1
 
       # The Nix libz3.so needs the loader path at runtime; the Devenv shell
       # exports Z3_LIBRARY_PATH_OVERRIDE for z3-sys's link step.
       - name: Run z3-gated chelis-prove tests
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- bash -euo pipefail -c 'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"; cargo test -p chelis-prove --features z3'
 
       - name: Run cross-engine oracle (cvc5 + Z3 agreement)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- bash -euo pipefail -c 'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"; cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle'
 
       - name: Run clarabel-gated chelis-prove tests
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo test -p chelis-prove --features clarabel
 
       - name: Run the production solver config (cvc5 + Clarabel, both live)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo test -p chelis-prove --features "smt clarabel"
 
       - name: Re-validate committed Gappa proofs (--check-only)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- python scripts/generate_erf_proof.py --check-only
 
       - name: Arb cross-check (certify_erf_envelope validate)
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           devenv shell --no-tui -- cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
             -- validate crates/chelis-prove/data/erf_envelope.json
@@ -172,7 +151,6 @@ jobs:
         # Re-certifies each committed eps at its recorded subdivision count and
         # fails if any committed eps is below the fresh Arb bound (a shrunk /
         # tampered eps would forge a green). Mirrors the erf step above.
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: |
           devenv shell --no-tui -- bash -euo pipefail -c '
             for fn in exp log sqrt; do
@@ -182,7 +160,6 @@ jobs:
           '
 
       - name: Run arb-gated chelis-prove tests
-        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
         run: devenv shell --no-tui -- cargo test -p chelis-prove --features arb
 
   report:

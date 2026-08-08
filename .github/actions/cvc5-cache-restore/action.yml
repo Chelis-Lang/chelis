@@ -1,0 +1,47 @@
+# The restore half of the shared cvc5 closure cache. Every lane that
+# needs the pinned cvc5 tree (the SMT smoke lanes, the full-prove lane,
+# the release builds, the drift canary, and the native Nix package jobs)
+# derives the SAME key from the cvc5-dir drvPath, so one cached closure
+# serves them all. Pair with cvc5-cache-save after the step that
+# materializes the closure. Requires Nix on PATH (setup-devenv) and, when
+# the flake composes private inputs, the NIX_CONFIG access token already
+# exported.
+name: Restore cvc5 closure cache
+description: >-
+  Compute the pinned cvc5 derivation cache key, restore the shared
+  closure archive from actions/cache, and import it into the Nix store
+  on a hit.
+inputs:
+  system:
+    description: Nix system whose cvc5-dir closure is cached (for example x86_64-linux)
+    required: true
+outputs:
+  cache-hit:
+    description: Whether the closure archive was restored ('true' on a hit)
+    value: ${{ steps.restore.outputs.cache-hit }}
+  key:
+    description: Exact cache key derived from the cvc5-dir drvPath
+    value: ${{ steps.key.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - name: Compute the cvc5 toolchain cache key
+      id: key
+      shell: bash
+      env:
+        CVC5_SYSTEM: ${{ inputs.system }}
+      run: python3 -c 'import os, pathlib, subprocess; system = os.environ["CVC5_SYSTEM"]; drv = subprocess.check_output(["nix", "eval", "--raw", f".#legacyPackages.{system}.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
+
+    - name: Restore the cvc5 toolchain closure
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: /tmp/chelis-cvc5-cache
+        key: nix-cvc5-${{ steps.key.outputs.key }}
+
+    - name: Import the cvc5 toolchain closure
+      if: steps.restore.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        CVC5_SYSTEM: ${{ inputs.system }}
+      run: python3 -c 'import os, subprocess; system = os.environ["CVC5_SYSTEM"]; out = subprocess.check_output(["nix", "eval", "--raw", f".#legacyPackages.{system}.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'
