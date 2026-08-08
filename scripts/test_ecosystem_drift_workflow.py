@@ -13,6 +13,41 @@ WORKFLOW = (
 
 
 class EcosystemDriftWorkflowTests(unittest.TestCase):
+    def _build_job_block(self) -> str:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        return text.split("  build-chelis:", 1)[1].split("\n  drift:", 1)[0]
+
+    def test_build_job_ships_the_portable_release_output(self) -> None:
+        block = self._build_job_block()
+        self.assertIn(
+            "devenv build --no-tui --quiet outputs.release-chelis", block
+        )
+        self.assertIn("scripts/verify_release_chelis.py", block)
+        self.assertIn("--platform linux-x86_64", block)
+        self.assertIn("reef build packages/chelis-std", block)
+
+    def test_build_job_uses_no_host_toolchain(self) -> None:
+        block = self._build_job_block()
+        for marker in (
+            "dtolnay/rust-toolchain",
+            "astral-sh/setup-uv",
+            "scripts/ci_apt_get.py",
+            "scripts/ci_setup_uv_python.py",
+            "Swatinem/rust-cache",
+            "cargo build --release",
+            "strip target/release/chelis",
+        ):
+            self.assertNotIn(marker, block)
+
+    def test_build_job_stages_the_unpacked_release_tree(self) -> None:
+        block = self._build_job_block()
+        self.assertIn('cp "$HEAD_TOOLCHAIN/bin/chelis" "$staging/bin/"', block)
+        self.assertIn(
+            'cp "$HEAD_TOOLCHAIN/lib/libchelis_runtime.a" "$staging/lib/"', block
+        )
+        self.assertIn('cp "$HEAD_TOOLCHAIN"/include/*.h "$staging/include/"', block)
+        self.assertNotIn("cp target/release/chelis", block)
+
     def test_reef_canary_raises_the_whole_suite_timeout(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         reef_test_step = text.split(

@@ -60,6 +60,7 @@ DEVENV_COMMAND_PREFIX = "devenv shell --no-tui -- "
 DEVENV_WORKFLOW_JOBS = {
     "ci.yml": (
         "diagnostic-kind-oracle",
+        "rejection-authority-liveness",
         "lint-and-unit",
         "workspace-tests",
         "dtype-phase3-oracle",
@@ -74,6 +75,8 @@ DEVENV_WORKFLOW_JOBS = {
     "conformance-nightly.yml": ("conformance-nightly",),
     "heavy-e2e.yml": ("heavy-e2e",),
     "smt-full-prove.yml": ("full-smt-prove",),
+    "ecosystem-drift.yml": ("build-chelis",),
+    "loc-report.yml": ("loc-report",),
 }
 DOCS_ONLY_GATE_IF = (
     "if: ${{ !cancelled() && (needs.changes.result != 'success' "

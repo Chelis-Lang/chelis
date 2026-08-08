@@ -23,12 +23,31 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Pinned to v8.1.0 — see ci.yml lint-and-unit job for rationale.
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
 
+      # The Devenv shell composes the private Chelis-Lang/ci consumer module,
+      # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
+      - name: Mint a scoped token for the private ci input
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: ci
+
+      - name: Authenticate Nix to the private ci devenv input
+        shell: bash
+        env:
+          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+
+      # The Devenv shell supplies uv and the managed Python; the report
+      # anchors its output to the repo root, so the cwd stays here.
       - name: Generate LOC report
-        run: cd py && uv run loc-report
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+        run: devenv shell --no-tui -- uv run --project py loc-report
 
       - name: Commit LOC report
         run: |
