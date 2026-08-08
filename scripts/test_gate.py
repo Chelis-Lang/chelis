@@ -46,17 +46,28 @@ def _load_module():
 gate = _load_module()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-SPAN_COMMENTS_RS = REPO_ROOT / "crates" / "chelis-backend-c" / "tests" / "span_comments.rs"
+SPAN_COMMENTS_RS = (
+    REPO_ROOT / "crates" / "chelis-backend-c" / "tests" / "span_comments.rs"
+)
 SMT_FULL_PROVE_YML = REPO_ROOT / ".github" / "workflows" / "smt-full-prove.yml"
 CHELIS_PROVE_TOML = REPO_ROOT / "crates" / "chelis-prove" / "Cargo.toml"
 NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
+DEVENV_TOOLCHAINS_NIX = REPO_ROOT / "devenv" / "toolchains.nix"
 DEVENV_SETUP_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@"
-    "73f017c4d3179dc313844e9d5f08d17a7879c824"
+    "Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+)
+DEVENV_AUTH_ACTION = (
+    "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
+    "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
-DEVENV_COMMAND_PREFIX = "devenv shell --no-tui -- "
+DEVENV_COMMAND_PREFIX = "devenv --profile ci shell --no-tui -- "
+DEVENV_COMMAND_PREFIXES = (
+    DEVENV_COMMAND_PREFIX,
+    "devenv --profile sanitizers shell --no-tui -- ",
+    "devenv --profile smt shell --no-tui -- ",
+)
 DEVENV_WORKFLOW_JOBS = {
     "ci.yml": (
         "diagnostic-kind-oracle",
@@ -84,7 +95,7 @@ DOCS_ONLY_GATE_IF = (
 )
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
-    "devenv shell --no-tui -- "
+    "devenv --profile smt shell --no-tui -- "
     "cargo test -p chelis-prove --features carcara -- --test-threads=1"
 )
 
@@ -155,11 +166,7 @@ def _assert_carcara_full_suite_command(workflow: str) -> None:
     def run_steps() -> list[tuple[str, bool]]:
         lines = block.splitlines()
         steps_index = next(
-            (
-                index
-                for index, line in enumerate(lines)
-                if line.strip() == "steps:"
-            ),
+            (index for index, line in enumerate(lines) if line.strip() == "steps:"),
             None,
         )
         if steps_index is None:
@@ -255,8 +262,7 @@ def _assert_carcara_full_suite_command(workflow: str) -> None:
     canonical_steps = [
         command
         for command, conditional in carcara_steps
-        if not conditional
-        and shlex.split(command, comments=True) == canonical_words
+        if not conditional and shlex.split(command, comments=True) == canonical_words
     ]
     if len(carcara_steps) != 1 or canonical_steps != [CARCARA_FULL_SUITE_COMMAND]:
         raise AssertionError(
@@ -275,8 +281,7 @@ def _assert_carcara_feature_tree_is_gmp_only(feature_tree: str) -> None:
     active = [feature for feature in forbidden if feature in feature_tree]
     if active:
         raise AssertionError(
-            "Carcara feature graph must stay GMP-only; activated "
-            + ", ".join(active)
+            "Carcara feature graph must stay GMP-only; activated " + ", ".join(active)
         )
 
 
@@ -294,7 +299,9 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
                 "run: devenv build --no-tui outputs.chelis "
                 "outputs.chelis-runtime outputs.chelisup"
             ),
-            "uses: actions/create-github-app-token@",
+            f"uses: {DEVENV_AUTH_ACTION}",
+            "app-client-id: ${{ vars.CI_APP_ID }}",
+            "app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}",
         )
         for marker in required_markers:
             actual_count = block.count(marker)
@@ -310,16 +317,30 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
                 f"native Devenv setup in {job!r} must precede the runner verification"
             )
 
-    forbidden_markers = (
+    forbidden_setup_markers = (
         "uses: cachix/install-nix-action@",
         "uses: cachix/cachix-action@",
         "nix profile add github:cachix/devenv/",
+        "repositories: ci",
+        "access-tokens = github.com=",
     )
-    for marker in forbidden_markers:
+    for marker in forbidden_setup_markers:
         if marker in workflow:
             raise AssertionError(
                 f"native Devenv recipe duplicates central setup marker {marker!r}"
             )
+
+    forbidden_python_markers = (
+        "astral-sh/setup-uv",
+        "uv venv",
+        ".venv/bin/python",
+        ".devenv/state/venv/bin/python",
+    )
+    found_python = [marker for marker in forbidden_python_markers if marker in workflow]
+    if found_python:
+        raise AssertionError(
+            f"native Devenv recipe creates a host Python environment: {found_python!r}"
+        )
 
 
 def _assert_nix_docs_only_gate(workflow: str) -> None:
@@ -367,12 +388,21 @@ def _assert_runner_resource_bounds(workflow: str) -> None:
             if required not in block:
                 raise AssertionError(f"{job!r} must set {required!r} in NIX_CONFIG")
     linux = blocks.get("nix-linux-x86-64", "")
-    reclaim_index = linux.find("name: Reclaim runner disk space")
+    reclaim_action = (
+        "Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@"
+        "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+    )
+    reclaim_index = linux.find(f"uses: {reclaim_action}")
     setup_index = linux.find(f"uses: {DEVENV_SETUP_ACTION}")
     if reclaim_index < 0 or setup_index < 0 or reclaim_index > setup_index:
         raise AssertionError(
             "the Linux Nix job must reclaim runner disk before Devenv setup"
         )
+    if "sudo python3" in linux:
+        raise AssertionError("the Linux Nix job retains host disk cleanup")
+    darwin = blocks.get("nix-darwin-arm64", "")
+    if reclaim_action in darwin:
+        raise AssertionError("the Darwin Nix job must not run Ubuntu disk cleanup")
 
 
 def _assert_cvc5_closure_cache(workflow: str) -> None:
@@ -493,6 +523,7 @@ class DiagnosticKindOracleJobTests(unittest.TestCase):
                 "python scripts/diagnostic_kind_oracle.py",
             )
 
+
 # Whole WORKFLOW FILES that are out-of-scope-by-design for the per-PR developer
 # `gate.py` quartet (like the backend-sanitizers / macos-smoke jobs in ci.yml,
 # but in their own files). They run their own commands the gate does not
@@ -521,8 +552,8 @@ NON_GATE_WORKFLOWS = {
     # macOS. These jobs prove a separate source-build channel and do not run
     # commands from the canonical Cargo gate.
     "nix-packages.yml",
-    # Scheduled Actions-cache pruner (scripts/ci_cache_prune.py). Deletes stale
-    # caches to hold the pool under the 10GB LRU budget; runs no per-PR gate
+    # Scheduled shared Actions-cache pruner. Deletes stale caches to hold the
+    # pool under the repository limit; runs no per-PR gate
     # command. Out of gate.py scope by design.
     "cache-prune.yml",
     # OpenSpec validation uses the pinned central action in advisory mode.
@@ -616,9 +647,7 @@ class ListOutputTests(unittest.TestCase):
         self.assertIn("cargo test -p chelis-compiler-api --doc", rendered)
 
     def test_pipeline_compile_fail_contracts_are_in_the_lint_and_unit_stage(self):
-        rendered = [
-            gate.render(command) for command in gate.STAGES["lint-and-unit"]
-        ]
+        rendered = [gate.render(command) for command in gate.STAGES["lint-and-unit"]]
         for command in (
             "cargo test -p chelis-compiler-api --doc",
             "cargo test -p chelis-pipeline-core --doc",
@@ -639,9 +668,7 @@ class ListOutputTests(unittest.TestCase):
         # The dependency guard, documentation guard, and pipeline-artifact
         # compile-fail fixture must run in the per-PR gate (hosted CI runs
         # `gate.py lint-and-unit`), not only in the manual oracle.
-        rendered = [
-            gate.render(command) for command in gate.STAGES["lint-and-unit"]
-        ]
+        rendered = [gate.render(command) for command in gate.STAGES["lint-and-unit"]]
         for command in (
             "<managed-python> scripts/pipeline_core_dependency_guard.py",
             "<managed-python> scripts/pipeline_core_documentation_guard.py",
@@ -688,8 +715,9 @@ _GATE_COMMAND_PREFIXES = ("cargo ", "chelis ")
 
 def _unwrap_devenv_command(command: str) -> str:
     """Return the command that runs inside a single Devenv shell wrapper."""
-    if command.startswith(DEVENV_COMMAND_PREFIX):
-        return command.removeprefix(DEVENV_COMMAND_PREFIX)
+    for prefix in DEVENV_COMMAND_PREFIXES:
+        if command.startswith(prefix):
+            return command.removeprefix(prefix)
     return command
 
 
@@ -697,9 +725,7 @@ def _is_gate_relevant_command(command: str) -> bool:
     """True if `command` is a `cargo` or `chelis` invocation that a gate
     job must route through `gate.py` rather than hand-inline."""
     logical_command = _unwrap_devenv_command(command)
-    return any(
-        logical_command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES
-    )
+    return any(logical_command.startswith(prefix) for prefix in _GATE_COMMAND_PREFIXES)
 
 
 def _parse_ci_gate_invocations() -> dict[str, list[str]]:
@@ -742,32 +768,6 @@ def _parse_ci_gate_invocations() -> dict[str, list[str]]:
         if _is_gate_relevant_command(command):
             invocations[current_job].append(_unwrap_devenv_command(command))
     return invocations
-
-
-def _extract_ci_bash_array(name: str) -> list[str]:
-    """Extract a simple Bash array from `.github/workflows/ci.yml`.
-
-    The no-ai-authorship job stores its grep patterns as single-quoted
-    array entries. Keep this parser narrow so workflow shape changes are
-    surfaced by the tests instead of silently accepted.
-    """
-    lines = CI_YML.read_text().splitlines()
-    values: list[str] = []
-    inside = False
-    start = re.compile(rf"^\s*{re.escape(name)}=\(\s*$")
-    entry = re.compile(r"^\s*'(.+)'\s*$")
-    for line in lines:
-        if not inside:
-            if start.match(line):
-                inside = True
-            continue
-        if line.strip() == ")":
-            return values
-        m = entry.match(line)
-        if m is None:
-            raise AssertionError(f"unsupported {name} array line: {line!r}")
-        values.append(m.group(1))
-    raise AssertionError(f"missing Bash array {name} in {CI_YML}")
 
 
 def _ci_job_block(job: str) -> str:
@@ -816,16 +816,28 @@ def _workflow_job_block(path: Path, job: str) -> str:
     return "\n".join(lines[start:end])
 
 
-def _assert_devenv_job_recipe(job_block: str) -> None:
+def _assert_no_workflow_ci_policy(workflow: str) -> None:
+    forbidden = (
+        "CARGO_PROFILE_DEV_DEBUG:",
+        "CARGO_PROFILE_TEST_DEBUG:",
+        "CHELIS_C_TEST_EXTRA_FLAGS:",
+        "ASAN_OPTIONS:",
+        "UBSAN_OPTIONS:",
+    )
+    found = [marker for marker in forbidden if marker in workflow]
+    if found:
+        raise AssertionError(f"workflow duplicates Devenv CI policy: {found!r}")
+
+
+def _assert_devenv_job_recipe(job_block: str, expected_profile: str = "ci") -> None:
     """Require a converted job to use only the project Devenv toolchains."""
     required = (
         f"uses: {DEVENV_SETUP_ACTION}",
-        "uses: actions/create-github-app-token@",
-        "repositories: ci",
-        "NIX_CONFIG<<EOF\\n%s\\naccess-tokens = github.com=%s\\nEOF\\n",
-        '"$NIX_CONFIG" "$CI_TOKEN"',
+        f"uses: {DEVENV_AUTH_ACTION}",
+        "app-client-id: ${{ vars.CI_APP_ID }}",
+        "app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}",
         f"shell: {PORTABLE_DEVENV_SHELL}",
-        f"run: {DEVENV_COMMAND_PREFIX}",
+        f"run: devenv --profile {expected_profile} ",
     )
     missing = [marker for marker in required if marker not in job_block]
     if missing:
@@ -839,6 +851,8 @@ def _assert_devenv_job_recipe(job_block: str) -> None:
         ".venv/bin/python",
         ".devenv/state/venv/bin/python",
         "uv pip install",
+        "repositories: ci",
+        "access-tokens = github.com=",
     )
     found = [marker for marker in forbidden if marker in job_block]
     if found:
@@ -883,11 +897,37 @@ def _rust_cache_inputs(job_block: str) -> dict[str, str]:
 
 class DevenvWorkflowJobTests(unittest.TestCase):
     def test_converted_jobs_use_the_project_devenv_toolchains(self) -> None:
+        focused_profiles = {
+            ("ci.yml", "backend-sanitizers"): "sanitizers",
+            ("ci.yml", "smt-build"): "smt",
+            ("ci.yml", "smt-build-darwin-arm64"): "smt",
+            ("smt-full-prove.yml", "full-smt-prove"): "smt",
+        }
         for filename, jobs in DEVENV_WORKFLOW_JOBS.items():
             path = WORKFLOWS_DIR / filename
             for job in jobs:
                 with self.subTest(filename=filename, job=job):
-                    _assert_devenv_job_recipe(_workflow_job_block(path, job))
+                    _assert_devenv_job_recipe(
+                        _workflow_job_block(path, job),
+                        focused_profiles.get((filename, job), "ci"),
+                    )
+
+    def test_a_wrong_focused_profile_fails_the_recipe(self) -> None:
+        block = _ci_job_block("backend-sanitizers")
+        mutated = block.replace("--profile sanitizers", "--profile ci", 1)
+        with self.assertRaisesRegex(AssertionError, "profile sanitizers"):
+            _assert_devenv_job_recipe(mutated, "sanitizers")
+
+    def test_ci_environment_policy_is_not_duplicated_in_workflows(self) -> None:
+        for path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+            with self.subTest(workflow=path.name):
+                _assert_no_workflow_ci_policy(path.read_text(encoding="utf-8"))
+
+    def test_a_duplicated_ci_environment_value_fails_the_contract(self) -> None:
+        workflow = CI_YML.read_text(encoding="utf-8")
+        mutated = workflow + "\nenv:\n  CARGO_PROFILE_DEV_DEBUG: 0\n"
+        with self.assertRaisesRegex(AssertionError, "duplicates Devenv CI policy"):
+            _assert_no_workflow_ci_policy(mutated)
 
     def test_host_uv_setup_fails_the_devenv_recipe(self) -> None:
         block = _ci_job_block("lint-and-unit")
@@ -1061,7 +1101,7 @@ class CiParityTests(unittest.TestCase):
         wrapped = f"{DEVENV_COMMAND_PREFIX}{command}"
         mutated = block.replace(
             f"run: {wrapped}",
-            f"# run: {wrapped}\n        run: \"true\"",
+            f'# run: {wrapped}\n        run: "true"',
             1,
         )
         with self.assertRaises(AssertionError):
@@ -1173,14 +1213,31 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "aarch64-linux"):
             _assert_nix_system_job_parity(contracts, workflow)
 
-    def test_each_native_job_runs_the_nix_contract_suite_with_project_python(self):
+    def test_each_native_job_runs_the_nix_contract_suite_with_devenv_python(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        self.assertEqual(text.count("uses: astral-sh/setup-uv@v8.1.0"), 2)
-        self.assertEqual(text.count("run: uv venv --python 3.11 .venv"), 2)
+        self.assertNotIn("astral-sh/setup-uv", text)
+        self.assertNotIn("uv venv", text)
+        self.assertNotIn(".venv/bin/python", text)
         self.assertEqual(
-            text.count("run: .venv/bin/python scripts/test_nix_flake_contract.py"),
+            text.count(
+                "run: devenv --profile ci shell --no-tui -- "
+                "python scripts/test_nix_flake_contract.py"
+            ),
             2,
         )
+
+    def test_host_python_environment_fails_the_native_recipe(self):
+        text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "run: devenv --profile ci shell --no-tui -- "
+            "python scripts/test_nix_flake_contract.py",
+            "uses: astral-sh/setup-uv@v8.1.0\n"
+            "      - run: uv venv --python 3.11 .venv\n"
+            "      - run: .venv/bin/python scripts/test_nix_flake_contract.py",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "host Python"):
+            _assert_native_devenv_recipe(mutated)
 
     def test_each_native_job_uses_the_reviewed_portable_devenv_base(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
@@ -1197,14 +1254,10 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "devenv build"):
             _assert_native_devenv_recipe(mutated)
 
-    def test_missing_ci_app_token_fails_the_native_recipe(self):
+    def test_missing_private_ci_authentication_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace(
-            "uses: actions/create-github-app-token@",
-            "uses: omitted@",
-            1,
-        )
-        with self.assertRaisesRegex(AssertionError, "create-github-app-token"):
+        mutated = text.replace(f"uses: {DEVENV_AUTH_ACTION}", "uses: omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "authenticate-private-ci-input"):
             _assert_native_devenv_recipe(mutated)
 
     def test_missing_central_devenv_action_fails_the_native_recipe(self):
@@ -1252,8 +1305,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         mutated = text.replace(
             "    if: github.event_name == 'workflow_dispatch'\n",
-            "    needs: [changes]\n"
-            f"    {DOCS_ONLY_GATE_IF}\n",
+            f"    needs: [changes]\n    {DOCS_ONLY_GATE_IF}\n",
             1,
         )
         with self.assertRaisesRegex(AssertionError, "manual dispatch as its only"):
@@ -1283,7 +1335,12 @@ class NixPackagesWorkflowTests(unittest.TestCase):
 
     def test_missing_disk_reclaim_fails_the_resource_lock(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
-        mutated = text.replace("name: Reclaim runner disk space", "name: omitted", 1)
+        mutated = text.replace(
+            "Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@"
+            "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9",
+            "missing-reclaim-action",
+            1,
+        )
         with self.assertRaisesRegex(AssertionError, "reclaim runner disk"):
             _assert_runner_resource_bounds(mutated)
 
@@ -1356,8 +1413,8 @@ class SmtCiSplitTests(unittest.TestCase):
             "workflow_dispatch:",
             "shared-key: smt-smt-build",
             "cargo test -p chelis-prove --features smt",
-            "cargo test -p chelis-prove --features z3",
-            'cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
+            "chelis-z3-test --cargo-subcommand test -p chelis-prove --features z3",
+            'chelis-z3-test --cargo-subcommand test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
             "cargo test -p chelis-prove --features clarabel",
             'cargo test -p chelis-prove --features "smt clarabel"',
             "scripts/generate_erf_proof.py --check-only",
@@ -1388,7 +1445,9 @@ class SmtCiSplitTests(unittest.TestCase):
             "        run: cargo test -p chelis-prove --features carcara "
             "run_carcara_check -- --test-threads=1",
         )
-        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+        with self.assertRaisesRegex(
+            AssertionError, "complete serialized Carcara suite"
+        ):
             _assert_carcara_full_suite_command(filtered)
 
         duplicated = text.replace(
@@ -1397,7 +1456,9 @@ class SmtCiSplitTests(unittest.TestCase):
             "      - name: Accidental parallel Carcara rerun\n"
             "        run: cargo test -p chelis-prove --features carcara",
         )
-        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+        with self.assertRaisesRegex(
+            AssertionError, "complete serialized Carcara suite"
+        ):
             _assert_carcara_full_suite_command(duplicated)
 
         for alternate in (
@@ -1427,7 +1488,9 @@ class SmtCiSplitTests(unittest.TestCase):
             "        run: |\n"
             "          cargo test -p chelis-prove --features carcara\n",
         )
-        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+        with self.assertRaisesRegex(
+            AssertionError, "complete serialized Carcara suite"
+        ):
             _assert_carcara_full_suite_command(multiline)
 
         disabled = text.replace(
@@ -1439,23 +1502,24 @@ class SmtCiSplitTests(unittest.TestCase):
             "          cargo test -p chelis-prove --features carcara "
             "run_carcara_check -- --test-threads=1\n",
         )
-        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+        with self.assertRaisesRegex(
+            AssertionError, "complete serialized Carcara suite"
+        ):
             _assert_carcara_full_suite_command(disabled)
 
         conditional = text.replace(
             f"run: {CARCARA_FULL_SUITE_COMMAND}",
-            "if: ${{ always() }}\n"
-            f"        run: {CARCARA_FULL_SUITE_COMMAND}",
+            f"if: ${{{{ always() }}}}\n        run: {CARCARA_FULL_SUITE_COMMAND}",
         )
-        with self.assertRaisesRegex(AssertionError, "complete serialized Carcara suite"):
+        with self.assertRaisesRegex(
+            AssertionError, "complete serialized Carcara suite"
+        ):
             _assert_carcara_full_suite_command(conditional)
 
     def test_carcara_dependency_stays_gmp_only(self):
         text = CHELIS_PROVE_TOML.read_text()
         dependency = next(
-            line
-            for line in text.splitlines()
-            if line.startswith("gmp-mpfr-sys = ")
+            line for line in text.splitlines() if line.startswith("gmp-mpfr-sys = ")
         )
         self.assertIn("default-features = false", dependency)
         self.assertIn("optional = true", dependency)
@@ -1541,15 +1605,8 @@ def _parse_job_attrs() -> dict[str, dict[str, str]]:
 
 
 def _backend_sanitizer_optimization_errors(text: str) -> list[str]:
-    block = _workflow_job_blocks(text).get("backend-sanitizers", "")
-    flags = next(
-        (
-            line
-            for line in block.splitlines()
-            if line.strip().startswith("CHELIS_C_TEST_EXTRA_FLAGS:")
-        ),
-        "",
-    )
+    match = re.search(r'CHELIS_C_TEST_EXTRA_FLAGS\s*=\s*"(?P<flags>[^"]+)";', text)
+    flags = "" if match is None else match.group("flags")
     if re.search(r"(?:^|\s)-O(?:1|2)(?:\s|$)", flags) is None:
         return ["backend-sanitizers: C sanitizer flags need -O1 or -O2"]
     return []
@@ -1568,11 +1625,12 @@ def _backend_span_compile_optimization_errors(text: str) -> list[str]:
 class BackendSanitizerWorkflowTests(unittest.TestCase):
     def test_c_sanitizer_flags_satisfy_nix_fortify(self) -> None:
         self.assertEqual(
-            _backend_sanitizer_optimization_errors(CI_YML.read_text()), []
+            _backend_sanitizer_optimization_errors(DEVENV_TOOLCHAINS_NIX.read_text()),
+            [],
         )
 
     def test_c_sanitizer_guard_rejects_missing_optimization(self) -> None:
-        text = CI_YML.read_text()
+        text = DEVENV_TOOLCHAINS_NIX.read_text()
         mutated = text.replace("-O1 ", "", 1)
         self.assertEqual(
             _backend_sanitizer_optimization_errors(mutated),
@@ -1603,8 +1661,7 @@ class MacosManualOnlyTests(unittest.TestCase):
             for job, block in _workflow_job_blocks(text).items():
                 direct_macos = "runs-on: macos-latest" in block
                 matrix_macos = (
-                    "runs-on: ${{ matrix.os }}" in block
-                    and "os: macos-latest" in block
+                    "runs-on: ${{ matrix.os }}" in block and "os: macos-latest" in block
                 )
                 if direct_macos or matrix_macos:
                     found.append((path.name, job))
@@ -1687,9 +1744,7 @@ class DocsOnlySkipTests(unittest.TestCase):
 
     def test_changes_job_exists_and_is_ungated(self):
         attrs = _parse_job_attrs()
-        self.assertIn(
-            "changes", attrs, "the docs-only detector job must exist"
-        )
+        self.assertIn("changes", attrs, "the docs-only detector job must exist")
         # The changes job itself must not be gated on its own output and
         # must always run so its result/output are well-defined.
         self.assertNotIn("if", attrs["changes"])
@@ -1725,8 +1780,7 @@ class DocsOnlySkipTests(unittest.TestCase):
             if stripped.startswith("#"):
                 continue
             self.assertFalse(
-                stripped.startswith("paths-ignore:")
-                or stripped.startswith("paths:"),
+                stripped.startswith("paths-ignore:") or stripped.startswith("paths:"),
                 f"ci.yml uses a path filter ({stripped!r}); a path-filtered "
                 f"required check hangs pending forever. Use a job-level `if` "
                 f"on the changes output instead (chelis#419)",
@@ -1827,46 +1881,17 @@ class DocsOnlySkipTests(unittest.TestCase):
 
 
 class NoAiAuthorshipTests(unittest.TestCase):
-    def test_kiro_is_banned_in_authorship_patterns(self):
-        message_patterns = _extract_ci_bash_array("AI_MSG_PATTERNS")
-        identity_patterns = _extract_ci_bash_array("AI_IDENTITY_PATTERNS")
-        all_patterns = message_patterns + identity_patterns
-        self.assertTrue(
-            all_patterns,
-            "expected no-ai-authorship patterns in ci.yml",
+    def test_required_job_uses_the_reviewed_shared_profile(self):
+        block = _ci_job_block("no-ai-authorship")
+        self.assertIn("name: No AI authorship markers", block)
+        self.assertIn(
+            "uses: Chelis-Lang/ci/actions/check-authorship@"
+            "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9",
+            block,
         )
-        self.assertTrue(
-            any("kiro" in pattern.lower() for pattern in all_patterns),
-            f"Kiro missing from no-ai-authorship patterns: {all_patterns}",
-        )
-
-    def test_kiro_authorship_examples_match_workflow_patterns(self):
-        message_patterns = _extract_ci_bash_array("AI_MSG_PATTERNS")
-        identity_patterns = _extract_ci_bash_array("AI_IDENTITY_PATTERNS")
-        message_examples = [
-            "Co-Authored-By: Kiro <kiro@example.invalid>",
-            "Generated by Kiro",
-        ]
-        identity_examples = [
-            "Kiro <kiro@example.invalid>",
-            "Jane Kiro <jane@example.invalid>",
-        ]
-        for example in message_examples:
-            self.assertTrue(
-                any(
-                    re.search(pattern, example, re.IGNORECASE)
-                    for pattern in message_patterns
-                ),
-                f"message example was not banned by AI_MSG_PATTERNS: {example!r}",
-            )
-        for example in identity_examples:
-            self.assertTrue(
-                any(
-                    re.search(pattern, example, re.IGNORECASE)
-                    for pattern in identity_patterns
-                ),
-                f"identity example was not banned by AI_IDENTITY_PATTERNS: {example!r}",
-            )
+        self.assertIn("profile: all-markers", block)
+        self.assertNotIn("AI_MSG_PATTERNS", block)
+        self.assertNotIn("AI_IDENTITY_PATTERNS", block)
 
 
 class TomllibImportGuardTests(unittest.TestCase):
@@ -1884,13 +1909,19 @@ class TomllibImportGuardTests(unittest.TestCase):
         for line in lines:
             # Any line that starts a top-level def/class ends the import
             # region we care about; function-local `import tomllib` is fine.
-            if line and not line[0].isspace() and (
-                line.startswith("def ") or line.startswith("class ")
+            if (
+                line
+                and not line[0].isspace()
+                and (line.startswith("def ") or line.startswith("class "))
             ):
                 in_func = True
             stripped = line.strip()
-            if stripped == "import tomllib" and not in_func and (
-                line == stripped  # zero indentation == module top
+            if (
+                stripped == "import tomllib"
+                and not in_func
+                and (
+                    line == stripped  # zero indentation == module top
+                )
             ):
                 self.fail(
                     "gate.py imports tomllib at module top; defer it into "
@@ -1910,11 +1941,13 @@ class TomllibImportGuardTests(unittest.TestCase):
                 raise ModuleNotFoundError("No module named 'tomllib'")
             return real_import(name, *args, **kwargs)
 
-        ns: dict = {"__name__": "gate_under_test", "__file__": str(
-            REPO_ROOT / "scripts" / "gate.py"
-        ), "__builtins__": dict(__builtins__) if isinstance(
-            __builtins__, dict
-        ) else dict(vars(__builtins__))}
+        ns: dict = {
+            "__name__": "gate_under_test",
+            "__file__": str(REPO_ROOT / "scripts" / "gate.py"),
+            "__builtins__": dict(__builtins__)
+            if isinstance(__builtins__, dict)
+            else dict(vars(__builtins__)),
+        }
         ns["__builtins__"]["__import__"] = fake_import
         # exec must not raise: the top-level import block has no tomllib.
         exec(compile(source, "gate.py", "exec"), ns)
@@ -1935,11 +1968,13 @@ class TomllibImportGuardTests(unittest.TestCase):
                 raise ModuleNotFoundError("No module named 'tomllib'")
             return real_import(name, *args, **kwargs)
 
-        ns: dict = {"__name__": "gate_under_test", "__file__": str(
-            REPO_ROOT / "scripts" / "gate.py"
-        ), "__builtins__": dict(__builtins__) if isinstance(
-            __builtins__, dict
-        ) else dict(vars(__builtins__))}
+        ns: dict = {
+            "__name__": "gate_under_test",
+            "__file__": str(REPO_ROOT / "scripts" / "gate.py"),
+            "__builtins__": dict(__builtins__)
+            if isinstance(__builtins__, dict)
+            else dict(vars(__builtins__)),
+        }
         ns["__builtins__"]["__import__"] = fake_import
         exec(compile(source, "gate.py", "exec"), ns)
         err = io.StringIO()

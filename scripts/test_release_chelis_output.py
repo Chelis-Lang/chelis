@@ -17,19 +17,23 @@ RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 SETUP_DEVENV_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824"
+    "Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+)
+AUTH_DEVENV_ACTION = (
+    "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
+    "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
 )
 BUILD_JOB_REQUIRED_MARKERS = (
     SETUP_DEVENV_ACTION,
-    "actions/create-github-app-token@",
-    "repositories: ci",
-    "access-tokens = github.com=$CI_TOKEN",
+    AUTH_DEVENV_ACTION,
+    "app-client-id: ${{ vars.CI_APP_ID }}",
+    "app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}",
     "os: ubuntu-latest",
     "slug: linux-x86_64",
     "os: macos-latest",
     "slug: darwin-arm64",
     "devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json",
-    "python scripts/verify_release_chelis.py",
+    "devenv --profile ci shell --no-tui -- python scripts/verify_release_chelis.py",
     "--build-json release-chelis-build.json",
     "--stage-root release-chelis",
     "--platform ${{ matrix.slug }}",
@@ -151,7 +155,9 @@ def floor_contract_errors(contracts: str) -> list[str]:
     if floor is None:
         errors.append("contracts must record linuxReleaseGlibcFloor as MAJOR.MINOR")
     if consumption is None:
-        errors.append("contracts must record linuxReleaseConsumptionGlibc as MAJOR.MINOR")
+        errors.append(
+            "contracts must record linuxReleaseConsumptionGlibc as MAJOR.MINOR"
+        )
     if floor is not None and consumption is not None and floor > consumption:
         errors.append(
             "recorded glibc floor exceeds the off-Nix consumption environment"
@@ -192,7 +198,10 @@ class ReleaseChelisSourceContractTests(unittest.TestCase):
                 self.assertIn(f"release helper is missing {marker}", errors)
 
     def test_musl_runtime_target_fails(self) -> None:
-        helper = RELEASE_HELPER.read_text(encoding="utf-8") + "\n# x86_64-unknown-linux-musl\n"
+        helper = (
+            RELEASE_HELPER.read_text(encoding="utf-8")
+            + "\n# x86_64-unknown-linux-musl\n"
+        )
         errors = release_source_contract_errors(
             root_devenv=ROOT_DEVENV.read_text(encoding="utf-8"),
             release_module=RELEASE_MODULE.read_text(encoding="utf-8"),
@@ -221,9 +230,9 @@ class ReleaseChelisSourceContractTests(unittest.TestCase):
     def test_asset_name_matches_the_installer_request(self) -> None:
         install = CHELISUP_INSTALL.read_text(encoding="utf-8")
         helper = RELEASE_HELPER.read_text(encoding="utf-8")
-        self.assertIn('chelis-v{version}-{slug}.tar.gz', install)
+        self.assertIn("chelis-v{version}-{slug}.tar.gz", install)
         self.assertIn('("linux", "x86_64") => Ok("linux-x86_64")', install)
-        self.assertIn('chelis-v${version}-${platformSlug}', helper)
+        self.assertIn("chelis-v${version}-${platformSlug}", helper)
         self.assertIn('"linux-x86_64"', helper)
         self.assertIn('"darwin-arm64"', helper)
 

@@ -7,7 +7,7 @@
 
 ## 2. Rewrite the smoke lanes
 
-- [x] 2.1 Rewrite `smt-build`: pinned setup-devenv, private-ci auth, `cvc5-dir` closure cache, `nix build` + `CVC5_DIR` export, `devenv shell` build/verify/test. Job name, docs-only gate, and `Swatinem/rust-cache` shared key kept; timeout raised to 75m for the cold-closure case.
+- [x] 2.1 Rewrite `smt-build`: pinned setup-devenv, private-ci authentication, the `cvc5-dir` closure cache, `outputs.cvc5-dir`, and the `smt` profile. Keep the job name, docs-only gate, `Swatinem/rust-cache` shared key, and the 75-minute cold-closure timeout.
 - [x] 2.2 Rewrite `smt-build-darwin-arm64` the same way for `aarch64-darwin`; manual dispatch condition kept.
 - [x] 2.3 Remove the durable-asset `fetch` step from `smt-full-prove.yml`; the Actions-cache harvest cycle stays, with an updated lane comment.
 
@@ -25,8 +25,8 @@
 
 ## 5. Validate and accept
 
-- [ ] 5.1 Run the scripts test suite and confirm every mutation fails correctly.
-- [ ] 5.2 Run `python3 scripts/gate.py --local`.
+- [x] 5.1 Run the scripts test suite and confirm every mutation fails correctly.
+- [x] 5.2 Run `python3 scripts/gate.py --local`.
 - [ ] 5.3 Land through a pull request; the required `SMT Feature Build (Linux)` run with a Nix store `CVC5_DIR` in its log is the authoritative completion oracle.
 - [ ] 5.4 Dispatch `smt-build-darwin-arm64` once and record the result.
 - [ ] 5.5 File the follow-up issue for the `smt-full-prove` Devenv conversion (z3, Gappa, m4, Arb wiring) and the `ci_cvc5_cache.py` trim.

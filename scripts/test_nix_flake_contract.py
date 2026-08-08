@@ -26,6 +26,22 @@ EXPECTED_HEADERS = [
     "chelis_simd.h",
     "chelis_math.h",
 ]
+
+
+def assert_nix_format_inventory_contract(checks: str) -> None:
+    required = (
+        "lib.filesystem.listFilesRecursive root",
+        'lib.hasSuffix ".nix"',
+        '(toString path) != "${toString root}/Cargo.nix"',
+        "lib.escapeShellArgs nixFormatFiles",
+    )
+    missing = [marker for marker in required if marker not in checks]
+    if missing:
+        raise AssertionError(f"the Nix format inventory is incomplete: {missing!r}")
+    if "${root}/devenv/commands.nix" in checks:
+        raise AssertionError("the Nix format inventory must not list files manually")
+
+
 def nix_json(*args: str) -> object:
     completed = subprocess.run(
         [NIX, *args],
@@ -182,6 +198,20 @@ class NixFlakeContractTests(unittest.TestCase):
         checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
         self.assertIn("assert_exact_inventory", checks)
         self.assertIn('find "$package" -mindepth 1 -printf \'%P\\n\' | sort', checks)
+
+    def test_nix_format_uses_the_tracked_source_inventory(self) -> None:
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        assert_nix_format_inventory_contract(checks)
+
+    def test_a_manual_nix_format_file_list_fails_the_contract(self) -> None:
+        checks = (REPO_ROOT / "nix" / "checks.nix").read_text(encoding="utf-8")
+        mutated = checks.replace(
+            "lib.filesystem.listFilesRecursive root",
+            "[ ${root}/devenv/commands.nix ]",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "format inventory"):
+            assert_nix_format_inventory_contract(mutated)
 
     def test_static_cvc5_library_does_not_force_a_static_executable(self) -> None:
         cvc5 = (REPO_ROOT / "nix" / "cvc5.nix").read_text(encoding="utf-8")

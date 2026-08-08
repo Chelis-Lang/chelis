@@ -39,7 +39,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+
       - name: Validate OpenSpec tree
-        uses: Chelis-Lang/ci/actions/openspec-governance@74f11c693992cfa9278b93b0117778f6b38bfe16 # ci#32 with ci#30 advisory mode
+        uses: Chelis-Lang/ci/actions/openspec-governance@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
           mode: advisory

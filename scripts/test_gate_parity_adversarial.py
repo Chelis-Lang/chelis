@@ -105,7 +105,7 @@ class GateParityAdversarialTests(unittest.TestCase):
         mutated = self.ci_text.replace(
             ANCHOR,
             "      - name: Sneaky Devenv-wrapped cargo step\n"
-            "        run: devenv shell --no-tui -- cargo test --workspace --doc\n\n"
+            "        run: devenv --profile ci shell --no-tui -- cargo test --workspace --doc\n\n"
             + ANCHOR,
             1,
         )

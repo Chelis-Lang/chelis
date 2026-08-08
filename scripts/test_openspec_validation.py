@@ -14,7 +14,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_openspec.py"
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "openspec-validate.yml"
-CI_ACTION_SHA = "74f11c693992cfa9278b93b0117778f6b38bfe16"
+CI_ACTION_SHA = "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
 CHECKOUT_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 REMOTE_USES = re.compile(r"(?m)^\s*uses:\s*([^@\s]+)@([^\s#]+)")
 MODE_VALUE = re.compile(r"(?m)^\s+mode:\s*(\S+)\s*$")
@@ -31,6 +31,7 @@ def workflow_diagnostics(text: str) -> list[str]:
     diagnostics: list[str] = []
     expected_references = [
         ("actions/checkout", CHECKOUT_SHA),
+        ("Chelis-Lang/ci/actions/setup-devenv", CI_ACTION_SHA),
         ("Chelis-Lang/ci/actions/openspec-governance", CI_ACTION_SHA),
     ]
     if REMOTE_USES.findall(text) != expected_references:
@@ -55,7 +56,13 @@ class WorkflowContractTests(unittest.TestCase):
     def test_workflow_contract_rejects_negative_mutations(self) -> None:
         text = WORKFLOW_PATH.read_text(encoding="utf-8")
         fixtures = {
-            "mutable-action": text.replace(CI_ACTION_SHA, "main"),
+            "mutable-action": text.replace(CI_ACTION_SHA, "main", 1),
+            "missing-setup": text.replace(
+                "      - name: Set up portable Devenv\n"
+                f"        uses: Chelis-Lang/ci/actions/setup-devenv@{CI_ACTION_SHA} "
+                "# ci#50 shared composition\n\n",
+                "",
+            ),
             "mutable-checkout": text.replace(CHECKOUT_SHA, "v7"),
             "enforced-mode": text.replace("mode: advisory", "mode: enforce"),
             "second-mode": text + "\n# fixture\n          mode: enforce\n",

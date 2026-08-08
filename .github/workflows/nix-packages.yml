@@ -63,33 +63,18 @@ jobs:
       # The hosted runner root disk cannot hold the cold Nix closure next to
       # the preinstalled toolchains this job never uses.
       - name: Reclaim runner disk space
-        shell: bash
-        run: sudo python3 -c 'import shutil; [shutil.rmtree(path, ignore_errors=True) for path in ("/usr/share/dotnet", "/usr/local/lib/android", "/usr/local/.ghcup", "/opt/hostedtoolcache/CodeQL")]'
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
       - uses: actions/checkout@v6
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
       # The Devenv shell composes the private Chelis-Lang/ci consumer module, so
       # Nix needs a token to fetch it. Mint a short-lived, contents:read token
       # scoped to ci from the CI GitHub App and append it to NIX_CONFIG.
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: |
-          {
-            echo "NIX_CONFIG<<EOF"
-            printf '%s\n' "$NIX_CONFIG"
-            echo "access-tokens = github.com=$CI_TOKEN"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - name: Verify the runner system
         run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "x86_64-linux", system'
       - name: Verify the Nix sandbox
@@ -99,16 +84,12 @@ jobs:
         uses: ./.github/actions/cvc5-cache-restore
         with:
           system: x86_64-linux
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-      - name: Create the project Python environment
-        run: uv venv --python 3.11 .venv
       - name: Run the Devenv shell smoke checks
         run: devenv test --no-tui
       - name: Build the Devenv package outputs
         run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup
       - name: Run the Nix flake contract suite
-        run: .venv/bin/python scripts/test_nix_flake_contract.py
+        run: devenv --profile ci shell --no-tui -- python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
       - name: Save the cvc5 toolchain closure
@@ -137,26 +118,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: |
-          {
-            echo "NIX_CONFIG<<EOF"
-            printf '%s\n' "$NIX_CONFIG"
-            echo "access-tokens = github.com=$CI_TOKEN"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
       - name: Verify the runner system
         run: python3 -c 'import subprocess; system = subprocess.check_output(["nix", "eval", "--impure", "--raw", "--expr", "builtins.currentSystem"], text=True).strip(); assert system == "aarch64-darwin", system'
       - name: Verify the Nix sandbox
@@ -166,16 +133,12 @@ jobs:
         uses: ./.github/actions/cvc5-cache-restore
         with:
           system: aarch64-darwin
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-      - name: Create the project Python environment
-        run: uv venv --python 3.11 .venv
       - name: Run the Devenv shell smoke checks
         run: devenv test --no-tui
       - name: Build the Devenv package outputs
         run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup
       - name: Run the Nix flake contract suite
-        run: .venv/bin/python scripts/test_nix_flake_contract.py
+        run: devenv --profile ci shell --no-tui -- python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
       - name: Save the cvc5 toolchain closure

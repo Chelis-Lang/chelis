@@ -251,6 +251,35 @@ The Linux shell MUST also provide GCC, OpenBLAS, and Valgrind. The macOS shell M
 - **WHEN** a contributor evaluates the package list on macOS
 - **THEN** the shell does not add OpenBLAS or Valgrind
 
+### Requirement: Devenv provides focused CI profiles
+The shell MUST define `ci`, `sanitizers`, and `smt` profiles.
+
+The `ci` profile MUST set development and test Cargo debug information to zero. The `sanitizers` profile MUST extend `ci`.
+
+The `sanitizers` profile MUST own the C sanitizer flags and runtime options. The sanitizer flags MUST include optimization for the Nix fortify contract.
+
+The `smt` profile MUST extend `ci`. It MUST set `CVC5_DIR` from the lazy `outputs.cvc5-dir` Devenv output.
+
+The base shell MUST NOT set `CVC5_DIR`. Thus, ordinary shell activation does not force the cvc5 closure.
+
+#### Scenario: A contributor reproduces the CI Cargo environment
+- **WHEN** a contributor activates the `ci` profile
+- **THEN** Cargo development and test builds omit debug information
+
+#### Scenario: A contributor runs the sanitizer profile
+- **WHEN** a contributor activates the `sanitizers` profile
+- **THEN** the profile provides the complete sanitizer environment
+- **AND** it retains the CI Cargo policy
+
+#### Scenario: A contributor runs the SMT profile
+- **WHEN** a contributor activates the `smt` profile
+- **THEN** `CVC5_DIR` identifies the pinned cvc5 prebuilt tree
+- **AND** it retains the CI Cargo policy
+
+#### Scenario: A contributor enters the base shell
+- **WHEN** no SMT profile is active
+- **THEN** the shell does not add the cvc5 output to the environment
+
 ### Requirement: Devenv manages the Python environment
 The shell MUST enable Python 3.11, uv, and the Devenv Python virtual environment.
 
@@ -348,6 +377,8 @@ Each job MUST use `devenv-ci bash --noprofile --norc -e -o pipefail {0}` as its 
 The workflow MUST NOT duplicate the direct Nix, Cachix, or Devenv bootstrap. The reviewed action supplies Nix 2.34.4 and Devenv v2.2.
 
 Each job MUST run `devenv test --no-tui` and `devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup`. The Devenv cache MUST NOT replace the complete native flake check.
+
+Each Python helper MUST use the interpreter from `devenv --profile ci shell`. A native job MUST NOT install host uv or create `.venv`.
 
 The public Devenv cache does not contain the custom Chelis cvc5 derivation. Each job MAY reuse the prebuilt cvc5 toolchain closure from the repository Actions cache, keyed by the closure derivation name.
 

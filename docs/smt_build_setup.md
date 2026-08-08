@@ -80,9 +80,9 @@ cargo test -p chelis-prove --features carcara -- --test-threads=1
 
 The required `smt-build` job in `.github/workflows/ci.yml` keeps the branch
 protection context name `SMT Feature Build (Linux)`, but it is now the fast
-SMT smoke lane. It builds on the Devenv toolchain, links the flake's pinned
-cvc5 tree through `CVC5_DIR` (see "The pinned cvc5 supply" below), runs
-`cargo build -p chelis-cli --features smt` inside `devenv shell`, verifies
+SMT smoke lane. It builds on the Devenv toolchain and activates the `smt`
+profile. That profile sets `CVC5_DIR` from `outputs.cvc5-dir`. The lane runs
+`cargo build -p chelis-cli --features smt` inside that profile and verifies
 the built binary discharges a real obligation through cvc5 with
 `.github/scripts/verify_release_smt.py`, and runs a narrow cvc5 engine smoke
 (`cargo test -p chelis-prove --features smt --lib cvc5_engine_`). It is a
@@ -114,16 +114,16 @@ before reaching its proof steps.
 
 Building cvc5 from source is ~22 minutes of CMake/make. Every SMT lane
 (`smt-build`, the manual `smt-build-darwin-arm64`, and `full-smt-prove`)
-keeps that off CI the same way: the lane builds the flake's `cvc5-dir`
-(`nix/cvc5.nix` — the same pinned cvc5 1.3.1 the shipped binaries link) and
-exports it as `CVC5_DIR`. `cvc5-sys` sees `build/src/libcvc5.a` and LINKS it
+uses the same supply path. Each lane builds Devenv `outputs.cvc5-dir`, which
+comes from `nix/cvc5.nix`. The `smt` profile sets that output as `CVC5_DIR`.
+`cvc5-sys` sees `build/src/libcvc5.a` and links it
 instead of running CMake/make. The closure is cached in the GitHub Actions
 cache through the shared `.github/actions/cvc5-cache-restore` and
 `.github/actions/cvc5-cache-save` composite pair (one key derivation for
 every lane, including `nix-packages.yml`, `release.yml`, and the drift
 canary), so all jobs share one cached closure. A cvc5 or nixpkgs pin bump changes the derivation
 key and pays one ~30m Nix build; there is no separate publish step and no
-runbook. Every lane builds inside `devenv shell`, so the rustc, cc, and
+runbook. Every lane builds inside `devenv --profile smt shell`, so rustc, cc, and
 libclang match the repository pin, and the full-prove solver stack (z3,
 Gappa, GMP, m4, make) comes from the Devenv shell
 (`devenv/toolchains.nix`), which also exports `Z3_SYS_Z3_HEADER`,
@@ -140,15 +140,14 @@ outside Devenv, exercised locally rather than in CI.
 
 ### Cache-pool pruning
 
-The Actions-cache pool is dominated by `Swatinem/rust-cache` `target/`
-snapshots — one per (job, `Cargo.lock`/rustc generation) — plus per-PR caches.
-Left alone it creeps over GitHub's 10GB per-repo limit and LRU-evicts whatever
-is least-recently-used. `.github/workflows/cache-prune.yml` (weekly + manual)
-runs `scripts/ci_cache_prune.py`, which deletes closed-PR-ref caches and stale
-duplicate `main` generations while PROTECTING the `cvc5-prebuilt-*` fallback
-caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete
-on error); manual dispatch is dry-run unless `apply` is set.
-`scripts/test_ci_cache_prune.py` covers the deletion policy.
+The Actions-cache pool contains Cargo target snapshots and caches for pull requests.
+The weekly and manual `cache-prune.yml` workflow uses the reviewed shared prune action.
+Chelis owns the schedule, apply mode, retention count, and protected prefixes.
+
+The workflow keeps one primary generation for each prefix.
+It protects every `cvc5-prebuilt-*` cache.
+Manual dispatch uses dry-run mode unless the caller selects `apply`.
+The shared action fails closed if it cannot read a complete cache snapshot.
 
 One companion CI lane, the manual `smt-build-darwin-arm64`
 (`macos-latest`) job, builds `chelis-cli --features smt` on Darwin with

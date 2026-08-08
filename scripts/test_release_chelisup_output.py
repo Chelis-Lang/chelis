@@ -19,7 +19,11 @@ CHELISUP_INSTALL = REPO_ROOT / "crates" / "chelisup" / "src" / "install.rs"
 CHELISUP_BOOTSTRAP = REPO_ROOT / "crates" / "chelisup" / "bootstrap" / "chelisup.sh"
 
 SETUP_DEVENV_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824"
+    "Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+)
+AUTH_DEVENV_ACTION = (
+    "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
+    "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
 )
 MODULE_REQUIRED_MARKERS = (
     "outputs.release-chelisup",
@@ -50,12 +54,12 @@ WORKFLOW_REQUIRED_MARKERS = (
     "os: macos-latest",
     "slug: darwin-arm64",
     SETUP_DEVENV_ACTION,
-    "actions/create-github-app-token@",
-    "repositories: ci",
-    "access-tokens = github.com=$CI_TOKEN",
+    AUTH_DEVENV_ACTION,
+    "app-client-id: ${{ vars.CI_APP_ID }}",
+    "app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}",
     "devenv build --no-tui --quiet outputs.release-chelisup",
     "> release-chelisup-build.json",
-    "python scripts/verify_release_chelisup.py",
+    "devenv --profile ci shell --no-tui -- python scripts/verify_release_chelisup.py",
     "--build-json release-chelisup-build.json",
     "--stage-root release-chelisup",
     "${{ steps.build.outputs.path }}/chelisup-${{ matrix.slug }}",
@@ -274,10 +278,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_missing_private_input_authentication_fails(self) -> None:
         job = _job_block(self.workflow, "build-chelisup-release")
         mutated = self.workflow.replace(
-            job, job.replace("repositories: ci", "repositories: other", 1), 1
+            job, job.replace(AUTH_DEVENV_ACTION, "missing-private-auth", 1), 1
         )
         errors = release_workflow_contract_errors(mutated)
-        self.assertIn("release workflow matrix is missing repositories: ci", errors)
+        self.assertIn(
+            f"release workflow matrix is missing {AUTH_DEVENV_ACTION}", errors
+        )
 
     def test_missing_publish_dependency_fails(self) -> None:
         mutated = self.workflow.replace(

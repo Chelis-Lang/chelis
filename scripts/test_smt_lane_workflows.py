@@ -14,12 +14,14 @@ WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CVC5_RESTORE_ACTION = (
     REPO_ROOT / ".github" / "actions" / "cvc5-cache-restore" / "action.yml"
 )
-CVC5_SAVE_ACTION = (
-    REPO_ROOT / ".github" / "actions" / "cvc5-cache-save" / "action.yml"
-)
+CVC5_SAVE_ACTION = REPO_ROOT / ".github" / "actions" / "cvc5-cache-save" / "action.yml"
 
 SETUP_DEVENV_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824"
+    "Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+)
+AUTH_DEVENV_ACTION = (
+    "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
+    "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
 )
 SMOKE_JOBS = {
     "smt-build": "x86_64-linux",
@@ -31,7 +33,13 @@ LANE_FORBIDDEN_MARKERS = (
     "scripts/ci_apt_get.py",
     "ci_cvc5_cache.py",
     "brew install",
+    "nix build .#legacyPackages.",
+    "printf 'CVC5_DIR=%s\\n'",
+    "export LD_LIBRARY_PATH=",
+    "repositories: ci",
+    "access-tokens = github.com=",
 )
+SMT_DEVENV_PREFIX = "devenv --profile smt shell --no-tui -- "
 RETIRED_SCRIPTS = (
     "ci_publish_cvc5_release.py",
     "ci_cvc5_cache.py",
@@ -54,14 +62,14 @@ def _lane_errors(workflow: str, job_name: str, system: str) -> list[str]:
     errors: list[str] = []
     required = (
         SETUP_DEVENV_ACTION,
-        "actions/create-github-app-token@",
-        "repositories: ci",
+        AUTH_DEVENV_ACTION,
+        "app-client-id: ${{ vars.CI_APP_ID }}",
+        "app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}",
         "uses: ./.github/actions/cvc5-cache-restore",
         "uses: ./.github/actions/cvc5-cache-save",
         f"system: {system}",
-        f"nix build .#legacyPackages.{system}.cvc5-dir --out-link .cvc5-dir",
-        'printf \'CVC5_DIR=%s\\n\' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"',
-        "devenv shell --no-tui -- cargo build",
+        "devenv build --no-tui outputs.cvc5-dir",
+        f"{SMT_DEVENV_PREFIX}cargo build",
         "verify_release_smt.py",
     )
     for marker in required:
@@ -95,9 +103,10 @@ def full_prove_contract_errors(full_prove: str) -> list[str]:
         if not error.endswith("verify_release_smt.py")
     ]
     for marker in (
-        "devenv shell --no-tui -- cargo test -p chelis-prove --features smt",
-        'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"',
-        "devenv shell --no-tui -- python scripts/generate_erf_proof.py --check-only",
+        f"{SMT_DEVENV_PREFIX}cargo test -p chelis-prove --features smt",
+        f"{SMT_DEVENV_PREFIX}chelis-z3-test --cargo-subcommand test -p chelis-prove --features z3",
+        f'{SMT_DEVENV_PREFIX}chelis-z3-test --cargo-subcommand test -p chelis-prove --features "smt z3" --test cross_engine_oracle',
+        f"{SMT_DEVENV_PREFIX}python scripts/generate_erf_proof.py --check-only",
     ):
         if marker not in full_prove:
             errors.append(f"full-smt-prove is missing {marker}")
@@ -163,7 +172,7 @@ class SmokeLaneContractTests(unittest.TestCase):
     def test_each_supply_marker_has_a_negative_mutation(self) -> None:
         for job_name, system in SMOKE_JOBS.items():
             block = _job_block(self.workflow, job_name)
-            marker = f"nix build .#legacyPackages.{system}.cvc5-dir --out-link .cvc5-dir"
+            marker = "devenv build --no-tui outputs.cvc5-dir"
             with self.subTest(job=job_name):
                 mutated = self.workflow.replace(
                     block, block.replace(marker, "removed-marker"), 1
@@ -179,9 +188,7 @@ class SmokeLaneContractTests(unittest.TestCase):
             1,
         )
         errors = smoke_lane_contract_errors(mutated)
-        self.assertIn(
-            "smt-build uses forbidden marker dtolnay/rust-toolchain", errors
-        )
+        self.assertIn("smt-build uses forbidden marker dtolnay/rust-toolchain", errors)
 
     def test_a_harvested_prebuilt_reference_fails(self) -> None:
         block = _job_block(self.workflow, "smt-build")
@@ -225,23 +232,24 @@ class FullProveContractTests(unittest.TestCase):
             1,
         )
         errors = full_prove_contract_errors(mutated)
-        self.assertIn(
-            "full-smt-prove uses forbidden marker ci_cvc5_cache.py", errors
-        )
+        self.assertIn("full-smt-prove uses forbidden marker ci_cvc5_cache.py", errors)
 
     def test_removing_the_cvc5_supply_fails(self) -> None:
-        marker = "nix build .#legacyPackages.x86_64-linux.cvc5-dir --out-link .cvc5-dir"
+        marker = "devenv build --no-tui outputs.cvc5-dir"
         mutated = self.full_prove.replace(marker, "removed-marker", 1)
         errors = full_prove_contract_errors(mutated)
         self.assertIn(f"full-smt-prove is missing {marker}", errors)
 
-    def test_removing_the_z3_loader_path_fails(self) -> None:
+    def test_restoring_the_manual_z3_loader_path_fails(self) -> None:
+        block = _job_block(self.full_prove, "full-smt-prove")
         mutated = self.full_prove.replace(
-            'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"', "removed"
+            block,
+            block + '      - run: export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"\n',
+            1,
         )
         errors = full_prove_contract_errors(mutated)
         self.assertIn(
-            'full-smt-prove is missing export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"',
+            "full-smt-prove uses forbidden marker export LD_LIBRARY_PATH=",
             errors,
         )
 
@@ -262,9 +270,7 @@ class Cvc5CacheActionTests(unittest.TestCase):
     def test_a_failing_cache_save_must_stay_best_effort(self) -> None:
         mutated = self.save.replace("continue-on-error: true", "", 1)
         errors = cvc5_cache_action_errors(self.restore, mutated)
-        self.assertIn(
-            "cvc5-cache-save is missing continue-on-error: true", errors
-        )
+        self.assertIn("cvc5-cache-save is missing continue-on-error: true", errors)
 
 
 class ProducerRetirementTests(unittest.TestCase):
@@ -281,17 +287,13 @@ class ProducerRetirementTests(unittest.TestCase):
         texts = _workflow_texts()
         texts["ci.yml"] += "\n# scripts/ci_cvc5_cache.py\n"
         errors = producer_retirement_errors(texts)
-        self.assertIn(
-            "ci.yml references retired machinery: ci_cvc5_cache.py", errors
-        )
+        self.assertIn("ci.yml references retired machinery: ci_cvc5_cache.py", errors)
 
     def test_retired_script_files_are_gone(self) -> None:
         for name in RETIRED_SCRIPTS:
             with self.subTest(script=name):
                 self.assertFalse((REPO_ROOT / "scripts" / name).exists())
-                self.assertFalse(
-                    (REPO_ROOT / "scripts" / f"test_{name}").exists()
-                )
+                self.assertFalse((REPO_ROOT / "scripts" / f"test_{name}").exists())
         self.assertFalse((WORKFLOWS_DIR / "build-cvc5.yml").exists())
 
 

@@ -6,8 +6,8 @@
 
 ## 2. Convert the lane
 
-- [x] 2.1 Rewrite `full-smt-prove` on the smoke-lane shape: Devenv setup, auth, `cvc5-dir` closure cache, `CVC5_DIR` export, `devenv shell` for every command; name, schedule, timeout, `smt-smt-build` shared key, and reporter kept.
-- [x] 2.2 Export `LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"` inside the z3 and cross-engine steps.
+- [x] 2.1 Rewrite `full-smt-prove` on the smoke-lane shape: Devenv setup, authentication, `cvc5-dir` closure cache, `outputs.cvc5-dir`, and the `smt` profile for every command. Keep the name, schedule, timeout, `smt-smt-build` shared key, and reporter.
+- [x] 2.2 Run the Z3 and cross-engine steps through `chelis-z3-test`, which owns the scoped loader environment.
 - [x] 2.3 Delete `scripts/ci_cvc5_cache.py` and `scripts/test_ci_cvc5_cache.py`.
 
 ## 3. Update the contract surfaces
@@ -22,6 +22,6 @@
 
 ## 5. Validate and accept
 
-- [ ] 5.1 Run the scripts suite; confirm every mutation fails correctly.
-- [ ] 5.2 Run `python3 scripts/gate.py --local`.
+- [x] 5.1 Run the scripts suite; confirm every mutation fails correctly.
+- [x] 5.2 Run `python3 scripts/gate.py --local`.
 - [ ] 5.3 Dispatch `SMT Full Prove (Linux)` once; a green run with the Nix store `CVC5_DIR` in its log is the authoritative completion oracle.

@@ -8,8 +8,8 @@ The harvested-prebuilt producer then loses its consumers. Retiring it removes a 
 
 ## What Changes
 
-- Rebuild `smt-build` and `smt-build-darwin-arm64` on the Devenv toolchain: pinned `setup-devenv`, private-ci authentication, and `devenv shell` for every cargo command. Remove apt, `dtolnay/rust-toolchain`, and the host uv setup from those jobs.
-- Point both jobs' `CVC5_DIR` at the flake's `cvc5-dir` for their system, restored through the same GitHub Actions closure cache the Nix package job uses.
+- Rebuild `smt-build` and `smt-build-darwin-arm64` on the Devenv toolchain. Use pinned `setup-devenv`, private-ci authentication, and the `smt` profile for each Cargo command. Remove apt, `dtolnay/rust-toolchain`, and host uv.
+- Build Devenv `outputs.cvc5-dir` in both jobs. Restore the same derivation through the GitHub Actions closure cache.
 - Keep required context names, triggers, docs-only gating, timeouts, and the `Swatinem/rust-cache` cargo cache.
 - Keep `smt-full-prove.yml` on its host toolchain: mixing a host `cargo` link with a Nix-gcc-compiled `libcvc5.a` risks a libstdc++ ABI mismatch. The lane keeps the self-sufficient Actions-cache harvest cycle and loses only the durable-asset fetch. Its cold path remains the cargo-from-source cvc5 recipe proof.
 - Retire the producer: delete `build-cvc5.yml` and `scripts/ci_publish_cvc5_release.py` with its tests. `scripts/ci_cvc5_cache.py` stays for the full-prove lane's local harvest cycle.

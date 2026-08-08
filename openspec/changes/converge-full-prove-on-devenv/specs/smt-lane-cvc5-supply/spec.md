@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: The SMT lanes build on the Devenv toolchain
-The `smt-build`, `smt-build-darwin-arm64`, and `full-smt-prove` jobs MUST invoke the pinned shared Devenv setup and private-ci authentication before their first project command. Every cargo command in those jobs MUST run through `devenv shell`.
+The `smt-build`, `smt-build-darwin-arm64`, and `full-smt-prove` jobs MUST invoke the pinned shared Devenv setup and private-ci authentication before their first project command. Every Cargo command in those jobs MUST run through `devenv --profile smt shell`.
 
 Those jobs MUST NOT install a Rust toolchain with `dtolnay/rust-toolchain`. They MUST NOT install C or solver dependencies with apt. They MUST NOT create a host uv environment.
 
@@ -12,11 +12,11 @@ The job names, trigger conditions, docs-only gating, timeout ceilings, and the f
 #### Scenario: The Linux smoke lane runs on a code pull request
 - **WHEN** `smt-build` runs
 - **THEN** the pinned Devenv setup precedes authentication
-- **AND** the smt build, the discharge verifier, and the engine smoke tests run inside `devenv shell`
+- **AND** the SMT build, the discharge verifier, and the engine smoke tests run inside `devenv --profile smt shell`
 
 #### Scenario: The full-prove lane runs its corpus
 - **WHEN** `full-smt-prove` runs on schedule or dispatch
-- **THEN** every solver feature build and test command runs inside `devenv shell`
+- **THEN** every solver feature build and test command runs inside `devenv --profile smt shell`
 - **AND** the z3 and carcara features link the Devenv-provided solver libraries
 
 #### Scenario: A host toolchain step returns
@@ -27,8 +27,8 @@ The job names, trigger conditions, docs-only gating, timeout ceilings, and the f
 - **WHEN** the `smt-build` job name changes
 - **THEN** the workflow contract test fails
 
-### Requirement: The SMT lanes link the flake's pinned cvc5 tree
-Each SMT lane MUST build the flake's `cvc5-dir` for its system and MUST export that store path as `CVC5_DIR` before the smt cargo build.
+### Requirement: The SMT lanes link the pinned cvc5 tree
+Each SMT lane MUST build Devenv `outputs.cvc5-dir` for its system. The `smt` profile MUST set that store path as `CVC5_DIR` before the SMT Cargo build.
 
 Each lane MUST restore and save the `cvc5-dir` closure through the GitHub Actions cache, keyed on the `cvc5-dir` derivation path, with the same import/export pattern the Nix package job uses.
 
@@ -36,7 +36,7 @@ The SMT lanes MUST NOT fetch a harvested prebuilt cvc5 and MUST NOT build cvc5 f
 
 #### Scenario: The closure cache is warm
 - **WHEN** a lane restores the cached `cvc5-dir` closure
-- **THEN** `nix build` completes without rebuilding cvc5
+- **THEN** `devenv build outputs.cvc5-dir` completes without rebuilding cvc5
 - **AND** `cvc5-sys` links the prebuilt archives from `CVC5_DIR`
 
 #### Scenario: The cvc5 pin moves

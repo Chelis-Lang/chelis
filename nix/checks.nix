@@ -201,26 +201,16 @@ let
         touch "$out"
       '';
 
+  nixFormatFiles = builtins.filter (
+    path: lib.hasSuffix ".nix" (toString path) && (toString path) != "${toString root}/Cargo.nix"
+  ) (lib.filesystem.listFilesRecursive root);
   nixFormat =
     pkgs.runCommand "nix-format"
       {
         nativeBuildInputs = [ pkgs.nixfmt ];
       }
       ''
-        nixfmt --check \
-          ${root}/devenv.nix \
-          ${root}/devenv/commands.nix \
-          ${root}/devenv/generated-files.nix \
-          ${root}/devenv/git-hooks.nix \
-          ${root}/devenv/package-outputs.nix \
-          ${root}/devenv/smoke-tests.nix \
-          ${root}/devenv/toolchains.nix \
-          ${root}/flake.nix \
-          ${./checks.nix} \
-          ${./contracts.nix} \
-          ${./cvc5.nix} \
-          ${./packages.nix} \
-          ${./source.nix}
+        nixfmt --check ${lib.escapeShellArgs nixFormatFiles}
         touch "$out"
       '';
 

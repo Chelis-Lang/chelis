@@ -67,6 +67,12 @@ class DevenvGeneratedFiles:
     paths: frozenset[str]
 
 
+@dataclass(frozen=True)
+class DevenvCiProfiles:
+    names: frozenset[str]
+    exposes_cvc5: bool
+
+
 def parse_root_composition(root_text: str, yaml_text: str) -> DevenvComposition:
     # Remote inputs (e.g. `ci/devenv/consumer`) are composed through
     # devenv.yaml. Local modules must stay in devenv.nix, so a `./`/`../` or
@@ -170,6 +176,32 @@ def parse_python_smoke_tests(text: str) -> None:
         raise ValueError(f"the Devenv Python smoke contract is incomplete: {missing!r}")
 
 
+def parse_ci_profiles(text: str) -> DevenvCiProfiles:
+    required = (
+        "cvc5 = import ../nix/cvc5.nix",
+        "outputs.cvc5-dir = cvc5.dir;",
+        "ci.module.env = {",
+        'CARGO_PROFILE_DEV_DEBUG = "0";',
+        'CARGO_PROFILE_TEST_DEBUG = "0";',
+        "sanitizers = {",
+        'extends = [ "ci" ];',
+        'CHELIS_C_TEST_EXTRA_FLAGS = "-O1 -fsanitize=address,undefined -fno-omit-frame-pointer";',
+        'ASAN_OPTIONS = "detect_leaks=1:halt_on_error=1";',
+        'UBSAN_OPTIONS = "print_stacktrace=1:halt_on_error=1";',
+        "smt = {",
+        'CVC5_DIR = "${config.outputs.cvc5-dir}";',
+    )
+    missing = [fragment for fragment in required if fragment not in text]
+    if missing:
+        raise ValueError(f"the Devenv CI profile contract is incomplete: {missing!r}")
+    if text.count('extends = [ "ci" ];') != 2:
+        raise ValueError("the SMT and sanitizer profiles must extend the CI profile")
+    return DevenvCiProfiles(
+        names=frozenset({"ci", "sanitizers", "smt"}),
+        exposes_cvc5=True,
+    )
+
+
 def parse_openspec_composition(toolchains_text: str, yaml_text: str) -> None:
     # OpenSpec is provided by the ci consumer module (config.outputs.openspec),
     # not built in the Devenv shell. Its version is pinned once in ci and
@@ -258,6 +290,9 @@ def parse_contributor_docs(text: str) -> None:
         "devenv build outputs.chelis-runtime",
         "devenv build outputs.chelisup",
         "devenv build --no-tui outputs.release-chelisup",
+        "devenv --profile ci shell",
+        "devenv --profile sanitizers shell",
+        "devenv --profile smt shell",
     )
     missing = [fragment for fragment in required if fragment not in text]
     if missing:
@@ -307,6 +342,30 @@ class DevenvCompositionTests(unittest.TestCase):
         toolchains = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         yaml = (REPO_ROOT / "devenv.yaml").read_text(encoding="utf-8")
         parse_openspec_composition(toolchains, yaml)
+
+    def test_devenv_owns_ci_sanitizer_and_smt_profiles(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        profiles = parse_ci_profiles(text)
+        self.assertEqual(profiles.names, frozenset({"ci", "sanitizers", "smt"}))
+        self.assertTrue(profiles.exposes_cvc5)
+
+    def test_missing_ci_debug_policy_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        mutated = text.replace('CARGO_PROFILE_DEV_DEBUG = "0";', "")
+        with self.assertRaisesRegex(ValueError, "CI profile contract is incomplete"):
+            parse_ci_profiles(mutated)
+
+    def test_missing_sanitizer_policy_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        mutated = text.replace("-fsanitize=address,undefined", "-fno-sanitize=all")
+        with self.assertRaisesRegex(ValueError, "CI profile contract is incomplete"):
+            parse_ci_profiles(mutated)
+
+    def test_missing_cvc5_profile_output_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        mutated = text.replace("outputs.cvc5-dir = cvc5.dir;", "")
+        with self.assertRaisesRegex(ValueError, "CI profile contract is incomplete"):
+            parse_ci_profiles(mutated)
 
     def test_devenv_exposes_the_python_command_facade(self) -> None:
         text = (REPO_ROOT / "devenv/commands.nix").read_text(encoding="utf-8")

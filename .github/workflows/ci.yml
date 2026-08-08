@@ -72,35 +72,26 @@ jobs:
       # Free ~25-30 GB before materializing the Devenv closure; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Validate rejection authority construction boundary
-        run: devenv shell --no-tui -- python scripts/check_rejection_authority_boundary.py
+        run: devenv --profile ci shell --no-tui -- python scripts/check_rejection_authority_boundary.py
 
       - name: Validate rejection issue authorities against GitHub
         env:
           GH_TOKEN: ${{ github.token }}
-        run: devenv shell --no-tui -- python scripts/validate_rejection_issue_manifest.py
+        run: devenv --profile ci shell --no-tui -- python scripts/validate_rejection_issue_manifest.py
 
   # C2.2's producer seal depends on same-crate privacy, which an external
   # compile-fail doctest cannot distinguish from pub(crate). Run the actual
@@ -116,34 +107,23 @@ jobs:
     permissions:
       contents: read
     env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
       CARGO_TARGET_DIR: target/diagnostic-kind-oracle
     steps:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and mutation-oracle build
         uses: Swatinem/rust-cache@v2
@@ -151,7 +131,7 @@ jobs:
           workspaces: . -> target/diagnostic-kind-oracle
 
       - name: Run C2.2 controlled mutations
-        run: devenv shell --no-tui -- python scripts/diagnostic_kind_oracle.py
+        run: devenv --profile ci shell --no-tui -- python scripts/diagnostic_kind_oracle.py
 
   lint-and-unit:
     name: Lint and Unit Tests (Linux)
@@ -163,38 +143,39 @@ jobs:
     # disk consumer in target/; dropping it (alongside the free-disk step
     # below) is what keeps the Linux workspace build off "No space left on
     # device" / the mid-link ld bus-error (signal 7) — chelis#392. Symbols
-    # only affect backtraces, never what is tested. Set this for the Linux
-    # job because the disk pressure is Linux-only.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
+    # only affect backtraces, never what is tested. The `ci` Devenv profile
+    # owns this Linux disk policy.
     steps:
       - uses: actions/checkout@v6
 
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+      - name: Check workflow syntax
+        uses: Chelis-Lang/ci/actions/actionlint@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        with:
+          actionlint-version: '1.7.12'
+          actionlint-sha256: sha256:8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          mode: enforce
+
+      - name: Audit workflow security
+        uses: Chelis-Lang/ci/actions/zizmor@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        with:
+          zizmor-version: '1.28.0'
+          mode: advisory
 
       # Devenv activates its Python virtual environment and sets
       # PYO3_PYTHON before each cargo invocation.
@@ -207,12 +188,12 @@ jobs:
       - name: Script unit tests (scripts/test_*.py)
         env:
           CHELIS_SKIP_NEXTEST_PROFILE_SET_MATH: "1"
-        run: devenv shell --no-tui -- python -m unittest discover -s scripts -p 'test_*.py'
+        run: devenv --profile ci shell --no-tui -- python -m unittest discover -s scripts -p 'test_*.py'
 
       # Phase 1's registered-PyO3 ingress tests use the NumPy package
       # declared by devenv/toolchains.nix. The suite stubs safetensors.
       - name: Python binding ingress unit tests
-        run: devenv shell --no-tui -- python -m unittest discover -s bindings/python/tests -p 'test_*.py'
+        run: devenv --profile ci shell --no-tui -- python -m unittest discover -s bindings/python/tests -p 'test_*.py'
 
       # The lint-and-unit gate subset (build, clippy, fmt, chelis lint
       # --check) is defined once in scripts/gate.py and run here via
@@ -221,7 +202,7 @@ jobs:
       # and fails if any gate step is not produced by gate.py. See
       # docs/investigations/test_toolchain_guards_design.md.
       - name: Gate (lint-and-unit subset)
-        run: devenv shell --no-tui -- python scripts/gate.py lint-and-unit
+        run: devenv --profile ci shell --no-tui -- python scripts/gate.py lint-and-unit
 
   # Non-gate job (see NON_GATE_JOBS in scripts/test_gate.py, rule-id
   # GATE-SCOPE-SMT): the required fast SMT smoke. It builds the
@@ -248,36 +229,24 @@ jobs:
     # success. Runs on every code PR and push.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       # cvc5 closure cache: the shared composite pair derives one key
       # from the cvc5-dir drvPath, so every lane (SMT, full-prove,
@@ -290,11 +259,10 @@ jobs:
 
       # cvc5-sys links the prebuilt archives from CVC5_DIR and never runs
       # CMake, so this lane needs no apt C dependencies.
-      - name: Build the pinned cvc5 tree and export CVC5_DIR
+      - name: Build the Devenv cvc5 output
         run: |
           set -euo pipefail
-          nix build .#legacyPackages.x86_64-linux.cvc5-dir --out-link .cvc5-dir
-          printf 'CVC5_DIR=%s\n' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"
+          devenv build --no-tui outputs.cvc5-dir
 
       # Save immediately after the closure exists, so a later build or
       # test failure does not lose the ~30m cold cvc5 build.
@@ -316,13 +284,13 @@ jobs:
           cache-on-failure: true
 
       - name: Build smt feature
-        run: devenv shell --no-tui -- cargo build -p chelis-cli --features smt
+        run: devenv --profile smt shell --no-tui -- cargo build -p chelis-cli --features smt
 
       - name: Verify cvc5 discharge path (smt feature live)
-        run: devenv shell --no-tui -- python .github/scripts/verify_release_smt.py ./target/debug/chelis
+        run: devenv --profile smt shell --no-tui -- python .github/scripts/verify_release_smt.py ./target/debug/chelis
 
       - name: Run cvc5 engine smoke tests
-        run: devenv shell --no-tui -- cargo test -p chelis-prove --features smt --lib cvc5_engine_
+        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features smt --lib cvc5_engine_
 
   smt-build-darwin-arm64:
     name: SMT Feature Build (darwin-arm64)
@@ -347,22 +315,13 @@ jobs:
           test "$(uname -m)" = "arm64"
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Restore the cvc5 toolchain closure
         id: cvc5-cache
@@ -370,11 +329,10 @@ jobs:
         with:
           system: aarch64-darwin
 
-      - name: Build the pinned cvc5 tree and export CVC5_DIR
+      - name: Build the Devenv cvc5 output
         run: |
           set -euo pipefail
-          nix build .#legacyPackages.aarch64-darwin.cvc5-dir --out-link .cvc5-dir
-          printf 'CVC5_DIR=%s\n' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"
+          devenv build --no-tui outputs.cvc5-dir
 
       # Save immediately after the closure exists, so a later build or
       # test failure does not lose the ~30m cold cvc5 build.
@@ -392,7 +350,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build chelis-cli (release, smt)
-        run: devenv shell --no-tui -- cargo build --release -p chelis-cli --features smt
+        run: devenv --profile smt shell --no-tui -- cargo build --release -p chelis-cli --features smt
 
       - name: Verify packaged binary architecture
         run: |
@@ -400,7 +358,7 @@ jobs:
           file target/release/chelis | grep -E 'arm64|aarch64'
 
       - name: Verify cvc5 discharge path (smt feature live)
-        run: devenv shell --no-tui -- python .github/scripts/verify_release_smt.py ./target/release/chelis
+        run: devenv --profile smt shell --no-tui -- python .github/scripts/verify_release_smt.py ./target/release/chelis
 
   workspace-tests:
     name: Workspace Tests (Linux)
@@ -413,37 +371,26 @@ jobs:
     # always false. `needs: [changes]` is what makes the output readable.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
+    # Strip debuginfo through the `ci` Devenv profile. See lint-and-unit
+    # for the chelis#392 rationale.
     steps:
       - uses: actions/checkout@v6
 
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -464,12 +411,12 @@ jobs:
       # budget step below consumes it. Do not hand-inline cargo
       # commands into this job (see scripts/test_gate.py parity lock).
       - name: Gate (integration subset)
-        run: devenv shell --no-tui -- python scripts/gate.py integration
+        run: devenv --profile ci shell --no-tui -- python scripts/gate.py integration
 
       # Run the structural oracle here after the workspace build
       # is warm so its three `nextest list` calls are continuously enforced.
       - name: Verify nextest profile coverage
-        run: devenv shell --no-tui -- python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
+        run: devenv --profile ci shell --no-tui -- python -m unittest scripts.test_nextest_profile_partition.ProfilePartitionTests
 
       # Informational, non-failing: flags integration tests that have
       # regressed past their committed timing baseline or that are new
@@ -481,7 +428,7 @@ jobs:
       - name: Test-timing budget (informational)
         if: always()
         continue-on-error: true
-        run: devenv shell --no-tui -- python scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
+        run: devenv --profile ci shell --no-tui -- python scripts/test_timing_check.py --junit target/nextest/ci/junit.xml
 
   # Run the inherited Phase 0-3 acceptance contract beside the workspace
   # nextest suite. On the measured #1118 run these steps took 7m22s after a
@@ -497,34 +444,22 @@ jobs:
       issues: read
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -537,7 +472,7 @@ jobs:
       - name: Dtype Phase 0-3 oracle
         env:
           GH_TOKEN: ${{ github.token }}
-        run: devenv shell --no-tui -- python scripts/dtype_phase3_oracle.py
+        run: devenv --profile ci shell --no-tui -- python scripts/dtype_phase3_oracle.py
 
   # Keep the #732 Phase 2 acceptance contract executable as its own blocking
   # leg. This is deliberately not appended to the dtype job: each phase oracle
@@ -553,34 +488,23 @@ jobs:
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -591,7 +515,7 @@ jobs:
           save-if: false
 
       - name: Faithful observation Phase 2 oracle
-        run: devenv shell --no-tui -- python scripts/faithful_observation_phase2_oracle.py
+        run: devenv --profile ci shell --no-tui -- python scripts/faithful_observation_phase2_oracle.py
 
   # Keep the existing required status context while making the three expensive
   # legs parallel. `!cancelled()` lets this job inspect dependency failures
@@ -630,33 +554,20 @@ jobs:
     # and runs two codegen smoke scripts -- so the only visible cost is
     # unsymbolicated frames in a `RUST_BACKTRACE` dump on failure, which
     # is exactly the tradeoff the Linux jobs already accept. The release
-    # SMT jobs are deliberately not in this set: they build `--release`,
-    # which these dev/test profile vars do not reach.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
+    # SMT jobs use the separate `smt` profile, which extends this CI policy.
     steps:
       - uses: actions/checkout@v6
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -679,7 +590,7 @@ jobs:
       # serialization bloat as the Linux integration job; see
       # docs/investigations/ci_integration_test_runtime_diagnosis.md.
       - name: Workspace tests
-        run: devenv shell --no-tui -- cargo nextest run --workspace
+        run: devenv --profile ci shell --no-tui -- cargo nextest run --workspace
 
       - name: Verify packaged binary architecture
         run: |
@@ -687,7 +598,7 @@ jobs:
           file target/debug/chelis | grep -E 'arm64|aarch64'
 
       - name: Smoke test generated C with Accelerate
-        run: devenv shell --no-tui -- python .github/scripts/smoke_macos_accelerate.py ./target/debug/chelis
+        run: devenv --profile ci shell --no-tui -- python .github/scripts/smoke_macos_accelerate.py ./target/debug/chelis
 
       # Phase M smoke: emit `.mm` from the Metal backend and link it
       # against the Metal/Foundation frameworks. Compile-and-link only
@@ -696,7 +607,7 @@ jobs:
       # in the M6 manual gate (`cargo test -p chelis-backend-metal
       # --test gpu_correctness -- --ignored`) on a real workstation.
       - name: Smoke test Metal backend codegen + link
-        run: devenv shell --no-tui -- python .github/scripts/smoke_macos_metal.py ./target/debug/chelis
+        run: devenv --profile ci shell --no-tui -- python .github/scripts/smoke_macos_metal.py ./target/debug/chelis
 
   backend-sanitizers:
     name: Backend Sanitizers
@@ -708,49 +619,32 @@ jobs:
     # success. Runs on every code PR and push.
     needs: [changes]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
-    env:
-      # Nix enables _FORTIFY_SOURCE for its compiler. GCC requires optimization when fortify and -Werror are active.
-      CHELIS_C_TEST_EXTRA_FLAGS: -O1 -fsanitize=address,undefined -fno-omit-frame-pointer
-      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-      # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
-      # ASan/UBSan still report file:line from the C side; the Rust
-      # debuginfo dropped here does not affect the sanitizer findings.
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
+    # The `sanitizers` Devenv profile owns the sanitizer flags, runtime
+    # policy, and stripped Rust debuginfo.
     steps:
       - uses: actions/checkout@v6
 
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
       - name: Backend tests under ASan/UBSan
-        run: devenv shell --no-tui -- cargo test -p chelis-backend-c
+        run: devenv --profile sanitizers shell --no-tui -- cargo test -p chelis-backend-c
 
   no-ai-authorship:
     name: No AI authorship markers
@@ -767,58 +661,38 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Check commits for AI authorship markers
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+
+      - name: Resolve the commit range
+        id: authorship-range
         env:
           COMMITS: ${{ github.event.pull_request.commits }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-            HEAD="${{ github.event.pull_request.head.sha }}"
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
             # Deepen head to the PR commit range, then backstop-fetch the
-            # base commit so `base..head` resolves at the shallow boundary
-            # (both no-ops if already present).
-            git fetch --depth=$((COMMITS + 1)) origin "$HEAD" 2>/dev/null || true
-            git fetch --depth=1 origin "$BASE" 2>/dev/null || true
-            RANGE="$BASE..$HEAD"
+            # base commit so `base..head` resolves at the shallow boundary.
+            git fetch --depth=$((COMMITS + 1)) origin "$HEAD_SHA" 2>/dev/null || true
+            git fetch --depth=1 origin "$BASE_SHA" 2>/dev/null || true
           else
             git fetch --depth=2 origin "$GITHUB_SHA" 2>/dev/null || true
-            RANGE="HEAD~1..HEAD"
+            BASE_SHA="$(git rev-parse HEAD~1)"
+            HEAD_SHA="$(git rev-parse HEAD)"
           fi
-          FOUND=0
-          # Patterns covering Claude, Kiro, OpenAI, Codex, ChatGPT, Copilot, generic AI
-          AI_MSG_PATTERNS=(
-            '(Co-)?Authored-By:.*(claude|anthropic|kiro|openai|codex|chatgpt|copilot)'
-            'Generated (with|by).*(claude|kiro|openai|codex|chatgpt|copilot|gpt-[0-9]|ai|llm)'
-          )
-          AI_IDENTITY_PATTERNS=(
-            '(claude|anthropic|kiro|openai|codex|chatgpt|copilot)'
-          )
-          for SHA in $(git rev-list "$RANGE"); do
-            MSG="$(git log -1 --format="%B" "$SHA")"
-            AUTHOR="$(git log -1 --format="%an <%ae>" "$SHA")"
-            COMMITTER="$(git log -1 --format="%cn <%ce>" "$SHA")"
-            for pat in "${AI_MSG_PATTERNS[@]}"; do
-              if printf '%s\n' "$MSG" | grep -qiE "$pat"; then
-                echo "FAIL: $SHA commit message matches: $pat"
-                FOUND=1
-              fi
-            done
-            for pat in "${AI_IDENTITY_PATTERNS[@]}"; do
-              if printf '%s\n' "$AUTHOR" | grep -qiE "$pat"; then
-                echo "FAIL: $SHA author matches: $AUTHOR"
-                FOUND=1
-              fi
-              if printf '%s\n' "$COMMITTER" | grep -qiE "$pat"; then
-                echo "FAIL: $SHA committer matches: $COMMITTER"
-                FOUND=1
-              fi
-            done
-          done
-          if [ "$FOUND" -ne 0 ]; then
-            echo "Remove AI authorship markers from the flagged commits."
-            exit 1
-          fi
-          echo "All commits clean."
+          {
+            echo "base-sha=$BASE_SHA"
+            echo "head-sha=$HEAD_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check commits for AI authorship markers
+        uses: Chelis-Lang/ci/actions/check-authorship@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        with:
+          base-sha: ${{ steps.authorship-range.outputs.base-sha }}
+          head-sha: ${{ steps.authorship-range.outputs.head-sha }}
+          profile: all-markers
+          max-commits: ${{ github.event.pull_request.commits || 2 }}
 
   docs:
     name: Docs
@@ -826,44 +700,32 @@ jobs:
     defaults:
       run:
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
-    # Strip debuginfo; see lint-and-unit for the chelis#392 rationale.
-    # This job compiles the chelis-e2e skill-suite test binary.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
+    # Strip debuginfo through the `ci` Devenv profile. This job compiles the
+    # chelis-e2e skill-suite test binary.
     steps:
       - uses: actions/checkout@v6
 
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
 
       - name: Validate package SKILL and mdBook examples
-        run: devenv shell --no-tui -- cargo test -p chelis-e2e --test skill_suite
+        run: devenv --profile ci shell --no-tui -- cargo test -p chelis-e2e --test skill_suite
 
       - name: Build mdBook
-        run: devenv shell --no-tui -- mdbook build docs/book
+        run: devenv --profile ci shell --no-tui -- mdbook build docs/book

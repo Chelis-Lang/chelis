@@ -15,6 +15,11 @@ let
   gxxShim = pkgs.writeShellScriptBin "g++" ''
     exec ${pkgs.stdenv.cc}/bin/c++ -Wno-unused-command-line-argument "$@"
   '';
+
+  cvc5 = import ../nix/cvc5.nix {
+    inherit pkgs lib;
+    root = ../.;
+  };
 in
 {
   languages = {
@@ -36,6 +41,29 @@ in
   # .cargo/config.toml while the Devenv shell is active.
   env.PYO3_PYTHON = "${config.env.DEVENV_STATE}/venv/bin/python";
 
+  outputs.cvc5-dir = cvc5.dir;
+
+  profiles = {
+    ci.module.env = {
+      CARGO_PROFILE_DEV_DEBUG = "0";
+      CARGO_PROFILE_TEST_DEBUG = "0";
+    };
+
+    sanitizers = {
+      extends = [ "ci" ];
+      module.env = {
+        CHELIS_C_TEST_EXTRA_FLAGS = "-O1 -fsanitize=address,undefined -fno-omit-frame-pointer";
+        ASAN_OPTIONS = "detect_leaks=1:halt_on_error=1";
+        UBSAN_OPTIONS = "print_stacktrace=1:halt_on_error=1";
+      };
+    };
+
+    smt = {
+      extends = [ "ci" ];
+      module.env.CVC5_DIR = "${config.outputs.cvc5-dir}";
+    };
+  };
+
   # bindgen (cvc5-sys and every other -sys crate that generates bindings)
   # must load the Nix libclang: without this the clang-sys probe finds a
   # host libclang whose own dependencies are not on the shell loader path
@@ -46,10 +74,9 @@ in
 
   # Solver stack wiring (openspec converge-full-prove-on-devenv).
   # z3-sys links the prebuilt Nix libz3 through these two variables (the
-  # same override scripts/z3_test.py honors first). On Linux the runtime
-  # loader also needs the directory; the CI z3 steps export
-  # LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE" per step instead of a
-  # global loader path that would shadow system libraries.
+  # same override scripts/z3_test.py honors first). On Linux, that command
+  # sets the loader path for each Z3 invocation. The shell does not set a
+  # global loader path that can shadow system libraries.
   env.Z3_SYS_Z3_HEADER = "${pkgs.z3.dev}/include/z3.h";
   env.Z3_LIBRARY_PATH_OVERRIDE = "${pkgs.z3.lib}/lib";
   # carcara's `gmp-mpfr-sys/use-system-libs` probe compiles against system

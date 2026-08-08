@@ -55,12 +55,13 @@ jobs:
       # failed with git exit 128. Auto-revoked at job end.
       - name: Mint cross-repo token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: Chelis-Lang
           repositories: hull
+          permission-contents: read
 
       - name: Checkout chelis
         uses: actions/checkout@v6
@@ -91,24 +92,15 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
@@ -117,7 +109,7 @@ jobs:
 
       - name: Build chelis (release)
         working-directory: chelis
-        run: devenv shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
+        run: devenv --profile ci shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
 
       # FAIL FAST on a cross-repo cascade lag (chelis#341/#335). The fresh
       # campaign runs Hull's `chelis reef build`, which rejects any manifest
@@ -132,7 +124,7 @@ jobs:
       - name: Check Hull pin vs live chelis version (cascade-skew guard)
         working-directory: chelis
         run: |
-          devenv shell --no-tui -- python scripts/ci_check_hull_pin_skew.py \
+          devenv --profile ci shell --no-tui -- python scripts/ci_check_hull_pin_skew.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \
             --hull-reef-toml "$GITHUB_WORKSPACE/hull/reef.toml"
 
@@ -153,7 +145,7 @@ jobs:
         run: |
           export SEED="$(date -u +%Y%m%d)"
           # shellcheck disable=SC2016
-          devenv shell --no-tui -- bash -euo pipefail -c '
+          devenv --profile ci shell --no-tui -- bash -euo pipefail -c '
             cd "$GITHUB_WORKSPACE/hull"
             mkdir -p corpus/scratch
             export PATH="$GITHUB_WORKSPACE/chelis/target/release:$PATH"
@@ -170,13 +162,13 @@ jobs:
       - name: Re-validate the frozen corpus
         working-directory: chelis
         run: |
-          devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis"
 
       - name: Conformance teeth (injected-unsound must fail the gate)
         working-directory: chelis
         run: |
-          if devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          if devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0" >&2
@@ -195,34 +187,22 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Open/close nightly-failure tracking issue
-        uses: actions/github-script@v7
-        env:
-          RESULT: ${{ needs.conformance-nightly.result }}
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+
+      - name: Open or close the nightly tracking issue
+        uses: Chelis-Lang/ci/actions/nightly-status@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          script: |
-            const title = 'Nightly failing: Hull Conformance';
-            const { owner, repo } = context.repo;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
-            const found = await github.rest.search.issuesAndPullRequests({ q });
-            const existing = found.data.items.find(i => i.title === title);
-            if (process.env.RESULT === 'failure') {
-              if (existing) {
-                core.info(`Tracking issue #${existing.number} already open.`);
-              } else {
-                const issue = await github.rest.issues.create({
-                  owner, repo, title,
-                  body: `The **Hull Conformance** nightly failed.\n\nRun: ${runUrl}\nCommit: \`${context.sha}\`\n\nAuto-opened on failure; auto-closes when the nightly next passes.`,
-                  labels: ['nightly-failure'],
-                });
-                core.info(`Opened tracking issue #${issue.data.number}.`);
-              }
-            } else if (process.env.RESULT === 'success' && existing) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: existing.number,
-                body: `Nightly green again — ${runUrl}. Closing.`,
-              });
-              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
-              core.info(`Closed tracking issue #${existing.number}.`);
-            }
+          github-token: ${{ github.token }}
+          result: ${{ needs.conformance-nightly.result }}
+          issue-title: "Nightly failing: Hull Conformance"
+          issue-body: |
+            The **Hull Conformance** nightly failed.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit: `${{ github.sha }}`
+
+            Auto-opened on failure; auto-closes when the nightly next passes.
+          issue-label: nightly-failure
+          recovery-comment: >-
+            Nightly green again — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Closing.

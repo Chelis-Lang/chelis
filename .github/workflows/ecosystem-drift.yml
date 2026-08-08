@@ -72,27 +72,25 @@ jobs:
       # Free ~25-30 GB before the Nix closure build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+      - name: Resolve the Devenv Rust version
+        id: rust-version
+        run: |
+          rust_version="$(devenv --profile ci shell --no-tui -- rustc --version | awk '{print $2}')"
+          test -n "$rust_version"
+          echo "rust_version=$rust_version" >> "$GITHUB_OUTPUT"
 
       # cvc5 closure cache: the shared composite pair derives one key from
       # the cvc5-dir drvPath, so all lanes (SMT, full-prove, release, Nix
@@ -110,7 +108,7 @@ jobs:
       - name: Build and verify the portable chelis toolchain output
         run: |
           devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
-          python scripts/verify_release_chelis.py \
+          devenv --profile ci shell --no-tui -- python scripts/verify_release_chelis.py \
             --build-json release-chelis-build.json \
             --stage-root release-chelis \
             --platform linux-x86_64
@@ -154,7 +152,7 @@ jobs:
       # that breaks chelis-std's own lowering — a nautilus-#11-class bug).
       # Emits packages/chelis-std/dist/chelis-std-<ver>.{chb,tar.zst}.
       - name: Rebuild HEAD chelis-std bundle
-        run: devenv shell --no-tui -- "$HEAD_TOOLCHAIN/bin/chelis" reef build packages/chelis-std
+        run: devenv --profile ci shell --no-tui -- "$HEAD_TOOLCHAIN/bin/chelis" reef build packages/chelis-std
 
       # Stage release.yml's tarball content plus the freshly built
       # packages/chelis-std/ tree (so `reef install --from-monorepo
@@ -189,6 +187,7 @@ jobs:
 
     outputs:
       chelis_version: ${{ steps.version.outputs.chelis_version }}
+      rust_version: ${{ steps.rust-version.outputs.rust_version }}
 
   # One matrix leg per downstream shell. fail-fast:false so one shell's
   # break never cancels the others — the canary's whole job is to report
@@ -398,11 +397,13 @@ jobs:
     steps:
       - name: Mint per-shell App token
         id: token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: Chelis-Lang
+          permission-contents: read
+          permission-issues: write
           # contents:read for the shell checkout + every sibling dep repo
           # `reef install --from-github` reads release assets from;
           # issues:write for the per-shell tracking issue. `token_repos`
@@ -557,17 +558,14 @@ jobs:
           ref: ${{ github.sha }}
           path: chelis
 
-      # Pin the canary's Rust toolchain to the version the chelis Devenv
-      # shell resolves (rust-toolchain.toml's stable, as pinned by the
-      # Devenv lock), instead of floating on the upstream stable channel:
-      # an upstream Rust release must not be able to flip a drift leg red
-      # independently of chelis HEAD. Bump the version together with the
-      # Devenv nixpkgs/rust pin.
+      # Use the exact Rust version that the Chelis Devenv shell resolved in
+      # build-chelis. An upstream Rust release cannot change a drift leg
+      # independently of the locked Chelis environment.
       - name: Install Rust toolchain
         if: matrix.type == 'cargo'
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-05
         with:
-          toolchain: 1.95.0
+          toolchain: ${{ needs.build-chelis.outputs.rust_version }}
           components: clippy, rustfmt
 
       - name: Install uv

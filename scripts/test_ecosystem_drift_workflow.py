@@ -1,6 +1,7 @@
 """Regression checks for the scheduled ecosystem drift workflow."""
 
 from pathlib import Path
+import re
 import unittest
 
 
@@ -10,6 +11,23 @@ WORKFLOW = (
     / "workflows"
     / "ecosystem-drift.yml"
 )
+
+
+def assert_devenv_rust_version_contract(text: str) -> None:
+    build, drift = text.split("  build-chelis:", 1)[1].split("\n  drift:", 1)
+    if re.search(r"(?m)^\s+toolchain:\s+\d+\.\d+\.\d+\s*$", drift):
+        raise AssertionError("the drift job must not hardcode a Rust version")
+    required = (
+        "id: rust-version",
+        "devenv --profile ci shell --no-tui -- rustc --version",
+        "rust_version: ${{ steps.rust-version.outputs.rust_version }}",
+        "toolchain: ${{ needs.build-chelis.outputs.rust_version }}",
+    )
+    missing = [marker for marker in required if marker not in text]
+    if missing:
+        raise AssertionError(f"incomplete Devenv Rust version contract: {missing!r}")
+    if "id: rust-version" not in build:
+        raise AssertionError("the build job must export the Devenv Rust version")
 
 
 class EcosystemDriftWorkflowTests(unittest.TestCase):
@@ -22,7 +40,11 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
         self.assertIn(
             "devenv build --no-tui --quiet outputs.release-chelis", block
         )
-        self.assertIn("scripts/verify_release_chelis.py", block)
+        self.assertIn(
+            "devenv --profile ci shell --no-tui -- "
+            "python scripts/verify_release_chelis.py",
+            block,
+        )
         self.assertIn("--platform linux-x86_64", block)
         self.assertIn("reef build packages/chelis-std", block)
 
@@ -38,6 +60,19 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             "strip target/release/chelis",
         ):
             self.assertNotIn(marker, block)
+
+    def test_devenv_supplies_the_cargo_leg_rust_version(self) -> None:
+        assert_devenv_rust_version_contract(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_a_hardcoded_cargo_leg_rust_version_fails_the_contract(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "toolchain: ${{ needs.build-chelis.outputs.rust_version }}",
+            "toolchain: 1.95.0",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "must not hardcode"):
+            assert_devenv_rust_version_contract(mutated)
 
     def test_build_job_stages_the_unpacked_release_tree(self) -> None:
         block = self._build_job_block()

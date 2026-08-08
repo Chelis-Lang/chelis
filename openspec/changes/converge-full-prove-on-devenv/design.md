@@ -32,11 +32,11 @@ Local spikes (2026-08-08, this workstation, inside `devenv shell`) resolved both
 - `Z3_SYS_Z3_HEADER` and `Z3_LIBRARY_PATH_OVERRIDE` for z3-sys's prebuilt-link branch (the same variables `scripts/z3_test.py` honors first).
 - `CPATH`/`LIBRARY_PATH` entries for GMP, so carcara's `gmp-mpfr-sys/use-system-libs` probe finds the headers without a per-machine export (the macOS brew recipe in `docs/smt_build_setup.md` becomes unnecessary inside Devenv).
 
-Runtime resolution: on Darwin the Nix `libz3.dylib` carries an absolute install name, so no loader variable is needed. On Linux the z3 test steps export `LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"` inside the `devenv shell` command; a global `LD_LIBRARY_PATH` in the shell would shadow system libraries for every process and is deliberately avoided.
+On Darwin, the Nix `libz3.dylib` carries an absolute install name. On Linux, `chelis-z3-test` sets the loader path for each command. The global shell does not set `LD_LIBRARY_PATH`.
 
 ### The lane converts to the smoke-lane shape
 
-`full-smt-prove` adopts the exact converted block: pinned `setup-devenv`, private-ci authentication, the `cvc5-dir` closure cache shared with `nix-packages.yml` and the smoke lanes, `nix build` + `CVC5_DIR` export, `Swatinem/rust-cache` with the existing `smt-smt-build` shared key, and every build/test/certify command through `devenv shell`. The Gappa re-validation runs the Devenv Python (`devenv shell -- python scripts/generate_erf_proof.py --check-only`) with the `gappa` binary on the shell PATH.
+`full-smt-prove` uses pinned `setup-devenv`, private-ci authentication, and the shared `cvc5-dir` closure cache. It builds `outputs.cvc5-dir` and runs each command through the `smt` profile. The lane keeps the existing `smt-smt-build` Rust cache key. The Gappa revalidation uses the Devenv Python and the pinned `gappa` command.
 
 ### The arb feature is Linux-only, upstream
 
@@ -70,4 +70,4 @@ Rollback restores the lane and the cache script from git history.
 
 ## Open Questions
 
-- None blocking. The Linux `LD_LIBRARY_PATH` step wiring is exercised only by the hosted dispatch; the failure mode is loud (link or dlopen error).
+- None blocking. The hosted dispatch exercises the Linux Z3 loader path through `chelis-z3-test`.

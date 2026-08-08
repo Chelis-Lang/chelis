@@ -41,9 +41,6 @@ jobs:
     # warm cache), too heavy for the per-PR path; 75m leaves headroom over the
     # observed wall time while it makes forward progress.
     timeout-minutes: 75
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     defaults:
       run:
         shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
@@ -51,27 +48,18 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       # cvc5 closure cache: the shared composite pair derives one key from
       # the cvc5-dir drvPath, so all lanes share one cached closure. The
@@ -84,11 +72,10 @@ jobs:
         with:
           system: x86_64-linux
 
-      - name: Build the pinned cvc5 tree and export CVC5_DIR
+      - name: Build the Devenv cvc5 output
         run: |
           set -euo pipefail
-          nix build .#legacyPackages.x86_64-linux.cvc5-dir --out-link .cvc5-dir
-          printf 'CVC5_DIR=%s\n' "$(readlink -f .cvc5-dir)" >> "$GITHUB_ENV"
+          devenv build --no-tui outputs.cvc5-dir
 
       # Save immediately after the closure exists, so a later prove
       # failure does not lose the ~30m cold cvc5 build.
@@ -113,37 +100,37 @@ jobs:
           cache-on-failure: true
 
       - name: Build smt feature
-        run: devenv shell --no-tui -- cargo build -p chelis-cli --features smt
+        run: devenv --profile smt shell --no-tui -- cargo build -p chelis-cli --features smt
 
       - name: Run smt-gated chelis-prove tests
-        run: devenv shell --no-tui -- cargo test -p chelis-prove --features smt
+        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features smt
 
       - name: Run carcara-gated chelis-prove tests
         # The nightly parallel process exited with SIGSEGV after tests; the
         # same complete suite passed serially. Retain the full corpus while
         # containing that nondeterministic failure in this optional lane.
-        run: devenv shell --no-tui -- cargo test -p chelis-prove --features carcara -- --test-threads=1
+        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features carcara -- --test-threads=1
 
-      # The Nix libz3.so needs the loader path at runtime; the Devenv shell
-      # exports Z3_LIBRARY_PATH_OVERRIDE for z3-sys's link step.
+      # The Devenv command sets the Z3 link and loader environment from the
+      # pinned Nix library.
       - name: Run z3-gated chelis-prove tests
-        run: devenv shell --no-tui -- bash -euo pipefail -c 'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"; cargo test -p chelis-prove --features z3'
+        run: devenv --profile smt shell --no-tui -- chelis-z3-test --cargo-subcommand test -p chelis-prove --features z3
 
       - name: Run cross-engine oracle (cvc5 + Z3 agreement)
-        run: devenv shell --no-tui -- bash -euo pipefail -c 'export LD_LIBRARY_PATH="$Z3_LIBRARY_PATH_OVERRIDE"; cargo test -p chelis-prove --features "smt z3" --test cross_engine_oracle'
+        run: devenv --profile smt shell --no-tui -- chelis-z3-test --cargo-subcommand test -p chelis-prove --features "smt z3" --test cross_engine_oracle
 
       - name: Run clarabel-gated chelis-prove tests
-        run: devenv shell --no-tui -- cargo test -p chelis-prove --features clarabel
+        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features clarabel
 
       - name: Run the production solver config (cvc5 + Clarabel, both live)
-        run: devenv shell --no-tui -- cargo test -p chelis-prove --features "smt clarabel"
+        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features "smt clarabel"
 
       - name: Re-validate committed Gappa proofs (--check-only)
-        run: devenv shell --no-tui -- python scripts/generate_erf_proof.py --check-only
+        run: devenv --profile smt shell --no-tui -- python scripts/generate_erf_proof.py --check-only
 
       - name: Arb cross-check (certify_erf_envelope validate)
         run: |
-          devenv shell --no-tui -- cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
+          devenv --profile smt shell --no-tui -- cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
             -- validate crates/chelis-prove/data/erf_envelope.json
 
       - name: Arb cross-check exp/log/sqrt (certify_special_fn_envelope validate)
@@ -152,7 +139,7 @@ jobs:
         # fails if any committed eps is below the fresh Arb bound (a shrunk /
         # tampered eps would forge a green). Mirrors the erf step above.
         run: |
-          devenv shell --no-tui -- bash -euo pipefail -c '
+          devenv --profile smt shell --no-tui -- bash -euo pipefail -c '
             for fn in exp log sqrt; do
               cargo run -p chelis-prove --features arb --bin certify_special_fn_envelope \
                 -- validate "crates/chelis-prove/data/special_fn_envelopes/${fn}_envelope.json"
@@ -160,7 +147,7 @@ jobs:
           '
 
       - name: Run arb-gated chelis-prove tests
-        run: devenv shell --no-tui -- cargo test -p chelis-prove --features arb
+        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features arb
 
   report:
     name: Surface SMT full-prove status
@@ -170,34 +157,22 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Open/close SMT full-prove tracking issue
-        uses: actions/github-script@v7
-        env:
-          RESULT: ${{ needs.full-smt-prove.result }}
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+
+      - name: Open or close the SMT full-prove tracking issue
+        uses: Chelis-Lang/ci/actions/nightly-status@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          script: |
-            const title = 'Nightly failing: SMT Full Prove';
-            const { owner, repo } = context.repo;
-            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-            const q = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
-            const found = await github.rest.search.issuesAndPullRequests({ q });
-            const existing = found.data.items.find(i => i.title === title);
-            if (process.env.RESULT === 'failure') {
-              if (existing) {
-                core.info(`Tracking issue #${existing.number} already open.`);
-              } else {
-                const issue = await github.rest.issues.create({
-                  owner, repo, title,
-                  body: `The **SMT Full Prove** workflow failed.\n\nRun: ${runUrl}\nCommit: \`${context.sha}\`\n\nAuto-opened on failure; auto-closes when the workflow next passes.`,
-                  labels: ['nightly-failure'],
-                });
-                core.info(`Opened tracking issue #${issue.data.number}.`);
-              }
-            } else if (process.env.RESULT === 'success' && existing) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: existing.number,
-                body: `SMT Full Prove green again — ${runUrl}. Closing.`,
-              });
-              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
-              core.info(`Closed tracking issue #${existing.number}.`);
-            }
+          github-token: ${{ github.token }}
+          result: ${{ needs.full-smt-prove.result }}
+          issue-title: "Nightly failing: SMT Full Prove"
+          issue-body: |
+            The **SMT Full Prove** workflow failed.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit: `${{ github.sha }}`
+
+            Auto-opened on failure; auto-closes when the workflow next passes.
+          issue-label: nightly-failure
+          recovery-comment: >-
+            SMT Full Prove green again — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Closing.

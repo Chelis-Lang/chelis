@@ -84,27 +84,18 @@ jobs:
       # release-build job was missing the reclaim every ci.yml build job
       # already runs (chelis#392).
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a6408b57c8019cb34b48cbfb735383db1d138a4f # ci#46 devenv-native primitives
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: printf 'NIX_CONFIG<<EOF\n%s\naccess-tokens = github.com=%s\nEOF\n' "$NIX_CONFIG" "$CI_TOKEN" >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       # Devenv activates its Python virtual environment and sets
       # PYO3_PYTHON before each cargo invocation.
@@ -115,7 +106,7 @@ jobs:
       # bare PATH name). A release build matches the Hull campaign profile (a
       # debug build's check pass is multi-minute per program).
       - name: Build chelis (release)
-        run: devenv shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
+        run: devenv --profile ci shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
 
       # The pure runner core (wire_to_canonical, derive_compiler_outcome,
       # classify_program, assert_acceptance_oracle), the wire-normalizer golden
@@ -123,7 +114,7 @@ jobs:
       # self-test (the teeth). Binary-free; runs fast.
       - name: Conformance unit tests (pure core + teeth)
         run: |
-          devenv shell --no-tui -- python -m unittest \
+          devenv --profile ci shell --no-tui -- python -m unittest \
             tests.conformance.hull.test_run_conformance \
             tests.conformance.hull.test_wire_canonical \
             tests.conformance.hull.test_corpus_integrity
@@ -132,7 +123,7 @@ jobs:
       # binary. Fails on any CompilerUnsound / unexplained Disagree / EvalDisagree.
       - name: Conformance gate (frozen corpus vs live compiler)
         run: |
-          devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis"
 
       # E2E TEETH PROOF: an injected compiler-accepts-a-reject-sentinel
@@ -140,7 +131,7 @@ jobs:
       # if the runner exits 0, the gate has no teeth and this step fails.
       - name: Conformance teeth (injected-unsound must fail the gate)
         run: |
-          if devenv shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          if devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0; the gate did not catch the injected CompilerUnsound" >&2

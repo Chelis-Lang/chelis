@@ -1,10 +1,8 @@
 name: Prune CI caches
 
-# Deletes provably-dead Actions caches (closed-PR generations + stale duplicate
-# main generations) so the pool stays well under GitHub's 10GB per-repo LRU
-# budget and useful caches are never the eviction victim. Durable cvc5 fallback
-# caches (`cvc5-prebuilt-*`) are protected. Policy + tests:
-# scripts/ci_cache_prune.py / scripts/test_ci_cache_prune.py.
+# Deletes provably-dead Actions caches so the pool stays under GitHub's
+# repository limit. The shared action owns the cache mechanics. This workflow
+# owns the schedule, apply policy, retention count, and protected prefixes.
 
 on:
   schedule:
@@ -33,11 +31,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Scheduled runs apply; manual dispatch is dry-run unless `apply` is set,
-      # so a human can inspect the plan first.
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+
+      # Scheduled runs apply. Manual dispatch is a dry run unless `apply` is set.
       - name: Prune caches
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: >-
-          python3 scripts/ci_cache_prune.py
-          ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply)) && '--apply' || '' }}
+        uses: Chelis-Lang/ci/actions/prune-actions-cache@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        with:
+          github-token: ${{ github.token }}
+          primary-ref: refs/heads/main
+          apply: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.apply) }}
+          keep-per-prefix: '1'
+          protected-prefixes: cvc5-prebuilt-

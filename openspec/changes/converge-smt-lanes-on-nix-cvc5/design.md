@@ -17,7 +17,7 @@ Since `switch-linux-release-to-nix`, the shipped Linux compiler links the Nix-pi
 
 - The change does not convert `smt-full-prove.yml` to the Devenv toolchain. Its z3, Gappa, m4, and Arb system dependencies need their own verification pass, and a host cargo link against a Nix-gcc-compiled `libcvc5.a` is an ABI risk (see Decisions). A follow-up change owns that conversion.
 - The change does not alter the local developer cargo path. `cvc5-sys` still builds cvc5 from source when `CVC5_DIR` is absent.
-- The change does not add cvc5 to the Devenv shell environment. Exporting `CVC5_DIR` at shell entry would make first shell entry build cvc5; a follow-up can add an opt-in command.
+- The base shell does not add cvc5. The opt-in `smt` profile supplies `CVC5_DIR`, so ordinary shell activation stays lazy.
 - The change does not touch the Darwin release job (owned by the Darwin release follow-up).
 
 ## Decisions
@@ -28,14 +28,14 @@ Since `switch-linux-release-to-nix`, the shipped Linux compiler links the Nix-pi
 
 1. the pinned `setup-devenv` and private-ci authentication (the same block every converted job uses),
 2. the `cvc5-dir` closure cache restore/save steps copied from `nix-packages.yml`, keyed on the `cvc5-dir` derivation path,
-3. `nix build .#legacyPackages.<system>.cvc5-dir` with a local out-link, exporting `CVC5_DIR` into `$GITHUB_ENV`,
-4. `devenv shell --no-tui -- cargo build -p chelis-cli --features smt`, the cvc5 discharge verifier, and the engine smoke tests, all inside `devenv shell`.
+3. `devenv build outputs.cvc5-dir` for the pinned cvc5 tree,
+4. the SMT build, discharge verifier, and engine smoke tests inside `devenv --profile smt shell`.
 
 With `CVC5_DIR` set, `cvc5-sys` links the prebuilt archives and never runs CMake, so the apt C-dependency step disappears. bindgen's libclang comes from the Devenv shell.
 
 ### Toolchain mixing is the constraint that splits the scope
 
-Linking is consistent only when the compiler that builds the crate and the toolchain that compiled `libcvc5.a` agree on the C++ runtime. Inside `devenv shell`, cargo links with the Nix cc against the Nix libstdc++ - the same toolchain that built the flake's cvc5. A HOST cargo (ubuntu's gcc and libstdc++) linking the Nix-gcc-compiled archive can hit unresolved `GLIBCXX`/`CXXABI` versions. `smt-full-prove` therefore keeps its host toolchain AND its host-built cvc5: it retains the Actions-cache harvest cycle (`key`/`restore`/`activate`/`harvest`/`save`), which is self-sufficient without the durable asset. Only the durable-asset `fetch` step leaves.
+The crate compiler and the cvc5 compiler must use compatible C++ runtimes. The `smt` profile gives Cargo the pinned Nix compiler environment. The later `converge-full-prove-on-devenv` change moved `smt-full-prove` to the same environment and removed its harvest cycle.
 
 ### The producer retires; the library stays
 

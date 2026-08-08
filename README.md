@@ -146,20 +146,28 @@ Devenv files.
    chelis-gate --local
    ```
 
-Use `devenv shell --` to run one command without an interactive shell:
+Use the `ci` profile to reproduce the common CI Cargo environment:
 
 ```sh
 # Run the authoritative C-backend acceptance oracle.
-devenv shell -- cargo nextest run -p chelis-backend-c
+devenv --profile ci shell -- cargo nextest run -p chelis-backend-c
 
 # List the repository gate commands.
-devenv shell -- chelis-gate --list
+devenv --profile ci shell -- chelis-gate --list
 
 # List orphaned Chelis build processes.
-devenv shell -- chelis-reap-orphans
+devenv --profile ci shell -- chelis-reap-orphans
 
 # Validate the active OpenSpec tree.
-devenv shell -- openspec validate --all --strict --no-interactive
+devenv --profile ci shell -- openspec validate --all --strict --no-interactive
+```
+
+Use the focused profiles for sanitizer and SMT work:
+
+```sh
+devenv --profile sanitizers shell -- cargo test -p chelis-backend-c
+devenv build --no-tui outputs.cvc5-dir
+devenv --profile smt shell -- cargo test -p chelis-prove --features smt
 ```
 
 #### Shell behavior
@@ -190,6 +198,10 @@ owns that environment outside Devenv.
 
 `devenv test` initializes the managed files and Python. It then runs separate
 smoke tasks for the toolchain, Python, C, and C++.
+
+The `ci` profile removes Rust debug information from development and test builds. The `sanitizers` profile extends this policy with the C sanitizer environment.
+
+The `smt` profile extends the CI policy and sets `CVC5_DIR` from `outputs.cvc5-dir`. The base shell does not force the cvc5 closure.
 
 Devenv exposes the canonical root flake packages as build outputs.
 
@@ -237,10 +249,24 @@ POSIX wrapper that invokes the same checker with `.venv/bin/python`.
 Both hooks reject AI tool authorship markers before Git creates a commit. All
 listed format and lint hooks remain disabled.
 
+#### Shared CI actions
+
+Chelis pins its Devenv input and adopted `Chelis-Lang/ci` actions to one commit.
+The shared actions supply private-input authentication, nightly status, workflow audits, and cache pruning.
+
+The private-input action requires these repository settings:
+
+- `CI_APP_ID`
+- `CI_APP_PRIVATE_KEY`
+
+The GitHub App token grants `contents: read` for the private `ci` repository.
+Chelis retains workflow events, permissions, job names, and release policy.
+
 #### Native Nix CI
 
 Both jobs for native Nix packages use the reviewed portable Devenv action from
-`Chelis-Lang/ci`. The jobs run their tasks through the portable shell.
+`Chelis-Lang/ci`. The jobs use the shared fixed-scope authentication action.
+The jobs run their tasks through the portable shell.
 
 The action uses exact Nix and Devenv inputs. Its public Devenv cache is
 read-only. The cache does not contain the custom cvc5 derivation.

@@ -44,10 +44,27 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **CI now uses one reviewed shared-action revision.** Devenv and adopted
+  `Chelis-Lang/ci` actions use the same immutable commit. Shared actions now
+  own private-input authentication, nightly issue transitions, authorship
+  checks, workflow audits, runner disk reclamation, and cache pruning.
+  Chelis retains triggers, permissions, job names, cache policy, and release
+  policy. Native Nix jobs use Devenv Python and no longer create a host
+  environment.
+
+- **CI policy now lives in focused Devenv profiles.** The `ci` profile owns
+  Cargo debug settings. The `sanitizers` profile owns the C sanitizer
+  environment. The `smt` profile supplies `CVC5_DIR` from the new lazy
+  `outputs.cvc5-dir` output. SMT lanes build that output through Devenv,
+  and the full-prove Z3 steps use `chelis-z3-test`. The ecosystem drift
+  canary now gets its Rust version from Devenv instead of a stale workflow
+  literal. Native Nix jobs use Devenv Python without host uv or `.venv`.
+  The Nix format gate derives its file inventory from tracked source files.
+
 - **The full-prove lane joins the Devenv/Nix cvc5 convergence (openspec
   `converge-full-prove-on-devenv`).** `smt-full-prove.yml` now builds on
-  the Devenv toolchain with `CVC5_DIR` from the flake's `cvc5-dir`
-  closure, and the Devenv shell gains the solver stack (`z3`, `gappa`,
+  the Devenv toolchain with `CVC5_DIR` from `outputs.cvc5-dir`, and the
+  Devenv shell gains the solver stack (`z3`, `gappa`,
   `gmp`, `m4`, `make`) with the `Z3_SYS_Z3_HEADER`,
   `Z3_LIBRARY_PATH_OVERRIDE`, and GMP `CPATH`/`LIBRARY_PATH` wiring the
   z3 and carcara features need -- replacing the per-machine apt/brew
@@ -65,17 +82,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - **The SMT smoke lanes build on the Devenv toolchain and link the
   flake's pinned cvc5 (openspec `converge-smt-lanes-on-nix-cvc5`).**
   `smt-build` and `smt-build-darwin-arm64` now run their cargo commands
-  inside `devenv shell` and export `CVC5_DIR` from the flake's
-  `cvc5-dir` tree -- the same pinned cvc5 1.3.1 the shipped Linux binary
+  inside the `smt` profile and use `CVC5_DIR` from the Devenv
+  `outputs.cvc5-dir` tree -- the same pinned cvc5 1.3.1 the shipped Linux binary
   links -- restored through the Actions closure cache shared with
   `nix-packages.yml`. The floating `dtolnay/rust-toolchain@stable`, apt
   C dependencies, and host uv setup leave those jobs; the required
-  context name `SMT Feature Build (Linux)` is unchanged.
-  `smt-full-prove.yml` deliberately keeps its host toolchain and its
-  self-sufficient Actions-cache harvest cycle (a host cargo link
-  against a Nix-gcc-compiled archive risks a libstdc++ ABI mismatch);
-  its cold path remains the cargo-from-source cvc5 recipe proof.
-  Contract suite: `scripts/test_smt_lane_workflows.py`.
+  context name `SMT Feature Build (Linux)` is unchanged. The full-prove
+  lane uses the same Devenv and cvc5 supply. Contract suite:
+  `scripts/test_smt_lane_workflows.py`.
 
 ### Removed
 

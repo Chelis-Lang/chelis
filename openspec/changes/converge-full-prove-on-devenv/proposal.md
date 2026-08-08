@@ -7,7 +7,7 @@ Both blockers are now resolved by local spikes (2026-08-08, inside the Devenv sh
 ## What Changes
 
 - Add the solver stack to the Devenv shell: `z3`, `gappa`, `gmp`, `gnum4`, and `gnumake`, plus the `Z3_SYS_Z3_HEADER`, `Z3_LIBRARY_PATH_OVERRIDE`, and GMP `CPATH`/`LIBRARY_PATH` environment wiring that the z3 and carcara features need.
-- Rewrite `smt-full-prove.yml` on the converted smoke-lane shape: pinned Devenv setup, private-ci authentication, the shared `cvc5-dir` closure cache, `CVC5_DIR` from the flake, and every command through `devenv shell`. The apt, floating-rustc, host-uv, and cvc5 harvest-cycle steps leave.
+- Rewrite `smt-full-prove.yml` on the converted smoke-lane shape. Use pinned Devenv setup, private-ci authentication, the shared `cvc5-dir` closure cache, `outputs.cvc5-dir`, and the `smt` profile. Remove apt, floating rustc, host uv, and the cvc5 harvest cycle.
 - Retire `scripts/ci_cvc5_cache.py` and `scripts/test_ci_cvc5_cache.py`: the harvest cycle loses its last caller.
 - The cargo-from-source cvc5 recipe loses its last CI execution. The recipe stays documented for non-Devenv contributors; the pinned Nix build is the proven supply everywhere. The docs say this deliberately.
 

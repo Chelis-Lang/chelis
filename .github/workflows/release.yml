@@ -45,28 +45,13 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: |
-          {
-            echo "NIX_CONFIG<<EOF"
-            printf '%s\n' "$NIX_CONFIG"
-            echo "access-tokens = github.com=$CI_TOKEN"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       # cvc5 closure cache: the shared composite pair derives one key
       # from the cvc5-dir drvPath (the devenv-side cvc5 derivation is
@@ -85,7 +70,7 @@ jobs:
         id: build
         run: |
           devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
-          python scripts/verify_release_chelis.py \
+          devenv --profile ci shell --no-tui -- python scripts/verify_release_chelis.py \
             --build-json release-chelis-build.json \
             --stage-root release-chelis \
             --platform ${{ matrix.slug }}
@@ -245,34 +230,19 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
 
-      - name: Mint a scoped token for the private ci input
-        id: ci-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
         with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Chelis-Lang
-          repositories: ci
-
-      - name: Authenticate Nix to the private ci devenv input
-        shell: bash
-        env:
-          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
-        run: |
-          {
-            echo "NIX_CONFIG<<EOF"
-            printf '%s\n' "$NIX_CONFIG"
-            echo "access-tokens = github.com=$CI_TOKEN"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Build and verify portable chelisup output
         id: build
         run: |
           devenv build --no-tui --quiet outputs.release-chelisup > release-chelisup-build.json
-          python scripts/verify_release_chelisup.py \
+          devenv --profile ci shell --no-tui -- python scripts/verify_release_chelisup.py \
             --build-json release-chelisup-build.json \
             --stage-root release-chelisup \
             --platform ${{ matrix.slug }}
