@@ -109,7 +109,7 @@ before reaching its proof steps.
 
 Building cvc5 from source is ~22 minutes of CMake/make. The SMT lanes must
 never pay that on the per-PR path, so every SMT lane (the required `smt-build`,
-the `smt-build-glibc231` lane, the manual `smt-build-darwin-arm64` lane, and
+the manual `smt-build-darwin-arm64` lane, and
 `smt-full-prove.yml`) LINKS a prebuilt cvc5 instead of rebuilding it. The
 prebuilt tree is held in TWO stores, tried in order, driven by
 `scripts/ci_cvc5_cache.py`:
@@ -134,7 +134,7 @@ prebuilt tree is held in TWO stores, tried in order, driven by
 
 The store key — `cvc5-prebuilt-<namespace>-cvc5sys<version>-<schema>` — depends
 on the pinned `cvc5-sys` crate version (which moves with the bundled cvc5
-release), the os/arch namespace (`linux-x86_64`, `linux-glibc231`,
+release), the os/arch namespace (`linux-x86_64`,
 `darwin-arm64`), and the cache schema, but **NOT** on `Cargo.lock` and **NOT**
 on the rustc version. The harvested payload is 100% cvc5 C++/CMake output
 (`bindings.rs` is regenerated per build in `OUT_DIR` and is not harvested), so
@@ -168,7 +168,7 @@ A cvc5-sys bump can put a cold source build on the per-PR path. The new release 
 Publish the new assets before the bump PR runs its SMT jobs:
 
 1. Run `gh workflow run build-cvc5.yml --ref <bump-branch>`.
-2. Wait for all three namespace jobs and the publication job to pass.
+2. Wait for the namespace jobs and the publication job to pass.
 3. Rerun the CI jobs for the bump PR.
 
 If step 1 is skipped, the bump PR's `smt-build` builds cvc5 cold and will
@@ -189,28 +189,41 @@ caches. A failed open-PR lookup fail-safes to no PR pruning (never mass-delete
 on error); manual dispatch is dry-run unless `apply` is set.
 `scripts/test_ci_cache_prune.py` covers the deletion policy.
 
-Two companion CI lanes, `smt-build-glibc231` (a `debian:11` container)
-and the manual `smt-build-darwin-arm64` (`macos-latest`) job, build
-`chelis-cli --features smt` on the other two release targets and run
-the post-build verifier. They prove cvc5 builds on those toolchains
-before `release.yml` ships the feature there (chelis#422). The
-`debian:11` lane additionally installs `python3-pip` and `pip install
-tomli`, because cvc5's build-time TOML codegen imports `tomli` on
-Python < 3.11 and `python3-tomli` is not in the main bullseye suite.
+One companion CI lane, the manual `smt-build-darwin-arm64`
+(`macos-latest`) job, builds `chelis-cli --features smt` on the Darwin
+release target and runs the post-build verifier. It proves cvc5 builds
+on that toolchain before `release.yml` ships the feature there
+(chelis#422). The former `smt-build-glibc231` lane (a `debian:11`
+container) retired with the Cargo Linux release jobs when the Linux
+toolchain moved to the Nix release output (openspec
+`switch-linux-release-to-nix`); the Nix package CI now proves the
+Linux cvc5 build.
 
 ## Release builds (chelis#422)
 
 A manual dispatch starts `release.yml`. A dispatch at a `v*` tag publishes the release assets.
 
-`release.yml` builds all three release artifacts (linux-x86_64,
-linux-x86_64-glibc2.31, darwin-arm64) with `cargo build --release -p
-chelis-cli --features smt`, so the shipped `chelis` binary discharges
-property obligations through cvc5 instead of degrading to the
-solver-free fuzz path. Each release job:
+`release.yml` builds two release artifacts. The Linux toolchain
+(`chelis-v<ver>-linux-x86_64.tar.gz`) comes from the Nix release
+output: `devenv build --no-tui outputs.release-chelis` builds the
+compiler with the `smt` feature from the committed `Cargo.nix` graph
+and the pinned cvc5 1.3.1 tree (`nix/cvc5.nix`), stages the tarball,
+and runs the cvc5 discharge verifier inside the derivation. The
+recorded glibc floor of the portable binary lives in
+`nix/contracts.nix` (`linuxReleaseGlibcFloor`). A separate
+`consume-chelis-release` job then unpacks the exact staged tarball in a
+digest-pinned Ubuntu container without Nix, re-runs the cvc5 discharge
+verifier in `--tarball` mode, and compiles emitted C against the
+shipped runtime archive with the system `gcc` and OpenBLAS.
 
-- installs the cvc5 build prerequisites for its platform (the
-  `debian:11` job adds `tomli` as above; macOS relies on the image's
-  CMake/Python/Xcode CLT plus an idempotent `brew install cmake`), and
+The Darwin artifact (darwin-arm64) still builds with `cargo build
+--release -p chelis-cli --features smt`, so the shipped `chelis` binary
+discharges property obligations through cvc5 instead of degrading to
+the solver-free fuzz path. The Darwin release job:
+
+- installs the cvc5 build prerequisites for its platform (macOS relies
+  on the image's CMake/Python/Xcode CLT plus an idempotent `brew
+  install cmake`), and
 - runs `.github/scripts/verify_release_smt.py` against the freshly
   built binary, which proves a known producer obligation discharges
   via cvc5 (`proof_tier=smt`, `discharge_tier.engine=cvc5`). A binary
@@ -227,9 +240,10 @@ CLN path (the cvc5 CMake cache records `ENABLE_GPL=OFF` and
 `USE_CLN=OFF`; only `libgmp.a` is linked, never `libcln.a`), so the
 shipped artifact is distributable.
 
-`release.yml` deliberately does NOT link the durable prebuilt asset: each
-release job builds cvc5 cold from source, so the shipped binary is an
-INDEPENDENT, license-safe proof of the exact recipe rather than trusting an
+`release.yml` deliberately does NOT link the durable prebuilt asset: the
+Darwin job builds cvc5 cold from source, and the Linux job builds cvc5 from
+the pinned source tree inside the Nix sandbox, so the shipped binaries are
+INDEPENDENT, license-safe proofs of the exact recipe rather than trusting an
 asset produced by `build-cvc5.yml`. A `build-cvc5.yml` bug therefore can never
 silently reach a shipped artifact. Treat a `release.yml` cvc5 failure as real
 even when the per-PR SMT lanes are green off the asset.
@@ -238,7 +252,7 @@ even when the per-PR SMT lanes are green off the asset.
 
 The cold cvc5 build downloads the cvc5 source and its dependencies. Thus, the release jobs can receive a transient GitHub refusal.
 
-`publish-release` depends on all three build jobs. One build failure stops publication for the manually dispatched tag.
+`publish-release` depends on every build job and on the off-Nix consumption job. One failure stops publication for the manually dispatched tag.
 
 The v0.18.0 release run 30673030685 required three attempts. The first two attempts failed during dependency and source downloads.
 

@@ -3,14 +3,16 @@ name: Build cvc5 prebuilt
 # Produces the DURABLE prebuilt cvc5 that the smt lanes (ci.yml smt-build*,
 # smt-full-prove.yml) LINK instead of rebuilding cvc5 from source (~22m CMake/
 # make). Publishes one tar.gz + sha256 per namespace (linux-x86_64,
-# linux-glibc231, darwin-arm64) to a `cvc5-prebuilt-cvc5sys<ver>` prerelease
+# darwin-arm64) to a `cvc5-prebuilt-cvc5sys<ver>` prerelease
 # tag, keyed on the cvc5-sys version so a rustc-stable bump or unrelated
 # Cargo.lock churn never invalidates it. A Release asset has no Actions-cache
 # LRU budget, no 7-day TTL, and no branch scope, so the smt lanes stay warm
 # across the conditions that used to force a cold cvc5 rebuild onto the per-PR
 # path (chelis#583 follow-up). Automatic runs build missing Linux assets only.
 # A manual dispatch builds a missing Darwin asset. A manual `force` rebuilds
-# every namespace. See docs/smt_build_setup.md.
+# every namespace. The former linux-glibc231 namespace retired with the
+# debian:11 lanes when the Linux release moved to the Nix build (openspec
+# switch-linux-release-to-nix). See docs/smt_build_setup.md.
 
 on:
   workflow_dispatch:
@@ -53,7 +55,6 @@ jobs:
     outputs:
       tag: ${{ steps.plan.outputs.tag }}
       missing_linux_x86_64: ${{ steps.plan.outputs.missing_linux_x86_64 }}
-      missing_linux_glibc231: ${{ steps.plan.outputs.missing_linux_glibc231 }}
       missing_darwin_arm64: ${{ steps.plan.outputs.missing_darwin_arm64 }}
     steps:
       - uses: actions/checkout@v6
@@ -116,70 +117,6 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  build-linux-glibc231:
-    name: Build cvc5 (linux-glibc231)
-    needs: [plan]
-    if: needs.plan.outputs.missing_linux_glibc231 == 'true'
-    runs-on: ubuntu-latest
-    container: debian:11
-    defaults:
-      run:
-        shell: bash
-    steps:
-      # See ci.yml smt-build-glibc231 for why python3 must exist before the
-      # in-repo apt retry helper can run on the slim debian:11 image.
-      - name: Bootstrap checkout prerequisites
-        run: |
-          set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl python3
-
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install build prerequisites
-        run: |
-          set -euo pipefail
-          python3 scripts/ci_apt_get.py --no-sudo --no-install-recommends \
-            build-essential m4 \
-            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
-            python3 python3-pip python3-venv
-          pip3 install --break-system-packages tomli || pip3 install tomli
-
-      - name: Assert glibc 2.31 build environment
-        run: |
-          set -euo pipefail
-          ldd --version | awk 'NR==1'
-          ldd --version | awk 'NR==1' | grep -F '2.31'
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Compute cvc5 store dir
-        id: cvc5key
-        run: python3 scripts/ci_cvc5_cache.py key --namespace linux-glibc231
-
-      # Release profile to mirror ci.yml smt-build-glibc231 / release.yml.
-      - name: Build chelis-cli (release, smt; cvc5 from source)
-        run: cargo build --release -p chelis-cli --features smt
-
-      - name: Harvest cvc5 build
-        run: python3 scripts/ci_cvc5_cache.py harvest --dir "${{ steps.cvc5key.outputs.dir }}"
-
-      - name: Pack durable asset
-        id: pack
-        run: python3 scripts/ci_cvc5_cache.py pack --namespace linux-glibc231 --dir "${{ steps.cvc5key.outputs.dir }}" --out-dir artifacts
-
-      - name: Upload asset artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cvc5-linux-glibc231
-          path: |
-            artifacts/${{ steps.pack.outputs.asset }}
-            artifacts/${{ steps.pack.outputs.asset }}.sha256
-          if-no-files-found: error
-          retention-days: 3
-
   build-darwin-arm64:
     name: Build cvc5 (darwin-arm64)
     needs: [plan]
@@ -228,7 +165,7 @@ jobs:
 
   publish:
     name: Publish cvc5 prebuilt release
-    needs: [plan, build-linux-x86_64, build-linux-glibc231, build-darwin-arm64]
+    needs: [plan, build-linux-x86_64, build-darwin-arm64]
     # Never publish from a PR (contents: write). Run if the plan succeeded and
     # at least one namespace was actually (re)built. `always()` so a skipped
     # sibling build (asset already present) does not cancel publish of the
@@ -238,7 +175,6 @@ jobs:
       && github.event_name != 'pull_request'
       && needs.plan.result == 'success'
       && (needs.build-linux-x86_64.result == 'success'
-          || needs.build-linux-glibc231.result == 'success'
           || needs.build-darwin-arm64.result == 'success')
     runs-on: ubuntu-latest
     steps:

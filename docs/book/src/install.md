@@ -57,6 +57,15 @@ chelisup install 0.13.0        # into ~/.chelis/toolchains/0.13.0/
 The first install also records `0.13.0` as the default and installs the
 `chelis` shim, so `chelis --version` works from anywhere.
 
+Release toolchains ship for `linux-x86_64` and `darwin-arm64`. The Linux
+toolchain is built from the pinned Nix graph and runs on any Linux with
+glibc `2.39` or newer. The exact recorded floor lives in
+`nix/contracts.nix` as `linuxReleaseGlibcFloor`, and the release build
+fails when the built binary drifts from that record. The
+`libchelis_runtime.a` archive in the tarball does not inherit that
+floor: it links with an ordinary glibc `gcc` or `hipcc` toolchain, and
+its glibc binding happens at your final link.
+
 ### 3. Provision a project in one command
 
 Inside a freshly-cloned project (anything with a `reef.toml`):

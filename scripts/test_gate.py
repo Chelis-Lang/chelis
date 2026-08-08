@@ -437,13 +437,12 @@ NON_GATE_JOBS = {
     # smt-full-prove.yml. Runbook:
     # docs/smt_build_setup.md.
     "smt-build",
-    # Rule-id: GATE-SCOPE-SMT -- the chelis#422 prove-in-CI lanes that
-    # build `chelis-cli --features smt` (cvc5 from source) on the two
-    # release targets release.yml ships the feature to but ubuntu's
-    # smt-build does not cover: the glibc-2.31 (debian:11) compat
-    # toolchain and macOS-arm64. Same from-source cvc5 cost as smt-build,
-    # so out of the per-PR gate scope by design.
-    "smt-build-glibc231",
+    # Rule-id: GATE-SCOPE-SMT -- the chelis#422 prove-in-CI lane that
+    # builds `chelis-cli --features smt` (cvc5 from source) on the release
+    # target ubuntu's smt-build does not cover: macOS-arm64. Same
+    # from-source cvc5 cost as smt-build, so out of the per-PR gate scope
+    # by design. (The former glibc-2.31 debian:11 lane retired with the
+    # Nix-built Linux release; see openspec switch-linux-release-to-nix.)
     "smt-build-darwin-arm64",
 }
 
@@ -1676,7 +1675,6 @@ class DocsOnlySkipTests(unittest.TestCase):
         "no-ai-authorship",
         "docs",
         "changes",
-        "smt-build-glibc231",
     }
 
     def test_changes_job_exists_and_is_ungated(self):

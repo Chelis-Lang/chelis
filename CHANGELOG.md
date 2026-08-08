@@ -8,6 +8,38 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The Linux release toolchain builds from Nix (openspec
+  `switch-linux-release-to-nix`).** `release.yml` now produces
+  `chelis-v<ver>-linux-x86_64.tar.gz` from the Devenv release output
+  `outputs.release-chelis` (`nix/release-chelis.nix`): the committed
+  `Cargo.nix` graph, the pinned cvc5 1.3.1 tree, statically linked
+  `libstdc++`/`libzstd`, and a patchelf interpreter rewrite off the Nix
+  store. The derivation verifies behavior before the rewrite (version,
+  help, the release fixture, the cvc5 discharge), then enforces the ELF
+  portability postconditions and the recorded glibc floor
+  (`linuxReleaseGlibcFloor = "2.39"` in `nix/contracts.nix`; drift in
+  either direction fails the build). A new `consume-chelis-release` job
+  proves the exact staged tarball on a digest-pinned Ubuntu container
+  without Nix: it re-runs the cvc5 discharge verifier and compiles
+  emitted C against the shipped `libchelis_runtime.a` with the system
+  `gcc` and OpenBLAS. Contract suites:
+  `scripts/test_release_chelis_output.py` and
+  `scripts/test_verify_release_chelis.py`.
+
+### Removed
+
+- **The Cargo Linux release jobs and every glibc-2.31 compatibility
+  lane.** `build-linux-x86_64` and `build-linux-x86_64-glibc231`
+  (release.yml), the `smt-build-glibc231` CI lane (ci.yml), the
+  `build-linux-glibc231` cvc5 prebuilt job (build-cvc5.yml), and the
+  `linux-glibc231` cache namespace are retired; the `-glibc2.31` release
+  asset is no longer published. Chelis has no users yet, so the public
+  glibc-floor support policy is deferred; the recorded floor plus the
+  design notes in the owning openspec change document the retrofit paths
+  if a low floor is ever needed. The runtime static library is
+  unaffected: it is a pure-Rust glibc archive whose symbol binding
+  happens at the consumer's link.
+
 - **Recursive generic host calls compile via bounded memoized
   monomorphization (chelis#1158, successor to chelis#941).** The C-emitting
   host lane now compiles a recursive (direct or mutual) generic host call by

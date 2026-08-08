@@ -85,7 +85,7 @@ class ComputeKeyTests(unittest.TestCase):
 
     def test_namespace_separates_lanes(self):
         keys = {mod.compute_key(ns, "0.3.1") for ns in mod.NAMESPACES}
-        self.assertEqual(len(keys), 3)
+        self.assertEqual(len(keys), len(mod.NAMESPACES))
 
 
 class AssetNamingTests(unittest.TestCase):
@@ -96,12 +96,15 @@ class AssetNamingTests(unittest.TestCase):
         self.assertFalse(tag.startswith("v"))
 
     def test_asset_filename_is_key_plus_targz(self):
-        name = mod.asset_filename("linux-glibc231", "0.3.1")
-        self.assertEqual(name, "cvc5-prebuilt-linux-glibc231-cvc5sys0.3.1-v2.tar.gz")
+        name = mod.asset_filename("darwin-arm64", "0.3.1")
+        self.assertEqual(name, "cvc5-prebuilt-darwin-arm64-cvc5sys0.3.1-v2.tar.gz")
 
     def test_asset_filenames_unique_per_namespace(self):
         names = {mod.asset_filename(ns, "0.3.1") for ns in mod.NAMESPACES}
-        self.assertEqual(len(names), 3)
+        self.assertEqual(len(names), len(mod.NAMESPACES))
+
+    def test_retired_glibc231_namespace_stays_retired(self):
+        self.assertNotIn("linux-glibc231", mod.NAMESPACES)
 
 
 class Sha256SidecarTests(unittest.TestCase):
@@ -568,7 +571,6 @@ class PlanTests(unittest.TestCase):
             assets = {mod.asset_filename("linux-x86_64", "0.3.1"): {}}
             text = self._run_plan(Path(td), assets)
             self.assertIn("missing_linux_x86_64=false", text)
-            self.assertIn("missing_linux_glibc231=true", text)
             self.assertIn("missing_darwin_arm64=true", text)
 
     def test_force_marks_all_missing_even_when_present(self):

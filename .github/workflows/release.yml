@@ -7,262 +7,68 @@ permissions:
   contents: write
 
 jobs:
-  build-linux-x86_64:
-    name: Build chelis (linux-x86_64)
+  # The Linux toolchain tarball comes from the pinned, sandboxed Devenv
+  # release output (nix/release-chelis.nix): the committed Cargo.nix graph,
+  # the pinned cvc5 1.3.1 tree, a statically linked libstdc++/libzstd, and a
+  # patchelf interpreter rewrite off the Nix store. The derivation verifies
+  # behavior (version/help, the release fixture, the chelis#422 cvc5
+  # discharge) before the rewrite, then enforces the ELF portability
+  # postconditions and the recorded glibc floor from nix/contracts.nix.
+  build-chelis-release:
+    name: Build portable chelis toolchain (linux-x86_64)
     runs-on: ubuntu-latest
-    # chelis#1004: a cold cvc5 build measures ~30m here, and the retry
-    # wrapper can add a couple of fast-failing fetch attempts on top. This
-    # job had no ceiling at all, so a stalled fetch would have run toward
-    # the 6-hour runner cap; 75m bounds it while leaving real headroom.
-    timeout-minutes: 75
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      # cvc5 builds from source for `--features smt` (chelis#422):
-      # cmake/g++/libclang plus git (cvc5-sys clones the cvc5 source at
-      # build time). cvc5 auto-downloads and builds its own static GMP,
-      # so libgmp-dev is not strictly required, but it mirrors the
-      # ci.yml smt-build recipe (docs/smt_build_setup.md). apt-get under
-      # retry (scripts/ci_apt_get.py) so a transient mirror reset does not
-      # flake a release build.
-      - name: Install SMT build dependencies (cvc5)
-        run: python3 scripts/ci_apt_get.py g++ cmake libclang-dev git libgmp-dev libmpfr-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      # `--features smt` links cvc5 so the shipped `chelis prove` uses
-      # the SMT solver instead of degrading to the solver-free fuzz path
-      # (chelis#422). WI-11: the cvc5-sys build forces GMP and disables
-      # the GPL CLN path (ENABLE_GPL=OFF, USE_CLN=OFF), so the artifact
-      # is distributable. The verify step below proves the feature is
-      # live in the shipped binary.
-      #
-      # Wrapped in scripts/ci_cvc5_build.py (chelis#1004): the cold build
-      # starts by fetching cvc5 and its deps over the network, and a
-      # transient GitHub refusal there fails this job and skips the publish.
-      # The wrapper retries ONLY a fetch-signature failure; a real build
-      # failure still fails on the first attempt, so this job remains the
-      # cold-build proof docs/smt_build_setup.md says it is.
-      - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
-
-      - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
-
-      - name: Release binary test fixture
-        run: |
-          set -euo pipefail
-          (cd crates/chelis-cli/tests/fixtures/release_pipe_stage && ../../../../../target/release/chelis test tests)
-
-      - name: Strip binary
-        run: strip target/release/chelis
-
-      - name: Verify binary runs
-        run: ./target/release/chelis --help || ./target/release/chelis help || true
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Stage tarball contents
-        run: |
-          set -euo pipefail
-          staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64"
-          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
-          cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
-          cp README.md "$staging/"
-          cp LICENSE "$staging/"
-          tar czf "${staging}.tar.gz" "$staging"
-          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
-          ls -la "${staging}.tar.gz"*
-
-      # Verify the SHIPPED artifact: unpack the staged tarball and run
-      # the cvc5-discharge check on the extracted (stripped) bin/chelis.
-      # The earlier verify step runs on target/release/chelis before
-      # staging; this one proves the exact binary inside the .tar.gz
-      # users download still discharges via cvc5 (chelis#422), and would
-      # also catch a staging step that copied the wrong binary.
-      - name: Verify shipped tarball discharges via cvc5
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/verify_release_smt.py \
-            --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: chelis-linux-x86_64
-          path: |
-            chelis-*-linux-x86_64.tar.gz
-            chelis-*-linux-x86_64.tar.gz.sha256
-
-  build-linux-x86_64-glibc231:
-    name: Build chelis (linux-x86_64, glibc 2.31)
-    runs-on: ubuntu-latest
-    # Debian 11 ships glibc 2.31. Building inside it caps the binary's glibc
-    # verneed records at 2.31, so the tarball loads on Debian 11/12 and
-    # Ubuntu 20.04+. The default ubuntu-latest build records a hard
-    # GLIBC_2.39 requirement (Rust std's weak pidfd refs) and refuses to
-    # load on anything older (#330).
-    container: debian:11
-    # chelis#1004: see the linux-x86_64 job. Same measured ~30m cold build,
-    # same previously-unbounded wall clock.
-    timeout-minutes: 75
-    # Container jobs default `run:` steps to `sh`, which rejects
-    # `set -o pipefail` and `${VAR::8}`; debian:11 ships bash.
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    env:
+      NIX_CONFIG: |
+        sandbox = true
+        max-jobs = 2
+        cores = 0
     defaults:
       run:
-        shell: bash
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
-      # `--features smt` (chelis#422) builds cvc5 from source: cmake,
-      # g++ (via build-essential), libclang for bindgen, and git for the
-      # cvc5-sys clone. python3-pip provides `tomli` for cvc5's
-      # build-time TOML codegen, which on Python < 3.11 imports `tomli`
-      # (debian:11 ships Python 3.9, and python3-tomli is not in the main
-      # bullseye suite, only backports). python3-venv provides the `venv`
-      # module cvc5's cmake create_venv step uses for its codegen venv
-      # (debian:11's slim image omits it, so create_venv fails
-      # configure.sh otherwise). m4 is required by GMP's configure: cvc5
-      # builds its own static GMP from source under --auto-download, and
-      # GMP's ./configure aborts with "No usable m4 in $PATH" without it
-      # (debian:11's slim image omits m4). libgmp/libmpfr-dev and
-      # libopenblas-dev mirror the ci.yml smt-build-glibc231 lane so the
-      # prove-in-CI lane builds with the same system libs this job ships.
-      #
-      # Bootstrap the few packages needed BEFORE the in-repo retry helper can
-      # run, on the slim debian:11 image: git + ca-certificates + curl for
-      # `actions/checkout@v6`, and python3 to run scripts/ci_apt_get.py itself
-      # (debian:11-slim ships no python3, and the helper installs python3 among
-      # the heavy set -- chicken-and-egg, so python3 must exist first). The
-      # full cvc5 toolchain set is the one that actually flakes on a mirror
-      # reset, so that is what goes through the retry; a reset on these four
-      # tiny bootstrap packages is rare. See the matching ci.yml
-      # smt-build-glibc231 job.
-      - name: Bootstrap checkout prerequisites
-        run: |
-          set -euo pipefail
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates curl python3
-
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install build prerequisites
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@73f017c4d3179dc313844e9d5f08d17a7879c824 # ci#37 prerequisite
+
+      - name: Mint a scoped token for the private ci input
+        id: ci-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          repositories: ci
+
+      - name: Authenticate Nix to the private ci devenv input
+        shell: bash
+        env:
+          CI_TOKEN: ${{ steps.ci-token.outputs.token }}
         run: |
-          set -euo pipefail
-          python3 scripts/ci_apt_get.py --no-sudo --no-install-recommends \
-            build-essential m4 \
-            cmake libclang-dev libopenblas-dev libgmp-dev libmpfr-dev \
-            python3 python3-pip python3-venv
-          pip3 install --break-system-packages tomli || pip3 install tomli
+          {
+            echo "NIX_CONFIG<<EOF"
+            printf '%s\n' "$NIX_CONFIG"
+            echo "access-tokens = github.com=$CI_TOKEN"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
-      # `head -1` would SIGPIPE ldd under pipefail (racy exit 141);
-      # awk consumes its whole input.
-      - name: Assert glibc 2.31 build environment
+      # verify_release_chelis.py checks the exact output inventory, the
+      # checksum, the exact tarball tree, and -- at a v* tag -- that the tag
+      # equals v<workspace-version> before anything can publish.
+      - name: Build and verify the portable chelis toolchain output
+        id: build
         run: |
-          set -euo pipefail
-          ldd --version | awk 'NR==1'
-          ldd --version | awk 'NR==1' | grep -F '2.31'
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      # See the linux-x86_64 job for the WI-11 GMP-not-CLN rationale and the
-      # chelis#1004 fetch-retry rationale.
-      - name: Build chelis-cli (release, smt)
-        run: python3 scripts/ci_cvc5_build.py -- cargo build --release -p chelis-cli --features smt
-
-      - name: Build chelis-runtime staticlib (release)
-        run: cargo build --release -p chelis-runtime
-
-      # Run before strip so the prove path exercises a functional
-      # binary; the strip below only removes symbols.
-      - name: Verify cvc5 discharge path (smt feature live)
-        run: python3 .github/scripts/verify_release_smt.py ./target/release/chelis
-
-      # Runs the built binary inside the glibc-2.31 container, proving the
-      # shipped artifact actually loads and works on the oldest supported
-      # glibc — the exact failure mode of #330.
-      - name: Release binary test fixture
-        run: |
-          set -euo pipefail
-          (cd crates/chelis-cli/tests/fixtures/release_pipe_stage && ../../../../../target/release/chelis test tests)
-
-      - name: Strip binary
-        run: strip target/release/chelis
-
-      - name: Assert no glibc requirement above 2.31
-        run: |
-          set -euo pipefail
-          max_req="$(objdump -T target/release/chelis | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-          echo "max glibc requirement: ${max_req}"
-          test "$(printf 'GLIBC_2.31\n%s\n' "${max_req}" | sort -V | tail -1)" = "GLIBC_2.31"
-
-      - name: Verify binary runs
-        run: ./target/release/chelis --help || ./target/release/chelis help || true
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Stage tarball contents
-        run: |
-          set -euo pipefail
-          staging="chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31"
-          mkdir -p "$staging/bin" "$staging/lib" "$staging/include"
-          cp target/release/chelis "$staging/bin/"
-          cp target/release/libchelis_runtime.a "$staging/lib/"
-          cp crates/chelis-runtime/include/chelis_runtime.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_runtime_dtype.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_blas.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_simd.h "$staging/include/"
-          cp crates/chelis-runtime/include/chelis_math.h "$staging/include/"
-          cp README.md "$staging/"
-          cp LICENSE "$staging/"
-          tar czf "${staging}.tar.gz" "$staging"
-          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
-          ls -la "${staging}.tar.gz"*
-
-      # Verify the SHIPPED artifact (the stripped binary inside the
-      # tarball) discharges via cvc5 -- see the linux-x86_64 job. Here the
-      # staged binary is already stripped (strip runs above), so this
-      # proves the stripped, packaged cvc5 build still works.
-      - name: Verify shipped tarball discharges via cvc5
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/verify_release_smt.py \
-            --tarball "chelis-${{ steps.version.outputs.version }}-linux-x86_64-glibc2.31.tar.gz"
+          devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
+          python scripts/verify_release_chelis.py \
+            --build-json release-chelis-build.json \
+            --stage-root release-chelis
 
       - name: Stage chelisup bootstrap script
         run: |
-          set -euo pipefail
           # Publishing the bootstrap script as an asset gives the one-liner
           # a canonical URL: <repo>/releases/latest/download/chelisup.sh
           cp crates/chelisup/bootstrap/chelisup.sh chelisup.sh
@@ -270,11 +76,74 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: chelis-linux-x86_64-glibc2.31
+          name: chelis-linux-x86_64
           path: |
-            chelis-*-linux-x86_64-glibc2.31.tar.gz
-            chelis-*-linux-x86_64-glibc2.31.tar.gz.sha256
+            ${{ steps.build.outputs.path }}/chelis-v*-linux-x86_64.tar.gz
+            ${{ steps.build.outputs.path }}/chelis-v*-linux-x86_64.tar.gz.sha256
             chelisup.sh
+          if-no-files-found: error
+
+  # Off-Nix consumption proof: a clean, digest-pinned Ubuntu 24.04
+  # container (glibc 2.39 -- must equal linuxReleaseConsumptionGlibc in
+  # nix/contracts.nix, which must stay at or above the recorded binary
+  # floor). The container has no Nix; it runs the exact staged tarball,
+  # proves the cvc5 discharge on the shipped binary, and compiles emitted C
+  # against the shipped runtime archive with the system gcc and OpenBLAS.
+  consume-chelis-release:
+    name: Consume chelis release off Nix (linux-x86_64)
+    needs: [build-chelis-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The pinned image is minimal: bootstrap python3 and the C toolchain
+      # with raw apt-get (scripts/ci_apt_get.py itself needs python3, so the
+      # helper cannot bootstrap its own interpreter).
+      - name: Bootstrap consumption prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates gcc libc6-dev libopenblas-dev python3 tar gzip
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download the staged release artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: chelis-linux-x86_64
+          path: release-download
+
+      - name: Assert the consumption environment glibc matches the contract
+        run: |
+          set -euo pipefail
+          ldd --version | awk 'NR==1'
+          python3 .github/scripts/verify_consumption_glibc.py
+
+      - name: Unpack and run the shipped compiler
+        run: |
+          set -euo pipefail
+          tarball="$(find release-download -name 'chelis-v*-linux-x86_64.tar.gz' -print -quit)"
+          test -n "$tarball"
+          mkdir -p consume
+          tar -xzf "$tarball" -C consume
+          unpacked="$(find consume -mindepth 1 -maxdepth 1 -type d -print -quit)"
+          echo "unpacked=$unpacked" >> "$GITHUB_ENV"
+          "$unpacked/bin/chelis" --version
+          "$unpacked/bin/chelis" --help >/dev/null
+
+      - name: Verify the shipped tarball discharges via cvc5
+        run: |
+          set -euo pipefail
+          tarball="$(find release-download -name 'chelis-v*-linux-x86_64.tar.gz' -print -quit)"
+          python3 .github/scripts/verify_release_smt.py --tarball "$tarball"
+
+      - name: Compile and run emitted C against the shipped runtime
+        run: python3 .github/scripts/smoke_linux_openblas.py "$unpacked/bin/chelis"
 
   build-darwin-arm64:
     name: Build chelis (darwin-arm64)
@@ -458,7 +327,7 @@ jobs:
     name: Publish GitHub Release
     # Dispatch the workflow at a v* tag to publish its staged artifacts.
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux-x86_64, build-linux-x86_64-glibc231, build-darwin-arm64, build-chelisup-release]
+    needs: [build-chelis-release, consume-chelis-release, build-darwin-arm64, build-chelisup-release]
     runs-on: ubuntu-latest
     steps:
       - name: Download staged artifacts

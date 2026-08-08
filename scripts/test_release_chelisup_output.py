@@ -272,7 +272,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("release workflow must not build chelisup with Cargo", errors)
 
     def test_missing_private_input_authentication_fails(self) -> None:
-        mutated = self.workflow.replace("repositories: ci", "repositories: other", 1)
+        job = _job_block(self.workflow, "build-chelisup-release")
+        mutated = self.workflow.replace(
+            job, job.replace("repositories: ci", "repositories: other", 1), 1
+        )
         errors = release_workflow_contract_errors(mutated)
         self.assertIn("release workflow matrix is missing repositories: ci", errors)
 

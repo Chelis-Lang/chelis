@@ -189,8 +189,10 @@ class ReleaseWorkflowWiringTest(unittest.TestCase):
         ]
         self.assertEqual(
             len(smt_builds),
-            3,
-            "release.yml should build chelis-cli --features smt in all three jobs",
+            1,
+            "release.yml should build chelis-cli --features smt with Cargo only "
+            "in the Darwin job; the Linux toolchain comes from the Nix release "
+            "output (openspec switch-linux-release-to-nix)",
         )
         for line in smt_builds:
             self.assertIn(
@@ -214,8 +216,8 @@ class ReleaseWorkflowWiringTest(unittest.TestCase):
         # per job rather than by counting occurrences, so adding a ceiling
         # elsewhere in the file cannot mask a missing one here.
         for job in (
-            "build-linux-x86_64:",
-            "build-linux-x86_64-glibc231:",
+            "build-chelis-release:",
+            "consume-chelis-release:",
             "build-darwin-arm64:",
         ):
             with self.subTest(job=job):

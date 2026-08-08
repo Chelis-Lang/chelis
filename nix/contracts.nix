@@ -97,6 +97,18 @@
     };
   };
 
+  # Recorded glibc floor of the portable Linux release binary: the maximum
+  # GLIBC_* symbol version in its dynamic symbol table. The release
+  # derivation fails on drift in either direction, so a toolchain bump that
+  # moves the floor lands as a reviewed diff beside the lock change.
+  linuxReleaseGlibcFloor = "2.39";
+
+  # glibc version of the off-Nix consumption environment that runs the
+  # shipped Linux tarball in the release workflow. The recorded floor must
+  # not exceed this value, or our own consumption lane cannot run the
+  # artifact.
+  linuxReleaseConsumptionGlibc = "2.39";
+
   compilerBehaviorChecks = [
     "version"
     "help"

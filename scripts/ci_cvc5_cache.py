@@ -65,7 +65,7 @@ CLI
 ---
     key --namespace <ns>
         Emit `key=` and `dir=` (the Actions-cache key + store dir) to
-        $GITHUB_OUTPUT. `<ns>` is linux-x86_64 / linux-glibc231 / darwin-arm64.
+        $GITHUB_OUTPUT. `<ns>` is linux-x86_64 / darwin-arm64.
 
     asset-name --namespace <ns>
         Emit `tag=`, `asset=`, `sha256=`, `dir=` for the durable Release asset.
@@ -125,8 +125,11 @@ CACHE_SCHEMA = "v2"
 # linked (it degrades to a from-source rebuild instead of breaking the build).
 SENTINEL_NAME = ".chelis-cvc5-complete"
 
-# The three CI namespaces (os/arch), used by `plan` to enumerate assets.
-NAMESPACES = ("linux-x86_64", "linux-glibc231", "darwin-arm64")
+# The CI namespaces (os/arch), used by `plan` to enumerate assets. The
+# former `linux-glibc231` namespace retired with the debian:11 lanes when
+# the Linux release moved to the Nix build (openspec
+# switch-linux-release-to-nix).
+NAMESPACES = ("linux-x86_64", "darwin-arm64")
 
 # Paths (relative to the cvc5 source/build tree) that the cvc5-sys build script
 # reads on its prebuilt CVC5_DIR path. Directories are copied wholesale so the
@@ -210,9 +213,8 @@ def asset_filename(namespace: str, cvc5_sys_ver: str) -> str:
 def cache_dir(namespace: str) -> Path:
     """Absolute, per-namespace store directory OUTSIDE `target/`.
 
-    Per-namespace so lanes that build a different toolchain's cvc5 (e.g. the
-    glibc-2.31 container vs ubuntu-latest) never restore each other's artifacts
-    even if a key ever collided.
+    Per-namespace so lanes that build a different toolchain's cvc5 never
+    restore each other's artifacts even if a key ever collided.
     """
     return Path.home() / ".cache" / "chelis-cvc5" / namespace
 
@@ -637,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
     p_plan.add_argument(
         "--namespace",
         action="append",
-        help="restrict to this namespace (repeatable); default all three",
+        help="restrict to this namespace (repeatable); default all",
     )
     p_plan.set_defaults(func=cmd_plan)
 

@@ -40,6 +40,14 @@ limitations section).
 
 ## Release Mechanism
 
+> **Superseded for Linux (2026-08).** The Cargo Linux jobs and the
+> `-glibc2.31` variant this section describes retired with the openspec
+> change `switch-linux-release-to-nix`: the Linux tarball now comes from
+> the Nix release output (`nix/release-chelis.nix`), with a recorded
+> glibc floor in `nix/contracts.nix` and an off-Nix consumption job in
+> `release.yml`. The Darwin lane below is still accurate. This section is
+> retained as the phase 3j delivery record.
+
 Release is driven by `.github/workflows/release.yml`:
 
 - **Trigger:** a manual workflow dispatch at a pushed tag that matches `v*`.
