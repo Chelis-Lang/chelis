@@ -52,8 +52,8 @@
 - [x] 6.1 Add `setup-devenv` before `prune-actions-cache`.
 - [x] 6.2 Pass `refs/heads/main`, retention `1`, and protected prefix `cvc5-prebuilt-`.
 - [x] 6.3 Preserve the Monday schedule, manual apply input, permissions, and concurrency group.
-- [ ] 6.4 Run one hosted manual dry-run and inspect all numeric outputs.
-- [ ] 6.5 Restore scheduled apply mode only after the dry-run passes.
+- [x] 6.4 Run one hosted manual dry-run and inspect all numeric outputs.
+- [x] 6.5 Restore scheduled apply mode only after the dry-run passes.
 - [x] 6.6 Remove `scripts/ci_cache_prune.py` after equivalent shared and consumer tests pass.
 - [x] 6.7 Remove `scripts/test_ci_cache_prune.py` after its consumer-policy cases move to workflow contract tests.
 
@@ -81,7 +81,7 @@
 - [x] 9.1 Execute every workflow mutation and verify its exact failure category.
 - [x] 9.2 Verify that all direct `macos-latest` jobs remain manual-only.
 - [x] 9.3 Verify that branch dispatches remain artifact-only and tag publication remains manual.
-- [ ] 9.4 Push only after fresh approval under the repository permission policy.
+- [x] 9.4 Push only after fresh approval under the repository permission policy.
 - [ ] 9.5 Require `Lint and Unit Tests (Linux)` to pass as the authoritative completion oracle.
 - [ ] 9.6 Require all other existing required contexts without a branch-protection change.
 - [ ] 9.7 Keep the change incomplete if GitHub Actions does not produce the required oracle.

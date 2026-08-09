@@ -5,7 +5,9 @@ set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
 
-if [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
+if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    python_path="$VIRTUAL_ENV/bin/python"
+elif [ -x "$repo_root/.devenv/state/venv/bin/python" ]; then
     python_path="$repo_root/.devenv/state/venv/bin/python"
 elif [ -x "$repo_root/.venv/bin/python" ]; then
     python_path="$repo_root/.venv/bin/python"

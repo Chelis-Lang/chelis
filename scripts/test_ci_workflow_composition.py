@@ -173,7 +173,7 @@ def assert_policy_contract(workflows: dict[str, str]) -> None:
         "base-sha: ${{ steps.authorship-range.outputs.base-sha }}",
         "head-sha: ${{ steps.authorship-range.outputs.head-sha }}",
         "profile: all-markers",
-        "max-commits: ${{ github.event.pull_request.commits || 2 }}",
+        "max-commits: '1000'",
     ):
         if marker not in authorship:
             raise AssertionError(f"authorship job missing {marker!r}")

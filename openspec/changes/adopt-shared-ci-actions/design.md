@@ -102,6 +102,10 @@ Manual runs remain dry-run unless the caller selects apply. `cvc5-prebuilt-` rem
 
 The shared action owns enumeration, selection, and deletion mechanics. The local cache-prune implementation and its duplicate tests then leave the repository.
 
+The hosted consumer dry-run passed in run `31330755749`.
+It reported 31 caches and selected zero caches.
+It reported zero selected bytes, deletions, and deleted bytes.
+
 ### Tests lock ownership boundaries
 
 Workflow tests parse YAML and assert exact action order, pins, inputs, and disposition modes. Negative mutations remove each prerequisite or restore each forbidden inline block.

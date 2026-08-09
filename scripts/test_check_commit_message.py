@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -59,7 +61,7 @@ CARGO_HUSKY_DEPENDENCY = (
 @dataclass(frozen=True)
 class CargoHuskyFallback:
     checker_path: str
-    interpreter_paths: tuple[str, str]
+    interpreter_paths: tuple[str, str, str]
     uv_command: str
     dependency: str
     locked_version: str
@@ -71,6 +73,7 @@ class CargoHuskyFallback:
 
         checker_path = "scripts/check_commit_message.py"
         interpreter_paths = (
+            "$VIRTUAL_ENV/bin/python",
             ".devenv/state/venv/bin/python",
             ".venv/bin/python",
         )
@@ -157,6 +160,45 @@ class CommitMessagePolicyTests(unittest.TestCase):
         self.assertIn("--managed-python", fallback.uv_command)
         self.assertEqual(fallback.locked_version, "1.5.0")
 
+    def test_cargo_husky_hook_prefers_the_active_environment(self) -> None:
+        hook, manifest, lock = self.cargo_husky_inputs()
+        fallback = CargoHuskyFallback.parse(hook, manifest, lock)
+        self.assertEqual(fallback.interpreter_paths[0], "$VIRTUAL_ENV/bin/python")
+        self.assertLess(
+            hook.index('$VIRTUAL_ENV/bin/python'),
+            hook.index('.devenv/state/venv/bin/python'),
+        )
+
+    def test_cargo_husky_hook_executes_the_active_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            active = Path(temp_dir) / "active"
+            active_bin = active / "bin"
+            active_bin.mkdir(parents=True)
+            marker = Path(temp_dir) / "active-python-used"
+            python = active_bin / "python"
+            python.write_text(
+                "#!/bin/sh\n"
+                f"printf active > {shlex.quote(str(marker))}\n"
+                f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+            message_path = Path(temp_dir) / "COMMIT_EDITMSG"
+            message_path.write_text(ALLOWED_MESSAGES[0], encoding="utf-8")
+            environment = os.environ.copy()
+            environment["VIRTUAL_ENV"] = str(active)
+            result = subprocess.run(
+                [str(REPO_ROOT / ".cargo-husky/hooks/commit-msg"), str(message_path)],
+                cwd=REPO_ROOT,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            marker_value = marker.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(marker_value, "active")
+
     def test_cargo_husky_hook_has_valid_posix_shell_syntax(self) -> None:
         hook_path = REPO_ROOT / ".cargo-husky/hooks/commit-msg"
         result = subprocess.run(
@@ -193,6 +235,7 @@ class CommitMessagePolicyTests(unittest.TestCase):
         mutations = (
             (hook.replace("scripts/check_commit_message.py", "other.py"), manifest, lock),
             (hook.replace("--managed-python", "--system"), manifest, lock),
+            (hook.replace("$VIRTUAL_ENV/bin/python", "$OTHER/bin/python"), manifest, lock),
             (hook, manifest.replace(CARGO_HUSKY_DEPENDENCY, ""), lock),
             (hook, manifest, lock.replace('name = "cargo-husky"', 'name = "other"')),
         )
