@@ -82,6 +82,6 @@
 - [x] 9.2 Verify that all direct `macos-latest` jobs remain manual-only.
 - [x] 9.3 Verify that branch dispatches remain artifact-only and tag publication remains manual.
 - [x] 9.4 Push only after fresh approval under the repository permission policy.
-- [ ] 9.5 Require `Lint and Unit Tests (Linux)` to pass as the authoritative completion oracle.
-- [ ] 9.6 Require all other existing required contexts without a branch-protection change.
-- [ ] 9.7 Keep the change incomplete if GitHub Actions does not produce the required oracle.
+- [x] 9.5 Require `Lint and Unit Tests (Linux)` to pass as the authoritative completion oracle.
+- [x] 9.6 Require all other existing required contexts without a branch-protection change.
+- [x] 9.7 Keep the change incomplete if GitHub Actions does not produce the required oracle.
