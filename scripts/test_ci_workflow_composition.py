@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
 DEVENV_YAML = ROOT / "devenv.yaml"
 DEVENV_LOCK = ROOT / "devenv.lock"
-CI_REVISION = "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+CI_REVISION = "111b5865ccf04146344ad99dcdea9d724d65fc69"
 ACTIONLINT_VERSION = "1.7.12"
 ACTIONLINT_SHA256 = (
     "sha256:8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"

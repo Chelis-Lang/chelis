@@ -17,11 +17,11 @@ RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 SETUP_DEVENV_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+    "Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69"
 )
 AUTH_DEVENV_ACTION = (
     "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
-    "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+    "111b5865ccf04146344ad99dcdea9d724d65fc69"
 )
 BUILD_JOB_REQUIRED_MARKERS = (
     SETUP_DEVENV_ACTION,

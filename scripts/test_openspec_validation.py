@@ -14,7 +14,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_openspec.py"
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "openspec-validate.yml"
-CI_ACTION_SHA = "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+CI_ACTION_SHA = "111b5865ccf04146344ad99dcdea9d724d65fc69"
 CHECKOUT_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 REMOTE_USES = re.compile(r"(?m)^\s*uses:\s*([^@\s]+)@([^\s#]+)")
 MODE_VALUE = re.compile(r"(?m)^\s+mode:\s*(\S+)\s*$")
@@ -60,7 +60,7 @@ class WorkflowContractTests(unittest.TestCase):
             "missing-setup": text.replace(
                 "      - name: Set up portable Devenv\n"
                 f"        uses: Chelis-Lang/ci/actions/setup-devenv@{CI_ACTION_SHA} "
-                "# ci#50 shared composition\n\n",
+                "# ci#53 selective retry\n\n",
                 "",
             ),
             "mutable-checkout": text.replace(CHECKOUT_SHA, "v7"),

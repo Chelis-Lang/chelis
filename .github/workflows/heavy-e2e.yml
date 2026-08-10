@@ -51,15 +51,15 @@ jobs:
       # heavy-e2e job was the only build job missing it, which is why its
       # workspace build exhausted the runner disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#53 selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -101,10 +101,10 @@ jobs:
       issues: write
     steps:
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#53 selective retry
 
       - name: Open or close the nightly tracking issue
-        uses: Chelis-Lang/ci/actions/nightly-status@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/nightly-status@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#50 shared composition
         with:
           github-token: ${{ github.token }}
           result: ${{ needs.heavy-e2e.result }}

@@ -17,11 +17,11 @@ CVC5_RESTORE_ACTION = (
 CVC5_SAVE_ACTION = REPO_ROOT / ".github" / "actions" / "cvc5-cache-save" / "action.yml"
 
 SETUP_DEVENV_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+    "Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69"
 )
 AUTH_DEVENV_ACTION = (
     "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
-    "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+    "111b5865ccf04146344ad99dcdea9d724d65fc69"
 )
 SMOKE_JOBS = {
     "smt-build": "x86_64-linux",
@@ -40,6 +40,7 @@ LANE_FORBIDDEN_MARKERS = (
     "access-tokens = github.com=",
 )
 SMT_DEVENV_PREFIX = "devenv --profile smt shell --no-tui -- "
+SMT_RETRY_PREFIX = "devenv-retry --profile smt shell --no-tui -- "
 RETIRED_SCRIPTS = (
     "ci_publish_cvc5_release.py",
     "ci_cvc5_cache.py",
@@ -60,6 +61,7 @@ def _lane_errors(workflow: str, job_name: str, system: str) -> list[str]:
     if not block:
         return [f"missing SMT lane job {job_name}"]
     errors: list[str] = []
+    devenv_prefix = SMT_RETRY_PREFIX if job_name == "smt-build" else SMT_DEVENV_PREFIX
     required = (
         SETUP_DEVENV_ACTION,
         AUTH_DEVENV_ACTION,
@@ -69,9 +71,11 @@ def _lane_errors(workflow: str, job_name: str, system: str) -> list[str]:
         "uses: ./.github/actions/cvc5-cache-save",
         f"system: {system}",
         "devenv build --no-tui outputs.cvc5-dir",
-        f"{SMT_DEVENV_PREFIX}cargo build",
-        "verify_release_smt.py",
+        f"{devenv_prefix}cargo build",
+        f"{devenv_prefix}python .github/scripts/verify_release_smt.py",
     )
+    if job_name == "smt-build":
+        required += (f"{devenv_prefix}cargo test",)
     for marker in required:
         if marker not in block:
             errors.append(f"{job_name} is missing {marker}")
@@ -179,6 +183,16 @@ class SmokeLaneContractTests(unittest.TestCase):
                 )
                 errors = smoke_lane_contract_errors(mutated)
                 self.assertIn(f"{job_name} is missing {marker}", errors)
+
+    def test_linux_lane_requires_the_selective_devenv_retry(self) -> None:
+        block = _job_block(self.workflow, "smt-build")
+        mutated = self.workflow.replace(
+            block, block.replace(SMT_RETRY_PREFIX, SMT_DEVENV_PREFIX, 1), 1
+        )
+        errors = smoke_lane_contract_errors(mutated)
+        self.assertIn(
+            f"smt-build is missing {SMT_RETRY_PREFIX}cargo build", errors
+        )
 
     def test_a_host_toolchain_step_fails(self) -> None:
         block = _job_block(self.workflow, "smt-build")

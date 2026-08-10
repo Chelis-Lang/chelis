@@ -19,11 +19,11 @@ CHELISUP_INSTALL = REPO_ROOT / "crates" / "chelisup" / "src" / "install.rs"
 CHELISUP_BOOTSTRAP = REPO_ROOT / "crates" / "chelisup" / "bootstrap" / "chelisup.sh"
 
 SETUP_DEVENV_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+    "Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69"
 )
 AUTH_DEVENV_ACTION = (
     "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
-    "128d3acc50bb04bf75a6bb4cf34ec7f50dc388b9"
+    "111b5865ccf04146344ad99dcdea9d724d65fc69"
 )
 MODULE_REQUIRED_MARKERS = (
     "outputs.release-chelisup",
