@@ -41,6 +41,7 @@ LANE_FORBIDDEN_MARKERS = (
 )
 SMT_DEVENV_PREFIX = "devenv-retry --profile smt shell --no-tui -- "
 SMT_BARE_DEVENV_PREFIX = "devenv --profile smt shell --no-tui -- "
+PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 RETIRED_SCRIPTS = (
     "ci_publish_cvc5_release.py",
     "ci_cvc5_cache.py",
@@ -143,6 +144,11 @@ def cvc5_cache_action_errors(restore: str, save: str) -> list[str]:
     ):
         if marker not in save:
             errors.append(f"cvc5-cache-save is missing {marker}")
+    shell_marker = f"shell: {PORTABLE_DEVENV_SHELL}"
+    if restore.count(shell_marker) != 2:
+        errors.append("cvc5-cache-restore does not own each run shell")
+    if save.count(shell_marker) != 1:
+        errors.append("cvc5-cache-save does not own each run shell")
     return errors
 
 
@@ -189,9 +195,7 @@ class SmokeLaneContractTests(unittest.TestCase):
             block, block.replace(SMT_DEVENV_PREFIX, SMT_BARE_DEVENV_PREFIX, 1), 1
         )
         errors = smoke_lane_contract_errors(mutated)
-        self.assertIn(
-            f"smt-build is missing {SMT_DEVENV_PREFIX}cargo build", errors
-        )
+        self.assertIn(f"smt-build is missing {SMT_DEVENV_PREFIX}cargo build", errors)
 
     def test_a_host_toolchain_step_fails(self) -> None:
         block = _job_block(self.workflow, "smt-build")
@@ -284,6 +288,12 @@ class Cvc5CacheActionTests(unittest.TestCase):
         mutated = self.save.replace("continue-on-error: true", "", 1)
         errors = cvc5_cache_action_errors(self.restore, mutated)
         self.assertIn("cvc5-cache-save is missing continue-on-error: true", errors)
+
+    def test_a_host_shell_fails_the_cache_action_contract(self) -> None:
+        portable = f"shell: {PORTABLE_DEVENV_SHELL}"
+        mutated = self.restore.replace(portable, "shell: bash", 1)
+        errors = cvc5_cache_action_errors(mutated, self.save)
+        self.assertIn("cvc5-cache-restore does not own each run shell", errors)
 
 
 class ProducerRetirementTests(unittest.TestCase):

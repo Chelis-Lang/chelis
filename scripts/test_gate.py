@@ -67,11 +67,15 @@ DEVENV_COMMAND_PREFIXES = (
     DEVENV_COMMAND_PREFIX,
     "devenv-retry --profile sanitizers shell --no-tui -- ",
     "devenv-retry --profile smt shell --no-tui -- ",
+    # Keep bare wrappers visible to the parity scanner. The workflow
+    # composition contract rejects them as retry bypasses.
     "devenv --profile ci shell --no-tui -- ",
     "devenv --profile sanitizers shell --no-tui -- ",
     "devenv --profile smt shell --no-tui -- ",
 )
-DEVENV_WORKFLOW_JOBS = {
+# These jobs run project commands. Portable, off-Nix, and orchestration jobs
+# have closed dispositions in test_ci_execution_ownership.py.
+PROJECT_DEVENV_WORKFLOW_JOBS = {
     "ci.yml": (
         "diagnostic-kind-oracle",
         "rejection-authority-liveness",
@@ -906,7 +910,7 @@ class DevenvWorkflowJobTests(unittest.TestCase):
             ("ci.yml", "smt-build-darwin-arm64"): "smt",
             ("smt-full-prove.yml", "full-smt-prove"): "smt",
         }
-        for filename, jobs in DEVENV_WORKFLOW_JOBS.items():
+        for filename, jobs in PROJECT_DEVENV_WORKFLOW_JOBS.items():
             path = WORKFLOWS_DIR / filename
             for job in jobs:
                 with self.subTest(filename=filename, job=job):

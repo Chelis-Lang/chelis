@@ -22,7 +22,7 @@ runs:
   steps:
     - name: Export the cvc5 toolchain closure
       if: inputs.cache-hit != 'true'
-      shell: bash
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
       env:
         CVC5_SYSTEM: ${{ inputs.system }}
       run: python3 -c 'import os, subprocess; system = os.environ["CVC5_SYSTEM"]; out = subprocess.check_output(["nix", "eval", "--raw", f".#legacyPackages.{system}.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--to", "file:///tmp/chelis-cvc5-cache", out], check=True)'

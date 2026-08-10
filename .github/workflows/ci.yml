@@ -529,8 +529,14 @@ jobs:
       contents: read
     needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#53 selective retry
 
       - name: Require all integration legs
         run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}
@@ -651,6 +657,9 @@ jobs:
   no-ai-authorship:
     name: No AI authorship markers
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
     steps:
       # Shallow the clone to the PR's commit range instead of the whole
       # repo history (chelis#421). GitHub Actions expressions have no

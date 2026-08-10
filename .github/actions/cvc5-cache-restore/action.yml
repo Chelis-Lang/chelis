@@ -27,7 +27,7 @@ runs:
   steps:
     - name: Compute the cvc5 toolchain cache key
       id: key
-      shell: bash
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
       env:
         CVC5_SYSTEM: ${{ inputs.system }}
       run: python3 -c 'import os, pathlib, subprocess; system = os.environ["CVC5_SYSTEM"]; drv = subprocess.check_output(["nix", "eval", "--raw", f".#legacyPackages.{system}.cvc5-dir.drvPath"], text=True).strip(); pathlib.Path(os.environ["GITHUB_OUTPUT"]).open("a").write("key=" + pathlib.Path(drv).name + "\n")'
@@ -41,7 +41,7 @@ runs:
 
     - name: Import the cvc5 toolchain closure
       if: steps.restore.outputs.cache-hit == 'true'
-      shell: bash
+      shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
       env:
         CVC5_SYSTEM: ${{ inputs.system }}
       run: python3 -c 'import os, subprocess; system = os.environ["CVC5_SYSTEM"]; out = subprocess.check_output(["nix", "eval", "--raw", f".#legacyPackages.{system}.cvc5-dir.outPath"], text=True).strip(); subprocess.run(["nix", "copy", "--from", "file:///tmp/chelis-cvc5-cache", "--no-check-sigs", out], check=True)'

@@ -171,7 +171,7 @@ No numbered language specification, compiler surface, runtime surface, CLI surfa
 - **THEN** no compiler, runtime, CLI, backend, package, or generated-code behavior change is present
 
 ### Requirement: [CWC-008] Evidence fails closed and preserves the hosted oracle
-Workflow contract tests SHALL cover exact pins, action order, input mappings, finding modes, nightly identity, cache policy, and native Python paths.
+Workflow contract tests SHALL cover exact pins, action order, input mappings, finding modes, nightly identity, cache policy, execution ownership, and Python paths.
 
 Negative mutations SHALL remove one prerequisite or restore one forbidden inline form. Each mutation MUST fail for its intended reason.
 
@@ -214,3 +214,46 @@ The wrapper SHALL preserve the status of each unrelated failure. Commands outsid
 #### Scenario: A workflow bypasses the wrapper
 - **WHEN** a workflow invokes `devenv` directly for a project command
 - **THEN** the workflow composition contract test fails before hosted execution
+
+### Requirement: [CWC-010] Every CI execution surface has one environment disposition
+Every workflow job and local composite action SHALL have one entry in the closed execution ownership inventory.
+
+A project Devenv job SHALL install the portable base and use `devenv-ci` as its default shell. Each project command SHALL use `devenv-retry`.
+
+A portable Devenv job SHALL install the portable base before its first command. It SHALL use `devenv-ci` as its default shell.
+
+A local action that runs after Devenv setup SHALL declare `devenv-ci` for each `run` step. The caller's default shell does not control composite action steps.
+
+A managed job SHALL use only registered orchestration actions. A new tool setup action requires an explicit ownership review and inventory change.
+
+The docs-only detector can use host Python before setup. This exception prevents environment setup for a documentation-only change.
+
+Off-Nix release checks, ecosystem checks, and named portability probes can use the host environment. GitHub-only orchestration can use external actions without Devenv.
+
+The integration aggregator SHALL use the portable Devenv interpreter. The Hull manifest reader SHALL run after portable Devenv setup.
+
+The cvc5 cache actions SHALL retain GitHub Actions cache transport. Their Python and Nix commands SHALL run through the portable Devenv shell.
+
+#### Scenario: A new workflow job has no disposition
+- **WHEN** a workflow adds a job without an execution ownership entry
+- **THEN** the workflow contract test fails before hosted execution
+
+#### Scenario: A new local action has no disposition
+- **WHEN** the repository adds a local composite action without an execution ownership entry
+- **THEN** the workflow contract test fails before hosted execution
+
+#### Scenario: A managed job uses a host shell
+- **WHEN** a project or portable Devenv job adds an unregistered host-shell step
+- **THEN** the workflow contract test fails and names the job
+
+#### Scenario: A managed job adds a host tool action
+- **WHEN** a managed job adds an unregistered tool setup action
+- **THEN** the workflow contract test fails and names the action
+
+#### Scenario: A cvc5 cache step uses host Python
+- **WHEN** a cvc5 cache action changes one `run` step to the host shell
+- **THEN** the cache action contract fails before hosted execution
+
+#### Scenario: An intentional off-Nix check runs
+- **WHEN** a release, ecosystem, or named portability check uses its registered host disposition
+- **THEN** the workflow contract accepts that execution boundary

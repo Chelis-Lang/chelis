@@ -68,17 +68,14 @@ jobs:
         with:
           path: chelis
 
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#53 selective retry
+
       # Hull at the commit the frozen corpus was pinned against (manifest
       # hull_commit). The nightly reads that field and checks Hull out at it so
       # the fresh campaign and the frozen corpus share one Hull reference.
       - name: Read pinned Hull commit
         id: hull
-        # Single-field JSON read with the runner's system python3.
-        # The frozen corpus manifest records
-        # the exact Hull commit it was produced from. Explicit bash:
-        # this step runs before setup-devenv installs the devenv-ci
-        # launcher the job default names.
-        shell: bash
         run: |
           commit=$(python3 -c 'import json;print(json.load(open("chelis/tests/conformance/hull/manifest.json"))["hull_commit"])')
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -90,9 +87,6 @@ jobs:
           ref: ${{ steps.hull.outputs.commit }}
           path: hull
           token: ${{ steps.app-token.outputs.token }}
-
-      - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#53 selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).

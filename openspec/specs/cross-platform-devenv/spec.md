@@ -378,9 +378,13 @@ Each job MUST use `devenv-ci bash --noprofile --norc -e -o pipefail {0}` as its 
 
 The workflow MUST NOT duplicate direct Nix, Cachix, Devenv, App-token, or Nix-authentication bootstrap. The reviewed setup action supplies the pinned Nix and Devenv versions.
 
-Each job MUST run Python helpers through `devenv --profile ci shell --no-tui -- python`. It MUST NOT install host uv, create the repository-root `.venv`, or invoke a direct Devenv-state interpreter path.
+Each job MUST run project Python helpers through `devenv-retry --profile ci shell --no-tui -- python`.
 
-Each job MUST run `devenv test --no-tui` and `devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup`. The Devenv cache MUST NOT replace the complete native flake check.
+Runner-system and sandbox probes MUST use the portable default shell. These probes MUST NOT start a nested project environment.
+
+Each job MUST NOT install host uv, create the repository-root `.venv`, or invoke a direct Devenv-state interpreter path.
+
+Each job MUST run `devenv-retry test --no-tui` and `devenv-retry build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup`. The Devenv cache MUST NOT replace the complete native flake check.
 
 The public Devenv cache does not contain the custom Chelis cvc5 derivation. Each job can reuse the prebuilt cvc5 toolchain closure from the repository Actions cache, keyed by the closure derivation name.
 
@@ -388,7 +392,8 @@ The public Devenv cache does not contain the custom Chelis cvc5 derivation. Each
 - **WHEN** either native Nix package job runs
 - **THEN** the job invokes setup and fixed-scope authentication at the ci input revision
 - **AND** each Nix and Devenv `run` step uses the portable shell
-- **AND** each Python helper uses the activated Devenv interpreter
+- **AND** each project Python helper uses the activated project interpreter
+- **AND** each runner probe uses the portable Devenv interpreter
 - **AND** the job runs all named Devenv tasks
 - **AND** the job builds all three named Devenv package outputs
 - **AND** the job runs the complete native flake check

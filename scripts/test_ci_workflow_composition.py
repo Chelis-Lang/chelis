@@ -34,22 +34,25 @@ ADOPTED_ACTIONS = frozenset(
 REMOTE_CI_ACTION = re.compile(
     r"Chelis-Lang/ci/actions/(?P<action>[a-z0-9-]+)@(?P<revision>[^\s#]+)"
 )
-BARE_DEVENV_COMMAND = re.compile(r"\bdevenv (?=(?:--profile\b|build\b|test\b))")
+BARE_DEVENV_COMMAND = re.compile(r"(?<![A-Za-z0-9_-])devenv(?![A-Za-z0-9_-])(?=[ \t])")
 
 
 def workflow_texts() -> dict[str, str]:
-    return {
-        path.name: path.read_text(encoding="utf-8") for path in WORKFLOWS.glob("*.yml")
-    }
+    paths = [*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")]
+    return {path.name: path.read_text(encoding="utf-8") for path in paths}
 
 
 def job_blocks(workflow: str) -> dict[str, str]:
-    headers = list(re.finditer(r"(?m)^  (?P<name>[a-z0-9-]+):\s*$", workflow))
+    jobs = re.search(r"(?m)^jobs:\s*$", workflow)
+    if jobs is None:
+        raise AssertionError("the workflow does not contain a jobs map")
+    body = workflow[jobs.end() :]
+    headers = list(re.finditer(r"(?m)^  (?P<name>[A-Za-z0-9_-]+):\s*$", body))
     return {
-        header.group("name"): workflow[
+        header.group("name"): body[
             header.start() : headers[index + 1].start()
             if index + 1 < len(headers)
-            else len(workflow)
+            else len(body)
         ]
         for index, header in enumerate(headers)
     }
@@ -79,7 +82,7 @@ def assert_pin_contract(
         for match in REMOTE_CI_ACTION.finditer(text):
             action = match.group("action")
             if action not in ADOPTED_ACTIONS:
-                continue
+                raise AssertionError(f"{name}: unclassified ci action {action}")
             seen.add(action)
             if match.group("revision") != configured:
                 raise AssertionError(f"{name}: {action} does not use the ci revision")
@@ -94,8 +97,8 @@ def assert_private_auth_contract(workflows: dict[str, str]) -> None:
         for job_name, block in job_blocks(text).items():
             if setup not in block:
                 continue
-            project_devenv = re.search(r"(?m)^\s+run:.*\bdevenv\b", block)
-            if project_devenv is None:
+            project_devenv_at = block.find("devenv-retry")
+            if project_devenv_at < 0:
                 continue
             setup_at = block.index(setup)
             auth_at = block.find(auth)
@@ -103,7 +106,7 @@ def assert_private_auth_contract(workflows: dict[str, str]) -> None:
                 raise AssertionError(
                     f"{workflow_name}/{job_name}: missing private-ci authentication"
                 )
-            if not setup_at < auth_at < project_devenv.start():
+            if not setup_at < auth_at < project_devenv_at:
                 raise AssertionError(
                     f"{workflow_name}/{job_name}: invalid setup/authentication order"
                 )
@@ -254,13 +257,19 @@ class SharedCiCompositionTests(unittest.TestCase):
     def test_devenv_commands_use_the_selective_retry_wrapper(self) -> None:
         assert_devenv_retry_contract(self.workflows)
 
-    def test_devenv_retry_mutation_fails_for_its_intended_reason(self) -> None:
-        mutated = self.workflows.copy()
-        mutated["ci.yml"] = mutated["ci.yml"].replace(
-            "devenv-retry --profile ci", "devenv --profile ci", 1
+    def test_devenv_retry_mutations_fail_for_their_intended_reason(self) -> None:
+        mutations = (
+            ("devenv-retry --profile ci", "devenv --profile ci"),
+            ("devenv-retry --profile ci", "devenv shell"),
         )
-        with self.assertRaisesRegex(AssertionError, "bypasses devenv-retry"):
-            assert_devenv_retry_contract(mutated)
+        for old, new in mutations:
+            mutated = self.workflows.copy()
+            mutated["ci.yml"] = mutated["ci.yml"].replace(old, new, 1)
+            with (
+                self.subTest(command=new),
+                self.assertRaisesRegex(AssertionError, "bypasses devenv-retry"),
+            ):
+                assert_devenv_retry_contract(mutated)
 
     def test_nightly_issue_contracts(self) -> None:
         assert_nightly_contract(self.workflows)
@@ -270,6 +279,12 @@ class SharedCiCompositionTests(unittest.TestCase):
 
     def test_cache_prune_contract(self) -> None:
         assert_cache_contract(self.workflows)
+
+    def test_unclassified_ci_action_fails_closed(self) -> None:
+        mutated = self.workflows.copy()
+        mutated["ci.yml"] += f"\n# Chelis-Lang/ci/actions/new-action@{CI_REVISION}\n"
+        with self.assertRaisesRegex(AssertionError, "unclassified ci action"):
+            assert_pin_contract(self.yaml, self.lock, mutated)
 
     def test_pin_mutations_fail_for_their_intended_reason(self) -> None:
         replacements = ("main", "v1", "128d3ac", "0" * 40)
