@@ -93,7 +93,7 @@ PROJECT_DEVENV_WORKFLOW_JOBS = {
     "conformance-nightly.yml": ("conformance-nightly",),
     "heavy-e2e.yml": ("heavy-e2e",),
     "smt-full-prove.yml": ("full-smt-prove",),
-    "ecosystem-drift.yml": ("build-chelis",),
+    "ecosystem-drift.yml": ("build-chelis", "drift-source"),
     "loc-report.yml": ("loc-report",),
 }
 DOCS_ONLY_GATE_IF = (
@@ -844,9 +844,15 @@ def _assert_devenv_job_recipe(job_block: str, expected_profile: str = "ci") -> N
         "app-client-id: ${{ vars.CI_APP_ID }}",
         "app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}",
         f"shell: {PORTABLE_DEVENV_SHELL}",
-        f"run: devenv-retry --profile {expected_profile} ",
     )
     missing = [marker for marker in required if marker not in job_block]
+    profile_command = re.search(
+        rf"(?m)^\s*(?:run:\s*)?(?:if\s+)?devenv-retry --profile "
+        rf"{re.escape(expected_profile)}\s",
+        job_block,
+    )
+    if profile_command is None:
+        missing.append(f"devenv-retry profile {expected_profile}")
     if missing:
         raise AssertionError(f"incomplete Devenv CI job recipe: {missing!r}")
 

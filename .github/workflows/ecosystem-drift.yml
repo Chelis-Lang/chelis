@@ -175,6 +175,7 @@ jobs:
           # second chelis checkout.
           cp scripts/drift_repin_compiler.py "$staging/scripts/"
           cp scripts/drift_report_issue.py "$staging/scripts/"
+          cp scripts/ci_detect_chelis_path_deps.py "$staging/scripts/"
           tar czf chelis-head-toolchain.tar.gz "$staging"
           ls -la chelis-head-toolchain.tar.gz
 
@@ -189,9 +190,9 @@ jobs:
       chelis_version: ${{ steps.version.outputs.chelis_version }}
       rust_version: ${{ steps.rust-version.outputs.rust_version }}
 
-  # One matrix leg per downstream shell. fail-fast:false so one shell's
-  # break never cancels the others — the canary's whole job is to report
-  # EACH shell independently.
+  # One off-Nix matrix leg per binary consumer. fail-fast:false ensures that
+  # one consumer failure never cancels another consumer. Source-dependent
+  # Cargo shells use the separate project Devenv matrix below.
   drift:
     name: ${{ matrix.repo }} (${{ matrix.type }}) vs chelis HEAD
     needs: build-chelis
@@ -266,70 +267,12 @@ jobs:
               coral
               shoals
 
-          # ---- Cargo shells (Rust workspaces with Cargo path deps on the
-          # chelis crates). These differ from the reef shells in three ways:
-          #   1. their `Cargo.toml` references chelis via `../chelis/crates/...`
-          #      path deps, so the canary checks out chelis HEAD as the
-          #      `../chelis` sibling (the `type: cargo` step below) and builds
-          #      the shell's Rust workspace against HEAD chelis SOURCE — a
-          #      tighter coupling than the binary-only reef shells, and exactly
-          #      what these shells' own ci.yml `workspace-gate` does (sibling
-          #      checkout at the pinned chelis ref);
-          #   2. they still consume the HEAD `chelis` BINARY (on PATH) for
-          #      `chelis reef build` / `chelis check` and any cargo test that
-          #      subprocesses to `chelis`, plus HEAD chelis-std + released reef
-          #      deps in the local registry — same as the reef legs;
-          #   3. the cargo gate itself (build/test/clippy/fmt and any shell-
-          #      specific fixture generation) is encoded per shell in
-          #      `cargo_recipe`, mirroring each shell's ci.yml `workspace-gate`
-          #      job verbatim so the canary asks the same question that shell's
-          #      own per-PR CI asks, but against HEAD chelis.
-          #
-          # `reef_deps` and `token_repos` follow the reef-leg rules: the token
-          # covers the shell checkout + every sibling repo `reef install
-          # --from-github` reads release assets from, so a scoped token never
-          # 403s on a dep and triggers a false-positive drift issue.
-          #
-          # c-earchin has NO chelis Cargo path dep (it is a pure toolchain-
-          # binary consumer with a Rust workspace of its own), so its
-          # `needs_chelis_sibling` is false: the canary skips the sibling
-          # checkout + uv-venv setup for it. octant / calcify / hydronnx all
-          # path-dep on `../chelis/crates/...` and need the sibling.
-          - repo: octant
-            type: cargo
-            needs_chelis_sibling: true
-            reef_deps: "Chelis-Lang/nautilus@v0.7.34"
-            token_repos: |-
-              octant
-              nautilus
-            cargo_recipe: |
-              chelis reef build
-              cargo build --workspace --all-targets
-              cargo test --workspace
-              cargo clippy --workspace --all-targets -- -D warnings
-              cargo fmt --all -- --check
-          - repo: calcify
-            type: cargo
-            needs_chelis_sibling: true
-            reef_deps: "Chelis-Lang/nautilus@v0.7.26 Chelis-Lang/coral@v0.7.25"
-            token_repos: |-
-              calcify
-              nautilus
-              coral
-            cargo_recipe: |
-              chelis reef build
-              cargo build --workspace --all-targets
-              cargo test --workspace
-              cargo clippy --workspace --all-targets -- -D warnings
-              cargo fmt --all -- --check
-              # calcify's example / bridge / verify jobs (Phase 9/13 oracles)
-              # each subprocess to chelis; run them against HEAD too.
-              cargo test --workspace --test e2e -- --include-ignored
-              cargo test --workspace --test bridge -- --include-ignored
-              cargo test --workspace --test verify -- --include-ignored
+          # ---- Host Cargo consumer. c-earchin has no Chelis Cargo path
+          # dependency. It consumes the HEAD compiler binary while its own Rust
+          # workspace stays on the host toolchain, which preserves the off-Nix
+          # consumer proof. Source-dependent Cargo shells run in drift-source.
           - repo: c-earchin
             type: cargo
-            needs_chelis_sibling: false
             reef_deps: ""
             token_repos: c-earchin
             cargo_recipe: |
@@ -346,29 +289,6 @@ jobs:
               chelis prove references/pricing_rules.dp --spans references/pricing_rules.spans.json --json
               chelis reef build tests/integration/consumer
               chelis reef build .
-          - repo: hydronnx
-            type: cargo
-            needs_chelis_sibling: true
-            reef_deps: ""
-            token_repos: hydronnx
-            # hydronnx's cargo test depends on ONNX fixtures generated by its
-            # uv-run Python scripts (gen_tabular_model.py / gen_fixtures.py /
-            # parity_check.py) — mirror its workspace-gate fixture-gen +
-            # cargo gate. uv is installed by the `type: cargo` setup below.
-            cargo_recipe: |
-              python3 scripts/run_negative_tests.py
-              python3 scripts/run_blocked_probes.py
-              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
-                python3 scripts/gen_tabular_model.py
-              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' \
-                python3 scripts/gen_fixtures.py
-              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
-                python3 scripts/parity_check.py
-              cargo build --all-targets
-              cargo test
-              cargo clippy --all-targets -- -D warnings
-              cargo fmt -p hydronnx -- --check
-              chelis lint --check .
 
           # ---- Docker shell (hello-chelis). Its CI builds an Ubuntu image
           # that installs the chelis toolchain from a RELEASE tarball
@@ -435,6 +355,14 @@ jobs:
           # Always export CHELIS_TOOLCHAIN (the report step's helper scripts
           # live under it for every leg type, including docker).
           echo "CHELIS_TOOLCHAIN=${tdir}" >> "$GITHUB_ENV"
+
+      # This off-Nix classifier uses ubuntu-latest Python 3.11 or newer.
+      # It reads Cargo TOML before any host Cargo command can run.
+      - name: Verify an off-Nix binary consumer has no Chelis source dependency
+        id: classify
+        run: |
+          python3 "$CHELIS_TOOLCHAIN/scripts/ci_detect_chelis_path_deps.py" \
+            shell "$GITHUB_WORKSPACE/chelis" --expect absent
 
       # ----------------------------------------------------------------------
       # reef + cargo legs: run the HEAD chelis binary on the runner host.
@@ -538,28 +466,12 @@ jobs:
           chelis test tests/ --timeout 600 --suite-timeout 900 --jobs auto
 
       # ----------------------------------------------------------------------
-      # cargo legs only: build the shell's Rust workspace against HEAD chelis
-      # SOURCE via the `../chelis` sibling path deps, then run its cargo
-      # recipe (which still drives the HEAD chelis binary on PATH).
+      # Host Cargo consumer only. c-earchin has no Chelis source dependency,
+      # so this lane verifies the portable compiler against its host workspace.
+      # Source-dependent Cargo shells run through project Devenv below.
       # ----------------------------------------------------------------------
-      # chelis HEAD source as the `../chelis` sibling so the shell's
-      # `Cargo.toml` path deps (`../chelis/crates/...`) resolve. The shell is
-      # checked out at `shell/` and chelis at `chelis/`, both under
-      # `$GITHUB_WORKSPACE`; the cargo step runs with `working-directory:
-      # shell`, so `../chelis` resolves to `$GITHUB_WORKSPACE/chelis` — exactly
-      # the sibling layout each cargo shell's own ci.yml `workspace-gate`
-      # produces, but at HEAD (`github.sha`) instead of the pinned release ref.
-      # Skipped for c-earchin (no chelis Cargo path dep).
-      - name: Checkout chelis HEAD as sibling (cargo path dep)
-        if: matrix.type == 'cargo' && matrix.needs_chelis_sibling
-        uses: actions/checkout@v6
-        with:
-          repository: Chelis-Lang/chelis
-          ref: ${{ github.sha }}
-          path: chelis
-
       # Use the exact Rust version that the Chelis Devenv shell resolved in
-      # build-chelis. An upstream Rust release cannot change a drift leg
+      # build-chelis. An upstream Rust release cannot change this consumer
       # independently of the locked Chelis environment.
       - name: Install Rust toolchain
         if: matrix.type == 'cargo'
@@ -567,24 +479,6 @@ jobs:
         with:
           toolchain: ${{ needs.build-chelis.outputs.rust_version }}
           components: clippy, rustfmt
-
-      - name: Install uv
-        if: matrix.type == 'cargo' && matrix.needs_chelis_sibling
-        uses: astral-sh/setup-uv@v8.1.0
-
-      # The chelis sibling's `.cargo/config.toml` sets PYO3_PYTHON to its
-      # `.venv/bin/python`; any path-dep build that transitively pulls pyo3
-      # needs a matching uv venv in the sibling first (same as build-chelis).
-      - name: Create uv venv in chelis sibling
-        if: matrix.type == 'cargo' && matrix.needs_chelis_sibling
-        working-directory: chelis
-        run: python3 scripts/ci_setup_uv_python.py
-
-      # hydronnx's fixture generation runs `uv run` directly; ensure uv exists
-      # even when there is no chelis sibling needing the venv setup above.
-      - name: Install uv (fixture generation)
-        if: matrix.type == 'cargo' && !matrix.needs_chelis_sibling && matrix.repo == 'hydronnx'
-        uses: astral-sh/setup-uv@v8.1.0
 
       - name: Cache cargo registry and build (${{ matrix.repo }})
         if: matrix.type == 'cargo'
@@ -594,10 +488,8 @@ jobs:
           shared-key: drift-${{ matrix.repo }}
           cache-on-failure: false
 
-      # Run the shell's cargo gate verbatim (from its ci.yml workspace-gate),
-      # against HEAD chelis. The HEAD chelis binary is on PATH, HEAD chelis-std
-      # + released reef deps are in the local registry, and the `../chelis`
-      # sibling provides the Cargo path-dep source.
+      # Run c-earchin's host Cargo gate against the HEAD compiler binary.
+      # Source-dependent Cargo gates run in the project Devenv job.
       - name: Cargo gate (${{ matrix.repo }} vs HEAD)
         if: matrix.type == 'cargo'
         working-directory: shell
@@ -734,11 +626,224 @@ jobs:
 
       # Open-on-fail / close-on-pass tracking issue IN THE SHELL'S OWN
       # repo, via the minted App token (issues:write). Same logic as the
-      # heavy-e2e.yml report job, retargeted cross-repo. if:always() so it
-      # runs whether the gate above passed or failed; `job.status` is the
-      # aggregate result of the preceding steps in this matrix leg.
+      # heavy-e2e.yml report job, retargeted cross-repo. It runs after a
+      # successful partition check, whether the consumer gate passes or fails.
+      # Classifier failures stay in this repository and do not blame a shell.
       - name: File/update drift tracking issue
+        if: always() && steps.classify.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          SHELL_REPO: ${{ matrix.repo }}
+          JOB_STATUS: ${{ job.status }}
+          HEAD_VERSION: ${{ needs.build-chelis.outputs.chelis_version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHELIS_SHA: ${{ github.sha }}
+        run: python3 "$CHELIS_TOOLCHAIN/scripts/drift_report_issue.py"
+
+  # These shells compile Chelis through `../chelis` Cargo path dependencies.
+  # Run those source builds with the pinned Chelis project environment. The
+  # separate drift job retains the off-Nix binary-consumer proofs.
+  drift-source:
+    name: ${{ matrix.repo }} (cargo source) vs chelis HEAD
+    needs: build-chelis
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      # The canary verifies source compatibility, not release-pin cadence.
+      # This waiver affects dependency compiler-pin equality only.
+      CHELIS_REEF_ALLOW_DEP_COMPILER_DRIFT: "1"
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repo: octant
+            reef_deps: "Chelis-Lang/nautilus@v0.7.41"
+            token_repos: |-
+              octant
+              nautilus
+            cargo_recipe: |
+              chelis reef build
+              cargo build --workspace --all-targets
+              cargo test --workspace
+              cargo clippy --workspace --all-targets -- -D warnings
+              cargo fmt --all -- --check
+          - repo: calcify
+            reef_deps: "Chelis-Lang/nautilus@v0.7.33 Chelis-Lang/coral@v0.7.30"
+            token_repos: |-
+              calcify
+              nautilus
+              coral
+            cargo_recipe: |
+              chelis reef build
+              cargo build --workspace --all-targets
+              cargo test --workspace
+              cargo clippy --workspace --all-targets -- -D warnings
+              cargo fmt --all -- --check
+              cargo test --workspace --test e2e -- --include-ignored
+              cargo test --workspace --test bridge -- --include-ignored
+              cargo test --workspace --test verify -- --include-ignored
+          - repo: hydronnx
+            reef_deps: ""
+            token_repos: hydronnx
+            cargo_recipe: |
+              python3 scripts/run_negative_tests.py
+              python3 scripts/run_blocked_probes.py
+              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
+                python3 scripts/gen_tabular_model.py
+              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' \
+                python3 scripts/gen_fixtures.py
+              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
+                python3 scripts/parity_check.py
+              cargo build --all-targets
+              cargo test
+              cargo clippy --all-targets -- -D warnings
+              cargo fmt -p hydronnx -- --check
+              chelis lint --check .
+    steps:
+      - name: Free disk space (Ubuntu)
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#50 shared composition
+
+      - name: Mint per-shell App token
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Chelis-Lang
+          permission-contents: read
+          permission-issues: write
+          repositories: ${{ matrix.token_repos }}
+
+      - name: Checkout ${{ matrix.repo }} at main
+        uses: actions/checkout@v6
+        with:
+          repository: Chelis-Lang/${{ matrix.repo }}
+          ref: main
+          token: ${{ steps.token.outputs.token }}
+          path: shell
+
+      - name: Checkout chelis HEAD as sibling (cargo path dep)
+        uses: actions/checkout@v6
+        with:
+          repository: Chelis-Lang/chelis
+          ref: ${{ github.sha }}
+          path: chelis
+
+      - name: Download HEAD toolchain artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: chelis-head-toolchain
+          path: toolchain
+
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#53 selective retry
+
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@111b5865ccf04146344ad99dcdea9d724d65fc69 # ci#50 shared composition
+        with:
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
+      - name: Extract HEAD toolchain
+        run: |
+          set -euo pipefail
+          tar -xzf toolchain/chelis-head-toolchain.tar.gz -C toolchain
+          tdir="$GITHUB_WORKSPACE/toolchain/chelis-head-toolchain"
+          echo "CHELIS_TOOLCHAIN=${tdir}" >> "$GITHUB_ENV"
+
+      - name: Verify the consumer uses Chelis source dependencies
+        id: classify
+        working-directory: chelis
+        run: |
+          devenv-retry --profile ci shell --no-tui -- python \
+            "$CHELIS_TOOLCHAIN/scripts/ci_detect_chelis_path_deps.py" \
+            "$GITHUB_WORKSPACE/shell" "$GITHUB_WORKSPACE/chelis" \
+            --expect present
+
+      - name: Put HEAD chelis on PATH
+        run: |
+          set -u
+          test -n "$CHELIS_TOOLCHAIN"
+          echo "$CHELIS_TOOLCHAIN/bin" >> "$GITHUB_PATH"
+
+      - name: Verify HEAD chelis on PATH
+        working-directory: chelis
+        run: |
+          devenv-retry --profile ci shell --no-tui -- bash -euo pipefail -c '
+            got="$(chelis --version | cut -d " " -f 2)"
+            test "$got" = "${{ needs.build-chelis.outputs.chelis_version }}"
+            echo "chelis ${got} (HEAD) on PATH"
+          '
+
+      - name: Install HEAD chelis-std into local registry
+        working-directory: chelis
+        run: devenv-retry --profile ci shell --no-tui -- chelis reef install --from-monorepo "$CHELIS_TOOLCHAIN" chelis-std
+
+      - name: Install released reef dependencies
+        if: matrix.reef_deps != ''
+        working-directory: chelis
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          devenv-retry --profile ci shell --no-tui -- bash -euo pipefail -c '
+            for dep in ${{ matrix.reef_deps }}; do
+              echo "::group::reef install ${dep}"
+              chelis reef install --from-github "$dep"
+              echo "::endgroup::"
+            done
+          '
+
+      - name: Repin shell to HEAD chelis
+        working-directory: chelis
+        run: |
+          devenv-retry --profile ci shell --no-tui -- python \
+            "$CHELIS_TOOLCHAIN/scripts/drift_repin_compiler.py" \
+            "$GITHUB_WORKSPACE/shell" \
+            "${{ needs.build-chelis.outputs.chelis_version }}"
+
+      - name: Cache cargo registry and build (${{ matrix.repo }})
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shell
+          shared-key: drift-${{ matrix.repo }}
+          cache-on-failure: false
+
+      # The Devenv Linux shell supplies GCC and OpenBLAS for each downstream
+      # C link. The recipe runs in a child shell inside that environment.
+      - name: Cargo gate (${{ matrix.repo }} vs HEAD)
+        working-directory: chelis
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          CARGO_RECIPE: ${{ matrix.cargo_recipe }}
+        run: |
+          devenv-retry --profile ci shell --no-tui -- bash -euo pipefail -c '
+            cd "$GITHUB_WORKSPACE/shell"
+            exec bash -euo pipefail -c "$CARGO_RECIPE"
+          '
+
+      - name: Conformance audit (advisory, ${{ matrix.repo }} vs HEAD)
         if: always()
+        continue-on-error: true
+        working-directory: chelis
+        run: |
+          devenv-retry --profile ci shell --no-tui -- bash -euo pipefail -c '
+            cd "$GITHUB_WORKSPACE/shell"
+            echo "::group::chelis reef conform audit (advisory)"
+            chelis reef conform audit || echo "::warning::conformance gaps in ${{ matrix.repo }}"
+            echo "::endgroup::"
+          '
+
+      # Report source drift only after the classifier confirms this partition.
+      # A classifier failure is a Chelis CI failure, not a shell regression.
+      - name: File/update drift tracking issue
+        if: always() && steps.classify.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           SHELL_REPO: ${{ matrix.repo }}

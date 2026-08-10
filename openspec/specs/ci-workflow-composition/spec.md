@@ -226,9 +226,23 @@ A local action that runs after Devenv setup SHALL declare `devenv-ci` for each `
 
 A managed job SHALL use only registered orchestration actions. A new tool setup action requires an explicit ownership review and inventory change.
 
+Each direct run step in a project Devenv job SHALL use `devenv-retry` or one exact registered exception. A new run step MUST fail without either disposition.
+
 The docs-only detector can use host Python before setup. This exception prevents environment setup for a documentation-only change.
 
-Off-Nix release checks, ecosystem checks, and named portability probes can use the host environment. GitHub-only orchestration can use external actions without Devenv.
+Off-Nix release checks, binary ecosystem checks, and named portability probes can use the host environment. GitHub-only orchestration can use external actions without Devenv.
+
+An ecosystem job that compiles Chelis through Cargo source dependencies SHALL use project Devenv. The off-Nix ecosystem disposition MUST NOT include those source-dependent consumers.
+
+Each ecosystem leg SHALL classify Cargo manifests and local Cargo configuration at runtime.
+
+The classifier SHALL treat each path inside the designated Chelis source root as a source dependency. This root includes workspace members outside `crates/`.
+
+An absent-source check can use the designated source location when no checkout exists there.
+
+A matrix label or frozen repository list MUST NOT replace that source-dependency check.
+
+A classifier failure MUST NOT update a drift issue in the downstream repository.
 
 The integration aggregator SHALL use the portable Devenv interpreter. The Hull manifest reader SHALL run after portable Devenv setup.
 
@@ -245,6 +259,27 @@ The cvc5 cache actions SHALL retain GitHub Actions cache transport. Their Python
 #### Scenario: A managed job uses a host shell
 - **WHEN** a project or portable Devenv job adds an unregistered host-shell step
 - **THEN** the workflow contract test fails and names the job
+
+#### Scenario: A project job adds a bare project command
+- **WHEN** a project job adds a direct Cargo, Python, Chelis, or uv command without a registered exception
+- **THEN** the workflow contract test fails and names the step
+
+#### Scenario: An ecosystem consumer compiles Chelis source
+- **WHEN** a drift consumer resolves Cargo path dependencies from a Chelis source checkout
+- **THEN** that consumer runs through the pinned Chelis project Devenv environment
+- **AND** the runtime classifier confirms that source dependency before the Cargo gate
+
+#### Scenario: Cargo configuration selects Chelis source
+- **WHEN** a Cargo configuration path resolves inside the designated Chelis source root
+- **THEN** the classifier identifies the consumer as source-dependent
+
+#### Scenario: A binary consumer runs off Nix
+- **WHEN** a drift consumer uses only the portable compiler artifact and no Chelis source dependency
+- **THEN** its registered off-Nix environment remains valid
+
+#### Scenario: Source classification fails
+- **WHEN** the runtime classifier fails before a consumer gate
+- **THEN** the job does not update a drift issue in the downstream repository
 
 #### Scenario: A managed job adds a host tool action
 - **WHEN** a managed job adds an unregistered tool setup action

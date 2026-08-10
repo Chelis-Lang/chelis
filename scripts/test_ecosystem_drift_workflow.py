@@ -13,6 +13,112 @@ WORKFLOW = (
 )
 
 
+def job_block(text: str, name: str) -> str:
+    jobs = re.search(r"(?m)^jobs:\s*$", text)
+    if jobs is None:
+        raise AssertionError("the workflow does not contain a jobs map")
+    body = text[jobs.end() :]
+    headers = list(re.finditer(r"(?m)^  (?P<name>[A-Za-z0-9_-]+):\s*$", body))
+    blocks = {
+        header.group("name"): body[
+            header.start() : headers[index + 1].start()
+            if index + 1 < len(headers)
+            else len(body)
+        ]
+        for index, header in enumerate(headers)
+    }
+    if name not in blocks:
+        raise AssertionError(f"the workflow does not contain job {name!r}")
+    return blocks[name]
+
+
+def step_block(job: str, name: str) -> str:
+    start = re.search(rf"(?m)^      - name: {re.escape(name)}\s*$", job)
+    if start is None:
+        raise AssertionError(f"the job does not contain step {name!r}")
+    next_step = re.search(r"(?m)^      - ", job[start.end() :])
+    end = start.end() + next_step.start() if next_step is not None else len(job)
+    return job[start.start() : end]
+
+
+def matrix_repos(block: str) -> set[str]:
+    return set(
+        re.findall(r"(?m)^          - repo: (?P<repo>[A-Za-z0-9_-]+)\s*$", block)
+    )
+
+
+def assert_drift_partition_contract(text: str) -> None:
+    host = matrix_repos(job_block(text, "drift"))
+    source = matrix_repos(job_block(text, "drift-source"))
+    expected_host = {
+        "nautilus",
+        "coral",
+        "shoals",
+        "school",
+        "hull",
+        "whale",
+        "c-earchin",
+        "hello-chelis",
+    }
+    expected_source = {"octant", "calcify", "hydronnx"}
+    if host != expected_host:
+        raise AssertionError(f"the off-Nix consumer set differs: {sorted(host)}")
+    if source != expected_source:
+        raise AssertionError(
+            f"the source-dependent consumer set differs: {sorted(source)}"
+        )
+
+
+def _contains_active_line(block: str, marker: str) -> bool:
+    return any(
+        marker in line and not line.lstrip().startswith("#")
+        for line in block.splitlines()
+    )
+
+
+def assert_runtime_classifier_contract(text: str) -> None:
+    build = job_block(text, "build-chelis")
+    host = job_block(text, "drift")
+    source = job_block(text, "drift-source")
+    script = "ci_detect_chelis_path_deps.py"
+    stage = step_block(build, "Stage toolchain tarball")
+    host_classifier = step_block(
+        host, "Verify an off-Nix binary consumer has no Chelis source dependency"
+    )
+    source_classifier = step_block(
+        source, "Verify the consumer uses Chelis source dependencies"
+    )
+    host_report = step_block(host, "File/update drift tracking issue")
+    source_report = step_block(source, "File/update drift tracking issue")
+
+    required = (
+        (stage, f'cp scripts/{script} "$staging/scripts/"'),
+        (host_classifier, "id: classify"),
+        (host_classifier, f'python3 "$CHELIS_TOOLCHAIN/scripts/{script}"'),
+        (host_classifier, "--expect absent"),
+        (source_classifier, "id: classify"),
+        (source_classifier, "devenv-retry --profile ci shell --no-tui -- python"),
+        (source_classifier, script),
+        (source_classifier, '"$GITHUB_WORKSPACE/shell" "$GITHUB_WORKSPACE/chelis"'),
+        (source_classifier, "--expect present"),
+        (host_report, "if: always() && steps.classify.outcome == 'success'"),
+        (source_report, "if: always() && steps.classify.outcome == 'success'"),
+    )
+    guarded_classifier = any(
+        re.search(r"(?m)^        if:", classifier) is not None
+        for classifier in (host_classifier, source_classifier)
+    )
+    wrong_order = host.find(host_classifier) > host.find(
+        "- name: Cargo gate"
+    ) or source.find(source_classifier) > source.find("- name: Cargo gate")
+    if (
+        any(not _contains_active_line(block, marker) for block, marker in required)
+        or guarded_classifier
+        or wrong_order
+    ):
+        raise AssertionError("the runtime source-dependency classifier differs")
+
+
 def assert_devenv_rust_version_contract(text: str) -> None:
     build, drift = text.split("  build-chelis:", 1)[1].split("\n  drift:", 1)
     if re.search(r"(?m)^\s+toolchain:\s+\d+\.\d+\.\d+\s*$", drift):
@@ -64,6 +170,103 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
     def test_devenv_supplies_the_cargo_leg_rust_version(self) -> None:
         assert_devenv_rust_version_contract(WORKFLOW.read_text(encoding="utf-8"))
 
+    def test_source_dependent_cargo_legs_use_project_devenv(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        assert_drift_partition_contract(text)
+        assert_runtime_classifier_contract(text)
+        source = job_block(text, "drift-source")
+
+        for marker in (
+            "Chelis-Lang/ci/actions/setup-devenv@",
+            "Chelis-Lang/ci/actions/authenticate-private-ci-input@",
+            "shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}",
+            "devenv-retry --profile ci shell --no-tui --",
+            "Checkout chelis HEAD as sibling (cargo path dep)",
+        ):
+            self.assertIn(marker, source)
+
+        for marker in (
+            "dtolnay/rust-toolchain",
+            "astral-sh/setup-uv",
+            "sudo apt-get",
+            "scripts/ci_setup_uv_python.py",
+        ):
+            self.assertNotIn(marker, source)
+
+    def test_binary_consumer_legs_remain_off_nix(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        assert_drift_partition_contract(text)
+        assert_runtime_classifier_contract(text)
+
+    def test_a_missing_runtime_classifier_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace("--expect absent", "--expect omitted", 1)
+        with self.assertRaisesRegex(AssertionError, "runtime source-dependency"):
+            assert_runtime_classifier_contract(mutated)
+
+    def test_a_commented_runtime_classifier_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace(
+            '          python3 "$CHELIS_TOOLCHAIN/scripts/ci_detect_chelis_path_deps.py" \\\n',
+            '          # python3 "$CHELIS_TOOLCHAIN/scripts/ci_detect_chelis_path_deps.py" \\\n',
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "runtime source-dependency"):
+            assert_runtime_classifier_contract(mutated)
+
+    def test_a_guarded_runtime_classifier_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "      - name: Verify an off-Nix binary consumer has no Chelis source dependency\n",
+            "      - name: Verify an off-Nix binary consumer has no Chelis source dependency\n"
+            "        if: false\n",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "runtime source-dependency"):
+            assert_runtime_classifier_contract(mutated)
+
+    def test_a_classifier_after_the_cargo_gate_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        host = job_block(text, "drift")
+        classifier = step_block(
+            host, "Verify an off-Nix binary consumer has no Chelis source dependency"
+        )
+        cargo_gate = step_block(host, "Cargo gate (${{ matrix.repo }} vs HEAD)")
+        mutated_host = host.replace(classifier, "", 1).replace(
+            cargo_gate, cargo_gate + classifier, 1
+        )
+        mutated = text.replace(host, mutated_host, 1)
+        with self.assertRaisesRegex(AssertionError, "runtime source-dependency"):
+            assert_runtime_classifier_contract(mutated)
+
+    def test_a_classifier_failure_does_not_report_shell_drift(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "if: always() && steps.classify.outcome == 'success'",
+            "if: always()",
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "runtime source-dependency"):
+            assert_runtime_classifier_contract(mutated)
+
+    def test_a_source_dependent_leg_in_the_host_job_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "          - repo: c-earchin", "          - repo: octant", 1
+        )
+        with self.assertRaisesRegex(AssertionError, "off-Nix consumer set differs"):
+            assert_drift_partition_contract(mutated)
+
+    def test_a_host_consumer_in_the_source_job_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace(
+            "          - repo: hydronnx", "          - repo: c-earchin", 1
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "source-dependent consumer set differs"
+        ):
+            assert_drift_partition_contract(mutated)
+
     def test_a_hardcoded_cargo_leg_rust_version_fails_the_contract(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
         mutated = text.replace(
@@ -87,7 +290,7 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         reef_test_step = text.split(
             "- name: chelis test tests/ (${{ matrix.repo }} vs HEAD)", 1
-        )[1].split("# cargo legs only", 1)[0]
+        )[1].split("# Host Cargo consumer only", 1)[0]
 
         self.assertIn(
             "chelis test tests/ --timeout 600 --suite-timeout 900 --jobs auto",

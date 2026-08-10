@@ -44,6 +44,14 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Source-dependent ecosystem checks now use project Devenv.** The octant,
+  calcify, and hydronnx drift legs compile Chelis path dependencies inside the
+  pinned `ci` profile. Binary-only Reef, Docker, and c-earchin checks retain
+  their off-Nix consumer environments. A runtime classifier checks Cargo
+  manifests, Cargo configuration, and all paths within the Chelis source root.
+  Classifier failures remain in Chelis CI. Exact step fingerprints protect
+  each direct-command exception from command additions.
+
 - **CI now uses one reviewed shared-action revision.** Devenv and adopted
   `Chelis-Lang/ci` actions use the same immutable commit. Shared actions now
   own private-input authentication, nightly issue transitions, authorship
