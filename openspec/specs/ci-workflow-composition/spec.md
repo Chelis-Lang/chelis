@@ -244,6 +244,8 @@ A matrix label or frozen repository list MUST NOT replace that source-dependency
 
 A classifier failure MUST NOT update a drift issue in the downstream repository.
 
+Project Devenv SHALL expose a Linux library path for downstream Python wheel probes. Only affected consumer recipes SHALL add it to `LD_LIBRARY_PATH`.
+
 The integration aggregator SHALL use the portable Devenv interpreter. The Hull manifest reader SHALL run after portable Devenv setup.
 
 The cvc5 cache actions SHALL retain GitHub Actions cache transport. Their Python and Nix commands SHALL run through the portable Devenv shell.
@@ -272,6 +274,11 @@ The cvc5 cache actions SHALL retain GitHub Actions cache transport. Their Python
 #### Scenario: Cargo configuration selects Chelis source
 - **WHEN** a Cargo configuration path resolves inside the designated Chelis source root
 - **THEN** the classifier identifies the consumer as source-dependent
+
+#### Scenario: A source consumer runs Python wheels
+- **WHEN** a source-dependent consumer runs Linux Python wheels that need C++ or zlib runtime libraries
+- **THEN** that consumer adds the project wheel library path to its recipe environment
+- **AND** the project Devenv shell does not set a global `LD_LIBRARY_PATH`
 
 #### Scenario: A binary consumer runs off Nix
 - **WHEN** a drift consumer uses only the portable compiler artifact and no Chelis source dependency

@@ -149,6 +149,9 @@ def parse_python_module(text: str) -> DevenvPython:
         "venv.enable = true;",
         "uv.enable = true;",
         'PYO3_PYTHON = "${config.env.DEVENV_STATE}/venv/bin/python";',
+        "CHELIS_PYTHON_WHEEL_LIBRARY_PATH",
+        "pkgs.stdenv.cc.cc.lib",
+        "pkgs.zlib",
     )
     missing = [fragment for fragment in required if fragment not in text]
     if missing:
@@ -451,6 +454,12 @@ class DevenvCompositionTests(unittest.TestCase):
     def test_missing_numpy_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         mutated = text.replace("ps.numpy", "ps.pytest")
+        with self.assertRaisesRegex(ValueError, "Python contract is incomplete"):
+            parse_python_module(mutated)
+
+    def test_missing_python_wheel_loader_path_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        mutated = text.replace("CHELIS_PYTHON_WHEEL_LIBRARY_PATH", "OMITTED")
         with self.assertRaisesRegex(ValueError, "Python contract is incomplete"):
             parse_python_module(mutated)
 

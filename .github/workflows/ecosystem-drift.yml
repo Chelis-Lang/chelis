@@ -693,11 +693,14 @@ jobs:
             cargo_recipe: |
               python3 scripts/run_negative_tests.py
               python3 scripts/run_blocked_probes.py
-              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
+              LD_LIBRARY_PATH="$CHELIS_PYTHON_WHEEL_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+                uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
                 python3 scripts/gen_tabular_model.py
-              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' \
+              LD_LIBRARY_PATH="$CHELIS_PYTHON_WHEEL_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+                uv run --with 'onnx>=1.16' --with 'numpy>=1.26' \
                 python3 scripts/gen_fixtures.py
-              uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
+              LD_LIBRARY_PATH="$CHELIS_PYTHON_WHEEL_LIBRARY_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+                uv run --with 'onnx>=1.16' --with 'numpy>=1.26' --with 'onnxruntime>=1.17' \
                 python3 scripts/parity_check.py
               cargo build --all-targets
               cargo test

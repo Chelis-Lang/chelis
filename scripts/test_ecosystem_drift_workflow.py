@@ -119,6 +119,23 @@ def assert_runtime_classifier_contract(text: str) -> None:
         raise AssertionError("the runtime source-dependency classifier differs")
 
 
+def assert_hydronnx_wheel_loader_contract(text: str) -> None:
+    source = job_block(text, "drift-source")
+    hydronnx = source.split("          - repo: hydronnx", 1)[1].split("    steps:", 1)[
+        0
+    ]
+    wheel_path = 'LD_LIBRARY_PATH="$CHELIS_PYTHON_WHEEL_LIBRARY_PATH'
+    required = (wheel_path, "uv run --with 'onnx>=1.16'")
+    if any(marker not in hydronnx for marker in required):
+        raise AssertionError("the Hydronnx Python wheel loader contract differs")
+    if hydronnx.count(wheel_path) != 3:
+        raise AssertionError("the Hydronnx wheel loader contract needs three paths")
+    if "export LD_LIBRARY_PATH" in source or re.search(
+        r"(?m)^\s+LD_LIBRARY_PATH:", source
+    ):
+        raise AssertionError("the source job must not set a global loader path")
+
+
 def assert_devenv_rust_version_contract(text: str) -> None:
     build, drift = text.split("  build-chelis:", 1)[1].split("\n  drift:", 1)
     if re.search(r"(?m)^\s+toolchain:\s+\d+\.\d+\.\d+\s*$", drift):
@@ -197,6 +214,19 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         assert_drift_partition_contract(text)
         assert_runtime_classifier_contract(text)
+
+    def test_hydronnx_scopes_the_python_wheel_loader_path(self) -> None:
+        assert_hydronnx_wheel_loader_contract(WORKFLOW.read_text(encoding="utf-8"))
+
+    def test_a_missing_hydronnx_wheel_loader_path_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace(
+            '              LD_LIBRARY_PATH="$CHELIS_PYTHON_WHEEL_LIBRARY_PATH',
+            '              LD_LIBRARY_PATH="$OMITTED',
+            1,
+        )
+        with self.assertRaisesRegex(AssertionError, "wheel loader contract"):
+            assert_hydronnx_wheel_loader_contract(mutated)
 
     def test_a_missing_runtime_classifier_fails(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")

@@ -50,7 +50,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   their off-Nix consumer environments. A runtime classifier checks Cargo
   manifests, Cargo configuration, and all paths within the Chelis source root.
   Classifier failures remain in Chelis CI. Exact step fingerprints protect
-  each direct-command exception from command additions.
+  each direct-command exception from command additions. Hydronnx opts into a
+  scoped Nix loader path for its temporary Python wheels.
 
 - **CI now uses one reviewed shared-action revision.** Devenv and adopted
   `Chelis-Lang/ci` actions use the same immutable commit. Shared actions now

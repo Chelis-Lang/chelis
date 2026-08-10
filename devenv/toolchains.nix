@@ -41,6 +41,16 @@ in
   # .cargo/config.toml while the Devenv shell is active.
   env.PYO3_PYTHON = "${config.env.DEVENV_STATE}/venv/bin/python";
 
+  # Linux wheels from downstream probes need the Nix C++ and zlib runtimes.
+  # Consumers opt into this path. The project shell does not set a global
+  # LD_LIBRARY_PATH that can shadow system libraries.
+  env.CHELIS_PYTHON_WHEEL_LIBRARY_PATH = lib.optionalString pkgs.stdenv.isLinux (
+    lib.makeLibraryPath [
+      pkgs.stdenv.cc.cc.lib
+      pkgs.zlib
+    ]
+  );
+
   outputs.cvc5-dir = cvc5.dir;
 
   profiles = {
