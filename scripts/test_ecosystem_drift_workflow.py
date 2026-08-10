@@ -125,11 +125,12 @@ def assert_hydronnx_wheel_loader_contract(text: str) -> None:
         0
     ]
     wheel_path = 'LD_LIBRARY_PATH="$CHELIS_PYTHON_WHEEL_LIBRARY_PATH'
-    required = (wheel_path, "uv run --with 'onnx>=1.16'")
+    isolated_uv = "uv run --isolated --with 'onnx>=1.16'"
+    required = (wheel_path, isolated_uv)
     if any(marker not in hydronnx for marker in required):
         raise AssertionError("the Hydronnx Python wheel loader contract differs")
-    if hydronnx.count(wheel_path) != 3:
-        raise AssertionError("the Hydronnx wheel loader contract needs three paths")
+    if hydronnx.count(wheel_path) != 3 or hydronnx.count(isolated_uv) != 3:
+        raise AssertionError("the Hydronnx wheel loader contract needs three isolated paths")
     if "export LD_LIBRARY_PATH" in source or re.search(
         r"(?m)^\s+LD_LIBRARY_PATH:", source
     ):
@@ -225,6 +226,12 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
             '              LD_LIBRARY_PATH="$OMITTED',
             1,
         )
+        with self.assertRaisesRegex(AssertionError, "wheel loader contract"):
+            assert_hydronnx_wheel_loader_contract(mutated)
+
+    def test_a_nonisolated_hydronnx_wheel_environment_fails(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        mutated = text.replace("uv run --isolated --with", "uv run --with", 1)
         with self.assertRaisesRegex(AssertionError, "wheel loader contract"):
             assert_hydronnx_wheel_loader_contract(mutated)
 

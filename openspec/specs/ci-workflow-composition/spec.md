@@ -244,7 +244,7 @@ A matrix label or frozen repository list MUST NOT replace that source-dependency
 
 A classifier failure MUST NOT update a drift issue in the downstream repository.
 
-Project Devenv SHALL expose a Linux library path for downstream Python wheel probes. Only affected consumer recipes SHALL add it to `LD_LIBRARY_PATH`.
+Project Devenv SHALL expose a Linux library path for downstream Python wheel probes. Only affected consumer recipes SHALL add it to `LD_LIBRARY_PATH`. These probes SHALL use an isolated uv environment.
 
 The integration aggregator SHALL use the portable Devenv interpreter. The Hull manifest reader SHALL run after portable Devenv setup.
 
@@ -277,7 +277,8 @@ The cvc5 cache actions SHALL retain GitHub Actions cache transport. Their Python
 
 #### Scenario: A source consumer runs Python wheels
 - **WHEN** a source-dependent consumer runs Linux Python wheels that need C++ or zlib runtime libraries
-- **THEN** that consumer adds the project wheel library path to its recipe environment
+- **THEN** that consumer adds the project wheel library path to each affected command
+- **AND** each affected command uses an isolated uv environment
 - **AND** the project Devenv shell does not set a global `LD_LIBRARY_PATH`
 
 #### Scenario: A binary consumer runs off Nix
