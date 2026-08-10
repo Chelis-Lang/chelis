@@ -75,7 +75,7 @@ jobs:
       - name: Build the Devenv cvc5 output
         run: |
           set -euo pipefail
-          devenv build --no-tui outputs.cvc5-dir
+          devenv-retry build --no-tui outputs.cvc5-dir
 
       # Save immediately after the closure exists, so a later prove
       # failure does not lose the ~30m cold cvc5 build.
@@ -100,37 +100,37 @@ jobs:
           cache-on-failure: true
 
       - name: Build smt feature
-        run: devenv --profile smt shell --no-tui -- cargo build -p chelis-cli --features smt
+        run: devenv-retry --profile smt shell --no-tui -- cargo build -p chelis-cli --features smt
 
       - name: Run smt-gated chelis-prove tests
-        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features smt
+        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features smt
 
       - name: Run carcara-gated chelis-prove tests
         # The nightly parallel process exited with SIGSEGV after tests; the
         # same complete suite passed serially. Retain the full corpus while
         # containing that nondeterministic failure in this optional lane.
-        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features carcara -- --test-threads=1
+        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features carcara -- --test-threads=1
 
       # The Devenv command sets the Z3 link and loader environment from the
       # pinned Nix library.
       - name: Run z3-gated chelis-prove tests
-        run: devenv --profile smt shell --no-tui -- chelis-z3-test --cargo-subcommand test -p chelis-prove --features z3
+        run: devenv-retry --profile smt shell --no-tui -- chelis-z3-test --cargo-subcommand test -p chelis-prove --features z3
 
       - name: Run cross-engine oracle (cvc5 + Z3 agreement)
-        run: devenv --profile smt shell --no-tui -- chelis-z3-test --cargo-subcommand test -p chelis-prove --features "smt z3" --test cross_engine_oracle
+        run: devenv-retry --profile smt shell --no-tui -- chelis-z3-test --cargo-subcommand test -p chelis-prove --features "smt z3" --test cross_engine_oracle
 
       - name: Run clarabel-gated chelis-prove tests
-        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features clarabel
+        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features clarabel
 
       - name: Run the production solver config (cvc5 + Clarabel, both live)
-        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features "smt clarabel"
+        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features "smt clarabel"
 
       - name: Re-validate committed Gappa proofs (--check-only)
-        run: devenv --profile smt shell --no-tui -- python scripts/generate_erf_proof.py --check-only
+        run: devenv-retry --profile smt shell --no-tui -- python scripts/generate_erf_proof.py --check-only
 
       - name: Arb cross-check (certify_erf_envelope validate)
         run: |
-          devenv --profile smt shell --no-tui -- cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
+          devenv-retry --profile smt shell --no-tui -- cargo run -p chelis-prove --features arb --bin certify_erf_envelope \
             -- validate crates/chelis-prove/data/erf_envelope.json
 
       - name: Arb cross-check exp/log/sqrt (certify_special_fn_envelope validate)
@@ -139,7 +139,7 @@ jobs:
         # fails if any committed eps is below the fresh Arb bound (a shrunk /
         # tampered eps would forge a green). Mirrors the erf step above.
         run: |
-          devenv --profile smt shell --no-tui -- bash -euo pipefail -c '
+          devenv-retry --profile smt shell --no-tui -- bash -euo pipefail -c '
             for fn in exp log sqrt; do
               cargo run -p chelis-prove --features arb --bin certify_special_fn_envelope \
                 -- validate "crates/chelis-prove/data/special_fn_envelopes/${fn}_envelope.json"
@@ -147,7 +147,7 @@ jobs:
           '
 
       - name: Run arb-gated chelis-prove tests
-        run: devenv --profile smt shell --no-tui -- cargo test -p chelis-prove --features arb
+        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features arb
 
   report:
     name: Surface SMT full-prove status

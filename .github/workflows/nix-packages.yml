@@ -85,11 +85,11 @@ jobs:
         with:
           system: x86_64-linux
       - name: Run the Devenv shell smoke checks
-        run: devenv test --no-tui
+        run: devenv-retry test --no-tui
       - name: Build the Devenv package outputs
-        run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup
+        run: devenv-retry build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup
       - name: Run the Nix flake contract suite
-        run: devenv --profile ci shell --no-tui -- python scripts/test_nix_flake_contract.py
+        run: devenv-retry --profile ci shell --no-tui -- python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
       - name: Save the cvc5 toolchain closure
@@ -134,11 +134,11 @@ jobs:
         with:
           system: aarch64-darwin
       - name: Run the Devenv shell smoke checks
-        run: devenv test --no-tui
+        run: devenv-retry test --no-tui
       - name: Build the Devenv package outputs
-        run: devenv build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup
+        run: devenv-retry build --no-tui outputs.chelis outputs.chelis-runtime outputs.chelisup
       - name: Run the Nix flake contract suite
-        run: devenv --profile ci shell --no-tui -- python scripts/test_nix_flake_contract.py
+        run: devenv-retry --profile ci shell --no-tui -- python scripts/test_nix_flake_contract.py
       - name: Run the complete native flake check set
         run: nix flake check --print-build-logs
       - name: Save the cvc5 toolchain closure

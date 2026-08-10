@@ -39,8 +39,8 @@ LANE_FORBIDDEN_MARKERS = (
     "repositories: ci",
     "access-tokens = github.com=",
 )
-SMT_DEVENV_PREFIX = "devenv --profile smt shell --no-tui -- "
-SMT_RETRY_PREFIX = "devenv-retry --profile smt shell --no-tui -- "
+SMT_DEVENV_PREFIX = "devenv-retry --profile smt shell --no-tui -- "
+SMT_BARE_DEVENV_PREFIX = "devenv --profile smt shell --no-tui -- "
 RETIRED_SCRIPTS = (
     "ci_publish_cvc5_release.py",
     "ci_cvc5_cache.py",
@@ -61,7 +61,6 @@ def _lane_errors(workflow: str, job_name: str, system: str) -> list[str]:
     if not block:
         return [f"missing SMT lane job {job_name}"]
     errors: list[str] = []
-    devenv_prefix = SMT_RETRY_PREFIX if job_name == "smt-build" else SMT_DEVENV_PREFIX
     required = (
         SETUP_DEVENV_ACTION,
         AUTH_DEVENV_ACTION,
@@ -70,12 +69,12 @@ def _lane_errors(workflow: str, job_name: str, system: str) -> list[str]:
         "uses: ./.github/actions/cvc5-cache-restore",
         "uses: ./.github/actions/cvc5-cache-save",
         f"system: {system}",
-        "devenv build --no-tui outputs.cvc5-dir",
-        f"{devenv_prefix}cargo build",
-        f"{devenv_prefix}python .github/scripts/verify_release_smt.py",
+        "devenv-retry build --no-tui outputs.cvc5-dir",
+        f"{SMT_DEVENV_PREFIX}cargo build",
+        f"{SMT_DEVENV_PREFIX}python .github/scripts/verify_release_smt.py",
     )
     if job_name == "smt-build":
-        required += (f"{devenv_prefix}cargo test",)
+        required += (f"{SMT_DEVENV_PREFIX}cargo test",)
     for marker in required:
         if marker not in block:
             errors.append(f"{job_name} is missing {marker}")
@@ -176,7 +175,7 @@ class SmokeLaneContractTests(unittest.TestCase):
     def test_each_supply_marker_has_a_negative_mutation(self) -> None:
         for job_name, system in SMOKE_JOBS.items():
             block = _job_block(self.workflow, job_name)
-            marker = "devenv build --no-tui outputs.cvc5-dir"
+            marker = "devenv-retry build --no-tui outputs.cvc5-dir"
             with self.subTest(job=job_name):
                 mutated = self.workflow.replace(
                     block, block.replace(marker, "removed-marker"), 1
@@ -187,11 +186,11 @@ class SmokeLaneContractTests(unittest.TestCase):
     def test_linux_lane_requires_the_selective_devenv_retry(self) -> None:
         block = _job_block(self.workflow, "smt-build")
         mutated = self.workflow.replace(
-            block, block.replace(SMT_RETRY_PREFIX, SMT_DEVENV_PREFIX, 1), 1
+            block, block.replace(SMT_DEVENV_PREFIX, SMT_BARE_DEVENV_PREFIX, 1), 1
         )
         errors = smoke_lane_contract_errors(mutated)
         self.assertIn(
-            f"smt-build is missing {SMT_RETRY_PREFIX}cargo build", errors
+            f"smt-build is missing {SMT_DEVENV_PREFIX}cargo build", errors
         )
 
     def test_a_host_toolchain_step_fails(self) -> None:
@@ -249,7 +248,7 @@ class FullProveContractTests(unittest.TestCase):
         self.assertIn("full-smt-prove uses forbidden marker ci_cvc5_cache.py", errors)
 
     def test_removing_the_cvc5_supply_fails(self) -> None:
-        marker = "devenv build --no-tui outputs.cvc5-dir"
+        marker = "devenv-retry build --no-tui outputs.cvc5-dir"
         mutated = self.full_prove.replace(marker, "removed-marker", 1)
         errors = full_prove_contract_errors(mutated)
         self.assertIn(f"full-smt-prove is missing {marker}", errors)

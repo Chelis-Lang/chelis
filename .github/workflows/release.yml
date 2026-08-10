@@ -69,8 +69,8 @@ jobs:
       - name: Build and verify the portable chelis toolchain output
         id: build
         run: |
-          devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
-          devenv --profile ci shell --no-tui -- python scripts/verify_release_chelis.py \
+          devenv-retry build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
+          devenv-retry --profile ci shell --no-tui -- python scripts/verify_release_chelis.py \
             --build-json release-chelis-build.json \
             --stage-root release-chelis \
             --platform ${{ matrix.slug }}
@@ -241,8 +241,8 @@ jobs:
       - name: Build and verify portable chelisup output
         id: build
         run: |
-          devenv build --no-tui --quiet outputs.release-chelisup > release-chelisup-build.json
-          devenv --profile ci shell --no-tui -- python scripts/verify_release_chelisup.py \
+          devenv-retry build --no-tui --quiet outputs.release-chelisup > release-chelisup-build.json
+          devenv-retry --profile ci shell --no-tui -- python scripts/verify_release_chelisup.py \
             --build-json release-chelisup-build.json \
             --stage-root release-chelisup \
             --platform ${{ matrix.slug }}

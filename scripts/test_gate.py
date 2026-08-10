@@ -62,9 +62,12 @@ DEVENV_AUTH_ACTION = (
     "111b5865ccf04146344ad99dcdea9d724d65fc69"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
-DEVENV_COMMAND_PREFIX = "devenv --profile ci shell --no-tui -- "
+DEVENV_COMMAND_PREFIX = "devenv-retry --profile ci shell --no-tui -- "
 DEVENV_COMMAND_PREFIXES = (
     DEVENV_COMMAND_PREFIX,
+    "devenv-retry --profile sanitizers shell --no-tui -- ",
+    "devenv-retry --profile smt shell --no-tui -- ",
+    "devenv --profile ci shell --no-tui -- ",
     "devenv --profile sanitizers shell --no-tui -- ",
     "devenv --profile smt shell --no-tui -- ",
 )
@@ -95,7 +98,7 @@ DOCS_ONLY_GATE_IF = (
 )
 WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 CARCARA_FULL_SUITE_COMMAND = (
-    "devenv --profile smt shell --no-tui -- "
+    "devenv-retry --profile smt shell --no-tui -- "
     "cargo test -p chelis-prove --features carcara -- --test-threads=1"
 )
 
@@ -294,9 +297,9 @@ def _assert_native_devenv_recipe(workflow: str) -> None:
         required_markers = (
             f"uses: {DEVENV_SETUP_ACTION}",
             f"shell: {PORTABLE_DEVENV_SHELL}",
-            "run: devenv test --no-tui",
+            "run: devenv-retry test --no-tui",
             (
-                "run: devenv build --no-tui outputs.chelis "
+                "run: devenv-retry build --no-tui outputs.chelis "
                 "outputs.chelis-runtime outputs.chelisup"
             ),
             f"uses: {DEVENV_AUTH_ACTION}",
@@ -837,7 +840,7 @@ def _assert_devenv_job_recipe(job_block: str, expected_profile: str = "ci") -> N
         "app-client-id: ${{ vars.CI_APP_ID }}",
         "app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}",
         f"shell: {PORTABLE_DEVENV_SHELL}",
-        f"run: devenv --profile {expected_profile} ",
+        f"run: devenv-retry --profile {expected_profile} ",
     )
     missing = [marker for marker in required if marker not in job_block]
     if missing:
@@ -1220,7 +1223,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         self.assertNotIn(".venv/bin/python", text)
         self.assertEqual(
             text.count(
-                "run: devenv --profile ci shell --no-tui -- "
+                "run: devenv-retry --profile ci shell --no-tui -- "
                 "python scripts/test_nix_flake_contract.py"
             ),
             2,
@@ -1229,7 +1232,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
     def test_host_python_environment_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         mutated = text.replace(
-            "run: devenv --profile ci shell --no-tui -- "
+            "run: devenv-retry --profile ci shell --no-tui -- "
             "python scripts/test_nix_flake_contract.py",
             "uses: astral-sh/setup-uv@v8.1.0\n"
             "      - run: uv venv --python 3.11 .venv\n"
@@ -1246,12 +1249,12 @@ class NixPackagesWorkflowTests(unittest.TestCase):
     def test_missing_devenv_package_build_fails_the_native_recipe(self):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         mutated = text.replace(
-            "run: devenv build --no-tui outputs.chelis "
+            "run: devenv-retry build --no-tui outputs.chelis "
             "outputs.chelis-runtime outputs.chelisup",
             "run: omitted",
             1,
         )
-        with self.assertRaisesRegex(AssertionError, "devenv build"):
+        with self.assertRaisesRegex(AssertionError, "devenv-retry build"):
             _assert_native_devenv_recipe(mutated)
 
     def test_missing_private_ci_authentication_fails_the_native_recipe(self):
@@ -1276,8 +1279,8 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         setup = f"uses: {DEVENV_SETUP_ACTION}"
         mutated = text.replace(setup, "uses: omitted", 1).replace(
-            "run: devenv test --no-tui",
-            f"run: devenv test --no-tui\n      - {setup}",
+            "run: devenv-retry test --no-tui",
+            f"run: devenv-retry test --no-tui\n      - {setup}",
             1,
         )
         with self.assertRaisesRegex(AssertionError, "precede the runner verification"):

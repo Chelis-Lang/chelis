@@ -106,7 +106,7 @@ jobs:
       # bare PATH name). A release build matches the Hull campaign profile (a
       # debug build's check pass is multi-minute per program).
       - name: Build chelis (release)
-        run: devenv --profile ci shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
+        run: devenv-retry --profile ci shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
 
       # The pure runner core (wire_to_canonical, derive_compiler_outcome,
       # classify_program, assert_acceptance_oracle), the wire-normalizer golden
@@ -114,7 +114,7 @@ jobs:
       # self-test (the teeth). Binary-free; runs fast.
       - name: Conformance unit tests (pure core + teeth)
         run: |
-          devenv --profile ci shell --no-tui -- python -m unittest \
+          devenv-retry --profile ci shell --no-tui -- python -m unittest \
             tests.conformance.hull.test_run_conformance \
             tests.conformance.hull.test_wire_canonical \
             tests.conformance.hull.test_corpus_integrity
@@ -123,7 +123,7 @@ jobs:
       # binary. Fails on any CompilerUnsound / unexplained Disagree / EvalDisagree.
       - name: Conformance gate (frozen corpus vs live compiler)
         run: |
-          devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          devenv-retry --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis"
 
       # E2E TEETH PROOF: an injected compiler-accepts-a-reject-sentinel
@@ -131,7 +131,7 @@ jobs:
       # if the runner exits 0, the gate has no teeth and this step fails.
       - name: Conformance teeth (injected-unsound must fail the gate)
         run: |
-          if devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          if devenv-retry --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0; the gate did not catch the injected CompilerUnsound" >&2

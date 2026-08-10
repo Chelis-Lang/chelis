@@ -40,7 +40,7 @@ jobs:
       # The Devenv shell supplies uv and the managed Python; the report
       # anchors its output to the repo root, so the cwd stays here.
       - name: Generate LOC report
-        run: devenv --profile ci shell --no-tui -- uv run --project py loc-report
+        run: devenv-retry --profile ci shell --no-tui -- uv run --project py loc-report
 
       - name: Commit LOC report
         run: |

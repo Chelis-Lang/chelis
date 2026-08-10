@@ -109,7 +109,7 @@ jobs:
 
       - name: Build chelis (release)
         working-directory: chelis
-        run: devenv --profile ci shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
+        run: devenv-retry --profile ci shell --no-tui -- cargo build --release -p chelis-cli --bin chelis
 
       # FAIL FAST on a cross-repo cascade lag (chelis#341/#335). The fresh
       # campaign runs Hull's `chelis reef build`, which rejects any manifest
@@ -124,7 +124,7 @@ jobs:
       - name: Check Hull pin vs live chelis version (cascade-skew guard)
         working-directory: chelis
         run: |
-          devenv --profile ci shell --no-tui -- python scripts/ci_check_hull_pin_skew.py \
+          devenv-retry --profile ci shell --no-tui -- python scripts/ci_check_hull_pin_skew.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \
             --hull-reef-toml "$GITHUB_WORKSPACE/hull/reef.toml"
 
@@ -145,7 +145,7 @@ jobs:
         run: |
           export SEED="$(date -u +%Y%m%d)"
           # shellcheck disable=SC2016
-          devenv --profile ci shell --no-tui -- bash -euo pipefail -c '
+          devenv-retry --profile ci shell --no-tui -- bash -euo pipefail -c '
             cd "$GITHUB_WORKSPACE/hull"
             mkdir -p corpus/scratch
             export PATH="$GITHUB_WORKSPACE/chelis/target/release:$PATH"
@@ -162,13 +162,13 @@ jobs:
       - name: Re-validate the frozen corpus
         working-directory: chelis
         run: |
-          devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          devenv-retry --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis"
 
       - name: Conformance teeth (injected-unsound must fail the gate)
         working-directory: chelis
         run: |
-          if devenv --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
+          if devenv-retry --profile ci shell --no-tui -- python tests/conformance/hull/run_conformance.py \
             --chelis-bin "$GITHUB_WORKSPACE/chelis/target/release/chelis" \
             --simulate-unsound reject_0000; then
             echo "TEETH BROKEN: --simulate-unsound exited 0" >&2

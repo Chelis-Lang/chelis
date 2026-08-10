@@ -194,3 +194,23 @@ Local tests MUST NOT claim that they prove private action resolution, installati
 #### Scenario: GitHub Actions is unavailable
 - **WHEN** local evidence passes but the required hosted context does not run
 - **THEN** the migration remains incomplete
+
+### Requirement: [CWC-009] Workflow Devenv commands use selective evaluation retries
+Every project Devenv command in a GitHub Actions workflow SHALL invoke `devenv-retry` from the pinned `setup-devenv` action.
+
+The wrapper SHALL retry only the exact invalid-store-path diagnostic. It SHALL run a maximum of three attempts and refresh the evaluation cache after failure.
+
+The wrapper SHALL preserve the status of each unrelated failure. Commands outside GitHub Actions can invoke `devenv` directly.
+
+#### Scenario: A transient invalid store path stops evaluation
+- **WHEN** a project Devenv command emits the exact invalid-store-path diagnostic
+- **THEN** the wrapper refreshes the evaluation cache and retries the command
+- **AND** no more than three attempts run
+
+#### Scenario: A different command failure occurs
+- **WHEN** a project Devenv command fails without the exact diagnostic
+- **THEN** the wrapper returns the original failure status without a retry
+
+#### Scenario: A workflow bypasses the wrapper
+- **WHEN** a workflow invokes `devenv` directly for a project command
+- **THEN** the workflow composition contract test fails before hosted execution

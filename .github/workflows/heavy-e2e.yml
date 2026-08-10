@@ -75,7 +75,7 @@ jobs:
       # fail the run. This is the only place the `nightly` profile is
       # used.
       - name: Heavy e2e suite
-        run: devenv --profile ci shell --no-tui -- cargo nextest run --workspace --profile nightly
+        run: devenv-retry --profile ci shell --no-tui -- cargo nextest run --workspace --profile nightly
 
       # The chelis-std in-language self-test corpus (packages/chelis-std/tests/,
       # run via `chelis test tests/`). Its integration test is #[ignore] (a
@@ -86,7 +86,7 @@ jobs:
       # the heavy e2e suite above fails (independent signal).
       - name: chelis-std self-test corpus
         if: always()
-        run: devenv --profile ci shell --no-tui -- cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
+        run: devenv-retry --profile ci shell --no-tui -- cargo test -p chelis-cli --test chelis_std_self_test_corpus -- --ignored --nocapture
 
   # Surface a nightly failure as a tracking issue (opens on failure, closes on
   # green) so a red nightly is impossible to miss — scheduled-run failures do

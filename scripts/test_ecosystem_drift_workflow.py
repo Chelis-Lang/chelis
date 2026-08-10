@@ -19,7 +19,7 @@ def assert_devenv_rust_version_contract(text: str) -> None:
         raise AssertionError("the drift job must not hardcode a Rust version")
     required = (
         "id: rust-version",
-        "devenv --profile ci shell --no-tui -- rustc --version",
+        "devenv-retry --profile ci shell --no-tui -- rustc --version",
         "rust_version: ${{ steps.rust-version.outputs.rust_version }}",
         "toolchain: ${{ needs.build-chelis.outputs.rust_version }}",
     )
@@ -38,10 +38,10 @@ class EcosystemDriftWorkflowTests(unittest.TestCase):
     def test_build_job_ships_the_portable_release_output(self) -> None:
         block = self._build_job_block()
         self.assertIn(
-            "devenv build --no-tui --quiet outputs.release-chelis", block
+            "devenv-retry build --no-tui --quiet outputs.release-chelis", block
         )
         self.assertIn(
-            "devenv --profile ci shell --no-tui -- "
+            "devenv-retry --profile ci shell --no-tui -- "
             "python scripts/verify_release_chelis.py",
             block,
         )

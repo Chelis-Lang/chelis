@@ -34,6 +34,7 @@ ADOPTED_ACTIONS = frozenset(
 REMOTE_CI_ACTION = re.compile(
     r"Chelis-Lang/ci/actions/(?P<action>[a-z0-9-]+)@(?P<revision>[^\s#]+)"
 )
+BARE_DEVENV_COMMAND = re.compile(r"\bdevenv (?=(?:--profile\b|build\b|test\b))")
 
 
 def workflow_texts() -> dict[str, str]:
@@ -126,6 +127,15 @@ def assert_private_auth_contract(workflows: dict[str, str]) -> None:
                 raise AssertionError(
                     f"{workflow_name}/{job_name}: retained inline Nix authentication"
                 )
+
+
+def assert_devenv_retry_contract(workflows: dict[str, str]) -> None:
+    """Require the selective retry wrapper for each workflow Devenv command."""
+    for workflow_name, text in workflows.items():
+        if BARE_DEVENV_COMMAND.search(text):
+            raise AssertionError(
+                f"{workflow_name}: a Devenv command bypasses devenv-retry"
+            )
 
 
 def assert_nightly_contract(workflows: dict[str, str]) -> None:
@@ -240,6 +250,17 @@ class SharedCiCompositionTests(unittest.TestCase):
 
     def test_private_authentication_order_and_inputs(self) -> None:
         assert_private_auth_contract(self.workflows)
+
+    def test_devenv_commands_use_the_selective_retry_wrapper(self) -> None:
+        assert_devenv_retry_contract(self.workflows)
+
+    def test_devenv_retry_mutation_fails_for_its_intended_reason(self) -> None:
+        mutated = self.workflows.copy()
+        mutated["ci.yml"] = mutated["ci.yml"].replace(
+            "devenv-retry --profile ci", "devenv --profile ci", 1
+        )
+        with self.assertRaisesRegex(AssertionError, "bypasses devenv-retry"):
+            assert_devenv_retry_contract(mutated)
 
     def test_nightly_issue_contracts(self) -> None:
         assert_nightly_contract(self.workflows)

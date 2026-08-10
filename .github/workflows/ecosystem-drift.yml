@@ -88,7 +88,7 @@ jobs:
       - name: Resolve the Devenv Rust version
         id: rust-version
         run: |
-          rust_version="$(devenv --profile ci shell --no-tui -- rustc --version | awk '{print $2}')"
+          rust_version="$(devenv-retry --profile ci shell --no-tui -- rustc --version | awk '{print $2}')"
           test -n "$rust_version"
           echo "rust_version=$rust_version" >> "$GITHUB_OUTPUT"
 
@@ -107,8 +107,8 @@ jobs:
       # the Nix store so the raw drift runners and the docker leg can run it.
       - name: Build and verify the portable chelis toolchain output
         run: |
-          devenv build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
-          devenv --profile ci shell --no-tui -- python scripts/verify_release_chelis.py \
+          devenv-retry build --no-tui --quiet outputs.release-chelis > release-chelis-build.json
+          devenv-retry --profile ci shell --no-tui -- python scripts/verify_release_chelis.py \
             --build-json release-chelis-build.json \
             --stage-root release-chelis \
             --platform linux-x86_64
@@ -152,7 +152,7 @@ jobs:
       # that breaks chelis-std's own lowering — a nautilus-#11-class bug).
       # Emits packages/chelis-std/dist/chelis-std-<ver>.{chb,tar.zst}.
       - name: Rebuild HEAD chelis-std bundle
-        run: devenv --profile ci shell --no-tui -- "$HEAD_TOOLCHAIN/bin/chelis" reef build packages/chelis-std
+        run: devenv-retry --profile ci shell --no-tui -- "$HEAD_TOOLCHAIN/bin/chelis" reef build packages/chelis-std
 
       # Stage release.yml's tarball content plus the freshly built
       # packages/chelis-std/ tree (so `reef install --from-monorepo
