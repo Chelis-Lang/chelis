@@ -84,22 +84,73 @@ struct ConsumeSite {
     kind: ConsumeKind,
 }
 
+/// What a single binding of a name was introduced by.  One entry per
+/// `LinearScope::declare`, stacked so shadowing and scope exit are the
+/// existing push/pop machinery.
+///
+/// Both fields describe the *binding*, not the value's current state —
+/// `BindingState` owns that. They are separate concerns: a binding can be
+/// a destructured component and an alias at the same time (a component
+/// desugars to `p = (var __chelis_tmpN)`), and `pop` must drop both
+/// together.
+#[derive(Debug, Clone, Default)]
+struct BindingOrigin {
+    /// Alias chain link (Linearity-AliasedConsume-F1).  `Some(source)`
+    /// when `check_let` recorded a `let y = (var x)` binding as an
+    /// `Aliasing` consume; `consume_var_expr` walks the chain via
+    /// `resolve_alias_chain` and forwards a `Structural` consume to the
+    /// underlying source name's entry.  Multi-level chains
+    /// (`let z = y; let y = x`) are walked iteratively.
+    alias: Option<String>,
+    /// Destructured-component mark (Linearity-F2, chelis#1200).  `true`
+    /// when this binding was introduced by a `destructure: true` bind
+    /// emitted by `chelis_surf::desugar` for a `let` whose pattern is not
+    /// a bare `Var` — i.e. the name denotes a tuple component, or one of
+    /// the `__chelis_tmpN` intermediates that carry components.  The
+    /// `consume_var_expr` already-consumed arm reads this to decide
+    /// whether a consume-after-consume is a hard Linearity-F2 error or
+    /// the ordinary implicit-Copy fallthrough.
+    ///
+    /// This is a per-name mark rather than a block-scoped depth counter
+    /// on purpose.  A depth counter set by one destructuring `let` covers
+    /// that let's *body*, and in a block every later statement is nested
+    /// inside that body, so the gate fired for every variable in the rest
+    /// of the block — including ordinary bindings with no relationship to
+    /// the destructure (chelis#1200).
+    ///
+    /// This field is the *active F2 gate*, and it is region-relative:
+    /// `clear_destructured_marks` drops it on branch entry because a
+    /// branch body is a new declaration region.  It must never be used to
+    /// answer "which binding carries this value" — see `component`.
+    destructured: bool,
+    /// Permanent destructured-component identity (chelis#1200 review
+    /// finding 1).  Set with `destructured` when the bind is recorded, and
+    /// *never* cleared by region entry.
+    ///
+    /// The two facts are genuinely different.  Whether F2 is armed for a
+    /// name depends on where you are (a branch body is a fresh region);
+    /// whether the name denotes a tuple component whose value lives in a
+    /// `__chelis_tmpN` carrier is a property of the binding itself and is
+    /// true everywhere the binding is visible.  Reading the region-relative
+    /// mark to answer the identity question silently loses the carrier
+    /// inside any branch: the closure-capture path then consumed the
+    /// component's own entry, left the carrier `Consumed(Aliasing)`, and a
+    /// later `realize` of the component upgraded that to `Structural`
+    /// without a diagnostic — a consume inside a branch failed to survive
+    /// the join, contradicting `spec/design/implicit_linearity.md`.
+    component: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LinearScope {
     bindings: HashMap<String, Vec<BindingState>>,
     types: HashMap<String, Vec<Option<Expr>>>,
-    /// Alias chain map (Linearity-AliasedConsume-F1).  When
-    /// `check_let` records a `let y = (var x)` binding as an
-    /// `Aliasing` consume, it also pushes `x` onto the alias stack
-    /// at `aliases["y"]`.  When `consume_var_expr` resolves a
-    /// `Structural` consume on `y` it walks the alias chain via
-    /// `resolve_alias_chain` and forwards the consume to the
-    /// underlying source name's scope entry.  Multi-level chains
-    /// (`let z = y; let y = x`) are walked iteratively until the
-    /// resolved name has no alias.  Stacks parallel `bindings` so
-    /// scoping (`pop`) keeps the alias map consistent with the
-    /// shadowing semantics already in place for names and types.
-    aliases: HashMap<String, Vec<Option<String>>>,
+    /// Per-binding origin records, stacked in parallel with `bindings`
+    /// so `declare`/`pop` give alias links and component marks the same
+    /// shadowing semantics already in place for names and types: an
+    /// ordinary re-`let` of a component name pushes a fresh unmarked,
+    /// unaliased entry over it.
+    origins: HashMap<String, Vec<BindingOrigin>>,
 }
 
 impl LinearScope {
@@ -112,11 +163,15 @@ impl LinearScope {
                 borrow_sites: Vec::new(),
             });
         self.types.entry(name.clone()).or_default().push(ty);
-        // Push a `None` onto the alias stack so a re-let of `name`
-        // with a non-var RHS shadows any prior alias.  Callers that
-        // record an alias must follow with `record_alias` to flip
-        // the top of the stack from `None` to `Some(source)`.
-        self.aliases.entry(name).or_default().push(None);
+        // Push a blank origin so a re-`let` of `name` shadows any prior
+        // alias link and component mark.  Callers that establish either
+        // follow with `record_alias` / `mark_destructured`, which flip
+        // fields on the entry this pushed.
+        self.origins.entry(name).or_default().push(BindingOrigin {
+            alias: None,
+            destructured: false,
+            component: false,
+        });
     }
 
     fn pop(&mut self, name: &str) -> Option<(Option<Expr>, BindingState)> {
@@ -140,10 +195,10 @@ impl LinearScope {
             None
         };
 
-        if let Some(stack) = self.aliases.get_mut(name) {
+        if let Some(stack) = self.origins.get_mut(name) {
             stack.pop();
             if stack.is_empty() {
-                self.aliases.remove(name);
+                self.origins.remove(name);
             }
         }
 
@@ -181,17 +236,85 @@ impl LinearScope {
         self.bindings.keys().cloned().collect()
     }
 
+    fn origin(&self, name: &str) -> Option<&BindingOrigin> {
+        self.origins.get(name).and_then(|stack| stack.last())
+    }
+
+    fn origin_mut(&mut self, name: &str) -> Option<&mut BindingOrigin> {
+        self.origins
+            .get_mut(name)
+            .and_then(|stack| stack.last_mut())
+    }
+
     /// Record that the top-of-stack binding for `alias` is an
     /// aliasing copy of `source`.  Must be called after `declare`
-    /// for `alias` (the alias stack carries a `None` at the top
-    /// after `declare`; this flips it to `Some(source)`).  Used by
+    /// for `alias` (the origin entry `declare` pushed carries
+    /// `alias: None`; this flips it to `Some(source)`).  Used by
     /// the `Aliasing` consume producers in `check_let` and
     /// `check_def_body` per Linearity-AliasedConsume-F1.
     fn record_alias(&mut self, alias: &str, source: &str) {
-        if let Some(stack) = self.aliases.get_mut(alias)
-            && let Some(top) = stack.last_mut()
-        {
-            *top = Some(source.to_string());
+        if let Some(origin) = self.origin_mut(alias) {
+            origin.alias = Some(source.to_string());
+        }
+    }
+
+    /// Record that the top-of-stack binding for `name` is a
+    /// destructured component (Linearity-F2, chelis#1200).  Must be
+    /// called after `declare` for `name`, which pushes the unmarked
+    /// entry this flips.  Called by `check_let` for every name
+    /// introduced by a `destructure: true` bind.
+    fn mark_destructured(&mut self, name: &str) {
+        if let Some(origin) = self.origin_mut(name) {
+            origin.destructured = true;
+            origin.component = true;
+        }
+    }
+
+    /// Whether the currently-visible binding for `name` is a
+    /// destructured component.  Names that are not bound here (top-level
+    /// defs, unresolved names) answer `false`, matching the pre-#1200
+    /// behavior for anything outside a destructure.
+    fn is_destructured(&self, name: &str) -> bool {
+        self.origin(name).is_some_and(|origin| origin.destructured)
+    }
+
+    /// Whether the currently-visible binding for `name` was introduced by a
+    /// destructure, regardless of declaration region (chelis#1200 review
+    /// finding 1).
+    ///
+    /// This is the identity question, and it is the one every
+    /// *carrier-resolution* site must ask.  `is_destructured` answers the
+    /// different, region-relative question of whether the F2 gate is armed
+    /// here, and a branch body clears that.  Asking the armed-here question
+    /// when you meant the identity question drops the carrier inside every
+    /// branch.
+    fn is_component(&self, name: &str) -> bool {
+        self.origin(name).is_some_and(|origin| origin.component)
+    }
+
+    /// Drop the destructured-component marks on every currently-visible
+    /// binding (Linearity-F2, chelis#1200 / reviewer ruling Q1).
+    ///
+    /// Called when entering a branch scope (`check_if`, `check_match`).
+    /// Per `spec/design/implicit_linearity.md` §"Destructured components",
+    /// entering a new declaration region re-declares the values it works
+    /// on, and a fresh declaration shadows the mark — that is already what
+    /// `check_fn` gets for free, because it `declare`s every capture in
+    /// the closure's inner scope. Branch scopes clone the enclosing scope
+    /// without re-declaring, so without this a component consumed twice
+    /// inside one arm errored while the identical closure body compiled.
+    /// The reviewer ruled the closure verdict correct, so branches drop
+    /// the marks on entry.
+    ///
+    /// Only the marks are dropped: `BindingState` and alias links are
+    /// untouched, so consume tracking across the branch boundary and
+    /// `join_branch_states` are unaffected, and a destructure *inside* the
+    /// branch marks its own components normally.
+    fn clear_destructured_marks(&mut self) {
+        for stack in self.origins.values_mut() {
+            for origin in stack.iter_mut() {
+                origin.destructured = false;
+            }
         }
     }
 
@@ -214,10 +337,8 @@ impl LinearScope {
                 return None;
             }
             match self
-                .aliases
-                .get(&current)
-                .and_then(|stack| stack.last())
-                .and_then(|entry| entry.as_ref())
+                .origin(&current)
+                .and_then(|origin| origin.alias.as_ref())
             {
                 Some(source) => {
                     current = source.clone();
@@ -267,18 +388,6 @@ struct Checker {
     /// chelis#229 sibling-sweep gap.
     signature_inference: SignatureInferenceMetadata,
     type_headers: crate::deep_type::TypeResolutionEnv,
-    /// Depth counter for desugarer-synthesized destructure scopes
-    /// (`__chelis_tmp_N` bind chains tagged with `destructure: true`
-    /// in their meta-map). Incremented by `check_let` when entering
-    /// a destructure-marked bind and decremented on return. The
-    /// `consume_var_expr` already-consumed arm uses this to gate
-    /// the Linearity-F2 use-after-consume diagnostic: implicit
-    /// Copy insertion does not apply to destructured components
-    /// (tuple-get produces a fresh owned value, not an aliased
-    /// borrow), so double-consume on a destructured name is a
-    /// hard error rather than the silent fallthrough used by
-    /// regular bindings.
-    destructure_scope_depth: usize,
 }
 
 impl Checker {
@@ -334,7 +443,6 @@ pub fn check_linearity(program: &CheckedProgram) -> Result<CheckedProgram, Vec<C
         tensor_carrying_adts,
         signature_inference: program.signature_inference().clone(),
         type_headers: program.type_headers().clone(),
-        destructure_scope_depth: 0,
     };
     let mut scope = LinearScope::default();
 
@@ -464,7 +572,6 @@ pub fn check_linearity_with_context(
         tensor_carrying_adts,
         signature_inference: merged_signature_inference,
         type_headers: merged_type_headers,
-        destructure_scope_depth: 0,
     };
 
     let mut scope = LinearScope::default();
@@ -785,14 +892,20 @@ impl Checker {
             return;
         }
         let mut pushed = Vec::new();
-        // Linearity-F2 destructure-scope tracking.  When the bind
-        // is one of the desugarer-synthesized destructure
-        // intermediates (`__chelis_tmp_N` or a user-visible
-        // destructure component, tagged with `destructure: true`),
-        // bump the destructure-scope depth so the
-        // `consume_var_expr` already-consumed arm fires as an
-        // error rather than the silent fallthrough used by regular
-        // bindings.
+        // Linearity-F2 component tracking (chelis#1200).  When the bind
+        // is one of the desugarer-synthesized destructure intermediates
+        // (`__chelis_tmpN` or a user-visible destructure component,
+        // tagged with `destructure: true`), mark the names it introduces
+        // as destructured components so the `consume_var_expr`
+        // already-consumed arm fires as an error *for those names* rather
+        // than the silent fallthrough used by regular bindings.
+        //
+        // The mark is per-name and not a scope: the binding values below
+        // are checked in the enclosing scope and are ordinary variables
+        // (`_ = eat(v)` consumes `v`, which is not a component), and in a
+        // block every later statement is nested in this let's body, so a
+        // scope-shaped gate would classify the whole rest of the block as
+        // destructured.
         let bind_introduces_destructure = bind_introduces_destructure_tmp(&kids[0]);
         if let Some(bind_kids) = tagged_children(&kids[0], DeepTag::Bind) {
             let mut index = 0;
@@ -822,24 +935,21 @@ impl Checker {
                 if let Some(source) = alias_source {
                     scope.record_alias(name, &source);
                 }
+                // The marker governs the bindings introduced by this bind
+                // and nothing else.  The binding values were checked above
+                // in the enclosing scope, so an ordinary source variable
+                // appearing in a destructure's RHS is never classified as a
+                // component.
+                if bind_introduces_destructure {
+                    scope.mark_destructured(name);
+                }
                 pushed.push(name.to_string());
                 index += 2;
             }
         }
-        // The marker governs the bindings introduced above and therefore the
-        // let body. The binding values are evaluated in the enclosing scope:
-        // treating the root destructure value as already inside the new scope
-        // incorrectly classifies an ordinary source variable as a
-        // destructured component.
-        if bind_introduces_destructure {
-            self.destructure_scope_depth += 1;
-        }
         self.check_expr(&kids[1], scope);
         for name in pushed.into_iter().rev() {
             self.pop_and_check(scope, &name, expr_scope_end(&kids[1]));
-        }
-        if bind_introduces_destructure {
-            self.destructure_scope_depth -= 1;
         }
     }
 
@@ -913,8 +1023,39 @@ impl Checker {
             });
             if body_consumes {
                 self.read_or_error(name.as_str(), expr, outer_scope);
+                // chelis#1200: forward the capture consume to a
+                // destructured component's carrier.
+                //
+                // A component is an alias of a `__chelis_tmpN` the user
+                // cannot name, and that carrier is the component's only
+                // identity — every other consume of the component resolves
+                // to it. Marking the component's own entry therefore left
+                // the carrier `Live`, and capture-then-reuse of a component
+                // was silently accepted while the same reuse without the
+                // closure errored.
+                //
+                // The forwarding is deliberately NOT general. For an
+                // ordinary `y = x` alias both names are user-visible
+                // bindings, and a capture has consumed the name it captured
+                // since before this issue: `x = ...; y = x; f = fn () ->
+                // eat(y); g = fn () -> eat(x)` compiles, and downstream
+                // code relies on that spelling to hand two closures their
+                // own name for one value. Forwarding there would be an
+                // unrelated ecosystem-breaking tightening — the exact class
+                // of change chelis#1200 exists to undo — and it is not what
+                // the component misroute needs. A direct (unaliased)
+                // capture-then-reuse of an ordinary binding still errors,
+                // unchanged, through `read_or_error`.
+                // Identity, not the region-relative F2 gate: a branch body
+                // clears `destructured`, so reading it here lost the carrier
+                // for every capture inside an `if`/`match` arm (chelis#1200
+                // review finding 1).
+                let capture_target = match outer_scope.resolve_alias_chain(&name) {
+                    Some(carrier) if outer_scope.is_component(&carrier) => carrier,
+                    _ => name.clone(),
+                };
                 outer_scope.consume(
-                    &name,
+                    &capture_target,
                     ConsumeSite {
                         description: format!("closure capture {}", diag_site(expr)),
                         kind: ConsumeKind::Structural,
@@ -969,6 +1110,11 @@ impl Checker {
         let visible_names = scope.visible_names();
         let mut then_scope = scope.clone();
         let mut else_scope = scope.clone();
+        // chelis#1200 Q1: a branch body is a new declaration region, so
+        // the destructured-component mark does not cross into it. See
+        // `LinearScope::clear_destructured_marks`.
+        then_scope.clear_destructured_marks();
+        else_scope.clear_destructured_marks();
         self.check_expr(&kids[1], &mut then_scope);
         self.check_expr(&kids[2], &mut else_scope);
         self.join_branch_states(scope, &visible_names, &[then_scope, else_scope]);
@@ -1002,6 +1148,14 @@ impl Checker {
                 continue;
             }
             let mut arm_scope = scope.clone();
+            // chelis#1200 Q1: an arm body is a new declaration region, so
+            // the destructured-component mark does not cross into it. The
+            // arm's own pattern binders were already covered by `declare`
+            // below; this covers the outer names the arm merely mentions,
+            // which is what made the arm reject where the equivalent
+            // closure body compiled. See
+            // `LinearScope::clear_destructured_marks`.
+            arm_scope.clear_destructured_marks();
             let pattern_bindings = pattern_named_types(&arm_kids[0]);
             let pattern_names: Vec<String> = pattern_bindings
                 .iter()
@@ -1027,13 +1181,75 @@ impl Checker {
         branches: &[LinearScope],
     ) {
         for name in visible_names {
-            let consumed_site = branches.iter().find_map(|branch| match branch.top(name) {
-                Some(BindingState::Consumed(site)) => Some(site.clone()),
-                _ => None,
-            });
-            if let Some(site) = consumed_site
-                && matches!(scope.top(name), Some(BindingState::Live { .. }))
-            {
+            // A branch's `Structural` consume is the one that destroys the
+            // value, so it is the one that must survive the join. Prefer it
+            // over an `Aliasing` record from another branch: an alias bind
+            // does not destroy anything, and letting it win would report the
+            // wrong site.
+            let consumed_site = branches
+                .iter()
+                .find_map(|branch| match branch.top(name) {
+                    Some(BindingState::Consumed(site))
+                        if matches!(site.kind, ConsumeKind::Structural) =>
+                    {
+                        Some(site.clone())
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    branches.iter().find_map(|branch| match branch.top(name) {
+                        Some(BindingState::Consumed(site)) => Some(site.clone()),
+                        _ => None,
+                    })
+                });
+            let Some(site) = consumed_site else {
+                continue;
+            };
+            // chelis#1200 Q2: propagate onto an outer entry that is already
+            // `Consumed(Aliasing)`, not only onto a `Live` one.
+            //
+            // A destructured component desugars to `p = (var __chelis_tmpN)`,
+            // which records an `Aliasing` consume on the temp. The temp is the
+            // carrier every later consume of `p` resolves to, so it is never
+            // `Live` by the time a branch runs. Gating the join on `Live`
+            // therefore dropped the branch's `Structural` consume outright, and
+            // "component consumed in one arm, then again after the join" was
+            // silently accepted — falsifying the true positive F2 exists to
+            // protect. An `Aliasing` record is not a destruction, so a
+            // `Structural` consume from a branch legitimately replaces it,
+            // exactly as `consume_var_expr`'s Aliasing-then-Structural arm does
+            // on the straight-line path.
+            // The rule (chelis#1200 review finding 2):
+            //
+            //   Live                      -> a branch consume always wins.
+            //   Consumed(Aliasing), and
+            //     the name is a component
+            //     carrier                 -> a branch Structural consume wins.
+            //   Consumed(Aliasing), and
+            //     the name is an ordinary
+            //     binding                 -> unchanged.
+            //
+            // The carve-out is deliberately narrow. The justification above
+            // is entirely about carriers: a component's `Aliasing` record is
+            // bookkeeping for `p = (var __chelis_tmpN)`, never a destruction,
+            // so a branch's real consume must replace it. An ordinary `y = x`
+            // alias records the same `Aliasing` shape for a completely
+            // different reason, and upgrading it there rejects
+            // `y = x; if c then { f = fn () -> realize(x) f() } else t;
+            // add(y, y)` — which released 0.18.4 accepts. Tightening ordinary
+            // aliases is exactly the class of ecosystem-breaking change
+            // chelis#1200 exists to undo, so the upgrade asks for component
+            // identity (permanent) rather than the region-relative F2 mark.
+            let replaces_outer = match scope.top(name) {
+                Some(BindingState::Live { .. }) => true,
+                Some(BindingState::Consumed(outer)) => {
+                    matches!(outer.kind, ConsumeKind::Aliasing)
+                        && matches!(site.kind, ConsumeKind::Structural)
+                        && scope.is_component(name)
+                }
+                None => false,
+            };
+            if replaces_outer {
                 scope.consume(name, site);
             }
         }
@@ -1091,12 +1307,17 @@ impl Checker {
                         || consumed_at.description.contains("match scrutinee")) =>
             {
                 let description = consumed_at.description.clone();
+                // chelis#1200: report the name the user wrote, not
+                // `target`. `target` is the alias chain's terminal, which
+                // for a destructured component is the desugarer's
+                // `__chelis_tmpN` — a name that appears nowhere in the
+                // user's source and that they cannot act on.
                 self.push_diagnostic(CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
                         format!(
-                            "variable `{target}` was already consumed by {description}; later use {} is invalid",
+                            "variable `{name}` was already consumed by {description}; later use {} is invalid",
                             diag_site(expr)
                         ),
                     ),
@@ -1116,25 +1337,51 @@ impl Checker {
                 // borrows of the target trip `read_or_error`.
                 scope.consume(&target, site);
             }
-            Some(BindingState::Consumed(consumed_at)) if self.destructure_scope_depth > 0 => {
-                // Linearity-F2: inside a destructure-let scope a
-                // consume-after-consume on a destructured component
-                // is an error.  Implicit Copy insertion does not
-                // apply because tuple-get produces a fresh owned
-                // value rather than an aliased borrow, so reuse of
-                // a destructured tensor name must be made explicit
-                // via `copy()`.  Outside the destructure scope the
-                // implicit-linearity pass inserts a Copy for
-                // consuming fan-out, matching the spec's
-                // "Copy Insertion" semantics; per the existing
-                // baseline we do not flag that shape.
+            Some(BindingState::Consumed(consumed_at))
+                if matches!(site.kind, ConsumeKind::Structural)
+                    && scope.is_destructured(&target) =>
+            {
+                // Linearity-F2: a consume-after-consume on a
+                // destructured component is an error.  Implicit Copy
+                // insertion does not apply because tuple-get produces
+                // a fresh owned value rather than an aliased borrow,
+                // so reuse of a destructured tensor name must be made
+                // explicit via `copy()`.  For every other binding the
+                // implicit-linearity pass inserts a Copy for consuming
+                // fan-out, matching the spec's "Copy Insertion"
+                // semantics; per the existing baseline we do not flag
+                // that shape.
+                //
+                // chelis#1200: the guard is membership on the consumed
+                // *target*, not a block-scoped depth.  `target` is the
+                // alias chain's terminal name, so consuming a component
+                // through an alias still lands on the component's marked
+                // entry, while an ordinary binding that merely appears
+                // after a destructuring `let` in the same block does not.
+                //
+                // Only a `Structural` consume can trip this. An
+                // `Aliasing` consume — a second `let y = p` bind of the
+                // same component — destroys nothing: `lower_let` maps
+                // both names onto the component's node, so `(a, b) = p;
+                // y = a; z = a` is a fan-out of borrows, which
+                // Copy Insertion covers. Gating it here rejected that
+                // shape, which 0.18.3 accepted.
                 let description = consumed_at.description.clone();
+                // Name the binding the user wrote. When that name is
+                // itself the component, say so; when it is an ordinary
+                // binding that aliases one, say that instead rather than
+                // calling the user's own `let` a destructured binding.
+                let origin_phrase = if scope.is_destructured(name) {
+                    " (from a destructured binding)"
+                } else {
+                    " (an alias of a destructured binding)"
+                };
                 self.push_diagnostic(CheckError::new(
                     CheckErrorKind::UseAfterConsume,
                     with_macro_provenance(
                         expr,
                         format!(
-                            "variable `{name}` (from a destructured binding) was already consumed by {description}; later use {} is invalid",
+                            "variable `{name}`{origin_phrase} was already consumed by {description}; later use {} is invalid",
                             diag_site(expr)
                         ),
                     ),
@@ -1510,11 +1757,24 @@ fn collect_pattern_named_types(expr: &Expr, bindings: &mut Vec<(String, Option<E
     }
 }
 
+/// Free variables of `expr`, in a DETERMINISTIC (sorted) order.
+///
+/// chelis#1200: `check_fn` walks this list mutating `outer_scope` as it
+/// goes — it consumes or borrows each capture and can raise
+/// `UseAfterConsume`. When two captures are on one alias chain
+/// (`y = x; fn () -> add(realize(x), realize(y))`), the verdict depends
+/// on which is visited first, so a `HashSet`'s iteration order made the
+/// same program compile or fail run to run (measured: 11/12 reject,
+/// 1/12 accept). Sorting is the cheap half of the fix; forwarding the
+/// capture consume through the alias chain in `check_fn` is the half
+/// that makes both orders agree.
 fn free_vars(expr: &Expr, params: &[String]) -> Vec<String> {
     let mut bound = vec![params.iter().cloned().collect::<HashSet<_>>()];
     let mut free = HashSet::new();
     collect_free_vars(expr, &mut bound, &mut free);
-    free.into_iter().collect()
+    let mut free: Vec<String> = free.into_iter().collect();
+    free.sort();
+    free
 }
 
 fn collect_free_vars(expr: &Expr, bound: &mut Vec<HashSet<String>>, free: &mut HashSet<String>) {
@@ -1829,16 +2089,22 @@ fn tuple_get_element_type<'a>(
     tys.get(index)
 }
 
-/// Linearity-F2 destructure-scope gate.  Returns `true` if `bind_list`
-/// is a `(bind {meta} name value ...)` whose meta-map contains the
-/// `destructure: true` marker injected by `chelis_surf::desugar`
-/// when synthesizing the `__chelis_tmp_N` intermediates for
-/// `let (a, b) = ...` patterns.  Used by `Checker::check_let` to
-/// bump `destructure_scope_depth`, which gates the
-/// `consume_var_expr` already-consumed arm so use-after-consume on
-/// a destructured component surfaces as an error rather than the
-/// silent fallthrough used by regular bindings (where implicit
-/// Copy insertion covers consuming fan-out).
+/// Linearity-F2 destructured-component marker.  Returns `true` if
+/// `bind_list` is a `(bind {meta} name value ...)` whose meta-map
+/// contains the `destructure: true` marker injected by
+/// `chelis_surf::desugar` when synthesizing the `__chelis_tmpN`
+/// intermediates and component binds for a `let` whose pattern is not
+/// a bare `Var`.  Used by `Checker::check_let` to call
+/// `LinearScope::mark_destructured` on the names the bind introduces;
+/// the `consume_var_expr` already-consumed arm reads that per-name
+/// mark so use-after-consume on a destructured component surfaces as
+/// an error rather than the silent fallthrough used by regular
+/// bindings (where implicit Copy insertion covers consuming fan-out).
+///
+/// chelis#1200: this marker previously drove a block-scoped depth
+/// counter, which made the F2 error fire for every variable in the
+/// remainder of an enclosing block.  The marker itself was never the
+/// defect and is unchanged; only its consumer moved to per-name marks.
 fn bind_introduces_destructure_tmp(bind_expr: &Expr) -> bool {
     let Some((DeepTag::Bind, meta, _)) = stamped_parts(bind_expr) else {
         return false;

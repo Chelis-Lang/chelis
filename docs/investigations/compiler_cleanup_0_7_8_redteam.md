@@ -48,6 +48,22 @@ enumerated in PR #88's audit were independently grepped and match
 exactly. Zero in `chelis-backend-c/`, `chelis-backend-hip/`,
 `chelis-backend-metal/`, `chelis-ir/`. Audit is honest.
 
+**Stale anchors (recorded, not rewritten).** This table pins the state at
+the 0.7.8 cleanup and is kept as the historical record. Two of its anchors
+no longer exist:
+
+- `Linearity-F2`'s `destructure_scope_depth` was deleted by chelis#1200.
+  A block-scoped depth counter cannot express "is this value a
+  destructured component" — it answered "am I anywhere inside a
+  destructure region", which poisoned every later binding in the enclosing
+  block. The gate is now a per-binding mark on the scope entry. The
+  contract lives in `spec/04-type-system.md` §8.3 and
+  `spec/design/implicit_linearity.md` §"Destructured components".
+- `Linearity-AliasedConsume-F1`'s `aliases: HashMap<String, Vec<Option<String>>>`
+  became `origins: HashMap<String, Vec<BindingOrigin>>` in the same change,
+  which carries the alias link and the component mark on one stacked
+  entry.
+
 ## Adversarial coverage delta
 
 ### §3.1 HostEval-ScalarFn-F1

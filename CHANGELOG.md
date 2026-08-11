@@ -65,6 +65,80 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   authored `[a]` binders, so partially annotated recursive defs keep
   checking exactly as before.
 
+### Fixed
+
+- **chelis#1200: a destructuring `let` no longer poisons the rest of its
+  block.** The Linearity-F2 use-after-consume gate was scoped to the
+  destructuring let's *body*, and in a block every later statement is
+  nested inside that body — so one `_ = f(x)` discard (or any
+  non-`Var` let pattern) turned every subsequent consume-after-consume
+  in the block into a hard error, on ANY variable, including ordinary
+  bindings unrelated to the destructure and the destructure's own
+  source. The gate is now membership on the consumed binding: only a name
+  actually introduced by a destructure component is subject to F2, and
+  the mark rides the binding's scope entry so shadowing and scope exit
+  behave like every other per-binding property. The diagnostic keeps its
+  wording for a genuine component — under the new guard its "(from a
+  destructured binding)" claim is finally accurate — and an ordinary
+  binding that merely aliases one is now labelled as such instead. Reuse
+  of a component without `copy()` is still an error.
+
+  Downstream, coral's vendored suite recovers with no source edits: 7 of
+  its 9 test files stopped compiling under the old gate, so only 17 of
+  its 74 tests ran at all. All 74 run and pass again. Shoals'
+  `tests/curves_basis.ch` clears the same way.
+
+  The rule is now stated normatively at `spec/04-type-system.md` §8.3,
+  with the mechanism in `spec/design/implicit_linearity.md`
+  §"Destructured components" — both previously described copy insertion
+  with no component carve-out at all.
+
+- **chelis#1200: five further linearity misroutes found by review.** The
+  destructured-component rule is per BINDING, and the checker resolves
+  bindings through names. Each of these is a place where that resolution
+  went to the wrong binding:
+
+  - **A component consumed twice inside a `match` arm or an `if` branch
+    is accepted**, matching the closure-body verdict and 0.18.3. A
+    closure body re-declares its captures, so the mark was already
+    shadowed there; branch scopes clone without re-declaring, so the same
+    program rejected in an arm and compiled in a closure. Branch bodies
+    are new declaration regions and now drop the inherited marks. A
+    destructure authored INSIDE the arm still gates its own components.
+  - **A component consumed in a branch and again after the join is now an
+    error.** It was silently accepted: a component's carrier is never
+    `Live` (the component's own bind records an aliasing consume on it),
+    and the join only propagated a branch's consume onto `Live` entries,
+    so it dropped the consume outright. This one falsified the true
+    positive F2 exists to protect.
+  - **A component captured by a closure and reused afterwards is now an
+    error.** The capture consume landed on the component's own entry
+    instead of forwarding through the alias chain to its carrier, so the
+    carrier stayed live and the reuse was accepted — while the identical
+    reuse without the closure errored.
+  - **A nested destructure no longer hides an outer double consume.** The
+    desugarer restarted its `__chelis_tmpN` counter per block, so nested
+    destructures minted colliding names and the inner ones shadowed the
+    outer ones in the checker's scope. The counter is now context-wide.
+  - **A second alias bind of one component compiles again**
+    (`(a, b) = p; y = a; z = a`). An alias bind destroys nothing, so it
+    is not a fan-out event; gating it rejected a shape 0.18.3 accepted.
+
+  Also fixed: closure-capture classification was nondeterministic — the
+  capture list came from a `HashSet`, and because the walk mutates scope
+  as it goes, one measured program compiled on 1 run in 12 and failed on
+  the other 11. Diagnostics no longer name a desugarer temp
+  (`__chelis_tmpN`) to the user.
+
+  **Known gap, deferred:** an alias still resolves by NAME, so it follows
+  that name to whatever binding is on top of the scope stack rather than
+  to the generation it was taken against. Shadowing a source after an
+  alias is taken (or re-binding the source name as a destructured
+  component) therefore still misroutes, in both the false-negative and
+  false-positive directions. Closing it needs binding-generation
+  identity; the two shapes are pinned as `#[ignore]`d tests in
+  `crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C
