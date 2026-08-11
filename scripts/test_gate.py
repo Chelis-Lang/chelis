@@ -55,11 +55,11 @@ NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 DEVENV_TOOLCHAINS_NIX = REPO_ROOT / "devenv" / "toolchains.nix"
 DEVENV_SETUP_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@111b5865ccf04146344ad99dcdea9d724d65fc69"
+    "Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6"
 )
 DEVENV_AUTH_ACTION = (
     "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
-    "111b5865ccf04146344ad99dcdea9d724d65fc69"
+    "9d4d4c59e46a0672b5e17a5644e99700821c87e6"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 DEVENV_COMMAND_PREFIX = "devenv-retry --profile ci shell --no-tui -- "
@@ -397,7 +397,7 @@ def _assert_runner_resource_bounds(workflow: str) -> None:
     linux = blocks.get("nix-linux-x86-64", "")
     reclaim_action = (
         "Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@"
-        "111b5865ccf04146344ad99dcdea9d724d65fc69"
+        "9d4d4c59e46a0672b5e17a5644e99700821c87e6"
     )
     reclaim_index = linux.find(f"uses: {reclaim_action}")
     setup_index = linux.find(f"uses: {DEVENV_SETUP_ACTION}")
@@ -1350,7 +1350,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         mutated = text.replace(
             "Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@"
-            "111b5865ccf04146344ad99dcdea9d724d65fc69",
+            "9d4d4c59e46a0672b5e17a5644e99700821c87e6",
             "missing-reclaim-action",
             1,
         )
@@ -1899,7 +1899,7 @@ class NoAiAuthorshipTests(unittest.TestCase):
         self.assertIn("name: No AI authorship markers", block)
         self.assertIn(
             "uses: Chelis-Lang/ci/actions/check-authorship@"
-            "111b5865ccf04146344ad99dcdea9d724d65fc69",
+            "9d4d4c59e46a0672b5e17a5644e99700821c87e6",
             block,
         )
         self.assertIn("profile: all-markers", block)

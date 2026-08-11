@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 ACTIONS_DIR = ROOT / ".github" / "actions"
-CI_REVISION = "111b5865ccf04146344ad99dcdea9d724d65fc69"
+CI_REVISION = "9d4d4c59e46a0672b5e17a5644e99700821c87e6"
 SETUP_DEVENV = f"Chelis-Lang/ci/actions/setup-devenv@{CI_REVISION}"
 AUTH_DEVENV = "Chelis-Lang/ci/actions/authenticate-private-ci-input@" + CI_REVISION
 PORTABLE_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"

@@ -200,12 +200,19 @@ Every project Devenv command in a GitHub Actions workflow SHALL invoke `devenv-r
 
 The wrapper SHALL retry only the exact invalid-store-path diagnostic. It SHALL run a maximum of three attempts and refresh the evaluation cache after failure.
 
+The matcher SHALL remove ANSI SGR codes and leading Nix indentation before exact matching. The wrapper SHALL preserve the original stderr output.
+
 The wrapper SHALL preserve the status of each unrelated failure. Commands outside GitHub Actions can invoke `devenv` directly.
 
 #### Scenario: A transient invalid store path stops evaluation
 - **WHEN** a project Devenv command emits the exact invalid-store-path diagnostic
 - **THEN** the wrapper refreshes the evaluation cache and retries the command
 - **AND** no more than three attempts run
+
+#### Scenario: Nix colors the invalid store path diagnostic
+- **WHEN** Nix adds ANSI SGR codes and indentation to the exact diagnostic
+- **THEN** the wrapper refreshes the evaluation cache and retries the command
+- **AND** the job log retains the original presentation codes
 
 #### Scenario: A different command failure occurs
 - **WHEN** a project Devenv command fails without the exact diagnostic

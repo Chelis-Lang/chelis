@@ -7,7 +7,7 @@ inputs:
   # locally add `access-tokens = github.com=$(gh auth token)` to
   # ~/.config/nix/nix.conf. Bump with `devenv update ci`.
   ci:
-    url: github:Chelis-Lang/ci/111b5865ccf04146344ad99dcdea9d724d65fc69
+    url: github:Chelis-Lang/ci/9d4d4c59e46a0672b5e17a5644e99700821c87e6
     flake: false
   devenv:
     url: github:cachix/devenv/v2.2?dir=src/modules

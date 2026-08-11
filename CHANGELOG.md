@@ -56,7 +56,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - **CI now uses one reviewed shared-action revision.** Devenv and adopted
   `Chelis-Lang/ci` actions use the same immutable commit. Shared actions now
   own private-input authentication, nightly issue transitions, authorship
-  checks, workflow audits, runner disk reclamation, and cache pruning.
+  checks, workflow audits, runner disk reclamation, and cache pruning. The
+  retry wrapper now recognizes colored Nix store-path errors and preserves
+  the original stderr output.
   Chelis retains triggers, permissions, job names, cache policy, and release
   policy. Native Nix jobs use Devenv Python and no longer create a host
   environment.
