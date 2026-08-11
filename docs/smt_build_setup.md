@@ -127,7 +127,16 @@ runbook. Every lane builds inside `devenv --profile smt shell`, so rustc, cc, an
 libclang match the repository pin. The full-prove solver stack uses OpenBLAS,
 Z3, Gappa, GMP, m4, and make from the Devenv shell (`devenv/toolchains.nix`).
 The Clarabel Linux feature selects `openblas-src/system`. Cargo links the
-Devenv package instead of building OpenBLAS source.
+Devenv package instead of building OpenBLAS source. Both Clarabel steps set
+`OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1`. The runner OpenBLAS crashes
+in `blas_thread_shutdown` at process exit. One thread creates no worker pool,
+so that teardown path never runs. For a manual Linux run, use the same
+variables:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+cargo test -p chelis-prove --features clarabel
+```
 
 The former harvested-prebuilt machinery retired in two steps: the durable
 Release-asset producer (`build-cvc5.yml`) and its publish script left with

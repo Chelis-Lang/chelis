@@ -46,7 +46,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Clarabel Linux tests now link project Devenv OpenBLAS.** The
   `openblas-src/system` feature prevents Cargo from building and testing a
-  separate OpenBLAS source tree in the full-prove lane.
+  separate OpenBLAS source tree in the full-prove lane. Both Clarabel steps
+  set `OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1` so the runner OpenBLAS
+  does not crash in `blas_thread_shutdown` at process exit.
 
 - **Source-dependent ecosystem checks now use project Devenv.** The octant,
   calcify, and hydronnx drift legs compile Chelis path dependencies inside the

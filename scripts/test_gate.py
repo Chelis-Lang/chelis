@@ -305,6 +305,26 @@ def _assert_clarabel_uses_system_openblas(manifest: str) -> None:
         )
 
 
+def _assert_clarabel_steps_pin_openblas_threads(workflow: str) -> None:
+    block = _workflow_job_blocks(workflow).get("full-smt-prove")
+    if block is None:
+        raise AssertionError("missing full-smt-prove job")
+    steps = re.split(r"(?m)^      - name: ", block)[1:]
+    clarabel_steps = [step for step in steps if "--features clarabel" in step]
+    clarabel_steps += [step for step in steps if '--features "smt clarabel"' in step]
+    if len(clarabel_steps) != 2:
+        raise AssertionError(
+            f"expected two OpenBLAS-linked Clarabel steps; found {len(clarabel_steps)}"
+        )
+    for step in clarabel_steps:
+        for marker in ('OPENBLAS_NUM_THREADS: "1"', 'OMP_NUM_THREADS: "1"'):
+            if marker not in step:
+                raise AssertionError(
+                    "each Clarabel step must pin single-thread OpenBLAS; "
+                    f"missing {marker}"
+                )
+
+
 def _assert_native_devenv_recipe(workflow: str) -> None:
     blocks = _workflow_job_blocks(workflow)
     for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
@@ -1607,6 +1627,14 @@ class SmtCiSplitTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
         self.assertIn('openblas-src feature "system"', result.stdout)
+
+    def test_clarabel_steps_pin_single_thread_openblas(self):
+        workflow = SMT_FULL_PROVE_YML.read_text()
+        _assert_clarabel_steps_pin_openblas_threads(workflow)
+        with self.assertRaisesRegex(AssertionError, "single-thread OpenBLAS"):
+            _assert_clarabel_steps_pin_openblas_threads(
+                workflow.replace('OPENBLAS_NUM_THREADS: "1"', "", 1)
+            )
 
     def test_full_smt_workflow_shares_smoke_cache_key(self):
         smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))
