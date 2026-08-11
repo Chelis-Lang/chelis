@@ -124,11 +124,10 @@ every lane, including `nix-packages.yml`, `release.yml`, and the drift
 canary), so all jobs share one cached closure. A cvc5 or nixpkgs pin bump changes the derivation
 key and pays one ~30m Nix build; there is no separate publish step and no
 runbook. Every lane builds inside `devenv --profile smt shell`, so rustc, cc, and
-libclang match the repository pin, and the full-prove solver stack (z3,
-Gappa, GMP, m4, make) comes from the Devenv shell
-(`devenv/toolchains.nix`), which also exports `Z3_SYS_Z3_HEADER`,
-`Z3_LIBRARY_PATH_OVERRIDE`, and the GMP `CPATH`/`LIBRARY_PATH` wiring for
-the z3 and carcara features.
+libclang match the repository pin. The full-prove solver stack uses OpenBLAS,
+Z3, Gappa, GMP, m4, and make from the Devenv shell (`devenv/toolchains.nix`).
+The Clarabel Linux feature selects `openblas-src/system`. Cargo links the
+Devenv package instead of building OpenBLAS source.
 
 The former harvested-prebuilt machinery retired in two steps: the durable
 Release-asset producer (`build-cvc5.yml`) and its publish script left with

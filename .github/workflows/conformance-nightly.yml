@@ -69,7 +69,7 @@ jobs:
           path: chelis
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # Hull at the commit the frozen corpus was pinned against (manifest
       # hull_commit). The nightly reads that field and checks Hull out at it so
@@ -91,7 +91,7 @@ jobs:
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -182,10 +182,10 @@ jobs:
       issues: write
     steps:
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       - name: Open or close the nightly tracking issue
-        uses: Chelis-Lang/ci/actions/nightly-status@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/nightly-status@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#55 cursor pagination
         with:
           github-token: ${{ github.token }}
           result: ${{ needs.conformance-nightly.result }}

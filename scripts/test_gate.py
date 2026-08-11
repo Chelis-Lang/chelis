@@ -55,11 +55,11 @@ NIX_PACKAGES_YML = REPO_ROOT / ".github" / "workflows" / "nix-packages.yml"
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 DEVENV_TOOLCHAINS_NIX = REPO_ROOT / "devenv" / "toolchains.nix"
 DEVENV_SETUP_ACTION = (
-    "Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6"
+    "Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9"
 )
 DEVENV_AUTH_ACTION = (
     "Chelis-Lang/ci/actions/authenticate-private-ci-input@"
-    "9d4d4c59e46a0672b5e17a5644e99700821c87e6"
+    "a3b3e8ee939270649370826d62085c04342fd9e9"
 )
 PORTABLE_DEVENV_SHELL = "devenv-ci bash --noprofile --norc -e -o pipefail {0}"
 DEVENV_COMMAND_PREFIX = "devenv-retry --profile ci shell --no-tui -- "
@@ -292,6 +292,19 @@ def _assert_carcara_feature_tree_is_gmp_only(feature_tree: str) -> None:
         )
 
 
+def _assert_clarabel_uses_system_openblas(manifest: str) -> None:
+    required = (
+        '"dep:openblas-src"',
+        'openblas-src = { version = "0.10", optional = true, features = ["system"] }',
+    )
+    missing = [marker for marker in required if marker not in manifest]
+    if missing:
+        raise AssertionError(
+            "the Linux Clarabel lane must use Devenv OpenBLAS; missing "
+            + ", ".join(missing)
+        )
+
+
 def _assert_native_devenv_recipe(workflow: str) -> None:
     blocks = _workflow_job_blocks(workflow)
     for job in ("nix-linux-x86-64", "nix-darwin-arm64"):
@@ -397,7 +410,7 @@ def _assert_runner_resource_bounds(workflow: str) -> None:
     linux = blocks.get("nix-linux-x86-64", "")
     reclaim_action = (
         "Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@"
-        "9d4d4c59e46a0672b5e17a5644e99700821c87e6"
+        "a3b3e8ee939270649370826d62085c04342fd9e9"
     )
     reclaim_index = linux.find(f"uses: {reclaim_action}")
     setup_index = linux.find(f"uses: {DEVENV_SETUP_ACTION}")
@@ -1350,7 +1363,7 @@ class NixPackagesWorkflowTests(unittest.TestCase):
         text = NIX_PACKAGES_YML.read_text(encoding="utf-8")
         mutated = text.replace(
             "Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@"
-            "9d4d4c59e46a0672b5e17a5644e99700821c87e6",
+            "a3b3e8ee939270649370826d62085c04342fd9e9",
             "missing-reclaim-action",
             1,
         )
@@ -1563,6 +1576,37 @@ class SmtCiSplitTests(unittest.TestCase):
             _assert_carcara_feature_tree_is_gmp_only(
                 result.stdout + '\ngmp-mpfr-sys feature "mpfr"\nrug feature "float"'
             )
+
+    def test_clarabel_linux_uses_devenv_openblas(self):
+        manifest = CHELIS_PROVE_TOML.read_text()
+        _assert_clarabel_uses_system_openblas(manifest)
+        with self.assertRaisesRegex(AssertionError, "must use Devenv OpenBLAS"):
+            _assert_clarabel_uses_system_openblas(
+                manifest.replace('features = ["system"]', 'features = ["source"]', 1)
+            )
+
+        result = subprocess.run(
+            [
+                "cargo",
+                "tree",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "-p",
+                "chelis-prove",
+                "--features",
+                "clarabel",
+                "-e",
+                "features",
+                "--prefix",
+                "none",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertIn('openblas-src feature "system"', result.stdout)
 
     def test_full_smt_workflow_shares_smoke_cache_key(self):
         smoke_inputs = _rust_cache_inputs(_ci_job_block("smt-build"))
@@ -1899,7 +1943,7 @@ class NoAiAuthorshipTests(unittest.TestCase):
         self.assertIn("name: No AI authorship markers", block)
         self.assertIn(
             "uses: Chelis-Lang/ci/actions/check-authorship@"
-            "9d4d4c59e46a0672b5e17a5644e99700821c87e6",
+            "a3b3e8ee939270649370826d62085c04342fd9e9",
             block,
         )
         self.assertIn("profile: all-markers", block)

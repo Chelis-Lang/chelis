@@ -34,7 +34,13 @@ z3 = ["dep:z3", "num-rational"]
 # is only a proposal; the exact-verified rational cert is the proof. The
 # discharge is CertificateBearing@Exact ONLY when the exact cert verifies. The
 # default / smt / solver-free builds link none of this.
-clarabel = ["dep:clarabel", "num-rational", "dep:num-bigint", "dep:num-traits"]
+clarabel = [
+    "dep:clarabel",
+    "dep:openblas-src",
+    "num-rational",
+    "dep:num-bigint",
+    "dep:num-traits",
+]
 # WI-16 Carcara auditability: re-check cvc5's Alethe proofs in-process for
 # independent auditability of the linear-arithmetic / EUF fragment (the
 # SmtExpr/SmtSort surface has no bit-vector representation, so the bit-vector
@@ -98,6 +104,8 @@ gmp-mpfr-sys = { version = "1", default-features = false, optional = true }
 # dep. `clarabel` is an opt-in dev/CI feature, NOT in the shipped release binary
 # (release ships --features smt only), so the product and downstream shells link
 # zero BLAS; only chelis's own clarabel CI lane + dev builds pull OpenBLAS.
+# The Linux target dependency below activates `openblas-src/system`. Cargo
+# unifies it with Clarabel's static OpenBLAS feature and uses Devenv OpenBLAS.
 clarabel = { version = "0.11", optional = true }
 num-bigint = { version = "0.4", default-features = false, optional = true }
 num-traits = { version = "0.2", default-features = false, optional = true }
@@ -126,11 +134,13 @@ tempfile = "3"
 # entry, so cargo UNIFIES the features: when `--features clarabel` is on, the
 # `sdp` + the matching backend turn on for the active target; when it is off,
 # clarabel is not built at all (optional dep), so neither does any BLAS. Linux
-# links system OpenBLAS (libopenblas-dev; already in the CI smt-glibc231 lane);
+# links the OpenBLAS package from project Devenv. The direct openblas-src
+# dependency activates `system` and prevents a source build in the Cargo lane.
 # macOS uses the OS-bundled Accelerate framework. The shipped release binary
 # does not enable `clarabel`, so it links no BLAS.
 [target.'cfg(target_os = "linux")'.dependencies]
 clarabel = { version = "0.11", optional = true, features = ["sdp-openblas"] }
+openblas-src = { version = "0.10", optional = true, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }

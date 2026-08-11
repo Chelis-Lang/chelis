@@ -72,15 +72,15 @@ jobs:
       # Free ~25-30 GB before materializing the Devenv closure; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -112,15 +112,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -151,28 +151,28 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
 
       - name: Check workflow syntax
-        uses: Chelis-Lang/ci/actions/actionlint@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/actionlint@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           actionlint-version: '1.7.12'
           actionlint-sha256: sha256:8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
           mode: enforce
 
       - name: Audit workflow security
-        uses: Chelis-Lang/ci/actions/zizmor@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/zizmor@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           zizmor-version: '1.28.0'
           mode: advisory
@@ -235,15 +235,15 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -317,10 +317,10 @@ jobs:
           test "$(uname -m)" = "arm64"
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -381,15 +381,15 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -450,15 +450,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -495,15 +495,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -536,7 +536,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       - name: Require all integration legs
         run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}
@@ -567,12 +567,12 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -635,15 +635,15 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -673,7 +673,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       - name: Resolve the commit range
         id: authorship-range
@@ -698,7 +698,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Check commits for AI authorship markers
-        uses: Chelis-Lang/ci/actions/check-authorship@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/check-authorship@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           base-sha: ${{ steps.authorship-range.outputs.base-sha }}
           head-sha: ${{ steps.authorship-range.outputs.head-sha }}
@@ -719,15 +719,15 @@ jobs:
       # Free ~25-30 GB before the cargo build; see
       # Chelis-Lang/ci reclaim-ubuntu-runner-disk.
       - name: Free disk space (Ubuntu)
-        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       # The Devenv shell composes the private Chelis-Lang/ci consumer module,
       # so Nix needs a token to fetch it (same pattern as nix-packages.yml).
       - name: Authenticate the private ci input
-        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           app-client-id: ${{ vars.CI_APP_ID }}
           app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}

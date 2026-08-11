@@ -3,17 +3,17 @@
     "ci": {
       "flake": false,
       "locked": {
-        "lastModified": 1786467124,
-        "narHash": "sha256-VQ/TnfDJg+A+qFCYW19I1dYoW+cjKIcZMBkrFbufDeQ=",
+        "lastModified": 1786486457,
+        "narHash": "sha256-o5R4fcWat9I52AGdNpe3E3LWHZn3v1MDDi9Ed4zgj8Q=",
         "owner": "Chelis-Lang",
         "repo": "ci",
-        "rev": "9d4d4c59e46a0672b5e17a5644e99700821c87e6",
+        "rev": "a3b3e8ee939270649370826d62085c04342fd9e9",
         "type": "github"
       },
       "original": {
         "owner": "Chelis-Lang",
         "repo": "ci",
-        "rev": "9d4d4c59e46a0672b5e17a5644e99700821c87e6",
+        "rev": "a3b3e8ee939270649370826d62085c04342fd9e9",
         "type": "github"
       }
     },

@@ -44,6 +44,10 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Clarabel Linux tests now link project Devenv OpenBLAS.** The
+  `openblas-src/system` feature prevents Cargo from building and testing a
+  separate OpenBLAS source tree in the full-prove lane.
+
 - **Source-dependent ecosystem checks now use project Devenv.** The octant,
   calcify, and hydronnx drift legs compile Chelis path dependencies inside the
   pinned `ci` profile. Binary-only Reef, Docker, and c-earchin checks retain
@@ -58,7 +62,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   own private-input authentication, nightly issue transitions, authorship
   checks, workflow audits, runner disk reclamation, and cache pruning. The
   retry wrapper now recognizes colored Nix store-path errors and preserves
-  the original stderr output.
+  the original stderr output. The nightly status reporter now accepts
+  GitHub cursor issue pagination: it reads the canonical numeric repository
+  path, preserves each opaque cursor, and pins the pagination filter.
   Chelis retains triggers, permissions, job names, cache policy, and release
   policy. Native Nix jobs use Devenv Python and no longer create a host
   environment.

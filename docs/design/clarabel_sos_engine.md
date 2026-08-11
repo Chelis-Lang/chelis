@@ -206,8 +206,8 @@ until WS-5 lands.
 
 ## Feature gating
 
-`clarabel` is a cargo feature: `clarabel = ["dep:clarabel", "num-rational",
-"dep:num-bigint", "dep:num-traits"]`. The default, `smt`, `z3`, and solver-free
+`clarabel` is a cargo feature. It activates `clarabel`, `openblas-src`,
+`num-rational`, `num-bigint`, and `num-traits`. The default, `smt`, `z3`, and solver-free
 builds are unaffected: the engine, the Clarabel dependency, and the registration
 are all behind `#[cfg(feature = "clarabel")]`. The solver-free gate
 (`check_is_solver_free_on_the_corpus`) stays green because nothing on the default
@@ -221,15 +221,15 @@ feature onto it:
 ```toml
 [target.'cfg(target_os = "linux")'.dependencies]
 clarabel = { version = "0.11", optional = true, features = ["sdp-openblas"] }
+openblas-src = { version = "0.10", optional = true, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 clarabel = { version = "0.11", optional = true, features = ["sdp-accelerate"] }
 ```
 
-Linux links OpenBLAS (the CI clarabel lane installs `libopenblas-dev`; without
-it, `openblas-src` falls back to building OpenBLAS from source, which also
-works but is slower on a cold cache); macOS uses the OS-bundled Accelerate
-framework. The Clarabel float proposer (`propose.rs`) is itself gated to
+Linux links the OpenBLAS package from project Devenv. The direct
+`openblas-src/system` feature prevents a Cargo source build. macOS uses the
+OS-bundled Accelerate framework. The Clarabel float proposer (`propose.rs`) is itself gated to
 `cfg(any(target_os = "linux", target_os = "macos"))` -- the targets with a
 backend wired; on any other target the exact core and the `UnwiredProposer`
 engine still build. Because `clarabel` is opt-in and the shipped release binary

@@ -233,7 +233,7 @@ The common shell MUST provide Rust from `rust-toolchain.toml`, rust-analyzer, Py
 
 The Rust module MUST set `languages.rust.toolchainFile`. It MUST provide rust-analyzer through `languages.rust.lsp.package`.
 
-The Linux shell MUST also provide GCC, OpenBLAS, and Valgrind. The macOS shell MUST use the system Accelerate framework instead of OpenBLAS.
+The Linux shell MUST also provide GCC, OpenBLAS, and Valgrind. The Linux Clarabel feature MUST link this OpenBLAS package through `openblas-src/system`. It MUST NOT build a separate OpenBLAS source tree. The macOS shell MUST use the system Accelerate framework instead of OpenBLAS.
 
 #### Scenario: Common tools are available
 - **WHEN** a contributor enters the shell on Linux or macOS
@@ -246,6 +246,11 @@ The Linux shell MUST also provide GCC, OpenBLAS, and Valgrind. The macOS shell M
 #### Scenario: Linux tools are available
 - **WHEN** a contributor enters the shell on Linux
 - **THEN** GCC, OpenBLAS, and Valgrind are available from the Nix environment
+
+#### Scenario: Clarabel builds on Linux
+- **WHEN** CI activates the Clarabel feature in the Linux shell
+- **THEN** Cargo links the OpenBLAS package from Devenv
+- **AND** Cargo does not build an OpenBLAS source tree
 
 #### Scenario: macOS omits the Linux BLAS package
 - **WHEN** a contributor evaluates the package list on macOS

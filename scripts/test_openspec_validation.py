@@ -14,7 +14,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_openspec.py"
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "openspec-validate.yml"
-CI_ACTION_SHA = "9d4d4c59e46a0672b5e17a5644e99700821c87e6"
+CI_ACTION_SHA = "a3b3e8ee939270649370826d62085c04342fd9e9"
 CHECKOUT_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 REMOTE_USES = re.compile(r"(?m)^\s*uses:\s*([^@\s]+)@([^\s#]+)")
 MODE_VALUE = re.compile(r"(?m)^\s+mode:\s*(\S+)\s*$")

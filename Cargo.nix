@@ -2470,7 +2470,7 @@ rec {
         features = {
           "arb" = [ "dep:arb-sys" ];
           "carcara" = [ "smt" "dep:carcara" "gmp-mpfr-sys/use-system-libs" ];
-          "clarabel" = [ "dep:clarabel" "num-rational" "dep:num-bigint" "dep:num-traits" ];
+          "clarabel" = [ "dep:clarabel" "dep:openblas-src" "num-rational" "dep:num-bigint" "dep:num-traits" ];
           "cvc5-rs" = [ "dep:cvc5-rs" ];
           "gmp-mpfr-sys" = [ "dep:gmp-mpfr-sys" ];
           "num-rational" = [ "dep:num-rational" ];

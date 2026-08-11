@@ -40,9 +40,9 @@ jobs:
           persist-credentials: false
 
       - name: Set up portable Devenv
-        uses: Chelis-Lang/ci/actions/setup-devenv@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#54 colored selective retry
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       - name: Validate OpenSpec tree
-        uses: Chelis-Lang/ci/actions/openspec-governance@9d4d4c59e46a0672b5e17a5644e99700821c87e6 # ci#50 shared composition
+        uses: Chelis-Lang/ci/actions/openspec-governance@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
         with:
           mode: advisory
