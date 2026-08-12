@@ -120,19 +120,14 @@ jobs:
         run: devenv-retry --profile smt shell --no-tui -- chelis-z3-test --cargo-subcommand test -p chelis-prove --features "smt z3" --test cross_engine_oracle
 
       - name: Run clarabel-gated chelis-prove tests
-        # OpenBLAS crashes in blas_thread_shutdown at process exit on the
-        # runner. One thread creates no worker pool, so the teardown path
-        # that segfaults never runs. Clarabel SDP problems are small.
-        env:
-          OPENBLAS_NUM_THREADS: "1"
-          OMP_NUM_THREADS: "1"
-        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features clarabel
+        # OPENBLAS_MAIN_FREE=1 skips the OpenBLAS exit-time memory free that
+        # segfaults on the runner after every test passes. The env is inline
+        # so it reaches the test binary inside the devenv shell. One thread
+        # avoids the worker-pool teardown too; Clarabel problems are small.
+        run: devenv-retry --profile smt shell --no-tui -- env OPENBLAS_MAIN_FREE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 cargo test -p chelis-prove --features clarabel
 
       - name: Run the production solver config (cvc5 + Clarabel, both live)
-        env:
-          OPENBLAS_NUM_THREADS: "1"
-          OMP_NUM_THREADS: "1"
-        run: devenv-retry --profile smt shell --no-tui -- cargo test -p chelis-prove --features "smt clarabel"
+        run: devenv-retry --profile smt shell --no-tui -- env OPENBLAS_MAIN_FREE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 cargo test -p chelis-prove --features "smt clarabel"
 
       - name: Re-validate committed Gappa proofs (--check-only)
         run: devenv-retry --profile smt shell --no-tui -- python scripts/generate_erf_proof.py --check-only

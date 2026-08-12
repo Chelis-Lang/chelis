@@ -128,13 +128,13 @@ libclang match the repository pin. The full-prove solver stack uses OpenBLAS,
 Z3, Gappa, GMP, m4, and make from the Devenv shell (`devenv/toolchains.nix`).
 The Clarabel Linux feature selects `openblas-src/system`. Cargo links the
 Devenv package instead of building OpenBLAS source. Both Clarabel steps set
-`OPENBLAS_NUM_THREADS=1` and `OMP_NUM_THREADS=1`. The runner OpenBLAS crashes
-in `blas_thread_shutdown` at process exit. One thread creates no worker pool,
-so that teardown path never runs. For a manual Linux run, use the same
-variables:
+`OPENBLAS_MAIN_FREE=1`, `OPENBLAS_NUM_THREADS=1`, and `OMP_NUM_THREADS=1`. The
+runner OpenBLAS segfaults at process exit after every test passes.
+`OPENBLAS_MAIN_FREE=1` skips the exit-time memory free that crashes. For a
+manual Linux run, use the same variables:
 
 ```bash
-OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+OPENBLAS_MAIN_FREE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
 cargo test -p chelis-prove --features clarabel
 ```
 
