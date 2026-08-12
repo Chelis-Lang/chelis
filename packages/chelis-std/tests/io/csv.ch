@@ -86,6 +86,39 @@ def test_unterminated_quote_in_last_row_returns_none() -> unit ! { Test, IO } = 
     | None => assert_true(true, "trailing unterminated quote -> None (an unparsable line is not a placeholder row)")
   }
 }
+def kib4_line() -> string = {
+  s1 = "x"
+  s2 = string_concat(s1, s1)
+  s4 = string_concat(s2, s2)
+  s8 = string_concat(s4, s4)
+  s16 = string_concat(s8, s8)
+  s32 = string_concat(s16, s16)
+  s64 = string_concat(s32, s32)
+  s128 = string_concat(s64, s64)
+  s256 = string_concat(s128, s128)
+  s512 = string_concat(s256, s256)
+  s1024 = string_concat(s512, s512)
+  s2048 = string_concat(s1024, s1024)
+  string_concat(s2048, s2048)
+}
+-- Regression shape from the PR #1213 review: a malformed FIRST data row
+-- followed by a 4 KiB line. The recursive pre-#1213 parse_rows returned
+-- None without touching the long line; a shape that parses every line
+-- before judging validity instead drives `parse_line_chars`'s
+-- per-character recursion through the evaluator on the 4 KiB line and
+-- overflows the test worker's stack (SIGABRT, chelis#1225). Reaching
+-- None at all therefore proves the failure short-circuit: the long line
+-- was never parsed. (A 4 KiB line in a VALID row position still hits
+-- chelis#1225 on this lane -- that is the parser's own wall, which no
+-- row-level control flow can remove.)
+def test_short_first_row_before_long_line_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_short_then_long.csv"
+  _ = write_file(path, string_concat("a,b\n1\n", kib4_line()))
+  match try_read_csv(path) with {
+    | Some(_) => fail("a short first data row must yield None without parsing later rows, got Some")
+    | None => assert_true(true, "short first row -> None even with a 4 KiB later line")
+  }
+}
 def test_quoted_field_with_embedded_comma() -> unit ! { Test, IO } = {
   path = "/tmp/chelis_std_test_csv_quoted.csv"
   _ = write_file(path, "k,v\n\"a,b\",x")
