@@ -46,6 +46,79 @@ def test_mismatched_column_count_returns_none() -> unit ! { Test, IO } = {
     | None => assert_true(true, "mismatched col count -> None")
   }
 }
+def test_extra_column_count_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_too_many.csv"
+  _ = write_file(path, "a,b\nx,y,z")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a row with MORE fields than the header must yield None, got Some")
+    | None => assert_true(true, "wider-than-header row -> None")
+  }
+}
+def test_short_row_in_last_position_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_ragged_tail.csv"
+  _ = write_file(path, "a,b\n1,2\n3,4\n5")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a short row in the LAST position must yield None, got Some")
+    | None => assert_true(true, "trailing short row -> None (validity is not decided by the first data row alone)")
+  }
+}
+def test_short_row_in_first_position_followed_by_valid_rows_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_ragged_head.csv"
+  _ = write_file(path, "a,b\n1\n2,3\n4,5")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a short FIRST data row must yield None even when later rows are well-formed, got Some")
+    | None => assert_true(true, "leading short row -> None (a later valid row does not clear the verdict)")
+  }
+}
+def test_wide_row_in_middle_position_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_ragged_middle.csv"
+  _ = write_file(path, "a,b\n1,2\n3,4,5\n6,7")
+  match try_read_csv(path) with {
+    | Some(_) => fail("a wide row between two well-formed rows must yield None, got Some")
+    | None => assert_true(true, "interior wide row -> None")
+  }
+}
+def test_unterminated_quote_in_last_row_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_unterm_tail.csv"
+  _ = write_file(path, "k\nok\n\"dangling")
+  match try_read_csv(path) with {
+    | Some(_) => fail("an unterminated quote in a NON-first data row must yield None, got Some")
+    | None => assert_true(true, "trailing unterminated quote -> None (an unparsable line is not a placeholder row)")
+  }
+}
+def kib4_line() -> string = {
+  s1 = "x"
+  s2 = string_concat(s1, s1)
+  s4 = string_concat(s2, s2)
+  s8 = string_concat(s4, s4)
+  s16 = string_concat(s8, s8)
+  s32 = string_concat(s16, s16)
+  s64 = string_concat(s32, s32)
+  s128 = string_concat(s64, s64)
+  s256 = string_concat(s128, s128)
+  s512 = string_concat(s256, s256)
+  s1024 = string_concat(s512, s512)
+  s2048 = string_concat(s1024, s1024)
+  string_concat(s2048, s2048)
+}
+-- Regression shape from the PR #1213 review: a malformed FIRST data row
+-- followed by a 4 KiB line. The recursive pre-#1213 parse_rows returned
+-- None without touching the long line; a shape that parses every line
+-- before judging validity instead drives `parse_line_chars`'s
+-- per-character recursion through the evaluator on the 4 KiB line and
+-- overflows the test worker's stack (SIGABRT, chelis#1225). Reaching
+-- None at all therefore proves the failure short-circuit: the long line
+-- was never parsed. (A 4 KiB line in a VALID row position still hits
+-- chelis#1225 on this lane -- that is the parser's own wall, which no
+-- row-level control flow can remove.)
+def test_short_first_row_before_long_line_returns_none() -> unit ! { Test, IO } = {
+  path = "/tmp/chelis_std_test_csv_short_then_long.csv"
+  _ = write_file(path, string_concat("a,b\n1\n", kib4_line()))
+  match try_read_csv(path) with {
+    | Some(_) => fail("a short first data row must yield None without parsing later rows, got Some")
+    | None => assert_true(true, "short first row -> None even with a 4 KiB later line")
+  }
+}
 def test_quoted_field_with_embedded_comma() -> unit ! { Test, IO } = {
   path = "/tmp/chelis_std_test_csv_quoted.csv"
   _ = write_file(path, "k,v\n\"a,b\",x")
