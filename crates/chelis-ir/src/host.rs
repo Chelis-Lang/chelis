@@ -7122,7 +7122,22 @@ fn lower_app_host_expr(
     if has_callable_params && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
         let pushed = push_inlining(&name);
-        let lowered = lower_host_expr(&specialized, program, scope, tensor_helpers);
+        // PR #1215 review: thread the call's checked result type through the
+        // inlined body exactly as the precision/rank inline path above does.
+        // Plain lowering dropped it, so a generic ADT constructor in a
+        // callable-parameter callee's body — whose instantiation is only
+        // recoverable from the call-site result type — stayed unresolved and
+        // failed closed (`apply[a](f: (a) -> a, x: a) -> Box[a]`).
+        let definitions = adt_constructor_definitions(program);
+        let specialized_ty =
+            canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
+        let lowered = lower_host_expr_with_expected(
+            &specialized,
+            program,
+            scope,
+            tensor_helpers,
+            (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
+        );
         if pushed {
             pop_inlining(&name);
         }
@@ -7335,8 +7350,8 @@ fn lower_recursive_generic_call(
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
-                "recursive generic host call `{name}` has no top-level definition to \
-                 specialize (chelis#1158; [05-UNS-1])"
+                "generic host call `{name}` has no top-level definition to \
+                 specialize (chelis#1226; [05-UNS-1])"
             ),
         ));
     };
@@ -7492,18 +7507,54 @@ fn lower_recursive_generic_call(
         }));
     }
 
+    // PR #1215 review: a NON-recursive top-level call whose instantiation
+    // never resolves (`pick[a, b](x: a, y: Box[b]) -> a` applied to `Empty`
+    // — `b` unconstrained, the parameter untouched) has the
+    // pre-specialization lowering available: guarded value-level inlining,
+    // with the call's checked result type threaded through like every other
+    // inline path. Two gates keep this strictly a top-level-call fallback:
+    // inside an in-progress specialization the [04-INF-2] per-slot
+    // completion above owns the semantics and a mutually-recursive
+    // cross-member edge must stay on the fail-closed residue below; and the
+    // inlining stack bounds recursion — a recursive body re-entering here
+    // finds its own name, `inline_top_level_host_call` returns `None`, and
+    // the edge falls through to the residue.
+    let specializing = MONO_SPECIALIZATIONS.with(|state| !state.borrow().in_progress.is_empty());
+    if !specializing && let Some(specialized) = inline_top_level_host_call(app_expr, program) {
+        let pushed_canonical = push_inlining(&canonical_name);
+        let pushed_spelled = name != canonical_name && push_inlining(name);
+        let lowered = lower_host_expr_with_expected(
+            &specialized,
+            program,
+            scope,
+            tensor_helpers,
+            (!ret_ty.is_unresolved()).then_some(&ret_ty),
+        );
+        if pushed_spelled {
+            pop_inlining(name);
+        }
+        if pushed_canonical {
+            pop_inlining(&canonical_name);
+        }
+        return lowered;
+    }
+
     // Fail-closed residue: no concrete checked instantiation to key a
-    // specialized definition on — an outer call that never pins the type
-    // parameter, or a mutually-recursive cross-member edge whose argument
-    // leaves the callee parameter unconstrained (no positional
-    // correspondence exists across different defs' parameters in host
-    // lowering). Emitting a reference to the omitted generic definition is
-    // never legal, so reject loud instead.
+    // specialized definition on and no inlinable shape — an outer recursive
+    // call that never pins the type parameter, or a mutually-recursive
+    // cross-member edge whose argument leaves the callee parameter
+    // unconstrained (no positional correspondence exists across different
+    // defs' parameters in host lowering). Emitting a reference to the
+    // omitted generic definition is never legal, so reject loud instead.
+    // The wording is recursion-neutral and the citation is the OPEN residue
+    // tracker (chelis#1226): the call reaching here need not be recursive,
+    // and chelis#1158 closed with its delivery ([05-UNS-5] requires a live
+    // authority).
     Err(host_expr_lowering_error(
         app_expr,
         format!(
-            "recursive generic host call `{name}` has no concrete checked type \
-             application to specialize (chelis#1158; [05-UNS-1])"
+            "generic host call `{name}` has no concrete checked type \
+             application to specialize (chelis#1226; [05-UNS-1])"
         ),
     ))
 }
@@ -7737,7 +7788,7 @@ fn ensure_mono_specialization(
             format!(
                 "internal: specialized symbol `{symbol}` collides across two distinct \
                  canonical signatures (`{existing_key}` vs `{canonical_key}`); refusing to \
-                 emit a definition that serves either (chelis#1158; [05-UNS-1])"
+                 emit a definition that serves either (chelis#1226; [05-UNS-1])"
             ),
         ));
     }
@@ -7757,8 +7808,8 @@ fn ensure_mono_specialization(
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
-                "recursive generic host call `{name}` does not name a function-bodied \
-                 definition (chelis#1158; [05-UNS-1])"
+                "generic host call `{name}` does not name a function-bodied \
+                 definition (chelis#1226; [05-UNS-1])"
             ),
         ));
     };
@@ -7766,8 +7817,8 @@ fn ensure_mono_specialization(
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
-                "recursive generic host call `{name}` supplies {} argument(s) for {} \
-                 parameter(s) (chelis#1158; [05-UNS-1])",
+                "generic host call `{name}` supplies {} argument(s) for {} \
+                 parameter(s) (chelis#1226; [05-UNS-1])",
                 param_tys.len(),
                 param_exprs.len()
             ),
@@ -7780,8 +7831,8 @@ fn ensure_mono_specialization(
             return Err(host_expr_lowering_error(
                 app_expr,
                 format!(
-                    "recursive generic host call `{name}` has an unnameable parameter \
-                     (chelis#1158; [05-UNS-1])"
+                    "generic host call `{name}` has an unnameable parameter \
+                     (chelis#1226; [05-UNS-1])"
                 ),
             ));
         };
@@ -11900,9 +11951,9 @@ def bad[b](box: Box[b]) -> bool =
             .expect_err("real lowering must report the genuine bad call");
         assert_eq!(
             error.message,
-            "unsupported: Deep expression `app` on host expression lowering: recursive generic \
-             host call `bad` has no concrete checked type application to specialize \
-             (chelis#1158; [05-UNS-1]) (lowering); deliberate [04-TOT-3]: a malformed or \
+            "unsupported: Deep expression `app` on host expression lowering: generic host \
+             call `bad` has no concrete checked type application to specialize \
+             (chelis#1226; [05-UNS-1]) (lowering); deliberate [04-TOT-3]: a malformed or \
              unhandled Deep form cannot lower to a substitute host value"
         );
         MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());

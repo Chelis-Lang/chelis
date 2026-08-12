@@ -160,6 +160,19 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   body node ever mentions `a`. Acceptance oracle: `cargo nextest run
   -p chelis-ir --no-fail-fast`.
 
+  Two adversarial-review follow-ups ride along. A generic callee with a
+  **callable parameter** stays on the inline path (a callable argument has
+  no host-type key), and that path now threads the call's checked result
+  type through the body like every other inline path, so
+  `apply[a](f: (a) -> a, x: a) -> Box[a]` resolves its constructor again.
+  A **non-recursive** call whose instantiation never resolves
+  (`pick[a, b](x: a, y: Box[b]) -> a` applied to `Empty`) falls back to
+  guarded value-level inlining instead of dying on the specialization
+  residue. The residue that remains (a genuinely unresolvable call) keeps
+  failing closed, with recursion-neutral wording — non-recursive calls can
+  reach it — citing the open chelis#1226 rather than the closed
+  chelis#1158 ([05-UNS-5]).
+
   Not fixed here: a **recursive dimension-generic** function is never
   monomorphized at all, so a generic ADT parameterised by its dimension
   variable still fails at the code-generation boundary with an unresolved
