@@ -41,6 +41,13 @@
 //! - `permuted_edge_with_unconstrained_argument_specializes_correctly`
 //! - `mutual_unconstrained_cross_edge_fails_closed` (documented residue)
 //!
+//! chelis#1216 (PR #1218 review) — recursive erased-ADT-dimension generics:
+//! - `recursive_erased_dim_generic_compiles_links_and_runs` (the coral#26
+//!   shape end-to-end: the defect was an elided C symbol, so the C is
+//!   emitted, compiled, linked, and RUN)
+//! - `underconstrained_erased_dim_call_fails_closed` (checker-stamp
+//!   fallback negative parity; documented residue)
+//!
 //! Determinism golden (change task 4.2):
 //! - `specialized_symbol_set_is_deterministic_across_builds`
 //!
@@ -956,5 +963,84 @@ fn specialized_symbol_set_is_deterministic_across_builds() {
         symbols_a.len(),
         2,
         "two instantiations must emit exactly two specialized symbols: {symbols_a:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1216 (PR #1218 review): recursive ERASED-ADT-DIMENSION generics
+// ---------------------------------------------------------------------------
+
+/// chelis#1216's coral#26 shape: a RECURSIVE function generic over an
+/// erased ADT dimension (`Col[n]` stores no `n`-typed ABI field). The
+/// defect was an ELIDED C symbol — the inline path specialized the outer
+/// call and the recursive edge fell through to a plain call to a
+/// definition the emitter never wrote — so Host IR lowering alone does
+/// not cover the failure boundary; this fixture must compile, link, and
+/// RUN. Prints `true`.
+const RECURSIVE_ERASED_DIM: &str = "\
+type Col[n] =
+  | FloatCol(tensor[n, f32])
+def zero_i64() -> int64 = cast(0, int64)
+def one_i64() -> int64 = cast(1, int64)
+def col_len[n](col: Col[n]) -> int64 = match col with {
+  | FloatCol(xs) => numel(xs)
+}
+def all_eq_len[n](pairs: List[(string, Col[n])], expected: int64) -> bool =
+  if eq(len(pairs), zero_i64()) then true else {
+    entry = index(pairs, zero_i64())
+    if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)
+  }
+def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, int64))
+out = print(main())
+";
+
+/// Negative parity for the chelis#1216 checker-stamp fallback: `Col[n, a]`
+/// carries a TYPE parameter alongside the erased dimension, and the call
+/// site (`[]`) never constrains `a`, so the stamped type is still
+/// unresolved AFTER erased-argument canonicalization. The stamp must not
+/// be adopted: the checker and eval accept the program ([04-INF-2] types
+/// the unconstrained argument), and the build stays on the fail-closed
+/// [05-UNS-1] residue.
+const UNDERCONSTRAINED_ERASED_DIM: &str = "\
+type Col[n, a] =
+  | Tagged { label: a, xs: tensor[n, f32] }
+def zero_i64() -> int64 = cast(0, int64)
+def one_i64() -> int64 = cast(1, int64)
+def all_eq_len[n, a](pairs: List[(string, Col[n, a])], expected: int64) -> bool =
+  if eq(len(pairs), zero_i64()) then true else all_eq_len(drop(pairs, one_i64()), expected)
+def main() -> bool = all_eq_len([], cast(0, int64))
+out = print(main())
+";
+
+#[test]
+fn recursive_erased_dim_generic_compiles_links_and_runs() {
+    let eval = eval_first_line(RECURSIVE_ERASED_DIM, "erased_dim_eval");
+    let (_dir, out_dir) = build_ok(RECURSIVE_ERASED_DIM, "erased_dim");
+    let c_source = read_generated_c(&out_dir, "erased_dim");
+    let specialized = identifiers_with_prefix(&c_source, "all_eq_len__mono_");
+    assert!(
+        !specialized.is_empty(),
+        "the emitted C must contain an `all_eq_len` specialization; the \
+         chelis#1216 defect was precisely this symbol being elided"
+    );
+    let compiled = run_first_line(&out_dir, "erased_dim");
+    assert_eq!(eval, "true");
+    assert_eq!(compiled, eval, "compiled output must match the eval lane");
+}
+
+#[test]
+fn underconstrained_erased_dim_call_fails_closed() {
+    let eval = eval_first_line(UNDERCONSTRAINED_ERASED_DIM, "underconstrained_eval");
+    assert_eq!(eval, "true", "check and eval accept the unconstrained call");
+    let (_dir, c_artifact, stderr) = build_err(UNDERCONSTRAINED_ERASED_DIM, "underconstrained");
+    assert!(
+        stderr.contains("unsupported") && stderr.contains("[05-UNS-1]"),
+        "a stamp still unresolved after erasure must stay on the branded \
+         fail-closed residue, got:\n{stderr}"
+    );
+    assert!(
+        !c_artifact.exists(),
+        "no C artifact may be written on rejection: {}",
+        c_artifact.display()
     );
 }

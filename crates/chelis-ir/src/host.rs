@@ -13580,11 +13580,32 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             .host
             .as_ref()
             .expect("the program lowers a host lane");
+        // PR #1218 review: any-Monomorphized was too weak — pin the
+        // specialization to `all_eq_len` itself...
+        let specialization = host
+            .functions
+            .iter()
+            .find(|function| {
+                function.origin == HostFunctionOrigin::Monomorphized
+                    && function.name.starts_with("all_eq_len__mono_")
+            })
+            .expect("the specialization must belong to `all_eq_len`, not merely exist");
+        // ...and pin its recursive edge to the OWNING specialized symbol:
+        // the reported defect was precisely that edge falling through to a
+        // plain call to the elided generic symbol. Direct recursion at one
+        // instantiation memoizes to one symbol, so the edge must name the
+        // specialization it lives in.
+        let body = format!("{:?}", specialization.body);
         assert!(
-            host.functions
-                .iter()
-                .any(|function| function.origin == HostFunctionOrigin::Monomorphized),
-            "the recursive dimension-generic callee must reach lowering as a specialization"
+            body.contains(&format!("function: \"{}\"", specialization.name)),
+            "the recursive edge must call the owning specialized symbol \
+             `{}`, got body:\n{body}",
+            specialization.name
+        );
+        assert!(
+            !body.contains("function: \"all_eq_len\""),
+            "no edge may still call the elided generic symbol `all_eq_len`, \
+             got body:\n{body}"
         );
     }
 }
