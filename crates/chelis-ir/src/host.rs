@@ -3898,6 +3898,19 @@ fn lower_host_expr(
     lower_host_expr_with_expected(expr, program, scope, tensor_helpers, None)
 }
 
+/// `lower_host_expr_with_expected` for callers that already hold an
+/// `Option` (chelis#1201). Keeps the match-arm call sites readable rather
+/// than repeating the `match expected_ty` at each one.
+fn lower_host_expr_with_expected_opt(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+    tensor_helpers: &mut Vec<HostTensorHelper>,
+    expected_ty: Option<&HostTypeTerm>,
+) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    lower_host_expr_with_expected(expr, program, scope, tensor_helpers, expected_ty)
+}
+
 fn lower_host_expr_with_expected(
     expr: &Expr,
     program: &CheckedProgram,
@@ -4219,8 +4232,24 @@ fn lower_host_expr_kind(
                     format!("an `if` node requires 3 children, found {}", kids.len()),
                 ));
             }
-            let then_expr = lower_host_expr(&kids[1], program, scope, tensor_helpers)?;
-            let else_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
+            // chelis#1201: both branches are RESULT positions, so a generic
+            // ADT constructed in one resolves its instantiation from the
+            // caller's expected type — the same rule the match arms follow.
+            // The condition is not a result position and keeps plain lowering.
+            let then_expr = lower_host_expr_with_expected_opt(
+                &kids[1],
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty,
+            )?;
+            let else_expr = lower_host_expr_with_expected_opt(
+                &kids[2],
+                program,
+                scope,
+                tensor_helpers,
+                expected_ty,
+            )?;
             let explicit_ty = expr_host_type(expr, program, scope);
             let ty = if explicit_ty.is_unresolved() {
                 let then_ty = host_expr_type(&then_expr);
@@ -4240,7 +4269,7 @@ fn lower_host_expr_kind(
             })
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Match) => {
-            lower_match_host_expr(list, program, scope, tensor_helpers)?
+            lower_match_host_expr(list, program, scope, tensor_helpers, expected_ty)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Block) => {
             // chelis#859: sequenced expressions, value is the last child's
@@ -5526,6 +5555,13 @@ fn lower_match_host_expr(
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
+    // chelis#1201: the match's RESULT type, when the caller knows it. Arm
+    // bodies are result positions, so a generic ADT constructed in an arm
+    // resolves its instantiation from this. Without it, a specialized
+    // generic body's own constructors reach lowering unresolved even though
+    // `lower_mono_specialized_function` already knows the concrete return
+    // type. The scrutinee is NOT a result position and keeps plain lowering.
+    expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
     let kids = children(list);
     let match_expr = Expr::List(list.clone(), list_span(list));
@@ -5572,11 +5608,12 @@ fn lower_match_host_expr(
             let body = arm_kids.get(2).ok_or_else(|| {
                 host_expr_lowering_error(&match_expr, "a wildcard match arm has no body")
             })?;
-            generic_default = Some(Box::new(lower_host_expr(
+            generic_default = Some(Box::new(lower_host_expr_with_expected_opt(
                 body,
                 program,
                 scope,
                 tensor_helpers,
+                expected_ty,
             )?));
             continue;
         }
@@ -5595,13 +5632,25 @@ fn lower_match_host_expr(
                     let body = arm_kids.get(2).ok_or_else(|| {
                         host_expr_lowering_error(&match_expr, "a `Some` match arm has no body")
                     })?;
-                    some_expr = Some(lower_host_expr(body, program, &scoped, tensor_helpers)?);
+                    some_expr = Some(lower_host_expr_with_expected_opt(
+                        body,
+                        program,
+                        &scoped,
+                        tensor_helpers,
+                        expected_ty,
+                    )?);
                 }
                 Some("None") => {
                     let body = arm_kids.get(2).ok_or_else(|| {
                         host_expr_lowering_error(&match_expr, "a `None` match arm has no body")
                     })?;
-                    none_expr = Some(lower_host_expr(body, program, scope, tensor_helpers)?);
+                    none_expr = Some(lower_host_expr_with_expected_opt(
+                        body,
+                        program,
+                        scope,
+                        tensor_helpers,
+                        expected_ty,
+                    )?);
                 }
                 Some(ctor_name) => {
                     let ctor_fields = if let Some(definition) =
@@ -5656,7 +5705,7 @@ fn lower_match_host_expr(
                     generic_arms.push(HostMatchArm {
                         ctor: ctor_name.to_string(),
                         bindings,
-                        expr: lower_host_expr(
+                        expr: lower_host_expr_with_expected_opt(
                             arm_kids.get(2).ok_or_else(|| {
                                 host_expr_lowering_error(
                                     &match_expr,
@@ -5666,6 +5715,7 @@ fn lower_match_host_expr(
                             program,
                             &scoped,
                             tensor_helpers,
+                            expected_ty,
                         )?,
                     });
                 }
@@ -6742,11 +6792,14 @@ fn lower_app_host_expr(
         .as_ref()
         .is_some_and(crate::lower::type_expr_has_rank_var)
         || top_level_fn_is_nested_rank_polymorphic(program, &name);
-    let callee_is_nonrecursive_type_polymorphic =
-        top_level_fn_is_nonrecursive_type_polymorphic(program, &name)
-            && !callee_is_polymorphic_precision
-            && !callee_is_polymorphic_rank;
-    if (callee_is_nullary_generic_constructor_wrapper || callee_is_nonrecursive_type_polymorphic)
+    // chelis#1201: a NON-recursive ordinary-generic call is no longer
+    // inlined. Value-level inlining substitutes the argument expression over
+    // the parameter name and drops the parameter's declared type, so any
+    // generic-ADT term whose instantiation is only recoverable from those
+    // annotations reached lowering unresolved. Such a call now falls through
+    // to the same bounded monomorphization the recursive path uses, which
+    // keys on the checked type application instead of pasting syntax.
+    if callee_is_nullary_generic_constructor_wrapper
         && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
         let pushed = push_inlining(&name);
@@ -7069,7 +7122,22 @@ fn lower_app_host_expr(
     if has_callable_params && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
     {
         let pushed = push_inlining(&name);
-        let lowered = lower_host_expr(&specialized, program, scope, tensor_helpers);
+        // PR #1215 review: thread the call's checked result type through the
+        // inlined body exactly as the precision/rank inline path above does.
+        // Plain lowering dropped it, so a generic ADT constructor in a
+        // callable-parameter callee's body — whose instantiation is only
+        // recoverable from the call-site result type — stayed unresolved and
+        // failed closed (`apply[a](f: (a) -> a, x: a) -> Box[a]`).
+        let definitions = adt_constructor_definitions(program);
+        let specialized_ty =
+            canonicalize_representation_erased_adt_args(explicit_ty.clone(), &definitions);
+        let lowered = lower_host_expr_with_expected(
+            &specialized,
+            program,
+            scope,
+            tensor_helpers,
+            (!specialized_ty.is_unresolved()).then_some(&specialized_ty),
+        );
         if pushed {
             pop_inlining(&name);
         }
@@ -7282,8 +7350,8 @@ fn lower_recursive_generic_call(
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
-                "recursive generic host call `{name}` has no top-level definition to \
-                 specialize (chelis#1158; [05-UNS-1])"
+                "generic host call `{name}` has no top-level definition to \
+                 specialize (chelis#1226; [05-UNS-1])"
             ),
         ));
     };
@@ -7345,6 +7413,73 @@ fn lower_recursive_generic_call(
         }
     }
 
+    // chelis#1201: a NON-recursive generic call has no in-progress
+    // specialization to complete from, so the block above cannot reach it.
+    // The information it needs is still available: the callee's declared
+    // parameter types. Decode those, solve the call site's type variables
+    // against the slots that DID resolve, then re-decode the unresolved
+    // slots under that substitution. This is what value-level inlining used
+    // to discard by substituting the argument expression over the parameter
+    // name and dropping the parameter's declared type.
+    if param_tys.iter().any(HostTypeTerm::is_unresolved) || ret_ty.is_unresolved() {
+        // A def with no `params` list contributes no declared types to solve
+        // against. Spelled out rather than defaulted, so the empty case is a
+        // stated outcome and not a swallowed one: those slots simply stay
+        // unresolved and reach the residue below
+        // (spec/design/loud_unsupported.md C4.3).
+        let declared: Vec<Option<Expr>> = match params_list_of(&def_body) {
+            Some(params) => children(params)
+                .iter()
+                .map(param_declared_type_expr)
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        let mut subst: HashMap<String, HostTypeTerm> = HashMap::new();
+        for (slot, declared_expr) in declared.iter().enumerate() {
+            if let Some(declared_expr) = declared_expr
+                && let Some(actual) = param_tys.get(slot)
+                && !actual.is_unresolved()
+            {
+                let declared_term = decode_host_type_or_raise(declared_expr, &HashMap::new());
+                solve_host_type_vars(&declared_term, actual, &mut subst);
+            }
+        }
+        // The RETURN type is a binding source too, and often the only one:
+        // `hamt_from_pairs[a](pairs: List[(string, a)]) -> Hamt[a]` called
+        // with an unresolved `pairs` still has a concrete checked result
+        // (`Hamt[Column[...]]`), which pins `a` and thereby completes the
+        // argument slot. Solving from arguments alone leaves the
+        // substitution empty here and the call falls to the [05-UNS-1]
+        // residue (chelis#1201, coral#26's `from_pairs` shape).
+        if !ret_ty.is_unresolved()
+            && let Some(declared_ret) = declared_return_type_expr(program.exprs(), &canonical_name)
+        {
+            let declared_ret_term = decode_host_type_or_raise(&declared_ret, &HashMap::new());
+            solve_host_type_vars(&declared_ret_term, &ret_ty, &mut subst);
+        }
+        if !subst.is_empty() {
+            for (slot, param_ty) in param_tys.iter_mut().enumerate() {
+                if param_ty.is_unresolved()
+                    && let Some(Some(declared_expr)) = declared.get(slot)
+                {
+                    let completed = decode_host_type_or_raise(declared_expr, &subst);
+                    if !completed.is_unresolved() {
+                        *param_ty = completed;
+                    }
+                }
+            }
+            if ret_ty.is_unresolved()
+                && let Some(declared_ret) =
+                    declared_return_type_expr(program.exprs(), &canonical_name)
+            {
+                let completed = decode_host_type_or_raise(&declared_ret, &subst);
+                if !completed.is_unresolved() {
+                    ret_ty = completed;
+                }
+            }
+        }
+    }
+
     let derived_concrete =
         !param_tys.iter().any(HostTypeTerm::is_unresolved) && !ret_ty.is_unresolved();
     if derived_concrete {
@@ -7372,18 +7507,54 @@ fn lower_recursive_generic_call(
         }));
     }
 
+    // PR #1215 review: a NON-recursive top-level call whose instantiation
+    // never resolves (`pick[a, b](x: a, y: Box[b]) -> a` applied to `Empty`
+    // — `b` unconstrained, the parameter untouched) has the
+    // pre-specialization lowering available: guarded value-level inlining,
+    // with the call's checked result type threaded through like every other
+    // inline path. Two gates keep this strictly a top-level-call fallback:
+    // inside an in-progress specialization the [04-INF-2] per-slot
+    // completion above owns the semantics and a mutually-recursive
+    // cross-member edge must stay on the fail-closed residue below; and the
+    // inlining stack bounds recursion — a recursive body re-entering here
+    // finds its own name, `inline_top_level_host_call` returns `None`, and
+    // the edge falls through to the residue.
+    let specializing = MONO_SPECIALIZATIONS.with(|state| !state.borrow().in_progress.is_empty());
+    if !specializing && let Some(specialized) = inline_top_level_host_call(app_expr, program) {
+        let pushed_canonical = push_inlining(&canonical_name);
+        let pushed_spelled = name != canonical_name && push_inlining(name);
+        let lowered = lower_host_expr_with_expected(
+            &specialized,
+            program,
+            scope,
+            tensor_helpers,
+            (!ret_ty.is_unresolved()).then_some(&ret_ty),
+        );
+        if pushed_spelled {
+            pop_inlining(name);
+        }
+        if pushed_canonical {
+            pop_inlining(&canonical_name);
+        }
+        return lowered;
+    }
+
     // Fail-closed residue: no concrete checked instantiation to key a
-    // specialized definition on — an outer call that never pins the type
-    // parameter, or a mutually-recursive cross-member edge whose argument
-    // leaves the callee parameter unconstrained (no positional
-    // correspondence exists across different defs' parameters in host
-    // lowering). Emitting a reference to the omitted generic definition is
-    // never legal, so reject loud instead.
+    // specialized definition on and no inlinable shape — an outer recursive
+    // call that never pins the type parameter, or a mutually-recursive
+    // cross-member edge whose argument leaves the callee parameter
+    // unconstrained (no positional correspondence exists across different
+    // defs' parameters in host lowering). Emitting a reference to the
+    // omitted generic definition is never legal, so reject loud instead.
+    // The wording is recursion-neutral and the citation is the OPEN residue
+    // tracker (chelis#1226): the call reaching here need not be recursive,
+    // and chelis#1158 closed with its delivery ([05-UNS-5] requires a live
+    // authority).
     Err(host_expr_lowering_error(
         app_expr,
         format!(
-            "recursive generic host call `{name}` has no concrete checked type \
-             application to specialize (chelis#1158; [05-UNS-1])"
+            "generic host call `{name}` has no concrete checked type \
+             application to specialize (chelis#1226; [05-UNS-1])"
         ),
     ))
 }
@@ -7617,7 +7788,7 @@ fn ensure_mono_specialization(
             format!(
                 "internal: specialized symbol `{symbol}` collides across two distinct \
                  canonical signatures (`{existing_key}` vs `{canonical_key}`); refusing to \
-                 emit a definition that serves either (chelis#1158; [05-UNS-1])"
+                 emit a definition that serves either (chelis#1226; [05-UNS-1])"
             ),
         ));
     }
@@ -7637,8 +7808,8 @@ fn ensure_mono_specialization(
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
-                "recursive generic host call `{name}` does not name a function-bodied \
-                 definition (chelis#1158; [05-UNS-1])"
+                "generic host call `{name}` does not name a function-bodied \
+                 definition (chelis#1226; [05-UNS-1])"
             ),
         ));
     };
@@ -7646,8 +7817,8 @@ fn ensure_mono_specialization(
         return Err(host_expr_lowering_error(
             app_expr,
             format!(
-                "recursive generic host call `{name}` supplies {} argument(s) for {} \
-                 parameter(s) (chelis#1158; [05-UNS-1])",
+                "generic host call `{name}` supplies {} argument(s) for {} \
+                 parameter(s) (chelis#1226; [05-UNS-1])",
                 param_tys.len(),
                 param_exprs.len()
             ),
@@ -7660,8 +7831,8 @@ fn ensure_mono_specialization(
             return Err(host_expr_lowering_error(
                 app_expr,
                 format!(
-                    "recursive generic host call `{name}` has an unnameable parameter \
-                     (chelis#1158; [05-UNS-1])"
+                    "generic host call `{name}` has an unnameable parameter \
+                     (chelis#1226; [05-UNS-1])"
                 ),
             ));
         };
@@ -7709,6 +7880,25 @@ fn lower_mono_specialized_function(
 ) -> Result<HostFunction, crate::lower::LowerDiagnostic> {
     let body_expr = inline_local_callable_lets(body_expr);
     let mut fn_tensor_helpers = Vec::new();
+    // chelis#1201: pin this specialization's type variables for the body.
+    // The body's checked types are the generic ones the checker recorded, so
+    // without this a generic ADT constructed inside the body (coral#26's
+    // `Hamt` nodes) reads as unresolved even though the call site pinned it.
+    //
+    // Solve against the `fn` node's OWN recorded type, NOT the declared
+    // `defsig`. The two name their variables in different spaces: a
+    // signature says `a`, while every node the checker stamped inside the
+    // body says `t376`. A substitution keyed on the declared names installs
+    // correctly and then matches nothing, because no body node ever mentions
+    // `a`. Only the recorded generic signature shares the body's namespace.
+    let mut subst: HashMap<String, HostTypeTerm> = HashMap::new();
+    if let Some((generic_params, generic_ret)) = expr_fn_type(fn_expr) {
+        for (generic, actual) in generic_params.iter().zip(params.iter()) {
+            solve_host_type_vars(generic, &actual.ty, &mut subst);
+        }
+        solve_host_type_vars(&generic_ret, ret_ty, &mut subst);
+    }
+    let _subst_guard = ActiveTypeSubstGuard::push(subst);
     let mut host_body = lower_host_expr_with_expected(
         &body_expr,
         program,
@@ -8450,12 +8640,6 @@ fn checker_type_has_erased_adt_variable(
     }
 }
 
-fn top_level_fn_is_nonrecursive_type_polymorphic(program: &CheckedProgram, name: &str) -> bool {
-    top_level_fn_is_type_polymorphic(program, name)
-        && !recursive_top_level_fn_names_from_graph(&top_level_fn_call_graph(program))
-            .contains(name)
-}
-
 fn lower_host_callback(
     expr: &Expr,
     program: &CheckedProgram,
@@ -9142,7 +9326,66 @@ fn host_type_from_tensor_input(ty: &TensorType) -> HostTypeTerm {
     }
 }
 
+/// A node's host type, with the active specialization's type variables
+/// resolved (chelis#1201).
+///
+/// The raw form returns the GENERIC checked type the checker recorded, so
+/// inside a monomorphized body a generic ADT reads as unresolved even though
+/// the call site pinned it. Applying the substitution here catches every
+/// route a type arrives by — node metadata, `CheckedProgram` lookup, and the
+/// structural fallbacks — rather than only the metadata funnel. Outside a
+/// specialization the substitution is empty and this is the identity.
 fn expr_host_type(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+) -> HostTypeTerm {
+    let raw = expr_host_type_raw(expr, program, scope);
+    let subst = active_type_subst();
+    if subst.is_empty() {
+        return raw;
+    }
+    apply_host_type_subst(&raw, &subst)
+}
+
+/// Replace every bound `TypeVariable` in a host type (chelis#1201).
+fn apply_host_type_subst(ty: &HostTypeTerm, subst: &HashMap<String, HostTypeTerm>) -> HostTypeTerm {
+    match ty {
+        HostTypeTerm::TypeVariable(name) => subst.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        HostTypeTerm::Adt(name, args) => HostTypeTerm::Adt(
+            name.clone(),
+            args.iter()
+                .map(|a| apply_host_type_subst(a, subst))
+                .collect(),
+        ),
+        HostTypeTerm::List(inner) => {
+            HostTypeTerm::List(Box::new(apply_host_type_subst(inner, subst)))
+        }
+        HostTypeTerm::Option(inner) => {
+            HostTypeTerm::Option(Box::new(apply_host_type_subst(inner, subst)))
+        }
+        HostTypeTerm::Dict(key, value) => HostTypeTerm::Dict(
+            Box::new(apply_host_type_subst(key, subst)),
+            Box::new(apply_host_type_subst(value, subst)),
+        ),
+        HostTypeTerm::Tuple(items) => HostTypeTerm::Tuple(
+            items
+                .iter()
+                .map(|i| apply_host_type_subst(i, subst))
+                .collect(),
+        ),
+        HostTypeTerm::Fn(params, ret) => HostTypeTerm::Fn(
+            params
+                .iter()
+                .map(|p| apply_host_type_subst(p, subst))
+                .collect(),
+            Box::new(apply_host_type_subst(ret, subst)),
+        ),
+        _ => ty.clone(),
+    }
+}
+
+fn expr_host_type_raw(
     expr: &Expr,
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
@@ -9626,7 +9869,7 @@ fn expr_type(expr: &Expr) -> Option<HostTypeTerm> {
     meta.entries
         .iter()
         .find(|(key, _)| key == "type")
-        .map(|(_, value)| decode_host_type_or_raise(value, &HashMap::new()))
+        .map(|(_, value)| decode_host_type_or_raise(value, &active_type_subst()))
 }
 
 fn expr_fn_type(expr: &Expr) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
@@ -11395,6 +11638,165 @@ fn param_host_type(expr: &Expr) -> Option<HostTypeTerm> {
     }
 }
 
+thread_local! {
+    /// Type-variable bindings in force while a monomorphized body is being
+    /// lowered (chelis#1201). A stack, because specializing one body can
+    /// specialize another nested inside it.
+    ///
+    /// A specialized body's nodes still carry the GENERIC checked types the
+    /// checker recorded (`Hamt[a]`), so every generic-ADT construction inside
+    /// it reads as unresolved even though the specialization pinned `a` at
+    /// its call site. Threading a substitution parameter would touch ~130
+    /// call sites across this file; scoping it here matches the idiom
+    /// `MONO_SPECIALIZATIONS` and `HOST_LOWERING_CACHE_ACTIVE` already use,
+    /// and applies at the single point that decodes a node's checked type.
+    static ACTIVE_TYPE_SUBST: RefCell<Vec<HashMap<String, HostTypeTerm>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The substitution in force for the innermost specialization, if any.
+///
+/// Outside every specialization the answer is an empty substitution, and
+/// that is a real answer rather than a missing one: no type variable is
+/// bound there, so applying it is the identity. Spelled as an explicit
+/// branch instead of a default so the empty map is visibly the stated
+/// outcome (spec/design/loud_unsupported.md C4.3).
+fn active_type_subst() -> HashMap<String, HostTypeTerm> {
+    ACTIVE_TYPE_SUBST.with(|stack| match stack.borrow().last() {
+        Some(subst) => subst.clone(),
+        None => HashMap::new(),
+    })
+}
+
+/// RAII scope for a specialization's type bindings (chelis#1201).
+struct ActiveTypeSubstGuard;
+
+impl ActiveTypeSubstGuard {
+    fn push(subst: HashMap<String, HostTypeTerm>) -> Self {
+        ACTIVE_TYPE_SUBST.with(|stack| stack.borrow_mut().push(subst));
+        ActiveTypeSubstGuard
+    }
+}
+
+impl Drop for ActiveTypeSubstGuard {
+    fn drop(&mut self) {
+        ACTIVE_TYPE_SUBST.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+/// The `params` list of a top-level `fn` body (chelis#1201).
+fn params_list_of(fn_expr: &Expr) -> Option<&List> {
+    let Expr::List(fn_list, _) = fn_expr else {
+        return None;
+    };
+    if tag(fn_list) != Some(DeepTag::Fn) {
+        return None;
+    }
+    children(fn_list)
+        .first()
+        .and_then(as_list)
+        .filter(|params| tag(params) == Some(DeepTag::Params))
+}
+
+/// The declared type on a `params` entry: `(name {type: T})` (chelis#1201).
+fn param_declared_type_expr(param: &Expr) -> Option<Expr> {
+    let meta = match param {
+        Expr::List(list, _) => match list.elements.get(1) {
+            Some(Expr::Map(meta, _)) => meta,
+            _ => return None,
+        },
+        Expr::Node(node, _) => node.meta(),
+        _ => return None,
+    };
+    meta.entries
+        .iter()
+        .find(|(key, _)| key == "type")
+        .map(|(_, ty)| ty.clone())
+}
+
+/// The declared return type of a top-level def, read from its sibling
+/// `defsig`'s `t-fn` (chelis#1201).
+///
+/// A `def`'s own `fn` node carries no signature metadata — the declared
+/// signature is a separate top-level `(defsig {} name (t-fn {} ...))`
+/// item — so this looks the sibling up by the same exact-then-terminal
+/// name rule `find_top_level_def_named` uses.
+fn declared_return_type_expr(exprs: &[Expr], name: &str) -> Option<Expr> {
+    let mut terminal_match: Option<Expr> = None;
+    let mut terminal_is_ambiguous = false;
+    for expr in top_level_items(exprs) {
+        let Some((DeepTag::Defsig, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(sig_name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        let Some(ret) = kids
+            .get(1)
+            .and_then(as_list)
+            .filter(|tfn| tag(tfn) == Some(DeepTag::TFn))
+            .and_then(|tfn| children(tfn).last().cloned())
+        else {
+            continue;
+        };
+        if sig_name == name {
+            return Some(ret);
+        }
+        if terminal_name_matches(sig_name, name) {
+            if terminal_match.is_some() {
+                terminal_is_ambiguous = true;
+            } else {
+                terminal_match = Some(ret);
+            }
+        }
+    }
+    (!terminal_is_ambiguous).then_some(terminal_match).flatten()
+}
+
+/// Structurally match a declared host type against a resolved one, binding
+/// each `TypeVariable` on the declared side (chelis#1201).
+///
+/// Only the shapes a generic signature can name are walked; anything else
+/// contributes no binding rather than guessing one.
+fn solve_host_type_vars(
+    declared: &HostTypeTerm,
+    actual: &HostTypeTerm,
+    out: &mut HashMap<String, HostTypeTerm>,
+) {
+    match (declared, actual) {
+        (HostTypeTerm::TypeVariable(name), resolved) if !resolved.is_unresolved() => {
+            out.entry(name.clone()).or_insert_with(|| resolved.clone());
+        }
+        (HostTypeTerm::Adt(dname, dargs), HostTypeTerm::Adt(aname, aargs))
+            if terminal_name_matches(dname, aname) && dargs.len() == aargs.len() =>
+        {
+            for (d, a) in dargs.iter().zip(aargs.iter()) {
+                solve_host_type_vars(d, a, out);
+            }
+        }
+        (HostTypeTerm::List(d), HostTypeTerm::List(a))
+        | (HostTypeTerm::Option(d), HostTypeTerm::Option(a)) => solve_host_type_vars(d, a, out),
+        (HostTypeTerm::Dict(dk, dv), HostTypeTerm::Dict(ak, av)) => {
+            solve_host_type_vars(dk, ak, out);
+            solve_host_type_vars(dv, av, out);
+        }
+        (HostTypeTerm::Tuple(ds), HostTypeTerm::Tuple(as_)) if ds.len() == as_.len() => {
+            for (d, a) in ds.iter().zip(as_.iter()) {
+                solve_host_type_vars(d, a, out);
+            }
+        }
+        (HostTypeTerm::Fn(dp, dr), HostTypeTerm::Fn(ap, ar)) if dp.len() == ap.len() => {
+            for (d, a) in dp.iter().zip(ap.iter()) {
+                solve_host_type_vars(d, a, out);
+            }
+            solve_host_type_vars(dr, ar, out);
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11549,9 +11951,9 @@ def bad[b](box: Box[b]) -> bool =
             .expect_err("real lowering must report the genuine bad call");
         assert_eq!(
             error.message,
-            "unsupported: Deep expression `app` on host expression lowering: recursive generic \
-             host call `bad` has no concrete checked type application to specialize \
-             (chelis#1158; [05-UNS-1]) (lowering); deliberate [04-TOT-3]: a malformed or \
+            "unsupported: Deep expression `app` on host expression lowering: generic host \
+             call `bad` has no concrete checked type application to specialize \
+             (chelis#1226; [05-UNS-1]) (lowering); deliberate [04-TOT-3]: a malformed or \
              unhandled Deep form cannot lower to a substitute host value"
         );
         MONO_SPECIALIZATIONS.with(|state| *state.borrow_mut() = MonoSpecializationState::default());
@@ -12994,6 +13396,10 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         ));
     }
 
+    /// chelis#1201: a non-recursive generic is no longer inlined — it is
+    /// specialized through the same bounded monomorphization the recursive
+    /// path uses. The lowering assertion is the contract; the predicate that
+    /// used to gate inlining is gone with the inlining.
     #[test]
     fn nonrecursive_generic_match_is_a_bounded_callsite_specialization() {
         let checked = surf_check(
@@ -13008,11 +13414,107 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
              def concrete() -> Box[f32] = empty()\n\
              def main() -> bool = is_empty(concrete())\n",
         );
+        let lowered = try_lower_compiled_program(&checked)
+            .expect("the bounded generic match must lower through its concrete caller");
+        let host = lowered
+            .host
+            .as_ref()
+            .expect("the program lowers a host lane");
         assert!(
-            top_level_fn_is_nonrecursive_type_polymorphic(&checked, "is_empty"),
-            "a nonrecursive generic match is safe to specialize at its concrete call site"
+            host.functions
+                .iter()
+                .any(|function| function.origin == HostFunctionOrigin::Monomorphized),
+            "the non-recursive generic must reach lowering as a specialization, not an inline paste"
+        );
+    }
+
+    /// chelis#1201 / coral#26: a generic ADT constructed in a position the
+    /// caller's expected type cannot reach.
+    ///
+    /// The arm-body and `if`-branch propagation resolves a constructor that
+    /// sits in a RESULT position. A block-local binding is not one, so this
+    /// resolves only through the specialization's own type substitution —
+    /// and that substitution only matches if it is keyed on the same
+    /// variables the checker stamped into the body. This is the exact shape
+    /// coral's `Hamt` node constructors take.
+    #[test]
+    fn generic_adt_built_outside_a_result_position_specializes() {
+        let checked = surf_check(
+            "type Store[a] =\n\
+               | Vacant\n\
+               | Held { key: string, value: a }\n\
+             def unwrap[a](s: Store[a], fallback: a) -> a = match s with {\n\
+               | Vacant => fallback\n\
+               | Held { key: k, value: v } => v\n\
+             }\n\
+             def put[a](s: Store[a], key: string, value: a) -> a = {\n\
+               fresh = Held { key, value }\n\
+               unwrap(fresh, value)\n\
+             }\n\
+             def read() -> int64 = put(Vacant, \"a\", cast(1, int64))\n",
+        );
+        try_lower_compiled_program(&checked).expect(
+            "a generic ADT built in a block-local binding must resolve from the specialization",
+        );
+    }
+
+    /// chelis#1201: a bare nullary generic constructor used as a call
+    /// ARGUMENT. Nothing at its own site pins the parameter; it resolves
+    /// only from the callee's declared parameter type.
+    ///
+    /// This already passes without the substitution fix above — it is
+    /// coverage for the shape #1201's body describes, not a guard on that
+    /// fix. The guard is
+    /// `generic_adt_built_outside_a_result_position_specializes`.
+    #[test]
+    fn nullary_generic_constructor_in_argument_position_specializes() {
+        let checked = surf_check(
+            "type Store[a] =\n\
+               | Vacant\n\
+               | Held { key: string, value: a }\n\
+             def fresh_store[a]() -> Store[a] = Vacant\n\
+             def unwrap[a](s: Store[a], fallback: a) -> a = match s with {\n\
+               | Vacant => fallback\n\
+               | Held { key: k, value: v } => v\n\
+             }\n\
+             def seed[a](value: a) -> a = unwrap(fresh_store(), value)\n\
+             def read() -> int64 = seed(cast(7, int64))\n",
         );
         try_lower_compiled_program(&checked)
-            .expect("the bounded generic match must lower through its concrete caller");
+            .expect("a nullary generic constructor in argument position must lower");
+    }
+
+    /// chelis#1201: a generic container instantiated at a DIMENSION-generic
+    /// element type.
+    ///
+    /// #1201's body asserts that dim-generic tensor code and generic
+    /// container ADTs are disjoint populations. coral's `Frame` is both —
+    /// `Hamt[Column[n]]` — so this combination is pinned here directly.
+    ///
+    /// It already passes without the substitution fix above; it exists
+    /// because the claim it refutes was load-bearing in #1201's triage, not
+    /// as a guard on that fix.
+    #[test]
+    fn generic_container_over_a_dimension_generic_adt_specializes() {
+        let checked = surf_check(
+            "type Col[n] =\n\
+               | FloatCol(tensor[n, f32])\n\
+             type Box[a] =\n\
+               | Nothing\n\
+               | Just { item: a }\n\
+             def box_it[a](item: a) -> Box[a] = Just { item }\n\
+             def unbox[a](b: Box[a], fallback: a) -> a = match b with {\n\
+               | Nothing => fallback\n\
+               | Just { item: i } => i\n\
+             }\n\
+             def roundtrip[n](c: Col[n]) -> Col[n] = unbox(box_it(c), c)\n\
+             def total[n](c: Col[n]) -> tensor[n, f32] = match roundtrip(c) with {\n\
+               | FloatCol(t) => t\n\
+             }\n\
+             def main() -> tensor[2, f32] =\n\
+               total(FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))\n",
+        );
+        try_lower_compiled_program(&checked)
+            .expect("a generic container over a dim-generic element must lower");
     }
 }

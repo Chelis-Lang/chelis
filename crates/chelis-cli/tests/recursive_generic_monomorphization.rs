@@ -182,7 +182,7 @@ out = print(concrete())
 /// parameter unconstrained. The checker admits it ([04-INF-2]: unconstrained
 /// is chosen as the caller's own), and eval executes it; host lowering has
 /// no positional correspondence across different defs' parameters, so the
-/// build stays on the documented fail-closed chelis#1158 residue.
+/// build stays on the documented fail-closed chelis#1226 residue.
 const MUTUAL_UNCONSTRAINED_CROSS_EDGE: &str = "\
 type Box[a] =
   | Empty
@@ -514,8 +514,15 @@ fn no_shipped_diagnostic_cites_closed_issue_941() {
         !stderr.contains("chelis#941"),
         "no shipped diagnostic may cite the closed chelis#941, got:\n{stderr}"
     );
+    // chelis#1158 closed with its delivery, so it joined chelis#941 as a
+    // forbidden citation; the open residue tracker is chelis#1226
+    // (PR #1215 review).
     assert!(
-        stderr.contains("chelis#1158") || stderr.contains("[04-") || stderr.contains("[05-"),
+        !stderr.contains("chelis#1158"),
+        "no shipped diagnostic may cite the closed chelis#1158, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("chelis#1226") || stderr.contains("[04-") || stderr.contains("[05-"),
         "rejection must carry its authority (open issue or deciding atom) per \
          [05-UNS-5], got:\n{stderr}"
     );
@@ -687,9 +694,15 @@ fn permuted_edge_with_unconstrained_argument_specializes_correctly() {
 fn mutual_unconstrained_cross_edge_fails_closed() {
     let (_dir, c_artifact, stderr) = build_err(MUTUAL_UNCONSTRAINED_CROSS_EDGE, "mutual_empty");
     assert!(
-        stderr.contains("unsupported") && stderr.contains("chelis#1158"),
-        "the cross-member unconstrained edge stays on the branded chelis#1158 \
+        stderr.contains("unsupported") && stderr.contains("chelis#1226"),
+        "the cross-member unconstrained edge stays on the branded chelis#1226 \
          residue, got:\n{stderr}"
+    );
+    // PR #1215 review: the residue is reachable by non-recursive calls too,
+    // so its wording is recursion-neutral.
+    assert!(
+        !stderr.contains("recursive generic host call"),
+        "the residue diagnostic must not claim the call is recursive, got:\n{stderr}"
     );
     assert!(
         !c_artifact.exists(),

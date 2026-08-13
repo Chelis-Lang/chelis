@@ -139,6 +139,46 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   identity; the two shapes are pinned as `#[ignore]`d tests in
   `crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`.
 
+- **A non-recursive generic host call is specialized, not inlined
+  (chelis#1201).** Value-level inlining substituted the argument expression
+  over the parameter name and dropped the parameter's declared type, so a
+  generic ADT whose instantiation was only recoverable from that annotation
+  reached lowering unresolved and failed closed with `constructor ... is not
+  concretely instantiated`. Such a call now falls through to the same bounded
+  monomorphization chelis#1158 uses for the recursive case, which keys on the
+  checked type application instead of pasting syntax. Two further gaps are
+  closed with it: an `if` branch and a `match` arm are result positions and
+  now receive the caller's expected type, and a specialized body's own
+  constructors resolve through the specialization's type substitution.
+
+  That substitution is solved against the `fn` node's **recorded** type, not
+  the declared `defsig`. The two name their variables in different spaces — a
+  signature says `a` (and, for a dimension parameter, the source dimension
+  name), while every node the checker stamped inside the body names the same
+  variable in inference space (`t376`). A substitution built from the
+  declared signature installs correctly and then matches nothing, because no
+  body node ever mentions `a`. Acceptance oracle: `cargo nextest run
+  -p chelis-ir --no-fail-fast`.
+
+  Two adversarial-review follow-ups ride along. A generic callee with a
+  **callable parameter** stays on the inline path (a callable argument has
+  no host-type key), and that path now threads the call's checked result
+  type through the body like every other inline path, so
+  `apply[a](f: (a) -> a, x: a) -> Box[a]` resolves its constructor again.
+  A **non-recursive** call whose instantiation never resolves
+  (`pick[a, b](x: a, y: Box[b]) -> a` applied to `Empty`) falls back to
+  guarded value-level inlining instead of dying on the specialization
+  residue. The residue that remains (a genuinely unresolvable call) keeps
+  failing closed, with recursion-neutral wording — non-recursive calls can
+  reach it — citing the open chelis#1226 rather than the closed
+  chelis#1158 ([05-UNS-5]).
+
+  Not fixed here: a **recursive dimension-generic** function is never
+  monomorphized at all, so a generic ADT parameterised by its dimension
+  variable still fails at the code-generation boundary with an unresolved
+  host type variable. That is a distinct defect in the dimension/rank
+  lowering path rather than a residue of this one.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C
