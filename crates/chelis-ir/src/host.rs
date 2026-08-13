@@ -7150,7 +7150,19 @@ fn lower_app_host_expr(
     // preserved as calls to the owning specialized symbol. A call whose
     // instantiation never resolves stays on the fail-closed [05-UNS]
     // boundary below.
-    if top_level_fn_is_type_polymorphic(program, &name) {
+    // chelis#1216: the same reasoning covers a recursive function generic
+    // over an ERASED ADT dimension (chelis#940's `Frame[n] -> Column[n] ->
+    // tensor[n, _]` shape). Its standalone definition is elided exactly like
+    // the rank-polymorphic case above, and the inline path that would
+    // normally specialize it refuses on the recursive edge, so without this
+    // the call falls through to a plain call to a symbol that was never
+    // emitted, carrying the ADT's own unresolved parameter variable. A true
+    // rank variable is deliberately NOT routed here: variable rank is
+    // monomorphized through the DAG `tensor_rank_substitutions` path, not by
+    // specializing on a checked type application.
+    if top_level_fn_is_type_polymorphic(program, &name)
+        || top_level_fn_is_nested_rank_polymorphic(program, &name)
+    {
         return lower_recursive_generic_call(
             &app_expr,
             &name,
@@ -7369,10 +7381,27 @@ fn lower_recursive_generic_call(
     let definitions = adt_constructor_definitions(program);
     let mut param_tys = Vec::with_capacity(args.len());
     for arg in args {
-        let ty = canonicalize_representation_erased_adt_args(
+        let mut ty = canonicalize_representation_erased_adt_args(
             expr_host_type(arg, program, scope),
             &definitions,
         );
+        // chelis#1216: the structural walk does not reconstruct every node's
+        // type — a list literal lowers through `Cons` applications and comes
+        // back as a fresh inference variable — but the checker stamped the
+        // real type onto the node. Fall back to that stamp, and only adopt
+        // it once canonicalization has erased the representation-irrelevant
+        // ADT arguments: an argument whose sole unresolved part is an erased
+        // ADT dimension then yields a concrete key instead of sinking the
+        // whole application. A stamp that is still unresolved after erasure
+        // is genuinely underconstrained and is left to the residue.
+        if ty.is_unresolved()
+            && let Some(stamped) = expr_type(arg)
+        {
+            let stamped = canonicalize_representation_erased_adt_args(stamped, &definitions);
+            if !stamped.is_unresolved() {
+                ty = stamped;
+            }
+        }
         param_tys.push(ty);
     }
     let ret_ty = if !explicit_ty.is_unresolved() {
@@ -13516,5 +13545,67 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         );
         try_lower_compiled_program(&checked)
             .expect("a generic container over a dim-generic element must lower");
+    }
+
+    /// chelis#1216: a RECURSIVE function generic over an erased ADT
+    /// dimension.
+    ///
+    /// The inline path specializes the outer call but refuses the recursive
+    /// edge, and that edge then fell through to a plain call to a symbol the
+    /// emitter elided, carrying the ADT's own parameter variable to the
+    /// code-generation boundary. Such a callee is now monomorphized instead,
+    /// so the recursive edge has an in-progress specialization to complete
+    /// its slots from. coral's `column_lengths_match` -> `all_eq_len` is
+    /// this shape.
+    #[test]
+    fn recursive_dimension_generic_call_is_monomorphized() {
+        let checked = surf_check(
+            "type Col[n] =\n\
+               | FloatCol(tensor[n, f32])\n\
+             def zero_i64() -> int64 = cast(0, int64)\n\
+             def one_i64() -> int64 = cast(1, int64)\n\
+             def col_len[n](col: Col[n]) -> int64 = match col with {\n\
+               | FloatCol(xs) => numel(xs)\n\
+             }\n\
+             def all_eq_len[n](pairs: List[(string, Col[n])], expected: int64) -> bool =\n\
+               if eq(len(pairs), zero_i64()) then true else {\n\
+                 entry = index(pairs, zero_i64())\n\
+                 if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)\n\
+               }\n\
+             def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, int64))\n",
+        );
+        let lowered = try_lower_compiled_program(&checked)
+            .expect("a recursive dimension-generic call must lower through monomorphization");
+        let host = lowered
+            .host
+            .as_ref()
+            .expect("the program lowers a host lane");
+        // PR #1218 review: any-Monomorphized was too weak — pin the
+        // specialization to `all_eq_len` itself...
+        let specialization = host
+            .functions
+            .iter()
+            .find(|function| {
+                function.origin == HostFunctionOrigin::Monomorphized
+                    && function.name.starts_with("all_eq_len__mono_")
+            })
+            .expect("the specialization must belong to `all_eq_len`, not merely exist");
+        // ...and pin its recursive edge to the OWNING specialized symbol:
+        // the reported defect was precisely that edge falling through to a
+        // plain call to the elided generic symbol. Direct recursion at one
+        // instantiation memoizes to one symbol, so the edge must name the
+        // specialization it lives in.
+        let body = format!("{:?}", specialization.body);
+        assert!(
+            body.contains(&format!("function: \"{}\"", specialization.name)),
+            "the recursive edge must call the owning specialized symbol \
+             `{}`, got body:\n{body}",
+            specialization.name
+        );
+        assert!(
+            !body.contains("function: \"all_eq_len\""),
+            "no edge may still call the elided generic symbol `all_eq_len`, \
+             got body:\n{body}"
+        );
     }
 }
