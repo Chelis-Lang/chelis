@@ -86,29 +86,55 @@ pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// This fingerprint adds a discriminator derived from the running
 /// executable (byte length + modification time), which changes on every
-/// rebuild while staying stable across invocations of one binary. It is
-/// deliberately conservative: if the executable cannot be inspected, it
-/// degrades to [`COMPILER_VERSION`] (the previous behaviour), and a
-/// same-binary copy that lands at a different path or timestamp only
-/// costs a cache miss (recompile), never a stale hit.
+/// rebuild while staying stable across invocations of one binary. When
+/// the executable cannot be inspected — `current_exe`, its metadata, or
+/// its mtime read fails — the fingerprint fails toward cache MISSES,
+/// never toward sharing: a per-process discriminator (pid plus a random
+/// nonce, pinned by the same `OnceLock`) takes the inspection's place,
+/// so a degraded binary simply never shares compiled contexts across
+/// processes. That is a performance cost in a rare mode, not a
+/// correctness cost; collapsing to bare [`COMPILER_VERSION`] instead
+/// would let two uninspectable builds share entries again — the exact
+/// defect this fingerprint exists to close. A same-binary copy that
+/// lands at a different path or timestamp likewise only costs a cache
+/// miss (recompile), never a stale hit.
 pub fn build_fingerprint() -> &'static str {
     static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FINGERPRINT.get_or_init(|| {
-        let Ok(exe) = std::env::current_exe() else {
-            return COMPILER_VERSION.to_string();
-        };
-        let Ok(meta) = std::fs::metadata(&exe) else {
-            return COMPILER_VERSION.to_string();
-        };
-        let len = meta.len();
-        let mtime_nanos = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("{COMPILER_VERSION}+{len:x}.{mtime_nanos:x}")
+        let inspected = std::env::current_exe().ok().and_then(|exe| {
+            let meta = std::fs::metadata(&exe).ok()?;
+            let mtime_nanos = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())?;
+            Some((meta.len(), mtime_nanos))
+        });
+        fingerprint_string(inspected)
     })
+}
+
+/// The fingerprint text for one inspection result. Split from
+/// [`build_fingerprint`] so the degraded arm is testable: the production
+/// path cannot be made to fail its metadata read on demand.
+fn fingerprint_string(inspected: Option<(u64, u128)>) -> String {
+    match inspected {
+        Some((len, mtime_nanos)) => format!("{COMPILER_VERSION}+{len:x}.{mtime_nanos:x}"),
+        None => {
+            // Fail toward misses, not sharing (see `build_fingerprint`).
+            // The nonce comes from `RandomState`, whose per-instance keys
+            // are process-random, so two degraded processes disagree even
+            // under pid reuse.
+            use std::hash::{BuildHasher, Hasher};
+            let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+            hasher.write_u32(std::process::id());
+            let nonce = hasher.finish();
+            format!(
+                "{COMPILER_VERSION}+degraded.{pid:x}.{nonce:x}",
+                pid = std::process::id()
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -130,6 +156,36 @@ mod build_fingerprint_tests {
             "fingerprint {} must extend the compiler version {}",
             super::build_fingerprint(),
             super::COMPILER_VERSION
+        );
+    }
+
+    /// chelis#1156 review: when the executable cannot be inspected the
+    /// fingerprint must fail toward cache MISSES, never toward sharing.
+    /// Collapsing to the bare release version would let two
+    /// uninspectable builds share compiled contexts again, in the one
+    /// code path where nothing would ever report that it happened.
+    #[test]
+    fn degraded_fingerprint_does_not_collapse_to_the_release_version() {
+        let degraded = super::fingerprint_string(None);
+        assert_ne!(degraded, super::COMPILER_VERSION);
+        assert!(
+            degraded.starts_with(&format!("{}+degraded.", super::COMPILER_VERSION)),
+            "degraded fingerprint must be marked as such, got {degraded}"
+        );
+    }
+
+    /// The degraded discriminator must not be a constant: two draws must
+    /// differ, so a degraded binary never shares compiled contexts across
+    /// processes. Distinctness across two draws in ONE process is a
+    /// stronger property than the cross-process one it stands in for; the
+    /// production path pins one draw per process through its `OnceLock`,
+    /// which `build_fingerprint_is_stable_across_calls` above locks.
+    #[test]
+    fn degraded_fingerprints_are_distinct_per_draw() {
+        assert_ne!(
+            super::fingerprint_string(None),
+            super::fingerprint_string(None),
+            "the degraded discriminator must not be a constant"
         );
     }
 }

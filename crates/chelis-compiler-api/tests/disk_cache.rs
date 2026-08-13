@@ -636,7 +636,7 @@ fn cache_entry_from_a_different_compiler_build_is_a_clean_miss() {
     // identity carries a different one must be a clean miss.
     //
     // chelis#1156 sharpened this: the identity previously carried
-    // `COMPILER_VERSION`, which is a RELEASE identity, not a build one —
+    // `COMPILER_VERSION`, which is a RELEASE identity, not a build one;
     // two binaries from different commits share it until the next version
     // bump, so they shared cache entries and checked programs under each
     // other's type semantics. The identity now carries
