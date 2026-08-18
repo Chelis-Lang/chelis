@@ -1247,6 +1247,83 @@ fn eval_scalar_value_roots_render_bare() {
     }
 }
 
+/// GREEN regression (chelis#862, closed by [05-OBS-6] under chelis#912): a
+/// program whose ONLY display root is a unit-valued PRINT root renders that
+/// root WITH its `name = ` label.
+///
+/// Eval used to drop the prefix for exactly this shape - a lone bare `()`
+/// where the compiled lane printed `out = ()`. Adding any second root made
+/// eval label the unit root normally, so the divergence class was precisely
+/// "programs whose only display root is print-valued", which is why the
+/// multi-root rows elsewhere in this file never caught it. [05-OBS-6] removed
+/// the bare-when-single form in both lanes; this cell is the regression lock.
+///
+/// Two deliberate choices, both load-bearing:
+///
+/// * The assertion is on the ROOT RENDER LINE, never the print transcript.
+///   `c_suffixed_f32_literal_widens_from_its_stored_width` above builds the
+///   same single-print-root shape but asserts on `tensor_lines().first()`, so
+///   an assertion copied from there would pass vacuously for a second,
+///   independent reason.
+/// * No `c_toolchain_available()` guard, because none is needed: the
+///   divergence was eval-internal (the C lane was already correct), so this
+///   cell must not inherit the silent skip that
+///   `cross_lane_stdout_is_byte_identical_where_bits_agree` opens with.
+///   Joining the single-print-root shape to that cross-lane corpus is a
+///   separate follow-up, not this regression.
+#[test]
+fn eval_unit_valued_sole_print_root_keeps_its_name_issue_862() {
+    // (label, program, expected sole root line). Each program's only root is
+    // the unit-valued print binding; the binding name varies so the label is
+    // proven to come from the binding, not from a constant.
+    let rows: &[(&str, String, &str)] = &[
+        (
+            "tensor-reduction-root",
+            "module M.Main\n\
+             def f(x: tensor[4, f32]) -> tensor[f32] = sum(x, 0)\n\
+             out = print(f(to_tensor([1.5, 4.5, 2.5, 0.5])))\n"
+                .to_string(),
+            "out = ()",
+        ),
+        (
+            "f64-scalar-root",
+            "module M.Main\n\
+             def run() -> f64 = cast(0.1, f64)\n\
+             shown = print(run())\n"
+                .to_string(),
+            "shown = ()",
+        ),
+        (
+            "int32-scalar-root-distinct-name",
+            "module M.Main\n\
+             def run() -> int32 = 7\n\
+             whatever = print(run())\n"
+                .to_string(),
+            "whatever = ()",
+        ),
+    ];
+
+    for (label, program, expected_root) in rows {
+        let out = eval_stdout(program).unwrap_or_else(|error| panic!("[{label}] eval: {error}"));
+        let unit_lines: Vec<&str> = out
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.ends_with("()"))
+            .collect();
+        assert_eq!(
+            unit_lines,
+            vec![*expected_root],
+            "[{label}] [05-OBS-6]: the sole unit-valued print root is labelled, \
+             and the bare-when-single form is gone. Full output:\n{out}"
+        );
+        assert!(
+            !out.lines().any(|line| line.trim() == "()"),
+            "[{label}] [05-OBS-6]: no exit may render a root as a bare `()`. \
+             Full output:\n{out}"
+        );
+    }
+}
+
 // ===========================================================================
 // GREEN - chelis#732 Phase 1: the frozen eval grammar (§C1.3 / spec/05 §8.1)
 //
@@ -2325,11 +2402,14 @@ fn cross_lane_stdout_is_byte_identical_where_bits_agree() {
              root = run()\n"
                 .to_string(),
         ),
-        // The program carries a VALUE root beside the print: a
-        // single-print-root program hits the chelis#862 unit-root naming
-        // divergence (eval renders the lone unit root bare `()` while the
-        // compiled lane names it `out = ()`), which is a root-labeling
-        // discovery, not a numeric-rendering cell.
+        // The program carries a VALUE root beside the print. That shape was
+        // originally chosen to avoid the chelis#862 unit-root naming
+        // divergence (eval rendered a LONE unit root bare while the compiled
+        // lane named it); [05-OBS-6] closed that, and
+        // `eval_unit_valued_sole_print_root_keeps_its_name_issue_862` above
+        // locks it. The multi-root shape is kept here because moving this
+        // cell to the single-print-root form would widen the §C2.3 corpus,
+        // which is a separate change - the corpus may grow but never shrink.
         (
             "rank0-reduction-root",
             "module M.Main\n\
