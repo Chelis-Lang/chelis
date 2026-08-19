@@ -63,8 +63,8 @@ changes, seven categories of files must change with it:
 
    Not covered here: `crates/chelis-compiler-api/tests/compile_fail/
    pipeline_artifacts/Cargo.lock` is the same shape, with the same
-   `--locked` gate step. It is noted on chelis#1128 and left to a
-   follow-up by that issue's scope guard.
+   `--locked` gate step. It is tracked as chelis#1234, split out of
+   chelis#1128 by that issue's scope guard.
 
 This script is the single, scriptable entry point for the release bump.
 These tripwires fail loudly when the categories drift, pointing future
@@ -150,6 +150,7 @@ PINNED_REAL_LOCK_DIRS: list[Path] = [
 # The pipeline-artifacts fixture belongs in this list on the same grounds
 # and is deliberately absent: chelis#1128 scoped its own PR to the
 # checkpoint fixture and asked for siblings to be reported, not fixed.
+# Adding it is chelis#1234.
 COMPILE_FAIL_FIXTURE_MANIFESTS: list[Path] = [
     REPO_ROOT / "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
 ]

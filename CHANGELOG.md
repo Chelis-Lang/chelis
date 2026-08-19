@@ -88,9 +88,9 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.lock`
   — which, contrary to the issue's assumption, is also a `gate.py` stage
   and so goes red on the next bump too. Per that issue's scope guard it
-  is reported, not fixed here, and remains open work on chelis#1128. The
-  root `Cargo.lock` is not affected: nothing runs `--locked` at the
-  workspace root, so it re-resolves on the next build.
+  is reported, not fixed here, and split out as chelis#1234. The root
+  `Cargo.lock` is not affected: nothing runs `--locked` at the workspace
+  root, so it re-resolves on the next build.
 
   Acceptance oracle: `.venv/bin/python -m unittest
   scripts.test_bump_compiler_pins`, whose new
