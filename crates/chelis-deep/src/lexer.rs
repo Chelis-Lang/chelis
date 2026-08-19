@@ -704,6 +704,53 @@ mod tests {
         );
     }
 
+    /// chelis#683: `i64::MIN` is writable as a Deep integer literal.
+    ///
+    /// Surf needs a dedicated `IntMinMagnitude` sentinel because its lexer
+    /// reads the bare magnitude and the parser applies negation separately, so
+    /// `2^63` overflows `i64` before the sign is known. Deep does not have that
+    /// problem: `lex_number` captures `start` BEFORE the sign and then slices
+    /// the token as `&source[start..i]`, so the string handed to
+    /// `parse::<i64>()` is already signed and the bare magnitude is never
+    /// parsed on its own. (Skipping the `-` is what lets the digit scan
+    /// advance; it is the `start` capture that puts the sign in the slice.
+    /// Both are load-bearing - drop either and every negative literal breaks.)
+    ///
+    /// Note the asymmetry inside this same function: the hex and binary arms
+    /// DO strip the sign, parse the magnitude, and negate afterwards - the Surf
+    /// shape - which is why hex above `i64::MAX` still fails. That is the
+    /// issue's "Related" question and is deliberately left alone here.
+    ///
+    /// These cells pin the decimal behaviour, which is the reason no sentinel
+    /// is mirrored into this crate.
+    #[test]
+    fn i64_boundary_literals_lex_exactly() {
+        assert_eq!(
+            lex_kinds("-9223372036854775808 9223372036854775807"),
+            vec![TokenKind::Int(i64::MIN), TokenKind::Int(i64::MAX)]
+        );
+        assert_eq!(
+            lex_kinds("-9223372036854775808i64 9223372036854775807i64"),
+            vec![
+                TokenKind::TypedInt(i64::MIN, LiteralSuffix::I64),
+                TokenKind::TypedInt(i64::MAX, LiteralSuffix::I64),
+            ]
+        );
+    }
+
+    /// The negative half of the cell above: the UNSIGNED magnitude `2^63` is
+    /// not an `i64` and must fail to lex. If this ever starts succeeding, the
+    /// sign is no longer what makes `i64::MIN` representable and the reasoning
+    /// in `i64_boundary_literals_lex_exactly` needs rechecking.
+    #[test]
+    fn unsigned_i64_min_magnitude_is_a_lex_error() {
+        let err = lex("9223372036854775808").expect_err("2^63 is not an i64");
+        assert!(
+            matches!(err, LexError::InvalidNumber { .. }),
+            "expected InvalidNumber, got: {err:?}"
+        );
+    }
+
     #[test]
     fn integers() {
         assert_eq!(
