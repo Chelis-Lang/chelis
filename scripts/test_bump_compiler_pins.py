@@ -255,33 +255,27 @@ class LockRegenerationWiringTests(unittest.TestCase):
 
 
 class CompileFailFixtureLockTests(unittest.TestCase):
-    """Category 7: the committed `Cargo.lock` beside each out-of-workspace
+    """Category 7: the committed `Cargo.lock` beside an out-of-workspace
     compile-fail fixture pins the real crates at the workspace version, and
-    each fixture's gate step compiles it with `cargo check --locked`. Left
+    the fixture's gate step compiles it with `cargo check --locked`. Left
     behind by a bump, `--locked` refuses to update it and the gate reports
     the fixture's *diagnostic* as missing — it reads as a compile-fail
     regression rather than a stale lock (chelis#1128, hit cutting 0.18.2).
     """
 
-    GATE_SCRIPTS = (
-        "check_checkpoint_compile_fail",
-        "check_pipeline_core_compile_fail",
-    )
+    GATE_SCRIPTS = ("check_checkpoint_compile_fail",)
 
-    def test_inventory_covers_both_gated_fixtures(self):
+    def test_inventory_covers_the_gated_fixture(self):
         relative = {
             path.relative_to(bump_mod.REPO_ROOT).as_posix()
             for path in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS
         }
         self.assertEqual(
             relative,
-            {
-                "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
-                "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
-            },
+            {"crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml"},
         )
 
-    def test_inventory_matches_the_gate_scripts_manifest_constants(self):
+    def test_inventory_matches_the_gate_script_manifest_constant(self):
         # The parity lock the "keep in sync" comment asks for: a fixture that
         # moves must move in both places, or the bump silently stops
         # regenerating the lock its gate step is about to reject.
