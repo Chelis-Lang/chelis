@@ -67,6 +67,37 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **chelis#1128: a version bump no longer leaves the compile-fail
+  fixtures' `Cargo.lock` files stale.** Each out-of-workspace
+  compile-fail fixture is its own one-crate workspace depending on the
+  real crates by path, so its committed lock records them at
+  `workspace.package.version`, and each fixture's gate step compiles it
+  with `cargo check --locked` — which refuses to update a stale lock and
+  then reports the fixture's *diagnostics* as missing. The failure
+  therefore reads as a compile-fail regression rather than as the
+  unrelated lockfile it is, and it fires under release pressure (hit
+  cutting 0.18.2). `scripts/bump_compiler_pins.py` now re-resolves both
+  locks with `cargo update --workspace` after the version rewrite, which
+  rewrites only the local path-package versions and leaves every registry
+  pin and checksum alone. This is category 7 in that script's docstring,
+  alongside the 0.9.0 embedded-bundle and 0.15.0 Hull-manifest failures
+  the earlier categories record.
+
+  The sweep the issue asked for found one sibling with the identical
+  defect —
+  `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.lock`
+  — and, contrary to the issue's assumption, it is also a `gate.py`
+  stage, so it too went red on the next bump (with six phantom
+  diagnostic regressions in the message). Both are covered. The root
+  `Cargo.lock` is not affected: nothing runs `--locked` at the workspace
+  root, so it re-resolves on the next build.
+
+  Acceptance oracle: `.venv/bin/python -m unittest
+  scripts.test_bump_compiler_pins`, whose new
+  `test_each_lock_records_the_live_workspace_version` is the standing
+  tripwire — it names the stale lock and the fix instead of a phantom
+  diagnostic regression.
+
 - **chelis#1200: a destructuring `let` no longer poisons the rest of its
   block.** The Linearity-F2 use-after-consume gate was scoped to the
   destructuring let's *body*, and in a block every later statement is

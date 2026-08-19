@@ -5,10 +5,13 @@ or `python3 scripts/test_bump_compiler_pins.py`.
 """
 
 import importlib.util
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def _load_module():
@@ -26,6 +29,27 @@ def _load_module():
 
 
 bump_mod = _load_module()
+
+
+def _load_sibling(name: str):
+    """Import a `scripts/<name>.py` gate script for its constants only."""
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(name, here / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _workspace_version() -> str:
+    """Read `[workspace.package] version` out of the root Cargo.toml."""
+    text = (bump_mod.REPO_ROOT / "Cargo.toml").read_text()
+    section = text.split("[workspace.package]", 1)[1]
+    section = section.split("\n[", 1)[0]
+    m = re.search(r'^\s*version\s*=\s*"([^"]+)"', section, re.MULTILINE)
+    assert m is not None, "root Cargo.toml has no [workspace.package] version"
+    return m.group(1)
 
 
 class BumpWorkspaceVersionTests(unittest.TestCase):
@@ -228,6 +252,123 @@ class LockRegenerationWiringTests(unittest.TestCase):
             "examples/nautilus_quantile_contract/fixtures/nautilus/reef.toml",
             relative,
         )
+
+
+class CompileFailFixtureLockTests(unittest.TestCase):
+    """Category 7: the committed `Cargo.lock` beside each out-of-workspace
+    compile-fail fixture pins the real crates at the workspace version, and
+    each fixture's gate step compiles it with `cargo check --locked`. Left
+    behind by a bump, `--locked` refuses to update it and the gate reports
+    the fixture's *diagnostic* as missing — it reads as a compile-fail
+    regression rather than a stale lock (chelis#1128, hit cutting 0.18.2).
+    """
+
+    GATE_SCRIPTS = (
+        "check_checkpoint_compile_fail",
+        "check_pipeline_core_compile_fail",
+    )
+
+    def test_inventory_covers_both_gated_fixtures(self):
+        relative = {
+            path.relative_to(bump_mod.REPO_ROOT).as_posix()
+            for path in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS
+        }
+        self.assertEqual(
+            relative,
+            {
+                "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
+                "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
+            },
+        )
+
+    def test_inventory_matches_the_gate_scripts_manifest_constants(self):
+        # The parity lock the "keep in sync" comment asks for: a fixture that
+        # moves must move in both places, or the bump silently stops
+        # regenerating the lock its gate step is about to reject.
+        gated = {_load_sibling(name).MANIFEST for name in self.GATE_SCRIPTS}
+        self.assertEqual(set(bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS), gated)
+
+    def test_each_manifest_ships_a_committed_lock(self):
+        # The regeneration target must be real, not aspirational.
+        for manifest in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS:
+            self.assertTrue(manifest.is_file(), manifest)
+            self.assertTrue(manifest.with_name("Cargo.lock").is_file(), manifest)
+
+    def test_each_lock_records_the_live_workspace_version(self):
+        # The tripwire for the class itself: this is the assertion that goes
+        # red when a bump lands without the regeneration step, and it names
+        # the lock instead of a phantom diagnostic regression.
+        version = _workspace_version()
+        for manifest in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS:
+            lock = manifest.with_name("Cargo.lock")
+            # `assertTrue`, not `assertIn`: the haystack is a whole lockfile,
+            # and dumping it would bury the one line that names the fix.
+            self.assertTrue(
+                f'version = "{version}"' in lock.read_text(),
+                f"{lock.relative_to(bump_mod.REPO_ROOT)} does not pin the "
+                f"workspace version {version}. Re-run "
+                "`scripts/bump_compiler_pins.py <version>` so its gate step's "
+                "`cargo check --locked` accepts the lock.",
+            )
+
+    def test_regeneration_runs_cargo_update_once_per_manifest(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as runner:
+            bump_mod.regenerate_compile_fail_fixture_locks(dry_run=False)
+        invoked = [call.args[0] for call in runner.call_args_list]
+        self.assertEqual(
+            len(invoked), len(bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS)
+        )
+        for argv, manifest in zip(invoked, bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS):
+            self.assertEqual(argv[:3], ["cargo", "update", "--workspace"])
+            self.assertEqual(argv[3:], ["--manifest-path", str(manifest)])
+
+    def test_regeneration_never_passes_locked_or_regenerates_wholesale(self):
+        # `--locked` would reproduce the very failure this step exists to
+        # prevent; `generate-lockfile` would drag unrelated registry
+        # dependencies forward inside a release change set.
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ) as runner:
+            bump_mod.regenerate_compile_fail_fixture_locks(dry_run=False)
+        for call in runner.call_args_list:
+            argv = call.args[0]
+            self.assertNotIn("--locked", argv)
+            self.assertNotIn("generate-lockfile", argv)
+
+    def test_dry_run_reports_without_invoking_cargo(self):
+        with mock.patch.object(bump_mod.subprocess, "run") as runner:
+            bump_mod.regenerate_compile_fail_fixture_locks(dry_run=True)
+        runner.assert_not_called()
+
+    def test_nonzero_cargo_exit_is_fatal(self):
+        with mock.patch.object(
+            bump_mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 101),
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                bump_mod.regenerate_compile_fail_fixture_locks(dry_run=False)
+        self.assertIn("cargo update", str(caught.exception))
+
+    def test_missing_manifest_is_fatal_before_cargo_runs(self):
+        saved = bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS
+        bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS = [
+            bump_mod.REPO_ROOT / "crates/does-not-exist/Cargo.toml"
+        ]
+        try:
+            with mock.patch.object(bump_mod.subprocess, "run") as runner:
+                with self.assertRaises(SystemExit) as caught:
+                    bump_mod.regenerate_compile_fail_fixture_locks(dry_run=False)
+            runner.assert_not_called()
+        finally:
+            bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS = saved
+        self.assertIn("does-not-exist", str(caught.exception))
 
 
 if __name__ == "__main__":
