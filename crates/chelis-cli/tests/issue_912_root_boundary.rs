@@ -34,14 +34,29 @@ const IGNORE_LEDGER: &[LedgerRow] = &[
     LedgerRow {
         test: "manifest_completeness_eval_lane",
         blocked_by: "chelis#1079 - the root manifest is computed and discarded,                      so no manifest is reachable to iterate. chelis#1082                      (Expr::Node-blind manifest walkers) must land first or the                      manifest is silently empty.",
-        rerun: "cargo test -p chelis-cli --test issue_912_root_boundary --                 --ignored manifest_completeness_eval_lane",
+        rerun: concat!(
+            "cargo test -p chelis-cli --test issue_912_root_boundary",
+            " -- --ignored manifest_completeness_eval_lane"
+        ),
     },
     LedgerRow {
         test: "manifest_completeness_c_lane",
         blocked_by: "chelis#1079, as above. The C lane additionally needs                      `requires_main` threaded to a real caller: today all three                      `cmd_build_c_result` sites pass `None` and a source-text                      scan decides, which spec/05 forbids as [05-UNS-1]                      authority.",
-        rerun: "cargo test -p chelis-cli --test issue_912_root_boundary --                 --ignored manifest_completeness_c_lane",
+        rerun: concat!(
+            "cargo test -p chelis-cli --test issue_912_root_boundary",
+            " -- --ignored manifest_completeness_c_lane"
+        ),
     },
 ];
+
+/// The one command shape a ledger row may carry, as a function of the cell name.
+///
+/// Derived rather than trusted: chelis#1084 review found that a `contains`
+/// check on `--ignored` and the test name accepts `not-a-command --ignored
+/// <test>`. A row that cannot be spelled any other way cannot drift.
+fn canonical_rerun(test: &str) -> String {
+    format!("cargo test -p chelis-cli --test issue_912_root_boundary -- --ignored {test}")
+}
 
 struct LedgerRow {
     test: &'static str,
@@ -111,9 +126,11 @@ fn ignore_inventory_equals_the_declared_ledger() {
             "ledger row `{}` must name its blocking issue as `chelis#NNN`",
             row.test
         );
-        assert!(
-            row.rerun.contains("--ignored") && row.rerun.contains(row.test),
-            "ledger row `{}` must carry the exact command that re-runs that cell",
+        assert_eq!(
+            row.rerun,
+            canonical_rerun(row.test),
+            "ledger row `{}` must carry the exact command that re-runs that cell, \
+             character for character",
             row.test
         );
     }
@@ -139,7 +156,23 @@ fn eval_file(source: &str) -> (String, String, bool) {
     (stdout, stderr, out.status.success())
 }
 
-fn build_c(source: &str) -> (String, String, bool) {
+/// A `chelis build --target c` run plus the C it actually emitted.
+///
+/// The emitted translation unit is the only observable artifact this target
+/// produces - `build` has no `--json` or manifest flag - so a test that wants
+/// to prove a root survived the build has to read `prog.c`. Asserting on exit
+/// status alone cannot distinguish a retained root from a silently dropped one
+/// (chelis#1084 review).
+struct CBuild {
+    success: bool,
+    stderr: String,
+    /// Contents of the emitted `prog.c`, empty if the build wrote none.
+    emitted_c: String,
+    /// Contents of the emitted `prog.h`, empty if the build wrote none.
+    emitted_h: String,
+}
+
+fn build_c(source: &str) -> CBuild {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("prog.ch");
     std::fs::write(&file, source).unwrap();
@@ -150,6 +183,78 @@ fn build_c(source: &str) -> (String, String, bool) {
         .current_dir(dir.path())
         .output()
         .unwrap();
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+    CBuild {
+        success: out.status.success(),
+        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+        emitted_c: read("prog.c"),
+        emitted_h: read("prog.h"),
+    }
+}
+
+/// Build a throwaway Reef package whose `mylib` path dependency exports a
+/// generic def over a symbolic dimension, with `entry_body` as the entry file.
+///
+/// chelis#848 is specifically about an *unused package import* dragging an
+/// unrelated symbolic-input demand into eval, so the repro needs a real
+/// package and a real import. Before the chelis#1084 review this cell used a
+/// standalone file with a local dead `helper` def and no import at all, which
+/// could have stayed green straight through a regression of the actual bug.
+fn unused_import_package(entry_body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("myapp");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("mylib/src")).unwrap();
+    let version = env!("CARGO_PKG_VERSION");
+
+    std::fs::write(
+        root.join("reef.toml"),
+        format!(
+            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\
+             compiler = \"={version}\"\nmodule_prefix = \"App\"\n\n\
+             [dependencies]\nmylib = {{ path = \"./mylib\" }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("reef.lock"),
+        format!(
+            "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\n\n\
+             [[dependencies]]\nname = \"mylib\"\nversion = \"0.1.0\"\n\
+             compiler = \"={version}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n\
+             [dependencies.source]\nkind = \"path\"\npath = \"./mylib\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("mylib/reef.toml"),
+        format!(
+            "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\n\
+             compiler = \"={version}\"\nmodule_prefix = \"Mylib\"\n"
+        ),
+    )
+    .unwrap();
+    // The symbolic dimension `k` is the whole point: this is the def whose
+    // input demand chelis#848 leaked into an unrelated root.
+    std::fs::write(
+        root.join("mylib/src/shapes.ch"),
+        "module Mylib.Shapes\nexport (scale)\n\n\
+         def scale(a: tensor[k, f32]) -> tensor[k, f32] = mul(a, a)\n",
+    )
+    .unwrap();
+
+    let entry = root.join("src/probe.ch");
+    std::fs::write(&entry, entry_body).unwrap();
+    (dir, entry)
+}
+
+fn eval_in_package(entry: &std::path::Path) -> (String, String, bool) {
+    let out = Command::new(chelis_bin())
+        .args(["eval", "--file"])
+        .arg(entry)
+        .arg("--allow-style-violations")
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     (stdout, stderr, out.status.success())
@@ -157,29 +262,55 @@ fn build_c(source: &str) -> (String, String, bool) {
 
 // ─── #848 repro: symbolic-dim library defs block eval ───────────────────────
 
-/// A program that imports a library def with symbolic dims the user's root
-/// doesn't touch evaluates successfully. It used to error with "missing
-/// required input `a` for symbolic dimension `k`"; un-ignored under
-/// chelis#1084 after re-running it against `main`.
+/// Evaluating a root that does not touch an *imported* library def with
+/// symbolic dims succeeds. On chelis#848 the unused import alone made eval
+/// demand an unrelated input: `missing required input `a` for symbolic
+/// dimension `k``. Un-ignored under chelis#1084; rebuilt onto a real package
+/// import under that PR's review, because the earlier standalone-file shape
+/// did not exercise the bug at all.
 #[test]
 fn issue_848_dead_library_symbolic_dims_do_not_block_eval() {
-    // This test needs a library with symbolic-dim defs composed onto the
-    // program. The exact shape depends on the eval-in-context machinery.
-    // Placeholder: a program that would trigger the bug on origin/main.
-    let source = r#"
-def helper(a: tensor[k, f32]) -> tensor[k, f32] = mul(a, a)
-x = to_tensor([1.0, 2.0, 3.0])
-result = mul(x, x)
-"#;
-    let (stdout, stderr, success) = eval_file(source);
+    let (_dir, entry) = unused_import_package(
+        "module App.Probe\nimport Mylib.Shapes (scale)\n\nbench = cast(0.0, f32)\n",
+    );
+    let (stdout, stderr, success) = eval_in_package(&entry);
     assert!(
         success,
-        "eval should succeed: dead library symbolic dims must not block.\n\
+        "eval of an unused symbolic-dim import must succeed.\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    // The exact chelis#848 failure mode, named so a regression is unmistakable.
+    assert!(
+        !stderr.contains("missing required input"),
+        "chelis#848 regression: the unused import demanded an input.\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("bench"),
+        "the unrelated root `bench` must still surface.\nGot: {stdout}"
+    );
+}
+
+/// Negative control for the cell above: the import it relies on must actually
+/// resolve, or that cell would pass for the wrong reason.
+///
+/// Without this, a typo in the module name, a broken `reef.lock`, or a change
+/// that stopped composing path dependencies would leave the #848 cell green
+/// while testing nothing. A bogus import fails, so the sibling's success is
+/// evidence that a real library was composed onto the program.
+#[test]
+fn issue_848_fixture_import_is_load_bearing() {
+    let (_dir, entry) = unused_import_package(
+        "module App.Probe\nimport Mylib.NotThere (scale)\n\nbench = cast(0.0, f32)\n",
+    );
+    let (stdout, stderr, success) = eval_in_package(&entry);
+    assert!(
+        !success,
+        "an unresolvable import must fail, else the #848 cell proves nothing.\n\
          stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("result"),
-        "root `result` must appear in output"
+        stderr.contains("unresolved import"),
+        "the failure must be the import itself.\nstderr: {stderr}"
     );
 }
 
@@ -229,12 +360,21 @@ result = concat(a, b)
 
 // ─── Precision determinism ──────────────────────────────────────────────────
 
-/// An f64-declared root does not produce a hard error under `chelis build
-/// --target c` when a print is absent: f64 roots route Host for the C target
-/// (the tensor DAG cannot deliver f64), so both cases succeed. Un-ignored
-/// under chelis#1084 after re-running it against `main`.
+/// An f64-declared root is retained by `chelis build --target c`, with and
+/// without a print in the file.
+///
+/// Un-ignored under chelis#1084, then rewritten under that PR's review, which
+/// found the cell asserted only two exit statuses - a build that silently
+/// dropped the f64 root would have passed it.
+///
+/// The rewrite also corrected the cell's premise. It used to be named
+/// `..._routes_host_for_c_target` and claimed f64 roots route Host "because
+/// the tensor DAG cannot deliver f64". The emitted C says otherwise: the
+/// no-print build hands `y` back as one of `prog()`'s two tensor outputs,
+/// computed by a kernel over `double`. Retention is what this cell can honestly
+/// assert; lane choice is not what happens.
 #[test]
-fn precision_determinism_f64_root_routes_host_for_c_target() {
+fn precision_determinism_f64_root_is_retained_by_c_build() {
     let source_no_print = r#"
 x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
 y = mul(x, x)
@@ -244,24 +384,55 @@ x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)
 y = mul(x, x)
 z = print("host")
 "#;
-    let (_, _, success_no_print) = build_c(source_no_print);
-    let (_, _, success_with_print) = build_c(source_with_print);
+    let no_print = build_c(source_no_print);
+    let with_print = build_c(source_with_print);
+
     assert!(
-        success_no_print,
-        "f64 root without print must succeed (routes Host via precision check)"
+        no_print.success,
+        "f64 root without print must build.\nstderr: {}",
+        no_print.stderr
     );
     assert!(
-        success_with_print,
-        "f64 root with print must succeed (routes Host via HostOnly builtin)"
+        with_print.success,
+        "f64 root with print must build.\nstderr: {}",
+        with_print.stderr
+    );
+
+    // Without a print the program is emitted in library form, and BOTH roots
+    // must come back as outputs. A dropped `y` shows up here as `1`.
+    assert!(
+        no_print.emitted_h.contains("void prog("),
+        "no-print build must emit the library entry point.\nprog.h: {}",
+        no_print.emitted_h
+    );
+    assert!(
+        no_print
+            .emitted_c
+            .contains(r#"outputs are required\n", 2)"#),
+        "both roots must be retained as outputs of `prog`; a dropped f64 root \
+         leaves 1.\nprog.c: {}",
+        no_print.emitted_c
+    );
+
+    // With a print the program is emitted as a host main, which renders roots
+    // by name - so the root NAME is observable in this shape.
+    assert!(
+        with_print.emitted_c.contains(r#"printf("%s = ", "y")"#),
+        "the host-main build must render root `y` by name.\nprog.c: {}",
+        with_print.emitted_c
     );
 }
 
 // ─── Cohabitation independence ──────────────────────────────────────────────
 
 /// A root's numeric value does not change based on what other defs are in the
-/// same file. Un-ignored under chelis#1084 after re-running it against `main`;
-/// both lanes render a real `y = tensor(...)` line, so the comparison below is
-/// not the vacuous `None == None`.
+/// same file.
+///
+/// Un-ignored under chelis#1084. The equality below compares two `Option`s, so
+/// that PR's review reproduced a vacuous pass by making both inputs invalid:
+/// neither lane rendered `y`, and `None == None` held. Both evals are now
+/// required to succeed and to actually render the root before the values are
+/// compared.
 #[test]
 fn cohabitation_independence_same_root_different_cohabitants() {
     let source_alone = r#"
@@ -273,8 +444,17 @@ x = to_tensor([1.0, 2.0, 3.0, 4.0])
 y = mul(x, x)
 z = print("hello")
 "#;
-    let (out_alone, _, _) = eval_file(source_alone);
-    let (out_with, _, _) = eval_file(source_with_print_def);
+    let (out_alone, err_alone, ok_alone) = eval_file(source_alone);
+    let (out_with, err_with, ok_with) = eval_file(source_with_print_def);
+    assert!(
+        ok_alone,
+        "eval of the lone root failed.\nstderr: {err_alone}"
+    );
+    assert!(
+        ok_with,
+        "eval with a cohabiting def failed.\nstderr: {err_with}"
+    );
+
     // Extract the y = ... line from each
     let y_alone = out_alone
         .lines()
@@ -282,6 +462,18 @@ z = print("hello")
     let y_with = out_with
         .lines()
         .find(|l| l.starts_with("y =") || l.contains("y ="));
+
+    // Guard the comparison before making it: two absent roots are equal, and
+    // that equality proves nothing about cohabitation.
+    assert!(
+        y_alone.is_some(),
+        "root `y` did not render alone.\n{out_alone}"
+    );
+    assert!(
+        y_with.is_some(),
+        "root `y` did not render beside a print.\n{out_with}"
+    );
+
     assert_eq!(
         y_alone, y_with,
         "root `y` must produce the same value regardless of cohabiting defs.\n\
