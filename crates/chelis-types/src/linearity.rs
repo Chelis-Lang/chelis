@@ -1321,9 +1321,7 @@ impl Checker {
                             diag_site(expr)
                         ),
                     ),
-                    vec![format!(
-                        "Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume"
-                    )],
+                    vec!["Structural ownership consumes cannot be auto-copied; move the later use before the consume or copy before the structural consume".to_string()],
                 ));
             }
             Some(BindingState::Consumed(consumed_at))
