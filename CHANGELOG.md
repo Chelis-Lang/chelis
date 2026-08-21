@@ -67,6 +67,31 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **chelis#1197: a pipe stage calling an operator-named primitive resugars
+  again, and a blocked migration batch names every file that blocked it.**
+  `resugar_operator_application` and `resugar_finite_list` rewrite a Deep
+  `app` into `Binary`, `Unary`, or `List`, and none of the three can carry
+  the `|> f(args)` call-stage sugar, so `resugar_pipe_stage` rejected the
+  stage bodies the desugarer itself emits for `x |> add(y)`,
+  `x |> mul(cast(2.0, f32))`, `x |> cmplt(y)`, and `x |> Cons(Nil)`. Those
+  spellings are canonical Surf that `chelis fmt --check` accepts, that
+  `spec/02-surf-syntax.md` §8.2 uses in its own worked example, and that the
+  `prefer-pipe-operator` autofix emits, yet `chelis migrate surf` and
+  `chelis surf` both failed closed on them. The stage application is now
+  rebuilt from the Deep application before those sugars apply, so only the
+  stage callee is held back and its operands keep their operator spelling.
+  A stage whose parameter is not the leading argument, whose body is not an
+  application, or that carries more than one parameter still fails closed.
+
+  `chelis migrate surf` now also collects the whole batch's preflight
+  failures instead of returning on the first, so a single unmigratable file
+  no longer hides the rest. The batch stays all-or-nothing: a blocked file
+  still means nothing is written. A lone failure keeps its bare per-file
+  diagnostic. Acceptance oracles:
+  `cargo nextest run -p chelis-surf --test canonical_surf --no-fail-fast`
+  and
+  `cargo nextest run -p chelis-cli --test migrate_surf --no-fail-fast`.
+
 - **chelis#1200: a destructuring `let` no longer poisons the rest of its
   block.** The Linearity-F2 use-after-consume gate was scoped to the
   destructuring let's *body*, and in a block every later statement is

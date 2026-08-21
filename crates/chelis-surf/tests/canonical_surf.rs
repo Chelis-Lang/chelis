@@ -1216,6 +1216,78 @@ fn explicit_first_argument_pipe_lambda_alias_is_rejected() {
 }
 
 #[test]
+fn operator_named_and_finite_list_pipe_stages_keep_their_call_stage_sugar() {
+    // chelis#1197: the operator and finite-list sugars rewrite an
+    // application into `Binary`, `Unary`, or `List`, none of which can
+    // carry the `|> f(args)` stage form, so a stage calling `mul`, `cmplt`,
+    // or `Cons` used to fail closed on Deep the desugarer itself emits.
+    let source = concat!(
+        "scaled = x |> mul(y)\n",
+        "compared = x |> cmplt(y)\n",
+        "listed = x |> Cons(Nil)\n",
+        "chained = x |> fn (p) -> cast(p, f32) |> mul(cast(2.0, f32))\n",
+    );
+    let surf = parse_str(source).expect("operator-named pipe stages parse");
+    let deep = desugar_program(&surf);
+    let resugared = resugar_program(&deep).expect("operator-named pipe stages resugar");
+    let rendered = format_program(&resugared);
+
+    assert_eq!(rendered, source);
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&desugar_program(
+            &parse_str(&rendered).expect("resugared pipe stages reparse")
+        ))),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+        "an operator-named pipe stage must survive Surf -> Deep -> Surf -> Deep",
+    );
+}
+
+#[test]
+fn operator_sugar_inside_a_call_stage_argument_is_still_applied() {
+    // Only the stage application itself is held back from the operator
+    // sugar. An operand of that application keeps its canonical operator
+    // spelling.
+    assert_eq!(
+        resugar_one(concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
+            "(app {} (var {} mul) (var {} p) (app {} (var {} add) (var {} a) (var {} b)))))",
+        )),
+        "x |> mul((a + b))"
+    );
+}
+
+#[test]
+fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
+    for deep_source in [
+        // The stage parameter is not the first argument, so the stage is not
+        // first-argument insertion and has no call-stage spelling.
+        concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
+            "(app {} (var {} mul) (var {} y) (var {} p))))",
+        ),
+        // The body is not an application at all.
+        "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) (var {} p)))",
+        // A call-first stage carries exactly one parameter.
+        concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p q) ",
+            "(app {} (var {} mul) (var {} p) (var {} q))))",
+        ),
+    ] {
+        let mut malformed = parse_deep(deep_source).expect("Deep fixture parses");
+        let rendered = print_canonical(&malformed);
+        let Err(error) = resugar_expression(&malformed.remove(0)) else {
+            panic!(
+                "a stage body that cannot carry the call-stage sugar must fail closed: {rendered}"
+            );
+        };
+        assert!(
+            error.to_string().contains("call-first stage"),
+            "unexpected diagnostic for {deep_source}: {error}",
+        );
+    }
+}
+
+#[test]
 fn deep_surf_metadata_namespace_and_marker_values_are_closed() {
     let unknown = parse_deep("(var {surf_future: true} x)")
         .expect_err("unknown surf metadata key must be rejected at parse time");

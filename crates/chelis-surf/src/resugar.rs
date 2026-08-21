@@ -3115,6 +3115,9 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
             expected: "a one-parameter call-first stage",
         });
     };
+    if let Some(stage) = resugar_call_first_stage_application(&node.children[1], &param.name)? {
+        return Ok(stage);
+    }
     let is_param = |expr: &Expr| matches!(expr, Expr::Var(name, _) if name == &param.name);
     match *body {
         Expr::Apply(function, mut arguments, apply_span)
@@ -3145,6 +3148,50 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
             expected: "a call-first stage body using its parameter as the first argument",
         }),
     }
+}
+
+/// Rebuild the `|> f(args)` stage sugar from the Deep application a
+/// call-first stage was desugared from, holding the operator and
+/// finite-list sugars back at that one position.
+///
+/// Those sugars rewrite an `app` into `Binary`, `Unary`, or `List`, and
+/// none of the three can carry the stage sugar, so a stage calling an
+/// operator-named primitive or `Cons` would otherwise fail closed on Deep
+/// the desugarer itself emits (chelis#1197). Operands are resugared
+/// normally and keep their operator spelling.
+///
+/// `None` means the body is not an application of the stage parameter plus
+/// at least one further argument, which leaves the ordinary body
+/// resugaring to decide the shape. The stage parameter must stay the first
+/// argument of an application with a remaining argument: stripping it from
+/// a lone-argument application would produce `f()`, which desugars back to
+/// a bare zero-argument call rather than to this stage.
+fn resugar_call_first_stage_application(
+    body: &DeepExpr,
+    param: &str,
+) -> Result<Option<Expr>, ResugarError> {
+    let Ok(application) = node_ref(body) else {
+        return Ok(None);
+    };
+    if application.tag != DeepTag::App || application.children.len() < 3 {
+        return Ok(None);
+    }
+    let Expr::Var(carried, _) = resugar_expression_inner(&application.children[1])? else {
+        return Ok(None);
+    };
+    if carried != param {
+        return Ok(None);
+    }
+    let function = resugar_expression_inner(&application.children[0])?;
+    let arguments = application.children[2..]
+        .iter()
+        .map(resugar_expression_inner)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(Expr::Apply(
+        Box::new(function),
+        arguments,
+        application.span,
+    )))
 }
 
 fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
