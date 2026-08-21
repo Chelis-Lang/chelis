@@ -613,6 +613,32 @@ def f(x: tensor[4, f32]) -> tensor[4, f32] = {
     );
 }
 
+/// chelis#1211 item 2, the later-consume half: an ordinary alias stays
+/// consumable after a branch closure consumes its source. The join's
+/// Aliasing-to-Structural promotion is carrier-only, so the parent's
+/// `Consumed(Aliasing)` record on `x` survives the join and the
+/// after-join `realize(y)` forwards onto it as ordinary implicit-Copy
+/// fan-out. The later-borrow half (`add(y, y)` after a branch consume)
+/// is pinned end-to-end by the chelis-cli lane-parity cell
+/// `ordinary_alias_survives_a_branch_consume_of_its_source_in_both_lanes`.
+/// The verdict is recorded in `spec/design/implicit_linearity.md` §"New
+/// declaration regions" and rides [04-LIN-2]'s identity ruling.
+#[test]
+fn ordinary_alias_still_consumable_after_a_branch_closure_consumes_its_source() {
+    assert_linearity_clean(
+        r#"
+def f(c: bool, x: tensor[4, f32], t: tensor[4, f32]) -> tensor[4, f32] = {
+  y: tensor[4, f32] = x
+  r: tensor[4, f32] = if c then {
+    g = fn () -> realize(x)
+    g()
+  } else t
+  add(r, realize(y))
+}
+"#,
+    );
+}
+
 /// A synthesized temp is never named to the user. `a`'s carrier is
 /// `__chelis_tmpN`, and the closure-capture arm used to print the
 /// alias-chain terminal — a name that appears nowhere in the source and
