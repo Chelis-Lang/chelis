@@ -1,11 +1,14 @@
-//! chelis#1179: integer literals are tensor dimensions, not types.
+//! chelis#1179: integer literals are dimensions, not types.
 //!
-//! `spec/02-surf-syntax.md` permits `IntLit` only inside a tensor type's
-//! `DimList` (`DimExpr <- IntLit / Ident / '*' / '..' Ident`). Every other
-//! type position takes a `TypeExpr`, which has no integer production, and
-//! the Tree-sitter grammar rejects the spelling. The Rust parser previously
-//! shared one integer arm between the two positions, so `def g(a: 732) ->
-//! f32 = a` parsed silently and desugared to `(t-var {} 732)`.
+//! `spec/02-surf-syntax.md` permits `IntLit` in exactly two type-grammar
+//! positions: a tensor shape item (`DimExpr <- IntLit / Ident / '*' /
+//! '..' Ident`) and a type-application argument (`TypeArg <- TypeExpr /
+//! IntLit`, the concrete dimension instantiation of a
+//! dimension-parameterized ADT, chelis#940). Every bare type position
+//! takes a `TypeExpr`, which has no integer production. The Rust parser
+//! previously accepted an integer as a type ANYWHERE a type was expected,
+//! so `def g(a: 732) -> f32 = a` parsed silently and desugared to
+//! `(t-var {} 732)`.
 
 use chelis_surf::ast::{Decl, TypeExpr};
 use chelis_surf::parser::{parse_str, parse_str_legacy_v018};
@@ -50,8 +53,38 @@ fn integer_literal_rejects_in_sig_type() {
 }
 
 #[test]
-fn integer_literal_rejects_in_type_application_argument() {
-    assert_rejects_integer_type("value: Option[732] = source\n");
+fn integer_dimension_argument_parses_in_type_application() {
+    // A type-application argument is a dimension position: chelis#940's
+    // dimension-parameterized ADTs are instantiated with concrete integer
+    // dimensions (`Frame[2]` flowing into `tensor[2, f32]`).
+    let decls = parse_str("def concrete(frame: Frame[2]) -> Frame[2] = frame\n")
+        .expect("integer dimension arguments parse in type applications");
+    let Decl::FunDef { params, .. } = &decls[0] else {
+        panic!("expected a function definition");
+    };
+    let Some(TypeExpr::App(name, args, _)) = &params[0].ty else {
+        panic!("expected an applied type annotation");
+    };
+    assert_eq!(name, "Frame");
+    assert!(matches!(&args[0], TypeExpr::Named(n, _) if n == "2"));
+}
+
+#[test]
+fn integer_argument_parses_in_nested_type_application() {
+    let decls =
+        parse_str("value: Hamt[Column[2]] = source\n").expect("nested dimension arguments parse");
+    let Decl::LetDef { ty: Some(ty), .. } = &decls[0] else {
+        panic!("expected an annotated binding");
+    };
+    let TypeExpr::App(name, args, _) = ty else {
+        panic!("expected an applied type annotation");
+    };
+    assert_eq!(name, "Hamt");
+    let TypeExpr::App(inner, inner_args, _) = &args[0] else {
+        panic!("expected a nested applied type");
+    };
+    assert_eq!(inner, "Column");
+    assert!(matches!(&inner_args[0], TypeExpr::Named(n, _) if n == "2"));
 }
 
 #[test]

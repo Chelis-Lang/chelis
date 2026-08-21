@@ -2890,7 +2890,7 @@ impl Parser {
                     self.advance();
                     let mut args = Vec::new();
                     if *self.peek() != TokenKind::RBracket {
-                        args.push(self.parse_type()?);
+                        args.push(self.parse_type_arg()?);
                         while *self.peek() == TokenKind::Comma {
                             self.advance();
                             if self.comma_terminates_list(
@@ -2900,7 +2900,7 @@ impl Parser {
                             )? {
                                 break;
                             }
-                            args.push(self.parse_type()?);
+                            args.push(self.parse_type_arg()?);
                         }
                     }
                     let end = self.expect(&TokenKind::RBracket)?;
@@ -3035,8 +3035,8 @@ impl Parser {
     }
 
     /// One bracketed `tensor[...]` item: a dimension or the trailing
-    /// precision name. This is the only position whose grammar has an
-    /// integer production (`DimExpr <- IntLit / Ident / '*' / '..' Ident`,
+    /// precision name. Dimension positions have an integer production
+    /// (`DimExpr <- IntLit / Ident / '*' / '..' Ident`,
     /// spec/02-surf-syntax.md), so the literal-dimension arm lives here
     /// rather than in `parse_type_atom` (chelis#1179).
     fn parse_tensor_item(&mut self) -> Result<TypeExpr, ParseError> {
@@ -3045,6 +3045,20 @@ impl Parser {
             return Ok(TypeExpr::Named(n.to_string(), tok.span));
         }
         self.parse_type_atom()
+    }
+
+    /// One bracketed type-application argument (`Name[...]`). An integer
+    /// literal here is a concrete dimension argument to a
+    /// dimension-parameterized ADT (`Frame[2]`, the chelis#940 shape,
+    /// `TypeArg <- TypeExpr / IntLit`); every other argument is an
+    /// ordinary type expression. Bare-type positions reject integers in
+    /// `parse_type_atom` (chelis#1179).
+    fn parse_type_arg(&mut self) -> Result<TypeExpr, ParseError> {
+        if let TokenKind::Int(n) = self.peek().clone() {
+            let tok = self.advance();
+            return Ok(TypeExpr::Named(n.to_string(), tok.span));
+        }
+        self.parse_type()
     }
 
     // ---------------------------------------------------------------------------

@@ -1128,7 +1128,13 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType (S ',')? S ']'
                / '(' S TypeExpr S ')'
                / TypeName TypeArgs?
 
-TypeArgs      <- '[' S TypeExpr (S ',' S TypeExpr)* (S ',')? S ']'
+TypeArgs      <- '[' S TypeArg (S ',' S TypeArg)* (S ',')? S ']'
+
+# An IntLit type-application argument is the concrete dimension
+# instantiation of a dimension-parameterized ADT (`Frame[2]` whose
+# parameter reaches a tensor dimension slot). Bare type positions
+# have no integer production.
+TypeArg       <- TypeExpr / IntLit
 
 # Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
 TypeName      <- TypeIdent ('.' TypeIdent)*

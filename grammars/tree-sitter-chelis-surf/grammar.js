@@ -639,8 +639,19 @@ module.exports = grammar({
     tensor_type: ($) =>
       seq("tensor", "[", commaSep1(choice($.dimension_expression, $.identifier)), "]"),
     dimension_expression: ($) => choice($.axis_integer, "*", seq("..", $.identifier)),
+    // A type-application argument admits an integer literal: the concrete
+    // dimension instantiation of a dimension-parameterized ADT
+    // (`Frame[2]`, chelis#940). Bare type positions do not (chelis#1179).
     applied_type: ($) =>
-      prec(1, seq(field("name", $.qualified_type_name), "[", commaSep1($.type_expression), "]")),
+      prec(
+        1,
+        seq(
+          field("name", $.qualified_type_name),
+          "[",
+          commaSep1(choice($.type_expression, $.axis_integer)),
+          "]",
+        ),
+      ),
     unit_type: () => "unit",
     tuple_type: ($) =>
       seq("(", $.type_expression, ",", optional(commaSep1($.type_expression)), ")"),
