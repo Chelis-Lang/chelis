@@ -159,6 +159,71 @@ fn migrate_surf_keeps_a_single_failure_diagnostic_unaggregated() {
 }
 
 #[test]
+fn migrate_surf_keeps_the_bare_diagnostic_when_one_file_of_many_blocks() {
+    // The aggregate header earns its place by counting more than one blocked
+    // file. One blocked file out of a batch still reads as that file's problem.
+    let dir = tempdir().expect("tempdir");
+    let first_path = dir.path().join("first.ch");
+    let ambiguous_path = dir.path().join("ambiguous.ch");
+    let last_path = dir.path().join("last.ch");
+    let unmigrated = "def f = value\n";
+    fs::write(&first_path, unmigrated).expect("write first fixture");
+    fs::write(
+        &ambiguous_path,
+        "def g(x) = f({- attachment is ambiguous -} x)\n",
+    )
+    .expect("write ambiguous fixture");
+    fs::write(&last_path, unmigrated).expect("write last fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&first_path)
+        .arg(&ambiguous_path)
+        .arg(&last_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("inside a declaration"))
+        .stderr(predicate::str::contains("of 3").not());
+
+    assert_eq!(fs::read_to_string(first_path).unwrap(), unmigrated);
+    assert_eq!(fs::read_to_string(last_path).unwrap(), unmigrated);
+}
+
+#[test]
+fn migrate_surf_reports_an_untaken_write_only_when_writing_was_asked_for() {
+    let dir = tempdir().expect("tempdir");
+    let ambiguous_path = dir.path().join("ambiguous.ch");
+    let reserved_path = dir.path().join("reserved.ch");
+    fs::write(
+        &ambiguous_path,
+        "def g(x) = f({- attachment is ambiguous -} x)\n",
+    )
+    .expect("write ambiguous fixture");
+    fs::write(&reserved_path, "def resume(x: int32) -> int32 = x\n")
+        .expect("write reserved-identifier fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&ambiguous_path)
+        .arg(&reserved_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no file was modified"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--check"])
+        .arg(&ambiguous_path)
+        .arg(&reserved_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2 of 2"))
+        .stderr(predicate::str::contains("no file was modified").not());
+}
+
+#[test]
 fn migrate_surf_batch_is_all_or_nothing_on_ambiguous_comments() {
     let dir = tempdir().expect("tempdir");
     let valid_path = dir.path().join("valid.ch");

@@ -1187,7 +1187,7 @@ fn cmd_migrate_surf(
         }
     }
     if !blocked.is_empty() {
-        return Err(describe_blocked_migrations(&blocked, paths.len()).into());
+        return Err(describe_blocked_migrations(&blocked, paths.len(), inplace).into());
     }
 
     if check {
@@ -1278,12 +1278,21 @@ fn preflight_migration(path: &Path) -> Result<(PathBuf, String, String), String>
 /// A lone failure keeps its bare per-file diagnostic, which is the whole
 /// message when a caller migrates one file at a time. A batch gets the count
 /// as well, so a reader can see the run listed more than the first name.
-fn describe_blocked_migrations(blocked: &[String], total: usize) -> String {
+///
+/// Only `--inplace` promises that nothing was written, so only `--inplace`
+/// says so. Reporting an untaken write on a read-only run would invite the
+/// reader to look for damage that was never possible.
+fn describe_blocked_migrations(blocked: &[String], total: usize, inplace: bool) -> String {
     if let [only] = blocked {
         return only.clone();
     }
+    let consequence = if inplace {
+        "; no file was modified"
+    } else {
+        ""
+    };
     format!(
-        "{} of {total} files blocked the Surf v0.18 migration; no file was modified:\n  {}",
+        "{} of {total} files blocked the Surf v0.18 migration{consequence}:\n  {}",
         blocked.len(),
         blocked.join("\n  "),
     )

@@ -81,7 +81,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rebuilt from the Deep application before those sugars apply, so only the
   stage callee is held back and its operands keep their operator spelling.
   A stage whose parameter is not the leading argument, whose body is not an
-  application, or that carries more than one parameter still fails closed.
+  application, whose parameter occurs anywhere else in the application, or
+  that carries more than one parameter still fails closed. The occurrence
+  condition matters because the sugar drops the stage binder along with the
+  leading occurrence, so a second bound occurrence would be left free for
+  the enclosing scope to capture.
 
   `chelis migrate surf` now also collects the whole batch's preflight
   failures instead of returning on the first, so a single unmigratable file

@@ -1272,6 +1272,22 @@ fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
             "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p q) ",
             "(app {} (var {} mul) (var {} p) (var {} q))))",
         ),
+        // The stage parameter occurs again in an operand. The sugar drops the
+        // binder with the leading occurrence, so emitting `x |> add(p)` here
+        // would leave the second `p` free for an enclosing binding to capture.
+        concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
+            "(app {} (var {} add) (var {} p) (var {} p))))",
+        ),
+        // The same capture nested inside an operand.
+        //
+        // Both capture cases name an operator callee because that is the path
+        // this test owns. An ordinary callee reaches the older strip arm, which
+        // still frees a repeated parameter; that residue is chelis#1246.
+        concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
+            "(app {} (var {} add) (var {} p) (app {} (var {} neg) (var {} p)))))",
+        ),
     ] {
         let mut malformed = parse_deep(deep_source).expect("Deep fixture parses");
         let rendered = print_canonical(&malformed);

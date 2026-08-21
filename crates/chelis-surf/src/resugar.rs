@@ -16,6 +16,7 @@ use crate::ast::{
     BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
     Pattern, PropertyOption, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
 };
+use crate::desugar::expr_mentions_name;
 
 /// Failure to structurally resugar a Deep expression.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -3160,12 +3161,25 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// the desugarer itself emits (chelis#1197). Operands are resugared
 /// normally and keep their operator spelling.
 ///
-/// `None` means the body is not an application of the stage parameter plus
-/// at least one further argument, which leaves the ordinary body
-/// resugaring to decide the shape. The stage parameter must stay the first
-/// argument of an application with a remaining argument: stripping it from
-/// a lone-argument application would produce `f()`, which desugars back to
-/// a bare zero-argument call rather than to this stage.
+/// `None` means the application cannot carry the stage sugar, which leaves
+/// the ordinary body resugaring to decide the shape and, for an operator or
+/// finite-list body, to fail closed. Two conditions have to hold.
+///
+/// The stage parameter must lead an application that still has a further
+/// argument. Stripping it from a lone-argument application would produce
+/// `f()`, which desugars back to a bare zero-argument call rather than to
+/// this stage.
+///
+/// The stage parameter must not occur anywhere else in the application. The
+/// sugar drops the binder along with the leading occurrence, so any other
+/// bound occurrence would be left free and captured by whatever `param`
+/// names in the enclosing scope: `fn (p) -> add(p, p)` applied to `3.0`
+/// would print as `3.0 |> add(p)`, which is a different program wherever an
+/// outer `p` exists. The occurrence test ignores shadowing, so a stage that
+/// merely rebinds the name in an operand is refused as well; that is the
+/// conservative direction, and the desugarer never produces the shape
+/// because `fresh_pipe_param_name` mints a parameter no part of the stage
+/// mentions.
 fn resugar_call_first_stage_application(
     body: &DeepExpr,
     param: &str,
@@ -3187,6 +3201,13 @@ fn resugar_call_first_stage_application(
         .iter()
         .map(resugar_expression_inner)
         .collect::<Result<Vec<_>, _>>()?;
+    if expr_mentions_name(&function, param)
+        || arguments
+            .iter()
+            .any(|argument| expr_mentions_name(argument, param))
+    {
+        return Ok(None);
+    }
     Ok(Some(Expr::Apply(
         Box::new(function),
         arguments,
