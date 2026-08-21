@@ -143,6 +143,10 @@
       "required": true,
       "types": [
         {
+          "type": "axis_integer",
+          "named": true
+        },
+        {
           "type": "type_expression",
           "named": true
         }

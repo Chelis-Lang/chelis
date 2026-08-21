@@ -65,6 +65,28 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   authored `[a]` binders, so partially annotated recursive defs keep
   checking exactly as before.
 
+- **BREAKING (parser): an integer literal in a bare type position is now
+  a parse error (chelis#1179).** The Rust Surf parser shared one integer
+  arm between ordinary type atoms and dimension items, so an integer
+  parsed as a type anywhere a type was expected and desugared to a fresh
+  type variable — `def g(a: 732) -> f32 = a` produced `(t-var {} 732)`
+  and `chelis check` scored it 1.0. The Tree-sitter grammar already
+  rejected the spelling, so the two parsers disagreed. Both now agree: a
+  bare type position rejects with "expected a type; integer literals are
+  only dimensions inside `tensor[...]`" naming the byte offset, in the
+  canonical and legacy v0.18 parse modes alike. The two dimension
+  positions keep accepting integers: tensor shape items
+  (`tensor[3, 4, f32]`) and type-application arguments, whose intended
+  meaning is the concrete dimension instantiation of a
+  dimension-parameterized ADT (`Frame[2]`, chelis#940). The spec grammar
+  gains the previously missing `TypeArg <- TypeExpr / IntLit`
+  production, and the Tree-sitter `applied_type` rule matches it, so
+  Rust/Tree-sitter parity holds on both sides of the split. This is the
+  parser half only: the checker does not yet enforce an integer
+  argument's kind or extent (`Option[732]` still checks, and a
+  `Column[3]` return holding a 2-element column still scores 1.0);
+  chelis#1247 tracks that surviving mechanism.
+
 ### Fixed
 
 - **chelis#1200: a destructuring `let` no longer poisons the rest of its

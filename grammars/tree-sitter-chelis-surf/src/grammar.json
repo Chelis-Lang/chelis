@@ -4453,8 +4453,17 @@
             "type": "SEQ",
             "members": [
               {
-                "type": "SYMBOL",
-                "name": "type_expression"
+                "type": "CHOICE",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "type_expression"
+                  },
+                  {
+                    "type": "SYMBOL",
+                    "name": "axis_integer"
+                  }
+                ]
               },
               {
                 "type": "REPEAT",
@@ -4466,8 +4475,17 @@
                       "value": ","
                     },
                     {
-                      "type": "SYMBOL",
-                      "name": "type_expression"
+                      "type": "CHOICE",
+                      "members": [
+                        {
+                          "type": "SYMBOL",
+                          "name": "type_expression"
+                        },
+                        {
+                          "type": "SYMBOL",
+                          "name": "axis_integer"
+                        }
+                      ]
                     }
                   ]
                 }
