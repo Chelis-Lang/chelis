@@ -546,6 +546,7 @@ dependencies = [
  "chelis-backend-hip",
  "chelis-deep",
  "chelis-effects",
+ "chelis-image-id",
  "chelis-ir",
  "chelis-macros",
  "chelis-pipeline-core",
@@ -628,6 +629,16 @@ dependencies = [
  "chelis-surf",
  "chelis-types",
  "chelis-vocab",
+]
+
+[[package]]
+name = "chelis-image-id"
+version = "0.18.4"
+dependencies = [
+ "libc",
+ "object",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

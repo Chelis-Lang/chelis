@@ -229,9 +229,16 @@ pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
     // typecheck / lowering SEMANTICS change while the bundled chelis-std
     // bytes stay the same. Without this, a `chelis` binary built from
     // different compiler source but the same bundled stdlib would
-    // stale-hit an older binary's cached sub-context. Folding
-    // `COMPILER_VERSION` in flips the key on any compiler rebuild.
-    let compiler_version = crate::COMPILER_VERSION;
+    // stale-hit an older binary's cached sub-context.
+    //
+    // This must be the BUILD fingerprint, not `COMPILER_VERSION`: the
+    // bare crate version does not change between two builds from
+    // different commits of the same unreleased version, so it does not
+    // "flip the key on any compiler rebuild" the way this cache needs
+    // (chelis#1156). The stdlib sub-context is keyed without a package
+    // root, so it is shared by every package on the machine — a stale
+    // hit here reaches further than the per-package context cache.
+    let compiler_version = crate::build_fingerprint();
     hasher.update(b"compiler_version");
     hasher.update((compiler_version.len() as u64).to_le_bytes());
     hasher.update(compiler_version.as_bytes());
@@ -320,7 +327,11 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 /// The on-disk path for the bundled chelis-std's cache entry.
-fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
+///
+/// `pub(crate)` so [`crate::library_cache::evict_typecheck_cache`] can tell the
+/// RUNNING build's Layer-1 entry apart from the entries other builds left
+/// behind (chelis#1156 made Layer 1 one-per-compiler-build, not one-per-stdlib).
+pub(crate) fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
     cache_dir.join(format!(
         "chelis-std-{}-{}.tc",
         chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,
@@ -527,7 +538,10 @@ mod tests {
         // Regression for the compiler-build-identity gap: a chelis binary
         // built from different compiler source but the same bundled
         // chelis-std must NOT stale-hit an older binary's cached
-        // sub-context. The real key must fold COMPILER_VERSION in.
+        // sub-context. The real key must fold the BUILD fingerprint in —
+        // `COMPILER_VERSION` alone is a release identity, not a build
+        // identity, and does not change between two builds of the same
+        // unreleased version (chelis#1156).
         //
         // We cannot rebuild the compiler mid-test, so we recompute the
         // key with the compiler-version component perturbed and confirm
@@ -570,12 +584,22 @@ mod tests {
             hasher.finalize().into()
         };
 
-        // Recomputing with the REAL compiler version reproduces the key
+        // Recomputing with the REAL build fingerprint reproduces the key
         // exactly (proves the recompute mirror is faithful)...
         assert_eq!(
             real,
+            recompute_with_compiler_version(crate::build_fingerprint()),
+            "recompute mirror must match the real key for the real build fingerprint"
+        );
+        // ...and the bare crate version is NOT what the key folds in: a
+        // key built from the release string would be shared by every
+        // build of that version, which is the stale-hit this guards.
+        // Unconditional: the degraded arm also extends the release
+        // string, so the fingerprint never equals it.
+        assert_ne!(
+            real,
             recompute_with_compiler_version(crate::COMPILER_VERSION),
-            "recompute mirror must match the real key for the real compiler version"
+            "cache key must fold the build fingerprint, not the bare crate version"
         );
         // ...and recomputing with a DIFFERENT compiler version flips it.
         assert_ne!(

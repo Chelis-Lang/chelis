@@ -346,7 +346,11 @@ Closures:
   fallback that un-gated the cache for the no-`CHELIS_REEF_HOME` case. Fix
   folds a canonicalized `package_root` + `COMPILER_VERSION` `CacheIdentity`
   into the cache file name, the on-disk envelope, and the `load_if_fresh`
-  freshness check; cache format version bumped 3 -> 4.
+  freshness check; cache format version bumped 3 -> 4. **Superseded in part
+  by chelis#1156:** `COMPILER_VERSION` names a *release*, not a build, so two
+  binaries from different commits sharing one `workspace.package.version`
+  still collided. That component is now `build_fingerprint()`, derived from
+  the running image's linker build id (or a content digest).
 - **Negative-axis + rank-0 standalone-parameter IR lowering** (PR #132).
   Two pre-existing panics (present on the v0.7.9 tag) that shared one
   symptom — `chelis eval` / `chelis test` panicking with `softmax axis

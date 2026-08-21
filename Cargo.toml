@@ -7,6 +7,7 @@ members = [
     "crates/chelis-compiler-api",
     "crates/chelis-pipeline-core",
     "crates/chelis-version",
+    "crates/chelis-image-id",
     "crates/chelis-python",
     "crates/chelis-shell",
     "crates/chelis-std-bundle",
@@ -41,6 +42,7 @@ repository = "https://github.com/Chelis-Lang/chelis"
 
 [workspace.dependencies]
 chelis-vocab = { path = "crates/chelis-vocab" }
+chelis-image-id = { path = "crates/chelis-image-id" }
 chelis-deep = { path = "crates/chelis-deep" }
 chelis-pred = { path = "crates/chelis-pred" }
 chelis-runtime = { path = "crates/chelis-runtime" }
@@ -75,3 +77,14 @@ stacker = "0.1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 quote = "1"
 ryu = "1"
+
+# `sha2` is hot in dev builds, not just release: the compiled-context cache
+# hashes source digests and cache-envelope payloads on every process that
+# consults it, and chelis#1156's build fingerprint falls back to a whole-image
+# SHA-256 when the running image carries no linker build id. At the dev
+# profile's default `opt-level = 0` the SHA-256 compression function runs about
+# 25 MB/s here; at `opt-level = 3` it runs about 563 MB/s, a ~20x difference
+# that is the gap between a usable and an unusable fallback. This affects only
+# how the dependency is compiled, never what it computes.
+[profile.dev.package.sha2]
+opt-level = 3
