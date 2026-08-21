@@ -1175,67 +1175,19 @@ fn cmd_migrate_surf(
         );
     }
 
-    // Preflight the complete batch before the first write. Besides canonical
-    // parsing, require the public Surf -> Deep -> Surf -> Deep structural law
-    // after macro expansion; comments are intentionally outside Deep.
+    // Preflight the complete batch before the first write, collecting every
+    // file that blocks it so one run names them all instead of stopping at the
+    // first. The batch stays all-or-nothing: any blocked file writes nothing.
     let mut migrations = Vec::with_capacity(paths.len());
+    let mut blocked = Vec::new();
     for path in paths {
-        let source =
-            fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let migrated = chelis_surf::format::migrate_source_v018(&source)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        let canonical = chelis_surf::format::format_source(&migrated).map_err(|error| {
-            format!(
-                "{}: migrated output is not canonical: {error}",
-                path.display()
-            )
-        })?;
-        if canonical != migrated {
-            let line = migrated
-                .lines()
-                .zip(canonical.lines())
-                .position(|(migrated, canonical)| migrated != canonical)
-                .unwrap_or_else(|| migrated.lines().count().min(canonical.lines().count()));
-            let migrated_line = migrated.lines().nth(line).unwrap_or("<end of file>");
-            let canonical_line = canonical.lines().nth(line).unwrap_or("<end of file>");
-            return Err(format!(
-                "{}: migration output was not a canonical formatter fixed point at line {}:\n  migration: {migrated_line:?}\n  formatter: {canonical_line:?}",
-                path.display(),
-                line + 1,
-            )
-            .into());
+        match preflight_migration(path) {
+            Ok(migration) => migrations.push(migration),
+            Err(failure) => blocked.push(failure),
         }
-
-        let declarations = chelis_surf::parser::parse_str(&migrated).map_err(|error| {
-            format!(
-                "{}: migrated output does not parse: {error}",
-                path.display()
-            )
-        })?;
-        let deep = expanded_desugared_program(&declarations)
-            .map_err(|error| format!("{}: macro expansion failed: {error}", path.display()))?;
-        let resugared = chelis_surf::resugar::resugar_program(&deep)
-            .map_err(|error| format!("{}: Deep resugaring failed: {error}", path.display()))?;
-        let redesugared = expanded_desugared_program(&resugared).map_err(|error| {
-            format!(
-                "{}: resugared macro expansion failed: {error}",
-                path.display()
-            )
-        })?;
-        let deep_canonical = chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep),
-        );
-        let redesugared_canonical = chelis_deep::printer::print_canonical(
-            &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared),
-        );
-        if deep_canonical != redesugared_canonical {
-            return Err(format!(
-                "{}: migrated program failed the Surf -> Deep -> Surf -> Deep structural oracle\noriginal Deep:\n{}resugared Deep:\n{}",
-                path.display(), deep_canonical, redesugared_canonical
-            )
-            .into());
-        }
-        migrations.push((path.clone(), source, migrated));
+    }
+    if !blocked.is_empty() {
+        return Err(describe_blocked_migrations(&blocked, paths.len(), inplace).into());
     }
 
     if check {
@@ -1256,6 +1208,94 @@ fn cmd_migrate_surf(
         print!("{migrated}");
     }
     Ok(())
+}
+
+/// Migrate one file and prove the result canonical, returning the staged
+/// `(path, original, migrated)` triple or the reason the file blocks the batch.
+///
+/// Besides canonical parsing, the file must satisfy the public
+/// Surf -> Deep -> Surf -> Deep structural law after macro expansion; comments
+/// are intentionally outside Deep.
+fn preflight_migration(path: &Path) -> Result<(PathBuf, String, String), String> {
+    let source =
+        fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let migrated = chelis_surf::format::migrate_source_v018(&source)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let canonical = chelis_surf::format::format_source(&migrated).map_err(|error| {
+        format!(
+            "{}: migrated output is not canonical: {error}",
+            path.display()
+        )
+    })?;
+    if canonical != migrated {
+        let line = migrated
+            .lines()
+            .zip(canonical.lines())
+            .position(|(migrated, canonical)| migrated != canonical)
+            .unwrap_or_else(|| migrated.lines().count().min(canonical.lines().count()));
+        let migrated_line = migrated.lines().nth(line).unwrap_or("<end of file>");
+        let canonical_line = canonical.lines().nth(line).unwrap_or("<end of file>");
+        return Err(format!(
+            "{}: migration output was not a canonical formatter fixed point at line {}:\n  migration: {migrated_line:?}\n  formatter: {canonical_line:?}",
+            path.display(),
+            line + 1,
+        ));
+    }
+
+    let declarations = chelis_surf::parser::parse_str(&migrated).map_err(|error| {
+        format!(
+            "{}: migrated output does not parse: {error}",
+            path.display()
+        )
+    })?;
+    let deep = expanded_desugared_program(&declarations)
+        .map_err(|error| format!("{}: macro expansion failed: {error}", path.display()))?;
+    let resugared = chelis_surf::resugar::resugar_program(&deep)
+        .map_err(|error| format!("{}: Deep resugaring failed: {error}", path.display()))?;
+    let redesugared = expanded_desugared_program(&resugared).map_err(|error| {
+        format!(
+            "{}: resugared macro expansion failed: {error}",
+            path.display()
+        )
+    })?;
+    let deep_canonical = chelis_deep::printer::print_canonical(
+        &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&deep),
+    );
+    let redesugared_canonical = chelis_deep::printer::print_canonical(
+        &chelis_surf::resugar::normalize_deep_for_surface_roundtrip(&redesugared),
+    );
+    if deep_canonical != redesugared_canonical {
+        return Err(format!(
+            "{}: migrated program failed the Surf -> Deep -> Surf -> Deep structural oracle\noriginal Deep:\n{deep_canonical}resugared Deep:\n{redesugared_canonical}",
+            path.display(),
+        ));
+    }
+    Ok((path.to_path_buf(), source, migrated))
+}
+
+/// Render every file that blocked the batch.
+///
+/// A lone failure keeps its bare per-file diagnostic, which is the whole
+/// message when a caller migrates one file at a time. A batch gets the count
+/// as well, so a reader can see the run listed more than the first name.
+///
+/// Only `--inplace` promises that nothing was written, so only `--inplace`
+/// says so. Reporting an untaken write on a read-only run would invite the
+/// reader to look for damage that was never possible.
+fn describe_blocked_migrations(blocked: &[String], total: usize, inplace: bool) -> String {
+    if let [only] = blocked {
+        return only.clone();
+    }
+    let consequence = if inplace {
+        "; no file was modified"
+    } else {
+        ""
+    };
+    format!(
+        "{} of {total} files blocked the Surf v0.18 migration{consequence}:\n  {}",
+        blocked.len(),
+        blocked.join("\n  "),
+    )
 }
 
 struct PendingMigrationWrite {

@@ -74,6 +74,156 @@ fn migrate_surf_check_and_inplace_form_a_fixed_point() {
 }
 
 #[test]
+fn migrate_surf_accepts_operator_named_pipe_stages() {
+    // chelis#1197: `chelis fmt --check` already called these files canonical,
+    // but the migration preflight's Deep resugaring rejected every stage whose
+    // callee is an operator-named primitive.
+    let dir = tempdir().expect("tempdir");
+    let canonical_path = dir.path().join("canonical.ch");
+    let canonical = "def b() -> f32 = 0.0 |> fn (p) -> cast(p, f32) |> mul(cast(2.0, f32))\n";
+    fs::write(&canonical_path, canonical).expect("write canonical fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--check"])
+        .arg(&canonical_path)
+        .assert()
+        .success();
+
+    let legacy_path = dir.path().join("legacy.ch");
+    fs::write(
+        &legacy_path,
+        "def scale(x: f32, y: f32): f32 = x |> mul(y)\n",
+    )
+    .expect("write legacy fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&legacy_path)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(&legacy_path).unwrap(),
+        "def scale(x: f32, y: f32) -> f32 = x |> mul(y)\n",
+    );
+}
+
+#[test]
+fn migrate_surf_reports_every_preflight_failure_in_one_run() {
+    // chelis#1197: the preflight stays all-or-nothing, but a batch that cannot
+    // be migrated must name every file that blocked it, not only the first.
+    let dir = tempdir().expect("tempdir");
+    let valid_path = dir.path().join("valid.ch");
+    let ambiguous_path = dir.path().join("ambiguous.ch");
+    let reserved_path = dir.path().join("reserved.ch");
+    let valid = "def f = value\n";
+    fs::write(&valid_path, valid).expect("write valid fixture");
+    fs::write(
+        &ambiguous_path,
+        "def g(x) = f({- attachment is ambiguous -} x)\n",
+    )
+    .expect("write ambiguous fixture");
+    fs::write(&reserved_path, "def resume(x: int32) -> int32 = x\n")
+        .expect("write reserved-identifier fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&valid_path)
+        .arg(&ambiguous_path)
+        .arg(&reserved_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous.ch"))
+        .stderr(predicate::str::contains("reserved.ch"))
+        .stderr(predicate::str::contains("2 of 3"));
+
+    assert_eq!(fs::read_to_string(valid_path).unwrap(), valid);
+}
+
+#[test]
+fn migrate_surf_keeps_a_single_failure_diagnostic_unaggregated() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("ambiguous.ch");
+    fs::write(&path, "def g(x) = f({- attachment is ambiguous -} x)\n").expect("write fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--check"])
+        .arg(&path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("inside a declaration"))
+        .stderr(predicate::str::contains("of 1").not());
+}
+
+#[test]
+fn migrate_surf_keeps_the_bare_diagnostic_when_one_file_of_many_blocks() {
+    // The aggregate header earns its place by counting more than one blocked
+    // file. One blocked file out of a batch still reads as that file's problem.
+    let dir = tempdir().expect("tempdir");
+    let first_path = dir.path().join("first.ch");
+    let ambiguous_path = dir.path().join("ambiguous.ch");
+    let last_path = dir.path().join("last.ch");
+    let unmigrated = "def f = value\n";
+    fs::write(&first_path, unmigrated).expect("write first fixture");
+    fs::write(
+        &ambiguous_path,
+        "def g(x) = f({- attachment is ambiguous -} x)\n",
+    )
+    .expect("write ambiguous fixture");
+    fs::write(&last_path, unmigrated).expect("write last fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&first_path)
+        .arg(&ambiguous_path)
+        .arg(&last_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("inside a declaration"))
+        .stderr(predicate::str::contains("of 3").not());
+
+    assert_eq!(fs::read_to_string(first_path).unwrap(), unmigrated);
+    assert_eq!(fs::read_to_string(last_path).unwrap(), unmigrated);
+}
+
+#[test]
+fn migrate_surf_reports_an_untaken_write_only_when_writing_was_asked_for() {
+    let dir = tempdir().expect("tempdir");
+    let ambiguous_path = dir.path().join("ambiguous.ch");
+    let reserved_path = dir.path().join("reserved.ch");
+    fs::write(
+        &ambiguous_path,
+        "def g(x) = f({- attachment is ambiguous -} x)\n",
+    )
+    .expect("write ambiguous fixture");
+    fs::write(&reserved_path, "def resume(x: int32) -> int32 = x\n")
+        .expect("write reserved-identifier fixture");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--inplace"])
+        .arg(&ambiguous_path)
+        .arg(&reserved_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no file was modified"));
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["migrate", "surf", "--from", "0.18", "--check"])
+        .arg(&ambiguous_path)
+        .arg(&reserved_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2 of 2"))
+        .stderr(predicate::str::contains("no file was modified").not());
+}
+
+#[test]
 fn migrate_surf_batch_is_all_or_nothing_on_ambiguous_comments() {
     let dir = tempdir().expect("tempdir");
     let valid_path = dir.path().join("valid.ch");
