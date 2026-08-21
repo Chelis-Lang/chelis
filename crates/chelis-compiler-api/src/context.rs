@@ -1327,17 +1327,15 @@ mod tests {
             crate::build_fingerprint(),
             "identity must carry the build fingerprint"
         );
-        // On any host where the running executable is inspectable, the
-        // fingerprint is strictly finer than the release string. The
-        // degrade path (documented on `build_fingerprint`) leaves them
-        // equal, which is no worse than the pre-fix behaviour.
-        if crate::build_fingerprint() != crate::COMPILER_VERSION {
-            assert_ne!(
-                identity.compiler_version,
-                crate::COMPILER_VERSION,
-                "a build-identity cache key must not collapse to the release version"
-            );
-        }
+        // The fingerprint is strictly finer than the release string on
+        // every path, degraded included: both arms of `fingerprint_string`
+        // extend `COMPILER_VERSION` with a discriminator, so this can
+        // never be a conditional check.
+        assert_ne!(
+            identity.compiler_version,
+            crate::COMPILER_VERSION,
+            "a build-identity cache key must not collapse to the release version"
+        );
     }
 
     /// A differing build fingerprint must change the on-disk cache file

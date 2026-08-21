@@ -682,16 +682,14 @@ fn stdlib_cache_key_folds_the_compiler_version() {
     );
     // (c) chelis#1156 regression: the bare release version must NOT be
     // what the key folds in, or every build of one version collides.
-    // Skipped only on the documented degrade path (executable not
-    // inspectable), where the fingerprint IS the release string.
-    if chelis_compiler_api::build_fingerprint() != COMPILER_VERSION {
-        assert_ne!(
-            real,
-            recompute(COMPILER_VERSION),
-            "the stdlib cache key must fold the BUILD fingerprint, not the bare \
-             release version; two builds of one version must not share this cache"
-        );
-    }
+    // Unconditional: both arms of the fingerprint (digest and degraded)
+    // extend `COMPILER_VERSION`, so it is never the bare release string.
+    assert_ne!(
+        real,
+        recompute(COMPILER_VERSION),
+        "the stdlib cache key must fold the BUILD fingerprint, not the bare \
+         release version; two builds of one version must not share this cache"
+    );
 }
 
 // ---------------------------------------------------------------------

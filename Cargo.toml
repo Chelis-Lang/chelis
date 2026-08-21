@@ -75,3 +75,13 @@ stacker = "0.1"
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 quote = "1"
 ryu = "1"
+
+# `sha2` is hot in dev builds, not just release: the compiled-context
+# cache hashes source digests, cache-envelope payloads, and (chelis#1156)
+# the running executable itself on every process that consults the cache.
+# At the dev profile's default `opt-level = 0` the SHA-256 compression
+# function runs about 22 MB/s here, so hashing an 85MB debug test binary
+# costs ~3.8s; built at `opt-level = 3` the same hash costs ~0.2s. This
+# affects only how the dependency is compiled, never what it computes.
+[profile.dev.package.sha2]
+opt-level = 3

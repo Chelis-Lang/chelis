@@ -590,16 +590,13 @@ mod tests {
         // ...and the bare crate version is NOT what the key folds in: a
         // key built from the release string would be shared by every
         // build of that version, which is the stale-hit this guards.
-        // Skipped only on the documented degrade path, where the running
-        // executable cannot be inspected and the fingerprint IS the bare
-        // version (then this cache is no worse than before the fix).
-        if crate::build_fingerprint() != crate::COMPILER_VERSION {
-            assert_ne!(
-                real,
-                recompute_with_compiler_version(crate::COMPILER_VERSION),
-                "cache key must fold the build fingerprint, not the bare crate version"
-            );
-        }
+        // Unconditional: the degraded arm also extends the release
+        // string, so the fingerprint never equals it.
+        assert_ne!(
+            real,
+            recompute_with_compiler_version(crate::COMPILER_VERSION),
+            "cache key must fold the build fingerprint, not the bare crate version"
+        );
         // ...and recomputing with a DIFFERENT compiler version flips it.
         assert_ne!(
             real,
