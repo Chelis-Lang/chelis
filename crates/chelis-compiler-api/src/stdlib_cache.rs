@@ -327,7 +327,11 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 /// The on-disk path for the bundled chelis-std's cache entry.
-fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
+///
+/// `pub(crate)` so [`crate::library_cache::evict_typecheck_cache`] can tell the
+/// RUNNING build's Layer-1 entry apart from the entries other builds left
+/// behind (chelis#1156 made Layer 1 one-per-compiler-build, not one-per-stdlib).
+pub(crate) fn stdlib_cache_path(cache_dir: &Path, key: [u8; 32]) -> PathBuf {
     cache_dir.join(format!(
         "chelis-std-{}-{}.tc",
         chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION,

@@ -84,14 +84,13 @@ pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// either a spurious rejection of valid code, or, worse, silent
 /// acceptance of code this build would reject.
 ///
-/// The discriminator is the SHA-256 of the running executable's own
-/// bytes. Content *is* build identity: two binaries with identical bytes
-/// cannot disagree about anything, so sharing a cache entry between them
-/// is correct rather than merely tolerable; and any difference that
-/// could change type semantics - different compiler source, a different
-/// `rustc`, different codegen flags or features - necessarily changes
-/// those bytes and so changes the key. There is no false merge and no
-/// false split.
+/// The discriminator comes from [`chelis_image_id::running_image`], which
+/// answers "which build of which object is executing this code?" without
+/// consulting filesystem metadata. It is the linker's own content id
+/// (Mach-O `LC_UUID`, ELF `NT_GNU_BUILD_ID`) where the image carries one,
+/// and a SHA-256 of the whole image otherwise; the scheme tag and the
+/// image length are folded in alongside it so the two derivations can
+/// never be confused and a post-link size change cannot pass unnoticed.
 ///
 /// # Why not filesystem metadata
 ///
@@ -112,10 +111,10 @@ pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// That reduction is not theoretical. On the machine where this was
 /// measured, 394 distinct `(byte length, mtime)` pairs were each shared
-/// by two or more store executables whose SHA-256 digests differ,
-/// including two different `cargo` binaries of 31,232,680 bytes apiece.
-/// Under the old scheme those would have been one cache identity, which
-/// is the silent-acceptance half of chelis#1156 reopened.
+/// by two or more store executables whose SHA-256 digests differ. It also
+/// reproduced on this compiler directly: two `chelis` builds differing by
+/// one added function came out at *identical* byte length, because the
+/// added symbol landed in padding.
 ///
 /// # Why not a `build.rs` stamp
 ///
@@ -127,86 +126,71 @@ pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// to *that package's* files: editing `chelis-types` relinks this crate
 /// without rerunning its build script, leaving a stamp that claims two
 /// semantically different binaries are the same build. Both failures are
-/// in the unsound direction. Hashing the finished artifact has neither
-/// problem, and subsumes the `rustc`-version concern for free.
+/// in the unsound direction. Deriving from the finished image has
+/// neither problem, and subsumes the `rustc`-version concern for free.
 ///
 /// # Cost
 ///
-/// One SHA-256 pass over the executable, memoized by `OnceLock` to once
-/// per process and reached lazily: [`stdlib_cache::cache_disabled`] and
-/// the layered-build entry both short-circuit before any cache key is
-/// computed, so a run with the cache off never pays it. Measured at
-/// roughly 60ms for a 30MB release `chelis`, against a cache whose
-/// purpose is to avoid seconds of stdlib type-checking.
+/// Memoized by `OnceLock` to once per process. On a linker id it is a
+/// header read, microseconds regardless of image size. On the digest
+/// fallback it is one SHA-256 pass over the image, which for a 138MB
+/// debug `chelis` costs roughly 250ms; that is why the linker id is
+/// preferred rather than treated as an optimization.
+///
+/// This is NOT gated on [`stdlib_cache::cache_disabled`]. That seam gates
+/// the stdlib sub-context, but [`context::CacheIdentity::for_package_root`]
+/// derives an identity unconditionally, so a run with the cache disabled
+/// still resolves the fingerprint once.
 ///
 /// # Degraded path
 ///
-/// When the executable cannot be read - `current_exe`, `open`, or the
-/// read itself fails - the fingerprint fails toward cache MISSES, never
-/// toward sharing: a per-process discriminator (pid plus a random nonce,
-/// pinned by the same `OnceLock`) takes the digest's place, so a
-/// degraded binary simply never shares compiled contexts across
-/// processes. Collapsing to bare [`COMPILER_VERSION`] instead would let
-/// two uninspectable builds share entries again, the exact defect this
-/// fingerprint exists to close. Because that mode turns every invocation
-/// into a guaranteed full cache miss, and so presents as unexplained
-/// recompile-every-run slowness, it also emits a one-time stderr
-/// warning naming itself (chelis#1156 review F4).
+/// When the running image cannot be identified at all, the fingerprint
+/// fails toward cache MISSES, never toward sharing: a per-process
+/// discriminator (pid plus a random nonce, pinned by the same `OnceLock`)
+/// takes its place, so a degraded binary simply never shares compiled
+/// contexts across processes. Collapsing to bare [`COMPILER_VERSION`]
+/// instead would let two unidentifiable builds share entries again, the
+/// exact defect this fingerprint exists to close. Because that mode turns
+/// every invocation into a guaranteed full cache miss, and so presents as
+/// unexplained recompile-every-run slowness, it also emits a one-time
+/// stderr warning naming itself.
 pub fn build_fingerprint() -> &'static str {
     static FINGERPRINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FINGERPRINT.get_or_init(|| {
-        let inspected = std::env::current_exe().ok().and_then(|exe| hash_file(&exe));
-        if inspected.is_none() {
+        let image = chelis_image_id::running_image();
+        if image.is_none() {
             // Diagnosable, not silent: this path is safe (it can only
             // cause misses) but it disables the compiled-context cache
             // outright, and without a breadcrumb that reads as the
             // compiler having become mysteriously slow.
-            eprintln!(
-                "chelis: warning: could not read the running executable to identify \
-                 this compiler build, so compiled-context caches cannot be shared \
-                 between invocations and every run will rebuild them (chelis#1156)."
+            //
+            // Deliberately not `eprintln!`: that panics if stderr is
+            // closed or full, and panicking inside a `OnceLock`
+            // initializer would defeat the graceful degradation this arm
+            // exists to provide.
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "chelis: warning: could not identify the running compiler image, so \
+                 compiled-context caches cannot be shared between invocations and \
+                 every run will rebuild them (chelis#1156)."
             );
         }
-        fingerprint_string(inspected)
+        fingerprint_string(image.as_ref())
     })
 }
 
-/// SHA-256 of a file's full contents, or `None` if it cannot be read.
-///
-/// Chunked rather than `io::copy` into the hasher so this does not depend
-/// on `sha2`'s `std` feature staying enabled by feature unification.
-fn hash_file(path: &std::path::Path) -> Option<[u8; 32]> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        match file.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => hasher.update(&buf[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        }
-    }
-    Some(hasher.finalize().into())
-}
-
-/// The fingerprint text for one inspection result. Split from
+/// The fingerprint text for one identification result. Split from
 /// [`build_fingerprint`] so the degraded arm is testable: the production
-/// path cannot be made to fail its read on demand.
-fn fingerprint_string(inspected: Option<[u8; 32]>) -> String {
-    match inspected {
-        Some(digest) => {
-            const HEX: &[u8; 16] = b"0123456789abcdef";
-            let mut hex = String::with_capacity(digest.len() * 2);
-            for b in digest {
-                hex.push(HEX[(b >> 4) as usize] as char);
-                hex.push(HEX[(b & 0xf) as usize] as char);
-            }
-            format!("{COMPILER_VERSION}+{hex}")
-        }
+/// path cannot be made to fail identification on demand.
+fn fingerprint_string(image: Option<&chelis_image_id::RunningImage>) -> String {
+    match image {
+        Some(image) => format!(
+            "{COMPILER_VERSION}+{scheme}.{id}.{len:x}",
+            scheme = image.id.scheme(),
+            id = image.id.hex(),
+            len = image.len
+        ),
         None => {
             // Fail toward misses, not sharing (see `build_fingerprint`).
             // The nonce comes from `RandomState`, whose per-instance keys
@@ -246,10 +230,48 @@ mod build_fingerprint_tests {
         );
     }
 
-    /// chelis#1156 review: when the executable cannot be inspected the
-    /// fingerprint must fail toward cache MISSES, never toward sharing.
-    /// Collapsing to the bare release version would let two
-    /// uninspectable builds share compiled contexts again, in the one
+    /// The fingerprint is derived from the identified running image.
+    ///
+    /// This is a mirror: it recomputes through the same
+    /// `chelis_image_id::running_image`, so it CANNOT catch a change to
+    /// how that function derives an id. What it does catch is this crate
+    /// wiring the fingerprint to something else entirely, silently
+    /// falling into the degraded arm, or returning a constant. The
+    /// derivation itself is pinned by `chelis-image-id`'s own tests,
+    /// which compare content against metadata directly.
+    #[test]
+    fn build_fingerprint_is_derived_from_the_running_image() {
+        let image = chelis_image_id::running_image().expect("test binary must be identifiable");
+        assert_eq!(
+            super::build_fingerprint(),
+            super::fingerprint_string(Some(&image))
+        );
+        assert!(
+            !super::build_fingerprint().contains("degraded"),
+            "the production path must not be taking the degraded arm"
+        );
+    }
+
+    /// The fast path must actually be applying. If a refactor loses the
+    /// linker id, everything stays correct but every process starts
+    /// paying a full SHA-256 over the image (about 250ms for a debug
+    /// `chelis`), which is a silent performance cliff rather than a
+    /// visible failure.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn build_fingerprint_uses_the_linker_build_id_fast_path() {
+        let fp = super::build_fingerprint();
+        assert!(
+            fp.contains("+bid."),
+            "expected the linker-build-id scheme in {fp}; falling back to the \
+             whole-image digest is correct but costs a full hash per process"
+        );
+    }
+
+    /// chelis#1156 review: when the running image cannot be identified
+    /// the fingerprint must fail toward cache MISSES, never toward
+    /// sharing. Collapsing to the bare release version would let two
+    /// unidentifiable builds share compiled contexts again, in the one
     /// code path where nothing would ever report that it happened.
     #[test]
     fn degraded_fingerprint_does_not_collapse_to_the_release_version() {
@@ -258,102 +280,6 @@ mod build_fingerprint_tests {
         assert!(
             degraded.starts_with(&format!("{}+degraded.", super::COMPILER_VERSION)),
             "degraded fingerprint must be marked as such, got {degraded}"
-        );
-    }
-
-    /// The production fingerprint really is the digest of the running
-    /// executable, not merely *some* string derived from it. Recomputed
-    /// independently here, so a refactor that quietly reverted the
-    /// derivation to metadata (or to a constant) breaks this test rather
-    /// than passing silently.
-    #[test]
-    fn build_fingerprint_is_the_digest_of_the_running_executable() {
-        let exe = std::env::current_exe().expect("test binary must be locatable");
-        let digest = super::hash_file(&exe).expect("test binary must be readable");
-        assert_eq!(
-            super::build_fingerprint(),
-            super::fingerprint_string(Some(digest))
-        );
-    }
-
-    /// chelis#1156 (PR #1161 review, F1): the discriminator must come
-    /// from the executable's CONTENT, never from filesystem metadata.
-    ///
-    /// Nix canonicalizes every store file's mtime to exactly 1 second
-    /// past the epoch, and `cp -p` / `rsync -t` / tar and OCI layers
-    /// preserve timestamps across genuinely different builds. A
-    /// metadata-derived fingerprint therefore collapses to byte length
-    /// alone on those paths. This pins the property directly: identical
-    /// bytes at two different paths with two different mtimes (one of
-    /// them the literal Nix value) must produce one fingerprint.
-    #[test]
-    fn fingerprint_ignores_path_and_mtime() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
-        std::fs::write(&a, b"identical build output").expect("write a");
-        std::fs::write(&b, b"identical build output").expect("write b");
-        set_mtime(&a, 1);
-        set_mtime(&b, 1_755_000_000);
-
-        let (da, db) = (super::hash_file(&a), super::hash_file(&b));
-        assert_eq!(da, db, "identical content must fingerprint identically");
-        assert_eq!(
-            super::fingerprint_string(da),
-            super::fingerprint_string(db),
-            "path and mtime must not reach the fingerprint"
-        );
-    }
-
-    /// The converse, and the actual chelis#1156 failure shape: two
-    /// DIFFERENT builds that share a byte length and an mtime must not
-    /// share a fingerprint. This is the exact collision the old
-    /// `{len:x}.{mtime:x}` scheme could not see. It is not hypothetical:
-    /// sampling `/nix/store` on the machine where this was written found
-    /// 394 `(length, mtime)` pairs each shared by two or more
-    /// content-differing executables, every one of them at mtime 1, the
-    /// value both files carry here.
-    #[test]
-    fn fingerprint_separates_builds_sharing_a_length_and_mtime() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
-        std::fs::write(&a, b"build one, semantics A").expect("write a");
-        std::fs::write(&b, b"build two, semantics B").expect("write b");
-        assert_eq!(
-            std::fs::metadata(&a).expect("meta a").len(),
-            std::fs::metadata(&b).expect("meta b").len(),
-            "fixture must hold byte length constant, or it tests nothing"
-        );
-        set_mtime(&a, 1);
-        set_mtime(&b, 1);
-
-        assert_ne!(
-            super::fingerprint_string(super::hash_file(&a)),
-            super::fingerprint_string(super::hash_file(&b)),
-            "two different builds must not share a fingerprint just because \
-             a store normalized their timestamps to a common value"
-        );
-    }
-
-    /// Set a file's mtime to `secs` past the epoch. `File::set_modified`
-    /// keeps this dependency-free; `1` is the value Nix stamps on every
-    /// store file.
-    fn set_mtime(path: &std::path::Path, secs: u64) {
-        let f = std::fs::File::options()
-            .write(true)
-            .open(path)
-            .expect("open for set_modified");
-        f.set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
-            .expect("set_modified");
-        assert_eq!(
-            std::fs::metadata(path)
-                .expect("meta")
-                .modified()
-                .expect("mtime")
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .expect("post-epoch")
-                .as_secs(),
-            secs,
-            "the fixture must actually control mtime, or these tests are vacuous"
         );
     }
 
@@ -369,6 +295,55 @@ mod build_fingerprint_tests {
             super::fingerprint_string(None),
             super::fingerprint_string(None),
             "the degraded discriminator must not be a constant"
+        );
+    }
+
+    /// Two images that differ only in their id must not share a
+    /// fingerprint, and the scheme tag must keep a linker id and a digest
+    /// apart even when their hex happens to coincide.
+    #[test]
+    fn distinct_images_produce_distinct_fingerprints() {
+        use chelis_image_id::{ImageId, RunningImage};
+        let base = RunningImage {
+            path: std::path::PathBuf::from("/nowhere"),
+            len: 1024,
+            id: ImageId::LinkerBuildId(vec![0xaa; 16]),
+        };
+        let other_id = RunningImage {
+            id: ImageId::LinkerBuildId(vec![0xbb; 16]),
+            ..base.clone()
+        };
+        let other_len = RunningImage {
+            len: 2048,
+            ..base.clone()
+        };
+        // Same hex bytes, different scheme: the tag is what separates them.
+        let as_digest = RunningImage {
+            id: ImageId::ContentDigest([0xaa; 32]),
+            ..base.clone()
+        };
+        let fp = |i: &RunningImage| super::fingerprint_string(Some(i));
+        assert_ne!(fp(&base), fp(&other_id), "a different id must flip the key");
+        assert_ne!(
+            fp(&base),
+            fp(&other_len),
+            "a different length must flip the key"
+        );
+        assert_ne!(
+            fp(&base),
+            fp(&as_digest),
+            "a linker id and a digest must never collide"
+        );
+        // The path is diagnostics only and must NOT reach the key, or a
+        // relocated identical binary would orphan its own cache.
+        let moved = RunningImage {
+            path: std::path::PathBuf::from("/somewhere/else"),
+            ..base.clone()
+        };
+        assert_eq!(
+            fp(&base),
+            fp(&moved),
+            "the image path must not reach the key"
         );
     }
 }
