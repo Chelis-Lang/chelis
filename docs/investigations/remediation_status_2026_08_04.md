@@ -1,14 +1,22 @@
-# Chelis Numeric Remediation - Status (2026-08-05)
+# Chelis Numeric Remediation - Status (2026-08-21)
 
-This is the state of the numeric-remediation board. `main` is at `841b6ddb`.
+This is the state of the numeric-remediation board. `main` is at `77a74ea1`.
 The shipped release is **v0.18.4**, and it is breaking on four boundaries.
 
-**`main` is ahead of the release.** The `v0.18.4` tag is `c0138c82`, four
-commits below this basis, so PRs #1195, #1188, #1196, and #1155 are true of
-`main` and not of the release a shell can install. Where that distinction changes
-what a reader should do, the text says which side of the tag a repair sits on.
+**`main` is ahead of the release.** The `v0.18.4` tag is `c0138c82`, fourteen
+commits below this basis, so every post-release repair is true of `main` and
+not of the release a shell can install: the scalar alignment (#1188), the gate
+and reshape fixes (#1195, #1196), the pipeline core (#1155), the
+recursive-generic build capability (#1204, #1215, #1218 - closing #1158,
+#1201, #1216 and coral#26's build lane), the #1200 linearity repair (#1208),
+the CSV ingestion repair (#1213, part of #943), the #912 test wave
+(#1230-#1232), and the rustc 1.98.0 toolchain pin (#1236). Where that
+distinction changes what a reader should do, the text says which side of the
+tag a repair sits on.
 
-Every count and code claim here is measured on `841b6ddb`, and the command is
+Every count and code claim here was measured on `841b6ddb` for the 2026-08-05
+revision and re-measured on `77a74ea1` wherever this 2026-08-21 revision
+changes it, and the command is
 named where the number matters. Three figures are *not* independent
 measurements and are attributed in place: the changelog drift numbers are PR
 #1199's own, #847's non-reproducing disposition is PR #1178's, and the 8/1-8/2
@@ -31,7 +39,7 @@ census-permanence slice with the capability table proper unbuilt, #730 Phase 3
 has its gates but not its contract and Phase 4 is unbuilt, and #733 has
 nothing.
 
-The five classes carry **41 open children** between them, down from 63.
+The five classes carry **40 open children** between them, down from 63.
 Everything still open falls into four groups: a defect inventory concentrated
 in #730's support cells and #729's GPU lanes, two engineering campaigns (the
 capability table and the #912 root-boundary chain), one unowned keystone
@@ -43,17 +51,22 @@ patch cut** - canonical Surf, the int64 C ABI, the declaration contracts, and
 WireDag schema 5 - and two of them land on the roadmap's anti-churn
 invariants: the ABI widening overrides invariant 7's default, and the schema
 step raises a scope question invariant 1 does not answer. Neither is a clean
-violation and neither is clean compliance (pending decision 1). Two defects
-against that cut are open and unowned - **#1200**, a linearity regression that
-takes coral's suite from 74 passing to 17, and **#1197**, a
-`chelis migrate surf` batch abort - and nothing in CI can see either of them.
+violation and neither is clean compliance (pending decision 1). Of the two
+post-release defects, **#1200** - the linearity regression that took coral's
+suite from 74 passing to 17 - is repaired on `main` (PR #1208) but live in the
+release a shell installs, and **#1197**, the `chelis migrate surf` batch
+abort, is still open and unowned. The same main-side wave also retired coral's
+other build-lane wall: recursive generic host calls compile via bounded
+memoized monomorphization (#1204/#1215/#1218), and `Coral.Frame` now builds,
+links, and runs against the eval lane. Nothing in CI could see any of these;
+all were found downstream.
 
 ## Scoreboard
 
 | plan | landed | remaining |
 |---|---|---|
 | **#729 dtype semantics** | P0-P3 + §C6 census, all CI-wired (PRs #758, #956, #1033, #1049, #1054, #1065, #1118); Phase 4 opened by PR #1154 (permanent dispositions for all 301 census rows, descriptor-manifest bound, red-teamed  x 2); the dtype ledger delivered as code by PR #1181 (sealed `ScalarValue` `Pad` carrier, total exact-representability predicate, per-float-width `uniform_like` emission, exhaustive cast result-state match, checked runtime arithmetic with the dev/release overflow oracle, [05-OP-9]/[05-OP-10], required `BuiltinDecl` axis-layout metadata); [04-NUM-15] authored by PR #1169 and enforced by PR #1189 (one `CheckedCastPlan` over all 81 active dtype pairs, identity only on the same-`Prim` diagonal, lowest row-major flat index selected under OpenMP - closing #1150 and #1152); the scalar numeric family aligned across checker, eval, and C by PR #1188 (closing #704, #712, #715), which merged after the v0.18.4 tag | Capability table proper: Table A/B, derived checker acceptance, macro-generated dispatch (Supported cell without kernel = compile error), generated conformance suite, #912 projections. Plus: the P0 detector-half adjudication (unowned), the P3 oracle adjudication + stale tracker checkbox, the #1160 seam-relocation decision, #1112's GPU half (`chelis_gpu_tensor` still carries 32-bit extents after the host ABI widened), and the GPU support cells, none of which has moved (#689, #690, #693, #951) |
-| **#730 loud unsupported** | P0-P2; P3's typed `RejectionAuthority` + sealed 48-kind `DiagnosticKind` slices (PR #1037); P3's gate contract in two slices - PR #1175 (one typed compiler-api policy behind both public build paths, the `reject_unsupported_hip_ops` pair deduped, `COMPILED_HOST_ONLY_BUILTINS` deleted, the C precision preflights removed, a syntactic `reject_*` source manifest over both crates) and PR #1186 (Metal and seeded-effect policy moved into those same typed definitions, one shared host tensor-helper traversal, entry-scoped pure-DAG effect rejection, the single Phase 3 runner). Closed #697, #698, #705, #959, and - via LU6 in PR #1189 - #1150, whose `_ => input` host-emission fallback is deleted | **Phase 3 is not complete**: `scripts/loud_unsupported_phase3_oracle.py` passes five legs and is red on the sixth, the independently owned #912 root-realizability interlock. Also owed: the recorded gate contract as a written rule, deletion of gates that duplicate emitter rejections, a no-duplicate-gates tripwire beyond the syntactic manifest, and the first-error-vs-accumulate decision affirmed before the contract freezes; deliverable 6 rides the #912 chain; Phase 4 (ratchet totality, #990) is entirely unbuilt - no phase-4 oracle script, no nightly workflow |
+| **#730 loud unsupported** | P0-P2; P3's typed `RejectionAuthority` + sealed 48-kind `DiagnosticKind` slices (PR #1037); P3's gate contract in two slices - PR #1175 (one typed compiler-api policy behind both public build paths, the `reject_unsupported_hip_ops` pair deduped, `COMPILED_HOST_ONLY_BUILTINS` deleted, the C precision preflights removed, a syntactic `reject_*` source manifest over both crates) and PR #1186 (Metal and seeded-effect policy moved into those same typed definitions, one shared host tensor-helper traversal, entry-scoped pure-DAG effect rejection, the single Phase 3 runner). Closed #697, #698, #705, #959, and - via LU6 in PR #1189 - #1150, whose `_ => input` host-emission fallback is deleted. Closed #1158 via PR #1204 (after the tag): recursive generic host calls compile through bounded memoized monomorphization under the new [04-INF-2]/[04-INF-3] uniform-recursive-instantiation atoms (spec/04 §3.1.1) - a BREAKING check-time rejection of polymorphic recursion, lane-uniform - with PRs #1215/#1218 extending the same specialization to non-recursive generics (#1201) and recursive erased-dim generics (#1216), and the surviving fail-closed residue re-cited to the open tracker #1226 | **Phase 3 is not complete**: `scripts/loud_unsupported_phase3_oracle.py` passes five legs and is red on the sixth, the independently owned #912 root-realizability interlock. Also owed: the recorded gate contract as a written rule, deletion of gates that duplicate emitter rejections, a no-duplicate-gates tripwire beyond the syntactic manifest, and the first-error-vs-accumulate decision affirmed before the contract freezes; deliverable 6 rides the #912 chain; Phase 4 (ratchet totality, #990) is entirely unbuilt - no phase-4 oracle script, no nightly workflow |
 | **#731 checker totality** | P0-P3 implemented, incl. the construction gate (PR #1101) and authoring-scope fixes (PR #1136); **PP1 + PP2** (PR #1178): the function-parameter typing channel under [04-INF-1], the writeback information-ordering gate, the atom/primitive agreement matrix under [04-LIT-1] and `spec/03` §6.4, the orphan-`defsig` rule in `spec/03` §2.2, and the registered-builtin arm tripwire - closing #780, #783, #847, #851, #1131, #1147 | The decode-once rework's fresh-context red team is named pending in `checker_totality.md`'s header, but the round ran on PR #855 (an exact-head architectural pass and an explicitly fresh local-subagent pass, both FAIL, findings folded before merge), so that line is stale text rather than unmet work; the §C4.2 ingress half (#1088 - unowned, with #1129 holding its landing inventory); #850's build half; #1125's stamped-Node ingress-parity sweep; #1134's ingress-divergence decision; #874's tag-keyed exemption with #887 under it; carrier deletion last (#1029, whose stated precondition - no producer exists - is false: 1,014 `Expr::List` and 77 `Atom::Tag` occurrences under `crates/`, and the `Node::to_list` bridges plus `chelis-surf`'s desugar output are live producers) |
 | **#732 faithful observation** | All four phases (P3 via PRs #1099/#1115/#1118, shipped in v0.18.3); both known-red ledgers empty (`KNOWN_RED_CELLS` is `()` at `faithful_observation_phase2_oracle.py:159`, and `C_LANE_EXCLUDED` has no production occurrences left); tolerance table + #687 handshake shipped; Phase 2's empty-ledger acceptance repaired and continuously wired by PR #1185 | Direct class debt: #997's one structural `FO-DIAG` diagnostic-rendering migration (36 attributed tripwire tokens, one of them cfg-test-only), which is what keeps #732 open. Separate capability: #1059's C-host `to_string`. Oracle facts: Phase 2 has its own blocking `Faithful Observation Phase 2 Oracle` job and Phase 3 runs nested inside the `Dtype Phase 0-3 Oracle` job, both on every non-docs-only PR; #990's scheduled/change-gated package is separate |
 | **#733 spec provenance** | Nothing - Phase 0 is defined but explicitly not activated: no oracle suite, no PR template, no `governance` gate stage, and a `.github/CODEOWNERS` that covers 16 #729/#730 guard artifacts but not `spec/**` (its own header says Phase 0 owns the broader signoff) | Everything. P0 is Chelis-owned and self-contained; P1-P3 additionally wait on three Buoy prerequisites (the pinned revision's `devenv test` oracle, the `buoy.adapter-sdk/v1` pin, the approved host parsed-item schema). Its four children are #735, #797, #895, #898. v0.20 is formally blocked on P3 |
@@ -77,32 +90,43 @@ takes coral's suite from 74 passing to 17, and **#1197**, a
   declaration-role stamp - is the keystone and is **unowned**; `parse_deep`
   at `compiler.rs:2903` is a third, non-strict door that #1088's body does
   not yet name.
-- **#912** (root boundary; open children #862, #1079, #1080, #1082, #1083,
-  #1084, #1102, #1148, plus closed #820/#947/#1081/#1095): Face 2
+- **#912** (root boundary; open children #1079, #1080, #1082, #1083, #1102,
+  #1148, plus closed #820/#862/#947/#1081/#1084/#1095): Face 2
   (the `name = ` prefix) shipped in v0.18.1; Face 1 (existence) is partial -
-  manifest walkers are `Expr::Node`-blind (#1082), anonymous tuple/ADT roots
-  drop (#1083). The manifest is non-empty today only because of the
+  manifest walkers are `Expr::Node`-blind (#1082), and anonymous tuple/ADT
+  roots still drop from the manifest: the dotted-root expansion is a live
+  `TODO` at `chelis-effects/src/realizability.rs:506`. #1083 owns that half;
+  it was briefly closed on 2026-08-21, two minutes after PR #1231 merged and
+  against that PR's own "this does not close #1083" record, and reopened the
+  same day with the conflict recorded on the thread. The manifest is non-empty today only because of the
   transitional `normalize_nodes_to_lists` bridge, so **#1029's carrier
   deletion silently empties manifests unless #1082 lands first** - the two
   sibling classes are coupled in that order. Face 4 (artifact) is open, and
   worse than the checklist wording suggests: `requires_main()` has exactly one
-  production caller, `compute_manifest_json` at `main.rs:1819`, which
+  production caller, `compute_manifest_json` at `main.rs:1799`, which
   decorates `eval --json` and decides nothing. All three `cmd_build_c_result`
   sites pass `None`, so `c_source.contains("int main(")` at `main.rs:8556`
   decides, and `cmd_build_hip_host` never takes the parameter at all - it runs
   the same text search at `main.rs:8633`. spec/05 says a source-text scanner
   cannot satisfy [05-UNS-1]. #1023 §C is the live
-  acceptance checklist. The chain now gates a second plan's oracle as well as
-  its own: #730's Phase 3 runner ends at a leg that runs
-  `issue_912_root_boundary` with `--run-ignored all`, and that target's six
-  ignored tests are each gated on a piece of this chain (two on `todo!`, four
-  on "enable once the manifest / per-def realizability lands").
+  acceptance checklist. The chain still gates a second plan's oracle as well
+  as its own: #730's Phase 3 runner ends at a leg that runs
+  `issue_912_root_boundary` with `--run-ignored all`. PR #1231 re-ran that
+  target's six ignored cells against `main`, found four quietly green
+  (un-ignored, after a review round caught three of them passing vacuously),
+  and declared the remaining two - both `todo!` manifest-completeness cells -
+  in an enforced `IGNORE_LEDGER` citing #1079, so the leg is red on exactly
+  those two until #1079 lands. #1084's surviving ask (the ledger itself) is
+  what #1231 delivered; its first two asks had already landed unrecorded.
 - **#909** (typed host function values / C-host callable ABI; children #866,
   #867, #879): no longer paperless - `spec/design/host_function_values.md`
   is written and re-authored against current `main` (PR #1173), and the
   earlier spec lock PR #880 closed as superseded. Nothing is implemented, and
   #879 stays in the CI-pinned set.
-- **#883** (diagnostic spans; children #868, #886, #916, #1172): the decision
+- **#883** (diagnostic spans; open children #868, #886, #1172; #916 closed
+  2026-08-17 as fixed-at-main by code audit, its purpose-built reshape
+  slot-mismatch diagnostic having shipped in what is now
+  `infer/app_shape.rs`): the decision
   is made - `Unsupported` folds into the #909 plan as its FV1 slice,
   `CheckError` stays here with `report_at` as the primitive - and none of it
   is executed. `Unsupported::with_span` has zero call sites while 49
@@ -180,7 +204,14 @@ What each cut obliges a shell to do, not what each cut contained.
   (PR #1176, which invalidates 0.18.3 on-disk caches by design and reorders
   emitted C for multi-package reef builds). **The scalar
   `/* unsupported builtin */ 0` stubs behind #704/#712/#715 are still present
-  here** - PR #1188 repairs them on `main`, after the tag. Two of the four
+  here** - PR #1188 repairs them on `main`, after the tag - and so are the
+  #1200 linearity regression (repaired main-side by PR #1208), the branded
+  recursive-generic rejection (retired main-side by #1204/#1215/#1218), and
+  the quadratic compiled-lane CSV ingestion (repaired main-side by #1213).
+  `[Unreleased]` now also carries a BREAKING checker change - polymorphic
+  recursion rejects at check time under [04-INF-2]/[04-INF-3] - so the next
+  cut is migration-bearing regardless of what else it takes (pending
+  decision 9). Two of the four
   boundaries land on the roadmap's anti-churn invariants; see pending
   decision 1 for what that does and does not settle.
 - **v0.19** (planned; source migration) - carries what 0.18.4 did not take:
@@ -200,13 +231,13 @@ What each cut obliges a shell to do, not what each cut contained.
 
 ### What the five classes hold
 
-Of the 119 issues parented to the five trackers, 41 are open. #733 is the only
+Of the 119 issues parented to the five trackers, 40 are open. #733 is the only
 class with nothing closed under it.
 
 | tracker | open / total | open children |
 |---|---|---|
 | #729 | 12 / 50 | #689, #690, #693, #753, #759, #892, #951, #965, #1091, #1092, #1112, #1160 |
-| #730 | 18 / 36 | #699, #722, #794, #795, #870, #872, #906, #955, #957, #958, #960, #990, #1058, #1137, #1138, #1143, #1157, #1158 |
+| #730 | 17 / 36 | #699, #722, #794, #795, #870, #872, #906, #955, #957, #958, #960, #990, #1058, #1137, #1138, #1143, #1157 |
 | #731 | 5 / 20 | #850, #874, #1125, #1129, #1134 |
 | #732 | 2 / 9 | #997, #1059 |
 | #733 | 4 / 4 | #735, #797, #895, #898 |
@@ -228,7 +259,11 @@ class also carries older closures from its own phases):
   #734, #744, #745, #900, and the nullary-generic-ADT family #935, #936,
   #939, #940, #941, #948). PR #1175's first gate-contract slice closes #697,
   #698, #705; PR #1186's second closes #959; PR #1189's deletion of the
-  `_ => input` host-emission fallback closes #1150. #725 and #734 are
+  `_ => input` host-emission fallback closes #1150. PR #1204 closes #1158 by
+  landing the capability itself - bounded memoized monomorphization with
+  recursive edges preserved as calls - rather than by re-branding the
+  rejection; what still cannot resolve moved to the new residue tracker #1226
+  with recursion-neutral wording (PR #1215). #725 and #734 are
   consolidated into their open support owners #1058 and #1059 per the
   one-tracker rule, so each still owes a *support* half.
 - **#731.** PP1/PP2 (PR #1178) closes #780, #783, #847, #851, #1131, #1147,
@@ -243,19 +278,32 @@ class also carries older closures from its own phases):
 Two issues outside the classes belong to the same story. **#796** is closed on
 the maintainer call its row asked for, citing spec/05 §3.6.1's eval-only
 `test_*` contract; the compiled-assertion request it carried lives at #1170.
-**#862** is open with its fix already on `main`, waiting only on the named
-unit-valued-root regression test - the cheapest close on the board.
+**#862** closed on 2026-08-21 - the cheapest close on the board got made: PR
+#1230 landed the named unit-valued-root regression test over three
+sole-print-root programs, avoiding the three vacuity traps its disposition
+notes documented.
 
-**Two caveats on that 41.** All 22 of the most recent closures rest on a
+**Two caveats on that 40.** All 22 of the 2026-08-05 class closures rest on a
 PR-body keyword, the same mechanism that mis-closes #716, #729, and #912, and
-the guard named in the prevention map is still owed. And a small number of
-open children is not the same as a small amount of open work: nineteen issues
-now sit outside them (#1168, #1170, #1171, #1172, #1177, #1179, #1180, #1182,
-#1183, #1184, #1190-#1194, #1197, #1198, #1200, #1201), parented to #1024,
-#883, #1170, or nothing. **#1200** and **#1201** are the two that expose the
-scope: a linearity regression labelled `soundness` and `type-system`, and
-generic inlining dropping checked parameter annotations so generic-ADT terms
-reach C lowering unresolved. Both are class-shaped work with no class.
+the guard named in the prevention map is still owed (#1158's 2026-08-07
+closure rode the same path, legitimately - PR #1204's oracle is green). And a
+small number of open children is not the same as a small amount of open work:
+**twenty-seven** open issues now sit outside the five classes, parented to
+#1024, #883, #1170, or nothing. Thirteen predate the 2026-08-05 revision
+(#1168, #1170, #1171, #1172, #1177, #1179, #1180, #1182, #1183, #1184, #1192,
+#1197, #1198 - #1190/#1191/#1193/#1194 closed, and #1200/#1201 left the list
+by repair rather than by gaining a class). Fourteen were filed since, all
+parentless: a performance family (#1205 front-end superlinearity, #1206
+recursive-def tensor retention, #1207 superlinear typechecking), the #1208
+linearity residue (#1209 name-vs-generation alias resolution, #1211 carrier
+identity, #1212 authored-carrier collision), two `soundness` finds (#1214 HIP
+fused-in-place missing chelis#933's caller-storage check, #1224 the SMT
+runner dropping a where-clause assumption), #1222 (compiled-binary abort at
+exit), the #1213 excavations (#1217 stale-stdlib false green, #1225
+per-character CSV recursion wall), the fail-closed residue tracker #1226, and
+two CI items (#1221, #1234). The class-shaped-work-with-no-class observation
+that #1200/#1201 exposed now applies verbatim to the linearity residue and
+the performance family.
 
 ### The CI-pinned set (11, all legitimately live)
 
@@ -327,11 +375,12 @@ two concrete work items that tracker carries beyond #735 and #895.
 ## Live defect inventory
 
 Each entry is tagged with its owning tracker class and describes `main` at
-`841b6ddb`. All but the last two groups are parented sub-issues of a class this
+`77a74ea1`. All but the last two groups are parented sub-issues of a class this
 doc covers; the caveat is that **parented != scheduled** - a parent gives
 ownership and the oracle that proves the fix, but several of these appear in
 no remaining phase deliverable of their owning plan (see gap 5 below). No open
-PR carries any of them: the in-flight board holds no plan-set work at all.
+PR carries any of them: the in-flight board holds no plan-set work at all
+(#1227 documents #1207's investigation but fixes nothing).
 
 - **#690** (owner: #729) - HIP integer division by zero: kernels emit bare
   `a/b`; exit-0 garbage on GPU where eval traps branded. Fix is a
@@ -360,8 +409,10 @@ PR carries any of them: the in-flight board holds no plan-set work at all.
   silent-zero half is dead (Phase 1's raise at `lower.rs:10686` cites census
   row 1 and both issues), and what stays open is compiled integer *support*,
   which is a #729 capability-table decision rather than a #730 deliverable.
-  #1058 and #1158 have the same shape - the branded rejection fires correctly
-  and the capability is what is missing. Genuinely #730's: #794 (the
+  #1058 keeps that shape - the branded rejection fires correctly and the
+  capability is what is missing - while #1158 exited it on 2026-08-07: PR
+  #1204 landed the capability, and the recursive-generic rejection is retired
+  except for the #1226 residue. Genuinely #730's: #794 (the
   `extract_f64_value` par catch-all folds the first child where spec/03 says
   last, and `extract_usize_value` maps a negative `.dp` seed to 0 - both
   checker-unreachable today, so defense-in-depth per §C1.4), #960 (the
@@ -413,19 +464,53 @@ PR carries any of them: the in-flight board holds no plan-set work at all.
   #735 is one of #733's four children), and #738/#754/#763 (no shell has ever
   run a compiled binary; the cross-lane gate is speced, Linux x86-64 first,
   and unbuilt).
-- **v0.18.4 fallout, unparented** - **#1200** (labelled `soundness` +
-  `type-system`): discarding a call's result with `_ = f(x)` marks `x`
-  consumed, so a later use of `x` is rejected, while binding the result to a
-  name is accepted. It reaches callees that destructure a record parameter,
-  which canonical Surf's mandatory record-pattern pun makes common. Coral goes
-  from 74 passing / 0 failing on 0.18.3 to 17 passing / 7 files failing to
-  compile, and Shoals loses `Curves` coverage the same way. **#1197**: a
-  pipe-stage lambda with a chained body fails resugaring inside
+- **v0.18.4 fallout** - **#1200 is repaired on `main` and live in the
+  release.** PR #1208 replaced the Linearity-F2 region gate with per-binding
+  component tracking: coral's unmodified suite recovers 74/74 and shoals'
+  `curves_basis` clears, the destructured-component carve-out finally has
+  normative text (spec/04 §8.3 plus `implicit_linearity.md` - both previously
+  described copy insertion with no exception at all), and the repair sits
+  after the tag, so a shell on 0.18.4 still hits the regression. The repair's
+  own adversarial review filed the open residue, all unparented: **#1209**
+  (alias chains resolve names rather than binding generations - both
+  misroute directions, pinned as `#[ignore]`d tests), **#1211** (carrier
+  identity and temp-name uniqueness follow-up), and **#1212** (an authored
+  `__chelis_tmp0` in an enclosing block collides with a synthesized carrier
+  and hides a use-after-consume). That re-poses #1200's old ownership
+  question - see pending decision 2. **#1197** is unchanged: a pipe-stage
+  lambda with a chained body still fails resugaring inside
   `chelis migrate surf`, and because the migrator preflights the whole batch,
   one such file aborts the entire run - so the tool the release names as its
-  migration path can refuse to migrate a tree. Neither has a class parent, and
-  neither was caught by anything in CI: both were found downstream after the
-  cut.
+  migration path can refuse to migrate a tree. No class parent, no owner,
+  nothing in CI can see it.
+- **Filed since 2026-08-06, all unparented** - a performance family:
+  **#1205** (`chelis build` front-end time ~cubic in nested entry-body size,
+  ~quadratic flattened: 42.9 s vs 7.6 s for the same 160 tensor ops),
+  **#1206** (compiled recursive defs retain every frame's tensor
+  intermediates: a 288-frame local-vol MC exhausts >11 GB at 60k width),
+  **#1207** (typechecking superlinear in binding count - `Env::generalize`
+  sweeps the whole environment per binding; a 433-line shoals module takes
+  67 s; the investigation and levels plan sit on the open docs PR #1227).
+  Two `soundness` finds: **#1214** (the HIP backend's `fused_in_place_spec`
+  is missing chelis#933's caller-storage check, and a test asserts the unsafe
+  shape) and **#1224** (the SMT property runner drops a where-clause
+  assumption on the named-def gradient path - flaky spurious disproofs).
+  **#1222** (a compiled binary prints correct results, then aborts at exit
+  with `double free or corruption`). And the #1213/#943 excavations:
+  **#1217** (`chelis test` re-validates its prepared-graph cache against a
+  leaked bundled-stdlib tempdir, so a stdlib edit can run false-green or
+  false-red until the bundle identity joins the cache key) and **#1225**
+  (`parse_line_chars` recurses per character, so a valid CSV line beyond the
+  lane's stack budget crashes `try_read_csv`: eval ~4 KiB, compiled
+  ~100 KiB). #943 itself is half-repaired after the tag by PR #1213
+  (compiled-lane CSV ingestion is linear - 3.06 GB -> 121 MB allocated on the
+  9588-row probe - and the `string_slice`/`string_len`/`list_append` costs
+  are retired); its remaining half, user-written recursive `append`
+  accumulators, needs a static "uniquely referenced and not read again"
+  consumption fact feeding `chelis_list_push`. The PR implemented and
+  disproved the cheap dynamic `refcount == 1` route by oracle comparison
+  (5 of 5 adversarial programs wrong, and the asymptotics survive at half
+  the constant), so the static fact is the only live route.
 
 ## Prevention map (failure mode -> mechanism -> status)
 
@@ -435,19 +520,20 @@ PR carries any of them: the in-flight board holds no plan-set work at all.
 | Op x dtype drift, hand-mirrored lists | #729 Phase 4 capability table | opened; table proper unbuilt |
 | The next silent value substitution | #730's typed channels (landed) + Phase 4 ratchet totality (§C7) | Phase 4 unstarted (#990) |
 | Gate drift / duplicate gates | #730 P3 gate contract + dedup + deletion | the gates themselves are done (PRs #1175 and #1186: one shared typed policy per target, zero `fn reject_` definitions left in `chelis-cli`, the syntactic `reject_*` source manifest, #697/#698/#705/#959 closed); the recorded contract, the deletion pass, and a semantic no-duplicate tripwire remain |
-| A breaking release reaching shells before anyone runs their suites | the ecosystem-drift canary (auto-files per shell) + `conform bump-check` | neither detects nor gates this. The canary checks each shell out at `main` and never runs `chelis migrate surf`, so it only ever exercises pre-migration source - and #1200 appears only after migration rewrites record patterns to the mandatory v0.19 pun, which makes the existing leg structurally incapable of seeing it. The canary has also been red since 2026-08-02 and was red when v0.18.4 was cut, so it gates nothing in practice either. The missing leg applies a release candidate's own named migration to each shell tree and then runs that shell's suite |
+| A breaking release reaching shells before anyone runs their suites | the ecosystem-drift canary (auto-files per shell) + `conform bump-check` | neither detects nor gates this. The canary checks each shell out at `main` and never runs `chelis migrate surf`, so it only ever exercises pre-migration source - and #1200 appears only after migration rewrites record patterns to the mandatory v0.19 pun, which makes the existing leg structurally incapable of seeing it. The canary has also been red continuously since 2026-08-02 - including the 2026-08-21 run - so it gates nothing in practice either. The missing leg applies a release candidate's own named migration to each shell tree and then runs that shell's suite |
 | Unhandleable AST states reappearing | #731/#908: stamped-only ingress (#1088), then carrier deletion (#1029) | **nothing in flight** - PR #1036 closed unmerged, #1088 is unowned, and #1129 holds the landing inventory |
 | Spec silence and stale claims | #733 end-to-end | nothing active - the weakest link, with the #891/#904 twenty-builtins-no-spec instance as its measured cost |
 | Guards existing but not running | #1089's inventory of oracles outside continuous jobs; #990's scheduled/change-gated package | partial: #732's Phase 2 oracle has a dedicated blocking job and Phase 3 runs nested continuously, and #729's Phase 1/2 oracles run nested inside Phase 3. Still unwired: `unrepresentable_domain_oracle.py` (#908), `loud_unsupported_phase2_oracle.py` (#730), `compiler_pipeline_oracle.py` (its three controls run in the gate's `lint-and-unit` stage, but the oracle itself is invoked nowhere - `grep -n compiler_pipeline_oracle scripts/gate.py` returns one comment line and no call - which is not what #1089 asks for), and the new `loud_unsupported_phase3_oracle.py`, which is red on its #912 leg by design. #1090 closed as refuted - the canary already auto-files into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64) |
 | Silent lane divergence | #754/#763 cross-lane gate; #738 shell compiled lanes | unblocked by #732 P2, undelivered |
 | Agent-driven recurrence | #740's enforcement-ladder backlog; #895 executable plan inventories | entirely unchecked, dormant |
-| Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159), and 22 more class closures on 2026-08-05 through the same unguarded path |
+| Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159), and 22 more class closures on 2026-08-05 through the same unguarded path. The 2026-08-17/21 audit-and-pin wave (evidence-comment closures for #916/#646/#986; pinned-test PRs #1230-#1232 for #862/#1084/#683) is the closure discipline done right by hand - and the same wave produced the #1083 conflict (closed against PR #1231's own record, reopened the same day), which argues for the guard, not against the wave |
 
 ## The six biggest remaining gaps, elaborated
 
 ### 1. #730's gate half - delivered; the contract and the ratchet are not
 
-The gates themselves are in place. What `841b6ddb` measures:
+The gates themselves are in place. What `77a74ea1` measures (re-verified for
+this revision; every count and anchor below is unchanged from `841b6ddb`):
 
 - `grep -c "fn reject_" crates/chelis-cli/src/main.rs` is **0**. The CLI
   defines no rejection policy of its own; it calls the typed compiler-api
@@ -478,11 +564,12 @@ diagnostic-kind contract, the typed rejection-authority tests, the
 rejection-authority boundary, the live issue-authority manifest) pass, and the
 sixth - the #912 root-realizability integration - does not. That leg runs
 `cargo nextest run -p chelis-cli --test issue_912_root_boundary --run-ignored
-all`, and all six of that target's ignored tests are gated on the #912 chain:
-two on `todo!` bodies, four on "enable once the manifest / dotted-root
-surfacing / def-level precision routing / per-def realizability lands". Which
-of the six the leg reports is a matter for whoever runs it; the leg is red
-until the chain lands, which is the point. Also owed: the recorded gate
+all`. PR #1231 re-ran the target's six ignored cells against `main`, found
+four quietly green (now active, after a review round caught three of them
+passing vacuously), and declared the remaining two - both `todo!`
+manifest-completeness cells - in an enforced `IGNORE_LEDGER` citing #1079: an
+`#[ignore]` without a ledger row, or a stale row, now fails the target. The
+leg is red on exactly those two cells until #1079 lands, which is the point. Also owed: the recorded gate
 contract as a written rule
 (a gate may only make a diagnostic earlier or more specific), deletion of
 gates that duplicate emitter rejections (proven by the rejected-cells corpus),
@@ -538,7 +625,10 @@ adaptation). It needs an owner; nothing else.
 
 Face 1 (existence): the manifest walkers are `Expr::Node`-blind (#1082), so a
 stamped program can produce a silently empty manifest; anonymous tuple/ADT
-roots drop (#1083). Face 4 (artifact): `requires_main` reaches one production
+roots still drop from the manifest - the dotted-root expansion is a live
+`TODO` at `chelis-effects/src/realizability.rs:506`, owned by #1083 (briefly
+closed on 2026-08-21 against PR #1231's own record; reopened the same
+day). Face 4 (artifact): `requires_main` reaches one production
 caller that decides nothing (`compute_manifest_json`, which decorates
 `eval --json`). All three `cmd_build_c_result` sites pass `None`, leaving
 `c_source.contains("int main(")` as the deciding authority, and
@@ -546,8 +636,11 @@ caller that decides nothing (`compute_manifest_json`, which decorates
 source-text scanner cannot satisfy [05-UNS-1]. The dependency order is
 written: #1082 -> #1079
 (consume `ManifestedProgram`, delete the source_arch guard) -> thread
-`requires_main` incl. HIP -> #1083 -> #1084's acceptance cells -> the C1 f64
-build-routing. Jeff's chain; #1097 landed its fail-closed disposition piece;
+`requires_main` incl. HIP -> the dotted-root expansion -> the C1 f64
+build-routing. #1084's surviving ask is delivered: PR #1231's enforced
+`IGNORE_LEDGER` declares the two remaining `todo!` cells against #1079 and
+un-ignored the four that had quietly gone green.
+Jeff's chain; #1097 landed its fail-closed disposition piece;
 #730's deliverable 6 lands inside it. Its cost is not confined to its own
 class: #730's Phase 3 runner cannot go green until this chain does.
 
@@ -613,8 +706,9 @@ manifest only detects a wrong closure after the fact, on an unrelated PR's CI,
 and all 22 of the most recent closures sit on that unguarded path. And
 #754/#763/#737/#738 leave whole lanes evidence-free: Metal has never executed
 a typed kernel, and no shell has ever run a compiled binary. #1200 is what
-that costs - a linearity regression that is in 0.18.4 and that only coral's
-own suite can see.
+that costs - a linearity regression that shipped in 0.18.4, that only coral's
+own suite could see, and whose repair (PR #1208) had to be driven by
+downstream breakage rather than by any gate.
 
 Ranked by leverage: give #1088 an owner, wire the remaining oracles, then
 write down the gate contract that the two shipped slices now make cheap to
@@ -623,19 +717,24 @@ table and the #912 chain are the two real campaigns left before v0.19/v0.20.
 
 ## Open PRs
 
-Two PRs are open besides the docs-only change carrying this report, and what
+Six PRs are open besides the docs-only change carrying this report, and what
 each retires when it lands:
 
 | PR | what it retires | state |
 |---|---|---|
+| #1235 | Drops the superseded stamp-shell and aligns the python3 policy with the scripts | open |
+| #1233 | `bump_compiler_pins.py` regenerates the checkpoint compile-fail fixture's lock on a version bump (part of #1128; #1234 holds the sibling pipeline-artifacts fixture gap) | open |
+| #1227 | Publishes the #1207 typecheck-superlinearity investigation and levels plan (docs-only; fixes nothing) | open |
+| #1203 | Commits the crate2nix graph and composes shared devenv tools | open |
 | #1161 | Keys compiled-context caches on the build fingerprint rather than the release version: closes #1156, the one parentless issue the graph audit found | open |
 | #838 | Conform central workflow wrappers (#788 family, Chelis-Lang/ci#5 prereq) | draft |
 
-Neither touches the numeric-remediation plan set: they are cache and
-conformance work, and between them they retire one open issue (#1156).
-**Nothing in flight addresses #1200, #1201, #1197, or #1088**: the
-post-release regressions and the unowned keystone are unstaffed, and so are
-both remaining campaigns.
+None touches the numeric-remediation plan set: they are cleanup, tooling,
+cache, and conformance work, and between them they retire one open issue
+(#1156). **Nothing in flight addresses #1197 or #1088**: the surviving
+post-release regression and the unowned keystone are unstaffed, and so are
+both remaining campaigns. (#1200 and #1201 left that sentence the right way -
+repaired, by PRs #1208 and #1215.)
 
 ## Pending maintainer decisions
 
@@ -651,13 +750,20 @@ both remaining campaigns.
    the call is: amend invariant 7 to say what governs an ABI change in a
    breaking patch cut (or record 0.18.4 as its stated exception), and decide
    whether invariant 1 reaches the WireDag schema at all.
-2. **#1200's owner and class.** A 0.18.4 linearity regression that costs coral
-   57 tests currently has `soundness`/`type-system` labels and no parent. It is
-   checker-shaped, so #731 is the obvious home, but the class's own oracle is
-   green - which is exactly the "parented != scheduled" shape gap 5 describes,
-   arriving from the other direction.
-3. **#862** - land the named unit-valued-root regression test, then close.
-   Still the cheapest close on the board.
+2. **The linearity residue's owner and class.** #1200 was repaired without
+   ever getting either (PR #1208 landed classless), and its adversarial
+   review filed #1209, #1211, and #1212 - checker-shaped, unparented, while
+   #731's oracle stays green. The question #1200 posed is unanswered and now
+   has three successors; #1209's binding-generation identity is the
+   durable-fix shape PR #1208 itself named.
+3. **The performance family's home.** #1205, #1206, and #1207 are the same
+   shape from a lane no tracker owns: superlinear compile-path costs
+   (front-end lowering, compiled recursion's memory retention, and
+   `Env::generalize`'s per-binding environment sweep), each `area:perf`,
+   each parentless. #1207 already has a levels plan on PR #1227. Decide
+   whether they get a tracking hub (the one-tracking-issue-per-class rule
+   fits: a recurring cost class with a shared oracle shape) or stay
+   standalone ledger entries like #888.
 4. **The graph-shape questions the audit surfaced**: confirm the #1023/#1029
    hub-with-a-parent arrangement is intended. (#895's second home is already
    recorded by comment, so nothing is owed there.)
@@ -677,7 +783,10 @@ both remaining campaigns.
    first-argument application-to-pipe promotion, explicitly not delivered by
    #1031), #1172 (structural spans, parented to #883), #1179, and #1180 ride
    v0.19 or a further patch - and whether #1197 blocks the migration path
-   enough to warrant a 0.18.5.
+   enough to warrant a 0.18.5. Note the calculus has shifted: `[Unreleased]`
+   now carries the #1200 repair, the recursive-generic capability, and a
+   BREAKING check-time polymorphic-recursion rejection, so the next cut is a
+   migration-bearing release whether or not #1197 makes the bar.
 10. **#1170's relationship to #730 Phase 4.** The C-lane capability tracker
    inventories the same hand-maintained exclusion lists that Phase 4's ratchet
    totality is meant to derive. Decide whether it is a Phase 4 acceptance cell
@@ -692,8 +801,10 @@ that measures it.
    closes the issue whether or not the fix is complete, and the only guard is
    the liveness manifest's after-the-fact detection on an unrelated PR's CI.
    #716, #729, and #912 each sit on that history, reopened after the fact; the
-   one mitigation attempt (#1151) is reverted as overreach, and all 22 of the
-   most recent class closures rest on the same unguarded path.
+   one mitigation attempt (#1151) is reverted as overreach, and the 22 class
+   closures of 2026-08-05 rest on the same unguarded path - as do the August
+   repair closures (#1158, #1200, #1201, #1216), each backed by a green
+   oracle, which is the luck the guard would replace with a check.
 2. **Merge governance holds; the verification habit is what backs it.** The
    #1096 rollout (no-bypass, squash-only, green up-to-date checks) governs
    every merge, which is why the 8/1-8/2 pattern the sprint audit counted - 22
@@ -712,7 +823,13 @@ that measures it.
    evidence comments, but that is a convention, not a gate: the validation
    pass found ~29 fixed-but-open issues, several with threads describing their
    own fix as still in flight, and the plan docs carried an unperformed
-   instruction ("close the issues on the PR #863 merge") for weeks.
+   instruction ("close the issues on the PR #863 merge") for weeks. The
+   2026-08-17/21 audit wave is the first systematic counter-move: fixed-but-
+   open issues re-verified against `main` and closed with evidence comments
+   (#916, #646, #986) or with the owed test landed first (#862 via PR #1230,
+   #1084 via #1231, #683 via #1232). Still a convention rather than a gate -
+   and the same wave shows the cost in the other direction: #1083, closed
+   against PR #1231's own record and reopened the same day.
 5. **An oracle that reports FAIL outranks a phase claim that reports done.**
    Both current examples are self-reports corrected by execution: #732's Phase
    2 command failed on `main` because a zero-cell ledger has no real
@@ -728,14 +845,18 @@ that measures it.
    which documented 1 of its 20 commits and omitted a breaking change
    (chelis#1130's `shape()` return to int64, after 0.18.2's notes had told
    readers not to migrate onto the int32 form). Three consecutive releases now
-   show the same drift. The proposed guard - **CI asserting that a PR diff
+   show the same drift. The current cycle breaks the pattern so far: every
+   post-tag behavior PR (#1204, #1208, #1213, #1215, #1218) landed its
+   `[Unreleased]` entry in the same change set, including the BREAKING
+   polymorphic-recursion note with its reproducer. The proposed guard - **CI asserting that a PR diff
    adds no changelog line below the first `## [` header** - catches both the
    missing-entry case and the chelis#945 case where a rebase moves an entry
    into an already-released section.
 7. **The plan set's oracles cannot see the ecosystem.** Every phase oracle in
    these five plans is repo-internal, so a change can pass all of them and
    still break a shell. #1200 is what that costs: a linearity regression that
-   clears every gate the release ran and takes coral from 74 passing to 17.
+   clears every gate the release ran and takes coral from 74 passing to 17,
+   repaired main-side by PR #1208 only after coral reported it.
    #754/#763/#738 are where a shell-suite leg belongs, and "unblocked,
    undelivered" is no longer a theoretical position.
 8. **The sub-issue graph is trustworthy as the assignment record, and it is
