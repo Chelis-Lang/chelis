@@ -2667,6 +2667,15 @@ const DEBUG_SPELLINGS: &[&str] = &[
     "IrTensorValue",
 ];
 
+/// The measured pre-migration renderings of a stored f16/bf16 `0.1`:
+/// `half`'s `Debug` forwards to `to_f32()`, so it reported `0.099975586`
+/// and `0.100097656` for values every exit renders as `0.1`. These are
+/// PREFIXES of those strings, so a `half` version bump that shifts the
+/// trailing digits still trips the assertions, while the correct `0.1`
+/// rendering can never contain either one.
+const WIDENED_F16_IMAGE: &str = "0.0999755";
+const WIDENED_BF16_IMAGE: &str = "0.1000976";
+
 #[track_caller]
 fn assert_no_debug_spelling(rendered: &str, what: &str) {
     for needle in DEBUG_SPELLINGS {
@@ -2749,13 +2758,18 @@ fn fo_diag_scalars_carry_their_dtype_and_own_width_digits() {
 fn fo_diag_half_widths_are_not_reported_through_their_f32_image() {
     let f16 = scalar_of(Prim::F16, 0.1);
     assert_eq!(describe_value(&f16), "f16 0.1");
+    // The needle is the shared PREFIX of the measured widened image
+    // (`0.099975586`), not the whole string: a `half` bump that shifts the
+    // trailing digits must still trip this, and the correct rendering
+    // (`0.1`) can never contain it.
     assert!(
-        !describe_value(&f16).contains("0.09997559"),
+        !describe_value(&f16).contains(WIDENED_F16_IMAGE),
         "the f32 image of the stored f16 must not reach the diagnostic"
     );
 
     let bf16 = scalar_of(Prim::Bf16, 0.1);
     assert_eq!(describe_value(&bf16), "bf16 0.1");
+    assert!(!describe_value(&bf16).contains(WIDENED_BF16_IMAGE));
 
     // And the same value inside a malformed ADT field list, which is how a
     // JSON/CSV shape diagnostic reports it.
@@ -2955,7 +2969,7 @@ fn fo_diag_json_shape_diagnostics_report_exact_payloads() {
         err.contains("malformed JInt fields [f16 0.1]"),
         "own-width f16 digits in the diagnostic: {err}"
     );
-    assert!(!err.contains("0.09997559"), "no widened image: {err}");
+    assert!(!err.contains(WIDENED_F16_IMAGE), "no widened image: {err}");
 
     // A non-Json value reaching the serializer names what it actually is.
     let err = super::json::json_value_to_text(&RuntimeValue::Bool(true))
@@ -3033,7 +3047,7 @@ fn fo_diag_csv_shape_diagnostics_report_exact_payloads() {
     )
     .expect_err("a malformed JInt cell must fail");
     assert!(err.contains("malformed JInt cell [f16 0.1]"), "got: {err}");
-    assert!(!err.contains("0.09997559"), "got: {err}");
+    assert!(!err.contains(WIDENED_F16_IMAGE), "no widened image: {err}");
 
     // A non-string top-level key in a document reaching `to_csv`.
     let bad_doc = adt(
@@ -3047,17 +3061,142 @@ fn fo_diag_csv_shape_diagnostics_report_exact_payloads() {
     assert_no_debug_spelling(&err, "the to_csv document diagnostic");
 }
 
-/// End to end through the checked pipeline: the eval dispatch arms that
-/// migrated with this package report an argument's dtype and value, not a
-/// Rust `Option`/`Debug` spelling.
+/// Evaluate one Deep expression against hand-supplied runtime bindings.
+///
+/// The seven eval dispatch arms this package migrated are guards behind
+/// the checker: `check_json_builtin_signature` rejects a non-f64 `jnum`
+/// operand, a non-int64 `jint` operand, a non-`(string, Json)` `jdict`
+/// entry, and a non-f32/f64 `round_to` operand, so no CHECKED program
+/// reaches them (pinned below by
+/// `fo_diag_migrated_eval_arms_are_checker_front_run`). They exist for
+/// dynamically-constructed calls, and their whole job is to name the value
+/// they were handed - so the runtime library's own `eval_expr` entry, not
+/// the checked pipeline, is where their text is observable.
+fn eval_deep_with_bindings(
+    surf_expr: &str,
+    args: &[(&str, RuntimeValue)],
+) -> Result<String, String> {
+    let source = format!("probe = {surf_expr}\n");
+    let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let Expr::List(def, _) = &exprs[0] else {
+        panic!("desugaring a top-level binding yields one def form");
+    };
+    // `(def {} <name> <body>)`: the body is the fourth element.
+    let body = def.elements[3].clone();
+
+    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    let mut ctx = EvalContext {
+        bindings: HashMap::new(),
+        binding_types: HashMap::new(),
+        named_axis_route_cache: HashMap::new(),
+        named_axis_route_visiting: HashSet::new(),
+        top_level_defs: HashMap::new(),
+        type_env: HashMap::new(),
+        adt_fields: HashMap::new(),
+        adt_grad_rejections: HashMap::new(),
+        tensor_bindings: &empty_tensors,
+        transcript: Vec::new(),
+        resolving_top_levels: Vec::new(),
+        random_seed: None,
+        random_counter: 0,
+        cancel: None,
+    };
+    for (name, value) in args {
+        ctx.bindings.insert((*name).to_string(), value.clone());
+        ctx.binding_types.insert((*name).to_string(), None);
+    }
+    ctx.eval_expr(&body).map(|value| render_value(&value))
+}
+
+/// One migrated-arm probe: a Surf expression, the runtime bindings its
+/// free names take, and the diagnostic fragment the arm must report.
+type DispatchProbe<'a> = (&'a str, &'a [(&'a str, RuntimeValue)], &'a str);
+
+/// The migrated eval dispatch arms name the argument they were handed, at
+/// its own dtype and value.
+///
+/// Every expected fragment below is a rewrite, not an addition: the
+/// pre-migration text rendered `payload.dtype()` through `Debug` (`F32`,
+/// `Int32`, `F16`) or the whole `Option<&RuntimeValue>` through `Debug`
+/// (`Some(Scalar(ScalarPayload { value: ScalarValue { bits: I32(5) } }))`),
+/// so each `contains` here fails against the pre-migration sources.
 #[test]
-fn fo_diag_eval_dispatch_diagnostics_name_the_argument() {
-    let checked = checked_surf(
-        r#"
-x = json_f64(parse_json("{\"alpha\": \"txt\"}"), "alpha")
-"#,
-    );
-    let err = evaluate_host_program(&checked, &HashMap::new())
-        .expect_err("a string node is not a number");
-    assert_no_debug_spelling(&err, "the json_f64 kind diagnostic");
+fn fo_diag_eval_dispatch_arms_report_the_argument_they_were_handed() {
+    let f32_scalar = scalar_of(Prim::F32, f64::from(0.1f32));
+    let int32_scalar = int_scalar_of(Prim::Int32, 5);
+    let f16_scalar = scalar_of(Prim::F16, 0.1);
+    let text = RuntimeValue::String("x".to_string());
+    let bad_entry = RuntimeValue::List(vec![RuntimeValue::Tuple(vec![
+        int_scalar_of(Prim::Int32, 1),
+        adt("JNull", vec![]),
+    ])]);
+
+    let cases: &[DispatchProbe<'_>] = &[
+        (
+            "jnum(arg)",
+            &[("arg", f32_scalar)],
+            "jnum: expected an f64 value, got f32 0.1",
+        ),
+        (
+            "jnum(arg)",
+            &[("arg", int32_scalar.clone())],
+            "expected f64 arg at index 0, got int32 5",
+        ),
+        (
+            "jint(arg)",
+            &[("arg", int32_scalar)],
+            "jint: expected an int64 value, got int32 5",
+        ),
+        (
+            "round_to(arg, 2)",
+            &[("arg", f16_scalar)],
+            "round_to: unsupported operand dtype f16",
+        ),
+        (
+            "round_to(arg, 2)",
+            &[("arg", text)],
+            "expected float arg at index 0, got string \"x\"",
+        ),
+        (
+            "jdict(arg)",
+            &[("arg", bad_entry)],
+            "jdict keys must be strings, got int32 1 at index 0",
+        ),
+    ];
+
+    for (expr, bindings, expected) in cases {
+        let err = eval_deep_with_bindings(expr, bindings)
+            .expect_err("the dispatch guard must reject this argument");
+        assert!(
+            err.contains(expected),
+            "`{expr}` should report `{expected}`, got: {err}"
+        );
+        assert_no_debug_spelling(&err, "a migrated eval dispatch diagnostic");
+    }
+}
+
+/// Why the cell above drives the runtime library directly: every one of
+/// those arguments is rejected at CHECK time, so the arm's text is not
+/// reachable from a checked program today. If that ever stops being true,
+/// this cell goes red and the arm's wording becomes user-facing output
+/// that owes an end-to-end expectation.
+#[test]
+fn fo_diag_migrated_eval_arms_are_checker_front_run() {
+    for source in [
+        "x = jnum(0.1f32)\n",
+        "x = jnum(1i64)\n",
+        "x = jint(1i32)\n",
+        "x = jint(1.0f64)\n",
+        "x = round_to(cast(1.5f64, f16), 2)\n",
+        "x = round_to(5i32, 2)\n",
+        "x = jdict([(1i64, jnum(1.0f64))])\n",
+    ] {
+        let decls = chelis_surf::parser::parse_str(source).expect("surf parse");
+        let exprs = chelis_surf::desugar::desugar_program(&decls);
+        assert!(
+            chelis_types::check_ir_program(&exprs).is_err(),
+            "the checker must reject `{source}` before eval sees the argument"
+        );
+    }
 }

@@ -1068,6 +1068,14 @@ so through `format_element`. `runtime/mod.rs`'s `truncated_debug` is
 deleted rather than relocated, and truncation moved inside the boundary
 with it.
 
+That truncation is a 160-byte cap on the whole rendered diagnostic
+(`DIAGNOSTIC_RENDER_LIMIT`), cut on a char boundary with the elision
+stated. It COMPOSES on top of §C1.5's 32-element tensor rule rather than
+competing with it: element truncation stays where it belongs, in the
+canonical renderer at every exit, and this cap bounds only how much of an
+already-canonical rendering one error message carries. A rendering that
+fits is byte-identical to the untruncated form.
+
 The recount corrected the prose above in one place worth recording: the
 executable tripwire attributed 36 tokens to [#997] across four rows, but 13
 of them were cfg(test) assertions, not the single one the JSON annotation
@@ -1087,8 +1095,17 @@ value, which is the §B2.4 harm in its plainest form. The
 `fo_diag_half_widths_are_not_reported_through_their_f32_image` cell pins
 both halves of that.
 
+The seven migrated eval dispatch arms are guards BEHIND the checker:
+`check_json_builtin_signature` rejects every argument that would reach
+them, so their text is not observable from a checked program. The focused
+suite therefore drives them through the runtime library's own `eval_expr`
+entry with hand-supplied bindings, and pins the front-running itself in
+`fo_diag_migrated_eval_arms_are_checker_front_run` - if the checker ever
+stops rejecting those arguments, that cell goes red and the arms' wording
+becomes user-facing output owing an end-to-end expectation.
+
 Acceptance evidence: the focused suite is `cargo nextest run -p
-chelis-compiler-api --lib -E 'test(fo_diag)'` (10 cells), and the
+chelis-compiler-api --lib -E 'test(fo_diag)'` (11 cells), and the
 authoritative Phase 2 oracle is
 `scripts/faithful_observation_phase2_oracle.py`. The mutation obligation in
 item 3 was executed, not asserted: re-adding `format!("{value:?}")` to
