@@ -416,8 +416,20 @@ When a public surface has an implicit invariant, make it explicit and test it.
   `uv python install 3.11`. Inside Devenv, use the activated environment at
   `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python` or
   `uv run --managed-python --python 3.11 --no-project python`.
-  `scripts/gate.py` is the one allowed `python3` bootstrap: it automatically
-  re-executes through that uv command before running gate logic.
+  `scripts/gate.py` is the one `python3` entry point that self-heals: it
+  re-executes through that uv command before running gate logic, so a bare
+  `python3 scripts/gate.py` is always safe.
+- **Two diagnostics are deliberately bootstrap-free.**
+  `scripts/reap_orphans.py` and `scripts/preflight_exec_probe.py` are invoked
+  as bare `python3` on purpose: they run *before* and independently of a
+  working project environment, which is exactly when a uv re-exec would be
+  the thing that is broken. They therefore MUST stay standard-library only
+  and MUST keep parsing on the oldest system Python a supported workstation
+  ships (macOS still ships 3.9), which is what the
+  `from __future__ import annotations` header in each buys. Neither
+  exemption extends to any other script: everything else, and all ad-hoc
+  scripting, uses a uv-managed interpreter.
+  `scripts/test_bootstrapless_scripts.py` locks both properties.
 - Create a primary checkout's manual environment once with
   `uv venv --python 3.11`. A dedicated git worktree does not need to copy or
   symlink another checkout's `.venv`; for direct Cargo commands there, export
