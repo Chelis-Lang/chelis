@@ -65,8 +65,9 @@
 //!   declared column, and rows carrying an undeclared or duplicate key
 //!   all fail loudly -- no silent data loss.
 
+use super::RuntimeValue;
+use super::host_ops::{describe_fields, describe_value};
 use super::json::{jdict, jlist, jstr};
-use super::{RuntimeValue, truncate_rendered, truncated_debug};
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -338,7 +339,7 @@ fn csv_doc<'v>(builtin: &str, value: &'v RuntimeValue) -> Result<CsvDoc<'v>, Str
             RuntimeValue::Adt { ctor, .. } => {
                 shape_err(&format!("got a non-Json value (constructor `{ctor}`)"))
             }
-            other => shape_err(&format!("got a non-Json value: {}", truncated_debug(other))),
+            other => shape_err(&format!("got a non-Json value: {}", describe_value(other))),
         });
     };
     let lookup = |key: &str| {
@@ -476,7 +477,7 @@ fn cell_kind(node: &RuntimeValue) -> String {
             "JDict" => "a dict".to_string(),
             other => format!("not a Json value (constructor `{other}`)"),
         },
-        other => format!("not a Json value ({})", truncated_debug(other)),
+        other => format!("not a Json value ({})", describe_value(other)),
     }
 }
 
@@ -590,7 +591,7 @@ fn cell_f64(
         Some(("JNum", fields)) => Err(format!(
             "{}: malformed JNum cell {}",
             ctx(),
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
         // A `JInt` cell widens via the named lossy widening ([05-OP-3]) --
         // exact up to 2^53, the same contract as `json_f64` on `JInt`;
@@ -601,7 +602,7 @@ fn cell_f64(
         Some(("JInt", fields)) => Err(format!(
             "{}: malformed JInt cell {}",
             ctx(),
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
         Some(("JStr", [RuntimeValue::String(text)])) => {
             parse_cell_number(builtin, column, row_idx, text)
@@ -609,7 +610,7 @@ fn cell_f64(
         Some(("JStr", fields)) => Err(format!(
             "{}: malformed JStr cell {}",
             ctx(),
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
         Some(("JBool", _)) => Err(format!(
             "{}: cell is a bool, not a number (no silent true/false-to-number coercion)",
@@ -684,7 +685,7 @@ fn cell_i64(
         Some(("JInt", fields)) => Err(format!(
             "{}: malformed JInt cell {}",
             ctx(),
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
         Some(("JStr", [RuntimeValue::String(text)])) => {
             parse_cell_int(builtin, column, row_idx, text)
@@ -692,7 +693,7 @@ fn cell_i64(
         Some(("JStr", fields)) => Err(format!(
             "{}: malformed JStr cell {}",
             ctx(),
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
         Some(("JNum", _)) => Err(format!(
             "{}: cell is a float, not an exact integer; use csv_f64/csv_f64s if a float \
@@ -846,7 +847,7 @@ fn cell_to_field_text(column: &str, row_idx: usize, node: &RuntimeValue) -> Resu
         return Err(format!(
             "{}: cell is not a Json value ({})",
             ctx(),
-            truncated_debug(node)
+            describe_value(node)
         ));
     };
     match (ctor, fields) {
@@ -877,7 +878,7 @@ fn cell_to_field_text(column: &str, row_idx: usize, node: &RuntimeValue) -> Resu
         _ => Err(format!(
             "{}: malformed Json cell (constructor `{ctor}` with fields {})",
             ctx(),
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
     }
 }
@@ -908,7 +909,7 @@ pub(super) fn csv_to_text(value: &RuntimeValue) -> Result<String, String> {
             other => {
                 return Err(format!(
                     "to_csv: document has a non-string top-level key {}",
-                    truncated_debug(other)
+                    describe_value(other)
                 ));
             }
         }
@@ -937,7 +938,7 @@ pub(super) fn csv_to_text(value: &RuntimeValue) -> Result<String, String> {
             let RuntimeValue::String(key) = key else {
                 return Err(format!(
                     "to_csv: data row {row_idx} (0-based) has a non-string key {}",
-                    truncated_debug(key)
+                    describe_value(key)
                 ));
             };
             if !doc.columns.contains(&key.as_str()) {

@@ -704,7 +704,12 @@ const BASELINE: &[Entry] = &[
     // definition there. The compiler-api rows are the DECLARED
     // derived-Debug residue carriers per faithful_observation.md B2.4:
     // diagnostics that Debug-print mismatched values through derive(Debug),
-    // owned by chelis#729's payload work plus the review rule. -----------
+    // owned by chelis#729's payload work plus the review rule. A NEW
+    // diagnostic in these modules routes through the crate-private
+    // boundary beside render_value (host_ops.rs's describe_value /
+    // describe_argument / describe_fields, chelis#997's FO-DIAG package);
+    // Debug-printing the payload locally is not an option this baseline
+    // leaves open. -------------------------------------------------------
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-types/src/observation.rs",
@@ -736,38 +741,32 @@ const BASELINE: &[Entry] = &[
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/eval.rs",
-        31,
+        24,
         "declared derived-Debug residue carriers: Err(format!) \
-         diagnostics over Value/callable/handle shapes; +7 from the \
-         chelis#890/#903 JSON/CSV builtin dispatch arms (chelis#997 debt)",
+         diagnostics over Value/callable/handle shapes; the seven \
+         chelis#890/#903 JSON/CSV builtin dispatch arms left with \
+         chelis#997's FO-DIAG migration onto host_ops::describe_value / \
+         describe_argument",
     ),
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/json.rs",
-        18,
-        "chelis#890 JSON I/O runtime: Err(format!) parse/shape diagnostics \
-         over Json ADT fields and truncated payload renders -- the same \
-         residue-carrier class as eval.rs/host_ops.rs (chelis#997 debt; \
-         the sweep fix routes them through render_value); +1 cfg(test) \
-         assertion message in the invalid-escape regression test",
+        2,
+        "cfg(test) assertion messages Debug-QUOTING the &str input of the \
+         invalid-escape and parse-diagnostic loops (`{input:?}`) - string \
+         escaping, no numeric payload, the same non-exit class as \
+         tests.rs; every product diagnostic here routes through \
+         host_ops::describe_value / describe_fields (chelis#997 FO-DIAG)",
     ),
     (
         Pat::RustDebugNumericFormat,
         "crates/chelis-compiler-api/src/runtime/csv.rs",
-        10,
-        "chelis#903 CSV I/O runtime: Err(format!) parse/shape diagnostics \
-         over document shapes, incl. the integer-accessor malformed-cell \
-         renders -- the json.rs residue-carrier class (chelis#997 debt; \
-         same render_value sweep)",
-    ),
-    (
-        Pat::RustDebugNumericFormat,
-        "crates/chelis-compiler-api/src/runtime/mod.rs",
-        1,
-        "the shared truncated_debug helper for the chelis#890/#903 \
-         JSON/CSV shape diagnostics: ONE Debug spelling those modules \
-         route through (chelis#997 debt; the sweep replaces this single \
-         site)",
+        4,
+        "cfg(test) assertion messages Debug-QUOTING &str/String document \
+         and cell text - string escaping, no numeric payload, the same \
+         non-exit class as tests.rs; every product diagnostic here routes \
+         through host_ops::describe_value / describe_fields (chelis#997 \
+         FO-DIAG)",
     ),
     (
         Pat::RustDebugNumericFormat,

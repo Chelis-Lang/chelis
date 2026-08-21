@@ -165,9 +165,12 @@ Phase 3 (the first blocking provenance ratchet) ships with it only after
 the advisory Buoy pilot and change-impact phases are green. [#732] Phase 3
 (the tolerance table + the [#687] handshake) already shipped in v0.18.3
 through PRs #1099/#1115/#1118 and is not v0.20 payload; [#754] remains its
-external shell consumer. The [#732] tracker stays open for [#997]'s direct
-diagnostic-rendering contract debt. [#1059] is separate support capability
-work, not unfinished Phase 3 delivery.
+external shell consumer. [#997]'s direct diagnostic-rendering contract debt,
+the [#732] tracker's own stated closing condition, was retired on 2026-08-21
+by the `FO-DIAG` migration; the tracker's remaining residue is the
+disposition of [#1059], which its body already records as separate support
+capability work that does not hold it open, and which is a sub-issue
+re-homing decision rather than delivery.
 [#730] Phase 3 (gates become UX; amended 2026-07-30 to also deliver the
 typed diagnostic-kind and rejection-authority work) keeps Wave 4 as its
 recommended slot but is NOT gated on the capability table or the Buoy

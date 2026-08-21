@@ -1674,16 +1674,19 @@ impl<'a> EvalContext<'a> {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
                         payload.as_f64_lossy()
                     }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
                         return Err(format!(
-                            "jnum: expected an f64 value, got {:?} (suffix the literal, \
+                            "jnum: expected an f64 value, got {} (suffix the literal, \
                              `0.1f64`, or use cast(n, f64); an f32 value would quantize \
                              through the byte-exact serializer)",
-                            payload.dtype()
+                            describe_value(value)
                         ));
                     }
                     other => {
-                        return Err(format!("expected f64 arg at index 0, got {other:?}"));
+                        return Err(format!(
+                            "expected f64 arg at index 0, got {}",
+                            describe_argument(other)
+                        ));
                     }
                 };
                 Ok(super::json::jnum(value))
@@ -1698,15 +1701,18 @@ impl<'a> EvalContext<'a> {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
                         payload.as_i64()
                     }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
                         return Err(format!(
-                            "jint: expected an int64 value, got {:?} (suffix the literal, \
+                            "jint: expected an int64 value, got {} (suffix the literal, \
                              `1i64`, or use cast(n, int64))",
-                            payload.dtype()
+                            describe_value(value)
                         ));
                     }
                     other => {
-                        return Err(format!("expected int64 arg at index 0, got {other:?}"));
+                        return Err(format!(
+                            "expected int64 arg at index 0, got {}",
+                            describe_argument(other)
+                        ));
                     }
                 };
                 Ok(super::json::jint(value))
@@ -1745,7 +1751,8 @@ impl<'a> EvalContext<'a> {
                         Some(RuntimeValue::String(key)) => key,
                         other => {
                             return Err(format!(
-                                "jdict keys must be strings, got {other:?} at index {index}"
+                                "jdict keys must be strings, got {} at index {index}",
+                                describe_argument(other.as_ref())
                             ));
                         }
                     };
@@ -1796,13 +1803,16 @@ impl<'a> EvalContext<'a> {
                     }
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
                         Err(format!(
-                            "round_to: unsupported operand dtype {:?} ([05-OP-1] authors \
+                            "round_to: unsupported operand dtype {} ([05-OP-1] authors \
                              decimal rounding for f64 and f32 only; cast the operand \
                              explicitly)",
-                            payload.dtype()
+                            payload.dtype().name()
                         ))
                     }
-                    other => Err(format!("expected float arg at index 0, got {other:?}")),
+                    other => Err(format!(
+                        "expected float arg at index 0, got {}",
+                        describe_argument(other)
+                    )),
                 }
             }
             // Host-lane CSV I/O (chelis#903). Eval-only, like the JSON
