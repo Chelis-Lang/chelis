@@ -1580,26 +1580,19 @@ impl DesugarCtx {
             Expr::Apply(func, args, _) => self.desugar_apply(func, args, local_fn_params),
 
             Expr::Binary(op, lhs, rhs, _) => {
+                // Every operator keeps its authored operand order
+                // (spec/02-surf-syntax.md section 2): Deep application
+                // evaluates arguments left to right, so a swap here would
+                // reorder operand effects and traps (chelis#1180).
                 let op_name = binop_name(*op);
-                // a > b -> (app {} (var {} cmplt) b' a') -- swap operands
-                match op {
-                    BinOp::Gt => node(
-                        DeepTag::App,
-                        vec![
-                            dvar(op_name),
-                            self.desugar_expr_with_scope(rhs, local_fn_params),
-                            self.desugar_expr_with_scope(lhs, local_fn_params),
-                        ],
-                    ),
-                    _ => node(
-                        DeepTag::App,
-                        vec![
-                            dvar(op_name),
-                            self.desugar_expr_with_scope(lhs, local_fn_params),
-                            self.desugar_expr_with_scope(rhs, local_fn_params),
-                        ],
-                    ),
-                }
+                node(
+                    DeepTag::App,
+                    vec![
+                        dvar(op_name),
+                        self.desugar_expr_with_scope(lhs, local_fn_params),
+                        self.desugar_expr_with_scope(rhs, local_fn_params),
+                    ],
+                )
             }
 
             // P10 parses every negative spelling as unary minus. The one
@@ -2361,7 +2354,7 @@ fn binop_name(op: BinOp) -> &'static str {
         BinOp::Eq => "eq",
         BinOp::Ne => "neq",
         BinOp::Lt => "cmplt",
-        BinOp::Gt => "cmplt", // handled specially with swap
+        BinOp::Gt => "gt",
         BinOp::Le => "lte",
         BinOp::Ge => "gte",
         BinOp::And => "and",
@@ -2847,11 +2840,14 @@ mod tests {
     }
 
     #[test]
-    fn test_gt_swaps_operands() {
+    fn test_gt_keeps_authored_operand_order() {
+        // chelis#1180: `a > b` desugars to the `gt` builtin with the
+        // authored operand order. The old operand-swapped `cmplt(b, a)`
+        // form evaluated the right operand's effects and traps first.
         let expr = Expr::Binary(BinOp::Gt, Box::new(tvar("a")), Box::new(tvar("b")), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(app {} (var {} cmplt) (var {} b) (var {} a))"
+            "(app {} (var {} gt) (var {} a) (var {} b))"
         );
     }
 

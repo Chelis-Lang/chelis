@@ -366,3 +366,41 @@ fn declaration_tags_fail_when_requested_as_expressions() {
         "contextual tags must fail explicitly: {error}"
     );
 }
+
+#[test]
+fn gt_application_resugars_to_the_greater_than_operator_in_order() {
+    // chelis#1180: `a > b` desugars to `(app {} (var {} gt) a' b')`, so the
+    // resugarer must print that application back as the operator form with
+    // the operand order preserved, closing the bidirectional laws for `>`.
+    let deep = parse_one_deep("(app {} (var {} gt) (var {} a) (var {} b))");
+
+    let surf_ast = resugar_expression(&deep).expect("gt application resugars");
+    let surf = format_expression(&surf_ast);
+
+    assert_eq!(surf, "(a > b)");
+    let redesugared = redesugar_expression(&surf);
+    let gt_offset = redesugared
+        .find("(var {} gt)")
+        .expect("`a > b` must re-desugar through the gt built-in");
+    let a_offset = redesugared.find("} a)").expect("left operand present");
+    let b_offset = redesugared.find("} b)").expect("right operand present");
+    assert!(
+        gt_offset < a_offset && a_offset < b_offset,
+        "gt application must keep the authored operand order:\n{redesugared}"
+    );
+    assert!(
+        !redesugared.contains("cmplt"),
+        "`a > b` must not re-desugar through operand-swapped cmplt:\n{redesugared}"
+    );
+}
+
+#[test]
+fn swapped_cmplt_still_resugars_faithfully_as_less_than() {
+    // Hand-written Deep may still spell `cmplt(b, a)`; the resugarer keeps
+    // printing that faithfully as `b < a` rather than guessing `a > b`.
+    let deep = parse_one_deep("(app {} (var {} cmplt) (var {} b) (var {} a))");
+
+    let surf_ast = resugar_expression(&deep).expect("cmplt application resugars");
+
+    assert_eq!(format_expression(&surf_ast), "(b < a)");
+}

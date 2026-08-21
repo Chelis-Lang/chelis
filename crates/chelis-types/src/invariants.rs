@@ -382,7 +382,7 @@ fn is_boolean_shaped(body: &Expr) -> bool {
             let callee = kids.first().and_then(var_name);
             matches!(
                 callee,
-                Some("eq" | "neq" | "cmplt" | "lte" | "gte" | "and" | "or" | "not")
+                Some("eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" | "and" | "or" | "not")
             )
         }
         Some(DeepTag::If) => {

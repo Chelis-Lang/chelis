@@ -772,11 +772,12 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
                 .collect::<Option<Vec<_>>>()?,
         )),
         "not" => Some(SmtExpr::Not(Box::new(lower_bool(args.first()?, ctx)?))),
-        "eq" | "neq" | "cmplt" | "lte" | "gte" => {
+        "eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" => {
             let op = match name {
                 "eq" => CmpOp::Eq,
                 "neq" => CmpOp::Ne,
                 "cmplt" => CmpOp::Lt,
+                "gt" => CmpOp::Gt,
                 "lte" => CmpOp::Le,
                 "gte" => CmpOp::Ge,
                 _ => unreachable!(),
@@ -794,9 +795,9 @@ fn lower_bool(expr: &Expr, ctx: &LowerCtx) -> Option<SmtExpr> {
             coerce_cmp_operands(&mut l, &mut r, ctx);
             Some(SmtExpr::Cmp(op, Box::new(l), Box::new(r)))
         }
-        // `>` / `<` desugar to gte/cmplt with swapped operands already, so
-        // only the five comparison symbols appear. Anything else is not a
-        // boolean-shaped node we can lower.
+        // `<` desugars to `cmplt` and `>` to `gt` with authored operand
+        // order (chelis#1180); `<=`/`>=` to `lte`/`gte`. Anything else is
+        // not a boolean-shaped node we can lower.
         _ => None,
     }
 }

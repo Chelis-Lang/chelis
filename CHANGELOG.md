@@ -86,6 +86,35 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   argument's kind or extent (`Option[732]` still checks, and a
   `Column[3]` return holding a 2-element column still scores 1.0);
   chelis#1247 tracks that surviving mechanism.
+- **BREAKING (eval/build): `>` evaluates its operands in authored order
+  (chelis#1180).** Surf desugared `a > b` as the operand-swapped
+  `cmplt(b, a)`, and Deep application evaluates its arguments left to
+  right, so the right operand's effects and traps ran before the left
+  operand's in every executable lane:
+
+  ```text
+  verdict = lhs() > rhs()   -- printed RHS then LHS, in eval and compiled C
+  ```
+
+  `>` now desugars to the existing `gt` built-in with the authored
+  operand order. Comparison results are unchanged, including `false` on
+  either NaN operand, because `gt`'s value is defined as `cmplt(b, a)`
+  over the already-evaluated operand values
+  (`spec/05-risc-primitives.md` §3.2). Effectful operands now run left
+  to right in both lanes with byte-identical stdout, and when both
+  operands trap, the left operand's trap surfaces; a program that
+  observed the reversed order changes behavior. One further consequence
+  of the retarget: `gt` borrows both arguments where `cmplt` consumed
+  its second, so `>`'s operands stay usable afterward
+  (`mask = a > b` then `where(mask, a, b)` now checks) while the
+  equivalent `b < a` spelling still consumes — a strictly monotone
+  loosening; the family-wide inconsistency is tracked at chelis#1248.
+  The general operand evaluation-order rule is now normative at
+  `spec/03-deep-syntax.md` §4.4, and the Deep consumers that matched the
+  closed comparison-name set (the D-WF invariant grammar, its
+  boolean-shape check, constant folding, and the Tier B / opaque SMT
+  lowerings) admit the `gt` spelling, so `@invariant(p) p.value > 0.0`
+  keeps working end to end.
 
 ### Fixed
 
