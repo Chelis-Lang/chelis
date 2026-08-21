@@ -1133,7 +1133,8 @@ TypeArgs      <- '[' S TypeArg (S ',' S TypeArg)* (S ',')? S ']'
 # An IntLit type-application argument is the concrete dimension
 # instantiation of a dimension-parameterized ADT (`Frame[2]` whose
 # parameter reaches a tensor dimension slot). Bare type positions
-# have no integer production.
+# have no integer production. (Checker-side enforcement of the
+# argument's kind and extent is not fully implemented; chelis#1247.)
 TypeArg       <- TypeExpr / IntLit
 
 # Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).

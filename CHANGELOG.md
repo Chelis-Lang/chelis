@@ -76,12 +76,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   only dimensions inside `tensor[...]`" naming the byte offset, in the
   canonical and legacy v0.18 parse modes alike. The two dimension
   positions keep accepting integers: tensor shape items
-  (`tensor[3, 4, f32]`) and type-application arguments, the concrete
-  dimension instantiation of a dimension-parameterized ADT (`Frame[2]`,
-  chelis#940). The spec grammar gains the previously missing
-  `TypeArg <- TypeExpr / IntLit` production, and the Tree-sitter
-  `applied_type` rule matches it, so Rust/Tree-sitter parity holds on
-  both sides of the split.
+  (`tensor[3, 4, f32]`) and type-application arguments, whose intended
+  meaning is the concrete dimension instantiation of a
+  dimension-parameterized ADT (`Frame[2]`, chelis#940). The spec grammar
+  gains the previously missing `TypeArg <- TypeExpr / IntLit`
+  production, and the Tree-sitter `applied_type` rule matches it, so
+  Rust/Tree-sitter parity holds on both sides of the split. This is the
+  parser half only: the checker does not yet enforce an integer
+  argument's kind or extent (`Option[732]` still checks, and a
+  `Column[3]` return holding a 2-element column still scores 1.0);
+  chelis#1247 tracks that surviving mechanism.
 
 ### Fixed
 
