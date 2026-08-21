@@ -81,11 +81,15 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   rebuilt from the Deep application before those sugars apply, so only the
   stage callee is held back and its operands keep their operator spelling.
   A stage whose parameter is not the leading argument, whose body is not an
-  application, whose parameter occurs anywhere else in the application, or
-  that carries more than one parameter still fails closed. The occurrence
-  condition matters because the sugar drops the stage binder along with the
-  leading occurrence, so a second bound occurrence would be left free for
-  the enclosing scope to capture.
+  application, that carries more than one parameter, or that leaves a free
+  occurrence of its parameter elsewhere in the application still fails
+  closed. The last condition matters because the sugar drops the stage
+  binder along with the leading occurrence, so a surviving reference would
+  be captured by whatever the name means in the enclosing scope. That test
+  reads Deep name atoms rather than their resugared forms, since the
+  operator sugar erases exactly the callee name it needs to see, and it
+  honors an inner `fn` that rebinds the parameter, because nested pipe
+  stages independently mint the same `__chelis_pipe` spelling.
 
   `chelis migrate surf` now also collects the whole batch's preflight
   failures instead of returning on the first, so a single unmigratable file

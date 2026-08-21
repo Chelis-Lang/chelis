@@ -695,15 +695,7 @@ fn mark_call_first_pipe_stage(expr: deep::Expr) -> deep::Expr {
     }
 }
 
-/// Report whether `name` appears anywhere in `expr`, binding occurrences
-/// included and shadowing deliberately ignored.
-///
-/// `fresh_pipe_param_name` needs a name that is unused under every reading of
-/// the stage, and `resugar_call_first_stage_application` needs to refuse a
-/// stage whose parameter could still be referenced once its leading occurrence
-/// is stripped. Both want the conservative answer, so a shadowed occurrence
-/// still counts.
-pub(crate) fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
+fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Lit(_, _) => false,
         Expr::Var(found, _) | Expr::Constructor(found, _) => found == name,

@@ -1257,6 +1257,32 @@ fn operator_sugar_inside_a_call_stage_argument_is_still_applied() {
 }
 
 #[test]
+fn a_nested_stage_rebinding_the_pipe_parameter_keeps_its_sugar() {
+    // `fresh_pipe_param_name` only avoids the names visible in the Surf stage
+    // it is handed, so a pipe nested inside a stage operand is desugared
+    // separately and mints the same `__chelis_pipe` spelling. The inner
+    // occurrences are bound by the inner `fn`, so the outer stage is not
+    // stranding anything and keeps its call-stage sugar.
+    let source = "nested = x |> fn (p) -> cast(p, f32) |> mul(y |> add(z))\n";
+    let surf = parse_str(source).expect("a nested pipe operand parses");
+    let deep = desugar_program(&surf);
+    assert_eq!(
+        print_canonical(&deep).matches("__chelis_pipe").count(),
+        4,
+        "the fixture is only meaningful while both stages mint the same name",
+    );
+
+    let rendered = format_program(&resugar_program(&deep).expect("the nested stage resugars"));
+    assert_eq!(rendered, source);
+    assert_eq!(
+        print_canonical(&normalize_deep_for_surface_roundtrip(&desugar_program(
+            &parse_str(&rendered).expect("the resugared nested stage reparses")
+        ))),
+        print_canonical(&normalize_deep_for_surface_roundtrip(&deep)),
+    );
+}
+
+#[test]
 fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
     for deep_source in [
         // The stage parameter is not the first argument, so the stage is not
@@ -1287,6 +1313,19 @@ fn call_first_pipe_stage_bodies_that_cannot_carry_the_sugar_fail_closed() {
         concat!(
             "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} p) ",
             "(app {} (var {} add) (var {} p) (app {} (var {} neg) (var {} p)))))",
+        ),
+        // A parameter spelled like a binary primitive and reused as the callee
+        // of an operand's application. Resugaring the operand to `(a * b)`
+        // erases the `mul` the occurrence test is looking for, so the test has
+        // to read the Deep children rather than their resugared forms.
+        concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} mul) ",
+            "(app {} (var {} add) (var {} mul) (app {} (var {} mul) (var {} a) (var {} b)))))",
+        ),
+        // The unary twin: resugaring the operand to `-a` erases `neg`.
+        concat!(
+            "(pipe {} (var {} x) (fn {surf_pipe_stage: \"call-first\"} (params {} neg) ",
+            "(app {} (var {} add) (var {} neg) (app {} (var {} neg) (var {} a)))))",
         ),
     ] {
         let mut malformed = parse_deep(deep_source).expect("Deep fixture parses");

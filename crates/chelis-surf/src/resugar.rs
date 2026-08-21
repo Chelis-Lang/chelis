@@ -16,7 +16,6 @@ use crate::ast::{
     BinOp, Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, Literal, MatchArm, Param,
     Pattern, PropertyOption, TypeExpr, TypeInvariant, UnaryOp, Variant, VariantFields,
 };
-use crate::desugar::expr_mentions_name;
 
 /// Failure to structurally resugar a Deep expression.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -3170,16 +3169,21 @@ fn resugar_pipe_stage(expr: &DeepExpr) -> Result<Expr, ResugarError> {
 /// `f()`, which desugars back to a bare zero-argument call rather than to
 /// this stage.
 ///
-/// The stage parameter must not occur anywhere else in the application. The
-/// sugar drops the binder along with the leading occurrence, so any other
-/// bound occurrence would be left free and captured by whatever `param`
-/// names in the enclosing scope: `fn (p) -> add(p, p)` applied to `3.0`
-/// would print as `3.0 |> add(p)`, which is a different program wherever an
-/// outer `p` exists. The occurrence test ignores shadowing, so a stage that
-/// merely rebinds the name in an operand is refused as well; that is the
-/// conservative direction, and the desugarer never produces the shape
-/// because `fresh_pipe_param_name` mints a parameter no part of the stage
-/// mentions.
+/// No free occurrence of the stage parameter may remain in the application.
+/// The sugar drops the binder along with the leading occurrence, so a
+/// surviving reference would be captured by whatever `param` names in the
+/// enclosing scope: `fn (p) -> add(p, p)` applied to `3.0` would print as
+/// `3.0 |> add(p)`, which is a different program wherever an outer `p`
+/// exists.
+///
+/// `deep_mentions_free_name` reads the Deep children rather than their
+/// resugared forms, because resugaring is exactly what can hide the
+/// occurrence it looks for. The operator and finite-list sugars erase the
+/// callee name, so a parameter named `mul` reused as the callee of
+/// `(app {} (var {} mul) a b)` in an operand survives a Surf-side test: that
+/// operand comes back as `(a * b)`, mentioning no `mul` at all, and the
+/// stage prints as `x |> add((a * b))` with the second occurrence silently
+/// rebound to the builtin.
 fn resugar_call_first_stage_application(
     body: &DeepExpr,
     param: &str,
@@ -3196,23 +3200,111 @@ fn resugar_call_first_stage_application(
     if carried != param {
         return Ok(None);
     }
+    if deep_mentions_free_name(&application.children[0], param)
+        || application.children[2..]
+            .iter()
+            .any(|argument| deep_mentions_free_name(argument, param))
+    {
+        return Ok(None);
+    }
     let function = resugar_expression_inner(&application.children[0])?;
     let arguments = application.children[2..]
         .iter()
         .map(resugar_expression_inner)
         .collect::<Result<Vec<_>, _>>()?;
-    if expr_mentions_name(&function, param)
-        || arguments
-            .iter()
-            .any(|argument| expr_mentions_name(argument, param))
-    {
-        return Ok(None);
-    }
     Ok(Some(Expr::Apply(
         Box::new(function),
         arguments,
         application.span,
     )))
+}
+
+/// Report whether `name` occurs free anywhere in `expr` as a Deep name atom.
+///
+/// `resugar_call_first_stage_application` is asking whether deleting a binder
+/// would strand a reference to it, so the answer leans pessimistic: every
+/// name position counts, patterns and names carried in metadata included, and
+/// a false positive only costs a stage its sugar while a false negative
+/// prints a program that means something else.
+///
+/// `fn` is the one binder the walk models, because it is the one the
+/// desugarer can put in the way. Nested pipe stages each mint a parameter
+/// through `fresh_pipe_param_name`, which only avoids the names visible in
+/// the Surf stage handed to it, so an inner stage desugared separately
+/// reuses the same `__chelis_pipe` spelling. Those inner occurrences are
+/// bound by the inner `fn` and are not the outer stage's to strand. A binder
+/// this does not model, or a `params` child it cannot read, leaves the walk
+/// searching rather than assuming a binding it never confirmed.
+fn deep_mentions_free_name(expr: &DeepExpr, name: &str) -> bool {
+    if let Ok(node) = node_ref(expr)
+        && node.tag == DeepTag::Fn
+        && node.children.len() == 2
+        && params_bind_name(&node.children[0], name)
+    {
+        return meta_mentions_free_name(&node.meta.entries, name);
+    }
+    match expr {
+        DeepExpr::Atom(Atom::Name(found), _) => found == name,
+        DeepExpr::Atom(..) => false,
+        DeepExpr::Node(node, _) => {
+            meta_mentions_free_name(&node.meta().entries, name)
+                || node
+                    .children_slice()
+                    .iter()
+                    .any(|child| deep_mentions_free_name(child, name))
+        }
+        DeepExpr::List(list, _) => list
+            .elements
+            .iter()
+            .any(|element| deep_mentions_free_name(element, name)),
+        DeepExpr::Map(meta, _) => meta_mentions_free_name(&meta.entries, name),
+        DeepExpr::MetaExpr(meta, _) => {
+            meta_mentions_free_name(&meta.entries, name)
+                || deep_mentions_free_name(&meta.expr, name)
+        }
+        DeepExpr::BareList(items, _) => {
+            items.iter().any(|item| deep_mentions_free_name(item, name))
+        }
+        DeepExpr::UnknownForm(data) => {
+            meta_mentions_free_name(&data.meta.entries, name)
+                || data
+                    .children
+                    .iter()
+                    .any(|child| deep_mentions_free_name(child, name))
+        }
+    }
+}
+
+/// Report whether `name` occurs free in any metadata value.
+///
+/// Keys are drawn from a closed vocabulary rather than from the program, so
+/// a key that happens to spell the parameter is not an occurrence of it.
+fn meta_mentions_free_name(entries: &[(String, DeepExpr)], name: &str) -> bool {
+    entries
+        .iter()
+        .any(|(_, value)| deep_mentions_free_name(value, name))
+}
+
+/// Report whether a Deep `params` child binds `name`.
+///
+/// A parameter is either a bare name atom or a `MetaExpr` carrying the name
+/// alongside its type, matching what `resugar_param` accepts. Anything else
+/// is not a binding this can vouch for, so it reports `false` and the walk
+/// keeps searching.
+fn params_bind_name(params: &DeepExpr, name: &str) -> bool {
+    let Ok(params) = node_ref(params) else {
+        return false;
+    };
+    if params.tag != DeepTag::Params {
+        return false;
+    }
+    params.children.iter().any(|child| {
+        let bound = match child {
+            DeepExpr::MetaExpr(meta, _) => atom_name(&meta.expr),
+            other => atom_name(other),
+        };
+        bound == Some(name)
+    })
 }
 
 fn resugar_grad(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
