@@ -216,7 +216,7 @@ fn dladdr_self() -> Option<PathBuf> {
 pub fn identify(path: &Path) -> Option<(u64, ImageId)> {
     let file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    if let Some(id) = linker_build_id(&file) {
+    if let Some(id) = linker_build_id(&file, len) {
         return Some((len, ImageId::LinkerBuildId(id)));
     }
     let digest = sha256_file(&file)?;
@@ -247,43 +247,73 @@ pub fn running_image() -> Option<RunningImage> {
 /// underneath raises `SIGBUS`, and killing the compiler to save a few
 /// microseconds is a bad trade.
 ///
+/// `len` is the image's real byte length, and every format arm checks that the
+/// structures the header claims actually fit inside it before trusting the id.
+/// A truncated image must fall through to the digest, and that has to hold on
+/// each format for its own reason rather than by accident: a truncated Mach-O
+/// usually fails earlier anyway, because `sizeofcmds` runs past the end of the
+/// file and the load-command read errors out, but an ELF keeps its program
+/// headers and its `PT_NOTE` in the first few hundred bytes, so a truncation
+/// that destroys almost the whole image still yields a perfectly readable
+/// build-id note. Without this check the same truncation is rejected on one
+/// platform and accepted on the other.
+///
 /// Any parse failure returns `None` and routes the caller to the digest, so a
 /// malformed or unfamiliar image degrades to the slow-but-total path instead of
 /// producing a wrong id.
-fn linker_build_id(file: &std::fs::File) -> Option<Vec<u8>> {
+fn linker_build_id(file: &std::fs::File, len: u64) -> Option<Vec<u8>> {
     use object::{Endianness, FileKind};
 
     let data = object::ReadCache::new(file);
     match FileKind::parse(&data).ok()? {
-        FileKind::MachO32 => macho_uuid::<object::macho::MachHeader32<Endianness>, _>(&data),
-        FileKind::MachO64 => macho_uuid::<object::macho::MachHeader64<Endianness>, _>(&data),
-        FileKind::Elf32 => elf_build_id::<object::elf::FileHeader32<Endianness>, _>(&data),
-        FileKind::Elf64 => elf_build_id::<object::elf::FileHeader64<Endianness>, _>(&data),
+        FileKind::MachO32 => macho_uuid::<object::macho::MachHeader32<Endianness>, _>(&data, len),
+        FileKind::MachO64 => macho_uuid::<object::macho::MachHeader64<Endianness>, _>(&data, len),
+        FileKind::Elf32 => elf_build_id::<object::elf::FileHeader32<Endianness>, _>(&data, len),
+        FileKind::Elf64 => elf_build_id::<object::elf::FileHeader64<Endianness>, _>(&data, len),
         // Fat/universal Mach-O, PE, and everything else fall through to the
         // digest. A fat binary has no single image id to report.
         _ => None,
     }
 }
 
-/// The `LC_UUID` load command's payload, if the Mach-O image carries one.
+/// The `LC_UUID` load command's payload, if the Mach-O image carries one and
+/// its segments all fit within `len`.
 ///
-/// `LC_UUID` is a hash the linker computes over the image it just wrote, so it
-/// is a content id and not merely a build label.
-fn macho_uuid<'data, M, R>(data: R) -> Option<Vec<u8>>
+/// `LC_UUID` is a hash the linker computes over the mapped image, so it is a
+/// content id and not merely a build label. See [`ImageId::LinkerBuildId`] for
+/// exactly what that does and does not cover.
+fn macho_uuid<'data, M, R>(data: R, len: u64) -> Option<Vec<u8>>
 where
     M: object::read::macho::MachHeader,
     R: object::ReadRef<'data>,
 {
+    use object::read::macho::Segment as _;
+
     let header = M::parse(data, 0).ok()?;
     if !header.is_supported() {
         return None;
     }
     let endian = header.endian().ok()?;
-    let uuid = header.uuid(endian, data, 0).ok()??;
-    Some(uuid.to_vec())
+
+    let mut uuid: Option<Vec<u8>> = None;
+    let mut claimed_end: u64 = 0;
+    let mut commands = header.load_commands(endian, data, 0).ok()?;
+    while let Ok(Some(command)) = commands.next() {
+        if let Ok(Some((segment, _))) = M::Segment::from_command(command) {
+            let (offset, size) = segment.file_range(endian);
+            claimed_end = claimed_end.max(offset.saturating_add(size));
+        } else if let Ok(Some(command_uuid)) = command.uuid() {
+            uuid.get_or_insert_with(|| command_uuid.uuid.to_vec());
+        }
+    }
+    if claimed_end > len {
+        return None;
+    }
+    uuid
 }
 
-/// The `NT_GNU_BUILD_ID` note's descriptor, if the ELF image carries one.
+/// The `NT_GNU_BUILD_ID` note's descriptor, if the ELF image carries one and
+/// the structures its header claims all fit within `len`.
 ///
 /// Read from the program headers rather than the section headers: section
 /// headers live at the end of the file and are stripped from some shipped
@@ -292,7 +322,7 @@ where
 /// Emitting this note requires the link to be driven with `--build-id`. Most
 /// toolchains default to it, but none guarantee it, so a `None` here is an
 /// ordinary outcome and routes the caller to the digest.
-fn elf_build_id<'data, E, R>(data: R) -> Option<Vec<u8>>
+fn elf_build_id<'data, E, R>(data: R, len: u64) -> Option<Vec<u8>>
 where
     E: object::read::elf::FileHeader,
     R: object::ReadRef<'data>,
@@ -304,7 +334,29 @@ where
         return None;
     }
     let endian = header.endian().ok()?;
-    for segment in header.program_headers(endian, data).ok()? {
+    let program_headers = header.program_headers(endian, data).ok()?;
+
+    // Everything the header says is in this file must actually be in it. A
+    // `PT_NOTE` sitting in the first page survives a truncation that removes
+    // every `PT_LOAD` byte, so the note alone proves nothing about the image.
+    let mut claimed_end: u64 = 0;
+    for segment in program_headers {
+        let (offset, size) = segment.file_range(endian);
+        claimed_end = claimed_end.max(offset.saturating_add(size));
+    }
+    // Section headers are optional (a fully stripped image reports none), but
+    // when the header claims them they are part of the file too.
+    let section_offset: u64 = header.e_shoff(endian).into();
+    if section_offset != 0 {
+        let table =
+            u64::from(header.e_shnum(endian)).saturating_mul(u64::from(header.e_shentsize(endian)));
+        claimed_end = claimed_end.max(section_offset.saturating_add(table));
+    }
+    if claimed_end > len {
+        return None;
+    }
+
+    for segment in program_headers {
         let Ok(Some(mut notes)) = segment.notes(endian, data) else {
             continue;
         };
@@ -429,6 +481,198 @@ mod tests {
         let (_, id_b) = identify(&b).expect("identify b");
         assert!(matches!(id_a, ImageId::ContentDigest(_)));
         assert_ne!(id_a, id_b);
+    }
+
+    /// A synthetic, minimal ELF64 carrying a `NT_GNU_BUILD_ID` note.
+    ///
+    /// The ELF arm would otherwise be exercised only on Linux CI, and that gap
+    /// is exactly how PR #1161 shipped a truncation check that held on Mach-O
+    /// and not on ELF. Building the bytes here tests it on every platform.
+    ///
+    /// Layout: 64-byte header, one 56-byte `PT_NOTE` program header at offset
+    /// 64, and the note itself at offset 120. `e_shoff` is 0, i.e. fully
+    /// stripped of section headers, which is also the shape that forces the
+    /// build id to be found through the program headers.
+    fn synthetic_elf64_with_build_id(build_id: &[u8]) -> Vec<u8> {
+        synthetic_elf64(build_id, None)
+    }
+
+    /// As above, but optionally also declaring a `PT_LOAD` of `load_filesz`
+    /// bytes. A real binary always has one, and it is what makes a truncation
+    /// detectable when the note itself survives.
+    fn synthetic_elf64(build_id: &[u8], load_filesz: Option<u64>) -> Vec<u8> {
+        let phnum: u16 = if load_filesz.is_some() { 2 } else { 1 };
+        let note_offset: u64 = 64 + 56 * u64::from(phnum);
+        let mut note = Vec::new();
+        note.extend_from_slice(&4u32.to_le_bytes()); // n_namesz: "GNU\0"
+        note.extend_from_slice(&(build_id.len() as u32).to_le_bytes()); // n_descsz
+        note.extend_from_slice(&3u32.to_le_bytes()); // n_type: NT_GNU_BUILD_ID
+        note.extend_from_slice(b"GNU\0");
+        note.extend_from_slice(build_id);
+        while note.len() % 4 != 0 {
+            note.push(0);
+        }
+        let note_len = note.len() as u64;
+
+        let mut out = Vec::new();
+        // --- ELF64 header ---
+        out.extend_from_slice(&[0x7f, b'E', b'L', b'F']);
+        out.push(2); // ELFCLASS64
+        out.push(1); // ELFDATA2LSB
+        out.push(1); // EV_CURRENT
+        out.push(0); // ELFOSABI_SYSV
+        out.push(0); // ABI version
+        out.extend_from_slice(&[0; 7]); // padding
+        out.extend_from_slice(&3u16.to_le_bytes()); // e_type: ET_DYN
+        out.extend_from_slice(&62u16.to_le_bytes()); // e_machine: EM_X86_64
+        out.extend_from_slice(&1u32.to_le_bytes()); // e_version
+        out.extend_from_slice(&0u64.to_le_bytes()); // e_entry
+        out.extend_from_slice(&64u64.to_le_bytes()); // e_phoff
+        out.extend_from_slice(&0u64.to_le_bytes()); // e_shoff: stripped
+        out.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+        out.extend_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        out.extend_from_slice(&56u16.to_le_bytes()); // e_phentsize
+        out.extend_from_slice(&phnum.to_le_bytes()); // e_phnum
+        out.extend_from_slice(&0u16.to_le_bytes()); // e_shentsize
+        out.extend_from_slice(&0u16.to_le_bytes()); // e_shnum
+        out.extend_from_slice(&0u16.to_le_bytes()); // e_shstrndx
+        assert_eq!(out.len(), 64, "ELF64 header must be 64 bytes");
+
+        // --- optional PT_LOAD, mirroring a real binary ---
+        if let Some(filesz) = load_filesz {
+            out.extend_from_slice(&1u32.to_le_bytes()); // p_type: PT_LOAD
+            out.extend_from_slice(&5u32.to_le_bytes()); // p_flags: PF_R | PF_X
+            out.extend_from_slice(&0u64.to_le_bytes()); // p_offset
+            out.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+            out.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+            out.extend_from_slice(&filesz.to_le_bytes()); // p_filesz
+            out.extend_from_slice(&filesz.to_le_bytes()); // p_memsz
+            out.extend_from_slice(&4096u64.to_le_bytes()); // p_align
+        }
+
+        // --- one PT_NOTE program header ---
+        out.extend_from_slice(&4u32.to_le_bytes()); // p_type: PT_NOTE
+        out.extend_from_slice(&4u32.to_le_bytes()); // p_flags: PF_R
+        out.extend_from_slice(&note_offset.to_le_bytes()); // p_offset
+        out.extend_from_slice(&0u64.to_le_bytes()); // p_vaddr
+        out.extend_from_slice(&0u64.to_le_bytes()); // p_paddr
+        out.extend_from_slice(&note_len.to_le_bytes()); // p_filesz
+        out.extend_from_slice(&note_len.to_le_bytes()); // p_memsz
+        out.extend_from_slice(&4u64.to_le_bytes()); // p_align
+        assert_eq!(
+            out.len() as u64,
+            note_offset,
+            "program headers must end exactly at the note offset"
+        );
+
+        out.extend_from_slice(&note);
+        out
+    }
+
+    /// The ELF arm must actually extract `NT_GNU_BUILD_ID`.
+    #[test]
+    fn an_elf_image_yields_its_gnu_build_id() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let p = dir.path().join("synthetic.so");
+        let want: Vec<u8> = (0u8..16).collect();
+        std::fs::write(&p, synthetic_elf64_with_build_id(&want)).expect("write");
+
+        let (_, id) = identify(&p).expect("identify");
+        assert_eq!(
+            id.scheme(),
+            "bid",
+            "the ELF note must be found, not hashed around"
+        );
+        assert_eq!(id, ImageId::LinkerBuildId(want));
+    }
+
+    /// Two ELF images differing only in their build-id note must not share an
+    /// id, the ELF-side counterpart of the Mach-O `LC_UUID` property.
+    #[test]
+    fn elf_images_with_different_build_ids_differ() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let (a, b) = (dir.path().join("a.so"), dir.path().join("b.so"));
+        std::fs::write(&a, synthetic_elf64_with_build_id(&[0xaa; 16])).expect("write a");
+        std::fs::write(&b, synthetic_elf64_with_build_id(&[0xbb; 16])).expect("write b");
+        assert_eq!(
+            std::fs::metadata(&a).expect("meta a").len(),
+            std::fs::metadata(&b).expect("meta b").len(),
+            "fixture must hold length constant, or it tests nothing"
+        );
+        assert_ne!(identify(&a).expect("a").1, identify(&b).expect("b").1);
+    }
+
+    /// A truncated ELF must fall back to the digest even though its note is
+    /// intact.
+    ///
+    /// This is the case that made PR #1161 red on Linux and green on macOS. An
+    /// ELF keeps its program headers and `PT_NOTE` in the first few hundred
+    /// bytes, so a truncation that destroys the entire mapped image still
+    /// leaves a perfectly readable build-id note behind; a Mach-O of the same
+    /// shape fails earlier because `sizeofcmds` runs off the end. Only the
+    /// explicit extent check makes the two agree.
+    #[test]
+    fn a_truncated_elf_falls_back_to_the_digest_despite_an_intact_note() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let full = synthetic_elf64_with_build_id(&[0xcd; 16]);
+        let p = dir.path().join("truncated.so");
+        // Cut inside the note: the header and program header still parse, and
+        // the note's own offset still looks valid from the header alone.
+        std::fs::write(&p, &full[..full.len() - 8]).expect("write");
+
+        let (_, id) = identify(&p).expect("identify");
+        assert_eq!(
+            id.scheme(),
+            "sha256",
+            "a truncated ELF must not report a linker id just because its \
+             note happens to survive in the first page"
+        );
+    }
+
+    /// The exact shape that made PR #1161 red on Linux and green on macOS.
+    ///
+    /// `a_truncated_object_image_falls_back_to_the_digest` truncates the real
+    /// test binary to 2048 bytes. On Mach-O that already fails, because
+    /// `sizeofcmds` runs past the end of the file. On ELF it does not: the
+    /// header, the program headers, and the whole `PT_NOTE` all live in the
+    /// first few hundred bytes, so the build id is still perfectly readable
+    /// after the entire mapped image has been cut away. This reproduces that
+    /// layout directly rather than relying on a host to have it.
+    #[test]
+    fn a_real_shaped_elf_truncated_to_one_page_falls_back_to_the_digest() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        // A 4 MiB PT_LOAD, like any real binary, with the note early.
+        let full = synthetic_elf64(&[0xef; 16], Some(4 * 1024 * 1024));
+        assert!(
+            full.len() < 2048,
+            "the note must sit inside the surviving prefix, or this proves nothing"
+        );
+
+        let intact = dir.path().join("intact.so");
+        std::fs::write(&intact, &full).expect("write intact");
+        // The intact-note prefix, exactly as a 2048-byte truncation would leave it.
+        let truncated = dir.path().join("truncated.so");
+        let mut prefix = full.clone();
+        prefix.resize(2048, 0);
+        std::fs::write(&truncated, &prefix).expect("write truncated");
+
+        // Sanity: the note really does survive the cut, so the only thing that
+        // can reject this image is the declared-extent check.
+        let (_, intact_id) = identify(&intact).expect("intact");
+        assert_eq!(
+            intact_id.scheme(),
+            "sha256",
+            "the intact fixture itself declares 4 MiB it does not have, so it \
+             must also be rejected; if this ever says bid the check is broken"
+        );
+
+        let (_, id) = identify(&truncated).expect("truncated");
+        assert_eq!(
+            id.scheme(),
+            "sha256",
+            "an ELF whose PT_LOAD runs past the end of the file must not report \
+             a linker id, however intact its note looks"
+        );
     }
 
     /// A file that is not an object image at all must degrade to the digest
