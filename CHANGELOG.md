@@ -226,6 +226,30 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
   With this, `Coral.Frame` compiles and runs on the build lane (coral#26).
 
+- **chelis#1180: `>` evaluates its operands in authored order.** Surf
+  desugared `a > b` as the operand-swapped `cmplt(b, a)`, and Deep
+  application evaluates its arguments left to right, so the right
+  operand's effects and traps ran before the left operand's in every
+  executable lane:
+
+  ```text
+  verdict = lhs() > rhs()   -- printed RHS then LHS, in eval and compiled C
+  ```
+
+  `>` now desugars to the existing `gt` built-in with the authored
+  operand order. Comparison results are unchanged, including `false` on
+  either NaN operand, because `gt`'s value is defined as `cmplt(b, a)`
+  over the already-evaluated operand values
+  (`spec/05-risc-primitives.md` §3.2). Effectful operands now run left
+  to right in both lanes with byte-identical stdout, and when both
+  operands trap, the left operand's trap surfaces; a program that
+  observed the reversed order changes behavior. The general operand
+  evaluation-order rule is now normative at `spec/03-deep-syntax.md`
+  §4.4, and the Deep consumers that matched the closed comparison-name
+  set (the D-WF invariant grammar, its boolean-shape check, constant
+  folding, and the Tier B / opaque SMT lowerings) admit the `gt`
+  spelling, so `@invariant(p) p.value > 0.0` keeps working end to end.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C
