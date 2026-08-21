@@ -3,9 +3,11 @@
 **Status:** Phases 0-3 LANDED. Phase 2 completion was revalidated on
 2026-08-05 after repairing the oracle's empty-ledger receipt boundary; Phase 3
 landed through PRs #1099, #1115, and #1118 and shipped in v0.18.3. The phase
-implementation is complete, but tracking issue [#732] remains open while
-[#997] is a direct §C1.6/§B2.4 contract violation. [#1059] is separate support
-capability work and is not evidence that an existing exit is unfaithful.
+implementation is complete, and [#997]'s direct §C1.6/§B2.4 contract
+violation was retired on 2026-08-21 by the `FO-DIAG` migration below.
+[#1059] is separate support capability work and is not evidence that an
+existing exit is unfaithful; whether [#732] closes on it, or re-homes it,
+is the tracker's own disposition question.
 Phase 0 (the round-trip harness and the
 exit census) landed 2026-07-17 (PR #752, tightened by PR #774). Phase 1
 (the formatter, eval adoption, and the eval-side §B2.1 migration) landed
@@ -1004,10 +1006,14 @@ and every remaining value divergence is a failure rather than tolerance.
 
 Phase completion and class closure are related but not identical. A phase may
 remain delivered after its acceptance oracle is green while the tracker stays
-open for a newly admitted direct contract violation. [#732] therefore remains
-open while [#997] violates §C1.6/§B2.4. A separately requested capability such
-as [#1059] does not retroactively make the current loud rejection or the
-delivered formatter unfaithful; it has its own support acceptance.
+open for a newly admitted direct contract violation. [#732] stayed open on
+that basis while [#997] violated §C1.6/§B2.4; the `FO-DIAG` migration below
+retired that violation on 2026-08-21, so no direct contract violation is
+outstanding. A separately requested capability such as [#1059] does not
+retroactively make the current loud rejection or the delivered formatter
+unfaithful; it has its own support acceptance, and whether [#732] closes
+now or waits on it is a tracker disposition the maintainer decides, not a
+faithfulness question this design leaves open.
 
 `classify_red_run` is deliberately a non-instrumented helper: the script unit
 suite executes its green, gone-green, wrong-reason, and zero-test branches.
@@ -1025,7 +1031,7 @@ Every direct child of [#732] has one implementation owner in this design:
 | [#775] | §C1.5 / [05-OBS-4]: scalar roots and rank-0 tensors use the bare form in both lanes; closed after re-verification on 2026-08-04 |
 | [#1078] | §B2.3 and the Phase 2 known-red ledger: repaired cells leave the ledger and the ordinary corpus atomically; closed |
 | [#1104] | Phase 3's definition-digest and shared-helper canaries: mutating a shared comparator helper must make the oracle red; closed |
-| [#997] | §C1.6 and §B2.4, through the structural `FO-DIAG` package below; open and blocks class closure |
+| [#997] | §C1.6 and §B2.4, through the structural `FO-DIAG` package below; delivered 2026-08-21, no longer blocks class closure |
 | [#1059] | §C3's canonical formatter is the implementation dependency, but support for C-host tensor/list `to_string` is a separate capability package; open and does not weaken or reopen the existing loud-rejection contract |
 
 ### FO-DIAG: structural retirement of [#997]
@@ -1052,6 +1058,43 @@ single diagnostic-rendering boundary:
 5. Acceptance is the focused compiler-api diagnostic suite plus the
    authoritative Phase 2 oracle. Both must be green before [#997] closes and
    before [#732] can close.
+
+**Delivered 2026-08-21.** The boundary is
+`crates/chelis-compiler-api/src/runtime/host_ops.rs`'s `describe_value` /
+`describe_argument` / `describe_fields`, written directly beneath
+`render_value`; it owns the kind tag, the truncation cap, and the container
+grammar, and every numeric payload reaches text through `render_value` and
+so through `format_element`. `runtime/mod.rs`'s `truncated_debug` is
+deleted rather than relocated, and truncation moved inside the boundary
+with it.
+
+The recount corrected the prose above in one place worth recording: the
+executable tripwire attributed 36 tokens to [#997] across four rows, but 13
+of them were cfg(test) assertions, not the single one the JSON annotation
+claimed (json.rs carried 9, csv.rs 4, neither stated). The migration
+retired all 23 product tokens plus the 7 cfg(test) assertions whose
+argument is a runtime value or a float; the 6 survivors are cfg(test)
+messages Debug-QUOTING `&str` document and cell text, which carry no
+numeric payload and are the same declared non-exit class as
+`runtime/tests.rs`. Baselines shrank in the same change set: eval.rs 31 ->
+24, json.rs 18 -> 2, csv.rs 10 -> 4, mod.rs 1 -> row deleted, and
+`runtime/mod.rs` left the oracle's permitted-path set.
+
+The migration was not cosmetic. Derived `Debug` on a half-width scalar
+reports `half::f16`'s `to_f32()` image, so the same stored f16 rendered
+`0.099975586` in a diagnostic and `0.1` at every exit - two answers for one
+value, which is the §B2.4 harm in its plainest form. The
+`fo_diag_half_widths_are_not_reported_through_their_f32_image` cell pins
+both halves of that.
+
+Acceptance evidence: the focused suite is `cargo nextest run -p
+chelis-compiler-api --lib -E 'test(fo_diag)'` (10 cells), and the
+authoritative Phase 2 oracle is
+`scripts/faithful_observation_phase2_oracle.py`. The mutation obligation in
+item 3 was executed, not asserted: re-adding `format!("{value:?}")` to
+`runtime/mod.rs` and reverting one migrated json.rs field render both went
+red on `rust-debug-numeric-format` with the baseline-0 and baseline-2
+messages respectively.
 
 ## Issue map
 

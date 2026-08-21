@@ -2632,3 +2632,432 @@ y = round_to(2.675f64, 2)
         other => panic!("expected scalar, got {other:?}"),
     }
 }
+
+// ===========================================================================
+// FO-DIAG: the diagnostic-rendering boundary (chelis#997,
+// spec/design/faithful_observation.md §C1.6 / §B2.4).
+//
+// §C1.6: "a diagnostic must not launder what it reports." These pin the
+// boundary beside `render_value` -- `describe_value`, `describe_argument`,
+// `describe_fields` -- as the ONE way a runtime, JSON, or CSV payload
+// becomes diagnostic text, and pin the negative half: the derived-`Debug`
+// spellings must not reappear in any of it.
+//
+// Focused run:
+//   cargo nextest run -p chelis-compiler-api --lib -E 'test(fo_diag)'
+// ===========================================================================
+
+/// Derived-`Debug` fingerprints. A diagnostic containing any of these is
+/// rendering the Rust representation instead of the value.
+const DEBUG_SPELLINGS: &[&str] = &[
+    "Scalar(",
+    "ScalarPayload",
+    "ScalarValue",
+    "bits:",
+    "Bits::",
+    "F16(",
+    "Bf16(",
+    "F32(",
+    "F64(",
+    "I32(",
+    "I64(",
+    "RuntimeValue::",
+    "field_names",
+    "Adt {",
+    "IrTensorValue",
+];
+
+#[track_caller]
+fn assert_no_debug_spelling(rendered: &str, what: &str) {
+    for needle in DEBUG_SPELLINGS {
+        assert!(
+            !rendered.contains(needle),
+            "{what} leaked the derived-Debug spelling `{needle}`: {rendered}"
+        );
+    }
+}
+
+fn scalar_of(dtype: Prim, value: f64) -> RuntimeValue {
+    RuntimeValue::scalar_like_float(dtype, value).expect("in-domain scalar fixture")
+}
+
+fn int_scalar_of(dtype: Prim, value: i64) -> RuntimeValue {
+    RuntimeValue::scalar_like_int(dtype, value).expect("in-domain scalar fixture")
+}
+
+fn adt(ctor: &str, fields: Vec<RuntimeValue>) -> RuntimeValue {
+    RuntimeValue::Adt {
+        ctor: ctor.to_string(),
+        fields,
+        field_names: None,
+    }
+}
+
+/// A scalar renders as `<dtype> <canonical digits>`: the dtype comes from
+/// the sealed storage variant, and the digits are `format_element`'s, so a
+/// diagnostic and an exit channel agree on every payload.
+#[test]
+fn fo_diag_scalars_carry_their_dtype_and_own_width_digits() {
+    // Exact int64 above 2^53 -- the [#723] case. 9007199254740993 has no
+    // f64 twin, so a rendering that funnels through double reports
+    // ...992.
+    let big = int_scalar_of(Prim::Int64, 9_007_199_254_740_993);
+    assert_eq!(describe_value(&big), "int64 9007199254740993");
+    assert!(
+        !describe_value(&big).contains("9007199254740992"),
+        "the f64 image must not reach the diagnostic channel"
+    );
+
+    assert_eq!(describe_value(&int_scalar_of(Prim::Int32, -5)), "int32 -5");
+    assert_eq!(describe_value(&int_scalar_of(Prim::Int8, 127)), "int8 127");
+
+    // Own-width floats: the f32 prints its shortest-at-f32 digits, and the
+    // f64 holding the same f32's image prints the wider, different string.
+    assert_eq!(
+        describe_value(&scalar_of(Prim::F32, 0.1f32 as f64)),
+        "f32 0.1"
+    );
+    assert_eq!(
+        describe_value(&scalar_of(Prim::F64, 0.1f32 as f64)),
+        "f64 0.10000000149011612"
+    );
+    assert_eq!(
+        describe_value(&scalar_of(Prim::F64, f64::MAX)),
+        "f64 1.7976931348623157e308"
+    );
+    assert_eq!(describe_value(&scalar_of(Prim::F64, -0.0)), "f64 -0.0");
+
+    for value in [&big, &scalar_of(Prim::F32, 0.1f32 as f64)] {
+        assert_no_debug_spelling(&describe_value(value), "a scalar diagnostic");
+    }
+}
+
+/// The half widths are where derived `Debug` actively lies: `half::f16`'s
+/// `Debug` forwards to `to_f32()`, so it reports the WIDENED image rather
+/// than the shortest string that parses back to the stored f16. The
+/// pre-migration rendering of the first two fixtures below, measured:
+///
+/// ```text
+/// [Scalar(ScalarPayload { value: ScalarValue { bits: F16(0.099975586) } }),
+///  Scalar(ScalarPayload { value: ScalarValue { bits: Bf16(0.100097656) } })]
+/// ```
+///
+/// One stored value, two answers: `0.099975586` in a diagnostic and `0.1`
+/// at every exit. That is the §B2.4 harm itself, so these assertions pin
+/// the own-width digits and the absence of the widened image.
+#[test]
+fn fo_diag_half_widths_are_not_reported_through_their_f32_image() {
+    let f16 = scalar_of(Prim::F16, 0.1);
+    assert_eq!(describe_value(&f16), "f16 0.1");
+    assert!(
+        !describe_value(&f16).contains("0.09997559"),
+        "the f32 image of the stored f16 must not reach the diagnostic"
+    );
+
+    let bf16 = scalar_of(Prim::Bf16, 0.1);
+    assert_eq!(describe_value(&bf16), "bf16 0.1");
+
+    // And the same value inside a malformed ADT field list, which is how a
+    // JSON/CSV shape diagnostic reports it.
+    assert_eq!(describe_fields(&[f16, bf16]), "[f16 0.1, bf16 0.1]");
+}
+
+/// Bools, strings, and the nonnumeric controls: each names its kind, and
+/// a string is quoted so an empty or control-carrying value is visible.
+#[test]
+fn fo_diag_bools_strings_and_nonnumeric_controls() {
+    assert_eq!(describe_value(&RuntimeValue::Bool(true)), "bool true");
+    assert_eq!(describe_value(&RuntimeValue::Bool(false)), "bool false");
+    // A bool is never reported as a number ([05-OBS-3]).
+    assert!(!describe_value(&RuntimeValue::Bool(true)).contains('1'));
+
+    assert_eq!(
+        describe_value(&RuntimeValue::String(String::new())),
+        "string \"\""
+    );
+    assert_eq!(
+        describe_value(&RuntimeValue::String("a\nb\"c".to_string())),
+        "string \"a\\nb\\\"c\""
+    );
+
+    assert_eq!(describe_value(&RuntimeValue::Unit), "()");
+    assert_eq!(
+        describe_value(&RuntimeValue::MappedFile(vec![1, 2, 3])),
+        "<mapped-file:3>"
+    );
+    assert_eq!(
+        describe_value(&RuntimeValue::Closure {
+            params: vec!["x".to_string()],
+            param_types: vec![None],
+            body: chelis_deep::ast::Expr::Atom(
+                chelis_deep::ast::Atom::Bool(false),
+                chelis_deep::Span::new(0, 0)
+            ),
+            env: HashMap::new(),
+        }),
+        "<closure>"
+    );
+}
+
+/// Nested structure is `render_value`'s output verbatim -- the diagnostic
+/// channel and the exit channel are the same grammar below the top-level
+/// kind tag, so nested payloads cannot disagree.
+#[test]
+fn fo_diag_nested_structure_delegates_to_the_canonical_renderer() {
+    let list = RuntimeValue::List(vec![
+        int_scalar_of(Prim::Int64, 9_007_199_254_740_993),
+        scalar_of(Prim::F32, 0.1f32 as f64),
+        RuntimeValue::Bool(true),
+    ]);
+    assert_eq!(
+        describe_value(&list),
+        format!("list {}", render_value(&list))
+    );
+    assert_eq!(describe_value(&list), "list [9007199254740993, 0.1, true]");
+
+    let tuple = RuntimeValue::Tuple(vec![int_scalar_of(Prim::Int32, 1), RuntimeValue::Unit]);
+    assert_eq!(describe_value(&tuple), "tuple (1, ())");
+
+    // Tensors, dicts, and ADTs already name their own shape, so they are
+    // the canonical rendering unchanged.
+    let tensor = tensor_value(
+        Prim::F32,
+        vec![2],
+        vec![f64::from(0.1f32), f64::from(0.2f32)],
+    );
+    assert_eq!(describe_value(&tensor), render_value(&tensor));
+    assert_eq!(
+        describe_value(&tensor),
+        "tensor(shape=[2], data=[0.1, 0.2])"
+    );
+
+    let nested = adt(
+        "JList",
+        vec![RuntimeValue::List(vec![
+            adt(
+                "JInt",
+                vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
+            ),
+            adt("JNum", vec![scalar_of(Prim::F64, 1e-7)]),
+        ])],
+    );
+    assert_eq!(describe_value(&nested), render_value(&nested));
+    assert_eq!(
+        describe_value(&nested),
+        "JList([JInt(9007199254740993), JNum(1e-7)])"
+    );
+    assert_no_debug_spelling(&describe_value(&nested), "a nested Json diagnostic");
+}
+
+/// `describe_fields` tags every field, because a malformed-shape
+/// diagnostic has to say WHY the shape was rejected: `[int32 5]` under a
+/// `JNum` names the reason an untagged `[5]` does not.
+#[test]
+fn fo_diag_field_lists_tag_every_field() {
+    assert_eq!(describe_fields(&[]), "[]");
+    assert_eq!(
+        describe_fields(&[int_scalar_of(Prim::Int32, 5)]),
+        "[int32 5]"
+    );
+    assert_eq!(
+        describe_fields(&[
+            scalar_of(Prim::F32, 0.1f32 as f64),
+            RuntimeValue::Bool(true),
+            RuntimeValue::String("x".to_string()),
+        ]),
+        "[f32 0.1, bool true, string \"x\"]"
+    );
+}
+
+/// A missing argument slot reads as a missing argument, not as a Rust
+/// `Option` spelling.
+#[test]
+fn fo_diag_argument_slots_name_an_absent_argument() {
+    assert_eq!(describe_argument(None), "nothing");
+    let value = int_scalar_of(Prim::Int32, 7);
+    assert_eq!(describe_argument(Some(&value)), describe_value(&value));
+    assert_no_debug_spelling(&describe_argument(None), "an absent argument");
+}
+
+/// Truncation is the boundary's, not the call site's: one cap, applied
+/// once, on a char boundary, and stated rather than silent. A rendering
+/// that fits is byte-identical to the untruncated form.
+#[test]
+fn fo_diag_truncation_is_owned_by_the_boundary() {
+    let short = RuntimeValue::List(vec![int_scalar_of(Prim::Int32, 1)]);
+    assert_eq!(describe_value(&short), "list [1]");
+    assert!(!describe_value(&short).contains("elided"));
+
+    let long = RuntimeValue::List(
+        (0..200)
+            .map(|i| int_scalar_of(Prim::Int32, i))
+            .collect::<Vec<_>>(),
+    );
+    let rendered = describe_value(&long);
+    assert!(
+        rendered.starts_with("list [0, 1, 2, "),
+        "the head of the payload survives: {rendered}"
+    );
+    assert!(
+        rendered.ends_with(" more bytes elided)"),
+        "the cut is stated, not silent: {rendered}"
+    );
+
+    // Multibyte: the cut lands on a char boundary (a panic here is the
+    // failure), and a long multibyte string still truncates.
+    let wide = RuntimeValue::String("\u{1F600}".repeat(200));
+    let rendered = describe_value(&wide);
+    assert!(rendered.ends_with(" more bytes elided)"));
+    assert!(rendered.starts_with("string \"\u{1F600}"));
+}
+
+/// The JSON runtime's malformed-shape diagnostics report their payloads
+/// through the boundary. Positive: the exact int64 and the own-width f16
+/// survive. Negative: no derived-`Debug` spelling appears.
+#[test]
+fn fo_diag_json_shape_diagnostics_report_exact_payloads() {
+    // A `JNum` whose field is an integer is malformed; the diagnostic
+    // names the field's dtype, which is the whole reason it was rejected.
+    let bad_num = adt(
+        "JNum",
+        vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
+    );
+    let doc = adt(
+        "JDict",
+        vec![RuntimeValue::Dict(vec![(
+            RuntimeValue::String("v".to_string()),
+            bad_num,
+        )])],
+    );
+    let err = super::json::json_f64_at(&doc, "v").expect_err("a malformed JNum must fail");
+    assert!(
+        err.contains("malformed JNum fields [int64 9007199254740993]"),
+        "the exact stored integer must reach the diagnostic: {err}"
+    );
+    assert!(
+        !err.contains("9007199254740992"),
+        "no double funnel in the diagnostic channel: {err}"
+    );
+    assert_no_debug_spelling(&err, "the json_f64 shape diagnostic");
+
+    // A `JInt` carrying an f16 is malformed for `json_int`; the f16 is
+    // reported at its own width, not through its f32 image.
+    let bad_int = adt("JInt", vec![scalar_of(Prim::F16, 0.1)]);
+    let doc = adt(
+        "JDict",
+        vec![RuntimeValue::Dict(vec![(
+            RuntimeValue::String("v".to_string()),
+            bad_int,
+        )])],
+    );
+    let err = super::json::json_int_at(&doc, "v").expect_err("a malformed JInt must fail");
+    assert!(
+        err.contains("malformed JInt fields [f16 0.1]"),
+        "own-width f16 digits in the diagnostic: {err}"
+    );
+    assert!(!err.contains("0.09997559"), "no widened image: {err}");
+
+    // A non-Json value reaching the serializer names what it actually is.
+    let err = super::json::json_value_to_text(&RuntimeValue::Bool(true))
+        .expect_err("a bare bool is not a Json value");
+    assert!(err.contains("bool true"), "got: {err}");
+    assert_no_debug_spelling(&err, "the to_json shape diagnostic");
+
+    // A non-string JDict key is reported as the value it is.
+    let bad_key = adt(
+        "JDict",
+        vec![RuntimeValue::Dict(vec![(
+            int_scalar_of(Prim::Int32, 1),
+            adt("JNull", vec![]),
+        )])],
+    );
+    let err = super::json::ensure_json_value(&bad_key).expect_err("non-string key must fail");
+    assert!(err.contains("got int32 1"), "got: {err}");
+}
+
+/// The CSV runtime's cell and document diagnostics use the same boundary.
+#[test]
+fn fo_diag_csv_shape_diagnostics_report_exact_payloads() {
+    fn csv_doc(cell: RuntimeValue) -> RuntimeValue {
+        let row = adt(
+            "JDict",
+            vec![RuntimeValue::Dict(vec![(
+                RuntimeValue::String("v".to_string()),
+                cell,
+            )])],
+        );
+        adt(
+            "JDict",
+            vec![RuntimeValue::Dict(vec![
+                (
+                    RuntimeValue::String("columns".to_string()),
+                    adt(
+                        "JList",
+                        vec![RuntimeValue::List(vec![adt(
+                            "JStr",
+                            vec![RuntimeValue::String("v".to_string())],
+                        )])],
+                    ),
+                ),
+                (
+                    RuntimeValue::String("rows".to_string()),
+                    adt("JList", vec![RuntimeValue::List(vec![row])]),
+                ),
+            ])],
+        )
+    }
+
+    // A `JNum` cell holding an int64 above 2^53 is malformed; the exact
+    // digits reach the diagnostic.
+    let err = super::csv::csv_f64_at(
+        &csv_doc(adt(
+            "JNum",
+            vec![int_scalar_of(Prim::Int64, 9_007_199_254_740_993)],
+        )),
+        0,
+        "v",
+    )
+    .expect_err("a malformed JNum cell must fail");
+    assert!(
+        err.contains("malformed JNum cell [int64 9007199254740993]"),
+        "got: {err}"
+    );
+    assert!(!err.contains("9007199254740992"), "got: {err}");
+    assert_no_debug_spelling(&err, "the csv_f64 cell diagnostic");
+
+    // A `JInt` cell holding an f16 is malformed for `csv_int`; own width.
+    let err = super::csv::csv_int_at(
+        &csv_doc(adt("JInt", vec![scalar_of(Prim::F16, 0.1)])),
+        0,
+        "v",
+    )
+    .expect_err("a malformed JInt cell must fail");
+    assert!(err.contains("malformed JInt cell [f16 0.1]"), "got: {err}");
+    assert!(!err.contains("0.09997559"), "got: {err}");
+
+    // A non-string top-level key in a document reaching `to_csv`.
+    let bad_doc = adt(
+        "JDict",
+        vec![RuntimeValue::Dict(vec![(
+            int_scalar_of(Prim::Int32, 1),
+            adt("JNull", vec![]),
+        )])],
+    );
+    let err = super::csv::csv_to_text(&bad_doc).expect_err("a non-string key must fail");
+    assert_no_debug_spelling(&err, "the to_csv document diagnostic");
+}
+
+/// End to end through the checked pipeline: the eval dispatch arms that
+/// migrated with this package report an argument's dtype and value, not a
+/// Rust `Option`/`Debug` spelling.
+#[test]
+fn fo_diag_eval_dispatch_diagnostics_name_the_argument() {
+    let checked = checked_surf(
+        r#"
+x = json_f64(parse_json("{\"alpha\": \"txt\"}"), "alpha")
+"#,
+    );
+    let err = evaluate_host_program(&checked, &HashMap::new())
+        .expect_err("a string node is not a number");
+    assert_no_debug_spelling(&err, "the json_f64 kind diagnostic");
+}
