@@ -90,7 +90,21 @@ pub const COMPILER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// (Mach-O `LC_UUID`, ELF `NT_GNU_BUILD_ID`) where the image carries one,
 /// and a SHA-256 of the whole image otherwise; the scheme tag and the
 /// image length are folded in alongside it so the two derivations can
-/// never be confused and a post-link size change cannot pass unnoticed.
+/// never be confused and a size change cannot pass unnoticed.
+///
+/// Note that a linker id covers the MAPPED image, not the whole file, so
+/// it deliberately ignores debug-map and symbol-table churn that cannot
+/// change what the compiler computes. That is the correct granularity
+/// here: this cache stores type-checking results, and two images with
+/// identical code and data produce identical results. See
+/// [`chelis_image_id::ImageId`] for the measured evidence in both
+/// directions.
+///
+/// It also asks the loader which object it is running inside rather than
+/// which process is hosting it. `chelis-python` is a `cdylib`, where
+/// `std::env::current_exe()` names the Python interpreter: keying on that
+/// would merge two different binding builds under one interpreter and
+/// split one build across two virtualenvs.
 ///
 /// # Why not filesystem metadata
 ///

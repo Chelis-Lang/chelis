@@ -47,13 +47,41 @@ pub enum ImageId {
     /// The linker's own content id: a Mach-O `LC_UUID` or an ELF
     /// `NT_GNU_BUILD_ID` note.
     ///
-    /// Both are hashes the linker computes over the image it just wrote, which
-    /// is why this is a build identity and not merely a build *label*. Verified
-    /// on this workspace: two `chelis` builds differing by one added function
-    /// came out at identical byte length (the added symbol landed in padding)
-    /// and identical mtime, yet carried different `LC_UUID`s; and rebuilding
-    /// the first source again reproduced its original `LC_UUID` exactly, so the
-    /// id is stable across relinks of unchanged input.
+    /// # What this covers, exactly
+    ///
+    /// Both are hashes the linker computes over the **mapped image** - the code
+    /// and data the process actually executes and reads. Neither covers the
+    /// whole file: the symbol table, the debug map, and the code signature all
+    /// sit outside them.
+    ///
+    /// That is the right granularity for keying a cache of type-checking
+    /// results, and it is deliberately NOT the same as "these two files are
+    /// byte-identical". Measured on this workspace, both directions:
+    ///
+    /// - **It tracks every semantic change.** Editing one live string constant
+    ///   in `chelis-compiler-api` and relinking changed the `LC_UUID`
+    ///   (`793D66F4...` to `4E4BD4F1...`). Semantics are determined by code and
+    ///   data, so a change that leaves the mapped image identical cannot change
+    ///   behaviour.
+    /// - **It ignores rebuild churn that cannot affect behaviour.** Adding an
+    ///   unreferenced `pub fn` to a dependency crate produced a binary of
+    ///   identical length whose SHA-256 differed, because the added symbol was
+    ///   dead-stripped and the only surviving difference was cargo's rlib
+    ///   metadata hash inside the debug-map paths (1347 occurrences of one
+    ///   6-byte token). The `LC_UUID` was unchanged, correctly: those two
+    ///   binaries compute the same answers, so sharing a cache entry between
+    ///   them is right, and a whole-file digest would have forced a pointless
+    ///   recompile.
+    ///
+    /// It is also stable across relinks of unchanged input: rebuilding an
+    /// earlier source reproduced its original `LC_UUID` exactly.
+    ///
+    /// # Callers must not assume byte equality
+    ///
+    /// Because this deliberately excludes non-executed regions, two files with
+    /// different bytes can share an id. Do not use [`ImageId`] as a file
+    /// checksum; it answers "would these two images behave the same?", which is
+    /// the question a semantics cache needs and a checksum is only a proxy for.
     ///
     /// It is read from the image header, so obtaining it costs microseconds
     /// regardless of image size.
