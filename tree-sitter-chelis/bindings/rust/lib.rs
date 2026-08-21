@@ -235,6 +235,31 @@ mod tests {
     }
 
     #[test]
+    fn surf_integer_literals_are_dimensions_not_types_in_both_parsers() {
+        // chelis#1179: `IntLit` has exactly one type-position production,
+        // the tensor `DimExpr`. Both parsers accept it there and reject it
+        // in every ordinary type position.
+        for source in [
+            "value: tensor[732, f32] = x\n",
+            "def g(a: tensor[3, 4, f32]) -> tensor[3, 4, f32] = a\n",
+        ] {
+            assert_surf_parser_parity(source, true);
+        }
+        for source in [
+            "def g(a: 732) -> f32 = a\n",
+            "def g(a: f32) -> 732 = a\n",
+            "value: 732 = x\n",
+            "sig g: 732 -> f32\n",
+            "value: Option[732] = x\n",
+            "value: (732, f32) = x\n",
+            "def g(a: &732) -> f32 = a\n",
+            "type Wrap = | Wrap(732)\n",
+        ] {
+            assert_surf_parser_parity(source, false);
+        }
+    }
+
+    #[test]
     fn tracked_surf_corpus_is_tree_sitter_error_free() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

@@ -2846,8 +2846,16 @@ impl Parser {
     fn parse_type_atom(&mut self) -> Result<TypeExpr, ParseError> {
         match self.peek().clone() {
             TokenKind::Int(n) => {
-                let tok = self.advance();
-                Ok(TypeExpr::Named(n.to_string(), tok.span))
+                // spec/02-surf-syntax.md: `IntLit` has exactly one type-position
+                // production, the `DimExpr` inside a tensor shape. Everywhere
+                // else an integer is not a type; accepting one here silently
+                // manufactured `(t-var {} <digits>)` (chelis#1179).
+                Err(ParseError::Expected {
+                    expected: "a type; integer literals are only dimensions inside `tensor[...]`"
+                        .into(),
+                    found: format!("integer literal `{n}`"),
+                    offset: self.current_offset(),
+                })
             }
             TokenKind::Ident(name) => {
                 let tok = self.advance();
@@ -2930,13 +2938,13 @@ impl Parser {
                 self.expect(&TokenKind::LBracket)?;
                 // Parse dims (all but last are dims, last is precision ident)
                 let mut items = Vec::new();
-                items.push(self.parse_type_atom()?);
+                items.push(self.parse_tensor_item()?);
                 while *self.peek() == TokenKind::Comma {
                     self.advance();
                     if *self.peek() == TokenKind::RBracket {
                         break;
                     }
-                    items.push(self.parse_type_atom()?);
+                    items.push(self.parse_tensor_item()?);
                 }
                 let end = self.expect(&TokenKind::RBracket)?;
                 // Last item should be the precision (a Named ident)
@@ -3024,6 +3032,19 @@ impl Parser {
                 offset: self.current_offset(),
             }),
         }
+    }
+
+    /// One bracketed `tensor[...]` item: a dimension or the trailing
+    /// precision name. This is the only position whose grammar has an
+    /// integer production (`DimExpr <- IntLit / Ident / '*' / '..' Ident`,
+    /// spec/02-surf-syntax.md), so the literal-dimension arm lives here
+    /// rather than in `parse_type_atom` (chelis#1179).
+    fn parse_tensor_item(&mut self) -> Result<TypeExpr, ParseError> {
+        if let TokenKind::Int(n) = self.peek().clone() {
+            let tok = self.advance();
+            return Ok(TypeExpr::Named(n.to_string(), tok.span));
+        }
+        self.parse_type_atom()
     }
 
     // ---------------------------------------------------------------------------
