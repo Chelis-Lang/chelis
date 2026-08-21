@@ -965,11 +965,12 @@ pub(super) fn unsigned_family_diagnostic(name: &str, tensor: bool) -> Option<Che
              spelling uint8/uint16/uint32/uint64 per §1.1.2; active set: \
              {active_set})"
         ),
-        vec![format!(
+        vec![
             "spec/04-type-system.md §1.1.2 documents the workaround: cast to \
              int32 or int64 and reason at the wider signed precision; or use \
              a tensor of int8 / int16 / int32 / int64 if the bit-width matters"
-        )],
+                .to_string(),
+        ],
     ))
 }
 

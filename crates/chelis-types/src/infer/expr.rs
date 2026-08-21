@@ -1109,11 +1109,12 @@ pub(super) fn infer_lit(
                          suffix (`{n}i64`) or an explicit cast({n}, int64) \
                          (spec/04-type-system.md §5.3, §5.5)"
                     ),
-                    vec![format!(
+                    vec![
                         "spec/04-type-system.md §5.3: integer literals default to int32; \
                          the lexer parses at i64 so out-of-range tokens can be diagnosed \
                          before the narrowing rather than wrapping silently"
-                    )],
+                            .to_string(),
+                    ],
                 ));
             } else {
                 errors.push(CheckError::new(
@@ -1288,12 +1289,13 @@ pub(super) fn infer_lit(
                              `{n}i64` literal suffix or an explicit cast({n}, int64) \
                              (spec/04-type-system.md §5.3, §5.5)"
                             ),
-                            vec![format!(
+                            vec![
                                 "spec/04-type-system.md §5.3: integer literals default \
                              to int32; the lexer parses at i64 so out-of-range \
                              tokens can be diagnosed before the narrowing rather \
                              than wrapping silently"
-                            )],
+                                    .to_string(),
+                            ],
                         ),
                     )
                 } else {

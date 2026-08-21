@@ -2646,7 +2646,7 @@ fn resugar_let(node: NodeRef<'_>) -> Result<Expr, ResugarError> {
         });
     }
     let mut bindings = Vec::with_capacity(binding_node.children.len() / 2);
-    for pair in binding_node.children.chunks_exact(2) {
+    for pair in binding_node.children.as_chunks::<2>().0 {
         let value_node = node_ref(&pair[1])?;
         let binding_style = match meta_value(value_node.meta, "surf_binding_type") {
             None => None,

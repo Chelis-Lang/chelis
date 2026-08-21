@@ -419,13 +419,14 @@ pub(super) fn check_matmul_signature(
                  inner products)",
                     lhs_prec.name()
                 ),
-                vec![format!(
+                vec![
                     "spec/04-type-system.md §5.7.2: there is no current backend that \
                  supports integer BLAS, and an integer-matmul surface raises \
                  questions (saturating vs wrapping accumulator, signed-vs-unsigned \
                  interaction with §1.1.2) that are out of scope here. Integer \
                  reduce_sum is supported per §5.7.1."
-                )],
+                        .to_string(),
+                ],
             ),
         );
     }

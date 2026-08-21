@@ -6507,7 +6507,7 @@ fn dual_eval_let(
         return None;
     }
     let mut local_env = env.clone();
-    for pair in bind_kids.chunks_exact(2) {
+    for pair in bind_kids.as_chunks::<2>().0 {
         let name = symbol_name(&pair[0])?;
         let dual = dual_eval(&pair[1], &local_env, program, depth + 1)?;
         local_env.insert(name.to_string(), dual);
