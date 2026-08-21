@@ -67,22 +67,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **chelis#997: JSON and CSV runtime diagnostics no longer report a
-  numeric payload through derived `Debug`.** Every shape and type-mismatch
-  diagnostic in the host-lane JSON/CSV I/O runtime, and the JSON/CSV
-  builtin dispatch arms in the evaluator, now render their payload through
-  one crate-private diagnostic boundary written beside the canonical
-  `render_value` renderer, so a diagnostic and an exit channel report the
-  same stored value identically ([05-OBS-1], faithful-observation §C1.6).
-  User-visible text changes: a value is now named by its dtype and its
-  canonical digits (`got f32 0.1`, `got int64 9007199254740993`) instead of
-  by its Rust representation (`got Scalar(ScalarPayload { value:
-  ScalarValue { bits: F32(0.1) } })`), a malformed ADT field list reads
-  `malformed JNum fields [int32 5]`, and a missing argument reads `got
-  nothing`. The half widths were being misreported outright: `half::f16`'s
-  `Debug` forwards to `to_f32()`, so a stored f16 that every exit renders
-  as `0.1` appeared in a diagnostic as `0.099975586`.
-
 - **chelis#1200: a destructuring `let` no longer poisons the rest of its
   block.** The Linearity-F2 use-after-consume gate was scoped to the
   destructuring let's *body*, and in a block every later statement is
