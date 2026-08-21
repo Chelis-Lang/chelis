@@ -214,14 +214,24 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   the other 11. Diagnostics no longer name a desugarer temp
   (`__chelis_tmpN`) to the user.
 
-  **Known gap, deferred:** an alias still resolves by NAME, so it follows
-  that name to whatever binding is on top of the scope stack rather than
-  to the generation it was taken against. Shadowing a source after an
-  alias is taken (or re-binding the source name as a destructured
-  component) therefore still misroutes, in both the false-negative and
-  false-positive directions. Closing it needs binding-generation
-  identity; the two shapes are pinned as `#[ignore]`d tests in
+  The gap that review deferred — an alias resolved by NAME, following it
+  to whatever binding was on top of the scope stack rather than to the
+  generation it was taken against — is closed by chelis#1209: the checker
+  now keys all state (alias links, consumption marks, component
+  identity) on per-binding generation ids, normatively [04-LIN-1] in
+  `spec/04-type-system.md` §8.3. Shadowing a source after an alias is
+  taken no longer hides the alias's double consume or blames the fresh
+  binding, and re-binding a source name as a destructured component no
+  longer hands the old alias the component restriction; the two shapes
+  are un-ignored tests in
   `crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`.
+  The same identity closes chelis#1212 (an authored `__chelis_tmp0`
+  colliding with a synthesized carrier is now ordinary shadowing and
+  hides nothing). Deliberately unchanged, now pinned as [04-LIN-2]: a
+  closure capture consumes the binding it names, so two closures may
+  consume one value through two user-visible names, and an ordinary
+  alias's record at a branch join keeps its existing behavior (the
+  join's consume promotion stays carrier-only).
 
 - **A non-recursive generic host call is specialized, not inlined
   (chelis#1201).** Value-level inlining substituted the argument expression

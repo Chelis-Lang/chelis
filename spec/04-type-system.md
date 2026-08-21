@@ -2438,6 +2438,36 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   like any other value. A destructuring `let` written inside the region introduces
   components of that region and is excepted there as above.
 
+Two requirements pin the binding-identity semantics the rules above rest on:
+
+> **[04-LIN-1]** Every binding introduction — a `let` bind (destructuring
+> or not), a function parameter, a closure capture, a `match` binder, a
+> top-level `def` — creates a binding distinct from every other binding,
+> including earlier and later bindings of the same name. A name at a use
+> site denotes the innermost such binding whose scope encloses the site.
+> Every ownership fact — an alias relationship, a consumption, a borrow,
+> destructured-component identity — SHALL attach to the binding it was
+> resolved against where it was recorded, never to the name. In
+> particular, an alias denotes the binding its source name denoted where
+> the alias was introduced: a later re-binding of that name SHALL
+> neither re-point the alias nor confer the new binding's properties
+> (such as a component restriction) on it, and consuming through the
+> alias SHALL affect the aliased binding, not whichever binding owns the
+> name at the consuming use.
+
+> **[04-LIN-2]** Creating a closure that captures a value consumes the
+> binding the capture names. Distinct user-visible bindings of one
+> underlying value — an ordinary alias `y = x` beside its source — are
+> distinct for capture: one closure capturing `y` and another capturing
+> `x` each consume their own binding, and both closure creations are
+> accepted. The sole forwarding is a capture of a destructured component
+> (or of an alias of one), which consumes the component's carrier
+> binding.
+
+Diagnostics for violations of these rules SHALL name a binding the
+program's source spells — the alias or component name written at the
+faulting use — never a compiler-synthesized intermediate.
+
 ### 8.4 Tensor-carrying ADTs
 
 An ADT `T` is **tensor-carrying** iff at least one of `T`'s variant fields has a
