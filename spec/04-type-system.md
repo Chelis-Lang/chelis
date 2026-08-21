@@ -2419,8 +2419,10 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   drops for locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
-- Creating a closure that captures a tensor consumes that outer binding at closure
-  creation time.
+- Creating a closure whose body consumes a captured tensor consumes that outer binding
+  at closure creation time; a capture whose body uses are all borrow-reads borrows the
+  outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
+  subject below.
 - Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases outside the v1 inference scope.
@@ -2455,14 +2457,16 @@ Two requirements pin the binding-identity semantics the rules above rest on:
 > alias SHALL affect the aliased binding, not whichever binding owns the
 > name at the consuming use.
 
-> **[04-LIN-2]** Creating a closure that captures a value consumes the
-> binding the capture names. Distinct user-visible bindings of one
-> underlying value — an ordinary alias `y = x` beside its source — are
-> distinct for capture: one closure capturing `y` and another capturing
-> `x` each consume their own binding, and both closure creations are
-> accepted. The sole forwarding is a capture of a destructured component
-> (or of an alias of one), which consumes the component's carrier
-> binding.
+> **[04-LIN-2]** Creating a closure whose body consumes a captured value
+> consumes the binding the capture names at closure creation time; a
+> capture whose uses in the body are all borrow-reads borrows that
+> binding instead. Distinct user-visible bindings of one underlying
+> value — an ordinary alias `y = x` beside its source — are distinct for
+> capture: one closure consuming through `y` and another through `x`
+> each consume their own binding, and both closure creations are
+> accepted. The sole forwarding is a consuming capture of a destructured
+> component (or of an alias of one), which consumes the component's
+> carrier binding.
 
 Diagnostics for violations of these rules SHALL name a binding the
 program's source spells — the alias or component name written at the

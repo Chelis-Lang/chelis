@@ -1080,8 +1080,8 @@ implementation ledger owner is `spec/design/implicit_linearity.md`
 (`pass_b_alias_survives_shadowing_of_its_source`,
 `pass_b_alias_is_not_captured_by_a_later_destructure_of_its_source_name`,
 `authored_destructure_temp_name_does_not_hide_an_outer_double_consume`) run
-un-ignored and green; the 24 sibling cells in that file are the negative
-controls proving the fix is an identity rule and not a loosened or
+un-ignored and green; every sibling cell in that file is a negative
+control proving the fix is an identity rule and not a loosened or
 disabled check, with
 `two_closures_capturing_one_value_through_an_alias_still_compile` pinning
 [04-LIN-2]'s preserved verdict and the chelis-cli
@@ -1092,9 +1092,12 @@ sorted-capture rejection. Executed mutation receipt, 2026-08-21: making
 self.top_id(&source_record.name))` in place of following the recorded id)
 and running `cargo nextest run -p chelis-types --test
 issue_1200_destructure_component_scope` failed exactly the three
-acceptance cells (24 passed, 3 failed); reverting made all 27 green. The
-delivery remains one class change: a shadowing special-case in the chain
-walk or a reserved-name screen in the desugarer does not satisfy it.
+acceptance cells and no sibling (at the file's then-27-cell state: 24
+passed, 3 failed); reverting made all 27 green. Cells added afterwards
+that also ride generation identity (the component self-rebind pin) would
+join the failing set under the same mutation. The delivery remains one
+class change: a shadowing special-case in the chain walk or a
+reserved-name screen in the desugarer does not satisfy it.
 
 ### Adjacent ledger rows delivered with the class change
 

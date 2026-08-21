@@ -331,8 +331,8 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 //
 // An adversarial pass confirmed by execution that resolving marks and
 // consumes through bare string names in mutable alias stacks misroutes in
-// six ways. Five are closed here; the generation-crossing pair is Pass B
-// and is `#[ignore]`d at the bottom of this file.
+// six ways. Five are closed here; the generation-crossing pair is Pass B,
+// delivered by chelis#1209 and pinned at the bottom of this file.
 // ============================================================
 
 // ------------------------------------------------------------
@@ -741,6 +741,57 @@ def f(t: (tensor[4, f32], tensor[4, f32]), s: tensor[4, f32]) -> tensor[4, f32] 
   r1: tensor[4, f32] = realize(y)
   r2: tensor[4, f32] = realize(y)
   add(add(r1, r2), x)
+}
+"#,
+    );
+}
+
+/// The one verdict change generation identity brings beyond the two
+/// directions above: a self-rebind `a = a` of a COMPONENT records a real
+/// alias to the older generation (the source id is resolved before the
+/// new binding is declared), so double-consuming the re-bound name
+/// forwards to the component's carrier and is the same F2 error as any
+/// other component alias. Under name-keyed resolution the self-link
+/// walked back onto its own name, the cycle guard killed it, and the
+/// fan-out silently fell through to implicit copy.
+#[test]
+fn component_self_rebind_alias_double_consume_errors() {
+    let errors = linearity_errors(
+        r#"
+def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
+  (a, b) = p
+  a: tensor[4, f32] = a
+  r1: tensor[4, f32] = realize(a)
+  r2: tensor[4, f32] = realize(a)
+  add(r1, r2)
+}
+"#,
+    );
+    assert!(
+        errors.iter().any(|e| {
+            matches!(e.kind, CheckErrorKind::UseAfterConsume)
+                && e.message.contains("variable `a`")
+                && e.message.contains("(an alias of a destructured binding)")
+        }),
+        "a component self-rebind is an alias of the component and its \
+         double consume must be the F2 error; got {errors:?}"
+    );
+}
+
+/// NEGATIVE PARITY for the cell above: the same self-rebind of an
+/// ORDINARY binding is plain aliasing fan-out and stays copyable. The
+/// alias chain terminates at an unmarked generation, so nothing changed
+/// for this shape.
+#[test]
+fn ordinary_self_rebind_double_consume_stays_clean() {
+    assert_linearity_clean(
+        r#"
+def f(s: tensor[4, f32]) -> tensor[4, f32] = {
+  x: tensor[4, f32] = s
+  x: tensor[4, f32] = x
+  r1: tensor[4, f32] = realize(x)
+  r2: tensor[4, f32] = realize(x)
+  add(r1, r2)
 }
 "#,
     );

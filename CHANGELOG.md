@@ -227,11 +227,17 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   `crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`.
   The same identity closes chelis#1212 (an authored `__chelis_tmp0`
   colliding with a synthesized carrier is now ordinary shadowing and
-  hides nothing). Deliberately unchanged, now pinned as [04-LIN-2]: a
-  closure capture consumes the binding it names, so two closures may
-  consume one value through two user-visible names, and an ordinary
-  alias's record at a branch join keeps its existing behavior (the
-  join's consume promotion stays carrier-only).
+  hides nothing). One further verdict change rides the identity rule: a
+  self-rebind `a = a` of a destructured component now records a real
+  alias to the older generation, so double-consuming the re-bound name
+  is the same hard error as any other component alias (previously the
+  self-link was dead and the fan-out silently fell through to implicit
+  copy); the ordinary-binding self-rebind is unchanged and stays
+  copyable. Deliberately unchanged, now pinned as [04-LIN-2]: a
+  consuming closure capture consumes the binding it names, so two
+  closures may consume one value through two user-visible names, and an
+  ordinary alias's record at a branch join keeps its existing behavior
+  (the join's consume promotion stays carrier-only).
 
 - **A non-recursive generic host call is specialized, not inlined
   (chelis#1201).** Value-level inlining substituted the argument expression
