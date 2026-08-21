@@ -1,5 +1,7 @@
 use chelis_deep::DeepTag;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
@@ -141,109 +143,175 @@ struct BindingOrigin {
     component: bool,
 }
 
+/// Unique identity of one binding event (chelis#1209).
+///
+/// Minted by [`LinearScope::declare`], monotonically within one check
+/// invocation, and never reused: every `let` bind, function parameter,
+/// closure capture, match binder, and pre-declared top-level def gets
+/// its own generation. All checker state lives in the [`BindingRecord`]
+/// keyed by this id, so a name is only ever a lookup handle (`visible`
+/// resolves a use site to the innermost live generation) and re-binding
+/// a name cannot transfer or misroute state that belongs to an older
+/// generation. Mirrors the `TypeVar(u32)` / `VarGen` shape in
+/// `types.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BindingId(u32);
+
+/// Everything the checker tracks for one binding generation.
+#[derive(Debug, Clone)]
+struct BindingRecord {
+    /// The source-level name this generation was introduced under.
+    /// Diagnostics print the name the user wrote at the *use site*, not
+    /// this field; it exists for the `pop` LIFO check and debugging.
+    name: String,
+    ty: Option<Expr>,
+    state: BindingState,
+    origin: BindingOrigin,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LinearScope {
-    bindings: HashMap<String, Vec<BindingState>>,
-    types: HashMap<String, Vec<Option<Expr>>>,
-    /// Per-binding origin records, stacked in parallel with `bindings`
-    /// so `declare`/`pop` give alias links and component marks the same
-    /// shadowing semantics already in place for names and types: an
-    /// ordinary re-`let` of a component name pushes a fresh unmarked,
-    /// unaliased entry over it.
-    origins: HashMap<String, Vec<BindingOrigin>>,
+    /// All checker state, keyed by binding generation.
+    records: HashMap<BindingId, BindingRecord>,
+    /// Name -> stack of generations, innermost last. Shadowing pushes,
+    /// scope exit pops. This map answers "which binding does this use
+    /// site mean" and nothing else; every consumption mark, alias link,
+    /// and component mark lives on the id-keyed record it resolved to.
+    visible: HashMap<String, Vec<BindingId>>,
+    /// Generation counter. Shared (`Rc`) across clones so branch and
+    /// closure scopes forked from one root cannot mint colliding ids;
+    /// `Default` mints a fresh zero counter, which is what makes each
+    /// check invocation pure (`check_linearity_with_context` purity
+    /// contract). One root scope is built per check invocation, and
+    /// every other scope must be a clone of it: a second
+    /// `LinearScope::default()` mid-check would fork the counter.
+    next: Rc<Cell<u32>>,
 }
 
 impl LinearScope {
-    fn declare<S: Into<String>>(&mut self, name: S, ty: Option<Expr>) {
-        let name = name.into();
-        self.bindings
-            .entry(name.clone())
-            .or_default()
-            .push(BindingState::Live {
-                borrow_sites: Vec::new(),
-            });
-        self.types.entry(name.clone()).or_default().push(ty);
-        // Push a blank origin so a re-`let` of `name` shadows any prior
-        // alias link and component mark.  Callers that establish either
-        // follow with `record_alias` / `mark_destructured`, which flip
-        // fields on the entry this pushed.
-        self.origins.entry(name).or_default().push(BindingOrigin {
-            alias: None,
-            destructured: false,
-            component: false,
-        });
+    fn mint(&self) -> BindingId {
+        let id = BindingId(self.next.get());
+        self.next.set(id.0 + 1);
+        id
     }
 
-    fn pop(&mut self, name: &str) -> Option<(Option<Expr>, BindingState)> {
-        let ty = if let Some(stack) = self.types.get_mut(name) {
-            let ty = stack.pop();
-            if stack.is_empty() {
-                self.types.remove(name);
-            }
-            ty
-        } else {
-            None
-        };
+    fn declare<S: Into<String>>(&mut self, name: S, ty: Option<Expr>) -> BindingId {
+        let name = name.into();
+        let id = self.mint();
+        // The origin starts blank: a re-`let` of `name` shadows any
+        // prior alias link and component mark because the new generation
+        // begins unmarked. Callers that establish either follow with
+        // `record_alias` / `mark_destructured`, which flip fields on the
+        // record this inserted.
+        self.records.insert(
+            id,
+            BindingRecord {
+                name: name.clone(),
+                ty,
+                state: BindingState::Live {
+                    borrow_sites: Vec::new(),
+                },
+                origin: BindingOrigin::default(),
+            },
+        );
+        self.visible.entry(name).or_default().push(id);
+        id
+    }
 
-        let state = if let Some(stack) = self.bindings.get_mut(name) {
-            let state = stack.pop();
-            if stack.is_empty() {
-                self.bindings.remove(name);
+    fn pop(&mut self, id: BindingId) -> Option<(Option<Expr>, BindingState)> {
+        let record = self.records.remove(&id)?;
+        if let Some(stack) = self.visible.get_mut(&record.name) {
+            debug_assert_eq!(
+                stack.last(),
+                Some(&id),
+                "scope exit must unwind LIFO per name"
+            );
+            if let Some(position) = stack.iter().rposition(|entry| *entry == id) {
+                stack.remove(position);
             }
-            state
-        } else {
-            None
-        };
-
-        if let Some(stack) = self.origins.get_mut(name) {
-            stack.pop();
             if stack.is_empty() {
-                self.origins.remove(name);
+                self.visible.remove(&record.name);
             }
         }
+        Some((record.ty, record.state))
+    }
 
-        state.map(|state| (ty.flatten(), state))
+    /// The innermost live generation for `name`, if any. This is the
+    /// single point where a use site's name becomes an identity; every
+    /// state read or write past it is id-keyed.
+    fn top_id(&self, name: &str) -> Option<BindingId> {
+        self.visible
+            .get(name)
+            .and_then(|stack| stack.last())
+            .copied()
+    }
+
+    fn record(&self, id: BindingId) -> Option<&BindingRecord> {
+        self.records.get(&id)
+    }
+
+    fn record_mut(&mut self, id: BindingId) -> Option<&mut BindingRecord> {
+        self.records.get_mut(&id)
     }
 
     fn top(&self, name: &str) -> Option<&BindingState> {
-        self.bindings.get(name).and_then(|stack| stack.last())
+        self.top_id(name)
+            .and_then(|id| self.record(id))
+            .map(|record| &record.state)
+    }
+
+    fn state(&self, id: BindingId) -> Option<&BindingState> {
+        self.record(id).map(|record| &record.state)
     }
 
     fn ty(&self, name: &str) -> Option<&Expr> {
-        self.types
-            .get(name)
-            .and_then(|stack| stack.last())
-            .and_then(|ty| ty.as_ref())
+        self.top_id(name)
+            .and_then(|id| self.record(id))
+            .and_then(|record| record.ty.as_ref())
     }
 
     fn consume(&mut self, name: &str, site: ConsumeSite) {
-        if let Some(stack) = self.bindings.get_mut(name)
-            && let Some(top) = stack.last_mut()
-        {
-            *top = BindingState::Consumed(site);
+        if let Some(id) = self.top_id(name) {
+            self.consume_id(id, site);
+        }
+    }
+
+    fn consume_id(&mut self, id: BindingId, site: ConsumeSite) {
+        if let Some(record) = self.record_mut(id) {
+            record.state = BindingState::Consumed(site);
         }
     }
 
     fn borrow(&mut self, name: &str, site: String) {
-        if let Some(stack) = self.bindings.get_mut(name)
-            && let Some(BindingState::Live { borrow_sites }) = stack.last_mut()
+        if let Some(id) = self.top_id(name)
+            && let Some(record) = self.record_mut(id)
+            && let BindingState::Live { borrow_sites } = &mut record.state
         {
             borrow_sites.push(site);
         }
     }
 
-    fn visible_names(&self) -> Vec<String> {
-        self.bindings.keys().cloned().collect()
+    /// Every generation on every visible stack, sorted for
+    /// deterministic iteration. Shadowed generations are included on
+    /// purpose: an alias recorded against an older generation can
+    /// consume it inside a branch even while its name is shadowed, so a
+    /// join that only saw stack tops would drop that consume
+    /// (chelis#1209).
+    fn all_visible_ids(&self) -> Vec<BindingId> {
+        let mut ids: Vec<BindingId> = self.visible.values().flatten().copied().collect();
+        ids.sort_unstable();
+        ids
     }
 
     fn origin(&self, name: &str) -> Option<&BindingOrigin> {
-        self.origins.get(name).and_then(|stack| stack.last())
+        self.top_id(name)
+            .and_then(|id| self.record(id))
+            .map(|record| &record.origin)
     }
 
     fn origin_mut(&mut self, name: &str) -> Option<&mut BindingOrigin> {
-        self.origins
-            .get_mut(name)
-            .and_then(|stack| stack.last_mut())
+        let id = self.top_id(name)?;
+        self.record_mut(id).map(|record| &mut record.origin)
     }
 
     /// Record that the top-of-stack binding for `alias` is an
@@ -258,15 +326,15 @@ impl LinearScope {
         }
     }
 
-    /// Record that the top-of-stack binding for `name` is a
-    /// destructured component (Linearity-F2, chelis#1200).  Must be
-    /// called after `declare` for `name`, which pushes the unmarked
-    /// entry this flips.  Called by `check_let` for every name
-    /// introduced by a `destructure: true` bind.
-    fn mark_destructured(&mut self, name: &str) {
-        if let Some(origin) = self.origin_mut(name) {
-            origin.destructured = true;
-            origin.component = true;
+    /// Record that the binding generation `id` is a destructured
+    /// component (Linearity-F2, chelis#1200).  Takes the id `declare`
+    /// returned for the bind, whose record starts unmarked.  Called by
+    /// `check_let` for every name introduced by a `destructure: true`
+    /// bind.
+    fn mark_destructured(&mut self, id: BindingId) {
+        if let Some(record) = self.record_mut(id) {
+            record.origin.destructured = true;
+            record.origin.component = true;
         }
     }
 
@@ -292,6 +360,14 @@ impl LinearScope {
         self.origin(name).is_some_and(|origin| origin.component)
     }
 
+    /// [`Self::is_component`] for an already-resolved generation.  The
+    /// permanent flag rides the record, so this answer is stable across
+    /// shadowing and region entry.
+    fn is_component_id(&self, id: BindingId) -> bool {
+        self.record(id)
+            .is_some_and(|record| record.origin.component)
+    }
+
     /// Drop the destructured-component marks on every currently-visible
     /// binding (Linearity-F2, chelis#1200 / reviewer ruling Q1).
     ///
@@ -311,10 +387,8 @@ impl LinearScope {
     /// `join_branch_states` are unaffected, and a destructure *inside* the
     /// branch marks its own components normally.
     fn clear_destructured_marks(&mut self) {
-        for stack in self.origins.values_mut() {
-            for origin in stack.iter_mut() {
-                origin.destructured = false;
-            }
+        for record in self.records.values_mut() {
+            record.origin.destructured = false;
         }
     }
 
@@ -931,7 +1005,7 @@ impl Checker {
                 } else {
                     self.check_expr(value, scope);
                 }
-                scope.declare(name, self.expr_type(value, scope).cloned());
+                let id = scope.declare(name, self.expr_type(value, scope).cloned());
                 if let Some(source) = alias_source {
                     scope.record_alias(name, &source);
                 }
@@ -941,15 +1015,15 @@ impl Checker {
                 // appearing in a destructure's RHS is never classified as a
                 // component.
                 if bind_introduces_destructure {
-                    scope.mark_destructured(name);
+                    scope.mark_destructured(id);
                 }
-                pushed.push(name.to_string());
+                pushed.push(id);
                 index += 2;
             }
         }
         self.check_expr(&kids[1], scope);
-        for name in pushed.into_iter().rev() {
-            self.pop_and_check(scope, &name, expr_scope_end(&kids[1]));
+        for id in pushed.into_iter().rev() {
+            self.pop_and_check(scope, id, expr_scope_end(&kids[1]));
         }
     }
 
@@ -1076,19 +1150,19 @@ impl Checker {
             }
         }
 
-        let mut pushed = Vec::new();
+        let mut pushed: Vec<(String, BindingId)> = Vec::new();
         if let Some(params) = tagged_children(&kids[0], DeepTag::Params) {
             for param in params {
                 if let Some((name, ty)) = param_name_and_type(param) {
-                    inner_scope.declare(name, ty.cloned());
-                    pushed.push(name.to_string());
+                    let id = inner_scope.declare(name, ty.cloned());
+                    pushed.push((name.to_string(), id));
                 }
             }
         }
         for param in params {
-            if !pushed.iter().any(|p| p == &param) {
-                inner_scope.declare(param.clone(), None);
-                pushed.push(param);
+            if !pushed.iter().any(|(name, _)| name == &param) {
+                let id = inner_scope.declare(param.clone(), None);
+                pushed.push((param, id));
             }
         }
         if matches!(get_tag_expr(&kids[1]), Some(DeepTag::Borrow)) {
@@ -1096,8 +1170,8 @@ impl Checker {
         } else {
             self.check_expr(&kids[1], &mut inner_scope);
         }
-        for name in pushed.into_iter().rev() {
-            self.pop_and_check_param(&mut inner_scope, &name, expr_scope_end(&kids[1]));
+        for (_, id) in pushed.into_iter().rev() {
+            self.pop_and_check_param(&mut inner_scope, id, expr_scope_end(&kids[1]));
         }
     }
 
@@ -1107,7 +1181,7 @@ impl Checker {
             return;
         }
         self.check_expr(&kids[0], scope);
-        let visible_names = scope.visible_names();
+        let visible_ids = scope.all_visible_ids();
         let mut then_scope = scope.clone();
         let mut else_scope = scope.clone();
         // chelis#1200 Q1: a branch body is a new declaration region, so
@@ -1117,7 +1191,7 @@ impl Checker {
         else_scope.clear_destructured_marks();
         self.check_expr(&kids[1], &mut then_scope);
         self.check_expr(&kids[2], &mut else_scope);
-        self.join_branch_states(scope, &visible_names, &[then_scope, else_scope]);
+        self.join_branch_states(scope, &visible_ids, &[then_scope, else_scope]);
     }
 
     fn check_match(&mut self, list: &List, scope: &mut LinearScope) {
@@ -1138,7 +1212,7 @@ impl Checker {
             self.check_expr(&kids[0], scope);
         }
 
-        let visible_names = scope.visible_names();
+        let visible_ids = scope.all_visible_ids();
         let mut arm_scopes = Vec::new();
         for arm in kids.iter().skip(1) {
             let Some(arm_kids) = tagged_children(arm, DeepTag::Arm) else {
@@ -1157,30 +1231,32 @@ impl Checker {
             // `LinearScope::clear_destructured_marks`.
             arm_scope.clear_destructured_marks();
             let pattern_bindings = pattern_named_types(&arm_kids[0]);
-            let pattern_names: Vec<String> = pattern_bindings
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect();
+            let mut pattern_ids = Vec::new();
             for (name, ty) in &pattern_bindings {
-                arm_scope.declare(name.clone(), ty.clone());
+                pattern_ids.push(arm_scope.declare(name.clone(), ty.clone()));
             }
             self.check_expr(&arm_kids[1], &mut arm_scope);
             self.check_expr(&arm_kids[2], &mut arm_scope);
-            for name in pattern_names.into_iter().rev() {
-                self.pop_and_check(&mut arm_scope, &name, expr_scope_end(&arm_kids[2]));
+            for id in pattern_ids.into_iter().rev() {
+                self.pop_and_check(&mut arm_scope, id, expr_scope_end(&arm_kids[2]));
             }
             arm_scopes.push(arm_scope);
         }
-        self.join_branch_states(scope, &visible_names, &arm_scopes);
+        self.join_branch_states(scope, &visible_ids, &arm_scopes);
     }
 
     fn join_branch_states(
         &mut self,
         scope: &mut LinearScope,
-        visible_names: &[String],
+        visible_ids: &[BindingId],
         branches: &[LinearScope],
     ) {
-        for name in visible_names {
+        // The snapshot carries every generation visible at branch entry,
+        // shadowed ones included: branch clones share those ids with the
+        // parent, so a branch-body consume that resolved through an alias
+        // chain to a shadowed generation still merges back onto the same
+        // record here (chelis#1209).
+        for id in visible_ids {
             // A branch's `Structural` consume is the one that destroys the
             // value, so it is the one that must survive the join. Prefer it
             // over an `Aliasing` record from another branch: an alias bind
@@ -1188,7 +1264,7 @@ impl Checker {
             // wrong site.
             let consumed_site = branches
                 .iter()
-                .find_map(|branch| match branch.top(name) {
+                .find_map(|branch| match branch.state(*id) {
                     Some(BindingState::Consumed(site))
                         if matches!(site.kind, ConsumeKind::Structural) =>
                     {
@@ -1197,7 +1273,7 @@ impl Checker {
                     _ => None,
                 })
                 .or_else(|| {
-                    branches.iter().find_map(|branch| match branch.top(name) {
+                    branches.iter().find_map(|branch| match branch.state(*id) {
                         Some(BindingState::Consumed(site)) => Some(site.clone()),
                         _ => None,
                     })
@@ -1240,17 +1316,17 @@ impl Checker {
             // aliases is exactly the class of ecosystem-breaking change
             // chelis#1200 exists to undo, so the upgrade asks for component
             // identity (permanent) rather than the region-relative F2 mark.
-            let replaces_outer = match scope.top(name) {
+            let replaces_outer = match scope.state(*id) {
                 Some(BindingState::Live { .. }) => true,
                 Some(BindingState::Consumed(outer)) => {
                     matches!(outer.kind, ConsumeKind::Aliasing)
                         && matches!(site.kind, ConsumeKind::Structural)
-                        && scope.is_component(name)
+                        && scope.is_component_id(*id)
                 }
                 None => false,
             };
             if replaces_outer {
-                scope.consume(name, site);
+                scope.consume_id(*id, site);
             }
         }
     }
@@ -1470,22 +1546,22 @@ impl Checker {
         ));
     }
 
-    fn pop_and_check(&mut self, scope: &mut LinearScope, name: &str, end_offset: usize) {
-        self.pop_and_check_inner(scope, name, end_offset, false);
+    fn pop_and_check(&mut self, scope: &mut LinearScope, id: BindingId, end_offset: usize) {
+        self.pop_and_check_inner(scope, id, end_offset, false);
     }
 
-    fn pop_and_check_param(&mut self, scope: &mut LinearScope, name: &str, end_offset: usize) {
-        self.pop_and_check_inner(scope, name, end_offset, true);
+    fn pop_and_check_param(&mut self, scope: &mut LinearScope, id: BindingId, end_offset: usize) {
+        self.pop_and_check_inner(scope, id, end_offset, true);
     }
 
     fn pop_and_check_inner(
         &mut self,
         scope: &mut LinearScope,
-        name: &str,
+        id: BindingId,
         end_offset: usize,
         allow_param_boundary_drop: bool,
     ) {
-        let Some((ty, state)) = scope.pop(name) else {
+        let Some((ty, state)) = scope.pop(id) else {
             return;
         };
         if !ty
