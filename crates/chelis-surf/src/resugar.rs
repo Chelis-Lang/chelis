@@ -3259,6 +3259,9 @@ fn resugar_operator_application(node: &NodeRef<'_>) -> Result<Option<Expr>, Resu
         "eq" => BinOp::Eq,
         "neq" => BinOp::Ne,
         "cmplt" => BinOp::Lt,
+        // `>` desugars to `gt` with authored operand order (chelis#1180);
+        // hand-written `cmplt(b, a)` keeps resugaring faithfully as `b < a`.
+        "gt" => BinOp::Gt,
         "lte" => BinOp::Le,
         "gte" => BinOp::Ge,
         "and" => BinOp::And,

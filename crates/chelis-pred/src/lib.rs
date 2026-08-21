@@ -99,9 +99,10 @@ pub const TRANSCENDENTAL_WHITELIST: &[&str] = &["sqrt", "exp", "log", "sin", "co
 const ARITH_OPS: &[&str] = &["add", "sub", "mul", "div", "neg"];
 
 /// Comparison operators admitted in the predicate grammar. Names are the
-/// desugared Deep operator symbols (`>`/`>=` desugar to `cmplt`/`gte`
-/// etc.). `eq`/`neq` are the `==`/`!=` forms.
-const COMPARISON_OPS: &[&str] = &["eq", "neq", "cmplt", "lte", "gte"];
+/// desugared Deep operator symbols (`<` desugars to `cmplt`, `>` to `gt`
+/// with authored operand order per chelis#1180, `<=`/`>=` to `lte`/`gte`).
+/// `eq`/`neq` are the `==`/`!=` forms.
+const COMPARISON_OPS: &[&str] = &["eq", "neq", "cmplt", "gt", "lte", "gte"];
 
 /// Boolean connectives admitted in the predicate grammar.
 const BOOL_OPS: &[&str] = &["and", "or", "not"];

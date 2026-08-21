@@ -396,7 +396,7 @@ fn is_constant_foldable(
 /// stable D-WF set and any drift is locked by the constant-folding tests.
 fn is_constant_grammar_op(op: &str) -> bool {
     const ARITH: &[&str] = &["add", "sub", "mul", "div", "neg"];
-    const COMPARISON: &[&str] = &["eq", "neq", "cmplt", "lte", "gte"];
+    const COMPARISON: &[&str] = &["eq", "neq", "cmplt", "gt", "lte", "gte"];
     const BOOL: &[&str] = &["and", "or", "not"];
     const INTRINSICS: &[&str] = &["abs", "min", "max", "sqrt", "exp", "log", "sin", "cos"];
     ARITH.contains(&op)

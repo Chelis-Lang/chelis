@@ -827,6 +827,12 @@ no longer reachable from any Tier2 op.
 | `gte(a, b)` | `neg(cmplt(a, b))` |
 | `lte(a, b)` | `neg(cmplt(b, a))` |
 
+These lowerings define result values over already-evaluated operands. They
+never reorder the evaluation of the operand expressions themselves:
+`gt(a, b)` evaluates `a` before `b` like every application
+(`spec/03-deep-syntax.md` §4.4), and only the value computation reads the
+operands in `cmplt(b, a)` order.
+
 Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b)`. `not(a)` on bools is `neg(a)` (assuming bools are 0/1).
 
 ### 3.3 Activation Functions

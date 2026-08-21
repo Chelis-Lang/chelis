@@ -570,6 +570,30 @@ All operators desugar to `(app {} (var {} op) ...)`. No infix operators in Deep.
 (app {} (var {} sub) (var {} a) (var {} b))
 ```
 
+### 4.4 Evaluation Order
+
+In `(app {} f a₁ ... aₙ)`, the argument expressions `a₁ ... aₙ` evaluate in
+written order, left to right, each to completion before the next begins, and
+all before the application itself. Observable effects occur in that order,
+and the first argument whose evaluation traps determines the trap the
+application raises; later arguments are not evaluated after a trap.
+
+This order is a semantic contract in every executable lane, not an
+implementation convenience. Value-level rewrites — a derived built-in's
+lowering to RISC primitives (`spec/05-risc-primitives.md` §3), constant
+folding, or backend scheduling of the already-evaluated dataflow — operate
+on argument *values* and never reorder or skip the evaluation of argument
+*expressions* whose effects or traps are observable. Surf operator
+expressions inherit this order through their desugaring, which preserves
+the authored operand order for every operator (`spec/02-surf-syntax.md`
+§2). Multi-value constructors follow the same written-order rule: tuple,
+list, record, and record-update children evaluate left to right (§6.2's
+`kv` ordering restates this for records).
+
+Within a single primitive, elementwise and reduction evaluation order is
+owned by `spec/04-type-system.md` [04-NUM-12] and [04-NUM-15]; this section
+orders the argument expressions that produce a primitive's operands.
+
 ---
 
 ## 5. Pipe Semantics
