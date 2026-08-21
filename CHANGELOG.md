@@ -67,36 +67,42 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **chelis#1128: a version bump no longer leaves the checkpoint
-  compile-fail fixture's `Cargo.lock` stale.** The fixture is its own
-  one-crate workspace depending on the real crates by path, so its
-  committed lock records them at `workspace.package.version`, and
-  `scripts/check_checkpoint_compile_fail.py` compiles it with
-  `cargo check --locked` — which refuses to update a stale lock and then
-  reports the fixture's *diagnostic* as missing. The failure therefore
-  reads as a compile-fail regression rather than as the unrelated
-  lockfile it is, and it fires under release pressure (hit cutting
-  0.18.2). `scripts/bump_compiler_pins.py` now re-resolves the lock with
-  `cargo update --workspace` after the version rewrite, which rewrites
-  only the local path-package versions and leaves every registry pin and
-  checksum alone. This is category 7 in that script's docstring,
+- **chelis#1128 / chelis#1234: a version bump no longer leaves the
+  compile-fail fixtures' `Cargo.lock` files stale.** Each out-of-workspace
+  compile-fail fixture is its own one-crate workspace depending on the
+  real crates by path, so its committed lock records them at
+  `workspace.package.version`, and each fixture's `gate.py` step compiles
+  it with `cargo check --locked` — which refuses to update a stale lock
+  and then reports the fixture's *diagnostics* as missing. The failure
+  therefore reads as a compile-fail regression rather than as the
+  unrelated lockfile it is, and it fires under release pressure (hit
+  cutting 0.18.2). `scripts/bump_compiler_pins.py` now re-resolves both
+  locks with `cargo update --workspace` after the version rewrite, which
+  rewrites only the local path-package versions and leaves every registry
+  pin and checksum alone. This is category 7 in that script's docstring,
   alongside the 0.9.0 embedded-bundle and 0.15.0 Hull-manifest failures
   the earlier categories record.
 
-  The sweep the issue asked for found one sibling with the identical
-  defect —
-  `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.lock`
-  — which, contrary to the issue's assumption, is also a `gate.py` stage
-  and so goes red on the next bump too. Per that issue's scope guard it
-  is reported, not fixed here, and split out as chelis#1234. The root
-  `Cargo.lock` is not affected: nothing runs `--locked` at the workspace
-  root, so it re-resolves on the next build.
+  Two fixtures are covered:
+  `crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/` (4 path
+  packages, chelis#1128) and
+  `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/` (16
+  path packages, chelis#1234). Contrary to chelis#1128's step-4
+  prediction, the sibling is not silent: its gate step is CI-owned, so a
+  stale lock turns CI red with a message naming six phantom diagnostic
+  regressions and nothing pointing at the lockfile. The root `Cargo.lock`
+  is not affected — nothing runs `--locked` at the workspace root, so it
+  re-resolves on the next build. Those three are the only committed
+  lockfiles in the repo.
 
   Acceptance oracle: `.venv/bin/python -m unittest
-  scripts.test_bump_compiler_pins`, whose new
-  `test_each_lock_records_the_live_workspace_version` is the standing
-  tripwire — it names the stale lock and the fix instead of a phantom
-  diagnostic regression.
+  scripts.test_bump_compiler_pins`, whose
+  `test_each_lock_pins_every_path_package_to_the_workspace_version` is the
+  standing tripwire — it names the stale packages and the fix instead of a
+  phantom diagnostic regression. It parses each lock and checks every path
+  package individually rather than asking whether the workspace version
+  appears anywhere in the file; the substring form passed a partially
+  stale lock as soon as any one package happened to be current.
 
 - **chelis#1200: a destructuring `let` no longer poisons the rest of its
   block.** The Linearity-F2 use-after-consume gate was scoped to the

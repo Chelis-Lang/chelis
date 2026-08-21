@@ -42,6 +42,37 @@ def _load_sibling(name: str):
     return mod
 
 
+def _lock_path_packages(lock_text: str) -> dict:
+    """Map `{name: version}` for every PATH package in a `Cargo.lock`.
+
+    Cargo records a registry package with a `source =` (and a checksum) and a
+    local path package without one, so the absence of that key is the
+    discriminator. Parsed rather than substring-matched: chelis#1233 review
+    (@jeffreyksmithjr) noted that asking whether the workspace version appears
+    ANYWHERE in the lock passes a partially stale file as soon as one package
+    happens to be current - and the pipeline-artifacts lock records sixteen
+    path packages, so "one of them is right" is very weak evidence.
+    """
+    packages = {}
+    for block in lock_text.split("[[package]]")[1:]:
+        block = block.split("\n[", 1)[0]
+        if re.search(r"^source = ", block, re.MULTILINE):
+            continue
+        name = re.search(r'^name = "([^"]+)"', block, re.MULTILINE)
+        version = re.search(r'^version = "([^"]+)"', block, re.MULTILINE)
+        if name and version:
+            packages[name.group(1)] = version.group(1)
+    return packages
+
+
+def _manifest_package_name(manifest: Path) -> str:
+    """`[package] name` of a fixture crate - the one path package in its own
+    lock that pins its own version rather than the workspace's."""
+    m = re.search(r'^name = "([^"]+)"', manifest.read_text(), re.MULTILINE)
+    assert m is not None, f"{manifest} has no [package] name"
+    return m.group(1)
+
+
 def _workspace_version() -> str:
     """Read `[workspace.package] version` out of the root Cargo.toml."""
     text = (bump_mod.REPO_ROOT / "Cargo.toml").read_text()
@@ -263,19 +294,25 @@ class CompileFailFixtureLockTests(unittest.TestCase):
     regression rather than a stale lock (chelis#1128, hit cutting 0.18.2).
     """
 
-    GATE_SCRIPTS = ("check_checkpoint_compile_fail",)
+    GATE_SCRIPTS = (
+        "check_checkpoint_compile_fail",
+        "check_pipeline_core_compile_fail",
+    )
 
-    def test_inventory_covers_the_gated_fixture(self):
+    def test_inventory_covers_both_gated_fixtures(self):
         relative = {
             path.relative_to(bump_mod.REPO_ROOT).as_posix()
             for path in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS
         }
         self.assertEqual(
             relative,
-            {"crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml"},
+            {
+                "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
+                "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
+            },
         )
 
-    def test_inventory_matches_the_gate_script_manifest_constant(self):
+    def test_inventory_matches_the_gate_scripts_manifest_constants(self):
         # The parity lock the "keep in sync" comment asks for: a fixture that
         # moves must move in both places, or the bump silently stops
         # regenerating the lock its gate step is about to reject.
@@ -288,22 +325,64 @@ class CompileFailFixtureLockTests(unittest.TestCase):
             self.assertTrue(manifest.is_file(), manifest)
             self.assertTrue(manifest.with_name("Cargo.lock").is_file(), manifest)
 
-    def test_each_lock_records_the_live_workspace_version(self):
+    def test_each_lock_pins_every_path_package_to_the_workspace_version(self):
         # The tripwire for the class itself: this is the assertion that goes
         # red when a bump lands without the regeneration step, and it names
         # the lock instead of a phantom diagnostic regression.
+        #
+        # EVERY path package is checked, not just whether the version occurs
+        # somewhere in the file (chelis#1233 review): a lock can be partially
+        # stale, and the substring form passed as soon as any one package was
+        # current.
         version = _workspace_version()
         for manifest in bump_mod.COMPILE_FAIL_FIXTURE_MANIFESTS:
             lock = manifest.with_name("Cargo.lock")
-            # `assertTrue`, not `assertIn`: the haystack is a whole lockfile,
-            # and dumping it would bury the one line that names the fix.
+            fixture_crate = _manifest_package_name(manifest)
+            pinned = {
+                name: found
+                for name, found in _lock_path_packages(lock.read_text()).items()
+                # The fixture crate itself carries its own version (0.0.0), not
+                # the workspace's; every other path package is a real crate.
+                if name != fixture_crate
+            }
+            rel = lock.relative_to(bump_mod.REPO_ROOT)
             self.assertTrue(
-                f'version = "{version}"' in lock.read_text(),
-                f"{lock.relative_to(bump_mod.REPO_ROOT)} does not pin the "
-                f"workspace version {version}. Re-run "
+                pinned, f"{rel} records no workspace path packages to check"
+            )
+            stale = sorted(
+                f"{name} @ {found}" for name, found in pinned.items() if found != version
+            )
+            # `assertEqual` on the stale list, not `assertIn` on the file: the
+            # haystack is a whole lockfile and dumping it buries the fix.
+            self.assertEqual(
+                stale,
+                [],
+                f"{rel} has path packages behind the workspace version "
+                f"{version}: {stale}. Re-run "
                 "`scripts/bump_compiler_pins.py <version>` so its gate step's "
                 "`cargo check --locked` accepts the lock.",
             )
+
+    def test_tripwire_rejects_a_partially_stale_lock(self):
+        # The exact hole chelis#1233 review named: one current package used to
+        # carry the whole file. Synthetic lock, so it holds regardless of what
+        # the real fixtures happen to contain.
+        version = _workspace_version()
+        lock = (
+            "version = 4\n\n"
+            '[[package]]\nname = "chelis-current"\nversion = "' + version + '"\n\n'
+            '[[package]]\nname = "chelis-stale"\nversion = "0.0.1-old"\n\n'
+            '[[package]]\nname = "serde"\nversion = "1.0.229"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+            'checksum = "deadbeef"\n'
+        )
+        found = _lock_path_packages(lock)
+        # The registry package is excluded by its `source` key; both path
+        # packages are seen, and exactly one of them is stale.
+        self.assertEqual(
+            found, {"chelis-current": version, "chelis-stale": "0.0.1-old"}
+        )
+        self.assertIn(f'version = "{version}"', lock, "the old substring form passed")
 
     def test_regeneration_runs_cargo_update_once_per_manifest(self):
         with mock.patch.object(

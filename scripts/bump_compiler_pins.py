@@ -46,25 +46,23 @@ changes, seven categories of files must change with it:
    against the new binary — a real behavior change in the compiler
    still fails that PR loudly.
 
-7. The committed `Cargo.lock` beside the checkpoint compile-fail fixture
-   (`crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/`). The
-   fixture is its own one-crate workspace that depends on the real crates
-   by path, so its lock records them at the workspace version.
-   `scripts/check_checkpoint_compile_fail.py` compiles it with
-   `cargo check --locked`, which refuses to update a stale lock:
+7. The committed `Cargo.lock` beside each out-of-workspace compile-fail
+   fixture (`crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/`
+   and `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/`).
+   Each fixture is its own one-crate workspace that depends on the real
+   crates by path, so its lock records them at the workspace version. Both
+   are compiled by a `gate.py` step with `cargo check --locked`, which
+   refuses to update a stale lock:
 
        error: cannot update the lock file ... because --locked was passed
 
-   The gate step then reports the fixture's *diagnostic* as missing, which
+   The gate step then reports the fixture's *diagnostics* as missing, which
    reads as a compile-fail regression rather than a stale lock — a slow
    thing to diagnose under release pressure, which is exactly when it fires
-   (the 0.18.2 failure, chelis#1128). The lock is NOT auto-synced: cargo
-   writes it, but only when something re-resolves the fixture.
-
-   Not covered here: `crates/chelis-compiler-api/tests/compile_fail/
-   pipeline_artifacts/Cargo.lock` is the same shape, with the same
-   `--locked` gate step. It is tracked as chelis#1234, split out of
-   chelis#1128 by that issue's scope guard.
+   (the 0.18.2 failure, chelis#1128; the pipeline-artifacts sibling is
+   chelis#1234, and its message names six phantom regressions at once). The
+   locks are NOT auto-synced: cargo writes them, but only when something
+   re-resolves the fixture.
 
 This script is the single, scriptable entry point for the release bump.
 These tripwires fail loudly when the categories drift, pointing future
@@ -75,10 +73,11 @@ operators at this script:
     (category 5)
   - `chelis-std-bundle::extract_yields_reef_package_layout` asserts the
     embedded bundle pin (category 4).
-  - `scripts/check_checkpoint_compile_fail.py`, a `gate.py` stage, fails
-    on a stale fixture lock (category 7) — but blames the fixture's
-    diagnostic, not the lock, which is why
-    `test_bump_compiler_pins.py::test_each_lock_records_the_live_workspace_version`
+  - `scripts/check_checkpoint_compile_fail.py` and
+    `scripts/check_pipeline_core_compile_fail.py`, both `gate.py` stages,
+    fail on a stale fixture lock (category 7) — but blame the fixture's
+    diagnostics, not the lock, which is why
+    `test_bump_compiler_pins.py::test_each_lock_pins_every_path_package_to_the_workspace_version`
     exists to name the real cause first.
 
 Usage:
@@ -146,13 +145,9 @@ PINNED_REAL_LOCK_DIRS: list[Path] = [
 # version. Their gate steps compile them with `cargo check --locked`, which
 # refuses to update a stale lock. Keep in sync with the `MANIFEST` constant
 # in the matching `scripts/check_*_compile_fail.py`.
-#
-# The pipeline-artifacts fixture belongs in this list on the same grounds
-# and is deliberately absent: chelis#1128 scoped its own PR to the
-# checkpoint fixture and asked for siblings to be reported, not fixed.
-# Adding it is chelis#1234.
 COMPILE_FAIL_FIXTURE_MANIFESTS: list[Path] = [
     REPO_ROOT / "crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/Cargo.toml",
+    REPO_ROOT / "crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/Cargo.toml",
 ]
 
 
