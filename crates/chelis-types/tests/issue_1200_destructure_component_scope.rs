@@ -29,11 +29,16 @@
 //! F2 protects — reuse of a destructured component without `copy()` —
 //! must keep failing.
 //!
-//! The Pass A section at the bottom covers the review pass on that fix:
-//! the rule is per BINDING and the checker resolves bindings through
-//! names, so each case there is a place where that resolution reached the
-//! wrong binding. The normative rule is `spec/04-type-system.md` §8.3;
-//! the mechanism is `spec/design/implicit_linearity.md` §"Destructured
+//! The Pass A section further down covers the review pass on that fix:
+//! the rule is per BINDING, and while the checker still resolved
+//! bindings through names, each case there was a place where that
+//! resolution reached the wrong binding. The Pass B section at the
+//! bottom pins the generation-crossing identity fix (chelis#1209) that
+//! removed name resolution from checker state entirely: every binding
+//! event has a unique generation id and all alias links, consumption
+//! marks, and component marks attach to ids. The normative rule is
+//! `spec/04-type-system.md` §8.3 ([04-LIN-1], [04-LIN-2]); the
+//! mechanism is `spec/design/implicit_linearity.md` §"Destructured
 //! components".
 
 use chelis_surf::desugar::desugar_program;
@@ -536,9 +541,10 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 ///
 /// The carrier name is *synthesized*, not unforgeable: authored source can
 /// spell `__chelis_tmp0`, and `fresh_destructure_temp` only screens the
-/// block it is desugaring, so an authored name in an ENCLOSING block still
-/// collides. That is chelis#1212 — pre-existing, pinned `#[ignore]`d at the
-/// bottom of this file. Do not read this test as proving whole-context
+/// block it is desugaring, so an authored name in an ENCLOSING block can
+/// still produce the same spelling. That was chelis#1212; with id-keyed
+/// checker state the collision is ordinary shadowing (see the cell at the
+/// bottom of this file). Do not read this test as proving whole-context
 /// uniqueness of carrier names; it proves carrier *forwarding*.
 #[test]
 fn component_captured_then_reused_outside_the_closure_errors() {
@@ -642,28 +648,30 @@ def f(p: (tensor[4, f32], tensor[4, f32])) -> tensor[4, f32] = {
 }
 
 // ------------------------------------------------------------
-// Pass B — generation-crossing identity (DEFERRED)
+// Pass B — generation-crossing identity (chelis#1209, delivered)
 //
-// An alias resolves by NAME, so it follows the name to whatever binding
-// is on top of the stack today rather than to the generation it was taken
-// against. Both directions misroute. Closing this needs binding-generation
-// identity (unique binding ids) per the reviewer's Q3 ruling: "You need
-// the proposed move to binding generation identity. Possibly as a
-// follow-up implementation." That is Pass B, its own change set on its own
-// branch; these stay `#[ignore]`d rather than deleted so the gap is
-// visible.
+// An alias used to resolve by NAME, following the name to whatever
+// binding was on top of the stack at consume time rather than to the
+// generation it was taken against, and both directions misrouted. The
+// checker now keys all state on per-binding generation ids
+// (spec/04-type-system.md [04-LIN-1]): `BindingOrigin.alias` stores the
+// `BindingId` resolved when the alias bind was recorded, so a later
+// re-binding of the source's name neither re-points the chain nor lets
+// a later destructure of that name capture the alias. These two cells
+// are the acceptance oracle for that identity rule, one per misroute
+// direction.
 // ------------------------------------------------------------
 
-/// Pass B, direction 1: alias taken, then its SOURCE shadowed.
+/// Direction 1: alias taken, then its SOURCE shadowed.
 ///
 /// `y` aliases the component `a`; an ordinary `let` then re-binds `a`.
-/// `resolve_alias_chain("y")` walks to the NAME `a` and lands on the new,
-/// unrelated binding, so two things go wrong at once: `y`'s double consume
-/// is not reported (the component's carrier is never reached), and the
-/// fresh `a` is marked consumed, making the legal read of `a` in the
-/// result an error against the wrong binding.
+/// The chain must keep pointing at the generation `y` was taken
+/// against, so `y`'s double consume lands on the component's carrier
+/// (reported against `y`) and the fresh, unrelated `a` stays live for
+/// the legal read in the result. Under name-keyed resolution both went
+/// wrong at once: the double consume escaped and the fresh `a` was
+/// blamed.
 #[test]
-#[ignore = "Pass B (chelis#1200 follow-up): needs binding-generation identity; an alias resolves by name, not by the generation it was taken against"]
 fn pass_b_alias_survives_shadowing_of_its_source() {
     let errors = linearity_errors(
         r#"
@@ -686,16 +694,17 @@ def f(p: (tensor[4, f32], tensor[4, f32]), w: tensor[4, f32]) -> tensor[4, f32] 
     );
 }
 
-/// Pass B, direction 2: source aliased, then its NAME re-bound as a
+/// Direction 2: source aliased, then its NAME re-bound as a
 /// destructured component.
 ///
 /// `y` aliases an ordinary `x`, so double-consuming `y` is implicit-Copy
-/// fan-out and must compile — the control without the re-bind does. But
-/// the chain walks to the NAME `x`, which now denotes a marked component,
-/// so F2 fires: a false positive that exists only because the alias
-/// crossed a generation.
+/// fan-out and must compile — the control without the re-bind does. The
+/// chain terminates at the ordinary generation `y` was taken against;
+/// the later destructure's component mark lives on a new generation the
+/// chain never reaches. Under name-keyed resolution the walk landed on
+/// the marked component and F2 fired: a false positive that existed
+/// only because the alias crossed a generation.
 #[test]
-#[ignore = "Pass B (chelis#1200 follow-up): needs binding-generation identity; an alias resolves by name, not by the generation it was taken against"]
 fn pass_b_alias_is_not_captured_by_a_later_destructure_of_its_source_name() {
     assert_linearity_clean(
         r#"
@@ -712,27 +721,26 @@ def f(t: (tensor[4, f32], tensor[4, f32]), s: tensor[4, f32]) -> tensor[4, f32] 
 }
 
 // ------------------------------------------------------------
-// chelis#1212 — authored/synthesized carrier-name collision
+// chelis#1212 — authored/synthesized carrier-name collision (closed by
+// generation identity, chelis#1209)
 //
 // `fresh_destructure_temp` screens a candidate against the block it is
-// desugaring only, so an authored `__chelis_tmpN` in an ENCLOSING block is
-// invisible and the mint collides with it. The authored binding and the
-// synthesized carrier then share a name and a genuine use-after-consume on
-// the authored name is silently accepted.
-//
-// Pre-existing (the chelis#1200 counter fix closes synthesized-vs-
-// synthesized collisions, not synthesized-vs-authored). Closing it needs
-// either a context-wide authored-name reservation built from a single
-// linear name-visitor pass, or a carrier spelling `is_ident_continue`
-// cannot produce. `#[ignore]`d rather than deleted so the gap stays
-// visible in the suite.
+// desugaring only, so an authored `__chelis_tmpN` in an ENCLOSING block
+// is invisible and the mint still produces the same SPELLING. That
+// collision used to hide a genuine use-after-consume, because the
+// name-keyed checker resolved the alias through whichever binding
+// currently owned the name. With id-keyed state the authored binding
+// and the synthesized carrier are distinct generations that merely
+// share a spelling — ordinary shadowing — so the alias keeps pointing
+// at the authored generation and the violation is reported. No desugar
+// change was needed; the residual textual collision is cosmetic.
 // ------------------------------------------------------------
 
-/// The authored name is the ONLY difference from a program that correctly
-/// errors: renaming `__chelis_tmp0` to `user_temp` reports `y`'s
-/// use-after-consume. With the colliding spelling the error disappears.
+/// The authored name used to be the ONLY difference from a program that
+/// correctly errors: renaming `__chelis_tmp0` to `user_temp` reported
+/// `y`'s use-after-consume while the colliding spelling made the error
+/// disappear. Both spellings must now report it.
 #[test]
-#[ignore = "chelis#1212: authored __chelis_tmpN collides with a synthesized carrier"]
 fn authored_destructure_temp_name_does_not_hide_an_outer_double_consume() {
     let errors = linearity_errors(
         r#"
