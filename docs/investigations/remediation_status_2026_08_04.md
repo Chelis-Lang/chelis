@@ -52,15 +52,16 @@ Phase 3 has its gates but not its contract and Phase 4 is unbuilt, and #733
 has nothing.
 
 The class trackers carry **38 open children** between them, down from 40, and
-the route it took is worth more than the endpoint: 40 -> 41 -> 38 in two days.
-Up, because the linearity residue (#1209, #1211, #1212) had sat classless for a
-month and became children of #731 on 2026-08-21 - the arithmetic moving the
-wrong way because the assignment moved the right way. Then down by three,
-because their new parent made the class change obvious to write, and PR #1254
-landed #731's PP3 on 2026-08-22 and closed all three. Down by two more from
-#997 closing and #1059 leaving #732 for the #1170 hub. A month parentless,
-then claimed and delivered inside twenty-four hours: that is the argument for
-pending decision 3, not an anecdote beside it. Everything still open falls into
+the route it took is worth more than the endpoint: 40 -> 41 -> 38 across two
+days. It ended 2026-08-21 at **41**: three on, as the linearity residue
+(#1209, #1211, #1212) finished a month classless and became children of #731;
+two off, as #997 closed and #1059 left #732 for the #1170 hub. The arithmetic
+moved the wrong way because the assignment moved the right way. Then on
+2026-08-22 it fell to **38**, because the new parent made the class change
+obvious to write and PR #1254 landed #731's PP3 and closed all three. A month
+parentless, then claimed and delivered inside twenty-four hours: that is the
+argument for pending decision 3, not an anecdote beside it. Everything still
+open falls into
 four groups: a defect inventory concentrated in #730's support cells and
 #729's GPU lanes, two engineering campaigns (the capability table and the #912
 root-boundary chain), one unowned keystone (#1088), and an institutional
@@ -119,9 +120,10 @@ decision 9.
   manifest walkers are `Expr::Node`-blind (#1082), and anonymous tuple/ADT
   roots still drop from the manifest: the dotted-root expansion is a live
   `TODO` at `chelis-effects/src/realizability.rs:506`. #1083 owns that half;
-  it was briefly closed on 2026-08-21, two minutes after PR #1231 merged and
-  against that PR's own "this does not close #1083" record, and reopened the
-  same day with the conflict recorded on the thread. The manifest is non-empty today only because of the
+  it was briefly closed on 2026-08-21, two seconds after PR #1231 merged and
+  against that PR's own "this does not close #1083" record, and reopened an
+  hour later with the conflict recorded on the thread. The manifest is
+  non-empty today only because of the
   transitional `normalize_nodes_to_lists` bridge, so **#1029's carrier
   deletion silently empties manifests unless #1082 lands first** - the two
   sibling classes are coupled in that order. Face 4 (artifact) is open, and
@@ -438,14 +440,17 @@ wrongly if you take the prose in either document as the authority:
 - **#887** is a child of **#874**, which is itself a child of #731 - so it
   sits in the #731 subtree, matching "Tier 1 stays with #731". The roadmap's
   sibling table lists it under #908; that is the Tier 2 claim, not the link.
-- The five class **METAs** (#727 with its #695, #703, #709, #728, #694) are
-  deliberately outside the sub-issue graph. Per `AGENTS.md` the META/tracker
-  pairing is historical and not the pattern for a new class, so they are not
-  filed as children of their own trackers. #728 is the first to close, and it
-  closed *with* its tracker rather than separately, which is the disposal
-  route the rest should take: its closing comment names the class, points at
-  #732's document audit for the evidence, and records that the recurrence
-  guards outlive both issues.
+- The five class **METAs** (#727, #703, #709, #728, #694, with #695 under
+  #727) are *in* the sub-issue graph, and on the side a reader is likely to
+  guess wrong. Each META is the **parent** of its tracker - #729's parent is
+  #727, #730's is #703, #731's is #709, #732's is #728, #733's is #694 - so
+  the narrow true claim is the converse of the obvious one: a META is not
+  filed as a *child* of its own tracker. Per `AGENTS.md` that pairing is
+  historical and not the pattern for a new class. #728 is the first to close,
+  and it closed *with* its tracker rather than separately, which is the
+  disposal route the rest should take: its closing comment names the class,
+  points at #732's document audit for the evidence, and records that the
+  recurrence guards outlive both issues.
 
 Every parent question the plan docs leave open has an answer on the graph:
 **#916** sits at #883, **#1148** at #912, **#1157** and **#1137** at #730,
@@ -654,10 +659,10 @@ fixes nothing.
 | A breaking release reaching shells before anyone runs their suites | the ecosystem-drift canary (auto-files per shell) + `conform bump-check` | neither detects nor gates this. The canary checks each shell out at `main` and never runs `chelis migrate surf`, so it only ever exercises pre-migration source - and #1200 appears only after migration rewrites record patterns to the mandatory v0.19 pun, which makes the existing leg structurally incapable of seeing it. The canary has also been red continuously since 2026-08-02 - its last success is the 2026-08-01 run, and all twenty-four runs since, through 2026-08-21, have failed - so it gates nothing in practice either. The missing leg applies a release candidate's own named migration to each shell tree and then runs that shell's suite |
 | Unhandleable AST states reappearing | #731/#908: stamped-only ingress (#1088), then carrier deletion (#1029) | **nothing in flight** - PR #1036 closed unmerged, #1088 is unowned, and #1129 holds the landing inventory |
 | Spec silence and stale claims | #733 end-to-end | nothing active - the weakest link, with the #891/#904 twenty-builtins-no-spec instance as its measured cost |
-| Guards existing but not running | #1089's inventory of oracles outside continuous jobs; #990's scheduled/change-gated package | partial: #732's Phase 2 oracle has a dedicated blocking job and Phase 3 runs nested continuously, and #729's Phase 1/2 oracles run nested inside Phase 3. Still unwired: `unrepresentable_domain_oracle.py` (#908), `loud_unsupported_phase2_oracle.py` (#730), `compiler_pipeline_oracle.py` (its three controls run in the gate's `lint-and-unit` stage, but the oracle itself is invoked nowhere - `grep -n compiler_pipeline_oracle scripts/gate.py` returns one comment line and no call - which is not what #1089 asks for), and the new `loud_unsupported_phase3_oracle.py`, which is red on its #912 leg by design. #1090 closed as refuted - the canary already auto-files into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64). **A fresh instance of this exact mode landed on 2026-08-21 outside the oracle inventory**: `nix-packages.yml` does not run on pull requests, so the Nix and devenv lanes had been resolving a different rustc than CI for 18 days before #1236's toolchain pin turned that silent disagreement into a loud failure (#1237). PR #1238 restored green; the trigger gap is that issue's surviving ask |
+| Guards existing but not running | #1089's inventory of oracles outside continuous jobs; #990's scheduled/change-gated package | partial: #732's Phase 2 oracle has a dedicated blocking job and Phase 3 runs nested continuously, and #729's Phase 1/2 oracles run nested inside Phase 3. Still unwired: `unrepresentable_domain_oracle.py` (#908), `loud_unsupported_phase2_oracle.py` (#730), `compiler_pipeline_oracle.py` (its three controls run in the gate's `lint-and-unit` stage, but the oracle itself is invoked nowhere - `grep -n compiler_pipeline_oracle scripts/gate.py` returns one comment line and no call - which is not what #1089 asks for), and the new `loud_unsupported_phase3_oracle.py`, which is red on its #912 leg by design. #1090 closed as refuted - the canary already auto-files into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64). **A fresh instance of this exact mode landed on 2026-08-21 outside the oracle inventory**, and its two intervals are worth keeping apart. The guard's dormancy is the long one: `nix-packages.yml` declares an unconditional `pull_request` trigger and has not executed since 2026-08-03, eighteen days, for a reason nobody has diagnosed - #1237's body deliberately leaves trigger bug, disabled workflow, and runner availability all open. The divergence it would have caught is the short one: the Nix and devenv lanes resolved a different rustc than CI only once stable moved to 1.98.0 after 2026-08-20, about a day before #1236's toolchain pin turned that silent disagreement into a loud failure. A guard that has been dark for eighteen days is not measured by the defect that happened to arrive on day eighteen |
 | Silent lane divergence | #754/#763 cross-lane gate; #738 shell compiled lanes | unblocked by #732 P2, undelivered |
 | Agent-driven recurrence | #740's enforcement-ladder backlog; #895 executable plan inventories | entirely unchecked, dormant |
-| Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159), and 22 more class closures on 2026-08-05 through the same unguarded path. The 2026-08-17/21 audit-and-pin wave (evidence-comment closures for #916/#646/#986; pinned-test PRs #1230-#1232 for #862/#1084/#683) is the closure discipline done right by hand - and the same wave produced the #1083 conflict (closed against PR #1231's own record, reopened the same day), which argues for the guard, not against the wave. **#732's own closure is the strongest hand-done instance yet** and is worth copying: a stated closing condition met by a named PR, both owning documents audited by full read, every live thread assigned elsewhere by name, the last open child re-homed rather than swept, and the whole record posted on the thread before the close - the shape an automated guard would have to reproduce, not replace |
+| Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159), and 22 more class closures on 2026-08-05 through the same unguarded path. The 2026-08-17/21 audit-and-pin wave (evidence-comment closures for #916/#646/#986; pinned-test PRs #1230-#1232 for #862/#1084/#683) is the closure discipline done right by hand - and the same wave produced the #1083 conflict (closed against PR #1231's own record, reopened the same day), which argues for the guard, not against the wave. **#732's own closure is the sharpest illustration of why the guard is owed**, because the substance was right and the mechanism was still an accident. Right: #1059 was re-homed and the tracker stood at zero open children *before* PR #1250 merged, both owning documents were audited by full read, and every live thread had a named home elsewhere. Accidental: the close itself was a keyword auto-close at 23:31:48Z, two seconds after the merge, fired by narrative prose in PR #1250's body (`... then close #732`) rather than by any deliberate directive - the squash message carries no closing keyword at all. The full evidence record landed two minutes later, at 23:33:00Z, and its own first line says so. A guard would not have blocked this close; it would have made it deliberate |
 
 ## The six biggest remaining gaps, elaborated
 
@@ -866,12 +871,14 @@ each retires when it lands:
 | #838 | Conform central workflow wrappers (#788 family, Chelis-Lang/ci#5 prereq) | draft |
 
 None touches the plan set: they are tooling, docs, Nix, and conformance work.
-Three PRs left this table by merging since the last revision - #1235, #1161
+Two PRs left this table by merging since the last revision - #1235 and #1161
 (closing #1156, the one parentless issue the graph audit had found, and filing
-#1249 and #1252 behind it), and **#1254**, which was open for seven hours. It
-is the first plan-set PR this table has carried since #1036 (#731's ingress
-hardening) appeared on the 2026-08-04 revision, and unlike #1036 - which
-closed unmerged and whose landing inventory is still #1129 - it landed.
+#1249 and #1252 behind it). A third, **#1254**, opened and merged inside the
+gap between revisions and so never appeared on a published table: seven hours
+from open to merge. It is the first plan-set work to reach this section since
+#1036 (#731's ingress hardening) sat here on the 2026-08-04 revision, and
+unlike #1036 - which closed unmerged, its landing inventory still #1129 - it
+landed.
 
 **Nothing in flight addresses #1088**, and both remaining campaigns - the
 capability table and the #912 chain - are still unstaffed. #1197 leaves that
@@ -978,9 +985,25 @@ that measures it.
    (#1179, #1180, #1197, #997, #1156) and all three of PR #1254's (#1209,
    #1211, #1212), each closing within two seconds of its PR's merge, all backed
    by a green oracle, which is the luck the guard would replace with a check.
-   The contrast landed the same evening: #732 and #728 were closed by hand,
-   with a condition, a document audit, and a posted evidence record - a shape
-   no keyword can produce.
+
+   **#732 is the sixth of that evening, and it exposes a sub-mode the
+   condition had not named: a PR body's narrative prose is directive
+   surface.** Its `ClosedEvent` closer is PR #1250, at 23:31:48Z, two seconds
+   after the merge - but #1250's squash message carries no closing keyword at
+   all. What fired was a sentence of ordinary explanation in the PR *body*,
+   reading `... then close #732` while arguing about where #1059 should be
+   parented. Nobody wrote a directive; one got parsed. Only #728 was closed by
+   hand that evening (its `ClosedEvent` has no closer at all, at 23:33:02Z).
+
+   This exact pair has been through it before, which is the part that should
+   settle the argument. On 2026-07-17 PR #742's squash body closed both: #728
+   by an ordinary directive (`Fixes #728`) and **#732 by the same prose
+   accident**, a line reading `Fixes #732 P1's format_element placement as ...`
+   that GitHub read as `Fixes #732`. Both were reopened the next morning. So
+   the tracker that the plan set just finished has been wrongly auto-closed
+   twice, thirty-five days apart, by two different PRs, neither of which
+   intended it - and on the second occasion the close happened to be correct,
+   which is exactly the coincidence a guard exists to stop relying on.
 2. **Merge governance holds; the verification habit is what backs it.** The
    #1096 rollout (no-bypass, squash-only, green up-to-date checks) governs
    every merge, which is why the 8/1-8/2 pattern the sprint audit counted - 22
@@ -1006,9 +1029,12 @@ that measures it.
    #1084 via #1231, #683 via #1232), and it continued on 2026-08-21 with the
    #732/#728 class closure, whose evidence comment names the closing condition,
    the PR that met it, the two documents audited, and where each surviving
-   thread went. Still a convention rather than a gate - and the same wave shows
-   the cost in the other direction: #1083, closed against PR #1231's own record
-   and reopened the same day. **#1237 is the current live instance of the
+   thread went. Read that alongside condition 1: the *evidence* was authored
+   deliberately and the *close* fired by accident two minutes earlier, which
+   is a fair summary of where this repo's closure discipline currently sits.
+   Still a convention rather than a gate - and the same wave shows the cost in
+   the other direction: #1083, closed against PR #1231's own record and
+   reopened an hour later. **#1237 is the current live instance of the
    opposite failure**, and a benign one: PR #1238 repaired the breakage and
    deliberately said "Part of #1237" rather than "Closes", because the issue's
    third acceptance criterion (that `nix-packages.yml` run on pull requests at
@@ -1094,8 +1120,10 @@ that measures it.
    executed zero steps, with the whole story in an annotation rather than a
    log - *"The job was not started because an Actions budget is preventing
    further use."* Two runs are the record: the post-merge run on `main` at
-   20:44:57Z (all 15 jobs, 1-3s each, zero steps) and the #1250 branch's run at
-   20:57:55Z; by 21:00Z the budget was raised and the next run passed normally.
+   20:44:57Z, where 13 of 15 jobs failed in 2-3 seconds and the 2 dependent
+   jobs were skipped outright, every one of them having executed zero steps;
+   and the #1250 branch's run at 20:57:55Z. By 21:00Z the budget was raised and
+   the next run passed normally.
    Nothing in the repo detects or reports this state, and a red required check
    is indistinguishable at a glance from a real regression, which is the part
    worth fixing - the budget itself is an ops decision, but "CI is red for a
