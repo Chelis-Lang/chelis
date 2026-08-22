@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.5] — 2026-08-22
+
+Three breaking entries, all in the front end: the checker rejects
+polymorphic recursion, the parser rejects an integer literal in a bare
+type position, and `>` evaluates its operands in the order they were
+written. Each one either rejects a program that used to be accepted or
+runs an accepted program differently; each entry names what to change.
+
+**Every on-disk compiler cache is invalidated, twice over.** The
+compiled-context, stdlib, and library cache formats advance (8 → 9,
+4 → 5, 1 → 2), and cache keys now carry a build fingerprint rather than
+the release version. Both are automatic: the first build after
+upgrading is cold, and nothing needs to be deleted by hand.
+
 ### Added
 
 - **Recursive generic host calls compile via bounded memoized
@@ -24,22 +38,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   --no-fail-fast`.
 
 ### Changed
-
-- **Monomorphized specializations are compiler-internal symbols
-  (chelis#1158 hardening; findings credited to the PR #1202 adversarial
-  review).** Each host function now carries explicit authored or
-  monomorphized provenance through C-ABI projection. The published `.h` and
-  tensor-entry selection use that provenance, so a valid authored name that
-  matches `<def>__mono_<hash>` remains public. Specializations stay out of the
-  header and use translation-unit-local C linkage in binary and object mode.
-  Thus, two generated objects with one specialization name link without a
-  duplicate symbol. Speculative summary probes are state-isolated and use a
-  sorted order. Repeated builds emit byte-identical C, probe-only definitions
-  do not escape, and a failed probe does not fail the build. Specializations
-  intern by exact package definition identity under a canonical signature key.
-  Exact identity lookup precedes unique terminal-name fallback, so separate
-  package definitions named `depth` remain separate. A hash collision between
-  two canonical signatures fails loudly.
 
 - **BREAKING (checker): polymorphic recursion is now a check-time type
   error ([04-INF-2]/[04-INF-3], spec/04-type-system.md §3.1.1).** Every
@@ -86,6 +84,7 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   argument's kind or extent (`Option[732]` still checks, and a
   `Column[3]` return holding a 2-element column still scores 1.0);
   chelis#1247 tracks that surviving mechanism.
+
 - **BREAKING (eval/build): `>` evaluates its operands in authored order
   (chelis#1180).** Surf desugared `a > b` as the operand-swapped
   `cmplt(b, a)`, and Deep application evaluates its arguments left to
@@ -116,7 +115,131 @@ this project adheres to [Semantic Versioning](https://semver.org/).
   lowerings) admit the `gt` spelling, so `@invariant(p) p.value > 0.0`
   keeps working end to end.
 
+- **Compiled-context caches are keyed on the build, not the release
+  string (chelis#1156).** `CacheIdentity` and `stdlib_cache_key` folded in
+  `COMPILER_VERSION`, which names a *release*: every binary built from any
+  commit carrying the same `workspace.package.version` reports it, so two
+  binaries that disagree about type semantics shared cache entries and
+  checked programs under each other's rules. Measured on a released
+  `v0.18.2` binary and a post-chelis#1130 `main` binary — both reporting
+  `0.18.2` — sharing one cache dir: the release binary accepted and
+  evaluated a program it correctly rejects cold, and the `main` binary
+  raised a spurious `precision mismatch: expected int32, got int64` on a
+  program it correctly accepts cold. Both keys now extend the release
+  string with a build fingerprint taken from the running object image
+  (Mach-O `LC_UUID` / ELF `NT_GNU_BUILD_ID`, or a whole-image SHA-256 when
+  the image carries neither), derived by the new leaf crate
+  `chelis-image-id`. A same-content copy at a different path still shares
+  the cache; a different build takes a clean miss rather than a stale hit;
+  a version bump alone still flips the key. If the running image cannot be
+  identified at all, the fingerprint falls back to a per-process
+  discriminator and warns once, so a degraded process shares with nothing.
+  This mostly bites people who build from source — worktree binaries, CI
+  matrices, and images that vendor a pinned commit and label it with the
+  workspace version.
+
+- **Runtime diagnostics name a value by its dtype and canonical digits
+  (chelis#997).** The JSON, CSV, and eval runtime diagnostics rendered
+  numeric payloads through derived `Debug`, which `spec/05-risc-primitives.md`
+  [05-OBS-1] already forbids: a diagnostic is one of the exits that must
+  "emit text that parses back to exactly the stored bits at the value's own
+  dtype width". Reported text changes shape — `got f32 0.1` and
+  `got int64 9007199254740993` in place of the Rust representation, a
+  malformed ADT field list as `malformed JNum fields [int32 5]`, an absent
+  argument as `got nothing` — and below the top-level dtype tag the
+  diagnostic channel now agrees byte for byte with the exit channel. **The
+  half widths were misreported outright before this:** `half::f16`'s `Debug`
+  forwards to `to_f32()`, so a stored f16 that every exit renders as `0.1`
+  appeared in a diagnostic as `0.099975586`. Anything that scrapes runtime
+  diagnostic text needs updating; nothing about the values themselves
+  changed.
+
+- **Compiled-lane CSV ingestion is linear (part of chelis#943).** Reading a
+  9588-row by 8-column, 420 KB CSV in the compiled lane allocated 3055.6 MB
+  and held 2189.9 MB live; it now allocates 121.0 MB and holds 91.4 MB, a
+  25x reduction in allocated bytes. `Std.Io.Csv.parse_rows` moves off
+  recursion onto `map`/`fold` (one line carried two independent O(n²) costs:
+  `append` deep-cloned the accumulated rows per row, and `drop(lines, 1)`
+  cloned the remaining tail per row), `chelis_string_slice` locates byte
+  offsets with `char_indices()` and takes an O(1) all-ASCII fast path
+  instead of materializing a `Vec<char>` per call, `chelis_string_len`
+  returns a cached count instead of recounting, and `chelis_list_append`
+  reserves `len()+1` so the following push does not realloc. Character
+  indexing and multi-byte behavior are unchanged, and `try_read_csv` still
+  returns `None` on a ragged row or an unterminated quoted field. **Honest
+  cost:** each `RuntimeString` grows by exactly 8 bytes for the cached
+  count, so a workload that builds many strings and never slices them or
+  takes their length is a net allocation regression. Not fixed here: JSON's
+  `parse_array_rest`/`parse_object_rest` are still quadratic, and a
+  user-written recursive `append` accumulator is still quadratic —
+  chelis#943 remains open for both.
+
+- **The Rust toolchain is pinned to 1.98.0 (PR #1236; chelis#1237 for the
+  Nix half).** `rust-toolchain.toml` tracked the `stable` channel, so a Rust
+  release reached every branch at once with no staging; 1.98.0 (released
+  2026-08-20) tightened two lints and turned the whole repo red under
+  `-D warnings` on branches whose own diffs contained no Rust. Building
+  chelis from source now resolves the pinned toolchain through rustup's
+  directory override, and the Nix flake's `rust-overlay` input moves forward
+  far enough to resolve it. Raising the pin is a deliberate, scheduled change
+  in its own PR.
+
+- **Monomorphized specializations are compiler-internal symbols
+  (chelis#1158 hardening; findings credited to the PR #1202 adversarial
+  review).** Each host function now carries explicit authored or
+  monomorphized provenance through C-ABI projection. The published `.h` and
+  tensor-entry selection use that provenance, so a valid authored name that
+  matches `<def>__mono_<hash>` remains public. Specializations stay out of the
+  header and use translation-unit-local C linkage in binary and object mode.
+  Thus, two generated objects with one specialization name link without a
+  duplicate symbol. Speculative summary probes are state-isolated and use a
+  sorted order. Repeated builds emit byte-identical C, probe-only definitions
+  do not escape, and a failed probe does not fail the build. Specializations
+  intern by exact package definition identity under a canonical signature key.
+  Exact identity lookup precedes unique terminal-name fallback, so separate
+  package definitions named `depth` remain separate. A hash collision between
+  two canonical signatures fails loudly.
+
 ### Fixed
+
+- **Scalar activations and rounding no longer compile to `0` while the
+  evaluator answers correctly (chelis#704, chelis#712, chelis#715).** Scalar
+  `relu`, `sigmoid`, `silu`, `gelu`, `tan`, `atan`, `floor`, `ceil`, `round`,
+  `recip`, `max_elem`, and `min_elem` reached the C backend's
+  `/* unsupported builtin */ 0` stub, so a compiled `floor(1.5f32)` returned
+  `0` while `chelis eval` returned `1.0` — three lanes disagreeing silently,
+  with `tanh` additionally accepted by the checker and rejected by the
+  evaluator. Scalar `relu`, `sigmoid`, `tanh`, `silu`, and `gelu` now execute
+  as the rank-zero instance of their Tier-2 RISC composition with every
+  constituent primitive finalized at the declared dtype, and the C host ABI
+  emits private concrete specializations for f16, bf16, f32, and f64 from one
+  template; tensor activations keep using the canonical `chelis-ir` Tier-2
+  lowerers. `tan`, `atan`, `floor`, `ceil`, and `round` route through explicit
+  checker policy; scalar integer `floor`, `ceil`, and `round` are exact
+  identities at int8/int16/int32/int64 with no float round trip; scalar
+  `max_elem` and `min_elem` are locked across every admitted signed-integer
+  and float width. Two rounding defects fall out with it: the published
+  `chelis_f32_to_f16` helper rounded subnormal midpoints away from zero
+  instead of ties-to-even, and reduced-width activation constants are now
+  constructed directly so an f64 activation does not double-round through
+  f32. The scalar rules are authored in `spec/05-risc-primitives.md`. Part of
+  chelis#729.
+
+- **A deferred reshape shape survives the chain that carries it
+  (chelis#1190, chelis#1191).** An unresolved positional-`expand` shape choice
+  is now carried through reshape chains as a candidate relation — preserving
+  the element dtype and the exact element-count obligation — until the first
+  shape-bearing consumer selects one candidate, instead of being dropped at
+  the first intervening reshape. A failed deferred-output unification is
+  transactional, so a rejected candidate leaves no partial substitution
+  behind, and unresolved shape relations survive serialization. Every static
+  negative reshape target extent is now rejected. Because pre-repair
+  serialized substitutions must not stale-hit against the repaired unifier,
+  the compiled-context cache advances 8 → 9, the stdlib cache 4 → 5, and the
+  library cache 1 → 2; the first build after upgrading is cold. No normative
+  spec edit was needed — the implementation now follows
+  `spec/04-type-system.md` §§3.1, 4.3, 4.7.1-4.7.5, 5.1, 5.8 and
+  `spec/05-risc-primitives.md` §2.4, [05-DIM-1..3], §2.5.1, and [05-OP-7].
 
 - **chelis#1197: a pipe stage calling an operator-named primitive resugars
   again, and a blocked migration batch names every file that blocked it.**
