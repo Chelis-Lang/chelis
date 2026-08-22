@@ -358,13 +358,25 @@ fn count_occurrences(text: &str, needle: &str) -> usize {
 }
 
 fn write_qualified_collision_package(root: &std::path::Path) -> PathBuf {
+    // Derive the compiler pin and the chelis-std hashes rather than
+    // hardcoding them: `validate_manifest` rejects any pin other than the
+    // running binary's, and the lock's hashes are synthesized from the
+    // embedded bundle, so literals here go stale at every release bump.
+    let ver = chelis_compiler_api::COMPILER_VERSION;
+    let std_version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
+    let archive_sha256 = chelis_std_bundle::archive_sha256();
+    let shell_sha256 = chelis_std_bundle::shell_sha256();
     write_file(
         &root.join("reef.toml"),
-        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.4\"\nmodule_prefix = \"Demo\"\n",
+        &format!(
+            "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\nmodule_prefix = \"Demo\"\n"
+        ),
     );
     write_file(
         &root.join("reef.lock"),
-        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"0.4.0\"\ncompiler = \"=0.18.4\"\narchive_sha256 = \"c12eb890eb09451e8e8e3ae647d7072ec29c6c0c3737d1264526e7b05b722049\"\nshell_sha256 = \"5bd235c779ca0e49b026d383634c31331c124d0f02a4f8563a64aabca23d6d2a\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"0.18.4\"\n",
+        &format!(
+            "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"{std_version}\"\ncompiler = \"={ver}\"\narchive_sha256 = \"{archive_sha256}\"\nshell_sha256 = \"{shell_sha256}\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"{ver}\"\n"
+        ),
     );
     write_file(
         &root.join("src/a.ch"),
