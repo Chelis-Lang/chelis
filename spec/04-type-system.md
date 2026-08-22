@@ -2419,8 +2419,10 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   drops for locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
-- Creating a closure that captures a tensor consumes that outer binding at closure
-  creation time.
+- Creating a closure whose body consumes a captured tensor consumes that outer binding
+  at closure creation time; a capture whose body uses are all borrow-reads borrows the
+  outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
+  subject below.
 - Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
   cyclic consume cases outside the v1 inference scope.
@@ -2437,6 +2439,38 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   branch bodies each open such a region, so a component's fan-out inside one is copied
   like any other value. A destructuring `let` written inside the region introduces
   components of that region and is excepted there as above.
+
+Two requirements pin the binding-identity semantics the rules above rest on:
+
+> **[04-LIN-1]** Every binding introduction — a `let` bind (destructuring
+> or not), a function parameter, a closure capture, a `match` binder, a
+> top-level `def` — creates a binding distinct from every other binding,
+> including earlier and later bindings of the same name. A name at a use
+> site denotes the innermost such binding whose scope encloses the site.
+> Every ownership fact — an alias relationship, a consumption, a borrow,
+> destructured-component identity — SHALL attach to the binding it was
+> resolved against where it was recorded, never to the name. In
+> particular, an alias denotes the binding its source name denoted where
+> the alias was introduced: a later re-binding of that name SHALL
+> neither re-point the alias nor confer the new binding's properties
+> (such as a component restriction) on it, and consuming through the
+> alias SHALL affect the aliased binding, not whichever binding owns the
+> name at the consuming use.
+
+> **[04-LIN-2]** Creating a closure whose body consumes a captured value
+> consumes the binding the capture names at closure creation time; a
+> capture whose uses in the body are all borrow-reads borrows that
+> binding instead. Distinct user-visible bindings of one underlying
+> value — an ordinary alias `y = x` beside its source — are distinct for
+> capture: one closure consuming through `y` and another through `x`
+> each consume their own binding, and both closure creations are
+> accepted. The sole forwarding is a consuming capture of a destructured
+> component (or of an alias of one), which consumes the component's
+> carrier binding.
+
+Diagnostics for violations of these rules SHALL name a binding the
+program's source spells — the alias or component name written at the
+faulting use — never a compiler-synthesized intermediate.
 
 ### 8.4 Tensor-carrying ADTs
 

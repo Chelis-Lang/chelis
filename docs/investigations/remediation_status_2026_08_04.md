@@ -750,12 +750,17 @@ repaired, by PRs #1208 and #1215.)
    the call is: amend invariant 7 to say what governs an ABI change in a
    breaking patch cut (or record 0.18.4 as its stated exception), and decide
    whether invariant 1 reaches the WireDag schema at all.
-2. **The linearity residue's owner and class.** #1200 was repaired without
-   ever getting either (PR #1208 landed classless), and its adversarial
-   review filed #1209, #1211, and #1212 - checker-shaped, unparented, while
-   #731's oracle stays green. The question #1200 posed is unanswered and now
-   has three successors; #1209's binding-generation identity is the
-   durable-fix shape PR #1208 itself named.
+2. **The linearity residue's owner and class.** DECIDED 2026-08-21: #1209,
+   #1211, and #1212 are parented under #731 and delivered as one class
+   change, PP3 in `spec/design/checker_totality.md` (the name-keyed
+   binding-identity channel). The normative rule landed as [04-LIN-1] and
+   [04-LIN-2] in `spec/04-type-system.md` §8.3; the delivery branch is
+   `agent/1209-binding-generations`. (Original question: #1200 was
+   repaired without ever getting an owner or class - PR #1208 landed
+   classless - and its adversarial review filed the three issues
+   checker-shaped and unparented while #731's oracle stayed green.
+   #1209's binding-generation identity was the durable-fix shape PR #1208
+   itself named.)
 3. **The performance family's home.** #1205, #1206, and #1207 are the same
    shape from a lane no tracker owns: superlinear compile-path costs
    (front-end lowering, compiled recursion's memory retention, and
