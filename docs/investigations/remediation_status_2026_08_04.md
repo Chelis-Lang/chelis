@@ -82,8 +82,8 @@ The same main-side wave also retired coral's other build-lane wall: recursive
 generic host calls compile via bounded memoized monomorphization
 (#1204/#1215/#1218), and `Coral.Frame` now builds, links, and runs against the
 eval lane. Nothing in CI could see any of these; all were found downstream.
-What the release still owes a shell is now a cut, not a repair: see pending
-decision 9.
+What the release still owes a shell is a cut, not a repair, and that cut is in
+flight: 0.18.5, PR #1256 (decision 9).
 
 ## Scoreboard
 
@@ -234,8 +234,8 @@ What each cut obliges a shell to do, not what each cut contained.
   recursive-generic rejection (retired main-side by #1204/#1215/#1218), the
   quadratic compiled-lane CSV ingestion (repaired main-side by #1213), and the
   #1197 migrator batch abort (repaired main-side by #1243). `[Unreleased]`
-  now carries **three** BREAKING entries, so the next cut is migration-bearing
-  several times over regardless of what else it takes (pending decision 9):
+  on `main` carries **three** BREAKING entries, which is why the 0.18.5 cut
+  PR #1256 prepares is source-migrating several times over (decision 9):
   polymorphic recursion rejects at check time under [04-INF-2]/[04-INF-3]
   (#1204); an integer literal in a bare type position is a parse error rather
   than a fresh type variable (#1240, closing #1179); and `>` evaluates its
@@ -662,7 +662,7 @@ fixes nothing.
 | Guards existing but not running | #1089's inventory of oracles outside continuous jobs; #990's scheduled/change-gated package | partial: #732's Phase 2 oracle has a dedicated blocking job and Phase 3 runs nested continuously, and #729's Phase 1/2 oracles run nested inside Phase 3. Still unwired: `unrepresentable_domain_oracle.py` (#908), `loud_unsupported_phase2_oracle.py` (#730), `compiler_pipeline_oracle.py` (its three controls run in the gate's `lint-and-unit` stage, but the oracle itself is invoked nowhere - `grep -n compiler_pipeline_oracle scripts/gate.py` returns one comment line and no call - which is not what #1089 asks for), and the new `loud_unsupported_phase3_oracle.py`, which is red on its #912 leg by design. #1090 closed as refuted - the canary already auto-files into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64). **A fresh instance of this exact mode landed on 2026-08-21 outside the oracle inventory**, and its two intervals are worth keeping apart. The guard's dormancy is the long one: `nix-packages.yml` declares an unconditional `pull_request` trigger and has not executed since 2026-08-03, eighteen days, for a reason nobody has diagnosed - #1237's body deliberately leaves trigger bug, disabled workflow, and runner availability all open. The divergence it would have caught is the short one: the Nix and devenv lanes resolved a different rustc than CI only once stable moved to 1.98.0 after 2026-08-20, about a day before #1236's toolchain pin turned that silent disagreement into a loud failure. A guard that has been dark for eighteen days is not measured by the defect that happened to arrive on day eighteen |
 | Silent lane divergence | #754/#763 cross-lane gate; #738 shell compiled lanes | unblocked by #732 P2, undelivered |
 | Agent-driven recurrence | #740's enforcement-ladder backlog; #895 executable plan inventories | entirely unchecked, dormant |
-| Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159), and 22 more class closures on 2026-08-05 through the same unguarded path. The 2026-08-17/21 audit-and-pin wave (evidence-comment closures for #916/#646/#986; pinned-test PRs #1230-#1232 for #862/#1084/#683) is the closure discipline done right by hand - and the same wave produced the #1083 conflict (closed against PR #1231's own record, reopened the same day), which argues for the guard, not against the wave. **#732's own closure is the sharpest illustration of why the guard is owed**, because the substance was right and the mechanism was still an accident. Right: #1059 was re-homed and the tracker stood at zero open children *before* PR #1250 merged, both owning documents were audited by full read, and every live thread had a named home elsewhere. Accidental: the close itself was a keyword auto-close at 23:31:48Z, two seconds after the merge, fired by narrative prose in PR #1250's body (`... then close #732`) rather than by any deliberate directive - the squash message carries no closing keyword at all. The full evidence record landed two minutes later, at 23:33:00Z, and its own first line says so. A guard would not have blocked this close; it would have made it deliberate |
+| Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159), and 22 more class closures on 2026-08-05 through the same unguarded path. The 2026-08-17/21 audit-and-pin wave (evidence-comment closures for #916/#646/#986; pinned-test PRs #1230-#1232 for #862/#1084/#683) is the closure discipline done right by hand - and the same wave produced the #1083 conflict (closed against PR #1231's own record, reopened the same day), which argues for the guard, not against the wave. **#732's own closure is the sharpest illustration of why the guard is owed**, because the substance was right and the mechanism was still an accident. Right: #1059 was re-homed before PR #1250 merged, and the merge itself retired the last open child (#997), leaving zero at close; both owning documents were audited by full read, and every live thread had a named home elsewhere. Accidental: the close itself was a keyword auto-close at 23:31:48Z, two seconds after the merge, fired by narrative prose in PR #1250's body (`... then close #732`) rather than by any deliberate directive - the squash message carries no closing keyword at all. The full evidence record landed seventy-two seconds later, at 23:33:00Z, and its own first line says so. A guard would not have blocked this close; it would have made it deliberate |
 
 ## The six biggest remaining gaps, elaborated
 
@@ -947,24 +947,27 @@ residue filed rather than swallowed.
    baseline change, recorded in the PR #1163 body.
 8. **The owned-but-unscheduled residue** (gap 5): #795, #957, #958, #960,
    #699, #722, #794, and #874 each need a named delivery slot.
-9. **Which Surf follow-ons ride the v0.19 cut, and whether a 0.18.5 comes
-   first.** The 0.18.5 half of this has changed on both sides and needs a
-   fresh call rather than the old one. The argument *for* a patch cut was
-   #1197: the release names `chelis migrate surf` as its migration path and
-   that tool could refuse to migrate a tree. PR #1243 repaired it, so the
-   blocker is gone from `main` - and #1241 says the migrator still cannot
-   rewrite the general v0.18 pipe-lambda alias, so the path is repaired, not
-   finished. The argument *against* a patch cut got much stronger: `[Unreleased]`
-   now carries **three** BREAKING entries, not one - polymorphic recursion at
+9. **Which Surf follow-ons ride the v0.19 cut. The cut question itself is
+   DECIDED 2026-08-22: 0.18.5, in flight as PR #1256** (unmerged at this
+   revision). It carries the #1197 migrator repair, the recursive-generic
+   capability, and all three BREAKING boundaries - polymorphic recursion at
    check time ([04-INF-2]/[04-INF-3]), integer literals rejected in bare type
-   positions (#1240), and `>` evaluating operands in authored order (#1245) -
-   so anything cut from `main` today is a source-migrating release regardless
-   of what else rides it, and calling it 0.18.5 would repeat exactly what
-   pending decision 1 is still unpicking about 0.18.4. The remaining Surf
-   question is unchanged: whether #1171 (typed first-argument
+   positions (#1179), and `>` evaluating operands in authored order (#1180) -
+   so it is a source-migrating release, which is what the arithmetic here
+   always implied. The version number is the interesting part of the call and
+   is reasoned on that PR: the roadmap reserves the **v0.19 label for a defined
+   payload** (the per-dtype storage break, the capability decisions, the
+   manifested root completion), none of which this cut carries, and the
+   migrator keys off the 0.18 line - a compiler at 0.19 whose migrator still
+   speaks `--from 0.18` is a confusing pair. The PR flags itself as one review
+   comment away from 0.19 if the maintainer prefers, so this is a made call
+   with its reversal cost written down rather than a settled fact.
+
+   What is left of this decision is only the Surf ride-which-cut question, and
+   it is down to two: whether **#1171** (typed first-argument
    application-to-pipe promotion, explicitly not delivered by #1031) and
-   #1172 (structural spans, parented to #883) ride v0.19 or a further patch.
-   #1179 and #1180 have left this list by shipping into `[Unreleased]`.
+   **#1172** (structural spans, parented to #883) ride v0.19 or a further
+   patch. #1179 and #1180 left this list by shipping in the 0.18.5 cut.
 10. **#1170's relationship to #730 Phase 4.** The C-lane capability tracker
    inventories the same hand-maintained exclusion lists that Phase 4's ratchet
    totality is meant to derive. Decide whether it is a Phase 4 acceptance cell
@@ -1030,7 +1033,8 @@ that measures it.
    #732/#728 class closure, whose evidence comment names the closing condition,
    the PR that met it, the two documents audited, and where each surviving
    thread went. Read that alongside condition 1: the *evidence* was authored
-   deliberately and the *close* fired by accident two minutes earlier, which
+   deliberately and the *close* fired by accident seventy-two seconds earlier,
+   which
    is a fair summary of where this repo's closure discipline currently sits.
    Still a convention rather than a gate - and the same wave shows the cost in
    the other direction: #1083, closed against PR #1231's own record and
