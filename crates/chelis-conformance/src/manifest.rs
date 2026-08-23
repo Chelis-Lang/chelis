@@ -196,7 +196,7 @@ pub const MANIFEST: &[ContractRow] = &[
         // `manifest_matches_contract_doc` tripwire compares only row/tier/section,
         // so this description narrowing does not drift the machine form.
         key: "vendored-skills",
-        artifact: "Vendored shared skills + symlinked skill dirs",
+        artifact: "Uniform vendored shared skill set + symlinked skill dirs",
         tier: Tier::Must,
         section: "§8",
         since_version: CONTRACT_BASELINE_VERSION,

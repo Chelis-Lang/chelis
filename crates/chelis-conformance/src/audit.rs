@@ -141,6 +141,10 @@ struct Ctx {
     /// repo-local domain skills the shell owns, which `sync` preserves and §8
     /// exempts from the "not a pinned skill" drift check.
     local_skills: Vec<String>,
+    /// Every key the shell declared in `reef.toml`'s `[conform]` table. §8 fixes
+    /// that set; an unrecognized key is reported rather than ignored, so a shell
+    /// cannot declare a control the tool does not implement (chelis#1262).
+    conform_keys: Vec<String>,
 }
 
 impl Ctx {
@@ -151,6 +155,10 @@ impl Ctx {
         let local_skills = reef_toml
             .as_deref()
             .map(parse_local_skills)
+            .unwrap_or_default();
+        let conform_keys = reef_toml
+            .as_deref()
+            .map(parse_conform_keys)
             .unwrap_or_default();
         let agents_md = read_opt(&root.join("AGENTS.md"));
         let claude_symlink_ok = claude_is_symlink_to_agents(root);
@@ -166,6 +174,7 @@ impl Ctx {
             cargo_toml,
             workflows,
             local_skills,
+            conform_keys,
         }
     }
 
@@ -459,8 +468,9 @@ fn check_chelis_surface(ctx: &Ctx) -> Check {
 /// Row 8 (§4): `docs/UPSTREAM_BUGS.md` exists, carries the four required
 /// sections, and — the cite-by-number machine check added for chelis#739 —
 /// every confidently parsed entry under §Actively blocking / §Tracking /
-/// §Parked cites its bug as `chelis#NNN` or a `docs/issue_drafts/<name>` draft
-/// path, never a prose name. §4 makes this a MUST ("cite by number … never by a
+/// §Parked cites its bug as `chelis#NNN`, as a registry sibling's `<repo>#NNN`
+/// (chelis#1270), or as a `docs/issue_drafts/<name>` draft path, never a prose
+/// name. §4 makes this a MUST ("cite by number … never by a
 /// prose name"): a prose-name citation is invisible to every mechanical audit,
 /// which is the exact failure the contract's own §4 rationale cites (School
 /// carried a "generic-callback-unification limit" through three docs and a
@@ -553,7 +563,7 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
         for entry in &entries {
             if scan_citations(&entry.text).is_empty() && !cites_issue_draft(&entry.text) {
                 uncited.push(format!(
-                    "docs/UPSTREAM_BUGS.md:{}: §{section} entry {:?} cites no chelis#NNN or docs/issue_drafts/ path",
+                    "docs/UPSTREAM_BUGS.md:{}: §{section} entry {:?} cites no chelis#NNN, no registry sibling's <repo>#NNN, and no docs/issue_drafts/ path",
                     entry.line,
                     snippet(entry.head()),
                 ));
@@ -565,18 +575,26 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
     // actionable §4 violation. Surface the un-machine-checkable sections in the
     // same evidence so `--explain` still names them.
     if !uncited.is_empty() {
+        // Counted from the uncited entries themselves, never by re-matching a
+        // substring of the rendered evidence: the evidence wording is a
+        // diagnostic, not a data channel, and a reworded message must not be
+        // able to change the count.
+        let n = uncited.len();
         let mut evidence = uncited;
         evidence.extend(manual_evidence);
-        let n = evidence
-            .iter()
-            .filter(|e| e.contains("cites no chelis#NNN"))
-            .count();
+        // Name the accepted repo set once, under `--explain`. An author whose
+        // citation was rejected needs to know which repos resolve, and deriving
+        // it from the registry keeps the message correct as the ecosystem grows.
+        evidence.push(format!(
+            "  accepted citation repos: {}",
+            registry::citable_repos().collect::<Vec<_>>().join(", ")
+        ));
         return fail_ex(
             format!(
-                "docs/UPSTREAM_BUGS.md: {n} entr{} with a prose-name citation, not chelis#NNN / a docs/issue_drafts/ path (§4)",
+                "docs/UPSTREAM_BUGS.md: {n} entr{} with a prose-name citation, not chelis#NNN / <sibling>#NNN / a docs/issue_drafts/ path (§4)",
                 if n == 1 { "y" } else { "ies" },
             ),
-            "cite every entry by `chelis#NNN` or a `docs/issue_drafts/<name>` draft path at the entry, never a prose name (contract §4)",
+            "cite every entry at the entry by `chelis#NNN`, by a registry sibling's `<repo>#NNN` (e.g. `nautilus#43`), or by a `docs/issue_drafts/<name>` draft path, never by a prose name (contract §4)",
             evidence,
         );
     }
@@ -591,7 +609,7 @@ fn check_upstream_bugs(ctx: &Ctx) -> Check {
                     "ve"
                 },
             ),
-            "structure each bug as a top-level list item or sub-heading citing chelis#NNN / a draft path so the §4 cite-by-number rule is machine-checkable",
+            "structure each bug as a top-level list item or sub-heading citing chelis#NNN / a registry sibling's <repo>#NNN / a draft path so the §4 cite-by-number rule is machine-checkable",
             manual_evidence,
         );
     }
@@ -763,9 +781,13 @@ fn snippet(line: &str) -> String {
 }
 
 /// Row 9: narrowing-coverage (the offline half of the §4 staleness audit). Every
-/// `chelis#NNN` cited from a live `src/**/*.ch` narrowing must be covered by a
-/// `tests_blocked/` probe, a `docs/UPSTREAM_BUGS.md` entry, or the
-/// `tests_blocked/README.md` can't-be-probed list.
+/// citation at a live `src/**/*.ch` narrowing — `chelis#NNN` or a registry
+/// sibling's `<repo>#NNN` (chelis#1270) — must be covered by a `tests_blocked/`
+/// probe, a `docs/UPSTREAM_BUGS.md` entry, or the `tests_blocked/README.md`
+/// can't-be-probed list. Both sides run the same scanner, so the widened grammar
+/// widens cite and coverage together: a `nautilus#43` narrowing is now visible to
+/// the audit instead of reading as uncited prose, and it owes the same coverage
+/// an upstream cite owes.
 fn check_narrowing_coverage(ctx: &Ctx) -> Check {
     let cited = collect_citations_in_dir(&ctx.root.join("src"));
     if cited.is_empty() {
@@ -807,16 +829,19 @@ fn check_narrowing_coverage(ctx: &Ctx) -> Check {
 
 /// One `--explain` line naming which coverage sources were checked for an orphan
 /// `token` and why each failed, with a near-miss hint when the issue number
-/// appears in a non-canonical (non-`chelis#NNN`) form — the exact trap in
+/// appears in a non-canonical (bare-`#NNN`) form — the exact trap in
 /// chelis#654, where a space-form `chelis #316` (now matched, chelis#652) or a
 /// bare `#316` left the fix message ("add an UPSTREAM_BUGS entry") misleading.
+/// The number is split off the token rather than trimmed against a literal
+/// `chelis#` prefix, so the hint stays correct for a registry sibling's token
+/// (chelis#1270).
 fn coverage_evidence(token: &str, blocked: &str, upstream: &str, readme: &str) -> String {
-    let num = token.trim_start_matches("chelis#");
+    let num = token.split_once('#').map_or(token, |(_, n)| n);
     let bare = format!("#{num}");
     let upstream_note = if corpus_covers(upstream, token) {
         "covered".to_string()
     } else if upstream.contains(&bare) {
-        format!("mentions {bare} but not as a `chelis#{num}` token")
+        format!("mentions {bare} but not as a `{token}` token")
     } else {
         "no entry".to_string()
     };
@@ -909,9 +934,41 @@ fn check_agents_heading(ctx: &Ctx, heading: &str) -> Check {
     }
 }
 
+/// Every key contract §8 defines for `reef.toml`'s `[conform]` table. The table
+/// is this tool's own configuration surface, so the closed list lives with the
+/// checker that enforces it; widening it is a contract amendment.
+const CONFORM_TABLE_KEYS: &[&str] = &["local_skills"];
+
 fn check_vendored_skills(ctx: &Ctx) -> Check {
     let skills_dir = ctx.root.join("agent-skills");
     let mut problems = Vec::new();
+    // §8: the shared skill set is uniform by design and there is no per-shell
+    // exclusion control (chelis#1262). A shell that writes one anyway must be
+    // TOLD, not silently overridden on the next `sync`. Reported before the
+    // per-skill drift scan because it explains a whole class of "why did my
+    // pruned skill come back" in one line, and reported as its own failure so
+    // the fix text can name the sanctioned alternative instead of the generic
+    // "run conform sync".
+    let unknown: Vec<&str> = ctx
+        .conform_keys
+        .iter()
+        .map(String::as_str)
+        .filter(|k| !CONFORM_TABLE_KEYS.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        return fail(
+            format!(
+                "reef.toml [conform] declares unrecognized key(s): {}. Recognized: {}",
+                unknown.join(", "),
+                CONFORM_TABLE_KEYS.join(", ")
+            ),
+            "the shared skill set is uniform by design (contract §8) and there is no exclusion \
+             control, so a key like `exclude`/`skip_skills` would be silently overridden by the \
+             next `conform sync`. Remove the key. To record that a shared skill does not fit this \
+             shell, append a trailing `<!-- shell-local:begin -->` block to its SKILL.md saying \
+             so: that survives sync and reaches the agent at the point of use.",
+        );
+    }
     // A `local_skills` entry may not shadow a shared skill — that would let a
     // shell "own" (and silently fork) toolchain-managed content (chelis#651).
     for local in &ctx.local_skills {
@@ -977,7 +1034,10 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
                 "vendored skills drifted from the pinned set: {}",
                 problems.join(", ")
             ),
-            "run `chelis reef conform sync` to re-materialize agent-skills/ from the toolchain",
+            "run `chelis reef conform sync` to re-materialize agent-skills/ from the toolchain. \
+             The set is uniform by design (contract §8): a shared skill that does not fit this \
+             shell is recorded with a trailing `<!-- shell-local:begin -->` block in its SKILL.md, \
+             never removed, because a removal does not survive the next sync.",
         );
     }
     // Both tool-surface skill dirs must be symlinks that actually resolve to
@@ -1057,6 +1117,66 @@ pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
         .map(|s| s.trim().trim_matches(['"', '\'']).trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Every key declared in `reef.toml`'s `[conform]` table, in file order
+/// (chelis#1262). Hand-parsed for the same reason as [`parse_local_skills`] (the
+/// crate has no `toml` dependency), and deliberately *permissive about values*:
+/// it only needs the key names, so a value shape it cannot read still yields the
+/// key. Multi-line values are skipped by bracket/brace depth so an array element
+/// is never mistaken for a key.
+///
+/// `chelis-reef` ignores `[conform]` entirely (no `deny_unknown_fields`), which
+/// is exactly why this exists: without it, a shell can write
+/// `[conform] exclude = [...]`, get no error from any tool, and reasonably
+/// conclude the control works.
+pub(crate) fn parse_conform_keys(reef_toml: &str) -> Vec<String> {
+    fn strip_comment(line: &str) -> &str {
+        match line.find('#') {
+            Some(i) => &line[..i],
+            None => line,
+        }
+    }
+    let mut in_conform = false;
+    let mut depth: i32 = 0;
+    let mut keys = Vec::new();
+    for raw in reef_toml.lines() {
+        let line = strip_comment(raw);
+        let t = line.trim();
+        if depth == 0
+            && !t.contains('=')
+            && let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']'))
+        {
+            in_conform = header.trim() == "conform";
+            continue;
+        }
+        if !in_conform {
+            continue;
+        }
+        if depth == 0
+            && let Some((key, _)) = t.split_once('=')
+        {
+            let key = key.trim();
+            if !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                keys.push(key.to_string());
+            }
+        }
+        // Track only the conform table's own nesting, so a stray bracket
+        // elsewhere in reef.toml can never desynchronize this scan.
+        for b in t.bytes() {
+            match b {
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+        }
+        depth = depth.max(0);
+    }
+    keys
 }
 
 /// A trailing shell-local block (chelis#653) must be well-formed: exactly one
@@ -1422,44 +1542,72 @@ fn corpus_covers(corpus: &str, citation: &str) -> bool {
         .any(|(tok, _)| tok == citation)
 }
 
-/// Scan `text` for narrowing citations, tolerating inline whitespace between
-/// `chelis`, `#`, and the number, so `chelis#316`, `chelis #316`, and
+/// Scan `text` for narrowing citations, tolerating inline whitespace between the
+/// repo name, `#`, and the number, so `chelis#316`, `chelis #316`, and
 /// `chelis # 316` all normalize to the canonical token `chelis#316`
 /// (chelis#652 — a space-form cite/coverage entry must not read as uncovered).
-/// Returns each canonical `chelis#NNN` token paired with the byte offset where
+/// Returns each canonical `<repo>#NNN` token paired with the byte offset where
 /// the match starts, in source order (the offset feeds `--explain` site
 /// reporting, chelis#654). Newlines are NOT tolerated between the parts, so a
-/// sentence-final `chelis` followed by an unrelated `#heading` on the next line
+/// sentence-final repo name followed by an unrelated `#heading` on the next line
 /// is not a false match.
+///
+/// **The repo may be the upstream monorepo or any registry shell** (chelis#1270):
+/// `nautilus#43` is a citation, `torch#43` is not, and a bare `#43` is not. A
+/// cascade wave makes a sibling's issue the literal blocking artifact for most of
+/// the ecosystem, and registry membership gives that reference exactly the
+/// liveness the cite-by-number rule is buying.
+///
+/// The scan is anchored on the `#` and reads the repo name **leftward** as the
+/// maximal run of `[A-Za-z0-9_-]`. That anchoring is what keeps the widened
+/// grammar honest in both directions:
+///   - `hello-chelis#43` yields `hello-chelis#43` and never *also* a phantom
+///     `chelis#43`. A left-unanchored scan for the substring `chelis` would emit
+///     both, silently manufacturing an upstream citation out of a sibling one.
+///   - `chelischelis#5` yields nothing, because that maximal run matches no
+///     registered repo. (The previous scanner matched it as `chelis#5`.)
+///
+/// A `Chelis-Lang/` prefix or a full GitHub URL is tolerated: `/` is not a repo
+/// character, so the run stops there and leaves the bare repo name.
 fn scan_citations(text: &str) -> Vec<(String, usize)> {
     fn is_inline_ws(b: u8) -> bool {
         b == b' ' || b == b'\t'
     }
+    fn is_repo_char(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+    }
     let mut out = Vec::new();
     let bytes = text.as_bytes();
-    let mut i = 0;
-    while let Some(rel) = text[i..].find("chelis") {
-        let start = i + rel;
-        let mut j = start + "chelis".len();
+    for (hash, _) in text.match_indices('#') {
+        // The issue number, to the right.
+        let mut j = hash + 1;
         while j < bytes.len() && is_inline_ws(bytes[j]) {
             j += 1;
         }
-        if j < bytes.len() && bytes[j] == b'#' {
+        let num_start = j;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
             j += 1;
-            while j < bytes.len() && is_inline_ws(bytes[j]) {
-                j += 1;
-            }
-            let num_start = j;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > num_start {
-                out.push((format!("chelis#{}", &text[num_start..j]), start));
-            }
         }
-        // Advance just past this `chelis` occurrence so overlapping tokens
-        // (`chelischelis#5`) are still found.
-        i = start + "chelis".len();
+        if j == num_start {
+            continue;
+        }
+        // The repo name, to the left.
+        let mut k = hash;
+        while k > 0 && is_inline_ws(bytes[k - 1]) {
+            k -= 1;
+        }
+        let name_end = k;
+        while k > 0 && is_repo_char(bytes[k - 1]) {
+            k -= 1;
+        }
+        if k == name_end {
+            continue;
+        }
+        let name = &text[k..name_end];
+        if !registry::is_citable_repo(name) {
+            continue;
+        }
+        out.push((format!("{name}#{}", &text[num_start..j]), k));
     }
     out
 }
@@ -1558,6 +1706,121 @@ mod tests {
         assert_eq!(cites("blocked on chelis #316"), vec!["chelis#316"]);
         assert_eq!(cites("see chelis # 42 here"), vec!["chelis#42"]);
         assert!(cites("chelis\n#316").is_empty());
+    }
+
+    /// The grammar widened to registry siblings (chelis#1270): the literal
+    /// blocking artifact in a cascade wave is another shell's issue, and a
+    /// registry entry is exactly as live and checkable as an upstream one.
+    #[test]
+    fn registry_sibling_citations_are_scanned() {
+        let cites = |t: &str| {
+            scan_citations(t)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cites("blocked on nautilus#43"), vec!["nautilus#43"]);
+        assert_eq!(cites("waiting for coral #27"), vec!["coral#27"]);
+        // Every registered shell, so adding a shell to REGISTRY widens the
+        // grammar with it and this test proves the coupling rather than
+        // spot-checking two names.
+        for s in registry::REGISTRY {
+            let text = format!("blocked on {}#7", s.name);
+            assert_eq!(
+                cites(&text),
+                vec![format!("{}#7", s.name)],
+                "{} is registered and must be citable",
+                s.name
+            );
+        }
+        // An org prefix or a full GitHub URL still resolves to the bare repo:
+        // `/` is not a repo character, so the leftward run stops at it.
+        assert_eq!(
+            cites("see Chelis-Lang/nautilus#43"),
+            vec!["nautilus#43"],
+            "an org-qualified reference is the same citation"
+        );
+        assert_eq!(
+            cites("https://github.com/Chelis-Lang/chelis#1270 is the issue"),
+            vec!["chelis#1270"]
+        );
+    }
+
+    /// The negative half of the widening. A grammar that accepts any
+    /// `word#NNN` would accept everything and check nothing.
+    #[test]
+    fn an_unregistered_repo_is_not_a_citation() {
+        let cites = |t: &str| {
+            scan_citations(t)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect::<Vec<_>>()
+        };
+        // A bare number names no tracker.
+        assert!(cites("see #43 for details").is_empty());
+        // Third-party repos are not in the registry and do not resolve in the org.
+        assert!(cites("blocked on torch#43").is_empty());
+        assert!(cites("numpy #7 has the answer").is_empty());
+        // A package that is not a shell repo.
+        assert!(cites("chelis-std#12").is_empty());
+        // The org itself is not a repo.
+        assert!(cites("Chelis-Lang#5").is_empty());
+    }
+
+    /// The trap the leftward anchoring exists for. `hello-chelis` ends in
+    /// `chelis`, so a substring scan for the upstream name would read
+    /// `hello-chelis#43` as BOTH a sibling citation and an upstream `chelis#43`,
+    /// manufacturing an upstream reference nobody wrote and letting a coverage
+    /// entry for one silently satisfy the other.
+    #[test]
+    fn a_sibling_name_ending_in_the_upstream_name_is_not_also_an_upstream_citation() {
+        let cites = |t: &str| {
+            scan_citations(t)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cites("blocked on hello-chelis#43"), vec!["hello-chelis#43"]);
+        assert!(
+            !cites("blocked on hello-chelis#43").contains(&"chelis#43".to_string()),
+            "a hello-chelis cite must never also read as an upstream cite"
+        );
+        // A run that matches no registered repo is not a citation at all.
+        assert!(cites("chelischelis#5").is_empty());
+        assert!(cites("mychelis#5").is_empty());
+    }
+
+    #[test]
+    fn conform_table_keys_are_parsed() {
+        // Single-line array value.
+        assert_eq!(
+            parse_conform_keys("[conform]\nlocal_skills = [\"chelis-std\"]\n"),
+            vec!["local_skills".to_string()]
+        );
+        // Multi-line array: its elements are values, not keys.
+        assert_eq!(
+            parse_conform_keys(
+                "[package]\nname = \"s\"\n\n[conform]\nlocal_skills = [\n  \"a\",\n  \"b\",\n]\nexclude = [\"cli-surface\"]\n"
+            ),
+            vec!["local_skills".to_string(), "exclude".to_string()]
+        );
+        // Keys outside [conform] are not this table's.
+        assert_eq!(
+            parse_conform_keys("[package]\nname = \"s\"\ncompiler = \"=0.1.0\"\n"),
+            Vec::<String>::new()
+        );
+        // A later table closes the scan.
+        assert_eq!(
+            parse_conform_keys(
+                "[conform]\nlocal_skills = []\n\n[dependencies]\nnautilus = \"1\"\n"
+            ),
+            vec!["local_skills".to_string()]
+        );
+        // Comments do not become keys.
+        assert_eq!(
+            parse_conform_keys("[conform]\n# exclude = [\"x\"]\nlocal_skills = []\n"),
+            vec!["local_skills".to_string()]
+        );
     }
 
     #[test]

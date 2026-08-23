@@ -278,3 +278,105 @@ fn spaced_coverage_entry_covers_a_cite_and_explain_names_the_site() {
         staleness.evidence
     );
 }
+
+// --------------------------------------------- #1270 sibling-repo citation seam
+
+#[test]
+fn a_sibling_narrowing_citation_is_visible_to_row_9_and_owes_coverage() {
+    // Row 8 and row 9 read the same grammar, so widening it widens cite AND
+    // coverage together: a `nautilus#43` narrowing stops reading as uncited
+    // prose, and in exchange it owes the same coverage an upstream cite owes.
+    let (_tmp, root) = green_shell();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/thing.ch"),
+        "def x() -> I32 = fail(\"blocked on nautilus#43\")\n",
+    )
+    .unwrap();
+
+    let before = audit::audit(&root);
+    let r = row(&before, "staleness-audit");
+    assert_eq!(
+        r.verdict,
+        audit::Verdict::Fail,
+        "an uncovered sibling narrowing must fail row 9"
+    );
+    assert!(
+        r.diagnostic.contains("nautilus#43"),
+        "diag must name the sibling token: {}",
+        r.diagnostic
+    );
+
+    append(
+        &root.join("docs/UPSTREAM_BUGS.md"),
+        "\n## Tracking\n- blocked on nautilus#43 until the sibling cuts its release\n",
+    );
+    let after = audit::audit(&root);
+    assert_eq!(
+        row(&after, "staleness-audit").verdict,
+        audit::Verdict::Pass,
+        "an entry citing the same sibling token covers it"
+    );
+}
+
+#[test]
+fn a_hello_chelis_citation_is_not_covered_by_an_upstream_entry() {
+    // The behavioral form of the leftward-anchoring control. `hello-chelis` ends
+    // in `chelis`; a substring scan would read `hello-chelis#43` as an upstream
+    // `chelis#43` too, and then a `chelis#43` coverage entry would silently
+    // satisfy a sibling narrowing that nobody actually tracked.
+    let (_tmp, root) = green_shell();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/thing.ch"),
+        "def x() -> I32 = fail(\"blocked on hello-chelis#43\")\n",
+    )
+    .unwrap();
+    append(
+        &root.join("docs/UPSTREAM_BUGS.md"),
+        "\n## Tracking\n- tracked as chelis#43 upstream\n",
+    );
+
+    let before = audit::audit(&root);
+    let r = row(&before, "staleness-audit");
+    assert_eq!(
+        r.verdict,
+        audit::Verdict::Fail,
+        "an upstream entry must not cover a same-numbered sibling cite"
+    );
+    assert!(
+        r.diagnostic.contains("hello-chelis#43"),
+        "the orphan is the sibling token, not the upstream one: {}",
+        r.diagnostic
+    );
+
+    // Its own entry does cover it (negative parity for the assertion above).
+    append(
+        &root.join("docs/UPSTREAM_BUGS.md"),
+        "- and separately hello-chelis#43 in the shell\n",
+    );
+    let after = audit::audit(&root);
+    assert_eq!(row(&after, "staleness-audit").verdict, audit::Verdict::Pass);
+}
+
+#[test]
+fn an_unregistered_repo_narrowing_is_not_a_citation_at_all() {
+    // Negative control: widening to the registry must not turn every
+    // `word#NNN` into a tracked citation. `torch#43` is not scanned, so row 9
+    // sees no narrowing to cover and stays green on that basis alone. (The
+    // narrowing itself is still uncited prose under §4, which row 8 owns for
+    // UPSTREAM_BUGS entries.)
+    let (_tmp, root) = green_shell();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/thing.ch"),
+        "def x() -> I32 = fail(\"blocked on torch#43\")\n",
+    )
+    .unwrap();
+    let report = audit::audit(&root);
+    assert_eq!(
+        row(&report, "staleness-audit").verdict,
+        audit::Verdict::Pass,
+        "an unregistered repo reference is not a citation the audit tracks"
+    );
+}

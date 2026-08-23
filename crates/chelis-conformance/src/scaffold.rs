@@ -90,6 +90,12 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
         .map(|t| crate::audit::parse_local_skills(&t))
         .unwrap_or_default();
     let mut notices = Vec::new();
+    // Sampled ONCE, before the loop: the first written skill creates
+    // `agent-skills/`, so testing it inside the loop would report every skill
+    // after the first as "restored" on a fresh `init`. A tree with no
+    // `agent-skills/` at all is being materialized for the first time, which is
+    // not a restoration and gets no notice.
+    let skills_dir_existed = root.join("agent-skills").is_dir();
 
     for (skill_name, body) in skills::EMBEDDED_SKILLS {
         let rel = format!("agent-skills/{skill_name}/SKILL.md");
@@ -108,6 +114,17 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
                     "{skill_name}: upstream skill body changed and a shell-local override is present; re-check it"
                 ));
             }
+        }
+        // A shared skill that was ABSENT is being (re)created. Say so. §8 makes
+        // the set uniform with no exclusion control (chelis#1262), so a shell
+        // that pruned a skill it judged inapplicable gets it back on the next
+        // sync; restoring it silently is what let that decision degrade into
+        // AGENTS.md lore the tree then contradicted. The notice names the
+        // sanctioned alternative at the moment the author is looking.
+        if existing.is_none() && skills_dir_existed {
+            notices.push(format!(
+                "{skill_name}: re-materialized (the shared set is uniform; §8 has no exclusion control). To record that it does not fit this shell, append a shell-local block to its SKILL.md rather than deleting it."
+            ));
         }
         let content = match &block {
             Some(b) => format!(
@@ -197,6 +214,80 @@ fn remove_path(path: &Path) -> Result<(), String> {
         fs::remove_file(path)
     };
     res.map_err(|e| format!("remove {}: {e}", path.display()))
+}
+
+/// The documents `conform sync` / `conform bump` **restamp in place** and
+/// therefore cannot create: each is read, edited, and written back. Distinct
+/// from `agent-skills/`, which the write path *materializes* from the embedded
+/// set, so its absence is normal work rather than a missing prerequisite.
+///
+/// `reef.toml` is listed because [`crate::bump::rewrite_pins`] reads its
+/// `compiler` pin before rewriting anything.
+const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
+    ("reef.toml", "the compiler pin `conform bump` rewrites"),
+    (
+        "AGENTS.md",
+        "carries the `agents-inheritance` managed block sync restamps",
+    ),
+    (
+        "docs/CHELIS_SURFACE.md",
+        "carries the `chelis-surface-header` managed block sync restamps",
+    ),
+];
+
+/// Preflight the write path on a shell root: every artifact `sync`/`bump`
+/// restamps must already exist (chelis#1263).
+///
+/// **Why this is a separate pass rather than better error handling.** `bump`'s
+/// edit sequence is repin -> materialize skills -> restamp blocks, and each step
+/// writes as it goes. On a never-conformed repo the sequence used to die
+/// partway: measured on chelis 0.18.5, a tree missing `AGENTS.md` came back with
+/// `reef.toml` and `ci.yml` already repinned to the new version and
+/// `agent-skills/` fully materialized, and a tree missing
+/// `docs/CHELIS_SURFACE.md` came back with all of that *plus* a restamped
+/// `AGENTS.md`. Both then failed. A nonzero exit is the right verdict, but a
+/// half-bumped tree is not a state any caller asked for, and the wave also
+/// observed the same shapes reported as success. Checking every prerequisite
+/// before the first write makes "nothing was written" a structural fact instead
+/// of a claim, so there is nothing to roll back or enumerate.
+///
+/// Returns the missing artifacts as `(relative path, why it is needed)`.
+pub fn preflight_restamp_targets(root: &Path) -> Result<(), Vec<(&'static str, &'static str)>> {
+    let missing: Vec<(&'static str, &'static str)> = RESTAMPED_ARTIFACTS
+        .iter()
+        .copied()
+        .filter(|(rel, _)| !root.join(rel).is_file())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
+}
+
+/// Render [`preflight_restamp_targets`]'s failure as the message the CLI prints
+/// before exiting nonzero. Lives here so `sync` and `bump` cannot drift into two
+/// different explanations of the same refusal.
+pub fn preflight_failure_message(
+    verb: &str,
+    root: &Path,
+    missing: &[(&'static str, &'static str)],
+) -> String {
+    let mut out = format!(
+        "conform {verb} refuses to run on {}: it restamps these files in place, and they are missing:\n",
+        root.display()
+    );
+    for (rel, why) in missing {
+        out.push_str(&format!("  {rel}  ({why})\n"));
+    }
+    out.push_str(
+        "Nothing was written. This repo has not been conformed yet. For a NEW shell, stamp it \
+         with `chelis reef conform init <name> --module-prefix <Prefix> --output <path>`. On an \
+         EXISTING repo, add the files above by hand first: `conform init` writes the whole \
+         scaffold from its templates and would overwrite reef.toml, AGENTS.md, docs/, and \
+         .github/workflows/. Then re-run this command.",
+    );
+    out
 }
 
 /// Regenerate every managed block in the shell's documents to `version` (the

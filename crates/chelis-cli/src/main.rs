@@ -770,7 +770,8 @@ enum ConformCommand {
     },
     /// Regenerate the pointer managed blocks and re-materialize the skill set
     /// from the pinned toolchain, restamping to the reef pin. Touches only
-    /// managed regions and `agent-skills/`.
+    /// managed regions and `agent-skills/`. Refuses, before writing anything, on
+    /// a repo missing an artifact it restamps in place; run `conform init` first.
     Sync {
         /// Shell package root (defaults to `.`).
         #[arg(long)]
@@ -783,6 +784,8 @@ enum ConformCommand {
     /// when the bump's OWN output is non-conformant (its pins/stamps/skills) or a
     /// suite fails; a clean bump that leaves only author-follow-up rows (CI
     /// wiring, pre-existing doc fixes) exits 0 and lists the remaining steps.
+    /// On a repo that has not been conformed (missing an artifact the bump
+    /// restamps in place) it refuses before writing anything and names the gap.
     Bump {
         /// Target chelis version (bare `X.Y.Z`).
         version: String,
@@ -3999,14 +4002,26 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 Some(p) => p,
                 None => env::current_dir()?,
             };
+            conform_preflight(&root, "sync")?;
             let version = chelis_conformance::audit::audit(&root)
                 .reef_pin
                 .map(|p| p.trim_start_matches('=').to_string())
                 .unwrap_or_else(|| chelis_compiler_api::COMPILER_VERSION.to_string());
-            for notice in chelis_conformance::scaffold::materialize_skills(&root)? {
+            let mut written: Vec<String> = Vec::new();
+            let notices = report_partial_writes(
+                chelis_conformance::scaffold::materialize_skills(&root),
+                &written,
+                "agent-skills/",
+            )?;
+            written.push("agent-skills/".to_string());
+            for notice in notices {
                 eprintln!("note: {notice}");
             }
-            chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
+            report_partial_writes(
+                chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
+                &written,
+                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
+            )?;
             println!(
                 "synced managed blocks + skills to chelis {version} at {}",
                 root.display()
@@ -4017,14 +4032,30 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
                 Some(p) => p,
                 None => env::current_dir()?,
             };
+            // Fail closed BEFORE the first write (chelis#1263). The bump's edit
+            // sequence used to run until it hit the first missing artifact,
+            // leaving a half-bumped tree behind whichever step died.
+            conform_preflight(&root, "bump")?;
+            let mut written: Vec<String> = Vec::new();
             let changed = chelis_conformance::bump::rewrite_pins(&root, &version)?;
             for p in &changed {
                 println!("repinned {}", p.display());
+                written.push(p.display().to_string());
             }
-            for notice in chelis_conformance::scaffold::materialize_skills(&root)? {
+            let notices = report_partial_writes(
+                chelis_conformance::scaffold::materialize_skills(&root),
+                &written,
+                "agent-skills/",
+            )?;
+            written.push("agent-skills/".to_string());
+            for notice in notices {
                 eprintln!("note: {notice}");
             }
-            chelis_conformance::scaffold::sync_managed_blocks(&root, &version)?;
+            report_partial_writes(
+                chelis_conformance::scaffold::sync_managed_blocks(&root, &version),
+                &written,
+                "the managed blocks in AGENTS.md / docs/CHELIS_SURFACE.md",
+            )?;
             println!("restamped managed blocks + skills to chelis {version}");
 
             // Offline gate, categorized (chelis#655). A failure on a row whose
@@ -4172,6 +4203,43 @@ fn cmd_reef_conform(command: ConformCommand) -> Result<(), Box<dyn std::error::E
         }
     }
     Ok(())
+}
+
+/// Refuse a `conform` write verb on a repo that has not been conformed
+/// (chelis#1263). Runs before the verb's first write, so a refusal leaves the
+/// tree exactly as it found it and the message can say so without qualification.
+fn conform_preflight(root: &Path, verb: &str) -> Result<(), Box<dyn std::error::Error>> {
+    match chelis_conformance::scaffold::preflight_restamp_targets(root) {
+        Ok(()) => Ok(()),
+        Err(missing) => Err(chelis_conformance::scaffold::preflight_failure_message(
+            verb, root, &missing,
+        )
+        .into()),
+    }
+}
+
+/// Attach what the run had already written, and what it was writing when it
+/// failed, to a failure that happens *after* the preflight (chelis#1263). The
+/// preflight makes the common pre-conformance case unreachable here, so this
+/// covers the residue an offline tool cannot preflight away (a read-only file, a
+/// full disk, a concurrent edit). A nonzero exit that abandons an edit sequence
+/// has to say which edits landed; the caller cannot be left to diff the tree.
+fn report_partial_writes<T>(
+    result: Result<T, String>,
+    written: &[String],
+    in_progress: &str,
+) -> Result<T, Box<dyn std::error::Error>> {
+    result.map_err(|e| {
+        let mut msg = e;
+        msg.push_str(&format!(
+            "\nfailed while writing {in_progress}, which may be partially written"
+        ));
+        if !written.is_empty() {
+            msg.push_str("\nalready written by this run: ");
+            msg.push_str(&written.join(", "));
+        }
+        Box::<dyn std::error::Error>::from(msg)
+    })
 }
 
 /// Whether `dir` contains any `.ch` file (recursively).
