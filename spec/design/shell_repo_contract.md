@@ -207,8 +207,13 @@ School exemplar: [`docs/CHELIS_SURFACE.md`](https://github.com/Chelis-Lang/schoo
   Ecosystem set (`chelis_conformance::registry::REGISTRY`), and membership
   in it is exactly the liveness the cite-by-number rule buys: the reference
   resolves in the org, dedupes across sibling shells, and can be re-probed
-  at the next bump. A **bare `#NNN`** and a repo **outside** the registry
-  stay rejected — neither resolves without guessing which tracker was meant.
+  at the next bump. Write a sibling citation **tight**: `coral#27`, with no
+  space around the `#`. Four shells are also ordinary English nouns
+  (`school`, `hull`, `coral`, `whale`), so the spaced form would make prose
+  such as "the school #1 priority" scan as a citation; only `chelis` keeps
+  the older spaced spellings. A **bare `#NNN`** and a repo **outside** the
+  registry stay rejected — neither resolves without guessing which tracker
+  was meant.
   A cascade wave makes sibling blockage the common case rather than an edge
   (seven of eleven registry shells were blocked on one sibling release
   during the 0.18.5 wave), so do **not** manufacture a `docs/issue_drafts/`
@@ -383,9 +388,15 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   file: it survives `sync`, it keeps propagating upstream body changes underneath
   it, and it reaches the agent at the point of use instead of leaving an absence
   the agent cannot interpret. Correspondingly, `[conform]` in `reef.toml` accepts
-  exactly the keys this contract defines (today: `local_skills`); an unrecognized
-  key there **fails** `conform audit` rather than being silently ignored, so a
-  shell can never believe in a control the tool does not implement.
+  exactly the keys this contract defines (today: `local_skills`), in their inline
+  form only; an unrecognized key there **fails** `conform audit` rather than being
+  silently ignored, so a shell can never believe in a control the tool does not
+  implement. "Unrecognized" is spelling-independent: a dotted key
+  (`skills.exclude`), a quoted key (`"exclude"`), and a `[conform.…]` sub-table
+  are each reported, and a key the checker cannot even spell is reported verbatim
+  rather than skipped. Each of those spellings declares the same control; a
+  checker that quietly normalizes or drops what it cannot read is itself the
+  bypass, so this one reports instead.
 - **Shell-specific overrides on a shared skill** (chelis#653): a shell MAY append
   a single trailing `<!-- shell-local:begin -->…<!-- shell-local:end -->` block to
   a shared skill's `SKILL.md` to supersede toolchain guidance that does not fit

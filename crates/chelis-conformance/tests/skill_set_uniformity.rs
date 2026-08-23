@@ -174,6 +174,67 @@ fn every_spelling_of_an_exclusion_key_is_rejected() {
     }
 }
 
+/// The three ordinary TOML spellings that all audited PASS against the first
+/// version of this check. Each declares the exact control §8 denies; each got
+/// through because the key scan normalized what it could not read instead of
+/// reporting it. Renaming the key was never the bypass, the sanitizer was.
+#[test]
+fn ordinary_toml_spellings_of_an_exclusion_are_rejected_too() {
+    let cases: [(&str, &str, &str); 3] = [
+        (
+            "sub-table",
+            "\n[conform.skills]\nexclude = [\"cli-surface\"]\n",
+            "skills",
+        ),
+        (
+            "dotted key",
+            "\n[conform]\nskills.exclude = [\"cli-surface\"]\n",
+            "skills.exclude",
+        ),
+        (
+            "quoted key",
+            "\n[conform]\n\"exclude\" = [\"cli-surface\"]\n",
+            "exclude",
+        ),
+    ];
+    for (label, table, expected) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "spelling");
+        append_conform_table(&root, table);
+        let report = audit::audit(&root);
+        let r = row(&report, "vendored-skills");
+        assert_eq!(
+            r.verdict,
+            Verdict::Fail,
+            "the {label} spelling must be rejected"
+        );
+        assert!(
+            r.diagnostic.contains(expected),
+            "the {label} diagnostic must name {expected:?}: {}",
+            r.diagnostic
+        );
+        assert!(!report.ok(), "the {label} spelling must gate the audit");
+    }
+}
+
+/// A sub-table named after the one recognized key is still a shape the contract
+/// does not define. Without this, `[conform.local_skills]` would launder its
+/// whole body past a name-only check.
+#[test]
+fn a_sub_table_named_after_the_recognized_key_is_still_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "subtable");
+    append_conform_table(&root, "\n[conform.local_skills]\nexclude = [\"x\"]\n");
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("[conform.local_skills]"),
+        "the diagnostic must name the sub-table, not only its inner key: {}",
+        r.diagnostic
+    );
+}
+
 #[test]
 fn the_recognized_conform_key_still_passes() {
     // Negative parity for the unknown-key check: `local_skills` is contract

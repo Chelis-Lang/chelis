@@ -222,7 +222,8 @@ fn remove_path(path: &Path) -> Result<(), String> {
 /// set, so its absence is normal work rather than a missing prerequisite.
 ///
 /// `reef.toml` is listed because [`crate::bump::rewrite_pins`] reads its
-/// `compiler` pin before rewriting anything.
+/// `compiler` pin before rewriting anything, and because both verbs derive the
+/// version they stamp from that pin.
 const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
     ("reef.toml", "the compiler pin `conform bump` rewrites"),
     (
@@ -235,8 +236,18 @@ const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// One prerequisite the write path cannot proceed without.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightGap {
+    /// Repo-relative path of the artifact.
+    pub rel: &'static str,
+    /// Why the verb needs it, and what is wrong with it here.
+    pub reason: String,
+}
+
 /// Preflight the write path on a shell root: every artifact `sync`/`bump`
-/// restamps must already exist (chelis#1263).
+/// restamps must already exist, and `reef.toml` must carry a pin they can read
+/// (chelis#1263).
 ///
 /// **Why this is a separate pass rather than better error handling.** `bump`'s
 /// edit sequence is repin -> materialize skills -> restamp blocks, and each step
@@ -251,41 +262,57 @@ const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
 /// before the first write makes "nothing was written" a structural fact instead
 /// of a claim, so there is nothing to roll back or enumerate.
 ///
-/// Returns the missing artifacts as `(relative path, why it is needed)`.
-pub fn preflight_restamp_targets(root: &Path) -> Result<(), Vec<(&'static str, &'static str)>> {
-    let missing: Vec<(&'static str, &'static str)> = RESTAMPED_ARTIFACTS
-        .iter()
-        .copied()
-        .filter(|(rel, _)| !root.join(rel).is_file())
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(missing)
+/// **Existence is not enough for `reef.toml`.** A shell whose pin is unreadable
+/// (a truncated file, a hand-edit that lost the `=`, a range instead of an exact
+/// pin) has no version for `sync` to stamp. `sync` used to fall back to the
+/// *toolchain's own* version there and stamp the managed blocks with it, exit 0,
+/// which is the same defect class in a quieter form: the shell then carries
+/// blocks claiming a version it never adopted. Requiring a parseable pin makes
+/// the version the shell's, always.
+pub fn preflight_restamp_targets(root: &Path) -> Result<(), Vec<PreflightGap>> {
+    let mut gaps = Vec::new();
+    for (rel, why) in RESTAMPED_ARTIFACTS.iter().copied() {
+        if !root.join(rel).is_file() {
+            gaps.push(PreflightGap {
+                rel,
+                reason: format!("missing: {why}"),
+            });
+        } else if rel == "reef.toml"
+            && crate::audit::parse_compiler_pin(
+                &fs::read_to_string(root.join(rel)).unwrap_or_default(),
+            )
+            .is_none()
+        {
+            gaps.push(PreflightGap {
+                rel,
+                reason: "has no readable `compiler = \"=X.Y.Z\"` pin, so there is no version to \
+                         stamp the managed blocks with"
+                    .to_string(),
+            });
+        }
     }
+    if gaps.is_empty() { Ok(()) } else { Err(gaps) }
 }
 
 /// Render [`preflight_restamp_targets`]'s failure as the message the CLI prints
 /// before exiting nonzero. Lives here so `sync` and `bump` cannot drift into two
 /// different explanations of the same refusal.
-pub fn preflight_failure_message(
-    verb: &str,
-    root: &Path,
-    missing: &[(&'static str, &'static str)],
-) -> String {
+pub fn preflight_failure_message(verb: &str, root: &Path, gaps: &[PreflightGap]) -> String {
     let mut out = format!(
-        "conform {verb} refuses to run on {}: it restamps these files in place, and they are missing:\n",
+        "conform {verb} refuses to run on {}: it restamps files in place, and these are missing or unusable:\n",
         root.display()
     );
-    for (rel, why) in missing {
-        out.push_str(&format!("  {rel}  ({why})\n"));
+    for gap in gaps {
+        out.push_str(&format!("  {}  ({})\n", gap.rel, gap.reason));
     }
     out.push_str(
-        "Nothing was written. This repo has not been conformed yet. For a NEW shell, stamp it \
-         with `chelis reef conform init <name> --module-prefix <Prefix> --output <path>`. On an \
-         EXISTING repo, add the files above by hand first: `conform init` writes the whole \
-         scaffold from its templates and would overwrite reef.toml, AGENTS.md, docs/, and \
-         .github/workflows/. Then re-run this command.",
+        "Nothing was written. This repo is not conformed yet. For a NEW shell, stamp it with \
+         `chelis reef conform init <name> --module-prefix <Prefix> --output <path>`. On an \
+         EXISTING repo, repair the files above by hand first, then re-run this command: \
+         `conform init` writes the WHOLE scaffold from its templates and overwrites every file \
+         it owns, including reef.toml, AGENTS.md, docs/, .github/workflows/, src/main.ch, \
+         tests_neg/, and tests_blocked/, so pointing it at a repo with real source loses that \
+         source.",
     );
     out
 }

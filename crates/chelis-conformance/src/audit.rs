@@ -141,10 +141,10 @@ struct Ctx {
     /// repo-local domain skills the shell owns, which `sync` preserves and §8
     /// exempts from the "not a pinned skill" drift check.
     local_skills: Vec<String>,
-    /// Every key the shell declared in `reef.toml`'s `[conform]` table. §8 fixes
-    /// that set; an unrecognized key is reported rather than ignored, so a shell
-    /// cannot declare a control the tool does not implement (chelis#1262).
-    conform_keys: Vec<String>,
+    /// Every key the shell declared under `reef.toml`'s `[conform]` table. §8
+    /// fixes that set; an unrecognized key is reported rather than ignored, so a
+    /// shell cannot declare a control the tool does not implement (chelis#1262).
+    conform_keys: Vec<ConformKey>,
 }
 
 impl Ctx {
@@ -949,11 +949,14 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
     // pruned skill come back" in one line, and reported as its own failure so
     // the fix text can name the sanctioned alternative instead of the generic
     // "run conform sync".
-    let unknown: Vec<&str> = ctx
+    // A recognized key is recognized only in its inline form: a `[conform.…]`
+    // sub-table declares a shape the contract does not define, even when it is
+    // named after the one key that exists.
+    let unknown: Vec<String> = ctx
         .conform_keys
         .iter()
-        .map(String::as_str)
-        .filter(|k| !CONFORM_TABLE_KEYS.contains(k))
+        .filter(|k| k.from_sub_table || !CONFORM_TABLE_KEYS.contains(&k.path.as_str()))
+        .map(ConformKey::render)
         .collect();
     if !unknown.is_empty() {
         return fail(
@@ -1119,7 +1122,31 @@ pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every key declared in `reef.toml`'s `[conform]` table, in file order
+/// One key the shell declared under `reef.toml`'s `[conform]` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConformKey {
+    /// Dotted path **relative to `conform`**: `exclude`, `skills.exclude`.
+    pub path: String,
+    /// True when the path was declared by a `[conform.…]` sub-table header
+    /// rather than by an inline `key = value`. A recognized key is recognized
+    /// only in its inline form, so a sub-table is always unrecognized even when
+    /// it is named after one (`[conform.local_skills]` declares a table where
+    /// the contract defines an array).
+    pub from_sub_table: bool,
+}
+
+impl ConformKey {
+    /// How the key is spelled back in a diagnostic.
+    pub fn render(&self) -> String {
+        if self.from_sub_table {
+            format!("[conform.{}]", self.path)
+        } else {
+            self.path.clone()
+        }
+    }
+}
+
+/// Every key declared under `reef.toml`'s `[conform]` table, in file order
 /// (chelis#1262). Hand-parsed for the same reason as [`parse_local_skills`] (the
 /// crate has no `toml` dependency), and deliberately *permissive about values*:
 /// it only needs the key names, so a value shape it cannot read still yields the
@@ -1130,39 +1157,84 @@ pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
 /// is exactly why this exists: without it, a shell can write
 /// `[conform] exclude = [...]`, get no error from any tool, and reasonably
 /// conclude the control works.
-pub(crate) fn parse_conform_keys(reef_toml: &str) -> Vec<String> {
+///
+/// **The scan must be permissive, because a sanitizer here IS the bypass.** The
+/// first version normalized what it read: it matched only a bare `[conform]`
+/// header, and it silently DROPPED any key whose characters it could not spell.
+/// Three ordinary TOML spellings therefore audited clean while declaring exactly
+/// the control the contract denies: `[conform.skills]` + `exclude = [...]` (the
+/// sub-table header did not equal `conform`, so the whole table went unread),
+/// `[conform]` + `skills.exclude = [...]` (a dotted key, dropped by the charset
+/// filter), and `[conform]` + `"exclude" = [...]` (a quoted key, same). So:
+/// every header whose first segment is `conform` is in scope, quotes are
+/// stripped per segment before validating, and a key that fails the charset is
+/// reported **verbatim** rather than discarded. Anything this parser cannot
+/// interpret is surfaced to a human, never normalized away.
+pub(crate) fn parse_conform_keys(reef_toml: &str) -> Vec<ConformKey> {
     fn strip_comment(line: &str) -> &str {
         match line.find('#') {
             Some(i) => &line[..i],
             None => line,
         }
     }
-    let mut in_conform = false;
+    /// Strip one layer of matching surrounding quotes from a TOML key segment.
+    fn unquote(seg: &str) -> &str {
+        let s = seg.trim();
+        for q in ['"', '\''] {
+            if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
+                return s[1..s.len() - 1].trim();
+            }
+        }
+        s
+    }
+    fn dotted(raw: &str) -> String {
+        raw.split('.').map(unquote).collect::<Vec<_>>().join(".")
+    }
+
+    // `None` = outside the conform table. `Some(prefix)` = inside it, where
+    // `prefix` is the sub-table path ("" directly under `[conform]`).
+    let mut scope: Option<String> = None;
     let mut depth: i32 = 0;
     let mut keys = Vec::new();
     for raw in reef_toml.lines() {
         let line = strip_comment(raw);
         let t = line.trim();
-        if depth == 0
-            && !t.contains('=')
-            && let Some(header) = t.strip_prefix('[').and_then(|h| h.strip_suffix(']'))
-        {
-            in_conform = header.trim() == "conform";
+        if depth == 0 && !t.contains('=') && t.starts_with('[') && t.ends_with(']') {
+            // Trim repeated brackets so an array-of-tables header
+            // (`[[conform.x]]`) is read the same way as a plain one.
+            let header = t.trim_start_matches('[').trim_end_matches(']');
+            let mut segments = header.split('.').map(unquote);
+            if segments.next().map(str::trim) == Some("conform") {
+                let path = segments.collect::<Vec<_>>().join(".");
+                if !path.is_empty() {
+                    keys.push(ConformKey {
+                        path: path.clone(),
+                        from_sub_table: true,
+                    });
+                }
+                scope = Some(path);
+            } else {
+                scope = None;
+            }
             continue;
         }
-        if !in_conform {
+        let Some(prefix) = scope.as_deref() else {
             continue;
-        }
+        };
         if depth == 0
             && let Some((key, _)) = t.split_once('=')
         {
             let key = key.trim();
-            if !key.is_empty()
-                && key
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                keys.push(key.to_string());
+            if !key.is_empty() {
+                let path = dotted(key);
+                keys.push(ConformKey {
+                    path: if prefix.is_empty() {
+                        path
+                    } else {
+                        format!("{prefix}.{path}")
+                    },
+                    from_sub_table: false,
+                });
             }
         }
         // Track only the conform table's own nesting, so a stray bracket
@@ -1567,8 +1639,20 @@ fn corpus_covers(corpus: &str, citation: &str) -> bool {
 ///   - `chelischelis#5` yields nothing, because that maximal run matches no
 ///     registered repo. (The previous scanner matched it as `chelis#5`.)
 ///
-/// A `Chelis-Lang/` prefix or a full GitHub URL is tolerated: `/` is not a repo
-/// character, so the run stops there and leaves the bare repo name.
+/// **The whitespace tolerance is upstream-only, and that asymmetry is
+/// deliberate.** It exists for chelis#652, where shells had written upstream
+/// cites as `chelis #316`. Extending it to the registry made ordinary English
+/// prose scan as citations, because four shells are also common nouns: a `.ch`
+/// comment reading `the school #1 priority is the hull #3 mesh` produced two
+/// "uncovered narrowing citations" and turned a conformant shell red. A sibling
+/// therefore requires strict `<repo>#NNN` adjacency, with no whitespace on
+/// either side of the `#`; only `chelis` keeps the spaced forms.
+///
+/// A `Chelis-Lang/` prefix, or a repo URL whose fragment is the issue number
+/// (`https://github.com/Chelis-Lang/chelis#1270`), still resolves: `/` is not a
+/// repo character, so the leftward run stops at it and leaves the bare name. A
+/// path-style issue or PR URL (`.../chelis/issues/43`, `.../pull/43`) is NOT a
+/// citation: it carries no `#`, so there is nothing for this scan to anchor on.
 fn scan_citations(text: &str) -> Vec<(String, usize)> {
     fn is_inline_ws(b: u8) -> bool {
         b == b' ' || b == b'\t'
@@ -1576,13 +1660,42 @@ fn scan_citations(text: &str) -> Vec<(String, usize)> {
     fn is_repo_char(b: u8) -> bool {
         b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
     }
+    /// The maximal repo-char run ending at `end`, as `(name, start)`.
+    fn run_ending_at(text: &str, end: usize) -> Option<(&str, usize)> {
+        let bytes = text.as_bytes();
+        let mut start = end;
+        while start > 0 && is_repo_char(bytes[start - 1]) {
+            start -= 1;
+        }
+        (start < end).then(|| (&text[start..end], start))
+    }
+
     let mut out = Vec::new();
     let bytes = text.as_bytes();
     for (hash, _) in text.match_indices('#') {
-        // The issue number, to the right.
+        // The repo name, to the left. Strict adjacency first; that is the only
+        // form a registry sibling may take.
+        let mut repo = run_ending_at(text, hash).filter(|(n, _)| registry::is_citable_repo(n));
+        // Upstream-only whitespace tolerance (chelis#652): `chelis #316`.
+        if repo.is_none() {
+            let mut w = hash;
+            while w > 0 && is_inline_ws(bytes[w - 1]) {
+                w -= 1;
+            }
+            if w < hash {
+                repo = run_ending_at(text, w).filter(|(n, _)| *n == registry::UPSTREAM_REPO);
+            }
+        }
+        let Some((name, start)) = repo else {
+            continue;
+        };
+        // The issue number, to the right. The same upstream-only rule applies:
+        // `chelis # 316` normalizes, `coral # 27` does not.
         let mut j = hash + 1;
-        while j < bytes.len() && is_inline_ws(bytes[j]) {
-            j += 1;
+        if name == registry::UPSTREAM_REPO {
+            while j < bytes.len() && is_inline_ws(bytes[j]) {
+                j += 1;
+            }
         }
         let num_start = j;
         while j < bytes.len() && bytes[j].is_ascii_digit() {
@@ -1591,23 +1704,7 @@ fn scan_citations(text: &str) -> Vec<(String, usize)> {
         if j == num_start {
             continue;
         }
-        // The repo name, to the left.
-        let mut k = hash;
-        while k > 0 && is_inline_ws(bytes[k - 1]) {
-            k -= 1;
-        }
-        let name_end = k;
-        while k > 0 && is_repo_char(bytes[k - 1]) {
-            k -= 1;
-        }
-        if k == name_end {
-            continue;
-        }
-        let name = &text[k..name_end];
-        if !registry::is_citable_repo(name) {
-            continue;
-        }
-        out.push((format!("{name}#{}", &text[num_start..j]), k));
+        out.push((format!("{name}#{}", &text[num_start..j]), start));
     }
     out
 }
@@ -1720,7 +1817,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(cites("blocked on nautilus#43"), vec!["nautilus#43"]);
-        assert_eq!(cites("waiting for coral #27"), vec!["coral#27"]);
+        assert_eq!(cites("waiting for coral#27"), vec!["coral#27"]);
+        // A sibling requires strict adjacency; see
+        // `prose_containing_a_shell_name_before_a_number_is_not_a_citation`.
+        assert!(cites("waiting for coral #27").is_empty());
         // Every registered shell, so adding a shell to REGISTRY widens the
         // grammar with it and this test proves the coupling rather than
         // spot-checking two names.
@@ -1744,6 +1844,42 @@ mod tests {
             cites("https://github.com/Chelis-Lang/chelis#1270 is the issue"),
             vec!["chelis#1270"]
         );
+        // A path-style issue/PR URL carries no `#`, so it is not a citation.
+        assert!(cites("see https://github.com/Chelis-Lang/chelis/pull/43").is_empty());
+        assert!(cites("see https://github.com/Chelis-Lang/nautilus/issues/43").is_empty());
+    }
+
+    /// Four registry shells are also ordinary English nouns, so tolerating
+    /// whitespace before the `#` for siblings made prose scan as citations: a
+    /// `.ch` comment could turn a conformant shell red with two "uncovered
+    /// narrowing citations" it never wrote. Siblings require strict adjacency;
+    /// only `chelis` keeps the chelis#652 spaced forms.
+    #[test]
+    fn prose_containing_a_shell_name_before_a_number_is_not_a_citation() {
+        let cites = |t: &str| {
+            scan_citations(t)
+                .into_iter()
+                .map(|(c, _)| c)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            cites("# the school #1 priority is the hull #3 mesh").is_empty(),
+            "English prose must not scan as citations"
+        );
+        for prose in [
+            "coral #2 in the list",
+            "whale # 7 of the fixtures",
+            "the hull\t#4 case",
+        ] {
+            assert!(cites(prose).is_empty(), "{prose:?} must not scan");
+        }
+        // Strict adjacency still scans, for every shell.
+        assert_eq!(cites("blocked on coral#27"), vec!["coral#27"]);
+        assert_eq!(cites("blocked on school#12"), vec!["school#12"]);
+        // And the upstream spaced forms the tolerance was added for survive.
+        assert_eq!(cites("blocked on chelis #43"), vec!["chelis#43"]);
+        assert_eq!(cites("blocked on chelis # 43"), vec!["chelis#43"]);
+        assert_eq!(cites("blocked on chelis#43"), vec!["chelis#43"]);
     }
 
     /// The negative half of the widening. A grammar that accepts any
@@ -1790,37 +1926,106 @@ mod tests {
         assert!(cites("mychelis#5").is_empty());
     }
 
+    /// `(rendered key, from_sub_table)` for each parsed key.
+    fn conform_keys(toml: &str) -> Vec<(String, bool)> {
+        parse_conform_keys(toml)
+            .into_iter()
+            .map(|k| (k.render(), k.from_sub_table))
+            .collect()
+    }
+
     #[test]
     fn conform_table_keys_are_parsed() {
         // Single-line array value.
         assert_eq!(
-            parse_conform_keys("[conform]\nlocal_skills = [\"chelis-std\"]\n"),
-            vec!["local_skills".to_string()]
+            conform_keys("[conform]\nlocal_skills = [\"chelis-std\"]\n"),
+            vec![("local_skills".to_string(), false)]
         );
         // Multi-line array: its elements are values, not keys.
         assert_eq!(
-            parse_conform_keys(
+            conform_keys(
                 "[package]\nname = \"s\"\n\n[conform]\nlocal_skills = [\n  \"a\",\n  \"b\",\n]\nexclude = [\"cli-surface\"]\n"
             ),
-            vec!["local_skills".to_string(), "exclude".to_string()]
+            vec![
+                ("local_skills".to_string(), false),
+                ("exclude".to_string(), false)
+            ]
         );
         // Keys outside [conform] are not this table's.
-        assert_eq!(
-            parse_conform_keys("[package]\nname = \"s\"\ncompiler = \"=0.1.0\"\n"),
-            Vec::<String>::new()
-        );
+        assert!(conform_keys("[package]\nname = \"s\"\ncompiler = \"=0.1.0\"\n").is_empty());
         // A later table closes the scan.
         assert_eq!(
-            parse_conform_keys(
-                "[conform]\nlocal_skills = []\n\n[dependencies]\nnautilus = \"1\"\n"
-            ),
-            vec!["local_skills".to_string()]
+            conform_keys("[conform]\nlocal_skills = []\n\n[dependencies]\nnautilus = \"1\"\n"),
+            vec![("local_skills".to_string(), false)]
         );
         // Comments do not become keys.
         assert_eq!(
-            parse_conform_keys("[conform]\n# exclude = [\"x\"]\nlocal_skills = []\n"),
-            vec!["local_skills".to_string()]
+            conform_keys("[conform]\n# exclude = [\"x\"]\nlocal_skills = []\n"),
+            vec![("local_skills".to_string(), false)]
         );
+    }
+
+    /// The three spellings that bypassed the first version of this parser. Each
+    /// declares the exclusion control section 8 denies, and each audited clean
+    /// because the parser normalized rather than reported (chelis#1262 review).
+    #[test]
+    fn ordinary_toml_spellings_do_not_escape_the_conform_scan() {
+        // 1. Sub-table header: the whole table used to go unread, because the
+        //    header did not literally equal `conform`.
+        assert_eq!(
+            conform_keys("[conform.skills]\nexclude = [\"cli-surface\"]\n"),
+            vec![
+                ("[conform.skills]".to_string(), true),
+                ("skills.exclude".to_string(), false)
+            ]
+        );
+        // 2. Dotted key: dropped by the charset filter.
+        assert_eq!(
+            conform_keys("[conform]\nskills.exclude = [\"cli-surface\"]\n"),
+            vec![("skills.exclude".to_string(), false)]
+        );
+        // 3. Quoted key: same.
+        assert_eq!(
+            conform_keys("[conform]\n\"exclude\" = [\"cli-surface\"]\n"),
+            vec![("exclude".to_string(), false)]
+        );
+        // Quoted dotted segments normalize per segment.
+        assert_eq!(
+            conform_keys("[conform]\n\"skills\".\'exclude\' = []\n"),
+            vec![("skills.exclude".to_string(), false)]
+        );
+        // An array-of-tables header is read like a plain one.
+        assert_eq!(
+            conform_keys("[[conform.skills]]\nexclude = []\n"),
+            vec![
+                ("[conform.skills]".to_string(), true),
+                ("skills.exclude".to_string(), false)
+            ]
+        );
+        // A sub-table named after the ONE recognized key is still a sub-table,
+        // i.e. a shape the contract does not define. Reported, not laundered.
+        assert_eq!(
+            conform_keys("[conform.local_skills]\nexclude = []\n"),
+            vec![
+                ("[conform.local_skills]".to_string(), true),
+                ("local_skills.exclude".to_string(), false)
+            ]
+        );
+    }
+
+    /// The rule inverted from the first version: a key this parser cannot spell
+    /// is surfaced verbatim, never discarded. An allowlist of key characters can
+    /// never be complete, so the sanitizer must not double as the escape hatch.
+    #[test]
+    fn an_unspellable_key_is_reported_verbatim() {
+        for key in ["skills.exclude", "exclude!", "ex clude", "skip@skills"] {
+            let toml = format!("[conform]\n{key} = []\n");
+            assert_eq!(
+                conform_keys(&toml),
+                vec![(key.to_string(), false)],
+                "{key:?}"
+            );
+        }
     }
 
     #[test]

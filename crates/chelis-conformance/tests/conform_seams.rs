@@ -359,6 +359,43 @@ fn a_hello_chelis_citation_is_not_covered_by_an_upstream_entry() {
     assert_eq!(row(&after, "staleness-audit").verdict, audit::Verdict::Pass);
 }
 
+/// Prose in a shell's own source must not be able to fail its audit. Four
+/// registry shells are also English nouns (`school`, `hull`, `coral`, `whale`),
+/// so a comment listing priorities produced "uncovered narrowing citation(s):
+/// hull#3, school#1" on a conformant tree. Whitespace before the `#` is tolerated
+/// for the upstream repo only.
+#[test]
+fn prose_naming_a_shell_before_a_number_does_not_fail_row_9() {
+    let (_tmp, root) = green_shell();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/thing.ch"),
+        "# the school #1 priority is the hull #3 mesh\ndef x() -> I32 = 1\n",
+    )
+    .unwrap();
+    let report = audit::audit(&root);
+    let r = row(&report, "staleness-audit");
+    assert_eq!(
+        r.verdict,
+        audit::Verdict::Pass,
+        "prose must not scan as citations: {}",
+        r.diagnostic
+    );
+
+    // Negative parity: a real, strictly-adjacent sibling cite in the same file
+    // still fails until it is covered, so the fix narrowed prose, not the rule.
+    std::fs::write(
+        root.join("src/thing.ch"),
+        "# the school #1 priority is the hull #3 mesh\ndef x() -> I32 = fail(\"blocked on hull#3\")\n",
+    )
+    .unwrap();
+    let strict = audit::audit(&root);
+    assert_eq!(
+        row(&strict, "staleness-audit").verdict,
+        audit::Verdict::Fail
+    );
+}
+
 #[test]
 fn an_unregistered_repo_narrowing_is_not_a_citation_at_all() {
     // Negative control: widening to the registry must not turn every

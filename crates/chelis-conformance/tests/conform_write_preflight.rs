@@ -30,8 +30,17 @@ fn stamp(dir: &Path) -> std::path::PathBuf {
 fn missing_names(root: &Path) -> Vec<&'static str> {
     match scaffold::preflight_restamp_targets(root) {
         Ok(()) => Vec::new(),
-        Err(missing) => missing.into_iter().map(|(rel, _)| rel).collect(),
+        Err(gaps) => gaps.into_iter().map(|g| g.rel).collect(),
     }
+}
+
+fn gap_reason(root: &Path, rel: &str) -> String {
+    scaffold::preflight_restamp_targets(root)
+        .expect_err("expected a preflight gap")
+        .into_iter()
+        .find(|g| g.rel == rel)
+        .unwrap_or_else(|| panic!("no gap for {rel}"))
+        .reason
 }
 
 #[test]
@@ -100,17 +109,70 @@ fn a_directory_in_place_of_a_managed_document_is_refused() {
     assert_eq!(missing_names(&root), vec!["AGENTS.md"]);
 }
 
+/// Existence is not enough for `reef.toml`. A shell whose pin is unreadable has
+/// no version for `sync` to stamp, and `sync` used to fall back to the
+/// TOOLCHAIN's version, stamp the managed blocks with it, and exit 0. That is
+/// the same class of defect chelis#1263 names, in a quieter register: the shell
+/// ends up carrying blocks claiming a version it never adopted.
+#[test]
+fn an_unparseable_compiler_pin_is_refused() {
+    for (label, body) in [
+        ("garbage", "not a toml file at all\n"),
+        ("no compiler key", "[package]\nname = \"s\"\n"),
+        ("range pin", "[package]\ncompiler = \">=0.18.0\"\n"),
+        ("no exact marker", "[package]\ncompiler = \"0.18.5\"\n"),
+        ("truncated", "[package]\ncompiler = \"=0.18\"\n"),
+        ("empty", ""),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path());
+        std::fs::write(root.join("reef.toml"), body).unwrap();
+        assert_eq!(
+            missing_names(&root),
+            vec!["reef.toml"],
+            "{label}: an unreadable pin must be refused"
+        );
+        assert!(
+            gap_reason(&root, "reef.toml").contains("no readable"),
+            "{label}: the reason must say the pin is unreadable, not that the file is missing"
+        );
+    }
+}
+
+#[test]
+fn a_readable_pin_that_is_not_the_toolchain_version_still_passes() {
+    // Negative parity for the pin check: the preflight requires a pin it can
+    // READ, not a pin equal to anything. A shell mid-cascade sits on an older
+    // pin and must still be bumpable.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path());
+    std::fs::write(
+        root.join("reef.toml"),
+        "[package]\nname = \"shell\"\ncompiler = \"=0.9.1\"\nmodule_prefix = \"Shell\"\n",
+    )
+    .unwrap();
+    assert!(scaffold::preflight_restamp_targets(&root).is_ok());
+}
+
 #[test]
 fn the_refusal_message_names_the_gap_and_the_repair_verb() {
     let tmp = tempfile::tempdir().unwrap();
     let root = stamp(tmp.path());
     std::fs::remove_file(root.join("docs/CHELIS_SURFACE.md")).unwrap();
-    let missing = scaffold::preflight_restamp_targets(&root).unwrap_err();
-    let msg = scaffold::preflight_failure_message("bump", &root, &missing);
+    let gaps = scaffold::preflight_restamp_targets(&root).unwrap_err();
+    let msg = scaffold::preflight_failure_message("bump", &root, &gaps);
     assert!(msg.contains("docs/CHELIS_SURFACE.md"), "{msg}");
     assert!(msg.contains("Nothing was written"), "{msg}");
     assert!(
         msg.contains("chelis reef conform init"),
         "the message must name the repair verb: {msg}"
     );
+    // And must not steer a retrofit agent into losing real source: `init`
+    // rewrites the whole scaffold surface, source and tests included.
+    for owned in ["src/main.ch", "tests_neg/", "tests_blocked/"] {
+        assert!(
+            msg.contains(owned),
+            "the message must warn that init overwrites {owned}: {msg}"
+        );
+    }
 }

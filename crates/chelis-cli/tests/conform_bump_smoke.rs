@@ -294,6 +294,42 @@ fn bump_names_every_missing_artifact_in_one_refusal() {
     assert_unchanged(&root, &before);
 }
 
+/// `reef.toml` present but unreadable. This is the quiet half of the same
+/// defect: `sync` used to fall back to the TOOLCHAIN's version, stamp the
+/// managed blocks with it, and exit 0, leaving the shell carrying blocks for a
+/// version it never adopted; `bump` failed with a bare parse message that
+/// neither said nothing had been written nor pointed anywhere.
+#[test]
+fn both_verbs_refuse_an_unparseable_compiler_pin_and_write_nothing() {
+    for verb in ["bump", "sync"] {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("shell");
+        pre_conformance_shell(&root, &[]);
+        std::fs::write(root.join("reef.toml"), "[package]\nname = \"shell\"\n").unwrap();
+        let before = snapshot(&root);
+
+        let mut cmd = Command::cargo_bin("chelis").expect("binary");
+        cmd.args(["reef", "conform", verb]);
+        if verb == "bump" {
+            cmd.arg(chelis_compiler_api::COMPILER_VERSION);
+        }
+        cmd.arg("--path")
+            .arg(&root)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("reef.toml"))
+            .stderr(predicate::str::contains("Nothing was written"))
+            .stderr(predicate::str::contains("chelis reef conform init"));
+
+        assert_unchanged(&root, &before);
+        let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        assert!(
+            !agents.contains(chelis_compiler_api::COMPILER_VERSION),
+            "{verb} must not stamp the toolchain version onto a shell with no readable pin"
+        );
+    }
+}
+
 /// Negative parity for every refusal above: a fully conformed shell still bumps
 /// cleanly, exit 0, with the pins actually rewritten. A preflight that blocked a
 /// normal bump would be a worse defect than the partial write it replaces.
