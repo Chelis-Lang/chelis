@@ -85,10 +85,19 @@ pub(crate) fn split_shell_local(content: &str) -> (&str, Option<&str>) {
 /// changed underneath a shell-local override, and any un-materialized skill it
 /// pruned.
 pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
-    let local_skills = fs::read_to_string(root.join("reef.toml"))
-        .ok()
-        .map(|t| crate::audit::parse_local_skills(&t))
-        .unwrap_or_default();
+    // The `[conform] local_skills` allowlist, read from the PARSED manifest so
+    // `sync` and `audit` cannot disagree about what the shell declared
+    // (chelis#1262). An absent reef.toml declares nothing; a PRESENT one that
+    // does not parse is an error, not an empty declaration, because silently
+    // reading it as empty would prune a repo-local skill the shell did declare.
+    let local_skills = match fs::read_to_string(root.join("reef.toml")) {
+        Ok(text) => crate::conform::parse(&text)
+            .map_err(|e| {
+                format!("reef.toml does not parse as TOML, so `[conform] local_skills` cannot be read: {e}")
+            })?
+            .local_skills,
+        Err(_) => Vec::new(),
+    };
     let mut notices = Vec::new();
     // Sampled ONCE, before the loop: the first written skill creates
     // `agent-skills/`, so testing it inside the loop would report every skill
@@ -277,18 +286,25 @@ pub fn preflight_restamp_targets(root: &Path) -> Result<(), Vec<PreflightGap>> {
                 rel,
                 reason: format!("missing: {why}"),
             });
-        } else if rel == "reef.toml"
-            && crate::audit::parse_compiler_pin(
-                &fs::read_to_string(root.join(rel)).unwrap_or_default(),
-            )
-            .is_none()
-        {
-            gaps.push(PreflightGap {
-                rel,
-                reason: "has no readable `compiler = \"=X.Y.Z\"` pin, so there is no version to \
-                         stamp the managed blocks with"
-                    .to_string(),
-            });
+        } else if rel == "reef.toml" {
+            let text = fs::read_to_string(root.join(rel)).unwrap_or_default();
+            if let Err(e) = crate::conform::parse(&text) {
+                // A manifest this tool cannot parse is not a manifest it may
+                // half-apply a bump to: `materialize_skills` reads the
+                // `[conform] local_skills` allowlist out of it, so proceeding
+                // would prune a repo-local skill the shell did declare.
+                gaps.push(PreflightGap {
+                    rel,
+                    reason: format!("does not parse as TOML: {e}"),
+                });
+            } else if crate::audit::parse_compiler_pin(&text).is_none() {
+                gaps.push(PreflightGap {
+                    rel,
+                    reason: "has no readable `compiler = \"=X.Y.Z\"` pin, so there is no version \
+                             to stamp the managed blocks with"
+                        .to_string(),
+                });
+            }
         }
     }
     if gaps.is_empty() { Ok(()) } else { Err(gaps) }

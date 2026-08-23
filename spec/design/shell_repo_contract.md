@@ -387,16 +387,26 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   override block (below) saying so. That is strictly better than deleting the
   file: it survives `sync`, it keeps propagating upstream body changes underneath
   it, and it reaches the agent at the point of use instead of leaving an absence
-  the agent cannot interpret. Correspondingly, `[conform]` in `reef.toml` accepts
-  exactly the keys this contract defines (today: `local_skills`), in their inline
-  form only; an unrecognized key there **fails** `conform audit` rather than being
-  silently ignored, so a shell can never believe in a control the tool does not
-  implement. "Unrecognized" is spelling-independent: a dotted key
-  (`skills.exclude`), a quoted key (`"exclude"`), and a `[conform.…]` sub-table
-  are each reported, and a key the checker cannot even spell is reported verbatim
-  rather than skipped. Each of those spellings declares the same control; a
-  checker that quietly normalizes or drops what it cannot read is itself the
-  bypass, so this one reports instead.
+  the agent cannot interpret. Correspondingly, the **top-level `conform` value**
+  in `reef.toml` carries exactly the declarations this contract defines. Today
+  there is one: **`conform.local_skills`, an array of strings** (§8's repo-local
+  domain-skill allowlist). Anything else under `conform` — any key, at any
+  nesting depth — **fails** `conform audit` rather than being silently ignored,
+  so a shell can never believe in a control the tool does not implement.
+  Recognition is by **key path and value type**, not by spelling: the manifest is
+  parsed as TOML and the parsed value is what is checked, so a header
+  (`[conform]`), an inline table (`conform = { … }`), a dotted key
+  (`conform.local_skills = …`), a quoted key (`"local_skills"`), a sub-table
+  (`[conform.skills]`), and an array-of-tables all reach the same answer. A
+  *table* at `local_skills` is therefore unrecognized, because the recognized
+  declaration's value type is an array. A `conform` table that is not the
+  top-level one (`package.conform`, which is what a dotted `conform.exclude`
+  written after a table header actually declares) controls nothing and is
+  reported as such. A `reef.toml` that does not parse **fails this row** with the
+  parse error: §8 cannot be checked against a file the tool cannot read, and
+  reading an unreadable manifest as "declares nothing" would be a silent pass on
+  a MUST row. The rule behind all of that is one sentence: **a checker that
+  quietly normalizes or drops what it cannot read is itself the bypass.**
 - **Shell-specific overrides on a shared skill** (chelis#653): a shell MAY append
   a single trailing `<!-- shell-local:begin -->…<!-- shell-local:end -->` block to
   a shared skill's `SKILL.md` to supersede toolchain guidance that does not fit

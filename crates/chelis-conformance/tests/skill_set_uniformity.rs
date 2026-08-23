@@ -42,6 +42,33 @@ fn append_conform_table(root: &Path, body: &str) {
     std::fs::write(&path, text).unwrap();
 }
 
+/// Write `body` at the TOP of reef.toml, before `[package]`. Header-less
+/// spellings (`conform = { … }`, `conform.exclude = …`) belong to whichever
+/// table precedes them, so only here are they the top-level `conform` value.
+/// Appending them instead makes them `package.conform`, which is a different
+/// declaration and is covered by its own test.
+fn prepend_to_reef(root: &Path, body: &str) {
+    let path = root.join("reef.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{body}\n{text}")).unwrap();
+}
+
+/// Where a snippet goes in the fixture's reef.toml.
+#[derive(Clone, Copy)]
+enum At {
+    /// Before `[package]`: the snippet's keys are top-level.
+    Top,
+    /// After everything: header-less keys land under the last table.
+    End,
+}
+
+fn write_snippet(root: &Path, at: At, body: &str) {
+    match at {
+        At::Top => prepend_to_reef(root, body),
+        At::End => append_conform_table(root, body),
+    }
+}
+
 // ---------------------------------------------------------------- 1. no prune
 
 #[test]
@@ -174,33 +201,119 @@ fn every_spelling_of_an_exclusion_key_is_rejected() {
     }
 }
 
-/// The three ordinary TOML spellings that all audited PASS against the first
-/// version of this check. Each declares the exact control §8 denies; each got
-/// through because the key scan normalized what it could not read instead of
-/// reporting it. Renaming the key was never the bypass, the sanitizer was.
+/// Every TOML spelling of the control §8 denies, end to end through the audit.
+///
+/// Two review rounds produced six of these against a hand-rolled line scan, each
+/// one closed by a patch that left the next one open. The list is kept whole and
+/// run against the structural parse, where spelling-independence is a property
+/// of the parse rather than of an enumeration. The last three are the round-2
+/// finds: they never reached the old scan at all, because it only entered scope
+/// on a `[conform]` table HEADER, and header-less forms are ordinary TOML idiom.
 #[test]
 fn ordinary_toml_spellings_of_an_exclusion_are_rejected_too() {
-    let cases: [(&str, &str, &str); 3] = [
+    let cases: &[(&str, At, &str, &str)] = &[
+        // --- round 1: reached the scan, got past it.
         (
-            "sub-table",
+            "sub-table header",
+            At::End,
             "\n[conform.skills]\nexclude = [\"cli-surface\"]\n",
-            "skills",
+            "conform.skills.exclude",
         ),
         (
             "dotted key",
+            At::End,
             "\n[conform]\nskills.exclude = [\"cli-surface\"]\n",
-            "skills.exclude",
+            "conform.skills.exclude",
         ),
         (
             "quoted key",
+            At::End,
             "\n[conform]\n\"exclude\" = [\"cli-surface\"]\n",
-            "exclude",
+            "conform.exclude",
+        ),
+        (
+            "literal-quoted key",
+            At::End,
+            "\n[conform]\n'exclude' = [\"cli-surface\"]\n",
+            "conform.exclude",
+        ),
+        // --- round 2 (a): never reached the scan, which only entered scope on a
+        // table HEADER. These are ordinary TOML idiom, not exotic spellings.
+        (
+            "header-less inline table",
+            At::Top,
+            "conform = { exclude = [\"cli-surface\"] }\n",
+            "conform.exclude",
+        ),
+        (
+            "header-less dotted key",
+            At::Top,
+            "conform.exclude = [\"cli-surface\"]\n",
+            "conform.exclude",
+        ),
+        (
+            "header-less dotted sub-table",
+            At::Top,
+            "conform.skills.exclude = [\"cli-surface\"]\n",
+            "conform.skills.exclude",
+        ),
+        (
+            "inline table beside the recognized key",
+            At::Top,
+            "conform = { local_skills = [\"x\"], exclude = [\"cli-surface\"] }\n",
+            "conform.exclude",
+        ),
+        // --- round 2 (b): a bracket inside a STRING desynchronized a raw depth
+        // counter, so every later key was swallowed. One crafted prefix line
+        // re-opened the round-1 finding verbatim.
+        (
+            "bracket in a string value, then exclude",
+            At::End,
+            "\n[conform]\nlocal_skills = [\"a[\"]\nexclude = [\"cli-surface\"]\n",
+            "conform.exclude",
+        ),
+        (
+            "hash in a string value, then exclude",
+            At::End,
+            "\n[conform]\nlocal_skills = [\"a#b\"]\nexclude = [\"cli-surface\"]\n",
+            "conform.exclude",
+        ),
+        (
+            "brace in a string value, then a sub-table",
+            At::End,
+            "\n[conform]\nlocal_skills = [\"a{\"]\n\n[conform.skills]\nexclude = [\"x\"]\n",
+            "conform.skills.exclude",
+        ),
+        // --- other shapes worth locking.
+        (
+            "array-of-tables",
+            At::End,
+            "\n[[conform.x]]\nexclude = [\"cli-surface\"]\n",
+            "conform.x",
+        ),
+        (
+            "inline table value under a header",
+            At::End,
+            "\n[conform]\nskills = { exclude = [\"cli-surface\"] }\n",
+            "conform.skills.exclude",
+        ),
+        (
+            "spaced header",
+            At::End,
+            "\n[ conform ]\nexclude = [\"cli-surface\"]\n",
+            "conform.exclude",
+        ),
+        (
+            "quoted header",
+            At::End,
+            "\n[\"conform\"]\nexclude = [\"cli-surface\"]\n",
+            "conform.exclude",
         ),
     ];
-    for (label, table, expected) in cases {
+    for (label, at, table, expected) in cases {
         let tmp = tempfile::tempdir().unwrap();
         let root = stamp(tmp.path(), "spelling");
-        append_conform_table(&root, table);
+        write_snippet(&root, *at, table);
         let report = audit::audit(&root);
         let r = row(&report, "vendored-skills");
         assert_eq!(
@@ -217,9 +330,106 @@ fn ordinary_toml_spellings_of_an_exclusion_are_rejected_too() {
     }
 }
 
+/// A `conform` table BELOW the top level controls nothing, which is exactly what
+/// `conform.exclude = [...]` becomes when written after a table header. Silence
+/// there would be the same defect one level down, so it is reported.
+#[test]
+fn a_conform_table_under_another_table_is_reported() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "nested");
+    // Appended AFTER [package], so TOML reads it as `package.conform`.
+    append_conform_table(&root, "conform.exclude = [\"cli-surface\"]\n");
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("package.conform") && r.diagnostic.contains("controls nothing"),
+        "the diagnostic must say where it landed and that it is inert: {}",
+        r.diagnostic
+    );
+}
+
+/// A manifest this tool cannot parse cannot be audited against §8, so the row
+/// fails closed and names the parse error. Reading an unreadable file as
+/// "declares nothing" would be a silent pass on a MUST row.
+#[test]
+fn an_unparseable_manifest_fails_the_row_loudly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "broken");
+    std::fs::write(root.join("reef.toml"), "[conform\nlocal_skills = [\n").unwrap();
+    let report = audit::audit(&root);
+    let r = row(&report, "vendored-skills");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("does not parse as TOML"),
+        "diag: {}",
+        r.diagnostic
+    );
+    assert!(!report.ok());
+}
+
+/// The two parsers used to disagree: `'local_skills'` was RECOGNIZED by the key
+/// scan (quote-stripped) but not HONORED by the allowlist scan (literal match),
+/// so an author got a row-14 failure telling them to do what they had just done.
+/// One structural parse cannot disagree with itself.
+#[test]
+fn a_non_canonical_spelling_of_local_skills_is_honored_not_just_tolerated() {
+    for (label, at, table) in [
+        (
+            "literal-quoted",
+            At::End,
+            "\n[conform]\n'local_skills' = [\"domain\"]\n",
+        ),
+        (
+            "basic-quoted",
+            At::End,
+            "\n[conform]\n\"local_skills\" = [\"domain\"]\n",
+        ),
+        (
+            "header-less inline table",
+            At::Top,
+            "conform = { local_skills = [\"domain\"] }\n",
+        ),
+        (
+            "header-less dotted",
+            At::Top,
+            "conform.local_skills = [\"domain\"]\n",
+        ),
+        (
+            "multi-line array",
+            At::End,
+            "\n[conform]\nlocal_skills = [\n  \"domain\",\n]\n",
+        ),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "honored");
+        write_snippet(&root, at, table);
+        // Plant the repo-local domain skill only `local_skills` can legitimize.
+        std::fs::create_dir_all(root.join("agent-skills/domain")).unwrap();
+        std::fs::write(root.join("agent-skills/domain/SKILL.md"), "# domain\n").unwrap();
+
+        let report = audit::audit(&root);
+        assert_eq!(
+            row(&report, "vendored-skills").verdict,
+            Verdict::Pass,
+            "the {label} spelling must be honored, not reported: {}",
+            row(&report, "vendored-skills").diagnostic
+        );
+
+        // And `sync` must agree: the declared skill survives materialization.
+        scaffold::materialize_skills(&root).expect("materialize");
+        assert!(
+            root.join("agent-skills/domain/SKILL.md").is_file(),
+            "the {label} spelling must also be honored by sync"
+        );
+    }
+}
+
 /// A sub-table named after the one recognized key is still a shape the contract
-/// does not define. Without this, `[conform.local_skills]` would launder its
-/// whole body past a name-only check.
+/// does not define. With a structural parse the distinction is no longer
+/// "sub-table vs inline key" (there are no spellings after parsing) but VALUE
+/// TYPE: `conform.local_skills` is an array of strings, so a table there is
+/// unrecognized and cannot launder its body past a name-only check.
 #[test]
 fn a_sub_table_named_after_the_recognized_key_is_still_rejected() {
     let tmp = tempfile::tempdir().unwrap();
@@ -229,8 +439,9 @@ fn a_sub_table_named_after_the_recognized_key_is_still_rejected() {
     let r = row(&report, "vendored-skills");
     assert_eq!(r.verdict, Verdict::Fail);
     assert!(
-        r.diagnostic.contains("[conform.local_skills]"),
-        "the diagnostic must name the sub-table, not only its inner key: {}",
+        r.diagnostic.contains("conform.local_skills")
+            && r.diagnostic.contains("expected an array of strings"),
+        "the diagnostic must name the key and the shape it required: {}",
         r.diagnostic
     );
 }

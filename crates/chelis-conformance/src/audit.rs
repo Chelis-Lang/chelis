@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{CONTRACT_BASELINE_VERSION, ContractRow, MANIFEST, Tier};
-use crate::{canonical, managed_block, registry, skills};
+use crate::{canonical, conform, managed_block, registry, skills};
 
 /// The version of the toolchain performing the audit — the crate's own build
 /// version, which equals `chelis_compiler_api::COMPILER_VERSION` (both are the
@@ -137,14 +137,11 @@ struct Ctx {
     cargo_toml: Option<String>,
     /// `(filename, contents)` for every `.github/workflows/*.yml`.
     workflows: Vec<(String, String)>,
-    /// The `[conform] local_skills` allowlist from `reef.toml` (chelis#651):
-    /// repo-local domain skills the shell owns, which `sync` preserves and §8
-    /// exempts from the "not a pinned skill" drift check.
-    local_skills: Vec<String>,
-    /// Every key the shell declared under `reef.toml`'s `[conform]` table. §8
-    /// fixes that set; an unrecognized key is reported rather than ignored, so a
-    /// shell cannot declare a control the tool does not implement (chelis#1262).
-    conform_keys: Vec<ConformKey>,
+    /// The `conform` control surface parsed out of `reef.toml` (chelis#1262).
+    /// `None` when there is no `reef.toml` at all (row 2 owns that); `Some(Err)`
+    /// when the manifest does not parse, which §8 must report rather than read
+    /// as an empty declaration.
+    conform: Option<Result<conform::ConformDecl, String>>,
 }
 
 impl Ctx {
@@ -152,14 +149,7 @@ impl Ctx {
         let reef_toml = read_opt(&root.join("reef.toml"));
         let reef_pin = reef_toml.as_deref().and_then(parse_compiler_pin);
         let shell_name = reef_toml.as_deref().and_then(parse_package_name);
-        let local_skills = reef_toml
-            .as_deref()
-            .map(parse_local_skills)
-            .unwrap_or_default();
-        let conform_keys = reef_toml
-            .as_deref()
-            .map(parse_conform_keys)
-            .unwrap_or_default();
+        let conform = reef_toml.as_deref().map(conform::parse);
         let agents_md = read_opt(&root.join("AGENTS.md"));
         let claude_symlink_ok = claude_is_symlink_to_agents(root);
         let cargo_toml = read_opt(&root.join("Cargo.toml"));
@@ -173,8 +163,18 @@ impl Ctx {
             reef_toml,
             cargo_toml,
             workflows,
-            local_skills,
-            conform_keys,
+            conform,
+        }
+    }
+
+    /// The recognized `conform.local_skills` declaration, or empty when there is
+    /// no manifest, no declaration, or a manifest that does not parse. §8's own
+    /// row reports the unparseable case; the drift scan must not additionally
+    /// treat an unreadable file as an allowlist.
+    fn local_skills(&self) -> &[String] {
+        match &self.conform {
+            Some(Ok(decl)) => &decl.local_skills,
+            _ => &[],
         }
     }
 
@@ -934,11 +934,6 @@ fn check_agents_heading(ctx: &Ctx, heading: &str) -> Check {
     }
 }
 
-/// Every key contract §8 defines for `reef.toml`'s `[conform]` table. The table
-/// is this tool's own configuration surface, so the closed list lives with the
-/// checker that enforces it; widening it is a contract amendment.
-const CONFORM_TABLE_KEYS: &[&str] = &["local_skills"];
-
 fn check_vendored_skills(ctx: &Ctx) -> Check {
     let skills_dir = ctx.root.join("agent-skills");
     let mut problems = Vec::new();
@@ -949,32 +944,44 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
     // pruned skill come back" in one line, and reported as its own failure so
     // the fix text can name the sanctioned alternative instead of the generic
     // "run conform sync".
-    // A recognized key is recognized only in its inline form: a `[conform.…]`
-    // sub-table declares a shape the contract does not define, even when it is
-    // named after the one key that exists.
-    let unknown: Vec<String> = ctx
-        .conform_keys
-        .iter()
-        .filter(|k| k.from_sub_table || !CONFORM_TABLE_KEYS.contains(&k.path.as_str()))
-        .map(ConformKey::render)
-        .collect();
-    if !unknown.is_empty() {
-        return fail(
-            format!(
-                "reef.toml [conform] declares unrecognized key(s): {}. Recognized: {}",
-                unknown.join(", "),
-                CONFORM_TABLE_KEYS.join(", ")
-            ),
-            "the shared skill set is uniform by design (contract §8) and there is no exclusion \
-             control, so a key like `exclude`/`skip_skills` would be silently overridden by the \
-             next `conform sync`. Remove the key. To record that a shared skill does not fit this \
-             shell, append a trailing `<!-- shell-local:begin -->` block to its SKILL.md saying \
-             so: that survives sync and reaches the agent at the point of use.",
-        );
+    //
+    // The declaration is read from the PARSED manifest, so the answer does not
+    // depend on how it was spelled. An unparseable manifest fails here rather
+    // than reading as "declares nothing": §8 cannot be checked against a file
+    // this tool cannot read, and a silent pass on a MUST row is the failure this
+    // whole row exists to prevent.
+    match &ctx.conform {
+        None => {}
+        Some(Err(parse_error)) => {
+            return fail(
+                format!(
+                    "reef.toml does not parse as TOML, so the `conform` control surface cannot be \
+                     read: {parse_error}"
+                ),
+                "fix the manifest. Until it parses, no tool can tell whether this shell declares \
+                 a conformance control, so §8 cannot be audited and this row fails closed.",
+            );
+        }
+        Some(Ok(decl)) if !decl.is_clean() => {
+            return fail(
+                format!(
+                    "reef.toml declares conformance control(s) contract §8 does not define: {}. \
+                     The only recognized declaration is `conform.local_skills`, an array of \
+                     strings.",
+                    decl.findings().join(", ")
+                ),
+                "the shared skill set is uniform by design (contract §8) and there is no exclusion \
+                 control, so a key like `exclude`/`skip_skills` would be silently overridden by the \
+                 next `conform sync`. Remove the declaration. To record that a shared skill does \
+                 not fit this shell, append a trailing `<!-- shell-local:begin -->` block to its \
+                 SKILL.md saying so: that survives sync and reaches the agent at the point of use.",
+            );
+        }
+        Some(Ok(_)) => {}
     }
     // A `local_skills` entry may not shadow a shared skill — that would let a
     // shell "own" (and silently fork) toolchain-managed content (chelis#651).
-    for local in &ctx.local_skills {
+    for local in ctx.local_skills() {
         if skills::SHARED_SKILLS.contains(&local.as_str()) {
             problems.push(format!(
                 "{local}: [conform] local_skills may not name a shared skill"
@@ -1019,7 +1026,7 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
                             }
                         }
                     }
-                } else if ctx.local_skills.iter().any(|s| s == &name) {
+                } else if ctx.local_skills().iter().any(|s| s == &name) {
                     // Repo-local domain skill (chelis#651): shell-owned, exempt.
                 } else {
                     problems.push(format!(
@@ -1055,200 +1062,6 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
         }
     }
     pass()
-}
-
-/// Parse the `local_skills` allowlist from a `[conform]` table in `reef.toml`
-/// (chelis#651). Hand-parsed — the crate has no `toml` dependency — accepting a
-/// single- or multi-line array of double- or single-quoted names, tolerating
-/// inline `#` comments. `chelis-reef` ignores the `[conform]` table (no
-/// `deny_unknown_fields`), so this is its only reader.
-pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
-    // Skill names and TOML table headers never contain `#`, and the values are
-    // quoted names, so a bare `#` starts a comment. Cutting each physical line
-    // there keeps an inline comment from corrupting the entry that follows it in
-    // a multi-line array. (Narrow but sufficient; the crate has no TOML parser.)
-    fn strip_comment(line: &str) -> &str {
-        match line.find('#') {
-            Some(i) => &line[..i],
-            None => line,
-        }
-    }
-    let mut in_conform = false;
-    let mut collecting = false;
-    let mut buf = String::new();
-    for raw in reef_toml.lines() {
-        let line = strip_comment(raw);
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            // A new table header while still collecting means the array was
-            // never closed (malformed) — stop rather than swallow the header's
-            // name as a phantom skill.
-            if collecting {
-                break;
-            }
-            in_conform = t == "[conform]";
-            continue;
-        }
-        if !in_conform {
-            continue;
-        }
-        if collecting {
-            buf.push_str(line);
-            buf.push('\n');
-            if line.contains(']') {
-                break;
-            }
-        } else if let Some(rest) = t.strip_prefix("local_skills")
-            && let Some(rest) = rest.trim_start().strip_prefix('=')
-        {
-            buf.push_str(rest);
-            buf.push('\n');
-            if rest.contains(']') {
-                break;
-            }
-            collecting = true;
-        }
-    }
-    let (Some(open), Some(close)) = (buf.find('['), buf.rfind(']')) else {
-        return Vec::new();
-    };
-    if close < open {
-        return Vec::new();
-    }
-    buf[open + 1..close]
-        .split(',')
-        .map(|s| s.trim().trim_matches(['"', '\'']).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// One key the shell declared under `reef.toml`'s `[conform]` table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConformKey {
-    /// Dotted path **relative to `conform`**: `exclude`, `skills.exclude`.
-    pub path: String,
-    /// True when the path was declared by a `[conform.…]` sub-table header
-    /// rather than by an inline `key = value`. A recognized key is recognized
-    /// only in its inline form, so a sub-table is always unrecognized even when
-    /// it is named after one (`[conform.local_skills]` declares a table where
-    /// the contract defines an array).
-    pub from_sub_table: bool,
-}
-
-impl ConformKey {
-    /// How the key is spelled back in a diagnostic.
-    pub fn render(&self) -> String {
-        if self.from_sub_table {
-            format!("[conform.{}]", self.path)
-        } else {
-            self.path.clone()
-        }
-    }
-}
-
-/// Every key declared under `reef.toml`'s `[conform]` table, in file order
-/// (chelis#1262). Hand-parsed for the same reason as [`parse_local_skills`] (the
-/// crate has no `toml` dependency), and deliberately *permissive about values*:
-/// it only needs the key names, so a value shape it cannot read still yields the
-/// key. Multi-line values are skipped by bracket/brace depth so an array element
-/// is never mistaken for a key.
-///
-/// `chelis-reef` ignores `[conform]` entirely (no `deny_unknown_fields`), which
-/// is exactly why this exists: without it, a shell can write
-/// `[conform] exclude = [...]`, get no error from any tool, and reasonably
-/// conclude the control works.
-///
-/// **The scan must be permissive, because a sanitizer here IS the bypass.** The
-/// first version normalized what it read: it matched only a bare `[conform]`
-/// header, and it silently DROPPED any key whose characters it could not spell.
-/// Three ordinary TOML spellings therefore audited clean while declaring exactly
-/// the control the contract denies: `[conform.skills]` + `exclude = [...]` (the
-/// sub-table header did not equal `conform`, so the whole table went unread),
-/// `[conform]` + `skills.exclude = [...]` (a dotted key, dropped by the charset
-/// filter), and `[conform]` + `"exclude" = [...]` (a quoted key, same). So:
-/// every header whose first segment is `conform` is in scope, quotes are
-/// stripped per segment before validating, and a key that fails the charset is
-/// reported **verbatim** rather than discarded. Anything this parser cannot
-/// interpret is surfaced to a human, never normalized away.
-pub(crate) fn parse_conform_keys(reef_toml: &str) -> Vec<ConformKey> {
-    fn strip_comment(line: &str) -> &str {
-        match line.find('#') {
-            Some(i) => &line[..i],
-            None => line,
-        }
-    }
-    /// Strip one layer of matching surrounding quotes from a TOML key segment.
-    fn unquote(seg: &str) -> &str {
-        let s = seg.trim();
-        for q in ['"', '\''] {
-            if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
-                return s[1..s.len() - 1].trim();
-            }
-        }
-        s
-    }
-    fn dotted(raw: &str) -> String {
-        raw.split('.').map(unquote).collect::<Vec<_>>().join(".")
-    }
-
-    // `None` = outside the conform table. `Some(prefix)` = inside it, where
-    // `prefix` is the sub-table path ("" directly under `[conform]`).
-    let mut scope: Option<String> = None;
-    let mut depth: i32 = 0;
-    let mut keys = Vec::new();
-    for raw in reef_toml.lines() {
-        let line = strip_comment(raw);
-        let t = line.trim();
-        if depth == 0 && !t.contains('=') && t.starts_with('[') && t.ends_with(']') {
-            // Trim repeated brackets so an array-of-tables header
-            // (`[[conform.x]]`) is read the same way as a plain one.
-            let header = t.trim_start_matches('[').trim_end_matches(']');
-            let mut segments = header.split('.').map(unquote);
-            if segments.next().map(str::trim) == Some("conform") {
-                let path = segments.collect::<Vec<_>>().join(".");
-                if !path.is_empty() {
-                    keys.push(ConformKey {
-                        path: path.clone(),
-                        from_sub_table: true,
-                    });
-                }
-                scope = Some(path);
-            } else {
-                scope = None;
-            }
-            continue;
-        }
-        let Some(prefix) = scope.as_deref() else {
-            continue;
-        };
-        if depth == 0
-            && let Some((key, _)) = t.split_once('=')
-        {
-            let key = key.trim();
-            if !key.is_empty() {
-                let path = dotted(key);
-                keys.push(ConformKey {
-                    path: if prefix.is_empty() {
-                        path
-                    } else {
-                        format!("{prefix}.{path}")
-                    },
-                    from_sub_table: false,
-                });
-            }
-        }
-        // Track only the conform table's own nesting, so a stray bracket
-        // elsewhere in reef.toml can never desynchronize this scan.
-        for b in t.bytes() {
-            match b {
-                b'[' | b'{' => depth += 1,
-                b']' | b'}' => depth -= 1,
-                _ => {}
-            }
-        }
-        depth = depth.max(0);
-    }
-    keys
 }
 
 /// A trailing shell-local block (chelis#653) must be well-formed: exactly one
@@ -1926,108 +1739,6 @@ mod tests {
         assert!(cites("mychelis#5").is_empty());
     }
 
-    /// `(rendered key, from_sub_table)` for each parsed key.
-    fn conform_keys(toml: &str) -> Vec<(String, bool)> {
-        parse_conform_keys(toml)
-            .into_iter()
-            .map(|k| (k.render(), k.from_sub_table))
-            .collect()
-    }
-
-    #[test]
-    fn conform_table_keys_are_parsed() {
-        // Single-line array value.
-        assert_eq!(
-            conform_keys("[conform]\nlocal_skills = [\"chelis-std\"]\n"),
-            vec![("local_skills".to_string(), false)]
-        );
-        // Multi-line array: its elements are values, not keys.
-        assert_eq!(
-            conform_keys(
-                "[package]\nname = \"s\"\n\n[conform]\nlocal_skills = [\n  \"a\",\n  \"b\",\n]\nexclude = [\"cli-surface\"]\n"
-            ),
-            vec![
-                ("local_skills".to_string(), false),
-                ("exclude".to_string(), false)
-            ]
-        );
-        // Keys outside [conform] are not this table's.
-        assert!(conform_keys("[package]\nname = \"s\"\ncompiler = \"=0.1.0\"\n").is_empty());
-        // A later table closes the scan.
-        assert_eq!(
-            conform_keys("[conform]\nlocal_skills = []\n\n[dependencies]\nnautilus = \"1\"\n"),
-            vec![("local_skills".to_string(), false)]
-        );
-        // Comments do not become keys.
-        assert_eq!(
-            conform_keys("[conform]\n# exclude = [\"x\"]\nlocal_skills = []\n"),
-            vec![("local_skills".to_string(), false)]
-        );
-    }
-
-    /// The three spellings that bypassed the first version of this parser. Each
-    /// declares the exclusion control section 8 denies, and each audited clean
-    /// because the parser normalized rather than reported (chelis#1262 review).
-    #[test]
-    fn ordinary_toml_spellings_do_not_escape_the_conform_scan() {
-        // 1. Sub-table header: the whole table used to go unread, because the
-        //    header did not literally equal `conform`.
-        assert_eq!(
-            conform_keys("[conform.skills]\nexclude = [\"cli-surface\"]\n"),
-            vec![
-                ("[conform.skills]".to_string(), true),
-                ("skills.exclude".to_string(), false)
-            ]
-        );
-        // 2. Dotted key: dropped by the charset filter.
-        assert_eq!(
-            conform_keys("[conform]\nskills.exclude = [\"cli-surface\"]\n"),
-            vec![("skills.exclude".to_string(), false)]
-        );
-        // 3. Quoted key: same.
-        assert_eq!(
-            conform_keys("[conform]\n\"exclude\" = [\"cli-surface\"]\n"),
-            vec![("exclude".to_string(), false)]
-        );
-        // Quoted dotted segments normalize per segment.
-        assert_eq!(
-            conform_keys("[conform]\n\"skills\".\'exclude\' = []\n"),
-            vec![("skills.exclude".to_string(), false)]
-        );
-        // An array-of-tables header is read like a plain one.
-        assert_eq!(
-            conform_keys("[[conform.skills]]\nexclude = []\n"),
-            vec![
-                ("[conform.skills]".to_string(), true),
-                ("skills.exclude".to_string(), false)
-            ]
-        );
-        // A sub-table named after the ONE recognized key is still a sub-table,
-        // i.e. a shape the contract does not define. Reported, not laundered.
-        assert_eq!(
-            conform_keys("[conform.local_skills]\nexclude = []\n"),
-            vec![
-                ("[conform.local_skills]".to_string(), true),
-                ("local_skills.exclude".to_string(), false)
-            ]
-        );
-    }
-
-    /// The rule inverted from the first version: a key this parser cannot spell
-    /// is surfaced verbatim, never discarded. An allowlist of key characters can
-    /// never be complete, so the sanitizer must not double as the escape hatch.
-    #[test]
-    fn an_unspellable_key_is_reported_verbatim() {
-        for key in ["skills.exclude", "exclude!", "ex clude", "skip@skills"] {
-            let toml = format!("[conform]\n{key} = []\n");
-            assert_eq!(
-                conform_keys(&toml),
-                vec![(key.to_string(), false)],
-                "{key:?}"
-            );
-        }
-    }
-
     #[test]
     fn heading_level_is_atx_strict() {
         assert_eq!(heading_level("# Title"), Some(1));
@@ -2191,51 +1902,56 @@ mod tests {
         assert!(!corpus_covers("unrelated chelis #317 note", "chelis#316"));
     }
 
+    /// The `local_skills` corpus the hand-rolled parser was carrying, re-pointed
+    /// at the structural one (chelis#1262 review round 2). Every property here
+    /// still holds; the difference is that they now hold because the document is
+    /// parsed rather than because each spelling was anticipated.
     #[test]
     fn local_skills_parse() {
+        let names = |t: &str| conform::parse(t).expect("valid toml").local_skills;
         // single-line
         assert_eq!(
-            parse_local_skills(
-                "[package]\nname = \"s\"\n[conform]\nlocal_skills = [\"chelis-std\"]\n"
-            ),
+            names("[package]\nname = \"s\"\n[conform]\nlocal_skills = [\"chelis-std\"]\n"),
             vec!["chelis-std".to_string()]
         );
         // multi-line, with a trailing comma
         let toml = "[conform]\nlocal_skills = [\n  \"a\",\n  \"b\",\n]\n[dependencies]\n";
-        assert_eq!(
-            parse_local_skills(toml),
-            vec!["a".to_string(), "b".to_string()]
-        );
+        assert_eq!(names(toml), vec!["a".to_string(), "b".to_string()]);
         // absent section / key
-        assert!(parse_local_skills("[package]\nname = \"s\"\n").is_empty());
-        assert!(parse_local_skills("[conform]\nother = 1\n").is_empty());
+        assert!(names("[package]\nname = \"s\"\n").is_empty());
+        assert!(names("[conform]\nother = 1\n").is_empty());
         // a `local_skills` outside [conform] is ignored
-        assert!(parse_local_skills("[other]\nlocal_skills = [\"x\"]\n").is_empty());
+        assert!(names("[other]\nlocal_skills = [\"x\"]\n").is_empty());
         // single-quoted (TOML literal) names are accepted
         assert_eq!(
-            parse_local_skills("[conform]\nlocal_skills = ['chelis-std']\n"),
+            names("[conform]\nlocal_skills = ['chelis-std']\n"),
             vec!["chelis-std".to_string()]
         );
         // inline comments do not corrupt the following entry
         let commented = "[conform]\nlocal_skills = [ # keep these\n  \"a\", # first\n  \"b\",\n]\n";
-        assert_eq!(
-            parse_local_skills(commented),
-            vec!["a".to_string(), "b".to_string()]
-        );
+        assert_eq!(names(commented), vec!["a".to_string(), "b".to_string()]);
         // a single-line array with a trailing comment
         assert_eq!(
-            parse_local_skills("[conform]\nlocal_skills = [\"a\"] # note\n"),
+            names("[conform]\nlocal_skills = [\"a\"] # note\n"),
             vec!["a".to_string()]
         );
         // a key that merely has `local_skills` as a prefix is not the key
-        assert!(parse_local_skills("[conform]\nlocal_skills_extra = [\"x\"]\n").is_empty());
+        assert!(names("[conform]\nlocal_skills_extra = [\"x\"]\n").is_empty());
         // an empty array yields no names
-        assert!(parse_local_skills("[conform]\nlocal_skills = []\n").is_empty());
-        // a malformed non-array value must not swallow the next table header as
-        // a phantom skill name
-        assert!(
-            parse_local_skills("[conform]\nlocal_skills = \"x\"\n[dependencies]\nfoo = 1\n")
-                .is_empty()
+        assert!(names("[conform]\nlocal_skills = []\n").is_empty());
+        // a malformed non-array value yields no names (and is reported by §8)
+        assert!(names("[conform]\nlocal_skills = \"x\"\n[dependencies]\nfoo = 1\n").is_empty());
+        // NEW: the quoted spelling is now HONORED, not merely un-reported. The
+        // two hand-rolled parsers disagreed here, so an author who wrote
+        // `'local_skills'` got a row-14 failure telling them to do what they had
+        // just done.
+        assert_eq!(
+            names("[conform]\n'local_skills' = [\"chelis-std\"]\n"),
+            vec!["chelis-std".to_string()]
+        );
+        assert_eq!(
+            names("conform.local_skills = [\"chelis-std\"]\n"),
+            vec!["chelis-std".to_string()]
         );
     }
 

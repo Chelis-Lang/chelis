@@ -117,7 +117,6 @@ fn a_directory_in_place_of_a_managed_document_is_refused() {
 #[test]
 fn an_unparseable_compiler_pin_is_refused() {
     for (label, body) in [
-        ("garbage", "not a toml file at all\n"),
         ("no compiler key", "[package]\nname = \"s\"\n"),
         ("range pin", "[package]\ncompiler = \">=0.18.0\"\n"),
         ("no exact marker", "[package]\ncompiler = \"0.18.5\"\n"),
@@ -135,6 +134,32 @@ fn an_unparseable_compiler_pin_is_refused() {
         assert!(
             gap_reason(&root, "reef.toml").contains("no readable"),
             "{label}: the reason must say the pin is unreadable, not that the file is missing"
+        );
+    }
+}
+
+/// A manifest that does not parse is refused BEFORE the pin check, because the
+/// write path reads more than the pin out of it: `materialize_skills` takes the
+/// `[conform] local_skills` allowlist from the same file, so proceeding would
+/// prune a repo-local skill the shell did declare.
+#[test]
+fn an_unparseable_manifest_is_refused() {
+    for (label, body) in [
+        ("garbage", "not a toml file at all\n"),
+        (
+            "unterminated array",
+            "[package]\ncompiler = \"=0.18.5\"\nx = [\n",
+        ),
+        ("unterminated header", "[package\ncompiler = \"=0.18.5\"\n"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path());
+        std::fs::write(root.join("reef.toml"), body).unwrap();
+        assert_eq!(missing_names(&root), vec!["reef.toml"], "{label}");
+        assert!(
+            gap_reason(&root, "reef.toml").contains("does not parse as TOML"),
+            "{label}: the reason must name the parse failure, got {:?}",
+            gap_reason(&root, "reef.toml")
         );
     }
 }
