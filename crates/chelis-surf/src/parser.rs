@@ -394,6 +394,28 @@ impl Parser {
         consumed
     }
 
+    /// Reject a `;` left standing at a canonical binding-block separator
+    /// boundary (chelis#1267).
+    ///
+    /// `consume_block_separators` takes `;` only in `LegacyV018`, so in
+    /// canonical Surf v0.19 one survives at every separator position a
+    /// binding block has: before the first binding, between bindings, and
+    /// after the tail. Each position used to surface a different wrong
+    /// diagnostic, none of which named the rule. Call this immediately after
+    /// every `consume_block_separators` in `parse_block_inner` so all three
+    /// report the same thing.
+    ///
+    /// `par` and `do` genuinely require `;` (spec/02-surf-syntax.md §P5) and
+    /// parse through their own functions, so they never reach this.
+    fn reject_canonical_semicolon_separator(&self) -> Result<(), ParseError> {
+        if self.mode == ParseMode::Canonical && matches!(self.raw_peek(), TokenKind::Semicolon) {
+            return Err(ParseError::SemicolonBlockSeparator {
+                offset: self.current_offset(),
+            });
+        }
+        Ok(())
+    }
+
     fn expect(&mut self, kind: &TokenKind) -> Result<Token, ParseError> {
         if self.peek() == kind {
             Ok(self.advance())
@@ -2659,29 +2681,23 @@ impl Parser {
     fn parse_block_inner(&mut self, allow_unbound_tail: bool) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
+        // Separator position 1 of 3: before the first binding.
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         while !self.at_eof() && self.is_short_block_binding_start() {
             bindings.push(self.parse_block_let_binding()?);
+            // Separator position 2 of 3: between bindings. This runs before
+            // the `sep_count` check below, so a `;` here reports the rule
+            // whether or not a newline preceded it.
             let sep_count = self.consume_block_separators();
+            self.reject_canonical_semicolon_separator()?;
             if *self.peek() != TokenKind::RBrace && sep_count == 0 {
-                // `consume_block_separators` takes `;` only in LegacyV018, so
-                // a surviving `;` here means canonical Surf v0.19 refused it.
-                // Reporting that through the generic shape named the refused
-                // token as an acceptable spelling (chelis#1267); say the rule
-                // instead. The mode guard keeps the v0.19 wording off the
-                // migrator's accepting parse even if that consumption rule
-                // ever changes.
-                if self.mode == ParseMode::Canonical
-                    && matches!(self.raw_peek(), TokenKind::Semicolon)
-                {
-                    return Err(ParseError::SemicolonBlockSeparator {
-                        offset: self.current_offset(),
-                    });
-                }
                 return Err(ParseError::Expected {
+                    // A `;` never reaches here: canonical mode rejected it
+                    // just above, and LegacyV018 consumed it as a separator.
                     // Any other stray token is a plain missing separator, so
-                    // keep the generic shape and only list what this mode's
-                    // grammar actually accepts here (spec/02 §P5: canonical
+                    // keep the generic shape and list only what this mode's
+                    // grammar actually accepts (spec/02 §P5: canonical
                     // binding blocks separate on newlines alone).
                     expected: if self.mode == ParseMode::Canonical {
                         "separator (newline)".into()
@@ -2708,7 +2724,14 @@ impl Parser {
             });
         }
         let expr = self.parse_expr_until_block_separator()?;
+        // Separator position 3 of 3: after the tail. spec/02-surf-syntax.md
+        // §P5 rejects a trailing `;` by name, but it used to arrive here and
+        // be reported as a bare statement, which is false twice over for
+        // `{ a = 1i64\n add(a, 1i64); }`: that expression IS the tail, and
+        // there is no unbound statement. Following that advice (`_ = ...;`)
+        // only moved the failure onto the `;` message anyway (chelis#1267).
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         if *self.peek() != TokenKind::RBrace {
             // A second top-level expression after the tail: bare non-tail
             // statements silently juxtaposed into an application before
@@ -4558,13 +4581,139 @@ mod tests {
             ParseError::Expected {
                 ref expected,
                 ref found,
-                ..
+                offset,
             } => {
                 assert_eq!(expected, "separator (newline)", "got {err:?}");
                 assert_eq!(found, "Eof", "got {err:?}");
+                // Deliberate: the synthetic Eof token carries the opening
+                // `{`'s offset, so an unterminated block points at the
+                // construct that was never closed rather than at end of
+                // input. Pinned so a future offset change is a decision.
+                assert_eq!(offset, src.find('{').unwrap(), "got {err:?}");
             }
             ref other => panic!("expected generic separator error, got {other:?}"),
         }
+    }
+
+    /// Every canonical `;`-in-a-block shape must reach the one rule message,
+    /// pointing at the `;` the reader actually typed.
+    fn assert_semicolon_rule_at(src: &str, semicolon_index: usize) {
+        let err = parse_str(src).unwrap_err();
+        let offset = match err {
+            ParseError::SemicolonBlockSeparator { offset } => offset,
+            ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
+        };
+        let expected = src
+            .match_indices(';')
+            .nth(semicolon_index)
+            .expect("fixture has that many semicolons")
+            .0;
+        assert_eq!(offset, expected, "wrong `;` blamed: {err}");
+    }
+
+    #[test]
+    fn block_trailing_semicolon_after_tail_names_the_semicolon_rule() {
+        // Negative #17 (chelis#1267): spec/02-surf-syntax.md §P5 rejects a
+        // trailing `;` by name. It used to report "expression statement must
+        // be bound ... move it to tail position", which is false twice for
+        // this input: `add(a, 1i64)` IS the tail, and nothing is unbound.
+        // Taking that advice (`_ = add(a, 1i64);`) just landed on the `;`.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64);\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_on_its_own_line_after_tail_names_the_semicolon_rule() {
+        // Negative #18: same defect with the `;` on its own line, where the
+        // preceding newline is consumed first and the old code still fell
+        // through to the bare-statement message.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n  ;\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn canonical_two_statements_separated_by_semicolon_report_the_semicolon() {
+        // Negative #19: `{ f(x); g(y) }` has two faults at once, a bare
+        // non-tail statement and a `;`. Canonical mode now reports the `;`,
+        // which is the lexically first one and the only one whose remedy is
+        // not itself rejected: `_ = f(x); g(y)` still fails on the `;`.
+        assert_semicolon_rule_at("def f(x, y) -> unit = { f(x); g(y) }\n", 0);
+    }
+
+    #[test]
+    fn legacy_v018_two_statements_separated_by_semicolon_still_report_bare_statement() {
+        // Parity for #19: v0.18 reads that `;` as a real separator, so the
+        // genuine fault there is the bare statement, and #706's diagnostic
+        // must survive. This is what makes the canonical reclassification
+        // safe rather than a message swap.
+        let src = "def f(x, y) = { g(x); h(y) }";
+        let err = p_err(src);
+        let offset = match err {
+            ParseError::BareStatementInBlock { offset } => offset,
+            ref other => panic!("expected BareStatementInBlock, got {other:?}"),
+        };
+        assert_eq!(offset, src.find("h(y)").unwrap());
+    }
+
+    #[test]
+    fn block_semicolon_after_a_newline_between_bindings_names_the_semicolon_rule() {
+        // Negative #20 (chelis#1267): when a newline precedes the `;` the
+        // separator count is already nonzero, so the between-bindings arm was
+        // skipped, `is_short_block_binding_start` was false at `;`, and the
+        // tail parse got an empty range. That surfaced as a bare "unexpected
+        // end of input" with no offset at all, which the LSP then rendered
+        // past the end of the file.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  ;\n  b = 2i64\n  add(a, b)\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn block_semicolon_leading_a_binding_line_names_the_semicolon_rule() {
+        // Negative #21: the same shape with the next binding on the `;` line.
+        assert_semicolon_rule_at(
+            "def f() -> int64 = {\n  a = 1i64\n  ; b = 2i64\n  add(a, b)\n}\n",
+            0,
+        );
+    }
+
+    #[test]
+    fn block_containing_only_a_semicolon_names_the_semicolon_rule() {
+        // Negative #22: `;` at the leading separator position, before any
+        // binding exists. Also previously "unexpected end of input".
+        assert_semicolon_rule_at("def f() -> int64 = { ; }\n", 0);
+    }
+
+    #[test]
+    fn canonical_newline_separated_block_parses() {
+        // Positive control: the whole pre-existing block bank runs through
+        // the v0.18 helpers, so nothing pinned that a canonical block parses
+        // at all. Without this, every negative above could pass on a parser
+        // that rejected every block.
+        let decls = parse_str("def f() -> int64 = {\n  a = 1i64\n  add(a, 1i64)\n}\n")
+            .expect("a newline-separated canonical block parses");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn the_migrator_hint_in_the_semicolon_message_is_true() {
+        // The message tells the reader to run `chelis migrate surf --from
+        // 0.18`. Nothing pinned that the migrator actually resolves the shape
+        // being diagnosed, so a migrator regression would silently turn this
+        // diagnostic into the chelis#1267 defect reborn inside its own fix:
+        // advice that does not work. `migrate_source_v018` is the library
+        // path behind that CLI command (`cmd_migrate` in chelis-cli).
+        let repro = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }\n";
+        parse_str(repro).expect_err("the reproducer must not parse canonically");
+        let migrated = crate::format::migrate_source_v018(repro)
+            .expect("the migrator rewrites the `;` block the diagnostic points at");
+        assert!(
+            !migrated.contains(';'),
+            "migration should remove the block separators: {migrated}"
+        );
+        parse_str(&migrated).expect("migrator output must parse under canonical Surf v0.19");
     }
 
     #[test]
