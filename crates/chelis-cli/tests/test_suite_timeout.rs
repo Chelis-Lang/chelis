@@ -519,6 +519,52 @@ fn finalization_hang_retains_rows_but_replaces_false_green_summary() {
     assert_eq!(summary["failed"], 1);
 }
 
+/// A run that abandons its batch AND then misses the suite deadline reports the
+/// deadline, not the fallback: the incomplete-suite renderer keeps only rows,
+/// `--expect` verdicts, and its own `suite` record, so the `batch_fallback`
+/// record and the plain summary marker are both dropped. This is documented in
+/// `spec/design/chelis_native_testing_plan.md`; pin it so the doc stays honest.
+/// The human note still arrives, because leader stderr is forwarded verbatim.
+#[test]
+fn incomplete_suite_reports_the_deadline_not_the_abandoned_batch() {
+    let (_dir, pkg) = make_reef_package("suite-timeout-fallback-then-deadline");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .timeout(Duration::from_secs(10))
+        .current_dir(&pkg)
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_TEST_INTERNAL_TESTING", "1")
+        .env("CHELIS_TEST_FORCE_BATCH_ABORT", "1")
+        .env("CHELIS_TEST_HANG_AFTER_SUITE", "1")
+        .args(["test", "tests/", "--json", "--suite-timeout", "3"])
+        .output()
+        .expect("run");
+    assert_eq!(output.status.code(), Some(1));
+
+    let lines = json_lines(&output);
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.get("batch_fallback").is_some()),
+        "incomplete renderer leaked the fallback record: {lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|line| line["suite"]["incomplete"] == true),
+        "the deadline was not reported: {lines:#?}"
+    );
+    let summary = &lines.last().expect("summary")["summary"];
+    assert_eq!(summary["incomplete"], true);
+    assert!(
+        summary.get("batch_fallback").is_none(),
+        "the incomplete summary is rebuilt and carries no fallback flag: {summary}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("suite batching was abandoned"),
+        "the human note must still reach the operator:\nstderr={stderr}"
+    );
+}
+
 #[test]
 fn plain_timeout_counts_rows_not_fail_text_in_filename() {
     let (_dir, pkg) = make_reef_package("suite-timeout-plain-counts");

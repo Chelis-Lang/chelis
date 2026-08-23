@@ -457,29 +457,41 @@ The parent's eligibility classifier and the batch worker's own duplicate guard a
 files through one shared rule. A worker guard stricter than the classifier rejects
 manifests the parent already built, which surfaces only as an unexplained fallback.
 
-Demotion is the sanctioned per-file path, not a degradation, and is not reported:
-`--batch-mode file` produces the same rows and the same exit code.
+Demotion is the sanctioned per-file path, not a degradation, and is not reported by
+default: `--batch-mode file` produces the same rows and the same exit code. The reason is
+computed anyway, so it is available on demand. Setting `CHELIS_TEST_EXPLAIN_BATCHING=1`
+prints one stderr line per demoted file naming the collision (or the read, parse,
+enumeration, or module-init reason). Without it, a maintainer whose suite quietly lost the
+batch path has to bisect the colliding names by hand.
 
 #### Reporting an abandoned batch
 
-If the batch worker crashes, times out, or cannot produce complete ordered rows, the
-parent falls back to the existing per-file subprocess workers for that batch. Plain text
-and NDJSON output remain deterministic in discovery order. Use `--batch-mode file` to
-force per-file workers while debugging. `--jobs auto` still caps worker concurrency on
-paths that use file workers.
+If the batch worker cannot be run, crashes, times out, or exits without a usable row set,
+the parent falls back to the existing per-file subprocess workers for that batch. The
+runner is also total against a worker that returns rows it cannot attribute, though no
+current worker path reaches that state; the `status` table below marks which triggers are
+reachable. Plain text and NDJSON output remain deterministic in discovery order. Use
+`--batch-mode file` to force per-file workers while debugging. `--jobs auto` still caps
+worker concurrency on paths that use file workers.
 
-An abandoned batch is a degraded execution mode and must be reported, on both channels,
-naming the reason and every file the batch had claimed. The batch worker's stderr is
-inherited rather than captured, so any diagnostic it emitted is already on the terminal;
-without an attributed note from the parent it is an orphan line that no reader can tie
-to a file, to the batch, or to the fact that batching was dropped at all (chelis#1261).
-The note goes to stderr in every mode; `--json` additionally emits the record described
-below.
+An abandoned batch is a degraded execution mode and must be reported on every channel a
+reader might be capturing, naming the reason and every file the batch had claimed. The
+batch worker's stderr is inherited rather than captured, so any diagnostic it emitted is
+already on the terminal; without an attributed note from the parent it is an orphan line
+that no reader can tie to a file, to the batch, or to the fact that batching was dropped
+at all (chelis#1261). Three channels carry it:
+
+- **stderr**, in every mode: the attributed note with the reason and the file list.
+- **plain stdout**, on the summary line: ` (batch abandoned: ran per-file)`. A CI job
+  that captures only stdout is the common shape, and without this it reads a degraded run
+  as identical to a clean one. A clean run's summary line is unchanged, and the
+  supervisor's summary parser sees through the marker.
+- **`--json` stdout**: the record and summary flag described below.
 
 The exit code stays keyed to test outcomes: every selected test still ran, and a
 fallback is not a test failure. The report is what carries the degradation, which is why
-the summary record gains a flag rather than the exit code gaining a state. A consumer
-that reads only the summary can still tell a clean batched run from a fallback run, so
+the summary gains a marker rather than the exit code gaining a state. A consumer that
+reads only the summary can still tell a clean batched run from a fallback run, so
 "perfect success" remains distinguishable from "perfect results, degraded path".
 
 ### Machine-readable output with `--json`
@@ -510,12 +522,29 @@ $ chelis test tests/ --json
 {"summary":{"passed":2,"failed":0,"batch_fallback":true}}
 ```
 
-`status` is one of `worker-unavailable`, `timeout`, `malformed-output`, `worker-failed`,
-or `incomplete-rows`; `message` is the human sentence; `files` lists the batch's files in
-discovery order. The record appears once per run, because the runner attempts at most one
-batch. The incomplete-suite renderer emits only rows, verdicts, and its own `suite`
-record, so a run that also hit the suite deadline reports the deadline rather than the
-fallback.
+`message` is the human sentence and `files` lists the batch's files in discovery order.
+The record appears once per run, because the runner attempts at most one batch. The
+incomplete-suite renderer emits only rows, verdicts, and its own `suite` record, so a run
+that also hit the suite deadline reports the deadline rather than the fallback, and drops
+the plain-summary marker with it. The human note still reaches the operator there,
+because leader stderr is forwarded verbatim.
+
+`status` is one of five values, three of which a user can currently reach:
+
+| `status` | reachable | trigger |
+|---|---|---|
+| `worker-unavailable` | yes | the runner could not spawn or drive the batch worker process |
+| `timeout` | yes | the worker outlived the derived batch window and was terminated |
+| `worker-failed` | yes | the worker exited nonzero without a usable row set, or died on a signal |
+| `malformed-output` | defensive | a worker stdout line that is not a well-formed row record |
+| `incomplete-rows` | defensive | a complete-looking row set that does not match the batch manifest |
+
+The two defensive branches have no reachable trigger today: the worker's only stdout
+writer emits well-formed rows, and every row-losing path kills the worker first, so
+`worker-failed` wins the race. They stay because the parser and the row-attribution step
+must still be total, and a future worker change could reach either. `status` is a closed
+vocabulary regardless of reachability, pinned by an exhaustive unit test rather than by a
+CLI test that cannot construct the unreachable cases.
 
 ### Expected-failure files
 

@@ -5652,7 +5652,15 @@ fn output_forwarding_failure_report(
     .into_bytes()
 }
 
+/// Appended to the plain-text summary line when `--batch-mode auto` abandoned a
+/// batch, so a stdout-only capture can tell a degraded run from a clean one
+/// (chelis#1261). A clean run's summary line is unchanged.
+const PLAIN_BATCH_FALLBACK_MARKER: &str = " (batch abandoned: ran per-file)";
+
 fn parse_plain_test_summary(line: &str) -> Option<(usize, usize)> {
+    let line = line
+        .strip_suffix(PLAIN_BATCH_FALLBACK_MARKER)
+        .unwrap_or(line);
     let (passed, failed) = line.split_once(" passed, ")?;
     let failed = failed.strip_suffix(" failed")?;
     Some((passed.parse().ok()?, failed.parse().ok()?))
@@ -5990,7 +5998,16 @@ fn cmd_test(
         )
         .map_err(|e| e.to_string())?;
     } else {
-        writeln!(out, "\n{passed} passed, {failed} failed").map_err(|e| e.to_string())?;
+        // The marker rides on the summary line itself. A CI job that captures
+        // only stdout (the common shape) would otherwise read a degraded run as
+        // identical to a clean one, which is chelis#1261's complaint one
+        // channel over.
+        let marker = if batch_fallback {
+            PLAIN_BATCH_FALLBACK_MARKER
+        } else {
+            ""
+        };
+        writeln!(out, "\n{passed} passed, {failed} failed{marker}").map_err(|e| e.to_string())?;
     }
 
     Ok(if failed == 0 { 0 } else { 1 })
@@ -6375,18 +6392,30 @@ fn classify_test_jobs_for_batch(
     let mut batch_scope = BatchScope::default();
 
     for job in test_jobs {
-        let Ok(source) = fs::read_to_string(&job.file) else {
-            file_jobs.push(job.clone());
-            continue;
+        let source = match fs::read_to_string(&job.file) {
+            Ok(source) => source,
+            Err(e) => {
+                explain_batch_demotion(&job.rel_display, &format!("it could not be read: {e}"));
+                file_jobs.push(job.clone());
+                continue;
+            }
         };
-        let Ok(parsed) = chelis_surf::parser::parse_str(&source) else {
-            file_jobs.push(job.clone());
-            continue;
+        let parsed = match chelis_surf::parser::parse_str(&source) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                explain_batch_demotion(&job.rel_display, &format!("it could not be parsed: {e}"));
+                file_jobs.push(job.clone());
+                continue;
+            }
         };
         let flat = flatten_module_decls(&parsed);
         let tests = match enumerate_test_fns(&flat, filter, &job.rel_display) {
             EnumerationOutcome::Tests(tests) => tests,
-            EnumerationOutcome::Error(_) => {
+            EnumerationOutcome::Error(msg) => {
+                explain_batch_demotion(
+                    &job.rel_display,
+                    &format!("its tests could not be enumerated: {msg}"),
+                );
                 file_jobs.push(job.clone());
                 continue;
             }
@@ -6395,11 +6424,17 @@ fn classify_test_jobs_for_batch(
             continue;
         }
         if flat.iter().any(|decl| matches!(decl, Decl::LetDef { .. })) {
+            explain_batch_demotion(
+                &job.rel_display,
+                "it has a top-level module-init binding, which a shared batch would run once \
+                 for every file",
+            );
             file_jobs.push(job.clone());
             continue;
         }
         let scope = test_file_scope_names(&flat);
-        if batch_scope.admit(&job.rel_display, &scope).is_some() {
+        if let Some(collision) = batch_scope.admit(&job.rel_display, &scope) {
+            explain_batch_demotion(&job.rel_display, &collision);
             file_jobs.push(job.clone());
             continue;
         }
@@ -6415,6 +6450,22 @@ fn classify_test_jobs_for_batch(
         batch_jobs,
         file_jobs,
     }
+}
+
+/// Operator knob: when set to `1`, `--batch-mode auto` says on stderr why each
+/// test file took the per-file worker path instead of the suite batch.
+///
+/// Demotion is by design and silent, because it produces the same rows and the
+/// same exit code. The reason is computed regardless, though, and without a way
+/// to read it a maintainer tuning a slow suite has to bisect the colliding
+/// names by hand, which is what chelis#1261's reporter did across five of them.
+const EXPLAIN_BATCHING_ENV: &str = "CHELIS_TEST_EXPLAIN_BATCHING";
+
+fn explain_batch_demotion(rel_display: &str, reason: &str) {
+    if env::var(EXPLAIN_BATCHING_ENV).as_deref() != Ok("1") {
+        return;
+    }
+    eprintln!("note: {rel_display} is not in the suite batch: {reason}");
 }
 
 /// Top-level names one test file contributes to a shared compilation unit,
@@ -6466,7 +6517,16 @@ fn test_file_scope_names(decls: &[Decl]) -> TestFileScopeNames {
                 // sibling declaration in the merged unit can capture.
                 ImportKind::Qualified => {}
             },
-            _ => {}
+            // Exhaustive on purpose. A future `Decl` variant that binds a
+            // top-level name would silently contribute nothing here and reopen
+            // exactly the blind spot chelis#1261 reported, so a new variant has
+            // to stop this compiling until someone classifies it.
+            //
+            // `Module` is already flattened away before this runs. `LetDef`
+            // makes a file ineligible for batching on its own (module-init
+            // bindings), so its name never reaches a shared scope. `Export`
+            // marks existing declarations visible and binds nothing.
+            Decl::Module { .. } | Decl::LetDef { .. } | Decl::Export { .. } => {}
         }
     }
     TestFileScopeNames {
@@ -10466,6 +10526,93 @@ fn should_suppress_unfixable_violation(
         return false;
     }
     !fix_would_apply_for_violation(target, rule.as_ref(), &source, surface, violation)
+}
+
+#[cfg(test)]
+mod batch_fallback_reason_tests {
+    use super::{BatchFallbackReason, PLAIN_BATCH_FALLBACK_MARKER, parse_plain_test_summary};
+
+    /// The `status` strings are the published `--json` vocabulary
+    /// (`spec/design/chelis_native_testing_plan.md`). Two of the five are
+    /// defensive branches with no currently reachable trigger, so a CLI test
+    /// cannot pin them; this exhaustive match is what stops a rename or a new
+    /// variant from drifting away from the documented set. The match is written
+    /// without a wildcard on purpose: a sixth variant must fail to compile here.
+    #[test]
+    fn every_fallback_status_matches_the_documented_vocabulary() {
+        let cases = [
+            BatchFallbackReason::WorkerUnavailable("spawn refused".to_string()),
+            BatchFallbackReason::Timeout(90),
+            BatchFallbackReason::MalformedOutput("stdout line 1 is not JSON".to_string()),
+            BatchFallbackReason::WorkerFailed("batch worker exited with status 2".to_string()),
+            BatchFallbackReason::IncompleteRows("expected 3 rows, got 2".to_string()),
+        ];
+        for case in &cases {
+            let expected = match case {
+                BatchFallbackReason::WorkerUnavailable(_) => "worker-unavailable",
+                BatchFallbackReason::Timeout(_) => "timeout",
+                BatchFallbackReason::MalformedOutput(_) => "malformed-output",
+                BatchFallbackReason::WorkerFailed(_) => "worker-failed",
+                BatchFallbackReason::IncompleteRows(_) => "incomplete-rows",
+            };
+            assert_eq!(case.status(), expected, "status drifted for {case:?}");
+        }
+        let statuses = cases.iter().map(|case| case.status()).collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            vec![
+                "worker-unavailable",
+                "timeout",
+                "malformed-output",
+                "worker-failed",
+                "incomplete-rows",
+            ]
+        );
+    }
+
+    /// Every reason must render a non-empty sentence that names the batch
+    /// worker, and must carry its detail through: an attributed report whose
+    /// reason line says nothing is the failure chelis#1261 reported.
+    #[test]
+    fn every_fallback_message_names_the_worker_and_keeps_its_detail() {
+        let detail = "the-detail-marker";
+        let cases = [
+            BatchFallbackReason::WorkerUnavailable(detail.to_string()),
+            BatchFallbackReason::MalformedOutput(detail.to_string()),
+            BatchFallbackReason::WorkerFailed(format!("batch worker hit {detail}")),
+            BatchFallbackReason::IncompleteRows(detail.to_string()),
+        ];
+        for case in &cases {
+            let message = case.message();
+            assert!(
+                message.contains("batch worker"),
+                "unattributed message for {case:?}: {message}"
+            );
+            assert!(
+                message.contains(detail),
+                "detail was dropped for {case:?}: {message}"
+            );
+        }
+        let timeout = BatchFallbackReason::Timeout(90).message();
+        assert!(
+            timeout.contains("batch worker") && timeout.contains("90s"),
+            "timeout message lost its window: {timeout}"
+        );
+    }
+
+    /// The plain summary marker rides on the same line the supervisor's
+    /// incomplete-suite renderer parses counts from, so the parser has to see
+    /// through it. A clean summary line must parse exactly as before.
+    #[test]
+    fn plain_summary_parses_with_and_without_the_fallback_marker() {
+        assert_eq!(parse_plain_test_summary("2 passed, 1 failed"), Some((2, 1)));
+        assert_eq!(
+            parse_plain_test_summary(&format!("2 passed, 1 failed{PLAIN_BATCH_FALLBACK_MARKER}")),
+            Some((2, 1))
+        );
+        assert_eq!(parse_plain_test_summary("not a summary"), None);
+        assert_eq!(parse_plain_test_summary("x passed, 1 failed"), None);
+    }
 }
 
 #[cfg(test)]
