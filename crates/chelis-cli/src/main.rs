@@ -10,7 +10,7 @@ use chelis_compiler_api::schema::{
 };
 use chelis_deep::DeepTag;
 use chelis_deep::ast::{Atom as DeepAtom, Expr as DeepExpr};
-use chelis_surf::ast::Decl;
+use chelis_surf::ast::{Decl, ImportKind};
 use chelis_types::types::{Dim, Effect, EffectSet, TensorPrec, Type};
 use chelis_vocab::DiagnosticKind;
 use clap::{ArgAction, ArgGroup, Parser, Subcommand};
@@ -5934,6 +5934,13 @@ fn cmd_test(
         );
     }
 
+    // `--batch-mode auto` may abandon an attempted batch and re-run its files
+    // per-file. The run is still complete and its exit code still tracks test
+    // outcomes only, but the report has to say the batched path was dropped:
+    // a perfect-looking summary that hides a degraded execution mode is the
+    // failure chelis#1261 reported.
+    let mut batch_fallback = false;
+
     match batch_mode {
         TestBatchMode::File => {
             let worker_count = jobs.resolve(test_jobs.len());
@@ -5952,7 +5959,7 @@ fn cmd_test(
             )?;
         }
         TestBatchMode::Auto => {
-            run_test_jobs_auto(
+            batch_fallback = run_test_jobs_auto(
                 &self_path,
                 &cwd,
                 &test_jobs,
@@ -5970,9 +5977,16 @@ fn cmd_test(
     }
 
     if json {
+        // Additive: the field is absent unless a batch was abandoned, so the
+        // summary record every existing consumer parses is byte-identical.
+        let fallback_field = if batch_fallback {
+            ",\"batch_fallback\":true"
+        } else {
+            ""
+        };
         writeln!(
             out,
-            "{{\"summary\":{{\"passed\":{passed},\"failed\":{failed}}}}}"
+            "{{\"summary\":{{\"passed\":{passed},\"failed\":{failed}{fallback_field}}}}}"
         )
         .map_err(|e| e.to_string())?;
     } else {
@@ -6249,10 +6263,11 @@ fn run_test_jobs_auto(
     passed: &mut usize,
     failed: &mut usize,
     progress_file: Option<&Path>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let classified = classify_test_jobs_for_batch(test_jobs, filter);
     let mut rows_by_index = BTreeMap::<usize, Vec<TestRow>>::new();
     let mut file_fallback_jobs = classified.file_jobs;
+    let mut fallback_reason = None::<BatchFallbackReason>;
 
     if !classified.batch_jobs.is_empty() {
         match run_test_batch_subprocess(
@@ -6264,12 +6279,16 @@ fn run_test_jobs_auto(
             progress_file,
         )? {
             BatchSubprocessOutcome::Rows(rows) => {
-                if !group_batch_rows_by_file(&classified.batch_jobs, rows, &mut rows_by_index) {
+                if let Some(reason) =
+                    group_batch_rows_by_file(&classified.batch_jobs, rows, &mut rows_by_index)
+                {
                     file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
+                    fallback_reason = Some(reason);
                 }
             }
-            BatchSubprocessOutcome::Fallback => {
+            BatchSubprocessOutcome::Fallback(reason) => {
                 file_fallback_jobs.extend(batch_jobs_as_file_jobs(&classified.batch_jobs));
+                fallback_reason = Some(reason);
             }
         }
     }
@@ -6290,13 +6309,20 @@ fn run_test_jobs_auto(
         )?);
     }
 
+    // Reported before the rows: the batch was abandoned before any of these
+    // rows existed, and a reader who stops at the first failing row still sees
+    // that the run did not take the path it asked for.
+    if let Some(reason) = &fallback_reason {
+        emit_batch_fallback_note(out, json, &classified.batch_jobs, reason)?;
+    }
+
     for job in test_jobs {
         if let Some(rows) = rows_by_index.remove(&job.index) {
             emit_test_file_rows(out, json, &job.rel_display, &rows, passed, failed)?;
         }
     }
 
-    Ok(())
+    Ok(fallback_reason.is_some())
 }
 
 fn batch_jobs_as_file_jobs(batch_jobs: &[TestBatchManifestFile]) -> Vec<TestFileJob> {
@@ -6310,14 +6336,19 @@ fn batch_jobs_as_file_jobs(batch_jobs: &[TestBatchManifestFile]) -> Vec<TestFile
         .collect()
 }
 
+/// Distribute a completed batch's rows back to their owning files. Returns the
+/// fallback reason when the rows cannot be attributed, `None` on success.
 fn group_batch_rows_by_file(
     batch_jobs: &[TestBatchManifestFile],
     rows: Vec<TestRow>,
     rows_by_index: &mut BTreeMap<usize, Vec<TestRow>>,
-) -> bool {
+) -> Option<BatchFallbackReason> {
     let expected_rows: usize = batch_jobs.iter().map(|job| job.tests.len()).sum();
     if rows.len() != expected_rows {
-        return false;
+        return Some(BatchFallbackReason::IncompleteRows(format!(
+            "expected {expected_rows} rows for the selected tests, got {}",
+            rows.len()
+        )));
     }
     let index_by_file = batch_jobs
         .iter()
@@ -6325,11 +6356,14 @@ fn group_batch_rows_by_file(
         .collect::<HashMap<_, _>>();
     for row in rows {
         let Some(index) = index_by_file.get(&row.file).copied() else {
-            return false;
+            return Some(BatchFallbackReason::IncompleteRows(format!(
+                "row named file `{}`, which is not in the batch",
+                row.file
+            )));
         };
         rows_by_index.entry(index).or_default().push(row);
     }
-    true
+    None
 }
 
 fn classify_test_jobs_for_batch(
@@ -6338,7 +6372,7 @@ fn classify_test_jobs_for_batch(
 ) -> ClassifiedTestJobs {
     let mut batch_jobs = Vec::new();
     let mut file_jobs = Vec::new();
-    let mut seen_top_level_names = HashSet::<String>::new();
+    let mut batch_scope = BatchScope::default();
 
     for job in test_jobs {
         let Ok(source) = fs::read_to_string(&job.file) else {
@@ -6364,12 +6398,11 @@ fn classify_test_jobs_for_batch(
             file_jobs.push(job.clone());
             continue;
         }
-        let names = top_level_decl_names(&flat);
-        if names.iter().any(|name| seen_top_level_names.contains(name)) {
+        let scope = test_file_scope_names(&flat);
+        if batch_scope.admit(&job.rel_display, &scope).is_some() {
             file_jobs.push(job.clone());
             continue;
         }
-        seen_top_level_names.extend(names);
         batch_jobs.push(TestBatchManifestFile {
             index: job.index,
             file: job.file.clone(),
@@ -6384,25 +6417,233 @@ fn classify_test_jobs_for_batch(
     }
 }
 
-fn top_level_decl_names(decls: &[Decl]) -> Vec<String> {
-    let mut out = Vec::new();
+/// Top-level names one test file contributes to a shared compilation unit,
+/// split by how each name entered scope.
+///
+/// `--batch-mode auto` merges every batched file's flattened declarations into
+/// a single unit, so the batch has one top-level scope. A name that file A
+/// imports and file B declares therefore resolves to B's declaration inside A
+/// as well, which recompiles A against a binding it never asked for
+/// (chelis#1261). Import-versus-declaration is a batch scope collision on the
+/// same footing as declaration-versus-declaration, so the colliding file takes
+/// the per-file worker path instead.
+struct TestFileScopeNames {
+    /// Names the file itself binds at top level, including ADT variant
+    /// constructors (a merged unit has one constructor namespace).
+    declared: Vec<String>,
+    /// Explicitly imported `import M (a, b)` names, each paired with `M`.
+    /// Two files importing the same name from the same module agree on what
+    /// it means; two files importing it from different modules do not.
+    imported: Vec<(String, String)>,
+    /// Set by an `import M (..)`. This runner cannot enumerate a wildcard's
+    /// name set without resolving the package graph, so it cannot prove that
+    /// no sibling declaration captures one of those names.
+    wildcard_import: bool,
+}
+
+fn test_file_scope_names(decls: &[Decl]) -> TestFileScopeNames {
+    let mut declared = Vec::new();
+    let mut imported = Vec::new();
+    let mut wildcard_import = false;
     for decl in decls {
         match decl {
             Decl::FunDef { name, .. }
             | Decl::Sig { name, .. }
-            | Decl::TypeDef { name, .. }
             | Decl::TypeAlias { name, .. }
-            | Decl::MacroDef { name, .. } => out.push(name.clone()),
-            Decl::Dim { names, .. } => out.extend(names.iter().cloned()),
+            | Decl::MacroDef { name, .. }
+            | Decl::Property { name, .. } => declared.push(name.clone()),
+            Decl::TypeDef { name, variants, .. } => {
+                declared.push(name.clone());
+                declared.extend(variants.iter().map(|variant| variant.name.clone()));
+            }
+            Decl::Dim { names, .. } => declared.extend(names.iter().cloned()),
+            Decl::Import { module, kind, .. } => match kind {
+                ImportKind::Names(names) => {
+                    imported.extend(names.iter().map(|name| (name.clone(), module.clone())));
+                }
+                ImportKind::All => wildcard_import = true,
+                // A qualified import binds only `M.name`, which no unqualified
+                // sibling declaration in the merged unit can capture.
+                ImportKind::Qualified => {}
+            },
             _ => {}
         }
     }
-    out
+    TestFileScopeNames {
+        declared,
+        imported,
+        wildcard_import,
+    }
+}
+
+/// The accumulated top-level scope of a suite batch.
+///
+/// The parent's eligibility classifier and the batch worker's own guard both
+/// admit files through this one type so the two can never disagree about what
+/// "collision" means: a worker that rejected a file the parent had already
+/// batched would turn every such suite into a silent per-file fallback.
+#[derive(Default)]
+struct BatchScope {
+    /// Declared name to the file that declared it.
+    declared: HashMap<String, String>,
+    /// Imported name to the module it came from and the file that imported it.
+    imported: HashMap<String, (String, String)>,
+}
+
+impl BatchScope {
+    /// Admit `file` into the batch, or report the collision that keeps it out.
+    ///
+    /// Names are checked against the files already admitted before any of this
+    /// file's own names are recorded, so a file that legitimately repeats a
+    /// name internally (a `sig` beside its `def`) is not a collision with
+    /// itself.
+    fn admit(&mut self, file: &str, scope: &TestFileScopeNames) -> Option<String> {
+        if scope.wildcard_import {
+            return Some(format!(
+                "{file} imports a whole module, and this runner cannot enumerate \
+                 the names that brings into the shared batch scope"
+            ));
+        }
+        for name in &scope.declared {
+            if let Some(owner) = self.declared.get(name) {
+                return Some(format!("`{name}` is declared by both {owner} and {file}"));
+            }
+            if let Some((module, owner)) = self.imported.get(name) {
+                return Some(format!(
+                    "`{name}` is declared by {file} and imported from `{module}` by {owner}"
+                ));
+            }
+        }
+        for (name, module) in &scope.imported {
+            if let Some(owner) = self.declared.get(name) {
+                return Some(format!(
+                    "`{name}` is imported from `{module}` by {file} and declared by {owner}"
+                ));
+            }
+            if let Some((seen_module, owner)) = self.imported.get(name)
+                && seen_module != module
+            {
+                return Some(format!(
+                    "`{name}` is imported from `{seen_module}` by {owner} \
+                     and from `{module}` by {file}"
+                ));
+            }
+        }
+        for name in &scope.declared {
+            self.declared.insert(name.clone(), file.to_string());
+        }
+        for (name, module) in &scope.imported {
+            self.imported
+                .entry(name.clone())
+                .or_insert_with(|| (module.clone(), file.to_string()));
+        }
+        None
+    }
+}
+
+/// Why `--batch-mode auto` gave up on an attempted suite batch and re-ran its
+/// files through per-file workers.
+///
+/// A batch that is never attempted (no eligible files) is not a fallback: the
+/// distinction is exactly what the reasonless predecessor could not express,
+/// which is how an abandoned batch reached the user as one unattributed line
+/// on the worker's stderr (chelis#1261).
+#[derive(Debug, Clone)]
+enum BatchFallbackReason {
+    WorkerUnavailable(String),
+    Timeout(u64),
+    MalformedOutput(String),
+    WorkerFailed(String),
+    IncompleteRows(String),
+}
+
+impl BatchFallbackReason {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::WorkerUnavailable(_) => "worker-unavailable",
+            Self::Timeout(_) => "timeout",
+            Self::MalformedOutput(_) => "malformed-output",
+            Self::WorkerFailed(_) => "worker-failed",
+            Self::IncompleteRows(_) => "incomplete-rows",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::WorkerUnavailable(detail) => {
+                // Covers spawn failure and every later failure to drive the
+                // process: the runner never got a verdict out of it.
+                format!("batch worker could not be run: {detail}")
+            }
+            Self::Timeout(seconds) => {
+                format!("batch worker exceeded its {seconds}s window and was terminated")
+            }
+            Self::MalformedOutput(detail) => {
+                format!("batch worker emitted output this runner could not read: {detail}")
+            }
+            // Already self-describing at every construction site.
+            Self::WorkerFailed(detail) => detail.clone(),
+            Self::IncompleteRows(detail) => {
+                format!("batch worker did not report a usable row set: {detail}")
+            }
+        }
+    }
+}
+
+/// Report an abandoned suite batch on both channels it can reach.
+///
+/// The human note names the files and the reason, so the batch worker's own
+/// stderr (which is inherited, and therefore already on the terminal by the
+/// time this runs) stops being an unattributed line. The `--json` record is
+/// additive: it is a new top-level record kind beside the existing `suite`
+/// record, so a consumer that reads rows and the summary keeps parsing.
+fn emit_batch_fallback_note(
+    out: &mut impl Write,
+    json: bool,
+    batch_jobs: &[TestBatchManifestFile],
+    reason: &BatchFallbackReason,
+) -> Result<(), String> {
+    let files = batch_jobs
+        .iter()
+        .map(|job| job.rel_display.clone())
+        .collect::<Vec<_>>();
+    let noun = if files.len() == 1 { "file" } else { "files" };
+    let note = format!(
+        "warning: suite batching was abandoned; {count} test {noun} re-ran through \
+         per-file workers\n  reason: {reason}\n  files: {files}\n  \
+         any diagnostic printed above this warning came from the abandoned batch worker\n  \
+         pass `--batch-mode file` to run this suite per-file without the batch attempt\n",
+        count = files.len(),
+        reason = reason.message(),
+        files = files.join(", "),
+    );
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    stderr
+        .write_all(note.as_bytes())
+        .and_then(|()| stderr.flush())
+        .map_err(|e| e.to_string())?;
+
+    if json {
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({
+                "batch_fallback": {
+                    "status": reason.status(),
+                    "message": reason.message(),
+                    "files": files,
+                }
+            })
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 enum BatchSubprocessOutcome {
     Rows(Vec<TestRow>),
-    Fallback,
+    Fallback(BatchFallbackReason),
 }
 
 fn run_test_batch_subprocess(
@@ -6435,55 +6676,66 @@ fn run_test_batch_subprocess(
                 .map_err(|e| format!("open suite progress file `{}`: {e}", path.display()))
         })
         .transpose()?;
-    let output = match run_batch_worker_command_with_timeout(
-        cmd,
-        batch_worker_timeout(batch_jobs, timeout_secs),
-        |line| {
-            let line = line.strip_suffix(b"\n").unwrap_or(line);
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
-                return;
-            };
-            if test_row_from_json(&value).is_none() {
-                return;
-            }
-            if let Some(progress) = progress.as_mut() {
-                let _ = progress.write_all(line);
-                let _ = progress.write_all(b"\n");
-                let _ = progress.flush();
-            }
-        },
-    ) {
+    let worker_timeout = batch_worker_timeout(batch_jobs, timeout_secs);
+    let output = match run_batch_worker_command_with_timeout(cmd, worker_timeout, |line| {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+            return;
+        };
+        if test_row_from_json(&value).is_none() {
+            return;
+        }
+        if let Some(progress) = progress.as_mut() {
+            let _ = progress.write_all(line);
+            let _ = progress.write_all(b"\n");
+            let _ = progress.flush();
+        }
+    }) {
         Ok(output) => output,
-        Err(_) => return Ok(BatchSubprocessOutcome::Fallback),
+        Err(e) => {
+            return Ok(BatchSubprocessOutcome::Fallback(
+                BatchFallbackReason::WorkerUnavailable(e.to_string()),
+            ));
+        }
     };
     if output.timed_out {
-        return Ok(BatchSubprocessOutcome::Fallback);
+        return Ok(BatchSubprocessOutcome::Fallback(
+            BatchFallbackReason::Timeout(worker_timeout.as_secs()),
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.output.stdout);
     let mut rows = Vec::new();
-    for line in stdout.lines() {
+    for (number, line) in stdout.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        let number = number + 1;
+        let malformed = |detail: String| {
+            Ok(BatchSubprocessOutcome::Fallback(
+                BatchFallbackReason::MalformedOutput(format!("stdout line {number} {detail}")),
+            ))
+        };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            return Ok(BatchSubprocessOutcome::Fallback);
+            return malformed("is not JSON".to_string());
         };
         let Some(file) = value.get("file").and_then(|v| v.as_str()) else {
-            return Ok(BatchSubprocessOutcome::Fallback);
+            return malformed("has no `file` field".to_string());
         };
         let Some(test) = value.get("test").and_then(|v| v.as_str()) else {
-            return Ok(BatchSubprocessOutcome::Fallback);
+            return malformed("has no `test` field".to_string());
         };
         let Some(status_s) = value.get("status").and_then(|v| v.as_str()) else {
-            return Ok(BatchSubprocessOutcome::Fallback);
+            return malformed("has no `status` field".to_string());
         };
         let status = match status_s {
             "pass" => TestStatus::Pass,
             "fail" => TestStatus::Fail,
-            _ => return Ok(BatchSubprocessOutcome::Fallback),
+            other => {
+                return malformed(format!("has status `{other}`, not `pass` or `fail`"));
+            }
         };
         let message = value
             .get("message")
@@ -6497,14 +6749,21 @@ fn run_test_batch_subprocess(
         });
     }
 
-    let should_fallback = match output.output.status.code() {
-        None => true,
-        Some(0) => false,
-        Some(1) => rows.is_empty(),
-        Some(_) => true,
+    // Exit 1 is the worker's "some test failed" code, so it is only a fallback
+    // when the worker produced no rows to attribute that failure to.
+    let failure = match output.output.status.code() {
+        None => Some("batch worker was terminated by a signal".to_string()),
+        Some(0) => None,
+        Some(1) if rows.is_empty() => {
+            Some("batch worker exited with status 1 and emitted no test rows".to_string())
+        }
+        Some(1) => None,
+        Some(code) => Some(format!("batch worker exited with status {code}")),
     };
-    if should_fallback {
-        return Ok(BatchSubprocessOutcome::Fallback);
+    if let Some(detail) = failure {
+        return Ok(BatchSubprocessOutcome::Fallback(
+            BatchFallbackReason::WorkerFailed(detail),
+        ));
     }
 
     Ok(BatchSubprocessOutcome::Rows(rows))
@@ -7788,7 +8047,11 @@ where
 {
     let mut combined_decls = Vec::new();
     let mut selected = Vec::<(String, String, chelis_deep::Span, String)>::new();
-    let mut seen_names = HashSet::<String>::new();
+    // Same admission rule the parent classifier applied, so this guard can only
+    // reject a manifest the parent should never have built. A stricter guard
+    // here would reject legitimate batches and turn them into silent per-file
+    // fallbacks, which is how the two used to disagree.
+    let mut batch_scope = BatchScope::default();
 
     for file in files {
         let source = fs::read_to_string(&file.file)
@@ -7796,10 +8059,9 @@ where
         let parsed = chelis_surf::parser::parse_str(&source)
             .map_err(|e| format!("parse {}: {e}", file.file.display()))?;
         let flat = flatten_module_decls(&parsed);
-        for name in top_level_decl_names(&flat) {
-            if !seen_names.insert(name.clone()) {
-                return Err(format!("duplicate top-level name `{name}` in test batch"));
-            }
+        if let Some(collision) = batch_scope.admit(&file.rel_display, &test_file_scope_names(&flat))
+        {
+            return Err(format!("test batch scope collision: {collision}"));
         }
 
         let tests = match enumerate_test_fns(&flat, None, &file.rel_display) {

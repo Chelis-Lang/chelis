@@ -207,8 +207,23 @@ chelis test tests_blocked/ --expect blocked
 Directory runs use `--batch-mode auto` by default: eligible files are compiled
 as one suite batch so the fixed Reef context and test-source compile costs are
 paid once. Files with top-level module-init bindings or top-level name
-collisions use the per-file worker path. If a batch worker crashes, times out,
-or emits incomplete rows, the parent falls back to per-file workers.
+collisions use the per-file worker path.
+
+The batch is one compilation unit with one top-level scope, so a name
+collision is any way two batched files can disagree about what a name means:
+both declaring it, one declaring what another explicitly imported (in either
+order), both importing it from different modules, or a wildcard import whose
+names cannot be enumerated without resolving the package graph. Importing the
+same name from the same module is not a collision. Demotion is not reported:
+the per-file path gives the same rows and the same exit code.
+
+If a batch worker crashes, times out, or emits incomplete rows, the parent
+falls back to per-file workers and says so on stderr, naming the reason and
+every file the batch had claimed. The exit code still tracks test outcomes
+only, because every selected test still ran; `--json` adds a `batch_fallback`
+record before the rows and a `batch_fallback` flag on the summary so a machine
+consumer can tell a batched run from a fallback run. Both `--json` additions
+are absent when the batch completes.
 
 Use `--batch-mode file` to force per-file subprocess isolation while debugging.
 `--jobs auto` caps worker concurrency on file-worker paths; pass `--jobs 1` for

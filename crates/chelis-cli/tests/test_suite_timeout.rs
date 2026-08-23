@@ -600,7 +600,27 @@ fn batch_stderr_survives_fallback_without_duplication() {
         .output()
         .expect("run");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stderr, b"batch diagnostic before abort\n");
+    // The worker's own bytes survive exactly once and stay at the front of
+    // stderr. chelis#1261 adds the runner's attributed note behind them: the
+    // worker line alone never said which files it belonged to, or that the
+    // batched path had been abandoned at all.
+    let stderr = String::from_utf8(output.stderr.clone()).expect("utf-8 stderr");
+    assert_eq!(
+        stderr.matches("batch diagnostic before abort").count(),
+        1,
+        "worker stderr was duplicated: {stderr:?}"
+    );
+    let Some(rest) = stderr.strip_prefix("batch diagnostic before abort\n") else {
+        panic!("worker stderr was not forwarded first: {stderr:?}");
+    };
+    assert!(
+        rest.starts_with("warning: suite batching was abandoned"),
+        "abandoned batch was not attributed after the worker line: {stderr:?}"
+    );
+    assert!(
+        rest.contains("tests/smoke.ch"),
+        "fallback note did not name the abandoned file: {stderr:?}"
+    );
     let lines = json_lines(&output);
     assert_eq!(
         lines
