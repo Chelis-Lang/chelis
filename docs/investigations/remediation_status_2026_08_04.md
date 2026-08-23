@@ -1,7 +1,8 @@
-# Chelis Numeric Remediation - Status (2026-08-22)
+# Chelis Numeric Remediation - Status (2026-08-23)
 
-This is the state of the numeric-remediation board. `main` is at `254d6070`.
-The shipped release is **v0.18.4**, and it is breaking on four boundaries.
+This is the state of the numeric-remediation board. The execution basis for
+this revision is `main` at `d2cceb0b`. The shipped release is **v0.18.5**
+(`fc3232ff`); `main` is three commits ahead.
 
 **One class is closed.** #732 (faithful observation) closed on 2026-08-21 on
 its own stated condition, and its META #728 closed with it - the first class
@@ -9,25 +10,16 @@ closure since the plan set was authored in 2026-07. The board is four active
 classes plus a closure record from here on; the #732 rows below say what the
 class left behind rather than what it still owes.
 
-**`main` is ahead of the release.** The `v0.18.4` tag is `c0138c82`,
-twenty-three commits below this basis, so every post-release repair is true of
-`main` and not of the release a shell can install: the scalar alignment
-(#1188), the gate and reshape fixes (#1195, #1196), the pipeline core (#1155),
-the recursive-generic build capability (#1204, #1215, #1218 - closing #1158,
-#1201, #1216 and coral#26's build lane), the #1200 linearity repair (#1208),
-the CSV ingestion repair (#1213, part of #943), the #912 test wave
-(#1230-#1232), the rustc 1.98.0 toolchain pin (#1236), and this revision's own
-wave: the integer-literal type rejection (#1240, closing #1179), the
-`chelis migrate surf` repair (#1243, closing #1197), the `>` operand order
-(#1245, closing #1180), the FO-DIAG diagnostic boundary (#1250, closing #997
-and with it #732), the cache-fingerprint fix (#1161, closing #1156), and
-#731's PP3 (#1254, closing #1209, #1211, and #1212). Where that distinction
-changes what a reader should do, the text says which side of the tag a repair
-sits on.
+v0.18.5 contains the post-v0.18.4 repair wave: scalar alignment, gate and
+reshape fixes, pipeline-core extraction, recursive-generic build support,
+linearity and CSV repairs, the #912 test wave, the rustc 1.98.0 pin,
+integer-literal type rejection, the `chelis migrate surf` repair, authored `>`
+operand order, the FO-DIAG boundary that closed #732, the cache-fingerprint
+fix, and #731 PP3. None of those remains an unreleased main-only repair.
 
 Every count and code claim here was measured on `841b6ddb` for the 2026-08-05
-revision and re-measured on `254d6070` wherever this 2026-08-22 revision
-changes it, and the command is
+revision, re-measured on `254d6070` for the 2026-08-22 revision, and refreshed
+against `d2cceb0b` wherever this revision changes it. The command is
 named where the number matters. Three figures are *not* independent
 measurements and are attributed in place: the changelog drift numbers are PR
 #1199's own, #847's non-reproducing disposition is PR #1178's, and the 8/1-8/2
@@ -46,55 +38,44 @@ per-defect recurrence guards; this document is the board.
 Waves 0-3 of the remediation roadmap are complete, with one exception: #733's
 Phase 0 (OpenSpec activation), the lone outstanding Wave-0 item. Of the four
 Wave-4 slots, **#732 is closed** - its Phase 3 delivered in v0.18.3 and its
-last direct debt (#997) retired by PR #1250 - while #729 Phase 4 is open at
-its census-permanence slice with the capability table proper unbuilt, #730
+last direct debt (#997) retired by PR #1250 - while #729 Phase 4A's
+census-permanence slice is landed, Phase 4B's language/schema freeze is this
+change, and the 4C-4E table/consumer/conformance work is unbuilt. #730
 Phase 3 has its gates but not its contract and Phase 4 is unbuilt, and #733
 has nothing.
 
-The class trackers carry **38 open children** between them, down from 40, and
-the route it took is worth more than the endpoint: 40 -> 41 -> 38 across two
-days. It ended 2026-08-21 at **41**: three on, as the linearity residue
-(#1209, #1211, #1212) finished a month classless and became children of #731;
-two off, as #997 closed and #1059 left #732 for the #1170 hub. The arithmetic
-moved the wrong way because the assignment moved the right way. Then on
-2026-08-22 it fell to **38**, because the new parent made the class change
-obvious to write and PR #1254 landed #731's PP3 and closed all three. A month
-parentless, then claimed and delivered inside twenty-four hours: that is the
-argument for pending decision 3, not an anecdote beside it. Everything still
-open falls into
-four groups: a defect inventory concentrated in #730's support cells and
-#729's GPU lanes, two engineering campaigns (the capability table and the #912
-root-boundary chain), a keystone in flight as an open draft (#1088, PR
-#1285), and an institutional
-enforcement layer that is specified and largely not running.
+After this change closes #898, the class trackers carry **53 open children**:
+#729 has 26, #730 has 17, #731 has 7, #732 has none, and #733 has 3. The live
+pre-merge graph is one higher because #898 remains open until this PR merges.
+The higher total records the focused Phase 4 delivery children #1281-#1298,
+not a compatibility backlog: each executable slice has one structural owner.
+Everything still open falls into four groups: a defect inventory concentrated
+in #730's support cells and #729's GPU lanes, two engineering campaigns (the
+capability table and #912 root-boundary chain), the post-#1088 stamped-carrier
+follow-ons now that PR #1285 has landed, and an institutional enforcement
+layer that is specified and largely not running.
 
-The weak point is downstream. **v0.18.4 is breaking on four boundaries in a
-patch cut** - canonical Surf, the int64 C ABI, the declaration contracts, and
-WireDag schema 5 - and two of them land on the roadmap's anti-churn
-invariants: the ABI widening overrides invariant 7's default, and the schema
-step raises a scope question invariant 1 does not answer. Neither is a clean
-violation and neither is clean compliance (pending decision 1). **Both
-post-release defects are now repaired main-side and both are still live in the
-release a shell installs**: **#1200**, the linearity regression that took
-coral's suite from 74 passing to 17 (PR #1208), and **#1197**, the
-`chelis migrate surf` batch abort - the release's own named migration path
-refusing to migrate a tree - which PR #1243 closed after three review rounds.
+The weak point is downstream. v0.18.4 broke four boundaries in a patch cut -
+canonical Surf, the int64 C ABI, declaration contracts, and WireDag schema 5 -
+and exposed both a linearity regression (#1200) and a broken named migration
+path (#1197). **v0.18.5 now ships both repairs** along with the rest of the
+post-tag wave.
 The same main-side wave also retired coral's other build-lane wall: recursive
 generic host calls compile via bounded memoized monomorphization
 (#1204/#1215/#1218), and `Coral.Frame` now builds, links, and runs against the
 eval lane. Nothing in CI could see any of these; all were found downstream.
-What the release still owes a shell is a cut, not a repair, and that cut is in
-flight: 0.18.5, PR #1256 (decision 9).
+The remaining downstream risk is the planned v0.19 behavior/storage cut, not
+an unshipped repair release.
 
 ## Scoreboard
 
 | plan | landed | remaining |
 |---|---|---|
-| **#729 dtype semantics** | P0-P3 + §C6 census, all CI-wired (PRs #758, #956, #1033, #1049, #1054, #1065, #1118); Phase 4 opened by PR #1154 (permanent dispositions for all 301 census rows, descriptor-manifest bound, red-teamed  x 2); the dtype ledger delivered as code by PR #1181 (sealed `ScalarValue` `Pad` carrier, total exact-representability predicate, per-float-width `uniform_like` emission, exhaustive cast result-state match, checked runtime arithmetic with the dev/release overflow oracle, [05-OP-9]/[05-OP-10], required `BuiltinDecl` axis-layout metadata); [04-NUM-15] authored by PR #1169 and enforced by PR #1189 (one `CheckedCastPlan` over all 81 active dtype pairs, identity only on the same-`Prim` diagonal, lowest row-major flat index selected under OpenMP - closing #1150 and #1152); the scalar numeric family aligned across checker, eval, and C by PR #1188 (closing #704, #712, #715), which merged after the v0.18.4 tag | Capability table proper: Table A/B, derived checker acceptance, macro-generated dispatch (Supported cell without kernel = compile error), generated conformance suite, #912 projections. Plus: the P0 detector-half adjudication (unowned), the P3 oracle adjudication + stale tracker checkbox, the #1160 seam-relocation decision, #1112's GPU half (`chelis_gpu_tensor` still carries 32-bit extents after the host ABI widened), and the GPU support cells, none of which has moved (#689, #690, #693, #951) |
+| **#729 dtype semantics** | P0-P3 + §C6 census, all CI-wired (PRs #758, #956, #1033, #1049, #1054, #1065, #1118); Phase 4A opened the permanent 301-row capacity disposition in PR #1154; the dtype ledger landed in PR #1181; [04-NUM-15] was authored in PR #1169 and enforced by PR #1189; scalar numeric families aligned in PR #1188 and shipped in v0.18.5. This change is Phase 4B: [05-OP-11..25], [04-NUM-16], reduction tie/NaN/infinity/order rules, canonical `to_string`, and the exact typed capability schema are frozen; `dtype_phase4b_oracle.py` is the authoritative freeze check | **4C:** populate Table A/B, host-constructor and sibling-builtin registries, and external target dispositions, with authoritative `dtype_phase4c_oracle.py`. **4D:** derive checker/reporting, backend dispatch, build gates, host casts/ABI, #912 projections, and exported-stdlib dependency closures, with authoritative `dtype_phase4d_oracle.py`. **4E:** generate the complete executable product and final `dtype_phase4_oracle.py`, then fresh red team. Behavior changes for reductions (#170 owns the product-tree/backend rows; #1281 owns the remaining reduction rows), wrap ops, classification, named casts, and [05-OP-25]'s `to_string` checker/eval domain (#1282) and C-host cells (#1059) ship at v0.19 before the v0.20 mechanism. Also open: #1160 seam relocation, #1112's GPU half, and GPU cells #689/#690/#693/#951 |
 | **#730 loud unsupported** | P0-P2; P3's typed `RejectionAuthority` + sealed 48-kind `DiagnosticKind` slices (PR #1037); P3's gate contract in two slices - PR #1175 (one typed compiler-api policy behind both public build paths, the `reject_unsupported_hip_ops` pair deduped, `COMPILED_HOST_ONLY_BUILTINS` deleted, the C precision preflights removed, a syntactic `reject_*` source manifest over both crates) and PR #1186 (Metal and seeded-effect policy moved into those same typed definitions, one shared host tensor-helper traversal, entry-scoped pure-DAG effect rejection, the single Phase 3 runner). Closed #697, #698, #705, #959, and - via LU6 in PR #1189 - #1150, whose `_ => input` host-emission fallback is deleted. Closed #1158 via PR #1204 (after the tag): recursive generic host calls compile through bounded memoized monomorphization under the new [04-INF-2]/[04-INF-3] uniform-recursive-instantiation atoms (spec/04 §3.1.1) - a BREAKING check-time rejection of polymorphic recursion, lane-uniform - with PRs #1215/#1218 extending the same specialization to non-recursive generics (#1201) and recursive erased-dim generics (#1216), and the surviving fail-closed residue re-cited to the open tracker #1226 | **Phase 3 is not complete**: `scripts/loud_unsupported_phase3_oracle.py` passes five legs and is red on the sixth, the independently owned #912 root-realizability interlock. Also owed: the recorded gate contract as a written rule, deletion of gates that duplicate emitter rejections, a no-duplicate-gates tripwire beyond the syntactic manifest, and the first-error-vs-accumulate decision affirmed before the contract freezes; deliverable 6 rides the #912 chain; Phase 4 (ratchet totality, #990) is entirely unbuilt - no phase-4 oracle script, no nightly workflow |
 | **#731 checker totality** | P0-P3 implemented, incl. the construction gate (PR #1101) and authoring-scope fixes (PR #1136); **PP1 + PP2** (PR #1178): the function-parameter typing channel under [04-INF-1], the writeback information-ordering gate, the atom/primitive agreement matrix under [04-LIT-1] and `spec/03` §6.4, the orphan-`defsig` rule in `spec/03` §2.2, and the registered-builtin arm tripwire - closing #780, #783, #847, #851, #1131, #1147 | The decode-once rework's fresh-context red team is named pending in `checker_totality.md`'s header, but the round ran on PR #855 (an exact-head architectural pass and an explicitly fresh local-subagent pass, both FAIL, findings folded before merge), so that line is stale text rather than unmet work; the §C4.2 ingress half is in flight as open draft PR #1285 (#1088, which also dispositions the #1129 re-salvage); #850's build half; #1125's stamped-Node ingress-parity sweep; #1134's ingress-divergence decision; #874's tag-keyed exemption with #887 under it; carrier deletion last (#1029, whose stated precondition - no producer exists - is false: 1,018 `Expr::List` and 77 `Atom::Tag` matching lines under `crates/`, and the `Node::to_list` bridges plus `chelis-surf`'s desugar output are live producers) |
 | **#732 faithful observation - CLOSED 2026-08-21** | All four phases (P3 via PRs #1099/#1115/#1118, shipped in v0.18.3); both known-red ledgers empty (`KNOWN_RED_CELLS` is `()` at `faithful_observation_phase2_oracle.py:159`, and `C_LANE_EXCLUDED` has no production occurrences left); tolerance table + #687 handshake shipped; Phase 2's empty-ledger acceptance repaired and continuously wired by PR #1185; and the last direct debt - #997's structural `FO-DIAG` diagnostic-rendering migration - retired by PR #1250, which is the tracker's own stated closing condition. META #728 closed with it | Nothing, and the closure says so in a form that can be checked: zero open children at close, both owning documents (`faithful_observation.md`, `remediation_roadmap.md`) audited by full read, and every live thread touching this class's artifacts assigned elsewhere by name - own-width eval tensor digits to #729's v0.19 D1 step, the `OBSERVATION_EXIT_SURFACES` derived-universe revisit to #730 Phase 4 §C7.1, root set/order/artifact acceptance to #912/#1023, the shell-invokable comparator gate to #754, the bool decode exception to #894, `chelis_format_shortest` hardening to the #729/#893 pair, and the scheduled full-matrix package to #990. #1059's C-host `to_string` is separate capability work and was re-homed under #1170 before the close, not left dangling. What outlives the tracker are the recurrence guards: the three no-third-formatter tripwire classes, the round-trip harness, and both phase oracles - Phase 2 as its own blocking job, Phase 3 nested inside the `Dtype Phase 0-3 Oracle` job, both on every non-docs-only PR |
-| **#733 spec provenance** | Nothing - Phase 0 is defined but explicitly not activated: no oracle suite, no PR template, no `governance` gate stage, and a `.github/CODEOWNERS` that covers 16 #729/#730 guard artifacts but not `spec/**` (its own header says Phase 0 owns the broader signoff) | Everything. P0 is Chelis-owned and self-contained; P1-P3 additionally wait on three Buoy prerequisites (the pinned revision's `devenv test` oracle, the `buoy.adapter-sdk/v1` pin, the approved host parsed-item schema). Its four children are #735, #797, #895, #898. v0.20 is formally blocked on P3 |
+| **#733 spec provenance** | #898's missing numeric-operation authorities are authored by this change, but no provenance phase is activated: no oracle suite, PR template, `governance` gate stage, or `spec/**` CODEOWNERS coverage | P0 remains Chelis-owned and self-contained; P1-P3 additionally wait on three Buoy prerequisites (the pinned revision's `devenv test` oracle, the `buoy.adapter-sdk/v1` pin, and approved host parsed-item schema). The remaining children are #735, #797, and #895. v0.20 is formally blocked on P3 |
 
 ## Sibling classes (what the five plans structurally cannot deliver)
 
@@ -263,23 +244,21 @@ What each cut obliges a shell to do, not what each cut contained.
 
 ### What the class trackers hold
 
-Of the 121 issues parented to the five trackers, 38 are open. #733 is the only
-class with nothing closed under it, and #732 is now the only one with nothing
-open.
+Of the 126 issues parented to the five trackers, 41 remain open after this
+change closes #898. #733 is the only class with nothing closed under it before
+this merge, and #732 is now the only one with nothing open.
 
 | tracker | open / total | open children |
 |---|---|---|
-| #729 | 12 / 50 | #689, #690, #693, #753, #759, #892, #951, #965, #1091, #1092, #1112, #1160 |
-| #730 | 17 / 36 | #699, #722, #794, #795, #870, #872, #906, #955, #957, #958, #960, #990, #1058, #1137, #1138, #1143, #1157 |
-| #731 | 5 / 23 | #850, #874, #1125, #1129, #1134 |
+| #729 | 14 / 52 | #689, #690, #693, #753, #759, #892, #951, #965, #1091, #1092, #1112, #1160, #1281, #1282 |
+| #730 | 17 / 37 | #699, #722, #794, #795, #870, #872, #906, #955, #957, #958, #960, #990, #1058, #1137, #1138, #1143, #1157 |
+| #731 | 7 / 25 | #850, #874, #1125, #1129, #1134, #1247, #1264 |
 | #732 (closed) | 0 / 8 | - |
-| #733 | 4 / 4 | #735, #797, #895, #898 |
+| #733 | 3 / 4 after this change | #735, #797, #895 |
 
-Two of those rows moved for reasons the count hides. #731's total went from 20
-to 23 while its open count returned to the same five it started at: #1209,
-#1211, and #1212 joined on 2026-08-21 and closed on 2026-08-22, so the class
-absorbed three existing defects and discharged them without ever showing a
-larger backlog for more than a day. #732 lost a child without closing it:
+Two of those rows moved for reasons the count hides. #731 absorbed and closed
+#1209, #1211, and #1212, then gained #1247 and #1264 as new live children.
+#733 loses #898 only when this change merges. #732 lost a child without closing it:
 #1059 moved to #1170, whose subject - compiled-lane capability - is what
 #1059's acceptance actually is.
 
@@ -480,19 +459,18 @@ moved to where the oracle is - and an `Also part of #732` comment records the
 provenance the single parent link would otherwise erase. #1059 stays open and
 stays in the CI-pinned set; nothing about the class closure loosened it.
 
-Five open children appear in no plan doc, and all five are legitimate:
+Four open children appear in no plan doc, and all four are legitimate:
 **#1091** (the [04-NUM-14] cast trap breaking five shells) and **#1092**
 (hydronnx's privatized `TensorValue.data`) under #729; **#1129** (the landing
 inventory for the #1036/#1038 and #1037/#1042 branch work) under #731, which
 carries more weight now that #1036 is closed unmerged; and **#797** (central
-OpenSpec governance gate) and **#898** (reference-only `min_reduce`/
-`prod_reduce`/`argmax_reduce`/`argmin_reduce`) under #733, which are the only
-two concrete work items that tracker carries beyond #735 and #895.
+OpenSpec governance gate) under #733. #898 leaves this list because this
+change authors its missing reduction contracts and closes it on merge.
 
 ## Live defect inventory
 
 Each entry is tagged with its owning tracker class and describes `main` at
-`254d6070`. All but the last two groups are parented sub-issues of a class this
+`d2cceb0b`. All but the last two groups are parented sub-issues of a class this
 doc covers; the caveat is that **parented != scheduled** - a parent gives
 ownership and the oracle that proves the fix, but several of these appear in
 no remaining phase deliverable of their owning plan (see gap 5 below). **No
@@ -656,7 +634,7 @@ fixes nothing.
 | failure mode it prevents | mechanism | status |
 |---|---|---|
 | A new bare-float/raw-dtype numeric surface | §C6 census + tripwire; PR #1154's permanent dispositions (baseline regeneration cannot silently bless a change) | landed; #1160 (seam-identity relocation vocabulary) is the open design question, and it recurs on every dtype-migration rung |
-| Op x dtype drift, hand-mirrored lists | #729 Phase 4 capability table | opened; table proper unbuilt |
+| Op x dtype drift, hand-mirrored lists | #729 Phase 4 capability table | 4A capacity ratchet landed; 4B semantics/schema frozen by this change; 4C tables, 4D consumers, and 4E conformance unbuilt |
 | The next silent value substitution | #730's typed channels (landed) + Phase 4 ratchet totality (§C7) | Phase 4 unstarted (#990) |
 | Gate drift / duplicate gates | #730 P3 gate contract + dedup + deletion | the gates themselves are done (PRs #1175 and #1186: one shared typed policy per target, zero `fn reject_` definitions left in `chelis-cli`, the syntactic `reject_*` source manifest, #697/#698/#705/#959 closed); the recorded contract, the deletion pass, and a semantic no-duplicate tripwire remain |
 | A breaking release reaching shells before anyone runs their suites | the ecosystem-drift canary (auto-files per shell) + `conform bump-check` | neither detects nor gates this. The canary checks each shell out at `main` and never runs `chelis migrate surf`, so it only ever exercises pre-migration source - and #1200 appears only after migration rewrites record patterns to the mandatory v0.19 pun, which makes the existing leg structurally incapable of seeing it. The canary has also been red continuously since 2026-08-02 - its last success is the 2026-08-01 run, and all twenty-four runs since, through 2026-08-21, have failed - so it gates nothing in practice either. The missing leg applies a release candidate's own named migration to each shell tree and then runs that shell's suite |
@@ -726,25 +704,27 @@ to keep.
 ### 2. #729's capability table - the mechanism that retires hand-mirrored lists
 
 Op acceptance is hand-maintained lists, backend dispatch is hand-written match
-arms, conformance is hand-curated files - three places every new op must
-agree. The table inverts all three: checker acceptance derived from Table A
-(op x dtype x surface, atom citation mandatory), dispatch skeletons
-macro-generated so a `Supported` cell with no kernel is a compile error and a
-kernel with no cell is dead code, conformance generated. Part of v0.19's
-decision payload is already out ahead of the table as check-time rejections
-(#724, #726), and two more pieces sit on `main` as exactly the hand-curated
-matrices this phase exists to generate: the checked-cast product (PR #1189, in
-0.18.4) and the scalar contract (PR #1188, after the tag). Every one of those
-is work the table would otherwise have to redo as derived output. Still to
-decide or ship: #753 (wrap ops exist only as spec text
-plus `Unimplemented` cells), #759's `cast_saturate` rung, the #689/#693 GPU
-cells, #965. Entry conditions: schema freeze plus five recorded open questions
-(the surface axis for container callables is the one that bites). The merged
-census permanence is the floor; #1160 needs deciding so the next dtype
-migration can relocate seam identities without a hand-carried maintainer
-override. Known inherited holes: #951, #957, #958, #960, and the capability
-table's own stale seed-row statuses (#724/#726 "not yet landed", left for this
-phase to refresh).
+arms, and conformance is hand-curated files - three places every new op must
+agree. Phase 4B freezes the inversion: Table A is the complete
+`BuiltinId x SurfaceClass x operand Prim x SemanticParams` semantic product,
+with `SurfaceClass = Scalar | Tensor`; Table B adds
+`eval | c-host | c-dag | hip | metal` only for supported A cells.
+Container/boundary builtins use the sibling
+`BuiltinId x SiblingDomain x SiblingCaseId x SemanticParams` registry and its
+supported-row backend product; runtime, stdlib, and binding callables retain
+§C6's exact-canonical-identity family registries. Recursive host types use the
+companion constructor table.
+
+The language and schema decisions are no longer open. [05-OP-11..16] own
+reductions, [05-OP-17..19] own wrap arithmetic, [05-OP-20..22] own float
+classification, and [05-OP-23..24] complete the named cast ladder without
+`cast_round`. The five former schema questions are resolved in
+`capability_table.md`. What remains is implementation: 4C table population,
+4D generated checker/backend/root consumers, and 4E generated conformance.
+Behavior-changing kernels or stable loud rejections ship at v0.19; the
+behavior-preserving mechanism ships at v0.20. The merged census permanence is
+the floor. #1160 remains a parallel seam-relocation decision, and inherited
+holes include #951, #957, #958, and #960.
 
 ### 3. #1088 - owned and in flight; #1029 is next behind it
 
@@ -863,10 +843,11 @@ validating through the local HIP gate, and none of them has an owner.
 
 #733's Phase 0 is self-contained and Chelis-owned, so its dormancy has no
 external excuse; the measured cost is visible in the #891/#904 instance
-(twenty builtins and a prelude ADT with zero spec entries). Its four children
-are #735 (the unauthored `with seed` / `with device` semantics), #797 (adopt
-the central OpenSpec governance gate), #895, and #898 (four reference-only
-reduce builtins); none has moved. #740's backlog is two items of eight, and
+(twenty builtins and a prelude ADT with zero spec entries). Before this change
+merges, its four children are #735 (the unauthored `with seed` / `with device`
+semantics), #797 (adopt the central OpenSpec governance gate), #895, and #898.
+#898's missing reduction authorities are delivered by this change, leaving
+three open children afterward. #740's backlog is two items of eight, and
 neither of the two binds anything: the mechanism index is hand-maintained and
 the one per-crate guardrail covers one crate. #1089's
 unwired oracles are empirically proven gaps - a deleted assertion produced no
@@ -982,8 +963,8 @@ residue filed rather than swallowed.
 8. **The owned-but-unscheduled residue** (gap 5): #795, #957, #958, #960,
    #699, #722, #794, and #874 each need a named delivery slot.
 9. **Which Surf follow-ons ride the v0.19 cut. The cut question itself is
-   DECIDED 2026-08-22: 0.18.5, in flight as PR #1256** (unmerged at this
-   revision). It carries the #1197 migrator repair, the recursive-generic
+   settled: v0.18.5 shipped through PR #1256 on 2026-08-23.** It carries the
+   #1197 migrator repair, the recursive-generic
    capability, and all three BREAKING boundaries - polymorphic recursion at
    check time ([04-INF-2]/[04-INF-3]), integer literals rejected in bare type
    positions (#1179), and `>` evaluating operands in authored order (#1180) -
@@ -993,19 +974,24 @@ residue filed rather than swallowed.
    payload** (the per-dtype storage break, the capability decisions, the
    manifested root completion), none of which this cut carries, and the
    migrator keys off the 0.18 line - a compiler at 0.19 whose migrator still
-   speaks `--from 0.18` is a confusing pair. The PR flags itself as one review
-   comment away from 0.19 if the maintainer prefers, so this is a made call
-   with its reversal cost written down rather than a settled fact.
+   speaks `--from 0.18` is a confusing pair. That reasoning is now the record
+   of the shipped cut.
 
    What is left of this decision is only the Surf ride-which-cut question, and
    it is down to two: whether **#1171** (typed first-argument
    application-to-pipe promotion, explicitly not delivered by #1031) and
    **#1172** (structural spans, parented to #883) ride v0.19 or a further
    patch. #1179 and #1180 left this list by shipping in the 0.18.5 cut.
-10. **#1170's relationship to #730 Phase 4.** The C-lane capability tracker
-   inventories the same hand-maintained exclusion lists that Phase 4's ratchet
-   totality is meant to derive. Decide whether it is a Phase 4 acceptance cell
-   or an independent surface before both build one.
+10. **#1170's relationship to #730 Phase 4 is decided.** Its container and
+   boundary builtins use the sibling
+   `BuiltinId x SiblingDomain x SiblingCaseId x SemanticParams` capability
+   registry selected by their declarations, not numeric Table A's
+   `SurfaceClass` axis. Exported callables retain §C6's semantic family
+   registry. Runtime C exports and PyO3 bindings additionally use Phase 4C's
+   total external target-disposition registry; exported stdlib definitions
+   instead derive per-backend executability transitively from their checked
+   bodies in Phase 4D. #730 owns the shared loud-rejection channel. Neither
+   plan builds an independent support list.
 
 ## Standing process conditions
 

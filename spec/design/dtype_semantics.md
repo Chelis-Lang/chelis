@@ -1,18 +1,10 @@
 # Grounded Dtype Semantics
 
-**Status:** Active phased plan. Phase 0 landed in PR #758; its named receipt is
-`.venv/bin/python scripts/dtype_phase0_oracle.py`, and the temporary compiled
-print-truncation slack is now zero after [#732] Phase 2. The PR #956 §C6
-covered-family tripwire and Phase 1's typed wire-schema, registered-PyO3 entry
-legs, and sealed dtype-semantics layer landed through PRs #1033 and #1049.
-Phase 2's complete kernel split, exact prover carriers, trap freeze, and
-reduction/adjoint consumers landed through PR #1054. PR #1065 began Phase 3
-with exact, minimum-trapping signed-integer `abs`; this revision delivers the
-remaining C scalar/tensor value work and continuously wires
-`.venv/bin/python scripts/dtype_phase3_oracle.py`, which inherits Phases 0-2
-and the faithful-observation Phase 3 contract. Phase 4 entry has begun with
-the capacity-disposition closure; the capability table and its generated
-consumer projections have not landed.
+**Status:** Active phased plan. Phases 0-3 and their nested oracle chain have
+landed. Phase 4A's covered-family capacity ratchet has landed. This change
+completes Phase 4B by freezing the remaining language decisions and the typed
+capability schema. Phase 4C's machine tables, Phase 4D's generated consumers,
+and Phase 4E's generated conformance product have not landed.
 Tracking issue: [#729].
 **Owning specs:** `spec/04-type-system.md` (the authored overflow/rounding and
 per-dtype value contract), `spec/05-risc-primitives.md` (op result semantics),
@@ -678,13 +670,13 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    lands, the guard is the capacity census and tripwire (deliverable 1
    below).
 3. **Ops**: a new numeric operation exists only with a decided row in the
-   registry that owns its FAMILY. Table A's key is
-   (builtin, surface, operand dtype, semantic-parameter case) and stays the
-   LANGUAGE-BUILTIN law;
+   registry that owns its FAMILY. Numeric Table A and the sibling builtin
+   registry's exact keys stay the LANGUAGE-BUILTIN law;
    runtime exports, prelude/stdlib defs, and binding functions do not
-   fit that key - no `BuiltinId`, no `Scalar|Tensor` surface (PR #950
-   red team P1-2, which also caught the pre-existing strain in the
-   `to_string` x Tensor/List seed row). Post-ratchet growth totality is
+   fit those keys because they have no `BuiltinId`. Container and boundary
+   builtins use the sibling registry rather than inventing a List-valued
+   scalar/tensor surface (PR #950 red team P1-2). Post-ratchet growth totality
+   is
    therefore REGISTRIES PER FAMILY, each exhaustive over new members of its
    own enumerated surface:
    language builtins in Table A, with checker acceptance DERIVED from
@@ -755,8 +747,10 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    everywhere** (the standing Table A / Table B split,
    `capability_table.md` §Derivations): registering an op decides what
    is legal in Surf, Deep, and the RISC DAG - a target-independent
-   fact the CHECKER reports. What a given backend can execute is Table
-   B's separate, later decision: a language-legal op a target cannot
+   fact the CHECKER reports. What a given execution target can run is Table
+   B's, the sibling backend product's, the external target registry's, or an
+   exported-stdlib body's derived dependency closure's separate, later
+   decision: a language-legal op a target cannot
    run is a build-stage capability rejection through [#730]'s
    `Unsupported` channel where the target is known, NEVER a checker
    type error. Both stages' diagnostic machinery already exists
@@ -1290,7 +1284,7 @@ numeric form is type-unrepresentable.
 | §C5 kernel signatures | Phase 2 | this doc |
 | §C6 covered-family census + tripwire | canonical row identities, complete derived classifications, stdlib ADT shapes AND their capacity flags, post-ratchet callable-to-`[05-OP-N]` registrations, public-header context invariance, the seam complete-descriptor set, and the exact non-seam/Json permanent complete-descriptor freezes; unflagged rows append by live ISSUE citation, new numeric callables also author/register a new OP atom, and FLAGGED rows are shrink-only (a shape-validated maintainer override is the sole human exception) | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
 | §C6 typed wire/PyO3 leg state | before Phase 1 entry: frozen when each named enumerator and mutation command is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
-| capability table schema | Phase 4 entry | `capability_table.md` (the owning doc) + this doc |
+| capability table schema | Phase 4B | `capability_table.md` (the owning doc) + this doc + every named consumer plan |
 
 "Frozen" means: later phases may ADD consumers but not reinterpret
 behavior. If your phase needs a frozen contract to change, stop, update
@@ -1401,14 +1395,11 @@ enumerators establish, never a prose or baseline claim.
    unit tests per cell of the §C1 table (positive AND negative per the
    repo's negative-test-parity rule: every rounding case, every trap
    case, every special value).
-2. **The spec/04 section**: spec/04 §9 carries the decided contract as
-   current blockquote authorities, including [04-NUM-14]'s checked-cast
-   ladder, with an honest status banner
-   (seeded ahead of this phase; implementation tracked here). This phase
-   RATIFIES and refines those semantics (and their §C1/§C2 correspondence) in
-   the same PR as the module, so spec and code cannot diverge at the moment the
-   semantics become real. Chelis#733 Phase 1 separately migrates the authority
-   form and revisions through the pinned Buoy shell-side integration.
+2. **The spec/04 section**: spec/04 §9 carries the timeless decided contract,
+   including [04-NUM-14]'s checked-cast rule. Implementation status remains in
+   this plan and current-state documents, never in the normative section.
+   Chelis#733 Phase 1 separately migrates the authority form and revisions
+   through the pinned Buoy shell-side integration.
 3. **The storage decision at every layer of the §C3 census as
    re-derived at entry** (the four layers named in §C3 - eval
    `TensorStorage`, the versioned wire schema, the Python boundary,
@@ -1430,7 +1421,7 @@ enumerators establish, never a prose or baseline claim.
    reduction data arguments, bare pipe stages, and polymorphic
    instantiations for integer `mean` [#724] and the authored bool-arithmetic
    roster [#726]. Direct and polymorphic paths reuse one canonical diagnostic;
-   Phase 4 replaces this interim policy with the generated Table-A view.
+   Phase 4D replaces this interim policy with the generated Table-A view.
 
 **Frozen at your exit:** §C1 table + spec section; §C3 API + storage +
 wire schema; §C4 rules 1-4 as implemented in Rust. **Eval is now the
@@ -1582,7 +1573,8 @@ bytes. This is [#728]'s acceptance and the precondition Phase 4's generated
 conformance matrix asserts against.
 
 **Explicitly not yours:** the permanent generated inventory of which cells
-exist (Phase 4 mechanizes the already-decided interim rows); HIP/Metal kernel
+exist (Phase 4C records the already-decided interim rows and Phase 4D derives
+their consumers); HIP/Metal kernel
 work (none needed).
 
 **Oracle:** `.venv/bin/python scripts/dtype_phase3_oracle.py` is this phase's
@@ -1667,67 +1659,125 @@ interim generator with Tables A/B.
 
 ## Phase 4 - the capability table becomes the permanent guard
 
-The table's SCHEMA is owned by `spec/design/capability_table.md` (the two
-operation tables: semantic table A and per-backend table B; finite
-semantic-parameter products expanded per Prim; scalar/tensor surfaces
-separate; atom citations mandatory; plus the companion recursive host-ABI
-constructor table) - read it before this phase; its seed-decision list is this
-phase's work-list.
+The schema is owned by `spec/design/capability_table.md`. It keeps `Prim`,
+`BuiltinId`, and capability policy in `chelis-types`; separates semantic Table
+A from per-backend Table B; expands finite semantic parameters per `Prim` and
+scalar/tensor surface; routes container/boundary builtins to the exact sibling
+registry while retaining §C6's external-family semantic registries; gives
+runtime and binding callables total external target dispositions; derives an
+exported stdlib definition's executability transitively from its checked body;
+and composes host ABI types through a separate constructor table.
+Phase 4 is split so table authoring, generated routing, and executable coverage
+cannot be conflated.
 
-**You inherit:** two agreeing lanes and a hand-curated matrix of tests.
+### Phase 4A - capacity-ratchet permanence (landed)
+
+**Delivered:** §C6's covered-family census, typed coverage manifests,
+callable-to-`[05-OP-N]` semantic registrations, public-header invariance, and
+the shrink-only flagged-seam rule. This prevents a new numeric channel or
+callable from bypassing review while the capability tables are built.
+
+### Phase 4B - semantic and schema freeze (this change)
+
+**Delivered:**
+
+1. The remaining callable decisions are timeless normative atoms: the exact
+   `mean`, extrema, product, argument-reduction, modular-arithmetic, float
+   classification, named-lossy-cast, and canonical `to_string` contracts. The extrema contract
+   divides every non-NaN tie, including equal infinities, routes a NaN
+   cotangent to the first NaN selected by the forward rule, and applies the
+   same rule to windowed extrema.
+2. `capability_table.md` freezes the exact typed Table-A/Table-B cells,
+   backend set, companion constructor table, exact sibling-builtin key and
+   cells, external-family semantic and target routing, exported-stdlib
+   dependency derivation, ownership boundary, and macro-expanded machine form.
+   There are no open schema questions after this slice.
+3. Behavior-changing implementation work remains assigned to v0.19 and may
+   not be disguised as table population. The v0.20 table mechanism records
+   honest `Unimplemented` cells until those implementations land.
+
+**Frozen at exit:** the numbered-spec atoms and capability schema. Changing
+either follows §B1; table implementation may not reinterpret them.
+
+**Authoritative 4B oracle:**
+`.venv/bin/python scripts/dtype_phase4b_oracle.py`; exit 0 and final line
+`DTYPE PHASE 4B ORACLE: PASS`. It validates the exact normative atom set,
+named-cast exclusion, typed numeric and sibling schema markers, phase naming,
+and generated rejection-registry agreement. Its success proves this freeze,
+not any Phase 4C implementation.
+
+### Phase 4C - populate the machine authorities
 
 **You deliver:**
 
-1. The `const` op x dtype x finite-semantic-parameter table
-   (`Supported | Rejected(&'static str)`),
-   with the never-authored cells decided on the record: integer `mean`
-   ([#724] - reject, widen, or authored floor-mean), bool arithmetic
-   ([#726] - proposal default: reject, diagnostics pointing at explicit
-   casts), scalar floor/ceil/round on ints ([#715]'s three-lane row - all
-   interim lanes already honor the decided integer identity rule; encode that
-   row rather than reopening or rediscovering it here).
-2. Checker acceptance derived from the table (delete the hand-mirrored
-   lists, e.g. `TRANSCENDENTAL_FLOAT_ONLY_OPS` becomes a table view).
-3. Backend dispatch skeletons macro-generated from the table: a
-   `Supported` cell with no kernel is a compile error in that backend; a
-   kernel with no cell is dead code the build flags.
-4. The generated conformance suite: every expanded `Supported` cell executed
-   in every lane asserting exact agreement (or the spec/05 §8 tolerance row
-   §C4.5 points at), including the complete checked-cast source x target
-   product; every
-   `Rejected` cell asserting the same diagnostic from every lane. This
-   suite REPLACES the hand-written matrix files as the standing guard;
-   the audit files remain as regression archaeology.
-5. The pre-table [#912] `BuiltinDecl.realizability` declarations and target
-   capability sets become generated projections of Tables A/B. The root
-   manifest may consume those projections and the checked root set, but it
-   cannot remain an independently authored builtin/backend authority.
-6. The recursive host-ABI constructor table and generated pairwise
-   composition suite. Host-type lowering derives concrete nestings from
-   constructor and child dispositions; it never curates an inventory of
-   shapes such as the [#955] `Option`/`List` report.
+1. Closed Rust key and cell types in `chelis-types`: Table A keyed by
+   `(BuiltinId, SurfaceClass, operand Prim, SemanticParams)` and Table B over
+   every A-`Supported` row times `eval | c-host | c-dag | hip | metal`.
+2. Compact authoring macros that expand to the complete machine rows. A
+   missing or duplicate expansion, new `Prim`, undeclared `BuiltinDecl`
+   domain, absent atom, or unsupported backend hole fails construction or
+   compilation.
+3. Fully populated Tables A/B, the recursive host-constructor table, and the
+   sibling builtin registry. Its exact key is `(BuiltinId, SiblingDomain,
+   SiblingCaseId, SemanticParams)` and its supported rows expand over the same
+   backend set; §C6's external-family semantic registry remains separate, and
+   runtime/binding callables populate the exact
+   `(ExternalCallableFamily, CanonicalCallableId, ExternalTargetContext)`
+   target-disposition registry. Table A and
+   sibling semantic cells use typed signature, result, atom, and diagnostic
+   identities; backend cells use typed kernel, issue, or rejected-by-design
+   authorities.
+4. Exact `[05-OP-N]` backfill and generated rejection-registry membership for
+   every numeric callable entering these products.
 
-**Why deliverable 4 is generated rather than curated (measured, chelis#937).**
-`uniform_like` on an f64 tensor in the compiled C lane returned near-zero
-garbage - a mean around 0.000365 where 0.5 was owed - while the f32 path was
-correct, and no test was red, because the hand-curated acceptance matrix simply
-had no `uniform_like` x f64 cell. A suite generated over every Table-A cell
-cannot omit a cell, which is precisely the failure mode this deliverable exists
-to make impossible; a curated matrix can only ever be as complete as whoever
-last extended it. The interim guard is the cross-lane parity-oracle row that
-lands with the chelis#937 decision, whose capability seed row belongs to
-`capability_table.md`.
+**Authoritative 4C oracle (supporting the overall Phase 4 oracle):**
+`.venv/bin/python scripts/dtype_phase4c_oracle.py`; exit 0 and final line
+`DTYPE PHASE 4C ORACLE: PASS`.
 
-**Frozen at your exit:** the table schema and the rule that lanes derive
-from it. After this phase, "add a builtin" without deciding every lane is
-a build failure, which is the class-level end state.
+### Phase 4D - replace hand-authored consumers
 
-**Explicitly not yours:** relitigating §C1 semantics (frozen since
-Phase 1).
+**You deliver:** checker acceptance and reporting, early build gates, backend
+dispatch skeletons, [#912] root-realizability projections, checked host-cast
+planning, recursive host-ABI resolution, and exported-stdlib dependency
+closures generated from the owning tables and checked bodies. Delete each
+hand-mirrored list only after its generated
+consumer is live. A root capability may derive from numeric Table B, the host
+constructor table, or a sibling registry; the root manifest authors none of
+those decisions.
 
-**Oracle:** the generated matrix is the named suite (this phase's single
-authoritative oracle per the repo contract); mutation check: deleting any
-lane's arm for a Supported cell must fail the BUILD, not just the tests.
+**Authoritative 4D oracle (supporting the overall Phase 4 oracle):**
+`.venv/bin/python scripts/dtype_phase4d_oracle.py`; exit 0 and final line
+`DTYPE PHASE 4D ORACLE: PASS`.
+
+### Phase 4E - generated conformance and class elimination
+
+**You deliver:** an executable product over every Table-A semantic cell,
+Table-B backend cell, finite parameter, surface, sibling semantic/backend
+cell, legal host-constructor composition, external target disposition, and
+derived exported-stdlib/backend result. Supported/implemented cells
+execute with exact agreement or the one owning tolerance rule;
+rejected/unimplemented cells assert the typed diagnostic at every rendering
+stage. The suite includes structural mutations
+for a missing A row, missing B row, stale atom, missing dispatch arm, omitted
+constructor nesting, extrema finite-tie/NaN/infinity-tie routing, and a
+missing generated case.
+
+Finite-difference checks cover smooth reduction points and the two-way tie
+subgradient. General `k`-way extrema ties, including equal positive and
+negative infinities, additionally assert permutation symmetry and that routed
+cotangents sum to the upstream cotangent; no plan may claim that generic
+finite differences prove the nonsmooth `g/k` convention.
+
+**Authoritative Phase 4 oracle:**
+`.venv/bin/python scripts/dtype_phase4_oracle.py`; exit 0 and final line
+`DTYPE PHASE 4 ORACLE: PASS`. It invokes the 4B, 4C, and 4D oracles and the
+4E product. Phase 4 is complete only after this command passes and a fresh local
+red-team agent validates the exact head. Supporting-oracle success alone is
+not phase completion.
+
+**Explicitly not Phase 4's job:** relitigating §C1 semantics or declaring an
+`Unimplemented` cell implemented because a partial pre-table path happens to
+pass a happy-path test.
 
 ---
 
@@ -1739,9 +1789,11 @@ different decisions:
 - `RuntimeDType` and `Repr` in `chelis-vocab` own stable ABI representation
   identity. `RuntimeDType` owns numeric IDs, external spelling, and the mapping
   to `Repr`. `Repr` describes each current physical encoding, and byte width
-  derives from it. `Repr` does not select a storage format. This document owns
-  finalization, value domains, the §C3 storage decision, cast behavior,
-  operation legality, and kernel behavior.
+  derives from it. `Repr` does not select a storage format. `Prim`,
+  `BuiltinId`, and capability policy remain in `chelis-types`; they do not
+  move to or duplicate into vocab. This document owns finalization, value
+  domains, the §C3 storage decision, cast behavior, operation legality, and
+  kernel behavior.
 - `loud_unsupported.md` defines how every negative decision reaches the user.
   This document defines correct behavior for supported cells. A cell may move
   from silently wrong to loudly rejected under [#730], then to correctly
@@ -1752,23 +1804,27 @@ different decisions:
   that decision.
 - Before Table B is generated, [#730] may use only a private exhaustive target
   adapter whose negative decisions cite a spec atom or implementation issue.
-  Phase 4 replaces those decisions without changing the HostType/ABI boundary.
+  Phase 4C populates the typed cells and Phase 4D replaces those decisions
+  without changing the HostType/ABI boundary.
 - The companion host-ABI constructor table composes recursive host types from
   closed constructor and child dispositions. [#730] LU4 owns the total typed
   resolver and rejection channel; this plan owns the backend dispositions.
   Neither plan may enumerate concrete `Option`/`List` nestings as policy.
-- Checked `cast` is a finite source x target x surface x backend product.
-  This plan owns conversion semantics and `IndexedTrapCandidate`'s lowest-flat-
-  index selection ([#1150], [#1152]); [#730] LU6 owns exhaustive host-emission
-  planning and the typed negative channel. Identity is not a fallback.
-- Table A rejections are reported by the checker because they are
-  target-independent. Table B `Unimplemented` and `RejectedByDesign` cells are
-  reported by build/lowering where the target is known, using [#730]'s
-  diagnostic contract.
+- Checked `cast` is a finite source x target x surface Table-A product; Table
+  B adds the backend. This plan owns conversion semantics and
+  `IndexedTrapCandidate`'s lowest-flat-index selection ([#1150], [#1152]);
+  [#730] LU6 owns exhaustive host-emission planning and the typed negative
+  channel. Identity is not a fallback.
+- Table-A and sibling semantic rejections are reported by the checker because
+  they are target-independent. Table-B, sibling-backend, and external-target
+  `Unimplemented`/`RejectedByDesign` cells, plus typed failures derived from an
+  exported stdlib body's dependencies, are reported where the execution target
+  is known, using [#730]'s diagnostic contract.
 - [#912]'s root manifest owns root identity, order, and artifact routing, not
   operation legality. Its pre-table builtin realizability and target sets are
-  exhaustive adapters; Phase 4 replaces their hand-authored decisions with
-  generated Table-A/Table-B projections.
+  exhaustive adapters; Phase 4D replaces their hand-authored decisions with
+  projections generated from numeric Table B, the companion host-constructor
+  table, or the callable's sibling registry.
 - `deep_tag_lane_contribution` is deliberately outside this interlock. It
   classifies Deep syntax through an exhaustive typed `DeepTag` disposition
   under [#908]/[#731], rather than being generated from numeric capability
@@ -1790,7 +1846,9 @@ updates this section, `loud_unsupported.md` §I1, and
 | 1 | [#684], [#717], [#720] (with Phase 2's fold work), [#724] eval half, [#726] eval half |
 | 2 | [#680], [#688], [#711], [#718] eval cells, [#722] eval half |
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
-| 4 | [#692], [#712], [#715] lane skew, [#724]/[#726] authored, future lane skew as a class |
+| 4A-4B | §C6 capacity permanence; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions and schema freeze |
+| v0.19 behavior | [#170] product-tree/backend work; [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] `to_string` checker/eval domain; [#1059] compiled tensor/List cells |
+| 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] migrates the last raw Pad constant carrier; [#937] supplies the missing-cell evidence for the generated matrix; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
 Orthogonal, do not wait: [#703]'s loud-fallback discipline (now its own
@@ -1805,11 +1863,12 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 | # | question | decided in | recorded where |
 |---|---|---|---|
 | 1 | per-dtype buffers vs finalize-on-write f64 | DECIDED 2026-07-17: per-dtype buffers. The proposal default is ratified: f64 storage cannot meet [#684] by construction, and the 2026-07 review endorsed per-dtype `TensorStorage` as the structural core | §C3 of this doc + the PR |
-| 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | cells DECIDED 2026-07 on the issues ([#724] reject; [#726] reject + first-class `count`; [#712]/[#715] support - see capability_table.md's seed rows); Phase 4 ratifies each as an atom | capability table + spec/05 |
+| 2 | integer `mean` / bool arithmetic / int floor-ceil-round capability rows | DECIDED: [#724] reject; [#726] reject with the explicit-cast counting path; [#712]/[#715] support. Phase 4B freezes the corresponding atom/schema bindings | capability table + spec/05 |
 | 3 | trap surface form and exact strings | Phase 2 | §C2 + `pub const` in the module |
 | 4 | crate placement | DECIDED 2026-07-17: a `chelis-types` MODULE. `Prim` already lives there (`types.rs`); the checker already consumes value-domain semantics (literal range diagnostics today, table-A acceptance at Phase 4); every §C5 consumer already depends on the crate; and §C3's privacy contract is module-scoped (`pub(in dtype_semantics)`), so the firewall is identical to a crate boundary. Constraint check passed: chelis-runtime stays dependency-light (libc+memmap2 only) - the generated helpers are emitted by chelis-backend-c, and C-side parity is enforced by tests, not a link edge. Discipline: the module stays import-clean (only `Prim` + std from the surrounding crate) so a later lift to a leaf crate remains mechanical. This also fixes [#732] Phase 1's `format_element` placement as FINAL (its §C3.1 pre-[#729] fallback is the answer - no Wave 2 -> Wave 3 migration) | §C5 + this doc + faithful_observation.md §C3.1 |
 | 5 | wire-schema versioning mechanics for the storage change | DECIDED in the Phase 1 implementation: `EXECUTION_VALUE_SCHEMA_VERSION = 2` in `schema.rs`. The tensor payload is the tagged per-dtype `TensorElements` (`{"dtype": ..., "values": [...]}`; integer families exact at width, f16/bf16 as their exact f64 images, bool as true/false); `EvalResult` stamps `schema_version` (serde default 1 on deserialize, so a version-less payload identifies a v1 producer loudly); v1 clients posting the old bare-array `data` binding fail loudly at serde (a type error at the payload position; the untagged-enum message does not name the field), never a reinterpretation. The manifest is NOT bitten: `chelis_manifest_spec.md` carries type strings, not `ExecutionValue` payloads. The constant is independent of `WIRE_DAG_SCHEMA_VERSION` (which still governs `WireDag`) | schema.rs |
 
+[#170]: https://github.com/Chelis-Lang/chelis/issues/170
 [#387]: https://github.com/Chelis-Lang/chelis/issues/387
 [#680]: https://github.com/Chelis-Lang/chelis/issues/680
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
@@ -1853,10 +1912,14 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
 [#732]: https://github.com/Chelis-Lang/chelis/issues/732
 [#878]: https://github.com/Chelis-Lang/chelis/issues/878
+[#898]: https://github.com/Chelis-Lang/chelis/issues/898
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#937]: https://github.com/Chelis-Lang/chelis/issues/937
 [#955]: https://github.com/Chelis-Lang/chelis/issues/955
+[#965]: https://github.com/Chelis-Lang/chelis/issues/965
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
 [#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
+[#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
+[#1282]: https://github.com/Chelis-Lang/chelis/issues/1282

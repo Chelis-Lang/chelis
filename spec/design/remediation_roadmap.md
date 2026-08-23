@@ -299,18 +299,22 @@ flowchart TB
     direction TB
     n729p0["P0 · domain checker + #687 oracle lanes (LANDED)"]:::w0
     n729c6["C6 · covered-family capacity tripwire<br/>(PR #956)"]:::w3
-    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
-    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
-    n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
-    n729p2["P2 · kernel split + traps + prove"]:::w3
-    n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3
-    n729p4["P4 · capability table"]:::w4
+    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle (LANDED)"]:::w3
+    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle (LANDED)"]:::w3
+    n729p1["P1 · semantics module + storage decision<br/>+ eval adoption (LANDED)"]:::w3
+    n729p2["P2 · kernel split + traps + prove<br/>(LANDED)"]:::w3
+    n729p3["P3 · C backend adoption<br/>+ generated observation (LANDED)"]:::w3
+    n729p4a["P4A · capacity ratchet<br/>(LANDED)"]:::w4
+    n729p4b["P4B · semantic + schema freeze<br/>(THIS CHANGE)"]:::w4
+    n729p4c["P4C · populate typed tables"]:::w4
+    n729p4d["P4D · generated consumers"]:::w4
+    n729p4e["P4E · generated conformance"]:::w4
     n729p0 --> n729c6
     n729c6 ==>|"HARD: covered-family oracle"| n729c6wire
     n729c6 ==>|"HARD: covered-family oracle"| n729c6binding
     n729c6wire ==>|"HARD: wire leg green"| n729p1
     n729c6binding ==>|"HARD: binding leg green"| n729p1
-    n729p1 --> n729p2 --> n729p3 --> n729p4
+    n729p1 --> n729p2 --> n729p3 --> n729p4a --> n729p4b --> n729p4c --> n729p4d --> n729p4e
   end
 
   n719["#719 sqrt fix (FIXED: PR #760)"]:::ext
@@ -325,7 +329,7 @@ flowchart TB
   n732p1 -.->|"format_element Rust side<br/>(I1: either order pinned)"| n729p1
   n732p2 -.->|"generated print helper<br/>(I1: either order pinned)"| n729p3
   n729p3 -.->|"value divergences shrink<br/>before the oracle turns on"| n732p3
-  n729p4 -.->|"Rejected(reason) cells<br/>feed gate derivation"| n730p3
+  n729p4d -.->|"typed rejection cells<br/>feed gate derivation"| n730p3
   n719 ==>|"HARD: precedes the<br/>sqrt = 0 tolerance row"| n732p3
   n683 -.->|"natural moment"| n729p2
   n713 -.->|"natural moment"| n729p3
@@ -486,12 +490,14 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 | **v0.18.1 - always-labelled root prefix** (SHIPPED) | [05-OBS-6]'s `name = value` prefix from #994, with the stale repo expectations synchronized in #1011 | **exact-output migration** | shipped the prefix once without changing payload digits or value shape; it did not prove manifest completeness, dotted expansion/order, unavailable-root diagnostics, or artifact routing |
 | **v0.18.3 - extent/cast migration + faithful-observation guards** (SHIPPED) | [05-DIM-1/2] extent migration + `round` parity + `cast_trunc` + [#732] P3 (PRs #1099/#1115/#1118) | **source + exact-output migration** for the extent/round/cast changes; [#732] P3 itself is behavior-preserving | Phase 3's tolerance table and shared comparator shipped here and must not be scheduled again in v0.20 |
 | **v0.18.4 - canonical Surf + int64 C ABI + declaration contracts + WireDag 5** (SHIPPED) | PR #1031's canonical Surf v0.19 grammar and total Deep resugaring ([#1024]) + chelis#1149's int64 extent ABI (part of [#1112]) + PR #1178's [04-INF-1] declaration contracts + PR #1181's WireDag schema 5, with PR #1189's exhaustive checked cast ([#1150], [#1152]) and PR #1176's dependency typecheck cache riding along | **source migration + ABI break + wire break** | four boundaries in one patch cut. Migration: `chelis migrate surf --from 0.18 --inplace`, rebuild against the new `chelis_runtime.h`, author annotations for orphan `defsig` and unresolved deferred inference; WireDag payloads migrate on read one way only. The ABI widening overrode invariant 7's default and the schema step raises a scope question invariant 1 does not answer, so the "bindings adapt once" promise needs re-adjudicating before v0.19 |
-| **v0.19.0 - grounded dtype storage break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells, and, of the cells seeded 2026-08-04, only [#722]'s integer-unary B-cells still ride this cut - the other three are delivered: [#704]'s scalar activation c-host B-cell and the scalar `tan`/`atan`/`recip` row landed on `main` after the v0.18.4 tag in PR #1188, which closed [#704], [#712], and [#715], and are carried by the in-flight 0.18.5 cut (PR #1256, unmerged at this revision); [#937]'s per-dtype `uniform_like` emission shipped in v0.18.4 with PR #1181) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the storage break and the root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Canonical Surf and the int64 ABI already shipped at 0.18.4, so this cut no longer carries them. Bindings adapt to the per-dtype payload once *from here*; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
-| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#732] P3 already shipped in v0.18.3. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
+| **v0.18.5 - scalar capability and release consolidation** (SHIPPED) | PR #1256, including the post-v0.18.4 scalar activation and scalar `tan`/`atan`/`recip` work from PR #1188 | **mechanical** for shells beyond the already documented 0.18.4 changes | Released 2026-08-23. The scalar rows are no longer v0.19 work and must not be scheduled again |
+| **v0.19.0 - grounded dtype storage break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every remaining behavior-changing capability implementation or stable loud rejection**: integer-overflow traps, [#722]'s remaining integer-unary backend cells, the exact reduction/NaN/infinity/tie rules [05-OP-11..16] ([#170] owns the product-tree/backend rows; [#1281] owns the remaining reduction rows), modular arithmetic [05-OP-17..19], float classification [05-OP-20..22], the named lossy casts [05-OP-23..24], canonical `to_string` checker/eval domain ([#1282]) and compiled tensor/List cells [05-OP-25] ([#1059]), and the HIP/Metal/C backend dispositions. It also carries the prelude JSON/CSV integer-capacity decision for any admitted prelude numeric channel and [#912]/[#1023]'s complete manifested root boundary | **source + exact-value migration** (wave 2) | the storage break, new callable surface, extrema-gradient convention, `to_string` domain, and root-topology expectation migration are coordinated here. Each legal-but-unbuilt backend cell ships as a stable typed rejection rather than silent behavior. Canonical Surf, the int64 ABI, and scalar capabilities already shipped and do not move again |
+| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4C typed table population (numeric/sibling/host/external target authorities) + P4D generated consumers (including exported-stdlib dependency closure) + P4E generated conformance, plus [#730] P3 (gates -> UX) and [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: Phase 4B froze semantics and 0.19 shipped every behavior/rejection; 0.20 only makes those decisions unavoidable. [#732] P3 already shipped in v0.18.3. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
 Net downstream shape: the original four-cut `conform` model assumed one bump,
 probe re-run, and inventory refresh per minor cut. Actual history inserted
-three additional shipped contract patches: **v0.18.1** changed exact
+three additional shipped contract patches plus one consolidation release:
+**v0.18.1** changed exact
 root-output expectations by adding the [05-OBS-6] prefix, **v0.18.3** changed
 both source (int64 extents) and exact output (compiled `round` half-ties), and
 **v0.18.4** changed source (canonical Surf, `defsig`/deferred-inference
@@ -500,7 +506,8 @@ source-visible waves are now shipped **v0.17** (seed suffix + fixing
 loud-rejected code), shipped **v0.18.1** (root label prefix), shipped
 **v0.18.3** (int64 extents, `round` half-ties, the `cast_trunc` reserved word),
 shipped **v0.18.4** (canonical Surf v0.19, the int64 C ABI, the declaration
-contracts, WireDag 5), and planned **v0.19** (the remaining
+contracts, WireDag 5), shipped **v0.18.5** (scalar capability consolidation),
+and planned **v0.19** (the remaining
 capability behavior + [#729] §C3 storage + manifested root topology). v0.20
 remains mechanical. No later wave may undo or restyle an earlier one - and a
 patch-level version number is not by itself evidence that a cut is mechanical,
@@ -662,8 +669,14 @@ Migration-note stubs (the breaking delta per cut):
   capability decision is now fixed (supported, or a cited stable rejection).
   Checked casts now trap instead of choosing an implicit conversion for
   fractional float-to-integer values (`cast(3.5, int32)`) and non-member bool
-  values (`cast(2, bool)`); apply `floor` or `round` before the integer cast,
-  and produce exactly 0 or 1 before a bool cast. Python `np.uint64` ingress now
+  values (`cast(2, bool)`); use the separately named `cast_trunc`,
+  `cast_saturate`, or `cast_wrap` when that lossy rule is intended, and compose
+  `round` with checked `cast` rather than expecting a `cast_round` mode.
+  `wrap_add`/`wrap_sub`/`wrap_mul` provide explicit modular integer arithmetic;
+  `is_nan`/`is_finite`/`is_infinite` classify every active float dtype without
+  conversion. New reduction entries pin empty-axis, arithmetic-order, NaN, and
+  result-dtype behavior; extrema gradients split finite ties equally and route
+  a NaN cotangent to the first selected NaN. Python `np.uint64` ingress now
   raises `ChelisError` instead of silently producing an f64 payload; choose an
   explicit int64 or f64 conversion.
   The v0.18.1 root prefix is unchanged; the complete manifested root set now
@@ -968,6 +981,7 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
 [#894]: https://github.com/Chelis-Lang/chelis/pull/894
+[#170]: https://github.com/Chelis-Lang/chelis/issues/170
 [#174]: https://github.com/Chelis-Lang/chelis/issues/174
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717
 [#856]: https://github.com/Chelis-Lang/chelis/issues/856
@@ -998,3 +1012,5 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1024]: https://github.com/Chelis-Lang/chelis/issues/1024
 [#1112]: https://github.com/Chelis-Lang/chelis/issues/1112
 [#1172]: https://github.com/Chelis-Lang/chelis/issues/1172
+[#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
+[#1282]: https://github.com/Chelis-Lang/chelis/issues/1282

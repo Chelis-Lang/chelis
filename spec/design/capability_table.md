@@ -1,11 +1,10 @@
 # The Capability Table: schema for the op x parameter x lane authority
 
-**Status:** Schema contract, pre-implementation. The table is delivered by
-`spec/design/dtype_semantics.md` ([#729]) Phase 4. This document owns the
-schema consumed by [#729] Phase 4, `loud_unsupported.md` [#730] Phase 3, and
-`spec_provenance.md` [#733] Phase 3/§C5. The schema freezes at [#729] Phase 4
-entry and may then change only through this document and every consuming
-plan in one change set.
+**Status:** Phase 4B schema frozen; machine tables and generated consumers are
+not implemented. This document owns the schema consumed by [#729] Phase 4,
+`loud_unsupported.md` [#730] Phase 3, and `spec_provenance.md` [#733]
+Phase 3/§C5. A schema change requires this document and every consuming plan
+to change together.
 **Owning specs:** `spec/05-risc-primitives.md` (op semantics the rows
 cite), `spec/04-type-system.md` (dtype rules), and the four sibling plans.
 
@@ -13,13 +12,13 @@ cite), `spec/04-type-system.md` (dtype rules), and the four sibling plans.
 
 ### Dependency owner
 
-The machine form lives above dependency-free `chelis-vocab`, which owns
-closed identities shared by the checker, runtimes, and backends.
-`loud_unsupported.md` Phase 2 establishes `EffectKind` and `RuntimeDType` in
-that crate. Phase 4 places `Prim` and `BuiltinId` there, with compatibility
-re-exports from `chelis-types`. `chelis-vocab` owns identity and wire
-representation only. Numeric finalization, storage, operation semantics, and
-kernel behavior remain in `dtype_semantics.md` and its consumers.
+The machine form lives in `chelis-types`, which owns `Prim`, `BuiltinId`, the
+capability keys and cells, and target-independent numeric policy. Those types
+do not move to or duplicate into `chelis-vocab`. Dependency-free
+`chelis-vocab` owns only the cross-layer representation vocabulary required by
+lower layers, including `EffectKind`, `RuntimeDType`, `Repr`, and canonical C
+wire spellings. Backends consume `chelis-types` for numeric identity and
+capability policy and `chelis-vocab` for representation vocabulary.
 
 The schema separates target-independent operation semantics from
 per-backend implementation status. Tables A and B cover operations; the
@@ -58,8 +57,11 @@ not a Table-A or Table-B row expansion.
 
 ### Table A - the semantic table (target-independent; the checker's law)
 
-One row per **(builtin, surface, operand dtype, semantic-parameter case)**.
-Every builtin declares a finite semantic-parameter product. The product is
+One row per
+**(`BuiltinId`, `SurfaceClass`, operand `Prim`, `SemanticParams`)**, where
+`SurfaceClass` is exactly `Scalar | Tensor`.
+Every builtin declares its applicable capability domains and a finite
+semantic-parameter product. The product is
 `Unit` for an op with no dtype-valued parameter. A dtype-valued argument adds
 one closed `Prim` axis, so checked `cast` expands to every
 `(source Prim, target Prim, surface)` case rather than one ambiguous "cast x
@@ -70,12 +72,14 @@ holes rather than silently inheriting a neighbor's disposition.
 
 The row fields are:
 
-- **builtin** - the user-facing name (`add`, `mean`, `bitand`, `abs`,
-  `reduce_window_max`, `to_string`, ...). NOT `RiscOp`: several audited
+- **builtin** - a closed `BuiltinId` whose declaration supplies the
+  user-facing name (`add`, `mean`, `bitand`, `abs`,
+  `reduce_window_max`, `cast`, ...). NOT `RiscOp`: several audited
   builtins have no IR op at all (the bitwise family, [#682]/[#695]), and users
   hit the table at the name level. The builtin -> RiscOp/kernel mapping is
   a per-backend implementation detail below.
-- **surface** - `Scalar | Tensor`, always separate rows. Non-negotiable:
+- **surface** - `SurfaceClass::Scalar | SurfaceClass::Tensor`, always
+  separate rows. Non-negotiable:
   the audit measured opposite behaviors per surface within single lanes
   ([#715] scalar-stubs vs correct tensors; [#718]'s inverted width matrix).
 - **operand dtype** - one row per `Prim` (rows may be authored via dtype-class
@@ -87,42 +91,47 @@ The row fields are:
   paired with the operand dtype it is the complete source x target matrix.
   Literal values, axes, and windows do not become unbounded table axes: their
   validity remains a rule in `sig`.
-- **cell** - `Supported { sig, atom }` or `Rejected { reason, atom }`:
-  - `sig`: the result type/shape rule (e.g. `mean: tensor[n, f32] ->
-    tensor[f32]`), which the checker derives from - deleting the
-    hand-mirrored lists (`TRANSCENDENTAL_FLOAT_ONLY_OPS` becomes a view).
-  - `atom`: the controlling current atom revision ([#733] §C5 item 1). The
-    machine-readable table schema requires this field, and the pinned Buoy
-    shell-side integration checks authority and freshness. A row without an
-    atom fails table construction or the blocking provenance policy. This is the authoring-forcing function: an undecided
-    cell (integer `mean` [#724], bool `add` [#726]) cannot be made `Supported`
-    OR `Rejected` without someone writing the normative sentence and crossing
-    the `spec/**` signoff.
-  - `Rejected.reason` is the user-facing diagnostic fragment, rendered in
-    `loud_unsupported.md` §C2's format by whichever stage reports it.
+- **cell** - one of these typed shapes; no field is free-form prose:
+  - `Supported { signature_rule: SignatureRuleId, result_dtype_rule:
+    ResultDtypeRule, op_atom: SpecAtomRef }`;
+  - `Rejected { op_atom: SpecAtomRef, diagnostic_kind: DiagnosticKind }`.
+  `SignatureRuleId` names a closed checker rule for shape and bounded
+  parameter constraints. `ResultDtypeRule` determines the result dtype
+  without reparsing a signature string. `SpecAtomRef` is a structured
+  normative authority; for a numeric callable it resolves to the exact
+  governing `[05-OP-N]`. A missing, duplicate, malformed, or nonexistent
+  authority makes table construction fail. An undecided cell therefore
+  cannot become either `Supported` or `Rejected` without first authoring its
+  language rule.
 
-Effects are NOT rows (they are constructs, not ops - `EffectKind` +
-checker totality, [#730]/[#731]). Movement ops and reductions are ordinary
-rows; parameter constraints (axis validity, window literalness per [#725]'s
-resolution) live in `sig`, not in extra axes. The finite product is only for
-closed semantic choices such as a target dtype; it is not an enumeration of
-runtime values.
+Effects are NOT rows (they are constructs, not ops - `EffectKind` + checker
+totality, [#730]/[#731]). Movement ops and reductions are ordinary rows;
+parameter constraints (axis validity, window literalness per [#725]'s
+resolution) live behind `SignatureRuleId`, not in extra axes. The finite
+product is only for closed semantic choices such as a target dtype; it is not
+an enumeration of runtime values. Container and boundary builtins do not
+stretch `SurfaceClass`: their declarations select the sibling builtin
+registry defined below. An overloaded builtin may select more than one
+domain, but every applicable domain is explicit and total.
 
 ### Table B - the backend table (per-target reality)
 
-One row per **(A-row, backend)**, backends = `eval | c-host | c-dag |
-hip | metal` (eval is a backend here on purpose: [#717] proved the
-reference lane needs conformance rows too):
+One row per **(Table-A `Supported` row, backend)**, backends exactly
+`eval | c-host | c-dag | hip | metal` (eval is a backend here on purpose:
+[#717] proved the reference lane needs conformance rows too). A Table-A
+`Rejected` row has no Table-B product:
 
-- **cell** - `Implemented { kernel-ref }` or `Unimplemented { issue,
-  diagnostic }` or `RejectedByDesign { reason, atom }`:
+- **cell** - one of these typed shapes:
+  `Implemented { kernel_id: KernelId }`,
+  `Unimplemented { issue: IssueRef, diagnostic_kind: DiagnosticKind }`, or
+  `RejectedByDesign { atom: SpecAtomRef, diagnostic_kind: DiagnosticKind }`:
   - `Implemented`: names the kernel/template/host-op the dispatch
     generator wires; the macro-generated skeleton makes an A-`Supported`
     row with no B-cell in some backend a **compile error in that
     backend** - the "add a builtin" inversion.
   - `Unimplemented`: legal and LOUD - the build gate rejects programs
-    hitting the cell with the diagnostic, and the cell must carry a
-    tracking issue. This is where the orphaned HIP work gets owned:
+    hitting the cell with the diagnostic, and the cell must carry an open
+    implementation issue. This is where the orphaned HIP work gets owned:
     HIP x int64-tensor cells become `Unimplemented { issue: #689 }`
     (and the div-guard gap [#690] rides the same rows) the day the table
     lands, converting silent-F32-kernels into clean rejections until
@@ -131,17 +140,114 @@ reference lane needs conformance rows too):
     existing exemplary diagnostic becomes this cell's rendering; Metal's
     rank-1 limit is a `sig`-level constraint on its B-cells).
 
+### Sibling builtin registry - container and boundary callables
+
+Builtins whose legal applications cannot be keyed by a numeric scalar/tensor
+operand use one sibling semantic registry. Its key is exactly
+**(`BuiltinId`, `SiblingDomain`, `SiblingCaseId`, `SemanticParams`)**:
+
+- `SiblingDomain` is the closed enum `Container | Boundary`. `Container`
+  covers operations whose governing input is an ADT or recursive container;
+  `Boundary` covers conversions between the language value domain and a
+  non-numeric result or external representation.
+- `SiblingCaseId` is a closed, builtin-owned identifier for one finite type
+  shape relevant to legality or implementation, such as
+  `ToStringTensor`, `ToStringList`, or `PadSequencesListOfTensor`. It is not a
+  free-form type string. The builtin's exhaustive case enumerator maps every
+  accepted checked application to exactly one case; no case and multiple
+  cases are both construction failures. Recursive ABI representability is
+  not duplicated here: it remains the companion constructor table's job.
+- `SemanticParams` has the same finite-product meaning as in Table A. A
+  dtype-valued choice such as `pad_sequences_to`'s output dtype expands to
+  one `Prim` case per admitted dtype.
+
+The semantic cell is one of these typed shapes:
+
+- `Supported { signature_rule: SignatureRuleId, result_type_rule:
+  ResultTypeRuleId, op_atom: SpecAtomRef }`;
+- `Rejected { op_atom: SpecAtomRef, diagnostic_kind: DiagnosticKind }`.
+
+`ResultTypeRuleId` is the general result-type counterpart to Table A's
+`ResultDtypeRule`; it may select a string, container, tensor, or other checked
+type without encoding prose. Every sibling `Supported` row expands across
+the same exact backend set as Table B (`eval | c-host | c-dag | hip | metal`),
+and those backend cells use the identical `Implemented | Unimplemented |
+RejectedByDesign` shapes. Thus `to_string` is owned only by the `Boundary`
+domain: its disjoint `ToStringScalar`, `ToStringTensor`, and `ToStringList`
+applications are separate sibling cases and may carry different backend
+dispositions without putting `List` into `SurfaceClass`. It has no Table-A
+row. The exhaustive `to_string` case enumerator must name every additional
+checked type shape it accepts; a wildcard or fallthrough case is forbidden.
+
+Every `BuiltinDecl` carries a non-empty closed set of
+`Numeric | Container | Boundary` domains plus the exact case enumerator for
+each selected sibling domain. Numeric means Table A. A declaration may select
+multiple domains, but an accepted application must resolve to exactly one
+semantic row across them. Adding a builtin, domain, or sibling case without a
+semantic disposition fails construction; adding a supported sibling row
+without every backend cell fails compilation. Runtime exports, exported
+stdlib definitions, and binding functions have no `BuiltinId` and therefore
+do not enter this registry. Their separate semantic and execution authorities
+are defined below. They do not feed [#912] builtin-root realizability.
+
+### External callable registries - semantic authority and execution reality
+
+The §C6 enumerators discover three closed external callable families:
+`RuntimeCExport | ExportedStdlibDef | PyO3Binding`. Their canonical identities
+include the family and complete callable declaration, so a rename or signature
+change removes the old key and adds a new one.
+
+For every structurally numeric callable, the existing semantic registry is
+keyed by **(`ExternalCallableFamily`, `CanonicalCallableId`)** and contains the
+exact `SemanticRegistration { callable, atom }` required by §C6. It binds the
+callable to one controlling `[05-OP-N]`; it is not an implementation-status
+cell. A dtype-free callable has no semantic registration, and classification
+is derived by the family enumerator rather than declared by the row.
+
+Runtime C exports and PyO3 bindings additionally populate an external target
+disposition registry keyed by **(`ExternalCallableFamily`,
+`CanonicalCallableId`, `ExternalTargetContext`)**. The family fixes the only
+admitted target context: `RuntimeCExport -> c-runtime` and `PyO3Binding ->
+python-extension`. Every discovered callable in those two families has
+exactly one cell, numeric or not:
+
+- `Implemented { implementation_id: ExternalImplementationId }`;
+- `Unimplemented { issue: IssueRef, diagnostic_kind: DiagnosticKind }`; or
+- `RejectedByDesign { atom: SpecAtomRef, diagnostic_kind: DiagnosticKind }`.
+
+Missing, duplicate, family/target-mismatched, and stale-identity rows fail the
+registry constructor. A numeric row also fails unless its separate semantic
+registration exists. The target disposition says whether the published
+external callable exists and executes in its owning environment; it does not
+decide language legality or substitute for a backend cell of a builtin used
+inside that implementation.
+
+An exported stdlib definition has no independent external target cell: it is
+Chelis source compiled for the selected backend. Its executability is derived
+transitively from every statically resolved builtin Table-B cell, sibling
+backend cell, host-constructor cell, and effect disposition reachable from its
+checked body. The exported-stdlib manifest must expose a checked body and
+declared signature to this generated dependency closure. An unresolved call,
+missing owning row, empty-by-default dependency result, or recursive cycle
+without a completed fixed point is a construction failure. For each backend,
+the definition is executable exactly when every reachable dependency is
+implemented; otherwise the first dependency in canonical source order returns
+its typed rejection authority. Its §C6 semantic registration still binds a
+numeric exported identity to the language atom; it never supplies execution
+status.
+
 ### Companion host-ABI constructor table
 
 Concrete host types are recursive, so enumerating observed complete shapes
 would recreate [#955] whenever constructors nest in a new order. The machine
 schema therefore carries a companion closed table keyed by
 **(host constructor, position, backend)**. `position` distinguishes a
-constructor's represented fields when their ABI roles differ. Each cell is:
+constructor's represented fields when their ABI roles differ. Each cell is
+typed:
 
-- `Represented { abi-constructor }`;
-- `Unimplemented { issue, diagnostic }`; or
-- `RejectedByDesign { reason, atom }`.
+- `Represented { abi_constructor: HostAbiConstructorId }`;
+- `Unimplemented { issue: IssueRef, diagnostic_kind: DiagnosticKind }`; or
+- `RejectedByDesign { atom: SpecAtomRef, diagnostic_kind: DiagnosticKind }`.
 
 Primitive leaves use the operation-specific typed-carrier projection of the
 corresponding Table-B row. Product,
@@ -164,41 +270,77 @@ of the shapes that happened to appear in the report.
 
 | consumer | derives from | mechanism |
 |---|---|---|
-| checker acceptance | A | generated predicate; hand lists deleted ([#712]'s class dies here) |
-| `chelis check` reporting | A | check always reports A-`Rejected` cells because they are target-independent type facts; B-level rejections surface at build where the target is known |
-| build gates | B | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
-| backend dispatch | B | macro-generated skeletons; missing arm = compile error |
-| [#912] builtin realizability and target sets | A + B | generated routing projection; target-independent legality comes from A and per-backend availability from B, with no independently authored support list |
-| conformance suite | expanded A parameter product x B + host constructor table | every (`Supported`, `Implemented`) source x semantic-parameter x surface x backend cell executed, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it; every legal constructor pair is composed in both nesting orders |
-| checked host-cast plan | expanded `cast` A rows + c-host B cells | The pre-Table adapter is `CheckedCastPlan`: C host ABI projection maps every admitted scalar/tensor source and target onto that exhaustive plan, exact same-type pairs alone are identity, and every other pair selects its checked implementation or exact typed rejection. [#730] LU6 owns this typed boundary; Phase 4 replaces its interim product source with the expanded rows |
+| checker acceptance | A + sibling semantic registry | generated predicate; hand lists deleted ([#712]'s class dies here) |
+| `chelis check` reporting | A + sibling semantic registry | check always reports semantic `Rejected` cells because they are target-independent type facts; backend-level rejections surface at build where the target is known |
+| build gates | B + sibling backend product + exported-stdlib dependency closure | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
+| backend dispatch | B + sibling backend product + external target dispositions | macro-generated skeletons; missing arm or external disposition = compile error |
+| [#912] builtin realizability and target sets | A + B + host/sibling-builtin registries | generated routing projection; a root capability comes from the domain that owns it, with no independently authored support list |
+| conformance suite | expanded A parameter product x B + host constructor table + sibling builtin registry + external target dispositions + exported-stdlib dependency closure | every (`Supported`, `Implemented`) source x semantic-parameter x surface x backend cell executed, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it; every legal constructor pair is composed in both nesting orders; every sibling-registry and external callable is exercised under its declared domain; every stdlib export is derived and exercised per backend |
+| checked host-cast plan | expanded `cast` A rows + c-host B cells | The pre-Table adapter is `CheckedCastPlan`: C host ABI projection maps every admitted scalar/tensor source and target onto that exhaustive plan, exact same-type pairs alone are identity, and every other pair selects its checked implementation or exact typed rejection. [#730] LU6 owns this typed boundary; Phase 4D replaces its interim product source with the Phase-4C rows |
 | host-type resolution | host constructor table + operation-specific Table-B typed-carrier projections | recursive composition; no inventory of concrete nested shapes and no default ABI |
-| [#733] citations | A + B | the table schema requires controlling atom revisions; the pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
+| [#733] citations | A + B + host/sibling-builtin registries + external semantic/target registries + exported-stdlib dependency closure | Table A and the sibling builtin registry bind every semantic cell to its controlling atom; their backend products add typed implementation or rejection authority without replacing that semantic binding. The host domain, external-family `SemanticRegistration` registries, external target dispositions, and derived stdlib dependencies carry their corresponding typed authorities. The pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
 
-## Seed decisions the table must ship with
+## Delivery split and oracles
 
-The audited cells that were never authored, listed so Phase 4 cannot ship
-around them (proposal defaults from the plans; final call is the atom
-author's). Rows marked DECIDED were settled in the 2026-07 design review
-on the named issues; Phase 4 still ratifies them as atoms per the [#733]
-signoff - the decision is recorded, the normative sentence still gets
-authored:
+Phase 4 deliberately separates authoring from generated consumption:
 
-| cell | proposal default |
+- **4B - semantic and schema freeze.** Author the controlling numbered-spec
+  atoms and freeze the numeric, sibling-builtin, host-constructor, and
+  external-family routing schemas before machine population. The authoritative
+  oracle is `.venv/bin/python scripts/dtype_phase4b_oracle.py`, whose success
+  line is `DTYPE PHASE 4B ORACLE: PASS`.
+- **4C - machine authority population.** Add the closed key/cell types and
+  compact authoring macros in `chelis-types`; expand them into a complete machine
+  table; give every `BuiltinDecl` an exhaustive domain declaration; populate
+  Tables A/B, the host-constructor table, sibling container/boundary
+  registries, and external target dispositions; and backfill exact semantic
+  atoms. Compact macros are an
+  authoring convenience only: duplicate or missing expanded rows fail. The
+  authoritative 4C oracle is
+  `.venv/bin/python scripts/dtype_phase4c_oracle.py`,
+  whose success line is `DTYPE PHASE 4C ORACLE: PASS`.
+- **4D - generated consumers.** Derive checker acceptance/reporting, build
+  gates, backend dispatch skeletons, root-realizability projections, checked
+  host casts, recursive host-ABI resolution, and exported-stdlib dependency
+  closure. Delete the hand-authored
+  mirrors only when the corresponding generated consumer is live. The
+  authoritative 4D oracle is
+  `.venv/bin/python scripts/dtype_phase4d_oracle.py`,
+  whose success line is `DTYPE PHASE 4D ORACLE: PASS`.
+- **4E - conformance.** Generate positive and negative execution cases over
+  the complete supported/implemented and rejected/unimplemented products,
+  including host-constructor nesting, external callables, and exported stdlib
+  definitions. The authoritative Phase 4 oracle is
+  `.venv/bin/python scripts/dtype_phase4_oracle.py`, whose success line is
+  `DTYPE PHASE 4 ORACLE: PASS`; it invokes the 4B, 4C, and 4D oracles and the
+  4E suite. Phase 4 is not complete until this final oracle passes and the
+  required fresh-context red team validates the generated surface.
+
+## Seed dispositions the table must ship with
+
+The audited cells are listed so Phase 4 cannot ship around them. Normative
+atoms decide the language rule; these rows record the initial machine
+dispositions and the issue that owns any unimplemented backend cell.
+
+| cell | frozen disposition |
 |---|---|
-| `mean` x Tensor x int widths ([#724]) | DECIDED (2026-07, on the issue) and LANDED on main 2026-08-04 (validated at 013b947d, all three lanes citing the issue in `crates/chelis-cli/tests/reduction_and_bitwise_matrix.rs`; [#724] closed. The decision is release-visible at v0.19 per the roadmap's anti-churn invariant 4): `Rejected` at check time on every application form - integer mean requires an explicit cast (`mean(cast(x, f32))`) or `floor_div(sum(x), n)`; `mean`'s sig is float-only (bool rejects with the integers). Scope: only fractional-producing reductions reject; `sum`/`max`/`min`/`prod` over integers stay valid. Phase 4 mechanizes the cell |
-| `add`/`sub`/`mul` x (any) x bool ([#726]) | DECIDED (2026-07, on the issue) and LANDED on main 2026-08-04 (validated at 013b947d, a check-time rejection in every surface form per `crates/chelis-cli/tests/issue_860_checker_chokepoint.rs`; [#726] closed. The decision is release-visible at v0.19 per the roadmap's anti-churn invariant 4): `Rejected` per [04-NUM-4] at check time on every application form. The interim authored roster also includes `neg` and `floor_div`, whose bool-typed results fall under [04-NUM-4]. It does NOT claim `sum`/`prod_reduce`: their pre-existing dispositions remain outside this #726 decision until first-class `count` and the reduction cells are authored together. Diagnostic points at `and`/`or`/`not`, the existing explicit-cast counting idiom (`sum(cast(x, int64), 0)`), and the future `count`. Phase 4 mechanizes only the authored cells |
-| scalar `relu`/`sigmoid`/`silu`/`gelu`/`tanh` ([#712], [#704]) | DECIDED (2026-07, on the issue) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation: `Supported` on float dtypes at BOTH surfaces (a scalar is a rank-0 tensor); non-float is a check-time domain `Rejected`, never a silent 0. Eval and C now execute every active float width through dtype-aware kernels/helpers, and the always-run scalar matrix requires byte-identical observation. Phase 4 replaces this interim hand registration and matrix with generated A/B projections and the generated product |
+| `mean` x Tensor x int widths ([#724]) | DECIDED (2026-07, on the issue) and LANDED on main 2026-08-04 (validated at 013b947d, all three lanes citing the issue in `crates/chelis-cli/tests/reduction_and_bitwise_matrix.rs`; [#724] closed. The decision is release-visible at v0.19 per the roadmap's anti-churn invariant 4): `Rejected` at check time on every application form - integer mean requires an explicit cast (`mean(cast(x, f32))`) or `floor_div(sum(x), n)`; `mean`'s sig is float-only (bool rejects with the integers). Scope: only fractional-producing reductions reject; `sum`/`max`/`min`/`prod` over integers stay valid. Phase 4C records the cell |
+| `add`/`sub`/`mul` x (any) x bool ([#726]) | DECIDED (2026-07, on the issue) and LANDED on main 2026-08-04 (validated at 013b947d, a check-time rejection in every surface form per `crates/chelis-cli/tests/issue_860_checker_chokepoint.rs`; [#726] closed. The decision is release-visible at v0.19 per the roadmap's anti-churn invariant 4): `Rejected` per [04-NUM-4] at check time on every application form. The interim authored roster also includes `neg` and `floor_div`, whose bool-typed results fall under [04-NUM-4]. It does NOT claim `sum`/`prod_reduce`: their pre-existing dispositions remain outside this #726 decision until first-class `count` and the reduction cells are authored together. Diagnostic points at `and`/`or`/`not`, the existing explicit-cast counting idiom (`sum(cast(x, int64), 0)`), and the future `count`. Phase 4C records only the authored cells |
+| scalar `relu`/`sigmoid`/`silu`/`gelu`/`tanh` ([#712], [#704]) | DECIDED (2026-07, on the issue) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation: `Supported` on float dtypes at BOTH surfaces (a scalar is a rank-0 tensor); non-float is a check-time domain `Rejected`, never a silent 0. Eval and C now execute every active float width through dtype-aware kernels/helpers, and the always-run scalar matrix requires byte-identical observation. Phase 4C records the rows, 4D replaces the hand registration, and 4E replaces the curated matrix |
 | scalar `tan`/`atan`/`recip` ([#704]) | DECIDED by existing `spec/05-risc-primitives.md` §2.2 and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation on float types only (f32, f64, f16, bf16); non-float is a check-time domain `Rejected`. In particular `recip(0)` is IEEE infinity, not [04-NUM-9] `DivZero`. Eval and C now agree at every admitted width, and the C host path has no silent-zero fallback. Like [#1009]'s callables these three predate the semantic-registration ratchet and have §2.2 table semantics rather than their own `[05-OP-N]` atoms; Phase 4 authors those atoms and replaces the interim hand registration/matrix |
-| scalar `floor`/`ceil`/`round` x int widths ([#715]'s rows) | DECIDED (2026-07, via [#712]'s comment) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation: `Supported` as an exact identity at int8/int16/int32/int64 in checker, eval, and C, with no float conversion. Phase 4 mechanizes the cells |
-| `max_elem`/`min_elem` x Scalar x all dtypes ([#715]) | DECIDED (2026-07, via [#712]'s comment) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation at every admitted signed-integer and float width in checker, eval, and C. Phase 4 mechanizes the cells |
+| scalar `floor`/`ceil`/`round` x int widths ([#715]'s rows) | DECIDED (2026-07, via [#712]'s comment) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation: `Supported` as an exact identity at int8/int16/int32/int64 in checker, eval, and C, with no float conversion. Phase 4C records the cells and 4D derives their consumers |
+| `max_elem`/`min_elem` x Scalar x all dtypes ([#715]) | DECIDED (2026-07, via [#712]'s comment) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation at every admitted signed-integer and float width in checker, eval, and C. Phase 4C records the cells and 4D derives their consumers |
 | C-DAG x int64 x `max_elem`/`abs` etc. ([#691]) | B-cells `Unimplemented { issue: #691 }` until integer kernels land - the fmaxf/fabsf substitution becomes a rejection. Status 2026-08-04: the direct DAG integer path is repaired ([#729] Phase 3 dispatches integer min/max/abs through exact checked integer paths, per the roadmap's unclaimed-issue ledger), and [#691] CLOSED 2026-08-04 once PR #1164 rehomed the emitter citations and released the [#730] rejection-authority liveness pin. That closure leaves a live obligation on this row rather than settling it: a `Unimplemented { issue: #691 }` B-cell now cites a CLOSED owner, which is the exact state the pin exists to prevent, so any surviving C-DAG integer cell is re-cited to an open owner (or dispositioned `Implemented` where Phase 3's exact integer dispatch already covers it) before Phase 4 mechanizes this row |
 | Metal x int64 x `abs` ([#693]/[#699]) | A is `Supported`; Metal B-cell `Implemented` once [#699]'s raise lands and the MSL integer path is wired; until then `Unimplemented { issue: #693 }` |
 | `abs`/`floor`/`ceil`/`round` x Tensor x int widths x compiled backends, grad path included ([#722]/[#699]) | A is `Supported`: `abs` is exact at the declared width and traps at the signed minimum per [04-NUM-9], and `floor`/`ceil`/`round` are the identity on an already-integral value. The B-cells are the seed decision, and [#699]'s `Const { value: 0.0 }` placeholder satisfies neither disposition - a fabricated zero is a third state the schema does not admit, which is exactly what [#722] measured. Because `grad` is built over the lowered DAG, the placeholder reached the reference lane too and both lanes agreed on all-zero gradients, so no cross-lane oracle could see it; a cell's atom owns the adjoint and no Table-B cell may invent one. Status 2026-08-04: the eval integer unary rows and the compiled C `abs` row landed (PR #1065, exact signed widths and MIN traps); the remaining compiled unary cells stay `Unimplemented { issue: #722 }` under [#699] |
 | `uniform_like` x Tensor x active float widths x eval/C, plus f32/f64 x HIP ([#937]) | `Supported` under [05-OP-8]. The implementation cell is typed rather than an f32 storage convention: f64 uses a 53-bit unit and one f64 FMA from exactly widened f32 bounds; f32 uses one f32 FMA; f16/bf16 round that f32 result once. Eval and C cover all four active float widths. HIP covers its existing f32/f64 `ElemKind` surface; the f16/bf16 HIP cells remain explicit unsupported cells under [#174], not implied support. Raw-bit C and HIP rows lock the f64 result against the shared authority; a structural negative asserts that no f64 store calls the f32 sampler. This is the concrete seed for Phase 4's generated all-cell suite |
 | `bitand`/`bitor`/`bitxor`/`shl`/`shr` x Scalar x int widths ([#682]) | `Supported`; C B-cells `Implemented`; shifts use the width-bounded unsigned helpers required by [04-NUM-13], never raw signed C shifts |
-| `to_string` x Tensor/List ([#1059]) | `Supported` (eval already stringifies); C B-cell `Unimplemented { issue: #1059 }` until the emitter renders via [#732]'s formatter. Re-cited 2026-08-04: [#734] owned only removing the `<value>` substitution and closed when the rejection landed, so it can no longer authorize a cell; [#1059] owns implementing the compiled capability and is the open owner |
-| `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths (spec/04 [04-NUM-7], [#753]) | A `Supported` on int8/16/32/64, `Rejected` on bool/float ("no modular arithmetic on non-integer dtypes; see [04-NUM-7]"); B-cells `Unimplemented { issue: #753 }` until kernels land ([#729] Phase 2's natural moment; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, no tolerance row) |
-| named lossy cast x directions x dtypes ([#759]) | future explicit truncating/narrowing rung over the checked-cast DEFAULT. Phase 1 implements the default only ([04-NUM-14]: target finalization; fractional float-to-int traps `Domain`; strict 0/1 bool; int-to-float IEEE RNE may lose exactness). Per-direction lossy rules remain to be authored as atoms (same discipline as [#753]) and implemented with [#729] Phase 2's kernel work - never the default; bool remains out of scope per [04-NUM-4] |
+| sibling `Boundary` cases `ToStringScalar` / `ToStringTensor` / `ToStringList` ([05-OP-25], [#1059], [#1282]) | The three disjoint semantic cells are `Supported` exactly for [05-OP-25]'s scalar, tensor, and recursively admitted List domains; every other value type is rejected by that atom and never reaches a backend row. [#1282] owns aligning the pre-table generic checker/evaluator with that closed domain before v0.19; Phase 4D replaces that hand path with the generated consumer. Eval backend cells for the admitted cases are `Implemented`. The C-host scalar cell records the existing scalar implementation; the Tensor and List cells are `Unimplemented { issue: #1059 }` until the emitter renders via [#732]'s formatter. [#734] owned only removal of the `<value>` substitution and is not a live cell authority |
+| `wrap_add`/`wrap_sub`/`wrap_mul` x (both surfaces) x int widths ([05-OP-17..19], [#753]) | A `Supported` on int8/16/32/64 and `Rejected` on bool/float. Every backend B-cell is `Unimplemented { issue: #753, diagnostic_kind: UnsupportedFeature }` until its exact-width modular kernels land; SMT lowers to `bvadd`/`bvsub`/`bvmul` exactly, with no tolerance row |
+| `mean`/`max_reduce`/`min_reduce`/`argmax_reduce`/`argmin_reduce` x admitted tensor dtypes ([05-OP-11..13], [05-OP-15..16], [#898], [#1281]) | A follows the exact dtype, result, empty-axis, order, NaN, infinity, tie, and AD contracts in the atoms. A pre-existing partial kernel is not an `Implemented` cell. Until the behavior work lands, each affected backend cell is `Unimplemented { issue: #1281, diagnostic_kind: UnsupportedFeature }`; #898 closes only the spec gap and never becomes a Table-B authority |
+| `prod_reduce` x admitted tensor dtypes ([05-OP-14], [#170], [#898]) | A follows [05-OP-14]'s exact dtype, empty identity, stride-4 product tree, overflow, and AD contract. Affected backend cells are `Unimplemented { issue: #170, diagnostic_kind: UnsupportedFeature }`; the more specific HIP wrong-dtype cells use [#689]. #898 closes only the spec gap |
+| `is_nan`/`is_finite`/`is_infinite` x both surfaces x active floats ([05-OP-20..22], [#965]) | A `Supported` for f16/bf16/f32/f64 and `Rejected` for every other Prim. B-cells are `Unimplemented { issue: #965, diagnostic_kind: UnsupportedFeature }` until stored-width classification exists in each lane |
+| named lossy casts x source/target dtypes x both surfaces ([05-OP-6], [05-OP-23..24], [#759]) | `cast_trunc` is the float-to-integer truncating rung; `cast_saturate` admits active signed-integer/float sources and signed-integer targets; `cast_wrap` admits signed-integer source/target pairs. All reject bool and deferred dtypes. There is no `cast_round` cell: programs compose `round` with checked `cast`. Table B records each lane as implemented or as `Unimplemented { issue: #759, diagnostic_kind: UnsupportedFeature }` without weakening the Table-A rule |
 | checked `cast` x source dtype x target dtype x both surfaces ([#1150], [#1152]) | `Supported` and governed by [04-NUM-14] for every admitted pair; identity exists only where source and target Prim are equal. The interim 9 x 9 product is executable through `CheckedCastPlan` and the generated Phase 3 matrix; every B-cell will replace that adapter with either its named checked implementation or an exact typed rejection. The conformance rows include in-range, fractional, non-finite, overflow, and mixed-offender tensors. Per [04-NUM-15], mixed offenders select the trap attached to the lowest row-major flat index in every lane, including parallel C. [#730] LU6 consumes these cells for host emission; [#729] owns conversion and indexed-trap semantics |
 
 ## New numeric ops before the table lands (added 2026-07-30)
@@ -214,9 +356,10 @@ statement, and an accumulator rule where applicable. A doc comment is
 not an authority (`AGENTS.md` §Numbered Specs Decide; the ops of
 chelis#898 are the standing backlog of exactly this omission).
 
-The requirement is structural per family. Table A remains the
-language-builtin registry (and checker acceptance is derived from it at
-Phase 4). Runtime exports and exported stdlib defs use the §C6
+The requirement is structural per family. Table A remains the numeric
+language-builtin registry and the sibling registry owns container/boundary
+builtins (checker acceptance is derived from both at Phase 4). Runtime exports
+and exported stdlib defs use the §C6
 operation-semantic registry delivered with the capacity tripwire:
 each structurally discovered numeric callable's exact canonical
 identity is a key whose value is one exact `[05-OP-N]` authority. The
@@ -234,12 +377,12 @@ numeric callable authors a new `[05-OP-N]` normative atom in spec/05
 and adds its exact registry mapping in the same change set. The
 deferred PyO3 leg must deliver the same identity-to-authority shape
 before Phase 1 entry. Table A's
-(builtin, surface, operand dtype, semantic-parameter case) key
+(`BuiltinId`, `SurfaceClass`, operand `Prim`, `SemanticParams`) key
 deliberately does NOT stretch to those families: runtime exports and
-PyO3 functions have no `BuiltinId`, and container/boundary callables
-have no `Scalar|Tensor` surface - the `to_string` x Tensor/List seed
-row above already strains that axis (PR #950 red team P1-2; open
-question 5).
+PyO3 functions have no `BuiltinId`. Container/boundary builtins use the
+frozen sibling registry above because they have no scalar/tensor surface;
+external-family callables continue to use their §C6 semantic registry plus
+the external execution authority defined above (PR #950 red team P1-2).
 
 Numeric-ness is signature-derived: a callable whose signature mentions
 a numeric dtype requires a registry entry, and the non-numeric
@@ -274,11 +417,14 @@ Changing a callable's canonical identity also invalidates its old
 registration. These controls are permanent parts of the §C6 tripwire,
 not review instructions.
 
-Table A registration decides LANGUAGE legality - what is legal in Surf,
-Deep, and the RISC DAG, target-independently, reported by the checker.
-The other family registries record which existing normative decision
-controls each discovered callable; they do not create language
-semantics. Per-backend executability is Table B's separate decision,
+Table A and sibling semantic registration decide LANGUAGE legality - what is
+legal in Surf, Deep, and the RISC DAG, target-independently, reported by the
+checker.
+The other family semantic registries record which existing normative decision
+controls each discovered callable; they do not create language semantics.
+Per-backend executability is Table B's, the sibling backend product's, the
+external target disposition's, or the exported-stdlib dependency closure's
+separate decision,
 reported at build through [#730]'s `Unsupported` channel where the
 target is known: a language-legal op a backend cannot run is a
 CAPABILITY rejection, never a checker type error (§Derivations owns
@@ -292,34 +438,41 @@ amendment, which provides no exception vocabulary. Its semantics must
 be authored at declared widths, or its dtype set restricted to f64,
 before it lands.
 
-## Open questions (decided at [#729] Phase 4 entry, recorded here)
+## Frozen schema decisions
 
-1. Machine form: `const` Rust table vs a checked-in data file with a
-   build-script parser (proposal: `const` Rust in one crate; the pinned Buoy
-   shell and versioned Chelis adapter read authorities and table metadata, and
-   Chelis does not add a second provenance parser).
-2. Whether `c-host` and `c-dag` stay distinct backends in B (proposal:
-   yes - the audit's divergences between them, [#691] vs host-lane
-   exactness, are per-path facts).
-3. Signature language for `sig` (how much shape/param constraint is
-   expressible; where [#725]'s "window must be literal" rule sits).
-4. Row count management (builtins x surfaces x operand dtypes x each finite
-   semantic-parameter product is a few thousand cells before cast-like
-   products; the authoring macros must stay compact while the machine form
-   remains fully expanded).
-5. Surface axis for container/boundary callables: the `to_string` x
-   Tensor/List seed row already names a `List` surface the
-   `Scalar|Tensor` axis forbids (PR #950 red team P1-2). Decide before
-   Phase 4 entry: extend the axis, or move container ops to a sibling
-   registry per `dtype_semantics.md` §C6's registries-per-family rule.
+1. The machine form is const Rust in `chelis-types`. Compact Rust macros
+   author dtype classes and parameter products, but expansion produces the
+   complete checked row set. A checked-in editable data file is not an
+   authority.
+2. `c-host` and `c-dag` remain distinct Table-B backends alongside `eval`,
+   `hip`, and `metal`.
+3. `SignatureRuleId`, `ResultDtypeRule`, `ResultTypeRuleId`, and
+   `SiblingCaseId` are closed typed identifiers. Shape and bounded
+   runtime-parameter checks live in the named signature rule; they are not
+   strings and do not create unbounded table axes.
+4. Row count is managed only at the authoring layer. The machine product is
+   exhaustive, and expansion rejects missing or duplicate cells rather than
+   filtering them.
+5. Table A's `SurfaceClass` is exactly scalar or tensor. Container and
+   boundary builtins use the exact sibling registry defined above, selected by
+   `BuiltinDecl`; host ABI recursion uses the companion constructor table.
+   Runtime, stdlib, and binding callables remain in §C6's per-family
+   `SemanticRegistration` registries. Runtime and binding callables also use
+   the external target-disposition registry; exported stdlib executability is
+   derived transitively from its checked body. An overloaded builtin declares
+   every domain it occupies.
 
 `pad_sequences`/`pad_sequences_to` ([#1009]) are the completed backfill case:
 they predate the §C6 semantic-registration ratchet, and now bind their exact
-callable identities to [05-OP-9]/[05-OP-10]. Their cells enter the table at
-Phase 4 under those atoms, not as a grandfathered exemption.
+callable identities to [05-OP-9]/[05-OP-10]. Their builtin applications enter
+the sibling `Container` registry at Phase 4 under those atoms, with separate
+finite cases and dtype-valued `SemanticParams`; their exported identities stay
+in the §C6 family registry. Neither path is a grandfathered exemption.
 
+[#170]: https://github.com/Chelis-Lang/chelis/issues/170
 [#174]: https://github.com/Chelis-Lang/chelis/issues/174
 [#682]: https://github.com/Chelis-Lang/chelis/issues/682
+[#689]: https://github.com/Chelis-Lang/chelis/issues/689
 [#690]: https://github.com/Chelis-Lang/chelis/issues/690
 [#691]: https://github.com/Chelis-Lang/chelis/issues/691
 [#692]: https://github.com/Chelis-Lang/chelis/issues/692
@@ -343,11 +496,15 @@ Phase 4 under those atoms, not as a grandfathered exemption.
 [#1059]: https://github.com/Chelis-Lang/chelis/issues/1059
 [#753]: https://github.com/Chelis-Lang/chelis/issues/753
 [#759]: https://github.com/Chelis-Lang/chelis/issues/759
+[#898]: https://github.com/Chelis-Lang/chelis/issues/898
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#912]: https://github.com/Chelis-Lang/chelis/issues/912
 [#937]: https://github.com/Chelis-Lang/chelis/issues/937
 [#955]: https://github.com/Chelis-Lang/chelis/issues/955
+[#965]: https://github.com/Chelis-Lang/chelis/issues/965
 [#1009]: https://github.com/Chelis-Lang/chelis/issues/1009
 [#1150]: https://github.com/Chelis-Lang/chelis/issues/1150
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717
+[#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
+[#1282]: https://github.com/Chelis-Lang/chelis/issues/1282

@@ -69,8 +69,32 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 division `a / b` (**float operands only**) | `(g / b, -g * (a/b) / b)` (= `(g/b, -g*y/b)` using `y = a/b`) |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise floor division: `floor(a / b)`, rounding toward −∞ | Non-differentiable (piecewise constant); `grad` rejects it |
 | `trunc_div` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise truncating division (round toward zero), **integer operands only** | Non-differentiable (piecewise constant); `grad` rejects it |
+| `wrap_add` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise modular addition | Non-differentiable; `grad` rejects it |
+| `wrap_sub` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise modular subtraction | Non-differentiable; `grad` rejects it |
+| `wrap_mul` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise modular multiplication | Non-differentiable; `grad` rejects it |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
 | `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
+
+> **[05-OP-17]** `wrap_add(left, right) -> result` admits two signed-integer
+> scalar operands or two signed-integer tensor operands with the same dtype
+> and dimensions. It returns the same surface, dimensions, and dtype. At an
+> operand width `w`, each result is the unique signed `w`-bit representative
+> congruent to the exact mathematical sum modulo `2^w`. It never traps for
+> overflow, has no accumulator, and is non-differentiable: `grad` rejects it.
+> A mixed dtype or surface, mismatched tensor dimensions, or a float, `bool`,
+> `string`, or deferred operand is a type error.
+>
+> **[05-OP-18]** `wrap_sub(left, right) -> result` has the signature, dtype,
+> shape, rejection, accumulator, and differentiation contract of [05-OP-17],
+> returning the unique signed operand-width representative congruent to the
+> exact mathematical difference modulo `2^w`.
+>
+> **[05-OP-19]** `wrap_mul(left, right) -> result` has the signature, dtype,
+> shape, rejection, accumulator, and differentiation contract of [05-OP-17],
+> returning the unique signed operand-width representative congruent to the
+> exact mathematical product modulo `2^w`.
+
+*(Not fully implemented; see chelis#753.)*
 
 **`div` semantics (float-only since chelis#178).** `div(a, b)`
 is **restricted to float operands** (f32, f64, f16, bf16) and
@@ -141,7 +165,17 @@ target.
 
 **Dimension rule:** Both inputs must have identical dimension lists. Output has the same dimensions. No broadcasting.
 
-**Precision rule:** Both inputs must have the same precision `p`. Output has the same precision. Exception: `cmplt` returns `bool` regardless of input precision. Additional restrictions: `div` admits only float precisions (integer operands are a type error citing this section); `trunc_div` admits only integer precisions (float operands are a type error); `floor_div` admits both integer and float precisions.
+**Precision rule:** Both inputs must have the same precision `p`. Output has
+the same precision. Exception: `cmplt` returns `bool` regardless of input
+precision. Additional restrictions: `div` admits only float precisions
+(integer operands are a type error citing this section); `trunc_div` and the
+three `wrap_*` operations admit only signed-integer precisions (float operands
+are a type error); `floor_div` admits both integer and float precisions.
+
+**Scalar modular forms.** `wrap_add`, `wrap_sub`, and `wrap_mul` admit two
+scalar operands wherever [05-OP-17..19] admit the tensor form. The result is a
+scalar of the same signed-integer dtype. A scalar and a non-scalar tensor do
+not broadcast.
 
 **Scalar `max_elem`/`min_elem`.** The element-wise maximum and its §3.4
 `min_elem` lowering also admit two scalar operands of the same numeric dtype
@@ -167,6 +201,30 @@ and float precisions as their tensor forms and use the same adjoint rule.
 | `floor` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise floor; identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
 | `ceil` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise ceil; identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
 | `round` | `(&tensor[D,p]) -> tensor[D,p]` | Element-wise round to nearest, ties to even (IEEE-754 roundTiesToEven / banker's rounding); identity on integer operands | Float operands are non-differentiable (piecewise constant) and `grad` rejects them; the integer identity may be erased before AD |
+| `is_nan` | `(&tensor[D,p_float]) -> tensor[D,bool]` | True exactly for NaN | Non-differentiable predicate; contributes zero cotangent |
+| `is_finite` | `(&tensor[D,p_float]) -> tensor[D,bool]` | True exactly for finite values | Non-differentiable predicate; contributes zero cotangent |
+| `is_infinite` | `(&tensor[D,p_float]) -> tensor[D,bool]` | True exactly for positive or negative infinity | Non-differentiable predicate; contributes zero cotangent |
+
+> **[05-OP-20]** `is_nan(x) -> result` admits an `f16`, `bf16`, `f32`, or
+> `f64` scalar or tensor and returns `bool` on the same surface and, for a
+> tensor, with the same dimensions. It reads the finalized stored value
+> without conversion and returns true exactly when that value is NaN. Signed
+> zeros, infinities, subnormals, and finite normals return false. It has no
+> accumulator and, like `cmplt`, contributes zero cotangent when used inside a
+> differentiable expression. Integer, `bool`, `string`, and deferred operands
+> are type errors.
+>
+> **[05-OP-21]** `is_finite(x) -> result` has the signature, dtype, shape,
+> no-conversion, accumulator, differentiation, and rejection contract of
+> [05-OP-20]. It returns true exactly for finite stored values, including
+> both signed zeros and subnormals, and false for NaN and both infinities.
+>
+> **[05-OP-22]** `is_infinite(x) -> result` has the signature, dtype, shape,
+> no-conversion, accumulator, differentiation, and rejection contract of
+> [05-OP-20]. It returns true exactly for positive or negative infinity and
+> false for NaN and every finite value.
+
+*(Not fully implemented; see chelis#965.)*
 
 **`recip`.** Native IEEE-754 reciprocal, used inside
 `lower_sigmoid` (and any other reciprocal-shaped lowering) to
@@ -174,8 +232,10 @@ produce a single op instead of the prior `exp(neg(log(x)))` chain.
 `recip(0) = +inf`, `recip(-0) = -inf`, `recip(-x) = -recip(x)` for
 finite x — never NaN-from-log.
 
-**Precision rule:** `recip`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, and
-`sqrt` admit float types only (f32, f64, f16, bf16). `neg` and `abs` admit
+**Precision rule:** `recip`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`,
+`sqrt`, `is_nan`, `is_finite`, and `is_infinite` admit float types only (f32,
+f64, f16, bf16). The three classification operations return `bool`; the other
+float operations return the operand dtype. `neg` and `abs` admit
 those float types plus the signed integer types. Integer `neg` and `abs`
 compute at the operand's declared width and trap on the unrepresentable
 minimum-value case according to [04-NUM-9]. `floor`, `ceil`, and `round` admit
@@ -183,20 +243,103 @@ both float and signed-integer types; each is exactly the identity on an
 integer operand, with no float conversion. No unary numeric primitive admits
 `bool`, `string`, or the deferred `f8e4m3` dtype.
 
-**Scalar unary forms.** `recip`, `tan`, `atan`, `floor`, `ceil`, and `round`
-admit a scalar operand wherever the precision rule above admits the tensor
-form and return a scalar of the same dtype. A scalar is the rank-zero instance
-of the element-wise operation: it uses [04-NUM-8]'s arithmetic width and is
-finalized once at its declared storage width. In particular, scalar integer
-`floor`, `ceil`, and `round` are exact identity operations and never convert
-through a float dtype.
+**Scalar unary forms.** `recip`, `tan`, `atan`, `floor`, `ceil`, `round`,
+`is_nan`, `is_finite`, and `is_infinite` admit a scalar operand wherever the
+precision rule above admits the tensor form. The classification operations
+return scalar `bool`; the others return the operand dtype. A scalar is the
+rank-zero instance of the element-wise operation: it uses [04-NUM-8]'s
+arithmetic width and is finalized once at its declared storage width. In
+particular, scalar integer `floor`, `ceil`, and `round` are exact identity
+operations and never convert through a float dtype.
 
 ### 2.3 Reduction
 
+`mean` is listed with the reductions to keep its dtype, empty-axis, and
+adjoint contract beside the primitives it composes. It remains Tier 2 and
+lowers exactly as [05-OP-11] specifies.
+
 | Name | Signature | Semantics | AD Adjoint |
 |---|---|---|---|
-| `sum` | `(&tensor[d1,...,dn,p], axis: int32, accumulator: prec = default(p)) -> tensor[d1,...,d{k-1},d{k+1},...,dn,acc]` | Sum over axis k, removing that dimension. `accumulator` controls the precision of the running sum and the result element type. | `expand(g, original_shape, axis=k)` (gradient flows back at the operand precision `p`; the adjoint is computed in operand precision) |
-| `max_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Max over axis k, removing that dimension | `g * one_hot(argmax(x, k))` — gradient flows to the max element only |
+| `sum` | `(&tensor[d1,...,dn,p], axis: int32, accumulator: prec = default(p)) -> tensor[d1,...,d{k-1},d{k+1},...,dn,sum_result(p,accumulator)]` | Sum over axis k, removing that dimension. `accumulator` controls the running precision; `sum_result` is §5.7.1's result-precision rule. | `expand(g, original_shape, axis=k)` (gradient flows back at the operand precision `p`; the adjoint is computed in operand precision) |
+| `mean` | `(&tensor[d1,...,dn,p_float], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p_float]` | Arithmetic mean over axis k | `expand(g / axis_extent, original_shape, axis=k)` |
+| `max_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Maximum over axis k | Route a NaN result to its first NaN; otherwise split `g` equally among every element equal to the selected maximum, including infinities |
+| `min_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Minimum over axis k | Route a NaN result to its first NaN; otherwise split `g` equally among every element equal to the selected minimum, including infinities |
+| `prod_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,p]` | Product over axis k | Reverse-mode derivative of the exact stride-4 product tree (mathematically, `g` times the product of every other element) |
+| `argmax_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,int64]` | Lowest axis index of the maximum or first NaN | Non-differentiable; `grad` rejects it |
+| `argmin_reduce` | `(&tensor[d1,...,dn,p], axis: int32) -> tensor[d1,...,d{k-1},d{k+1},...,dn,int64]` | Lowest axis index of the minimum or first NaN | Non-differentiable; `grad` rejects it |
+
+> **[05-OP-11]** `mean(x, axis) -> result` admits a tensor operand of
+> `f16`, `bf16`, `f32`, or `f64` and returns the same float dtype with the
+> selected axis removed. On a non-empty axis its value is exactly the
+> composition `div(sum(x, axis), divisor)`: `sum` uses its §5.7.1 default
+> accumulator, order, result dtype, and finalization; `divisor` is the positive
+> axis extent converted once to the sum result dtype under [04-NUM-14]; then
+> `div` executes and finalizes as a separate operation at [04-NUM-8]'s declared
+> width. Integer, `bool`, `string`, and deferred operands are type errors. A
+> zero-length axis is a type error when statically known. If an execution-time
+> extent is zero, a guard before the composition traps `Domain` as operation
+> `mean` at the result dtype. The adjoint is
+> `expand(g / divisor, original_shape, axis)` at the operand dtype. `mean` has
+> no accumulator parameter of its own.
+>
+> **[05-OP-12]** `max_reduce(x, axis) -> result` admits every active signed
+> integer and float tensor dtype and returns that same dtype with the selected
+> axis removed. Values are compared without conversion at their stored dtype.
+> The first NaN in increasing axis-index order is the result; otherwise the
+> maximum is returned, preserving the first stored representation among equal
+> values. A zero-length axis is a type error when statically known. If an
+> execution-time extent is zero, the operation traps `Domain` as operation
+> `max_reduce` at its result dtype. There is no accumulator parameter. For
+> float operands, the adjoint divides the upstream cotangent equally among all
+> elements that compare equal to the selected non-NaN maximum. This includes
+> equal positive or negative infinities. The tie count `k` is
+> counted exactly as `int64`, converted once to the operand float dtype under
+> [04-NUM-14], and each selected element receives ordinary dtype-width
+> `div(g, k)`. When the forward result is NaN, its full cotangent flows to the
+> first NaN selected by the forward rule and every other element receives
+> zero. Integer operands are forward-only and `grad` rejects them.
+>
+> **[05-OP-13]** `min_reduce(x, axis) -> result` has the same dtype,
+> finalization, empty-axis, accumulator, and differentiation contract as
+> [05-OP-12], replacing maximum by minimum. It returns the first NaN in
+> increasing axis-index order; otherwise it preserves the first stored
+> representation among equal minima. For float operands, every element equal
+> to the selected non-NaN minimum, including equal positive or negative
+> infinities, receives the upstream cotangent divided by the number of equal
+> minima.
+>
+> **[05-OP-14]** `prod_reduce(x, axis) -> result` admits every active signed
+> integer and float tensor dtype and returns that same dtype with the selected
+> axis removed. It has no accumulator parameter: multiplication uses the
+> operand's [04-NUM-8] arithmetic width (`f16` and `bf16` therefore multiply
+> in `f32`). The reduction uses four product lanes initialized to one; axis
+> element `i` updates lane `i mod 4`, and the lanes combine as
+> `(p0 * p1) * (p2 * p3)`. Each update and combine is finalized at the
+> arithmetic width, integer overflow is checked at every multiplication, and
+> the completed product is finalized once to the operand storage dtype. This
+> logical tree is identical in every lane and governs [04-NUM-12] trap
+> occurrence. A zero-length axis returns the multiplicative identity one at
+> the operand dtype. For float operands, the adjoint is the reverse-mode
+> derivative of that exact multiplication tree. A division-free
+> prefix/suffix implementation may be used only when it preserves that tree's
+> arithmetic-width operation order and result bits; consequently gradients at
+> zero operands are defined. Integer operands are forward-only and `grad`
+> rejects them.
+>
+> **[05-OP-15]** `argmax_reduce(x, axis) -> result` admits every active
+> signed integer and float tensor dtype and returns `int64` indices with the
+> selected axis removed. If the slice contains NaNs, it returns the lowest
+> axis index containing NaN; otherwise it returns the lowest axis index whose
+> stored value is maximal. Comparisons never convert through another dtype.
+> A zero-length axis is a type error when statically known. If an
+> execution-time extent is zero, the operation traps `Domain` as operation
+> `argmax_reduce` at result dtype `int64`. It has no accumulator and is
+> non-differentiable: `grad` rejects it.
+>
+> **[05-OP-16]** `argmin_reduce(x, axis) -> result` has the signature, dtype,
+> exact-comparison, empty-axis, accumulator, and non-differentiability
+> contract of [05-OP-15], returning the lowest NaN index when present and
+> otherwise the lowest axis index whose stored value is minimal.
 
 **Axis:** Integer index into the input rank. Non-negative axes are
 zero-indexed from the front. A negative axis indexes from the end:
@@ -227,17 +370,13 @@ The same constraint and diagnostic apply to `expand`'s insert axis.
 
 **Output dimensions:** The dimension at position `axis` is removed. All other dimensions are preserved.
 
-**Runtime-derived operand rank (chelis#320).** When a reduction
-(`max_reduce`) or `gather` is applied to a windowing/stacking
-intermediate whose IR node lowered without a static tensor type (a
-rank-0 placeholder), the lowering recovers the operand's rank from the
-ascribed result type — for a reduction the operand rank is the result
-rank plus one; for `gather` it is `result_rank - indices_rank + 1` —
-and re-inserts the reduced/gathered axis as a runtime-derived symbolic
-dim. This lets `grad` differentiate a windowed reduce/gather (the
-pooling/im2col pattern) instead of raising "axis out of range for an
-operand of rank 0"; the symbolic axis resolves from the operand's
-runtime shape at evaluation time.
+**Runtime-derived operand rank.** When a reduction or `gather` consumes a
+windowing or stacking result whose extent is known only at execution, its
+operand rank remains determined by the result contract: a reduction operand
+has result rank plus one, and a gather operand has
+`result_rank - indices_rank + 1`. The removed or gathered axis is represented
+as a runtime-derived symbolic dimension and resolves from the operand's
+runtime shape. No phase may substitute a rank-zero placeholder or axis zero.
 
 **Accumulator parameter (`sum` only).** The optional `accumulator: prec`
 parameter controls the precision used for the running sum and the precision
@@ -256,11 +395,9 @@ In short:
 - `int32` operands → `int32` accumulator → `int32` result
 - `int64` operands → `int64` accumulator → `int64` result
 
-(The `bf16`/`f16` rows formerly read "→ `f32` result" here, contradicting the
-authoritative table's operand-precision result column; corrected 2026-07-28.
-The `f32` accumulator is consumed inside the op and downcast on output, so the
-caller sees a uniform-precision result tensor. Only the narrow INTEGER rows
-widen their result, and they do so for overflow safety.)
+The `f32` accumulator for `bf16`/`f16` is consumed inside the op and downcast
+on output, so the caller sees a uniform-precision result tensor. Only the
+narrow integer rows widen their result, and they do so for overflow safety.
 
 There is no implicit precision promotion: omitting the parameter resolves to
 the documented default before lowering. The IR `RiscOp::ReduceSum` node
@@ -268,40 +405,38 @@ always carries a populated accumulator-precision field. Programs that
 explicitly request a narrower-than-default accumulator are a type error per
 §5.7.1.
 
-`max_reduce` does not take an accumulator parameter. Max is order-preserving
-and does not lose precision the way a long sum does, so the result element
-type matches the operand element type.
+`mean`, `max_reduce`, `min_reduce`, `prod_reduce`, `argmax_reduce`, and
+`argmin_reduce` do not take an accumulator parameter. Their exact accumulator
+and result rules are the [05-OP-11..16] contracts above; in particular, the
+value extrema and product return the operand dtype, while index reductions
+return `int64`.
 
 ### 2.3.1 Windowed Reduction
 
 | Name | Signature | Semantics | AD adjoint |
 |---|---|---|---|
-| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's max (ties distribute, as `max_reduce`); accumulated over overlapping windows |
-| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Subgradient: each window's `g` flows to every position equal to that window's min (ties distribute, as `min_reduce`); accumulated over overlapping windows |
+| `reduce_window_max` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed max over the last `n` axes | Each window splits `g` equally among equal non-NaN maxima, including infinities, or routes full `g` to its first NaN; contributions accumulate across overlapping windows |
+| `reduce_window_min` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed min over the last `n` axes | Each window splits `g` equally among equal non-NaN minima, including infinities, or routes full `g` to its first NaN; contributions accumulate across overlapping windows |
 | `reduce_window_sum` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed sum over the last `n` axes | Each window-source position receives the owning window's `g` (overlap-add over windows covering it) |
 | `reduce_window_mean` | `(&tensor[..., d1, ..., dn, p], window_shape: List[int64], strides: List[int64]) -> tensor[..., d1', ..., dn', p]` | Strided windowed mean over the last `n` axes | As `sum`, with each contribution scaled by `1 / window_volume` |
 
-**Design rationale: four primitives, not one with a Reducer enum.** The
-issue text (Chelis-Lang/chelis#254) proposed a `Reducer` enum argument
-(`Sum | Max | Min | Mean`). The shipped surface follows the same pattern as
-the existing reductions — `max_reduce`, `min_reduce`, `prod_reduce`,
-`argmax_reduce`, `argmin_reduce` are already four siblings, not one
-parameterized op — so adding four siblings keeps the builtin set
-consistent and avoids introducing a string-keyed or ADT-keyed argument that
-would have to be resolved at check time. The IR carries a single
-`RiscOp::ReduceWindow { reducer, window_shape, strides }` node whose
-`reducer` field selects `Max` / `Min` / `Sum` / `Mean`; the four Surf
-builtins differ only in which `ReduceWindowKind` they emit.
+Within each window, `reduce_window_max` and `reduce_window_min` inspect values
+in row-major window order. The first NaN is the forward result when any NaN is
+present; otherwise the operation returns the selected non-NaN extreme and
+preserves the first stored representation among equal extrema, including
+infinities. This selection rule also defines the adjoint's first-NaN and
+non-NaN tie sets.
 
-**Padding mode: Valid only.** The shipped surface implements
-`Valid`-padding only. Output spatial extent per windowed axis is
-`floor((input_dim - window) / stride) + 1`. `Same`-padding (with
-`ceil(input_dim / stride)` output and zero / `-inf` fill at the
-boundary) is **deferred** to a follow-up; users who need that
-behavior should pad explicitly with `pad(x, ..., fill)` before
-calling `reduce_window_*`. The four-arg signature in the original
-issue text proposed `(x, window_shape, strides, reducer)` with no
-explicit mode; this matches `Valid` as the implicit default.
+*(Not fully implemented; see chelis#1281.)*
+
+The four names are separate builtins rather than a runtime reducer argument.
+They may share one closed IR reducer identity, but the checker resolves the
+name and reducer before execution.
+
+**Padding mode: Valid only.** Output spatial extent per windowed axis is
+`floor((input_dim - window) / stride) + 1`. No implicit `Same` padding is
+defined; a program pads explicitly with `pad(x, ..., fill)` before calling a
+windowed reduction.
 
 **Shape contract.**
 
@@ -323,16 +458,11 @@ explicit mode; this matches `Valid` as the implicit default.
   error (an empty window output is structurally meaningless under
   `Valid` padding).
 
-**Lowering.** The IR `RiscOp::ReduceWindow` carries the full
-`{reducer, window_shape, strides}` triple. The IR evaluator, the host
-runtime, and the C backend each implement it as a direct windowed loop
-nest — `Mean` is implemented as windowed `Sum` divided by the window
-volume, computed inline rather than as a separate `Div` op. (The HIP
-target rejects it under [05-RWIN-2].) There is no Tier-2
-to Tier-1 decomposition: `reduce_window_*` is a Tier-1 primitive in its
-own right. The Surf `reduce_window_*` names are the public surface;
-the IR node and backends share the single `ReduceWindow` lowering
-path.
+**Primitive identity.** `reduce_window_*` is Tier 1 and carries the closed
+`{reducer, window_shape, strides}` parameters. Windowed mean is windowed sum
+at the declared arithmetic width followed by division by the positive window
+volume at that width. It is not a Tier-2 decomposition into a materialized
+window tensor.
 
 *Accumulation precision.* A windowed reduction accumulates at the
 operand's ARITHMETIC WIDTH (`spec/04-type-system.md` [04-NUM-8]) in every
@@ -341,27 +471,10 @@ lane: `f32` operands accumulate in `f32`, `f64` in `f64`, `f16`/`bf16` at
 accumulator parameter, so §5.7's widening does not apply to it and there
 is no other authorized widening.
 
-For integer operands that is a decided consequence, not an oversight
-(recorded 2026-07-30): a window sum that leaves the operand dtype's
-range traps per [04-NUM-3] - with occurrence governed by [04-NUM-12] -
-where the GLOBAL reduction's §5.7.1 default would have widened, because
-there is no parameter to request a wider window accumulator. If windowed
-reductions over narrow integers become a real need, the resolution is
-authoring an accumulator parameter for `reduce_window_*` on §5.7's
-pattern, never silent widening. No shipped behavior turns on this yet:
-the compiled lane's precision gate
-(`reject_unsupported_reduce_window_precision`) restricts
-`reduce_window_*` to `f32` before codegen today.
-
-*(Not honored today: the IR evaluator and host runtime accumulate each
-window in `f64` while the C backend accumulates `sum` / `mean` in an
-`f32` lane (`float acc`) - the two lanes disagree by construction for
-`f32` operands, which is precisely the divergence [04-NUM-8] forbids. The
-C lane is the conforming one. For the small windows the parity gate
-exercises (2×2, 3×3) the two agree inside the `1e-5` compile-run
-tolerance, which is why the divergence went unnoticed; a large `f32`
-window drifts past it. Fixing the eval side rides chelis#729 Phase 2's
-kernel split with the elementwise and global-reduction paths.)*
+For integer operands, a window sum that leaves the operand dtype's range
+traps per [04-NUM-3], with occurrence governed by [04-NUM-12]. The global
+sum's §5.7.1 widening does not apply because windowed reductions have no
+accumulator parameter. A lane may not widen silently.
 
 `reduce_window_sum` deliberately does **not** widen its RESULT precision
 the way the global `sum` reduction does; the output element type matches
@@ -378,127 +491,37 @@ input cotangent `din` (shape `S_in`). The adjoints, accumulated over the
 - `Sum`: scatter (overlap-add) the owning window's `g` to each
   window-source position — the transpose of the windowed sum.
 - `Mean`: as `Sum`, scaling each contribution by `1 / window_volume`.
-- `Max` / `Min`: route each window's `g` to every position equal to that
-  window's extreme — the windowed generalization of the `max_reduce` /
-  `min_reduce` `eq`-mask subgradient, so ties distribute the full `g`
-  (not a `1/k` share). `x` is read to locate the extreme.
+- `Max` / `Min`: if the window contains NaNs, route the full `g` to the first
+  NaN in row-major window order and zero to the rest. Otherwise split `g`
+  equally among the `k` positions equal to the selected non-NaN extreme,
+  including equal positive or negative infinities, so each
+  receives `g / k`; `k` is counted as exact `int64`, converted once to the
+  operand float dtype under [04-NUM-14], and ordinary dtype-width `div`
+  performs the quotient. Contributions from overlapping windows add. `x` is
+  read to locate the selected value and tie set.
 
-Like the forward op, `ReduceWindowGrad` is implemented directly by the IR
-evaluator, the host runtime, and the C backend (the C adjoint is emitted
-serially, since overlapping windows scatter-add into shared `din`
-positions); the HIP target rejects it before codegen under [05-RWIN-2].
-Second-order AD through the adjoint itself is not
-defined. The adjoints are validated against central
-finite differences for all four reducers over overlapping and strided
-windows (`chelis-ir::eval` unit tests), and the C backend is checked for
-evaluator parity (`chelis-backend-c::exec_compile::exec_reduce_window_grad_*`).
-
-**Output-dim formula vs. issue #254.** The admitting issue text
-sketched the `Valid` output extent as `(input_dim - window + 1) /
-stride`. That informal form only agrees with the standard pooling
-formula at `stride == 1`; for `stride > 1` it under-counts (e.g.
-`input=8, window=2, stride=2` gives `3` instead of the correct `4`
-non-overlapping windows at positions `0, 2, 4, 6`). The shipped
-formula `floor((input_dim - window) / stride) + 1` matches
-`jax.lax.reduce_window` / PyTorch pool kernels and is the normative
-contract above.
+Second-order AD through `ReduceWindowGrad` is not defined.
 
 > **[05-RWIN-2]** The C target SHALL implement `ReduceWindow` and
 > `ReduceWindowGrad`. The HIP target SHALL reject either node before codegen
 > with an `unsupported_feature` diagnostic that directs the caller to the C
 > target; it SHALL NOT emit a stub kernel or enter a panic backstop.
 
-**Statically-known windowed extents required on the build path.** The
-build/backend path needs each *windowed* axis extent to be known at
-compile time (a literal `tensor[..., 8, 8, p]` dim, or a named dim with
-a bound size). A windowed axis whose extent is only known at runtime
-(e.g. a `pad_sequences` result, whose dims are bound from input
-metadata) cannot be lowered to a correct static output shape under the
-current `DimInfo` model: the windowed output extent
-`floor((d - window) / stride) + 1` is strictly smaller than the input
-extent `d` and is not representable as a `DimExpr` (no subtraction /
-floor), so the backend's symbolic-dim binding would tie the windowed
-output axis to the *input* extent — silently mis-allocating the output
-tensor and emitting an out-of-bounds window read. To prevent that, the C
-build **rejects** such a program at compile time with an
-`unsupported_feature` error
-(`chelis_compiler_api::compiler::reject_symbolic_windowed_reduce`, consumed
-by both public build paths, with a defensive backstop in the C emitter); it does not
-emit a kernel. Window over a statically-sized axis, or pad the input to a
-concrete extent first. (The HIP target is unaffected by this specific
-check: it defers `reduce_window_*` codegen entirely — see **Backend
-status** above — so it never reaches the mis-allocation.) The leading
-pass-through axes may remain symbolic. The IR evaluator and host runtime
-always recompute from the concrete runtime shape and so handle
-runtime-only extents correctly; only the ahead-of-time C/HIP build path
-carries this restriction.
+**Reduction order.** `sum` evaluates each reduced slice with a
+stride-4 cascade: four accumulators initialized to zero receive axis element
+`i` in lane `i mod 4`, and the lanes combine as
+`(acc0 + acc1) + (acc2 + acc3)`. Each update and combine executes in the
+selected accumulator dtype. The order is positional and deterministic. Every
+evaluator and backend uses that logical operation tree; parallel scheduling
+may vary only when it preserves the same result bits and trap occurrence.
 
-Separately, the C `reduce_window_*` emitter is **f32-only** (no bf16/f16
-convert-load path yet). A bf16/f16 windowed reduction is rejected before
-codegen with an `unsupported_feature` error
-(`reject_unsupported_reduce_window_precision`, consumed by both public build
-paths, with the C emitter `panic!` as a defensive backstop), so it surfaces as a
-clean diagnostic rather than an emitter crash. Cast to `f32` before the
-windowed reduction; bf16/f16 widening is follow-on work.
-
-**Acceptance oracle.** The authoritative completion oracle for this
-primitive is the standard per-PR gate, `python3 scripts/gate.py`, which
-runs (among the broader suite): the type-checker shape-contract tests
-(`chelis-types::issue_254_reduce_window_signatures`), the IR
-evaluator + adjoint-lowering tests (`chelis-ir::issue_254_reduce_window`)
-plus the finite-difference adjoint checks
-(`chelis-ir::eval::tests::reduce_window_grad_*`), the host-runtime
-evaluator tests
-(`chelis-compiler-api::issue_254_reduce_window_host_runtime`), the C
-emit structural tests (`chelis-backend-c::issue_254_reduce_window_emit`)
-plus the gcc compile-and-run evaluator-parity tests for both the forward
-op and its adjoint
-(`chelis-backend-c::exec_compile::exec_reduce_window_*`), the
-build-path rejection of runtime-symbolic windowed axes
-(`chelis-compiler-api::compiler::tests::*reduce_window*` and
-`chelis-cli::cli::build_c_rejects_reduce_window_over_runtime_symbolic_axis`),
-and the end-to-end build-vs-eval parity over the executable example
-(`chelis-cli::cli::build_c_runs_tensor_structural_ops_and_matches_eval_output`).
-No `#[ignore]`d or HIP manual gate is required for this primitive,
-because HIP codegen (forward and adjoint) is deferred.
-
-**Reduction order (`sum` only).** `sum` evaluates the reduction with a
-**stride-4 ILP cascade** — four independent accumulator lanes loaded
-in round-robin (`acc[i & 3] += value[i]`), combined at the end as
-`(acc0 + acc1) + (acc2 + acc3)`. This matches PyTorch's CPU
-`row_sum` (`num_levels=4 ilp_factor=4`), so f32 `sum` is bit-exact
-with `torch.sum(...)` for `n ≤ 16` on the reduced axis. NumPy's
-`sum` uses a divide-and-conquer pairwise tree with 128-element
-blocks — structurally different from the stride-4 cascade — so the
-two coincide only by accident on specific inputs; chelis `sum` is
-**not** in general bit-exact with `numpy.sum`. For `n > 16` the
-result may differ from torch by up to ~1 ULP until the multi-level
-cascade lands as a follow-up. The order is purely positional so the
-algorithm is deterministic across runs and hosts; `#pragma omp
-parallel for` is applied to the outer (output-element) loop only,
-never the inner reduction.
-
-This change is observable for floating-point operands — the prior
-strict left-fold could diverge from torch by ~1 ULP at unfavorable
-seeds and forced parity-oracle carve-outs in downstream harnesses
-(issue Chelis-Lang/chelis#163). Integer reductions are unchanged in
-VALUE (integer addition is associative), but under [04-NUM-3]'s traps,
-whether an intermediate leaves the accumulator's range is
-order-dependent at range edges - `spec/04-type-system.md` [04-NUM-12]
-defines trap occurrence relative to each lane's documented order,
-including this cascade. The accumulator-precision rule
-above is orthogonal to the reduction order: the lane type is the
-accumulator type, and the final combine happens in the same
-precision.
-
-**GPU caveat.** The HIP and Metal backends keep their existing
-device reduction kernels (single-accumulator per-thread + tree
-combine for Metal; single-accumulator for HIP). Bit-exact GPU
-parity with torch's CPU `row_sum` is out of scope for this change
-— torch itself uses a different kernel (`cub::DeviceReduce`) on
-GPU. CPU eval, `chelis eval`, and the C backend all match
-`row_sum`; the HIP and Metal backends may differ from each other
-and from CPU at the ~1 ULP level on f32.
+`prod_reduce` uses one cross-lane order: four accumulators initialized to one
+receive axis element `i` in lane `i mod 4`, then combine as
+`(p0 * p1) * (p2 * p3)`. Every evaluator and backend uses that logical order;
+parallel scheduling may vary only when it preserves the same operation tree.
+Each multiplication executes at [04-NUM-8]'s arithmetic width, and the final
+result is finalized once to the operand storage dtype. This order governs
+both float result bits and [04-NUM-12] integer-overflow trap occurrence.
 
 ### 2.4 Movement
 
@@ -859,11 +882,13 @@ subgradient convention.
 | Name | Lowering to RISC |
 |---|---|
 | `matmul(A, B)` | See §4.1 |
-| `mean(x, axis)` | `div(sum(x, axis), divisor)` where `divisor = const(dim_size)` for a concrete-extent axis, or the runtime count `sum(const(1.0, x.shape), axis)` when the reduced axis is a runtime-derived (`Named(_, None)`) extent (chelis#320) |
 | `softmax(x, axis)` | See §4.2 |
 | `linear(x, w, b)` | `add(matmul(x, w), b)` (with appropriate expand on b) |
 | `cross_entropy(logits, labels)` | See §4.3 |
 | `min_elem(a, b)` | `neg(max_elem(neg(a), neg(b)))` |
+
+`mean` remains a Tier 2 builtin. Its complete contract is [05-OP-11], and its
+lowering is that atom's exact guarded sum-then-div composition.
 
 **Current implementation note:** the type checker currently also accepts a
 `normalize(x)` convenience name.
@@ -1193,6 +1218,31 @@ Until the compiled-lane helpers land, assertions are an eval-lane contract.
 > and `pad` otherwise; source elements at index `width` or beyond do not
 > appear in the result.
 
+### 3.6.3 Canonical value-to-string conversion
+
+> **[05-OP-25]** `to_string(value) -> result` borrows exactly one value
+> without consuming it and returns `string`. It admits exactly an active
+> numeric, `bool`, or `string` scalar; a tensor whose element dtype is an
+> active numeric dtype or `bool`; or `List[T]` when `T` is recursively
+> admitted by this rule. Every other value type is a type error. A `string`
+> scalar returns `value` byte-for-byte unchanged. Numeric and boolean scalar
+> and tensor elements render under [05-OBS-1..5] and §8.1. A rank-`r > 0`
+> tensor with dimensions `[d0, ..., d_(r-1)]` and `N` elements renders as
+> `tensor(shape=[d0, ..., d_(r-1)], data=[...])`, visiting elements in
+> row-major order: all `N` elements when `N <= 32`, otherwise the first 32
+> followed by [05-OBS-5]'s marked `, ...` cut. A rank-zero tensor renders as
+> its bare element under [05-OBS-4]. A `List` renders as `[` followed by every
+> element's recursive rendering in source order, separated by `, `, and then
+> `]`; `[]` is the empty-list rendering. A List boundary never truncates or
+> elides elements, although a tensor nested within it retains [05-OBS-5]
+> tensor truncation. String elements are inserted verbatim, without quoting or
+> escaping: this is a non-injective display form, not a serialization. Every
+> lane produces byte-identical text for the same admitted stored value. The
+> operation is pure, performs no arithmetic or dtype conversion, is
+> non-differentiable (`grad` rejects it), and has no accumulator.
+
+*(Not fully implemented; see chelis#1282 and chelis#1059.)*
+
 ### 3.7 Host-Lane Data I/O Numeric Operations (Eval-Only; chelis#890 / chelis#903)
 
 The JSON and CSV I/O builtin families (`parse_json`/`to_json`, the
@@ -1325,19 +1375,14 @@ deliberately not frozen here.)*
 
 ---
 
-### 3.8 Named Lossy Cast Forms (chelis#759)
+### 3.8 Named Lossy Cast Forms
 
 [04-NUM-14] makes the default `cast` a CHECKED cast: a fractional or
 non-finite float cast to an integer target traps `Domain`. That default
 does not change. The named forms below are the explicit, auditable escape
 hatches a program opts into when a lossy conversion is the intent. This
-section holds the ladder's float-to-integer rung; the saturating and
-rounding rungs remain future work under chelis#759.
-
-#### Named truncating cast atom
-
-Transitional blockquote authority per `spec/design/spec_provenance.md`
-§C1, matching the §7/§8 atoms of this file.
+section defines the complete named ladder. Each form is a distinct operation,
+not a mode parameter to `cast`.
 
 > **[05-OP-6]** `cast_trunc(source, target)` is the explicit truncating narrowing cast
 > from a float source dtype to an integer target dtype. For a **finite** source value it
@@ -1358,13 +1403,33 @@ finite and integral and in range (both yield the same integer); it differs
 only by *defining* the fractional case as truncation where `cast` traps
 `Domain`. `cast_trunc` has no accumulator.
 
-*(Implemented by `cast_trunc_raw` / `cast_trunc_scalar` /
-`cast_trunc_tensor` in `crates/chelis-types/src/dtype_semantics.rs`, the
-checker rule in `crates/chelis-types/src/infer/expr_record.rs`, and
-`chelis_checked_float_trunc_to_int` in
-`crates/chelis-runtime/include/chelis_runtime.h` for the compiled lane;
-the acceptance surface is `crates/chelis-cli/tests/cast_trunc.rs`. The
-design record is `spec/design/named_truncating_cast.md`.)*
+> **[05-OP-23]** `cast_saturate(source, target) -> result` admits an active
+> signed-integer or float source dtype and a signed-integer target dtype on a
+> scalar or tensor surface. It preserves the source surface and tensor
+> dimensions and returns the target dtype. It reads the source exactly at its
+> stored dtype. A finite float is truncated toward zero, then the resulting
+> mathematical integer is clamped to the target's inclusive range; an integer
+> source is clamped directly. Negative infinity returns the target minimum,
+> positive infinity the target maximum, and NaN traps `Domain` as operation
+> `cast_saturate` at the target dtype. It never traps `Overflow`, wraps, or
+> converts through another numeric dtype. `bool`, `string`, deferred, and
+> non-integer targets are type errors. It has no accumulator and is
+> non-differentiable: `grad` rejects it.
+>
+> **[05-OP-24]** `cast_wrap(source, target) -> result` admits an active
+> signed-integer source and signed-integer target on a scalar or tensor
+> surface. It preserves the source surface and tensor dimensions and returns
+> the unique signed target-width representative congruent to the exact stored
+> source modulo `2^target_width`. It never traps for overflow, saturates, or
+> converts through a float dtype. Float, `bool`, `string`, deferred, and
+> non-integer targets are type errors. It has no accumulator and is
+> non-differentiable: `grad` rejects it.
+
+There is no `cast_round` operation. A program that wants rounding followed by
+checked conversion spells `cast(round(source), target)`, so the rounding and
+checked-cast boundaries remain independently observable.
+
+*(Not fully implemented; see chelis#759.)*
 
 ---
 
@@ -1517,16 +1582,24 @@ Lowering:
 
 ## 5. AD Completeness
 
-Every RISC primitive has a defined adjoint rule (§2). This means `grad` can differentiate through any composition of RISC primitives.
+Every numeric callable states one of three contracts: an adjoint, a zero
+cotangent, or a structural `grad` rejection. No operation acquires an adjoint
+from a backend fallback.
 
-**Non-differentiable primitives:** `cmplt`, `const`, `load` have zero gradient.
-On float operands, `floor`, `ceil`, and `round` are piecewise constant and `grad`
-rejects them with an `AdRejectionReason::PiecewiseConstant` error rather than
-silently returning a zero gradient. On integer operands those three operations
-are exact identities and may be erased before AD; integers themselves do not carry
-cotangents. The type system (Phase 2, via the `Diff` effect) will detect when `grad`
-is applied to a function containing non-differentiable operations and report which
-operations are the problem.
+**Zero-cotangent predicates and sources.** `cmplt`, `is_nan`, `is_finite`,
+`is_infinite`, `const`, and `load` contribute zero cotangent. This permits a
+predicate to participate in a differentiable guard without pretending that
+the predicate itself has a useful derivative.
+
+**Structural rejections.** On float operands, `floor`, `ceil`, and `round` are
+piecewise constant and `grad` rejects them with an
+`AdRejectionReason::PiecewiseConstant` error rather than silently returning a
+zero gradient. `cast_trunc`, `cast_saturate`, `cast_wrap`,
+`argmax_reduce`, and `argmin_reduce` likewise reject `grad` under their atoms.
+The `wrap_*` operations and integer reduction/unary forms are forward-only
+because integer values do not carry cotangents. Integer `floor`, `ceil`, and
+`round` are exact identities and may be erased before AD. The `Diff` effect
+reports a non-differentiable operation before execution.
 
 **Almost-everywhere differentiable:** `max_elem` (gradient is zero at the boundary where inputs are equal), `relu` via `max_elem(x, 0)` (gradient is zero at x=0). These are valid targets for `grad` — the subgradient convention (pick one side) is standard in ML.
 
@@ -1663,7 +1736,7 @@ count allowlist is supporting evidence only and cannot satisfy [05-UNS-1].
 ## 8. Observation And Formatting Contract
 
 > **[05-OBS-1]** Every exit that renders a stored numeric value as text -
-> `print`, `to_list`, diagnostics, the wire schema's rendering - SHALL
+> `print`, `to_string`, `to_list`, diagnostics, the wire schema's rendering - SHALL
 > emit text that parses back to exactly the stored bits at the value's
 > own dtype width, and all exits within a lane SHALL agree with each
 > other and with the stored bits.

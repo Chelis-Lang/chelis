@@ -82,7 +82,7 @@ fixtures, format, and oracle. No previous contract survives by implication.
 | Spec-edit freshness by mechanically comparing carrier revs | **Strengthened.** Current revisions are necessary, and Phase 2 additionally requires complete provider-neutral transitive impact dispositions. | Phase 2; §C2 and §C6 |
 | Green test or issue-linked ignored test as the two coverage states | **Superseded.** Registration, freshness, selection, five-state execution verdict, debt, waiver, and assurance class remain independent facts. | §C3 and §C4 |
 | Blocking coverage manifest and advisory debt reports | **Replaced by versioned coverage policies, adoption ratchets, repository-owned debt, and repository-owned waivers.** Phase 3 freezes initial policy IDs, selectors, required roles, reports, and negative controls. | Phase 3; §C4 |
-| Capability-row, Deep-tag, tolerance-row, and diagnostic citations | **Retained and generalized as governed structural surfaces.** Selected members bind one current controlling atom revision; intentional duplicates also require derivations. | Phase 3; §C5 |
+| Capability-row, Deep-tag, tolerance-row, and diagnostic citations | **Retained and generalized as governed structural surfaces.** Numeric Table A binds each complete semantic cell to its controlling atom. Table B preserves that binding while adding a typed kernel, implementation issue, or rejected-by-design authority per backend. Host constructors, sibling callable registries, external target dispositions, and derived exported-stdlib dependencies remain separate governed domains. Intentional duplicates also require derivations. | Phase 3; §C5 |
 | OpenSpec proving inadequate as the trigger for provenance work | **Superseded.** OpenSpec becomes required for planning and agent communication when Phase 0's executable adoption surface lands; a nonblocking pilot through pinned Buoy shell interfaces may begin once Phase 1 fixtures, boundaries, and pins exist. Blocking still waits for the readiness rule. | Phase 0; Phases 1 and 3 |
 | Executable atoms through `chelis prove` | **Retained as optional stronger evidence, not a replacement for ordinary carriers.** Exact properties, models, proofs, assumptions, and exclusions are bound only when justified. | Phase 4 |
 
@@ -280,11 +280,33 @@ converted into passing coverage because an ignored test or issue exists.
 
 ## C5. Governed structural surfaces
 
-1. **Capability rows:** every member of the complete operation × surface ×
-   dtype × lane domain remains present, including prohibited, deferred, and
-   not-applicable members. No adapter predicate may filter difficult cells
-   before completeness checking. Every disposition cites one controlling
-   current atom revision.
+1. **Capability rows:** numeric Table A covers the complete finite
+   `BuiltinId × SurfaceClass × operand Prim × SemanticParams` domain, where
+   `SurfaceClass = Scalar | Tensor`.
+   Every A cell remains present, including rejections, and binds one current
+   controlling atom through its typed `SpecAtomRef`; no adapter predicate may
+   filter difficult cells before completeness checking. Table B then covers
+   every A-`Supported` cell times the exact backend set
+   `eval | c-host | c-dag | hip | metal`. Its typed disposition is an
+   implemented `KernelId`, an unimplemented `IssueRef` plus `DiagnosticKind`,
+   or a rejected-by-design `SpecAtomRef` plus `DiagnosticKind`. Compact
+   authoring macros expand before completeness validation; missing and
+   duplicate rows fail rather than being filtered. Recursive host
+   constructors form a separate complete constructor × position × backend
+   domain. Container and boundary builtins use the sibling
+   `BuiltinId × SiblingDomain × SiblingCaseId × SemanticParams` semantic
+   registry and its supported-row × backend product, selected by their
+   declaration. Runtime, stdlib, and binding callables instead retain §C6's
+   exact semantic registry keyed by
+   `ExternalCallableFamily × CanonicalCallableId`. Every runtime C export and
+   PyO3 binding additionally receives one total target disposition keyed by
+   `ExternalCallableFamily × CanonicalCallableId × ExternalTargetContext`;
+   its typed cell is an implementation identity, an open issue plus
+   diagnostic, or a rejected-by-design atom plus diagnostic. Exported stdlib
+   definitions have no authored target cell: their per-backend result is a
+   generated transitive dependency closure over the checked body, and an
+   unresolved dependency or empty-by-default result fails construction. None
+   is forced into numeric `SurfaceClass` rows.
 2. **Deep tags:** every member of the closed Deep vocabulary receives exactly
    one checker disposition and controlling atom revision.
 3. **Tolerance rows:** every governed cross-lane tolerance entry is explicit,
@@ -419,6 +441,12 @@ phase: selection, effectful execution, five-state result normalization, and
 exact binding back to carriers. This is the minimum execution surface needed
 for a blocking coverage claim; stronger model/property/proof evidence remains
 Phase 4.
+
+For the [#729] capability domains, this phase consumes the owning dtype
+oracles and their exact receipts. It does not redefine, weaken, or replace
+`dtype_phase4c_oracle.py`, `dtype_phase4d_oracle.py`, or the authoritative
+`dtype_phase4_oracle.py`; provenance proves their selection, execution state,
+and binding to governed rows, while [#729] continues to own what they execute.
 
 Promotion requires:
 

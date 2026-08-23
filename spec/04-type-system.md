@@ -946,10 +946,13 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 
 | Operation | Input type(s) | Output type | Dimension rule |
 |---|---|---|---|
-| `add`, `mul`, `max_elem` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | Dimensions must match exactly |
-| `neg`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved |
-| `sum(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k |
-| `max_reduce(x, axis=k)` | same as sum | same as sum | same as sum |
+| `add`, `mul`, `div`, `floor_div`, `trunc_div`, `max_elem`, `wrap_add`, `wrap_sub`, `wrap_mul` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | Dimensions must match exactly; each operation's dtype domain remains as specified in spec/05 |
+| `cmplt` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, bool]` | Dimensions must match exactly |
+| `neg`, `recip`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil`, `round` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved; each operation's dtype domain remains as specified in spec/05 |
+| `is_nan`, `is_finite`, `is_infinite` | `tensor[D, p_float]` | `tensor[D, bool]` | Dimensions preserved |
+| `sum(x, axis=k, accumulator=a)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, sum_result(p,a)]` | Remove dimension at axis k; `sum_result` is §5.7.1's result-precision rule |
+| `mean`, `max_reduce`, `min_reduce`, `prod_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k; `mean` additionally requires float `p` |
+| `argmax_reduce`, `argmin_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, int64]` | Remove dimension at axis k |
 | `reshape(x, shape)` | `tensor[D_old, p]` | `tensor[D_new, p]` | Product of dims must match. New dims are `d-lit` or `d-name` (user-specified) |
 | `permute(x, axes)` | `tensor[d₁,...,dₙ, p]` | `tensor[d_{axes[0]},...,d_{axes[n-1]}, p]` | Reorder dimensions |
 | `expand(x, shape)` | `tensor[D_small, p]` | `tensor[D_large, p]` | Add dimensions. Each new dim is explicit. |
@@ -1256,11 +1259,14 @@ symbolically.
 
 Multiple **named** axes may be reduced in one call — the variadic form
 `sum(x, seq, head)` (chelis#339) — or by composing single-axis reductions
-(`sum(sum(x, head), seq)`); the two are equivalent, and the variadic form is
-order-insensitive (`sum(x, head, seq)` produces the same result). The variadic
+in the canonical order below. The variadic form is order-insensitive:
+`sum(x, head, seq)` and `sum(x, seq, head)` produce the same result because
+axis arguments are sorted by their positions in the original operand, from
+highest position to lowest, before lowering. The resulting single-axis
+composition owns the exact value, trap, NaN-selection, and adjoint behavior;
+source spelling order never does. The variadic
 form is defined for the value reductions `sum`, `mean`, `max_reduce`,
-`min_reduce`, and `prod_reduce` (for `mean`, reducing axes one at a time with
-uniform weights equals the joint mean). It is **not** defined for the
+`min_reduce`, and `prod_reduce`. It is **not** defined for the
 index-returning reductions `argmax_reduce`/`argmin_reduce`: an index along one
 axis is not composable with a second reduction, so a variadic call on those is
 a hard error. Every axis in a variadic call must be a *named* axis (a
@@ -1268,8 +1274,8 @@ positional integer is only valid as the single axis of a concrete-rank
 operand), each name must resolve per the rules above, and a **duplicate** axis
 name in the list is a hard error. Inside a `..r` body the Body-Discipline
 admission is unchanged (`sum`/`mean` only, chelis#340). At lowering the
-variadic call desugars to the composition, innermost stage reducing the last
-listed axis.
+variadic call desugars to that canonical highest-original-position-first
+composition.
 
 **Unification (unitary).** A row shape unifies with a ground shape by locating
 each named anchor uniquely in the ground and binding the spreads to the runs
@@ -1786,6 +1792,11 @@ float finalization rule, not an implicit source-language cast. Conversion
 that discards a fractional part, wraps, or saturates requires an explicit
 rounding operation or a distinct named conversion; it is never the default
 float-to-integer behavior of `cast`.
+
+**Named conversions ([04-NUM-16]).** `cast_trunc`, `cast_saturate`, and
+`cast_wrap` are separate operations with the source/target domains and exact
+value rules in `spec/05-risc-primitives.md` §3.8. There is no `cast_round`;
+write `cast(round(x), target)` when that composition is intended.
 
 ### 5.3 Literal Types
 
@@ -2558,73 +2569,13 @@ Scope:
 
 ---
 
-## 9. Numeric Value Semantics (Decided 2026-07; Implementation Tracked As chelis#729)
-
-**Status banner - read before citing.** The atoms below are DECIDED
-normative semantics, authored 2026-07-16 out of the numeric audit
-(chelis#680-#734; metas #695/#727). They are NOT yet implemented: today's
-behavior diverges per the issue references in each atom's note, and the
-divergences are locked as issue-linked `#[ignore]`d tests. Those tests are
-visible known-failure records only: under `spec/design/spec_provenance.md`
-§C3-§C4, registration, freshness, execution, debt, and waiver remain separate,
-and an ignored test does not satisfy coverage. The delivery plan and the full
-elaboration (finalize semantics, kernel signatures, storage) is
-`spec/design/dtype_semantics.md`. Atom IDs are stable, and the current
-blockquote authorities remain normative until selected for fixture-proven
-migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
-`chelis-lint` rule—attaches and checks full semantic revisions.
-
-**Amendment 2026-07-28 - lifted contracts.** [04-NUM-9], [04-NUM-10], and
-[04-NUM-11] were added on the same date, moving three decisions out of
-`spec/design/dtype_semantics.md` and into this section: the closed trap-kind
-set with cross-lane rendering identity (its §C2), traps-as-values-until-the-
-lane-boundary including the device-lane error-flag shape (also §C2), and the
-guarantee that a value survives storage and transport at its declared dtype
-(the observable half of its §C3 storage decision). None of the three is a new
-decision; each was already decided and each lived only in a design document,
-which is a working artifact that stops being read once its phases ship. The
-numbered spec is where a decision has to live to outlast the work that made
-it - the precedent is [05-OBS-1..5], lifted the same way out of
-`faithful_observation.md`. The design documents keep the elaboration, the
-mechanism, and the evidence, and now point here for the rule.
-
-**Amendment 2026-07-28 - arithmetic width.** [04-NUM-2] formerly closed with
-"Computing a single op in f64 and rounding once is a conforming implementation
-for f32/f16/bf16." That clause was REMOVED and replaced by [04-NUM-8], which
-declares an arithmetic width per dtype. It is recorded here so the deletion is
-not re-derived as an oversight. The clause was permissive and single-op scoped,
-but `spec/design/dtype_semantics.md` cited it to mandate f64 computation for
-all float ops, and the IR evaluator extended that to multi-step float
-reductions and to `argmax`/`argmin` operand comparison - three levels of drift
-from one sentence. [04-NUM-8] states the width positively so there is nothing
-left to widen from.
-
-**Amendment 2026-07-30 - trap occurrence, and the record carries its
-cost.** A review pass on the same change set added [04-NUM-12]: trap
-OCCURRENCE for multi-step operations is defined relative to each lane's
-documented accumulation order, and trap-versus-exact divergence at
-accumulator range edges is the one permitted cross-lane trap divergence.
-[04-NUM-9] required identical RENDERING but was silent on occurrence,
-which order-dependence makes a real question for int64 reductions - and
-it had to be answered before chelis#729 Phase 2 freezes the trap
-contract. The same pass stated the availability trade in the rationale
-(trapping converts silent corruption into loud termination,
-deliberately), scoped [04-NUM-8]'s native-narrow permission to the basic
-operations so it no longer conflicts with the reduced-precision opt-in
-rule, and re-pointed the deferred-name rejection diagnostics at §1.1.1
-in the same change set (chelis#944: both lexers, the checker's
-tensor-element and cast-target arms, and their locking tests - the
-`uint*` messages formerly cited §1.1.2's superseded "out of scope"
-stance, and the newly reserved names fell to the generic unknown-name
-rejections with no citation).
+## 9. Numeric Value Semantics
 
 > **[04-NUM-1]** Every numeric op result SHALL be finalized into its
 > declared dtype - rounding for floats, width and domain checks for
 > integers and bool - before it becomes observable to any subsequent op,
 > comparison, fold, or output, in every lane and on every surface
 > (scalar and tensor alike).
-
-*(Not honored today: chelis#689, #693, #699, #714.)*
 
 > **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
 > ties-to-even, at the dtype's own STORAGE width (f64 identity; f32
@@ -2633,15 +2584,13 @@ rejections with no citation).
 > infinities preserved. The width at which the op is COMPUTED before
 > finalization is fixed by [04-NUM-8], not by this atom.
 
-*(Not honored today: chelis#714.)*
-
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
 > no lane and no surface SHALL wrap (except via the named modular
-> operations of [04-NUM-7]), saturate, or silently widen.
+> operations of [04-NUM-7] and the named `cast_wrap` of [04-NUM-16]),
+> saturate (except via the named `cast_saturate` of [04-NUM-16]), or
+> silently widen.
 > In-range integer arithmetic SHALL be exact at every width.
-
-*(Not honored today: chelis#689.)*
 
 > **[04-NUM-4]** A `bool` value SHALL be exactly 0 or 1; arithmetic
 > that would produce any other value in a bool-typed position SHALL be
@@ -2659,11 +2608,9 @@ rejections with no citation).
 > and SHALL NOT be "fixed"; identical printed numbers at an integer
 > dtype are a defect. Same inputs, opposite verdicts, by design.
 
-*(Honored and locked: `precision_matrix.rs` ByDesign rows.)*
-
-> **[04-NUM-7]** A named modular-arithmetic operation (initially
-> `wrap_add`, `wrap_sub`, `wrap_mul`; the roster is owned by the
-> capability table) on an integer dtype SHALL produce the unique value
+> **[04-NUM-7]** A named modular-arithmetic operation - exactly `wrap_add`,
+> `wrap_sub`, or `wrap_mul` - on a signed-integer dtype SHALL produce the unique
+> value
 > in that dtype's range congruent to the exact mathematical result
 > modulo 2^width, and SHALL NOT trap. These operations are the
 > explicit, user-visible escape hatch for modular arithmetic (hashing,
@@ -2676,9 +2623,7 @@ rejections with no citation).
 > escape hatch by construction), and requesting one on a non-integer
 > dtype is a checker-level type error.
 
-*(Not expressible today: no `wrap_*` builtins exist; the eval RNG's
-splitmix hash (`dropout_sample`, `chelis-ir/src/eval.rs`) is the
-in-tree witness of the need. Tracked by chelis#753.)*
+*(Not fully implemented; see chelis#753.)*
 
 > **[04-NUM-8]** Every dtype declares an ARITHMETIC WIDTH in addition to
 > its storage width. Every op SHALL be performed at its operands'
@@ -2716,9 +2661,9 @@ in-tree witness of the need. Tracked by chelis#753.)*
 > bit-identical native-narrow case above is not reduced precision) -
 > SHALL be available only through a named, explicit
 > opt-in at the call site, SHALL never be a default, and SHALL never be
-> selected by a backend, a build flag, or a global mode. No such opt-in is
-> authored yet; until one is, narrower-than-declared computation is
-> non-conforming in every lane.
+> selected by a backend, a build flag, or a global mode. This specification
+> defines no reduced-precision opt-in; narrower-than-declared computation is
+> therefore non-conforming in every lane.
 >
 > Arithmetic a backend SYNTHESIZES that is not an op on program values -
 > the loop counters and addressing expressions of generated code - carries
@@ -2727,24 +2672,11 @@ in-tree witness of the need. Tracked by chelis#753.)*
 > NOT be the carrier of a declared-dtype value crossing a boundary
 > ([04-NUM-11] governs those crossings).
 
-*(Not honored today: the IR evaluator computes every float op and every
-float reduction in f64 because its tensor store itself is f64-backed -
-`TensorValue { data: Vec<f64> }` in `chelis-ir/src/eval.rs` - so
-`binary_map`/`unary_map`'s closures and the `reduce` fold (`init: f64`)
-run at f64 whatever the dtype, and `reduce_argcmp` compares
-`argmax`/`argmin` operands as f64, returning the wrong index for
-adjacent int64 values above 2^53. The storage-width column's `bool` row
-is also ahead of the shipped ABI: the C runtime still stores bool at 4
-bytes through the f32 encoding (`RuntimeDType::byte_width`), and the
-native byte lands with the §C3 storage decision at 0.19 (chelis#892,
-chelis#894). Tracked by chelis#729 Phase 2's kernel split and Phase 1's
-storage decision.)*
-
 **Rationale for the f16/bf16 rows.** These are not exclusions carved out
 of a general rule; the arithmetic width is part of what the format is.
-No shipped hardware provides a bf16 arithmetic instruction: AVX512-BF16's
-`vdpbf16ps` and ARM's BFDOT/BFMMLA both accumulate into f32, and there is
-no `vaddbf16` on any target. f16 arithmetic does exist (ARMv8.2-A,
+BF16 instruction families such as AVX512-BF16 `vdpbf16ps` and ARM
+BFDOT/BFMMLA accumulate into f32 rather than providing bf16 addition. f16
+arithmetic does exist (ARMv8.2-A,
 AVX512-FP16, NVIDIA `__hadd`), which is why the atom permits it, but even
 there the transcendental path converts to f32 because the special-function
 units are f32. The same property holds one rung down and is why §1.1.1
@@ -2761,7 +2693,7 @@ multi-step reductions it also changes the answer, which is what would
 otherwise force a cross-lane tolerance table between two lanes that
 should agree exactly. The same argument applies to routing exact integer
 arithmetic through f64, which additionally destroys int64 exactness above
-2^53 (chelis#684, chelis#680).
+2^53.
 
 **Why reduced precision is opt-in only.** The prohibition on narrowing is
 not symmetric with the prohibition on widening by accident. Widening is
@@ -2776,9 +2708,11 @@ that must be spelled at the call site, so Chelis admits the capability and
 refuses the default.
 
 > **[04-NUM-9]** A numeric trap has a CLOSED set of kinds: `Overflow` (an
-> integer result outside the declared dtype's range), `Domain` (a value
-> outside the declared dtype's set - a fractional or non-finite value at an
-> integer dtype, a value other than 0 or 1 at `bool`), and `DivZero`
+> integer result outside the declared dtype's range), `Domain` (an input or
+> result violates the operation's defined mathematical domain or the target
+> dtype's value set - including a fractional or non-finite value at an
+> integer dtype, a value other than 0 or 1 at `bool`, or an empty reduction
+> whose operation has no identity), and `DivZero`
 > (integer division or remainder by a zero divisor). Every trap SHALL name
 > its kind, the operation that raised it, and the dtype it was finalizing
 > to, and SHALL render byte-identically in every lane and on every surface.
@@ -2792,7 +2726,11 @@ refuses the default.
 > primitive, the trap SHALL retain the lowered primitive name; it SHALL NOT
 > be renamed to the composed operation or wrapped in lane, lowering, or
 > evaluator plumbing. No additional prefix or suffix is permitted on any
-> user-facing numeric-trap line.
+> user-facing numeric-trap line. A typed operation-precondition guard is
+> itself the trap-producing primitive for this rule and carries the guarded
+> builtin's canonical name and declared result dtype. A failure raised by
+> such a guard therefore names the guarded builtin; it is not a renamed trap
+> from a later primitive in the successful lowering.
 
 > **[04-NUM-10]** A numeric trap SHALL be a VALUE inside a lane and SHALL
 > become a process failure only at that lane's boundary: `chelis eval`
@@ -2806,31 +2744,16 @@ refuses the default.
 > device lane's boundary, so this rule is satisfied there by construction
 > rather than excepted from.
 
-*(The device-lane shape is evidence-backed and provisional pending the HIP
-half, chelis#736. The Metal spike (chelis#737) measured flag detection as
-effectively free for the memory-bound elementwise shape the backend emits -
-worst case +0.7% median, int64 multiply included - and verified MSL int64
-bit-exactness. Implementation rider from the same spike, recorded here
-because it is a correctness constraint rather than a preference: the clang
-overflow builtins are BANNED in emitted MSL. `__builtin_mul_overflow(long)`
-crashes the backend compiler reproducibly, and at-scale vectorization
-miscompiles the add and sub forms into false positives; the division-based
-form crashes the backend as well. The hand-written checks - widening for
-int32, sign-bit XOR for add and sub, `mulhi` for int64 multiply - are the
-implementation.)*
-
 **The availability trade, stated.** Trapping converts silent data
 corruption into loud termination, by design: a long-running job that
 overflows an `int64` counter DIES where wrapping arithmetic would have
 carried a silently wrong value to completion. That operational cost is
 deliberate, and this record carries it alongside the benefit: the
 alternative outcome is not a successful run but a plausible wrong result,
-which the 2026-07 audit measured as the strictly worse failure mode
-(chelis#703). Code that WANTS mod-2^width semantics states it with
-[04-NUM-7]'s named `wrap_*` operations; saturation - the third behavior,
-which image pipelines want - is authored as named `sat_*` ops if `uint8`
-activates (§1.1.1's non-reservation note). Behaviors are named ops, never
-modes.
+which is the strictly worse failure mode. Code that WANTS mod-2^width semantics states it with
+[04-NUM-7]'s named `wrap_*` operations. Saturating conversion is the named
+`cast_saturate` of [04-NUM-16]; saturating arithmetic would require separate
+named operations if introduced. Behaviors are named operations, never modes.
 
 > **[04-NUM-11]** A value SHALL survive storage, transport, and every
 > boundary crossing at its declared dtype without collapse. An `int64`
@@ -2841,26 +2764,16 @@ modes.
 > that dtype, and no stage SHALL substitute a wider or narrower one to
 > compensate.
 
-*(Not honored before chelis#729 Phase 1: tensor storage, the wire schema,
-and the Python binding each flattened numeric payloads to f64, so an int64
-above 2^53 collapsed at every boundary no matter how exactly it had been
-computed - chelis#684, chelis#685, chelis#686. This atom is the
-user-visible statement of what `spec/design/dtype_semantics.md` §C3's
-storage decision delivers: that document owns the mechanism, this atom owns
-the guarantee. Also not honored on the Metal host/device bool boundary,
-where a value crosses at a quarter of its storage width: chelis#892.)*
-
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
 > multi-step operation (a reduction or scan), whether an intermediate
 > result leaves the accumulator dtype's range - and therefore whether
 > the operation traps - is evaluated against the lane's documented
-> accumulation order: the host lanes' stride-4 cascade
-> (`spec/05-risc-primitives.md` §2.3) or a device lane's documented tree
-> reduction. Same program, same inputs, same lane SHALL always produce
+> accumulation order in `spec/05-risc-primitives.md`. Same program, same
+> inputs, same lane SHALL always produce
 > the same trap or the same completion. Where two lanes document
 > different accumulation orders, an integer accumulation whose
-> intermediate sums approach the accumulator's range MAY trap in one
+> intermediate results approach the accumulator's range MAY trap in one
 > lane and complete in another; a lane that completes SHALL produce the
 > exact result. Trap-versus-exact at accumulator range edges is the ONLY
 > permitted cross-lane divergence in trap behavior: trap versus a wrong
@@ -2868,26 +2781,7 @@ where a value crosses at a quarter of its storage width: chelis#892.)*
 > and when two lanes both trap, [04-NUM-9]'s rendering identity applies
 > in full.
 
-*(Authored 2026-07-30, before chelis#729 Phase 2 freezes the trap
-strings, because [04-NUM-9]'s identity requirement was silent on exactly
-this interaction: trapping addition is associative in VALUE but not in
-trap occurrence, so pinned-order host lanes and tree-order device lanes
-can legitimately differ at range edges. The alternative - pinning one
-accumulation order across every lane - was considered and rejected: §2.3
-already documents per-lane order divergence for float values, and
-serializing device reductions to the host cascade would forfeit the
-parallel reduction for a case reachable only at the extreme edge of the
-range. Practical reach: §5.7.1's widened default accumulators make
-occurrence order-independent for the narrow integer dtypes whenever
-n·max|element| fits the accumulator - no ordering of partial sums each
-bounded by n·max|element| can overflow int32 before roughly 2^24 int8
-elements - so the divergence window is real only for int64 (and
-extreme-length int32) accumulations near the range edge. No lane traps
-integer overflow today ([04-NUM-3]'s divergence note), so this atom
-rides chelis#729 Phase 2 with the trap contract itself; the chelis#687
-and chelis#754 cross-lane oracles treat a trap-versus-complete
-divergence as conforming only under this atom's conditions.)*
- > **[04-NUM-13]** `shl` and `shr` on a signed integer dtype SHALL operate
+> **[04-NUM-13]** `shl` and `shr` on a signed integer dtype SHALL operate
 > on that dtype's fixed-width two's-complement bit pattern. `shl` discards
 > bits beyond the declared width and `shr` is arithmetic (sign-extending).
 > A non-negative count at least the declared width produces zero for
@@ -2896,8 +2790,6 @@ divergence as conforming only under this atom's conditions.)*
 > `shift amount must be non-negative, got N`. These semantics are
 > independent of host-language signed-shift behavior; a compiled backend
 > SHALL NOT invoke undefined or implementation-defined signed shifts.
-
- *(Implemented and UBSan-locked in eval and the C host lane for chelis#682.)*
 
 > **[04-NUM-14]** `cast(source, target)` SHALL be explicit and SHALL apply
 > the target dtype's finalization rule identically on scalar and tensor
@@ -2927,20 +2819,23 @@ divergence as conforming only under this atom's conditions.)*
 > implementation that reduces per-thread candidates to the global minimum
 > index is conforming, and serialization is not required.
 
-*(Authored 2026-08-04. [04-NUM-12] defined occurrence by "that lane's
-documented evaluation order", but no lane documented an order for an
-elementwise trapping map, so the multi-offender case was unauthored while
-both [04-NUM-9]'s cross-lane rendering identity and [04-NUM-12]'s
-within-lane determinism formally applied to it. Index order is the choice
-consistent with the two existing precedents: [04-NUM-10] already requires a
-device lane to carry "the first failing element index", and
-`spec/05-risc-primitives.md`'s `Scatter` deterministic-order rule already
-uses updates-tensor row-major flat order. The alternative - leaving the
-offender unspecified while guaranteeing the trap - was rejected because the
-kind is part of the rendered line, so an unspecified offender would have
-required weakening [04-NUM-9]'s byte-identity requirement to accommodate an
-implementation. Stated for elementwise trapping maps generally rather than
-for `cast`, so a later trapping map does not reopen the same question.)*
+> **[04-NUM-16]** The named lossy casts are separate operations, never a
+> mode of the checked `cast` in [04-NUM-14]. `cast_saturate(source, target)`
+> admits an active signed-integer or float source and a signed-integer target.
+> It reads the source value exactly at its stored dtype, truncates a finite float
+> toward zero, and clamps the resulting mathematical integer to the target's
+> inclusive range; `-inf` clamps to the target minimum, `+inf` to its maximum,
+> and `NaN` traps `Domain`. `cast_wrap(source, target)` admits active
+> signed-integer source and target dtypes and returns the unique signed
+> target-width representative congruent to the exact source modulo
+> `2^target_width`. Both operations apply
+> elementwise with identical scalar and tensor semantics. Neither admits
+> `bool`, `string`, or a deferred dtype. A rounding cast is not a separate
+> operation: a program spells `round(source)` followed by checked `cast`.
+> [04-NUM-15] governs the selected failure when a tensor `cast_saturate`
+> contains more than one `NaN`.
+
+*(Not fully implemented; see chelis#759.)*
 
 ---
 
@@ -2968,7 +2863,7 @@ Reading notes:
 
 - The **arithmetic width** column is [04-NUM-8]'s table restated per row. It
   is deliberately NOT reproduced into §1.1.3's per-backend matrix: it is a
-  target-independent fact and §1.1.3 records per-target implementation status.
+  target-independent language fact rather than a target capability cell.
 - The **trap cells** name [04-NUM-9]'s kinds; for multi-step operations,
   trap OCCURRENCE is governed by [04-NUM-12] (each lane's documented
   accumulation order).

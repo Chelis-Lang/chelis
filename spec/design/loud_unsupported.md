@@ -282,9 +282,9 @@ the build surface renders the branded string into a flat
 `kind: "unsupported_feature"` envelope
 (`crates/chelis-compiler-api/src/compiler.rs`, `unsupported_stage_error`).
 Consumers - including this plan's own rejected-cells corpus - match prose
-today. Two prerequisites, in order: [#729] Phase 4 supplies capability
-Table A, without which `check` has no target-independent rejections to
-report (`capability_table.md` §Derivations); then the structured payload
+today. Three prerequisites, in order: [#729] Phase 4C populates capability
+Table A; Phase 4D derives `check` reporting from its target-independent
+rejections (`capability_table.md` §Derivations); then the structured payload
 must be plumbed onto `schema::Diagnostic`. Until both land, the
 `unsupported:` brand is the machine surface and tests may match it. The
 byte-for-byte per-lane corpus assertions likewise arrive with [#732]
@@ -384,10 +384,12 @@ REGISTRIES of what actually exists:
   privacy errors, locked by `compile_fail` doctests. The required CI job also
   runs the boundary checker before the network-backed manifest validation.
 - **These registries are the named pre-table authority source.**
-  Phase 3 does not wait for [#729]'s capability table; when Table A/B
-  lands, its `Rejected(atom)` / `Unimplemented { issue }` cells
-  populate this type through the same validation, and the registries
-  become derivation inputs rather than the standalone source.
+  Phase 3 does not wait for [#729]'s capability table. Phase 4C populates
+  Table A's typed `Rejected { op_atom, diagnostic_kind }` cells and Table B's
+  typed `Unimplemented { issue, diagnostic_kind }` and
+  `RejectedByDesign { atom, diagnostic_kind }` cells; Phase 4D feeds them
+  through the same validation, and the registries become derivation inputs
+  rather than the standalone source.
 
 **Calibrated claim:** construction proves only citation IDENTITY and
 last-verified tracker STATE - an existing atom, or a manifest member
@@ -413,8 +415,8 @@ control: it passes construction/live validation and MUST fail review
 when attached to an unrelated rejection. The [#687] corpus update
 rides the same PR per B1. Before Table A/B exists, each production site is
 adjudicated against an already-controlling numbered-spec rule or the actual
-open issue that implements that capability. Table A/B later derives those
-decisions through the same type; this design document never authors a
+open issue that implements that capability. Phase 4C records those decisions
+in Tables A/B and Phase 4D derives consumers through the same type; this design document never authors a
 capability decision (§I1).
 
 ### C2.2 The closed kind vocabulary (added 2026-07-30; lands at Phase 3)
@@ -579,12 +581,12 @@ be represented.
    implement no `Default` and expose only `Result` decoders. Effect metadata
    decoding distinguishes `Missing`, `Malformed`, and
    `Unknown { symbol: &'a str }`. The unknown case borrows the input symbol.
-   Runtime dtype decoding preserves the invalid raw ID. `chelis-types` is not
-   the owner: it depends on `chelis-deep` and `chelis-pred`, while the runtime
-   must consume the same dtype vocabulary without depending on the checker.
-   This bottom placement also leaves a cycle-free placement for the `Prim` and
-   `BuiltinId` identities required by the capability table. Semantic behavior
-   and storage decisions remain in `dtype_semantics.md`.
+   Runtime dtype decoding preserves the invalid raw ID. `Prim`, `BuiltinId`,
+   and capability policy remain in `chelis-types`; they do not move to or
+   duplicate into vocab. Backends already depend on `chelis-types` for those
+   semantic identities, while the runtime consumes only the representation
+   vocabulary. Semantic behavior and storage decisions remain in
+   `dtype_semantics.md`.
 2. **Decode once, then exhaust.** Raw strings and raw dtype integers exist
    only at serialization/FFI boundaries. `chelis-deep` adapts metadata shape
    into the bottom crate's effect decoder; every checker, effects, lowering,
@@ -634,7 +636,7 @@ be represented.
    conversion from a decode/resolution failure to a concrete or ABI type.
    Before Table B is generated, the target selector is a private exhaustive
    adapter whose rejection arms cite a spec atom or implementation issue.
-   [#729] Phase 4 replaces that adapter's decisions without changing this
+   [#729] Phase 4D replaces that adapter's decisions without changing this
    typed boundary.
 
 ## C5. The census (normative appendix; Phase 0 re-verifies by execution)
@@ -793,12 +795,12 @@ checker. These are the permitted edges:
 | `chelis-ir` | `chelis-vocab`; IR and host lowering dispatch | its existing types/Deep edges remain above vocab |
 | `chelis-compiler-api` | `chelis-vocab`; evaluator dispatch and wire adapters | already sits above effects/IR/types |
 | `chelis-runtime` | `chelis-vocab`; immediate FFI dtype decoding | vocab adds no libc/runtime edge |
-| C/HIP/Metal backends | `chelis-vocab`; `Prim -> RuntimeDType -> C macro` mapping | all already sit above IR/types |
+| C/HIP/Metal backends | `chelis-types` for `Prim`/`BuiltinId`/capability policy; `chelis-vocab` for `RuntimeDType`/`Repr`/C wire spellings | all already sit above IR/types; vocab has no reverse edge |
 | `chelis-python` | `chelis-vocab`; remove the local `CHELIS_F32 = 0` copy | already sits above compiler-api/backend C |
 
-The capability-table identity types `Prim` and `BuiltinId` also belong in
-`chelis-vocab`, with compatibility re-exports from `chelis-types` during the
-move. Their dtype semantics remain in `chelis-types::dtype_semantics`. No
+The capability-table identity types `Prim` and `BuiltinId`, and all Table-A
+and Table-B policy, remain in `chelis-types`. `chelis-vocab` owns only the
+dependency-bottom representation identities named above. No
 Deep/runtime/backend edge points upward from vocab.
 
 The effect consumer set is exhaustive for the current tree:
@@ -2076,9 +2078,22 @@ not a fix.
 
 The build-lane stdlib corpus is derived from the exported stdlib manifest,
 not maintained as a sample list. Every exported module contributes at least
-one minimal importing program that reaches build/link/run when its Table-B
-cells are implemented, or asserts its exact typed capability rejection when
-they are not. The derivation fails if an exported module has neither result.
+one minimal importing program. Numeric scalar/tensor callables obtain their
+backend result from Table B; container or boundary builtins obtain it from
+the exact sibling
+`BuiltinId × SiblingDomain × SiblingCaseId × SemanticParams` registry and its
+supported-row × backend product. Runtime exports and binding functions use
+their §C6 semantic registry plus the exact external target-disposition
+registry; they are not stdlib execution authority. An exported stdlib
+definition instead derives its per-backend result transitively from every
+statically resolved numeric, sibling, host-constructor, and effect disposition
+reachable from its checked body. Recursive host values additionally compose
+through the host-constructor table. The program reaches build/link/run when
+every derived dependency is implemented or asserts the first
+canonical-source-order typed rejection when one is not. The derivation fails
+if an export has no declared signature or checked body, contains an unresolved
+call, reaches a missing owning row, leaves a recursive dependency cycle
+unresolved, or produces an empty-by-default result.
 The oracle mutates the manifest with a synthetic export and proves that the
 missing compiled cell is red, then runs the standing corpus. Eval-only stdlib
 self-tests and one hand-picked `Std.Io` build are supporting evidence, not
@@ -2091,11 +2106,11 @@ Host `cast` emission consumes one exhaustive plan over
 every other pair selects the checked conversion defined by [04-NUM-14] and
 the dtype plan or returns a cited `Unsupported`. The emitted code cannot copy
 the source expression through a wildcard. The oracle is generated from the
-full source x target x scalar/tensor x eval/c-host parameter product in
-`capability_table.md`, with in-range and trapping parity for each applicable
-cell and a mutation that replaces one non-identity plan with identity. Trap
-selection for multi-offender tensors belongs to [#729]'s indexed-trap item,
-not a second mechanism here.
+full Table-A source x target x scalar/tensor semantic product, with Table B
+adding the `eval` and `c-host` backend dimension. It checks in-range and
+trapping parity for each applicable cell and mutates one non-identity plan to
+identity. Trap selection for multi-offender tensors belongs to [#729]'s
+indexed-trap item, not a second mechanism here.
 
 ---
 
@@ -2139,18 +2154,28 @@ boundary, pinned:
   builds on this plan's Phase 1 conversion of census rows 6-7 (support
   replaces a raise, never a silent default). If [#729] Phase 3 arrives
   first, it absorbs rows 6-7's conversion and says so in both docs.
-- The capability table ([#729] Phase 4) eventually *generates* what this
-  plan's Phase 3 gate contract governs by hand; at that point rejected
-  cells' diagnostics come from the table's `Rejected(reason)` and this
-  plan's §C2 format governs the rendering.
-- **`RejectionAuthority` (§C2.1) types the citation channel; the table
-  owns the citations.** Which cells are `Deliberate` versus
-  `Unimplemented` is Table A/B's decision; when Table B lands, its
-  cells populate the enum through the same boundary the pre-table
-  adapter uses today. This plan never authors a capability decision.
+- [#729] Phase 4C populates the typed authorities, including external target
+  dispositions; Phase 4D then *generates*
+  what this plan's Phase 3 gate contract governs by hand; Phase 4E executes
+  the complete product. Table-A rejections carry
+  `Rejected { op_atom: SpecAtomRef, diagnostic_kind: DiagnosticKind }` and
+  this plan's §C2 format governs rendering. The authoritative 4C and 4D
+  oracles are `scripts/dtype_phase4c_oracle.py` and
+  `scripts/dtype_phase4d_oracle.py`; they support the final Phase 4 authority,
+  `scripts/dtype_phase4_oracle.py`, which also invokes the Phase 4B oracle.
+- **`RejectionAuthority` (§C2.1) types the citation channel; the capability
+  authorities own the citations.** Which cells are `Deliberate` versus
+  `Unimplemented` is a Table-B, sibling-backend, or external-target decision;
+  an exported stdlib result derives that decision from its checked-body
+  dependencies. Their typed `Implemented`,
+  `Unimplemented { issue, diagnostic_kind }`, or
+  `RejectedByDesign { atom, diagnostic_kind }` result populates the enum
+  through the same boundary the pre-table adapter uses today. This plan never
+  authors a capability decision.
 - **Finite parameter products prevent dtype-valued omissions.** The
-  capability schema expands `cast` over source dtype x target dtype x surface
-  x backend. LU6 consumes that closed product to plan host emission; [#729]
+  capability schema expands Table A over source dtype x target dtype x
+  surface, and Table B adds the backend. LU6 consumes that closed product to
+  plan host emission; [#729]
   owns the conversion and trap semantics. Adding one source or target dtype
   makes both the plan and conformance derivation incomplete at build time.
 - **Host containers compose from constructor dispositions.** LU4 consumes the
@@ -2162,11 +2187,21 @@ boundary, pinned:
   unsupported mechanism.** [#729] owns `IndexedTrapCandidate` construction
   and lowest-index selection in every lane. This plan owns only the §C2
   rendering of a selected trap or capability rejection.
+- **External-family execution has one owner.** Runtime C exports and PyO3
+  bindings consume the total
+  `(ExternalCallableFamily, CanonicalCallableId, ExternalTargetContext)`
+  disposition registry. Exported stdlib definitions have no independently
+  authored target cell: their target result is the generated transitive
+  dependency closure over the checked body. The §C6 `SemanticRegistration`
+  remains meaning-only in all three families.
 - **[#912] consumes this failure channel; it does not fork it.** Root identity,
   manifest order, and artifact routing remain [#912]'s decisions. A root-level
   `HostReason` is diagnostic context. The deciding atom/issue enters through
   `RejectionAuthority`, and `DiagnosticKind` supplies the stable machine
-  spelling; after Tables A/B land, their cell supplies that authority.
+  spelling. A root capability derives from numeric Table B, the companion
+  host-constructor table, or the callable's sibling registry; the manifest
+  supplies none of those authorities itself. Exported-stdlib dependency
+  derivation is likewise not a root-manifest support list.
 - **Deep structural realizability is not numeric capability policy.** [#912]'s
   wildcard-free typed `DeepTag` lane disposition decides whether a structural
   form forces Host or propagates to its children. Tables A/B neither generate
