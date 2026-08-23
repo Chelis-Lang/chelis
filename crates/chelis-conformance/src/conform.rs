@@ -47,10 +47,12 @@ pub struct ConformDecl {
     /// Every other declaration under the top-level `conform` table, by full
     /// dotted path, sorted. Each is a control the contract does not define.
     pub unrecognized: Vec<String>,
-    /// Paths of `conform` tables that are **not** the top-level control surface
+    /// Paths of `conform` **tables** that are not the top-level control surface
     /// (`package.conform`, which is what a dotted `conform.exclude = …` written
     /// after a table header actually declares). These control nothing at all, so
     /// reporting them is the whole point: a shell that wrote one meant the knob.
+    /// A non-table `conform` (a dependency named `conform = "1"`) is not one of
+    /// these; see [`find_misplaced`].
     pub misplaced: Vec<String>,
 }
 
@@ -150,13 +152,38 @@ fn collect(
     }
 }
 
-/// Record every `conform` table that is not the top-level one.
+/// Record every `conform` TABLE that is not the top-level one.
+///
+/// The value type is part of the test, not incidental. `[dependencies]` may
+/// legitimately name a package `conform`, and `conform = "1"` there is a version
+/// requirement, not a misplaced control surface: flagging it was a loud FALSE
+/// failure on a MUST row for an innocent manifest.
+///
+/// A `conform` that CAN CARRY KEYS is still flagged, including the inline form
+/// `conform = { version = "1" }` that a dependency could plausibly use, and an
+/// array-of-tables `[[deps.conform]]`. That is deliberate: a keyed `conform` is
+/// genuinely ambiguous between "a dependency spec" and "the control surface
+/// written one level too deep", and the second is exactly the mistake this walk
+/// exists to catch. A loud, informative failure naming the path is the safe
+/// resolution of that ambiguity; silence is not. The line falls at "can this
+/// hold a declaration at all", which is why a scalar or an array of scalars is
+/// left alone and a table is not.
 fn find_misplaced(value: &toml::Value, path: &str, decl: &mut ConformDecl) {
+    /// Whether `value` can hold keys, and so could be a control surface written
+    /// at the wrong depth. Narrowing this to `is_table()` alone would quietly
+    /// stop flagging `[[deps.conform]]`.
+    fn can_carry_keys(value: &toml::Value) -> bool {
+        match value {
+            toml::Value::Table(_) => true,
+            toml::Value::Array(items) => items.iter().any(toml::Value::is_table),
+            _ => false,
+        }
+    }
     match value {
         toml::Value::Table(table) => {
             for (key, child) in table {
                 let child_path = format!("{path}.{key}");
-                if key == CONFORM {
+                if key == CONFORM && can_carry_keys(child) {
                     decl.misplaced.push(child_path);
                     continue;
                 }
@@ -336,6 +363,85 @@ mod tests {
         }
     }
 
+    /// A dependency may legitimately be NAMED `conform`. Flagging
+    /// `[dependencies]\nconform = "1"` was a loud false failure on a MUST row
+    /// for an innocent manifest: the misplaced-table walk ignored value type,
+    /// and the near-miss test above only ever covered `conformance`, never the
+    /// exact name with a non-table value.
+    #[test]
+    fn a_non_table_dependency_named_conform_is_not_a_misplaced_control_surface() {
+        for text in [
+            "[dependencies]\nconform = \"1\"\n",
+            "[dependencies]\nconform = \"=0.4.0\"\n",
+            "[package]\nname = \"s\"\n\n[dependencies]\nconform = \"1\"\nnautilus = \"2\"\n",
+            // A non-table at top level is the control surface's own shape
+            // problem, covered separately; here the point is nesting.
+            "[build]\nconform = 3\n",
+            "[build]\nconform = true\n",
+            "[build]\nconform = [\"a\"]\n",
+            // An array of scalars carries no keys, so it is a value, not a
+            // control surface at the wrong depth.
+            "[build]\nconform = [1, 2]\n",
+        ] {
+            let d = decl(text);
+            assert!(
+                d.misplaced.is_empty(),
+                "{text:?} must not be a misplaced control surface: {:?}",
+                d.misplaced
+            );
+            assert!(d.is_clean(), "{text:?} -> {:?}", d.findings());
+        }
+    }
+
+    /// The other half of that call: a TABLE named `conform` below the top level
+    /// stays flagged, inline form included. It is genuinely ambiguous between a
+    /// dependency spec and the control surface written one level too deep, and a
+    /// loud informative failure is the safe resolution.
+    #[test]
+    fn a_table_valued_conform_below_the_top_level_still_flags() {
+        for text in [
+            "[package]\nname = \"s\"\nconform.exclude = [\"a\"]\n",
+            "[dependencies]\nconform = { version = \"1\" }\n",
+            "[package.conform]\nexclude = [\"a\"]\n",
+            // An array-of-tables can carry keys too. Narrowing the predicate to
+            // `is_table()` alone would silently stop flagging this, which is a
+            // regression the value-type fix could easily have introduced.
+            "[[dependencies.conform]]\nexclude = [\"a\"]\n",
+        ] {
+            let d = decl(text);
+            assert_eq!(d.misplaced.len(), 1, "{text:?} -> {:?}", d.findings());
+            assert!(
+                d.findings()[0].contains("controls nothing"),
+                "{text:?} -> {:?}",
+                d.findings()
+            );
+        }
+    }
+
+    /// Scope decision 3: the control surface is a TABLE, so a `conform` that is
+    /// anything else is a declaration in the wrong shape rather than a silent
+    /// no-op. Without this the decision had no executable coverage at all, which
+    /// makes it the one a refactor could delete with the suite still green.
+    #[test]
+    fn a_top_level_conform_that_is_not_a_table_is_reported() {
+        for text in [
+            "conform = []\n",
+            "conform = \"x\"\n",
+            "conform = 3\n",
+            "conform = true\n",
+            "conform = [\"cli-surface\"]\n",
+            "[[conform]]\nexclude = [\"a\"]\n",
+        ] {
+            let d = decl(text);
+            assert!(d.local_skills.is_empty(), "{text:?}");
+            assert_eq!(
+                d.findings(),
+                vec!["conform (expected a table)".to_string()],
+                "{text:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_unparseable_manifest_is_an_error_not_an_empty_declaration() {
         // The failure mode this replaces: an unreadable file read as "declares
@@ -349,10 +455,21 @@ mod tests {
         assert!(parse("[conform]\nexclüde = [\"a\"]\n").is_err());
     }
 
-    /// The two `[conform]` tables that actually exist in the ecosystem today,
-    /// verbatim (School's and hydronnx's, comments included). A parser change
-    /// that reported either of these would fail two conformant shells on a MUST
-    /// row, so they are locked as the real-world positive control.
+    /// The two `[conform]` tables that actually exist in the ecosystem today
+    /// (School's and hydronnx's), **reduced** from those shells' live manifests.
+    /// A parser change that reported either would fail two conformant shells on
+    /// a MUST row, so they are the real-world positive control.
+    ///
+    /// Reduced, not verbatim, in three ways, none of which the parse can see:
+    /// the surrounding manifest is trimmed to the tables that matter here; one
+    /// em dash in School's comment is written as a plain dash, because §8.6
+    /// forbids em dashes in Rust string literals; and School's final comment
+    /// sentence is dropped for length. The `compiler` pins are illustrative
+    /// context, deliberately **not** tracked against the shells: `parse` never
+    /// reads them, so refreshing them every bump wave would add churn to a test
+    /// whose subject is the `[conform]` block. What is reproduced faithfully is
+    /// the thing under test: the table's shape, key spelling, value type, and
+    /// the interleaved comments.
     #[test]
     fn the_conform_tables_shells_actually_ship_are_clean() {
         let school = "[package]\nname = \"school\"\ncompiler = \"=0.17.1\"\n\n\

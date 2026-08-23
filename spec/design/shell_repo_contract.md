@@ -399,10 +399,18 @@ pre-staging required changes, the unlock wave, and the re-probe table.
   (`conform.local_skills = …`), a quoted key (`"local_skills"`), a sub-table
   (`[conform.skills]`), and an array-of-tables all reach the same answer. A
   *table* at `local_skills` is therefore unrecognized, because the recognized
-  declaration's value type is an array. A `conform` table that is not the
-  top-level one (`package.conform`, which is what a dotted `conform.exclude`
-  written after a table header actually declares) controls nothing and is
-  reported as such. A `reef.toml` that does not parse **fails this row** with the
+  declaration's value type is an array. By the same rule the control surface
+  itself is a **table**, so a `conform` that is a string, a number, or an array
+  (`conform = []`) is reported too: "anything else under `conform`" does not
+  cover a `conform` with nothing under it, and a declaration in the wrong shape
+  must not read as an absent one. A `conform` table that is not the top-level one
+  (`package.conform`, which is what a dotted `conform.exclude` written after a
+  table header actually declares) controls nothing and is reported as such. That
+  test is on the value, not the name: a `conform` below the top level that
+  **cannot carry keys** — a version string, a number, an array of scalars — is
+  left alone, because `[dependencies] conform = "1"` is an ordinary dependency
+  named `conform` and failing a shell for that would be a false alarm on a MUST
+  row. A `reef.toml` that does not parse **fails this row** with the
   parse error: §8 cannot be checked against a file the tool cannot read, and
   reading an unreadable manifest as "declares nothing" would be a silent pass on
   a MUST row. The rule behind all of that is one sentence: **a checker that
