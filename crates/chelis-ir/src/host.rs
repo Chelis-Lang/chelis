@@ -4207,20 +4207,33 @@ fn lower_host_expr_kind(
                     },
                 )));
             }
-            if let Some(definition) = lookup_adt_constructor_definition(program, &name)
-                && definition.is_nullary()
-            {
-                let instantiated = definition.instantiate_nullary_term(&ty).map_err(|error| {
-                    host_expr_lowering_error(
-                        expr,
-                        format!("constructor `{name}` is not concretely instantiated: {error}"),
-                    )
-                })?;
-                return Ok(HostExpr::new(HostExprKind::AdtConstruct {
-                    ctor: name,
-                    fields: Vec::new(),
-                    ty: instantiated.ty,
-                }));
+            match resolve_adt_constructor_definition(program, &name) {
+                AdtConstructorResolution::Unique(definition) if definition.is_nullary() => {
+                    let instantiated =
+                        definition.instantiate_nullary_term(&ty).map_err(|error| {
+                            host_expr_lowering_error(
+                                expr,
+                                format!(
+                                    "constructor `{name}` is not concretely instantiated: {error}"
+                                ),
+                            )
+                        })?;
+                    return Ok(HostExpr::new(HostExprKind::AdtConstruct {
+                        ctor: name,
+                        fields: Vec::new(),
+                        ty: instantiated.ty,
+                    }));
+                }
+                // Whether this reference is a construction at all depends
+                // on which declaration answers it, so an ambiguous name
+                // cannot fall through to the variable path: that would
+                // emit a bare C identifier nothing declares and trade a
+                // rejection for a silently different lowering (chelis#730's
+                // shape). Fail closed instead.
+                AdtConstructorResolution::Ambiguous(candidates) => {
+                    return Err(ambiguous_constructor_error(expr, &name, &candidates));
+                }
+                AdtConstructorResolution::Unique(_) | AdtConstructorResolution::Missing => {}
             }
             HostExpr::new(HostExprKind::Var(name, ty))
         }
@@ -5653,21 +5666,33 @@ fn lower_match_host_expr(
                     )?);
                 }
                 Some(ctor_name) => {
-                    let ctor_fields = if let Some(definition) =
-                        lookup_adt_constructor_definition(program, ctor_name)
-                    {
-                        instantiate_adt_constructor(program, &definition, &scrutinee_ty)
-                            .map_err(|error| {
-                                host_expr_lowering_error(
-                                    &match_expr,
-                                    format!(
-                                        "match constructor `{ctor_name}` is not concretely instantiated: {error}"
-                                    ),
-                                )
-                            })?
-                            .fields
-                    } else {
-                        program
+                    let ctor_fields = match resolve_adt_constructor_definition(program, ctor_name) {
+                        AdtConstructorResolution::Unique(definition) => {
+                            instantiate_adt_constructor(program, &definition, &scrutinee_ty)
+                                .map_err(|error| {
+                                    host_expr_lowering_error(
+                                        &match_expr,
+                                        format!(
+                                            "match constructor `{ctor_name}` is not concretely instantiated: {error}"
+                                        ),
+                                    )
+                                })?
+                                .fields
+                        }
+                        // The field list decides which index each binder
+                        // reads, so answering an ambiguous pattern with
+                        // either candidate silently binds the other
+                        // package's field (chelis#1271). The `type_env`
+                        // fallback below is for names that are not
+                        // constructors at all and must not absorb this.
+                        AdtConstructorResolution::Ambiguous(candidates) => {
+                            return Err(ambiguous_constructor_error(
+                                &match_expr,
+                                ctor_name,
+                                &candidates,
+                            ));
+                        }
+                        AdtConstructorResolution::Missing => program
                             .type_env()
                             .get(ctor_name)
                             .and_then(parse_fn_type_expr)
@@ -5676,7 +5701,7 @@ fn lower_match_host_expr(
                                     .map(|ty| HostAdtField { name: None, ty })
                                     .collect::<Vec<_>>()
                             })
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
                     };
                     let mut scoped = scope.clone();
                     let mut bindings = Vec::new();
@@ -5915,12 +5940,26 @@ fn lower_record_host_expr(
     // example) exact `int8` or `bf16` terms. Looking up the bare constructor
     // first preserves the declaration's named variable and lets it leak all
     // the way to host resolution even though the use site is monomorphic.
-    let ctor_definition = lookup_adt_constructor_definition(program, &ctor).ok_or_else(|| {
-        host_expr_lowering_error(
-            &record_expr,
-            format!("record constructor `{ctor}` has no matching ADT declaration"),
-        )
-    })?;
+    let ctor_definition = match resolve_adt_constructor_definition(program, &ctor) {
+        AdtConstructorResolution::Unique(definition) => definition,
+        // The field-name check below reports the AUTHORED constructor, so
+        // validating against a different declaration produced a
+        // self-contradicting "has no field" rejection of a valid program
+        // (chelis#1271). Name both candidates instead of choosing.
+        AdtConstructorResolution::Ambiguous(candidates) => {
+            return Err(ambiguous_constructor_error(
+                &record_expr,
+                &ctor,
+                &candidates,
+            ));
+        }
+        AdtConstructorResolution::Missing => {
+            return Err(host_expr_lowering_error(
+                &record_expr,
+                format!("record constructor `{ctor}` has no matching ADT declaration"),
+            ));
+        }
+    };
     let checked_ty = expr_host_type(
         &Expr::List(list.clone(), chelis_deep::Span::new(0, 0)),
         program,
@@ -6770,7 +6809,19 @@ fn lower_app_host_expr(
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
         .unwrap_or(checked_ty);
-    let ctor_definition = lookup_adt_constructor_definition(program, &name);
+    let ctor_definition = match resolve_adt_constructor_definition(program, &name) {
+        AdtConstructorResolution::Unique(definition) => Some(definition),
+        // The resolved declaration supplies both the constructed ADT name
+        // and each argument's expected field type, which lowering then
+        // FORCES onto the argument. Answering an ambiguous name with the
+        // wrong package's declaration silently rewrote a payload's dtype
+        // (chelis#1271), so refuse rather than pick.
+        AdtConstructorResolution::Ambiguous(candidates) => {
+            return Err(ambiguous_constructor_error(&app_expr, &name, &candidates));
+        }
+        // Not a constructor: this is the ordinary call path.
+        AdtConstructorResolution::Missing => None,
+    };
     let inferred_ret_ty = fn_sig
         .as_ref()
         .map(|(_, ret_ty)| ret_ty.clone())
@@ -8002,6 +8053,10 @@ fn top_level_fn_is_nullary_generic_constructor_wrapper(
     let Some(ctor_name) = children(var).first().and_then(symbol_name) else {
         return false;
     };
+    // Predicate disposition (chelis#1271): an ambiguous constructor name
+    // answers `false`, which only declines this narrow specialization.
+    // The wrapper's body still lowers through the bare-variable path,
+    // which rejects the same ambiguity, so the program fails closed.
     lookup_adt_constructor_definition(program, ctor_name)
         .is_some_and(|definition| !definition.parameters.is_empty() && definition.is_nullary())
 }
@@ -9478,6 +9533,10 @@ fn infer_app_expr_host_type(
     };
     let name = callee_kids.first().and_then(symbol_name)?;
     if !BUILTIN_NAMES.contains(&name) {
+        // Predicate disposition (chelis#1271): this returns the type an
+        // application would produce, so answering an ambiguous name would
+        // stamp the wrong package's ADT name onto the expression. Decline
+        // instead; the application itself rejects the same ambiguity.
         if let Some(definition) = lookup_adt_constructor_definition(program, name) {
             let mut substitutions = HashMap::new();
             for (field, argument) in definition.fields.iter().zip(kids.iter().skip(1)) {
@@ -11489,9 +11548,9 @@ fn adt_parameter_is_stored(
     parameter_index: usize,
     definitions: &[GenericAdtConstructor],
 ) -> bool {
-    definitions
+    definitions_owning(definitions, adt_name, adt_name_of)
+        .candidates()
         .iter()
-        .filter(|definition| terminal_name_matches(&definition.adt_name, adt_name))
         .any(|definition| {
             definition
                 .stored_parameters
@@ -11501,13 +11560,149 @@ fn adt_parameter_is_stored(
         })
 }
 
+/// Which spelling answered when narrowing declarations to a name.
+enum NameMatch<'a> {
+    /// At least one declaration carries the name exactly.
+    Exact(Vec<&'a GenericAdtConstructor>),
+    /// No declaration carries the name exactly; these share its terminal
+    /// segment. Empty when nothing matched at all.
+    Terminal(Vec<&'a GenericAdtConstructor>),
+}
+
+impl<'a> NameMatch<'a> {
+    fn candidates(&self) -> &[&'a GenericAdtConstructor] {
+        match self {
+            Self::Exact(candidates) | Self::Terminal(candidates) => candidates,
+        }
+    }
+}
+
+/// Narrow `definitions` to the declarations that own `name` under `key`,
+/// preferring an exact spelling over the terminal-segment fallback.
+///
+/// The reef linker rewrites every cross-package binding to
+/// `Pkg__<pkg>__<Module>__<Name>`, and spec/04-type-system.md's "Module
+/// identity" rule makes that mangled spelling the declaration's identity.
+/// An exact spelling therefore resolves on its own and must never consult
+/// the terminal segment: two packages in one dependency graph may declare
+/// same-named types, whose terminals then collide by construction, and
+/// answering such a reference with the other package's declaration
+/// lowered a valid program against the wrong record (chelis#1271). The
+/// terminal fallback stays for short, unqualified spellings, which only
+/// arise when no declaration carries the exact name.
+fn definitions_owning<'a>(
+    definitions: &'a [GenericAdtConstructor],
+    name: &str,
+    key: fn(&GenericAdtConstructor) -> &str,
+) -> NameMatch<'a> {
+    let exact: Vec<&GenericAdtConstructor> = definitions
+        .iter()
+        .filter(|definition| key(definition) == name)
+        .collect();
+    if !exact.is_empty() {
+        return NameMatch::Exact(exact);
+    }
+    NameMatch::Terminal(
+        definitions
+            .iter()
+            .filter(|definition| terminal_name_matches(key(definition), name))
+            .collect(),
+    )
+}
+
+fn constructor_name_of(definition: &GenericAdtConstructor) -> &str {
+    &definition.ctor_name
+}
+
+fn adt_name_of(definition: &GenericAdtConstructor) -> &str {
+    &definition.adt_name
+}
+
+/// How a constructor reference resolved against the checked program's ADT
+/// registry (chelis#1271).
+enum AdtConstructorResolution {
+    /// Exactly one declaration owns the reference.
+    Unique(GenericAdtConstructor),
+    /// No declaration owns the reference. Call sites that also accept
+    /// plain functions read this as "not a constructor".
+    Missing,
+    /// The reference is spelled short and more than one declaration's
+    /// terminal segment answers it. Carries every candidate's declared
+    /// name so the diagnostic can name both sides instead of silently
+    /// picking whichever sorted first.
+    Ambiguous(Vec<String>),
+}
+
+fn resolve_adt_constructor_definition(
+    program: &CheckedProgram,
+    ctor_name: &str,
+) -> AdtConstructorResolution {
+    let definitions = adt_constructor_definitions(program);
+    let owning = definitions_owning(&definitions, ctor_name, constructor_name_of);
+    match (&owning, owning.candidates()) {
+        (_, []) => AdtConstructorResolution::Missing,
+        (_, [only]) => AdtConstructorResolution::Unique((*only).clone()),
+        // Two declarations carrying the SAME name are not a
+        // qualified-versus-unqualified ambiguity, and no name rule can
+        // separate them. The checker separates that case by call shape
+        // (chelis#148) and module-scoped constructor resolution owns the
+        // rest (chelis#157), so keep the existing deterministic choice
+        // from the sorted table rather than widening this repair.
+        (NameMatch::Exact(_), [first, ..]) => AdtConstructorResolution::Unique((*first).clone()),
+        (NameMatch::Terminal(_), many) => AdtConstructorResolution::Ambiguous(
+            many.iter()
+                .map(|definition| definition.ctor_name.clone())
+                .collect(),
+        ),
+    }
+}
+
+/// The fail-closed diagnostic for a constructor reference that more than
+/// one declaration answers to.
+///
+/// Lowering has no disambiguator at this point: the reference is short,
+/// the candidates are distinct types, and choosing one would rebuild the
+/// chelis#1271 defect with a different first-match rule.
+fn ambiguous_constructor_error(
+    expr: &Expr,
+    ctor_name: &str,
+    candidates: &[String],
+) -> crate::lower::LowerDiagnostic {
+    let listed = candidates
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    host_expr_lowering_error(
+        expr,
+        format!(
+            "constructor `{ctor_name}` is answered by {count} declarations \
+             ({listed}) whose names share a terminal segment; each is a \
+             distinct type, so lowering will not choose one. Spell the \
+             constructor with its declaring module or package",
+            count = candidates.len(),
+        ),
+    )
+}
+
+/// The single declaration that owns `ctor_name`, if there is one.
+///
+/// Two call sites are PREDICATES over a name that may or may not be a
+/// constructor, and neither can raise: they ask whether a callee has a
+/// narrow specialization shape and what an application's result type is.
+/// Both answer "no" for an ambiguous reference, which is safe because
+/// every path that turns a constructor reference into a construction
+/// (bare-variable, record, and positional application) rejects ambiguity
+/// on its own, so the program still fails closed rather than lowering
+/// down a silently different path.
 fn lookup_adt_constructor_definition(
     program: &CheckedProgram,
     ctor_name: &str,
 ) -> Option<GenericAdtConstructor> {
-    adt_constructor_definitions(program)
-        .into_iter()
-        .find(|definition| terminal_name_matches(&definition.ctor_name, ctor_name))
+    match resolve_adt_constructor_definition(program, ctor_name) {
+        AdtConstructorResolution::Unique(definition) => Some(definition),
+        AdtConstructorResolution::Missing | AdtConstructorResolution::Ambiguous(_) => None,
+    }
 }
 
 fn lookup_access_field(
@@ -11517,6 +11712,11 @@ fn lookup_access_field(
 ) -> Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError> {
     match &base.kind {
         HostExprKind::AdtConstruct { ctor, ty, .. } => {
+            // The base is an already-lowered construction, and every path
+            // that builds one rejects an ambiguous constructor name, so a
+            // `None` here means the name is unknown rather than
+            // contested. The caller renders that as "absent or ambiguous
+            // on the resolved ADT type" (chelis#1271).
             let Some(definition) = lookup_adt_constructor_definition(program, ctor) else {
                 return Ok(None);
             };
@@ -11546,11 +11746,14 @@ fn lookup_adt_field_on_type(
 ) -> Result<Option<(usize, HostTypeTerm)>, AdtInstantiationError> {
     let mut found = None;
     let instantiated_ty = HostTypeTerm::Adt(adt_name.to_string(), args.to_vec());
-    for definition in adt_constructor_definitions(program) {
-        if !terminal_name_matches(&definition.adt_name, adt_name) {
-            continue;
-        }
-        let instantiated = instantiate_adt_constructor(program, &definition, &instantiated_ty)?;
+    // Field access resolves through the ADT's own name, and it has the
+    // same chelis#1271 collision: two packages' `Wrapped` types share a
+    // terminal, so admitting both as candidates made them disagree on the
+    // index of a field one of them really has, and a valid access was
+    // rejected as "absent or ambiguous". An exact name answers alone.
+    let definitions = adt_constructor_definitions(program);
+    for definition in definitions_owning(&definitions, adt_name, adt_name_of).candidates() {
+        let instantiated = instantiate_adt_constructor(program, definition, &instantiated_ty)?;
         if let Some((index, field)) = instantiated
             .fields
             .iter()
@@ -13606,6 +13809,267 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
             !body.contains("function: \"all_eq_len\""),
             "no edge may still call the elided generic symbol `all_eq_len`, \
              got body:\n{body}"
+        );
+    }
+
+    // ── chelis#1271: cross-package constructor-name collision ────────
+    //
+    // Two packages in one dependency graph may declare types whose
+    // constructors share an unqualified name. The reef linker gives each
+    // a distinct `Pkg__<pkg>__<Module>__<Name>` identity, so lowering
+    // must resolve on the full spelling and must not silently pick one
+    // when only a short spelling is available. The end-to-end faces live
+    // in `crates/chelis-cli/tests/issue_1271_cross_package_ctor_collision.rs`;
+    // these cover the resolution rule itself and the ambiguity arm the
+    // checker will not let a whole program reach.
+
+    /// Two declarations whose mangled names differ only in their package
+    /// segment, with `Adep__` sorting ahead of `Blib__` so a first-match
+    /// rule always answers with the wrong one.
+    const COLLIDING_DECLARATIONS: &str = concat!(
+        "(deftype {} Adep__Wrapped () (variant {} Adep__Wrapped ",
+        "(field {} amount (t-prim {} f32)) (field {} extra (t-prim {} f32))))\n",
+        "(deftype {} Blib__Wrapped () (variant {} Blib__Wrapped ",
+        "(field {} extra (t-prim {} f32)) (field {} amount (t-prim {} f32))))\n"
+    );
+
+    /// Parse one Deep expression into the `Expr::List` carrier that
+    /// `lower_host_expr_kind` dispatches on, bridging stamped `Node`s the
+    /// way the surrounding lowering code already does (chelis#908).
+    fn deep_expr(source: &str) -> Expr {
+        fn bridge(expr: &Expr) -> Expr {
+            match expr {
+                Expr::Node(node, span) => Expr::List(
+                    List {
+                        elements: node.to_list(*span).elements.iter().map(bridge).collect(),
+                    },
+                    *span,
+                ),
+                Expr::List(list, span) => Expr::List(
+                    List {
+                        elements: list.elements.iter().map(bridge).collect(),
+                    },
+                    *span,
+                ),
+                other => other.clone(),
+            }
+        }
+        let parsed = chelis_deep::parser::parse_str(source)
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("one expression");
+        bridge(&parsed)
+    }
+
+    fn lower_against(program: &CheckedProgram, source: &str) -> Result<HostExpr, String> {
+        let mut helpers = Vec::new();
+        lower_host_expr(&deep_expr(source), program, &HashMap::new(), &mut helpers)
+            .map_err(|diagnostic| diagnostic.message)
+    }
+
+    #[test]
+    fn constructor_resolution_prefers_the_exact_spelling() {
+        // The repair: the mangled name IS the identity
+        // (spec/04-type-system.md, "Module identity"), so the
+        // later-sorting package still resolves to its own declaration.
+        let checked = parse_and_check(COLLIDING_DECLARATIONS);
+        let AdtConstructorResolution::Unique(definition) =
+            resolve_adt_constructor_definition(&checked, "Blib__Wrapped")
+        else {
+            panic!("an exactly-spelled constructor must resolve uniquely");
+        };
+        assert_eq!(definition.adt_name, "Blib__Wrapped");
+        assert_eq!(
+            definition
+                .fields
+                .iter()
+                .map(|field| field.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("extra"), Some("amount")],
+            "the exact spelling must carry its own field list and order"
+        );
+    }
+
+    #[test]
+    fn constructor_resolution_still_answers_a_unique_terminal_spelling() {
+        // The terminal fallback is what lets a short, unqualified
+        // spelling reach its declaration; the repair narrows it, it does
+        // not remove it.
+        let checked = parse_and_check(concat!(
+            "(deftype {} Blib__Wrapped () (variant {} Blib__Wrapped ",
+            "(field {} amount (t-prim {} f32))))\n"
+        ));
+        let AdtConstructorResolution::Unique(definition) =
+            resolve_adt_constructor_definition(&checked, "Wrapped")
+        else {
+            panic!("an uncontested terminal spelling must still resolve");
+        };
+        assert_eq!(definition.adt_name, "Blib__Wrapped");
+    }
+
+    #[test]
+    fn constructor_resolution_refuses_a_contested_terminal_spelling() {
+        // Negative parity: when the short spelling really is ambiguous,
+        // lowering must say so and name both sides rather than restore
+        // the defect under a different first-match rule.
+        let checked = parse_and_check(COLLIDING_DECLARATIONS);
+        let AdtConstructorResolution::Ambiguous(candidates) =
+            resolve_adt_constructor_definition(&checked, "Wrapped")
+        else {
+            panic!("a contested terminal spelling must not resolve");
+        };
+        assert_eq!(candidates, ["Adep__Wrapped", "Blib__Wrapped"]);
+        let message =
+            ambiguous_constructor_error(&deep_expr("(var {} Wrapped)"), "Wrapped", &candidates)
+                .message;
+        assert!(
+            message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
+            "the diagnostic must name both candidates; got: {message}"
+        );
+        assert!(
+            message.contains("unsupported:") && message.contains("[04-TOT-3]"),
+            "the diagnostic must keep the branded lowering shape; got: {message}"
+        );
+    }
+
+    #[test]
+    fn constructor_resolution_keeps_same_name_declarations_deterministic() {
+        // Out of scope by decision: two declarations carrying the SAME
+        // name are not a qualified-versus-unqualified ambiguity, and the
+        // checker separates them by call shape (chelis#148) with
+        // module-scoped resolution owning the rest (chelis#157). This
+        // repair leaves that case exactly as it was.
+        let checked = parse_and_check(concat!(
+            "(deftype {} AaaBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n",
+            "(deftype {} BbbBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n"
+        ));
+        let AdtConstructorResolution::Unique(definition) =
+            resolve_adt_constructor_definition(&checked, "Boxed")
+        else {
+            panic!("same-name declarations keep their existing deterministic choice");
+        };
+        assert_eq!(definition.adt_name, "AaaBox");
+    }
+
+    #[test]
+    fn adt_field_lookup_prefers_the_exact_type_name() {
+        // Field access resolves through the ADT name and had the same
+        // collision: admitting both declarations made them disagree on
+        // the index of `amount` and rejected a valid access.
+        let checked = parse_and_check(COLLIDING_DECLARATIONS);
+        let found = lookup_adt_field_on_type(&checked, "Blib__Wrapped", &[], "amount")
+            .expect("no instantiation error")
+            .expect("`amount` is declared on Blib__Wrapped");
+        assert_eq!(found.0, 1, "`amount` is field 1 in the exact declaration");
+    }
+
+    #[test]
+    fn adt_parameter_storage_prefers_the_exact_type_name() {
+        // Same narrowing on the storage classification: the erased
+        // parameter of one declaration must not be reported as stored
+        // because a terminal-colliding declaration stores its own. The
+        // declarations are built directly so the collision is the only
+        // variable.
+        let definitions = vec![
+            GenericAdtConstructor {
+                adt_name: "Adep__Column".to_string(),
+                ctor_name: "Adep__Col".to_string(),
+                parameters: vec!["a".to_string()],
+                stored_parameters: vec![true],
+                fields: Vec::new(),
+            },
+            GenericAdtConstructor {
+                adt_name: "Blib__Column".to_string(),
+                ctor_name: "Blib__Col".to_string(),
+                parameters: vec!["n".to_string()],
+                stored_parameters: vec![false],
+                fields: Vec::new(),
+            },
+        ];
+        assert!(
+            adt_parameter_is_stored("Adep__Column", 0, &definitions),
+            "the stored parameter of `Adep__Column` is stored"
+        );
+        assert!(
+            !adt_parameter_is_stored("Blib__Column", 0, &definitions),
+            "the erased parameter of `Blib__Column` must not inherit the \
+             terminal-colliding declaration's storage classification"
+        );
+    }
+
+    #[test]
+    fn bare_constructor_reference_refuses_a_contested_terminal_spelling() {
+        // Caller disposition: whether a bare reference is a construction
+        // at all depends on which declaration answers it, so ambiguity
+        // must reject rather than fall through to the variable path and
+        // emit a bare C identifier nothing declares.
+        let checked = parse_and_check(concat!(
+            "(deftype {} Adep__Flag () (variant {} Adep__On (field {} weight (t-prim {} f32))))\n",
+            "(deftype {} Blib__Flag () (variant {} Blib__On))\n"
+        ));
+        let message = lower_against(&checked, "(var {} On)")
+            .expect_err("a contested bare constructor reference must reject");
+        assert!(
+            message.contains("`Adep__On`") && message.contains("`Blib__On`"),
+            "the rejection must name both candidates; got: {message}"
+        );
+    }
+
+    #[test]
+    fn record_construction_refuses_a_contested_terminal_spelling() {
+        // Caller disposition: the field-name check reports the AUTHORED
+        // constructor, so validating against another declaration is what
+        // produced the self-contradicting "has no field" rejection.
+        let checked = parse_and_check(COLLIDING_DECLARATIONS);
+        let message = lower_against(
+            &checked,
+            "(record {} Wrapped (kv {} extra (lit {} 1.0)) (kv {} amount (lit {} 2.0)))",
+        )
+        .expect_err("a contested record constructor must reject");
+        assert!(
+            message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
+            "the rejection must name both candidates; got: {message}"
+        );
+        assert!(
+            !message.contains("has no field"),
+            "the contested case must not borrow the missing-field wording; got: {message}"
+        );
+    }
+
+    #[test]
+    fn positional_construction_refuses_a_contested_terminal_spelling() {
+        // Caller disposition: the resolved declaration supplies each
+        // argument's expected field type, which lowering then forces onto
+        // the argument, so a wrong answer rewrites the payload's dtype.
+        let checked = parse_and_check(concat!(
+            "(deftype {} Adep__Box () (variant {} Adep__Boxed (t-prim {} f64)))\n",
+            "(deftype {} Blib__Box () (variant {} Blib__Boxed (t-prim {} f32)))\n"
+        ));
+        let message = lower_against(&checked, "(app {} (var {} Boxed) (lit {} 1.0))")
+            .expect_err("a contested positional constructor must reject");
+        assert!(
+            message.contains("`Adep__Boxed`") && message.contains("`Blib__Boxed`"),
+            "the rejection must name both candidates; got: {message}"
+        );
+    }
+
+    #[test]
+    fn match_pattern_refuses_a_contested_terminal_spelling() {
+        // Caller disposition: the resolved field list decides which index
+        // each binder reads, so a wrong answer silently binds the other
+        // package's field. The `type_env` fallback for names that are not
+        // constructors must not absorb this.
+        let checked = parse_and_check(COLLIDING_DECLARATIONS);
+        let message = lower_against(
+            &checked,
+            "(match {} (var {} w) (arm {} (pat-record {} Wrapped \
+             (kv {} amount (pat-var {} a))) () (var {} a)))",
+        )
+        .expect_err("a contested match constructor must reject");
+        assert!(
+            message.contains("`Adep__Wrapped`") && message.contains("`Blib__Wrapped`"),
+            "the rejection must name both candidates; got: {message}"
         );
     }
 }
