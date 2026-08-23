@@ -34,6 +34,20 @@ pub enum ParseError {
          bind the value with `_ = <expr>` or move it to tail position (byte {offset})"
     )]
     BareStatementInBlock { offset: usize },
+    /// A `;` used where a canonical binding block wants a newline.
+    ///
+    /// The generic `Expected` shape used to render this as
+    /// `expected separator (`;` or newline), found Semicolon`, which named the
+    /// token it had just refused as one of the two acceptable spellings
+    /// (chelis#1267). `par`, `do`, and the v0.18 compatibility grammar do take
+    /// `;`, so the wording names canonical Surf v0.19 rather than claiming `;`
+    /// is never a block separator.
+    #[error(
+        "expected a newline separator, found `;`: `;` is not a block separator in canonical \
+         Surf v0.19; replace it with a newline, or run `chelis migrate surf --from 0.18` to \
+         rewrite v0.18 source (byte {offset})"
+    )]
+    SemicolonBlockSeparator { offset: usize },
     #[error("literal `{found}` is not an accepted spelling at byte {offset}; write `{expected}`")]
     NonCanonicalLiteral {
         found: String,
@@ -2650,8 +2664,30 @@ impl Parser {
             bindings.push(self.parse_block_let_binding()?);
             let sep_count = self.consume_block_separators();
             if *self.peek() != TokenKind::RBrace && sep_count == 0 {
+                // `consume_block_separators` takes `;` only in LegacyV018, so
+                // a surviving `;` here means canonical Surf v0.19 refused it.
+                // Reporting that through the generic shape named the refused
+                // token as an acceptable spelling (chelis#1267); say the rule
+                // instead. The mode guard keeps the v0.19 wording off the
+                // migrator's accepting parse even if that consumption rule
+                // ever changes.
+                if self.mode == ParseMode::Canonical
+                    && matches!(self.raw_peek(), TokenKind::Semicolon)
+                {
+                    return Err(ParseError::SemicolonBlockSeparator {
+                        offset: self.current_offset(),
+                    });
+                }
                 return Err(ParseError::Expected {
-                    expected: "separator (`;` or newline)".into(),
+                    // Any other stray token is a plain missing separator, so
+                    // keep the generic shape and only list what this mode's
+                    // grammar actually accepts here (spec/02 §P5: canonical
+                    // binding blocks separate on newlines alone).
+                    expected: if self.mode == ParseMode::Canonical {
+                        "separator (newline)".into()
+                    } else {
+                        "separator (`;` or newline)".into()
+                    },
                     found: format!("{:?}", self.raw_peek()),
                     offset: self.current_offset(),
                 });
@@ -4470,6 +4506,111 @@ mod tests {
                 );
             }
             other => panic!("expected `expression` error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_semicolon_separator_is_rejected_without_offering_semicolon() {
+        // Negative #14 (chelis#1267): canonical Surf v0.19 rejects `;` as a
+        // block separator (spec/02-surf-syntax.md §P5, §P12), so the
+        // diagnostic must not list `;` among the acceptable spellings. The
+        // issue's reproducer spelled the values `cast(1, int64)`; the suffix
+        // form fails identically and keeps the fixture free of type sugar.
+        let src = "def main() -> int64 = { a = 1i64; b = 2i64; add(a, b) }";
+        let err = parse_str(src).unwrap_err();
+        let offset = match err {
+            ParseError::SemicolonBlockSeparator { offset } => offset,
+            ref other => panic!("expected SemicolonBlockSeparator, got {other:?}"),
+        };
+        // Points at the first `;`, the one just after `1i64`.
+        assert_eq!(offset, src.find(';').unwrap());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("expected a newline separator, found `;`"),
+            "message must name the newline as the expectation: {msg}"
+        );
+        assert!(
+            msg.contains("not a block separator in canonical Surf v0.19"),
+            "message must state the v0.19 rule: {msg}"
+        );
+        assert!(
+            msg.contains("chelis migrate surf --from 0.18"),
+            "message must name the migrator: {msg}"
+        );
+        // The contradiction the issue reported: the old wording offered `;`
+        // as one of two acceptable separators while refusing that exact token.
+        assert!(
+            !msg.contains("separator (`;`"),
+            "message must not offer `;` as an acceptable separator: {msg}"
+        );
+    }
+
+    #[test]
+    fn block_missing_separator_non_semicolon_keeps_generic_message() {
+        // Negative #15 (chelis#1267 parity): a stray non-`;` token at a block
+        // separator boundary keeps the generic separator diagnostic rather
+        // than being rewritten into a `;` lecture. In canonical mode the
+        // generic wording names only the newline, because that is the only
+        // separator the grammar accepts here.
+        let src = "def f() -> int64 = { a = 1i64";
+        let err = parse_str(src).unwrap_err();
+        match err {
+            ParseError::Expected {
+                ref expected,
+                ref found,
+                ..
+            } => {
+                assert_eq!(expected, "separator (newline)", "got {err:?}");
+                assert_eq!(found, "Eof", "got {err:?}");
+            }
+            ref other => panic!("expected generic separator error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_v018_missing_separator_still_offers_semicolon() {
+        // Parity for #15: the generic wording is mode-dependent because the
+        // two grammars accept different separators. `;` is genuinely one of
+        // v0.18's, so dropping it from the legacy message would be the
+        // chelis#1267 defect pointed the other way.
+        let err = parse_str_legacy_v018("def f() -> int64 = { a = 1i64").unwrap_err();
+        match err {
+            ParseError::Expected {
+                ref expected,
+                ref found,
+                ..
+            } => {
+                assert_eq!(expected, "separator (`;` or newline)", "got {err:?}");
+                assert_eq!(found, "Eof", "got {err:?}");
+            }
+            ref other => panic!("expected generic separator error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_v018_block_still_accepts_semicolon_separators() {
+        // Positive parity for #14: the v0.18 compatibility grammar behind
+        // `chelis migrate surf --from 0.18` still reads `;` as a block
+        // separator, so the new wording is scoped to canonical Surf v0.19
+        // rather than claiming `;` is never a block separator.
+        let decls = parse_str_legacy_v018("def main() -> int64 = { a = 1i64; add(a, 2i64) }")
+            .expect("v0.18 blocks accept `;` separators");
+        assert_eq!(decls.len(), 1);
+    }
+
+    #[test]
+    fn par_separator_message_still_names_semicolon() {
+        // Negative control for #14: `par` and `do` genuinely require `;`
+        // (spec/02-surf-syntax.md §P5), so their separator diagnostic must
+        // keep offering it. Naming the newline there would be the same
+        // defect in the opposite direction.
+        let src = "def f(x, y) -> unit = par {\n    g(x)\n    h(y)\n}";
+        let err = parse_str(src).unwrap_err();
+        match err {
+            ParseError::Expected { ref expected, .. } => {
+                assert_eq!(expected, "separator (`;`)", "got {err:?}");
+            }
+            ref other => panic!("expected par separator error, got {other:?}"),
         }
     }
 
