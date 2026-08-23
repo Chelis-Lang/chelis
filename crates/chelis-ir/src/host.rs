@@ -11643,11 +11643,14 @@ fn resolve_adt_constructor_definition(
         (_, []) => AdtConstructorResolution::Missing,
         (_, [only]) => AdtConstructorResolution::Unique((*only).clone()),
         // Two declarations carrying the SAME name are not a
-        // qualified-versus-unqualified ambiguity, and no name rule can
-        // separate them. The checker separates that case by call shape
-        // (chelis#148) and module-scoped constructor resolution owns the
-        // rest (chelis#157), so keep the existing deterministic choice
-        // from the sorted table rather than widening this repair.
+        // qualified-versus-unqualified ambiguity: no name rule can tell
+        // them apart, so there is nothing here for a name rule to
+        // decide. That case is a settled decision with no open owner,
+        // and its gate is the checker, which either resolves a same-name
+        // constructor (by call shape) or rejects it. A program that
+        // survives the checker therefore does not expose which of two
+        // identically-named declarations this sorted table returns.
+        // Keep the existing choice rather than widening this repair.
         (NameMatch::Exact(_), [first, ..]) => AdtConstructorResolution::Unique((*first).clone()),
         (NameMatch::Terminal(_), many) => AdtConstructorResolution::Ambiguous(
             many.iter()
@@ -11663,6 +11666,13 @@ fn resolve_adt_constructor_definition(
 /// Lowering has no disambiguator at this point: the reference is short,
 /// the candidates are distinct types, and choosing one would rebuild the
 /// chelis#1271 defect with a different first-match rule.
+///
+/// The rendering BORROWS `host_expr_lowering_error`'s generic Deep-form
+/// brand, whose [04-TOT-3] text reads "a malformed or unhandled Deep
+/// form" - a contested but well-formed constructor spelling is neither.
+/// Citation accuracy in that shared block is chelis#1260's subject and
+/// this change leaves the block byte-identical, so the brand is borrowed
+/// here rather than corrected in passing.
 fn ambiguous_constructor_error(
     expr: &Expr,
     ctor_name: &str,
@@ -13820,8 +13830,16 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
     // must resolve on the full spelling and must not silently pick one
     // when only a short spelling is available. The end-to-end faces live
     // in `crates/chelis-cli/tests/issue_1271_cross_package_ctor_collision.rs`;
-    // these cover the resolution rule itself and the ambiguity arm the
-    // checker will not let a whole program reach.
+    // these cover the resolution rule itself and the ambiguity arm.
+    //
+    // No whole program reaches that arm, and the reason is structural
+    // rather than a property of today's checker: it needs mangled
+    // DECLARATIONS together with a SHORT reference, mangled declarations
+    // exist only in reef linker output, and there every reference is
+    // mangled too. A hand-authored mangled declaration is a
+    // `ReservedLinkerName` declaration error (spec/04-type-system.md,
+    // "Reserved linker name format"). The arm is therefore a fail-closed
+    // guard, and unit tests are the only place it can be exercised.
 
     /// Two declarations whose mangled names differ only in their package
     /// segment, with `Adep__` sorting ahead of `Blib__` so a first-match
@@ -13935,11 +13953,12 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
 
     #[test]
     fn constructor_resolution_keeps_same_name_declarations_deterministic() {
-        // Out of scope by decision: two declarations carrying the SAME
-        // name are not a qualified-versus-unqualified ambiguity, and the
-        // checker separates them by call shape (chelis#148) with
-        // module-scoped resolution owning the rest (chelis#157). This
-        // repair leaves that case exactly as it was.
+        // Settled by decision, with no open owner: two declarations
+        // carrying the SAME name are not a qualified-versus-unqualified
+        // ambiguity, so no name rule can separate them. The gate is the
+        // checker, which resolves a same-name constructor by call shape
+        // or rejects it, and this repair leaves the case exactly as it
+        // was. Locked so a later change to that decision is deliberate.
         let checked = parse_and_check(concat!(
             "(deftype {} AaaBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n",
             "(deftype {} BbbBox () (variant {} Boxed (field {} amount (t-prim {} f32))))\n"

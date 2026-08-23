@@ -33,6 +33,11 @@
 //                      | construction, so the emitted C does not compile
 // field access         | rejected: "absent or ambiguous on the resolved
 //                      | ADT type"
+//
+// A last test covers the IN-PACKAGE path instead: two modules of ONE
+// package, reached through the module-qualified references chelis#316
+// introduced. Their mangled names share a terminal exactly as two
+// packages' do, so the same defect reached lowering by a second route.
 
 use assert_cmd::Command;
 use chelis_compiler_api::COMPILER_VERSION;
@@ -56,6 +61,7 @@ struct Package<'a> {
 struct Built {
     source: Option<String>,
     out_dir: PathBuf,
+    unit: String,
     transcript: String,
 }
 
@@ -73,21 +79,78 @@ impl Built {
     /// returning `None` when no host compiler is available.
     fn syntax_check(&self) -> Option<std::process::Output> {
         let compiler = chelis_backend_c::toolchain::c_compiler();
-        let available = std::process::Command::new(&compiler)
-            .arg("--version")
-            .output()
-            .is_ok_and(|probe| probe.status.success());
-        if !available {
+        if !host_compiler_available(&compiler) {
             return None;
         }
         std::process::Command::new(&compiler)
             .arg("-fsyntax-only")
             .arg("-I")
             .arg(&self.out_dir)
-            .arg(self.out_dir.join("m.c"))
+            .arg(self.out_dir.join(&self.unit))
             .output()
             .ok()
     }
+
+    /// Link the emitted unit against a driver that calls `entry_symbol`
+    /// and prints its `f32` result, run it, and return stdout. `None`
+    /// when no host compiler is available.
+    fn compile_and_run(&self, entry_symbol: &str) -> Option<String> {
+        let source = self.source();
+        let toolchain = chelis_backend_c::toolchain::runtime_toolchain(
+            chelis_backend_c::toolchain::CodegenRequirements {
+                wants_openmp: true,
+                needs_blas: source.contains("cblas_sgemm(") || source.contains("\"chelis_blas.h\""),
+            },
+        );
+        if !host_compiler_available(&toolchain.compiler) {
+            return None;
+        }
+        let unit_header = self.unit.replace(".c", ".h");
+        write_file(
+            &self.out_dir.join("driver.c"),
+            &format!(
+                "#include <stdio.h>\n\
+                 #include \"chelis_runtime.h\"\n\
+                 #include \"{unit_header}\"\n\
+                 int main(void) {{\n\
+                 \x20   printf(\"%.6f\\n\", (double){entry_symbol}());\n\
+                 \x20   return 0;\n\
+                 }}\n"
+            ),
+        );
+        let mut command = std::process::Command::new(&toolchain.compiler);
+        command.current_dir(&self.out_dir);
+        command.arg("-O2");
+        command.args(&toolchain.compile_flags);
+        command.arg(&self.unit);
+        command.arg("driver.c");
+        command.args(["-L.", "-lchelis_runtime"]);
+        command.args(&toolchain.link_flags);
+        command.args(["-o", "prog"]);
+        let compiled = command.output().expect("host compiler should run");
+        assert!(
+            compiled.status.success(),
+            "the emitted translation unit must compile and link; the host \
+             compiler said:\n{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let run = std::process::Command::new(self.out_dir.join("prog"))
+            .output()
+            .expect("the linked program should run");
+        assert!(
+            run.status.success(),
+            "the linked program must exit 0; it said:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        Some(String::from_utf8_lossy(&run.stdout).trim().to_string())
+    }
+}
+
+fn host_compiler_available(compiler: &str) -> bool {
+    std::process::Command::new(compiler)
+        .arg("--version")
+        .output()
+        .is_ok_and(|probe| probe.status.success())
 }
 
 fn write_file(path: &Path, contents: &str) {
@@ -199,6 +262,7 @@ fn build_app(
     let built = Built {
         source: fs::read_to_string(out.join("m.c")).ok(),
         out_dir: out,
+        unit: "m.c".to_string(),
         transcript,
     };
     (dir, built)
@@ -518,6 +582,151 @@ fn field_access_resolves_the_authored_packages_declaration() {
         body.contains("chelis_adt_get_field(__adt_base_0, 1)"),
         "`amount` is field 1 in the authored declaration; emitted body was:\n{body}"
     );
+}
+
+// ── The in-package path (the chelis#316 shape) ───────────────────────
+
+/// Write one package whose modules share a `src/` and build `entry` to C.
+/// No dependencies and no publish step: the reef linker still mangles each
+/// module's declarations to `Pkg__demo__Demo__<Module>__<Name>`, but this
+/// reaches lowering through the in-package path rather than the
+/// cross-package one every test above uses.
+fn build_single_package(modules: &[(&str, &str)], entry: &str) -> (TempDir, PathBuf, Built) {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+    let reef_home = root.join("reef-home");
+    fs::create_dir_all(&reef_home).expect("mkdir reef home");
+    let package_root = root.join("demo");
+    write_file(
+        &package_root.join("reef.toml"),
+        &format!(
+            "[package]\n\
+             name = \"demo\"\n\
+             version = \"0.1.0\"\n\
+             compiler = \"={COMPILER_VERSION}\"\n\
+             module_prefix = \"Demo\"\n\
+             \n\
+             [dependencies]\n"
+        ),
+    );
+    for (file, body) in modules {
+        write_file(&package_root.join("src").join(file), body);
+    }
+    let entry_path = package_root.join("src").join(entry);
+    let out = package_root.join("out");
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&package_root)
+        .args([
+            "build",
+            entry_path.to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run chelis build");
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let unit = entry.replace(".ch", ".c");
+    let built = Built {
+        source: fs::read_to_string(out.join(&unit)).ok(),
+        out_dir: out,
+        unit,
+        transcript,
+    };
+    (dir, package_root, built)
+}
+
+const ALPHA: &str = "module Demo.Alpha\n\
+     export (Wrapped, make, value)\n\
+     type Wrapped =\n  | Wrapped { amount: f32, extra: f32 }\n\
+     def make(a: f32, e: f32) -> Wrapped = Wrapped { amount: a, extra: e }\n\
+     def value(w: Wrapped) -> f32 = w.amount\n";
+
+const BETA: &str = "module Demo.Beta\n\
+     export (Wrapped, make, value)\n\
+     type Wrapped =\n  | Wrapped { extra: f32, amount: f32 }\n\
+     def make(e: f32, a: f32) -> Wrapped = Wrapped { extra: e, amount: a }\n\
+     def value(w: Wrapped) -> f32 =\n  match w with {\n    | Wrapped { extra: _, amount } => amount\n  }\n";
+
+const DEMO_MAIN: &str = "module Demo.Main\n\
+     import Demo.Alpha\n\
+     import Demo.Beta\n\
+     export (main)\n\
+     def main() -> f32 = add(Demo.Alpha.value(Demo.Alpha.make(1.0, 2.0)), Demo.Beta.value(Demo.Beta.make(3.0, 4.0)))\n";
+
+#[test]
+fn module_qualified_constructors_in_one_package_keep_their_own_field_order() {
+    // Two modules of ONE package each declare a record `Wrapped` with the
+    // same field names in the opposite order, reached through the
+    // module-qualified references chelis#316 introduced. Pre-fix this
+    // rejected with "field `amount` is absent or ambiguous on the
+    // resolved ADT type": the two declarations' mangled names share the
+    // `Wrapped` terminal exactly as two packages' do, so the in-package
+    // path carries the same defect. Every test above is cross-package, so
+    // this pins the second path.
+    let modules = [
+        ("alpha.ch", ALPHA),
+        ("beta.ch", BETA),
+        ("main.ch", DEMO_MAIN),
+    ];
+    let (_dir, package_root, built) = build_single_package(&modules, "main.ch");
+    let source = built.source();
+
+    // `Alpha.value` is a field access and `Beta.value` is a match, so the
+    // two consumers of a colliding declaration exercise different lowering
+    // paths in one program. Each must read its own declaration's index:
+    // `amount` is field 0 in Alpha and field 1 in Beta.
+    let alpha = function_body(source, "float pkg__demo__Demo__Alpha__value(chelis_adt* w)");
+    assert!(
+        alpha.contains("chelis_adt_get_field(__adt_base_0, 0)"),
+        "`amount` is field 0 in Demo.Alpha; emitted body was:\n{alpha}"
+    );
+    let beta = function_body(source, "float pkg__demo__Demo__Beta__value(chelis_adt* w)");
+    assert!(
+        beta.contains("chelis_adt_get_field(__adt_0, 1)"),
+        "`amount` is field 1 in Demo.Beta; emitted body was:\n{beta}"
+    );
+
+    // Cross-lane agreement, which is what the issue reports as broken:
+    // `check` scores 1.0, `eval` answers 5.0, and the compiled artifact
+    // must answer the same. 1.0 from Alpha plus 4.0 from Beta; reading
+    // either module's field through the other's layout gives 2.0 or 3.0.
+    let entry = package_root.join("src/main.ch");
+    let checked = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&package_root)
+        .args(["check", entry.to_str().unwrap()])
+        .output()
+        .expect("run chelis check");
+    let report: serde_json::Value =
+        serde_json::from_slice(&checked.stdout).expect("check output must be json");
+    assert_eq!(report["score"], 1, "the package must check clean: {report}");
+
+    let evaluated = Command::cargo_bin("chelis")
+        .expect("binary")
+        .current_dir(&package_root)
+        .args(["eval", "--file", entry.to_str().unwrap()])
+        .output()
+        .expect("run chelis eval");
+    let evaluated = String::from_utf8_lossy(&evaluated.stdout).into_owned();
+    assert!(
+        evaluated.contains("main = 5.0"),
+        "eval must answer 5.0; got:\n{evaluated}"
+    );
+
+    if let Some(printed) = built.compile_and_run("pkg__demo__Demo__Main__main") {
+        assert_eq!(
+            printed, "5.000000",
+            "the compiled artifact must agree with eval"
+        );
+    }
 }
 
 // ── Negative parity ──────────────────────────────────────────────────
