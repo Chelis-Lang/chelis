@@ -398,12 +398,19 @@ impl Parser {
     /// boundary (chelis#1267).
     ///
     /// `consume_block_separators` takes `;` only in `LegacyV018`, so in
-    /// canonical Surf v0.19 one survives at every separator position a
-    /// binding block has: before the first binding, between bindings, and
-    /// after the tail. Each position used to surface a different wrong
-    /// diagnostic, none of which named the rule. Call this immediately after
-    /// every `consume_block_separators` in `parse_block_inner` so all three
-    /// report the same thing.
+    /// canonical Surf v0.19 one survives wherever that function is called
+    /// inside a binding block. There are four such positions, three in
+    /// `parse_block_inner` (before the first binding, between bindings, and
+    /// after the tail) and one in `parse_block_let_binding` (between a
+    /// binding's `=` and its value, the legal v0.18 spelling `a = ; 1i64`).
+    /// Each used to surface a different wrong diagnostic, none of which named
+    /// the rule. Call this immediately after every `consume_block_separators`
+    /// so they all report the same thing; adding a fifth call site without a
+    /// matching guard reopens this defect.
+    ///
+    /// The two `consume_block_separators` calls in `parse_property_decl` are
+    /// deliberately unguarded: they sit in a top-level declaration arm whose
+    /// own diagnostic already carries a real offset.
     ///
     /// `par` and `do` genuinely require `;` (spec/02-surf-syntax.md §P5) and
     /// parse through their own functions, so they never reach this.
@@ -2681,12 +2688,12 @@ impl Parser {
     fn parse_block_inner(&mut self, allow_unbound_tail: bool) -> Result<Expr, ParseError> {
         let start = self.advance().span; // consume LBrace
         let mut bindings = Vec::new();
-        // Separator position 1 of 3: before the first binding.
+        // Separator position 1 of 4: before the first binding.
         self.consume_block_separators();
         self.reject_canonical_semicolon_separator()?;
         while !self.at_eof() && self.is_short_block_binding_start() {
             bindings.push(self.parse_block_let_binding()?);
-            // Separator position 2 of 3: between bindings. This runs before
+            // Separator position 2 of 4: between bindings. This runs before
             // the `sep_count` check below, so a `;` here reports the rule
             // whether or not a newline preceded it.
             let sep_count = self.consume_block_separators();
@@ -2724,7 +2731,7 @@ impl Parser {
             });
         }
         let expr = self.parse_expr_until_block_separator()?;
-        // Separator position 3 of 3: after the tail. spec/02-surf-syntax.md
+        // Separator position 3 of 4: after the tail. spec/02-surf-syntax.md
         // §P5 rejects a trailing `;` by name, but it used to arrive here and
         // be reported as a bare statement, which is false twice over for
         // `{ a = 1i64\n add(a, 1i64); }`: that expression IS the tail, and
@@ -2780,7 +2787,13 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Eq)?;
+        // Separator position 4 of 4: between a binding's `=` and its value.
+        // `a = ; 1i64` is a legal v0.18 spelling that the migrator rewrites to
+        // `a = 1i64`, so migrated-era source reaches this. Unguarded it left
+        // the value's token range empty and bottomed out in an offsetless
+        // "unexpected end of input" (chelis#1267).
         self.consume_block_separators();
+        self.reject_canonical_semicolon_separator()?;
         let value = self.parse_expr_until_block_separator()?;
         Ok(LetBinding { pattern, ty, value })
     }
@@ -4638,22 +4651,46 @@ mod tests {
         // non-tail statement and a `;`. Canonical mode now reports the `;`,
         // which is the lexically first one and the only one whose remedy is
         // not itself rejected: `_ = f(x); g(y)` still fails on the `;`.
+        //
+        // What makes this a reclassification rather than a lost diagnostic:
+        // v0.18 reads that `;` as a real separator, so the bare statement is
+        // the genuine fault there and #706's message still fires. That half
+        // is already pinned by `block_bare_second_statement_semicolon_is_rejected`
+        // on byte-identical source, so it is not restated here.
         assert_semicolon_rule_at("def f(x, y) -> unit = { f(x); g(y) }\n", 0);
     }
 
     #[test]
-    fn legacy_v018_two_statements_separated_by_semicolon_still_report_bare_statement() {
-        // Parity for #19: v0.18 reads that `;` as a real separator, so the
-        // genuine fault there is the bare statement, and #706's diagnostic
-        // must survive. This is what makes the canonical reclassification
-        // safe rather than a message swap.
-        let src = "def f(x, y) = { g(x); h(y) }";
-        let err = p_err(src);
-        let offset = match err {
-            ParseError::BareStatementInBlock { offset } => offset,
-            ref other => panic!("expected BareStatementInBlock, got {other:?}"),
-        };
-        assert_eq!(offset, src.find("h(y)").unwrap());
+    fn block_semicolon_between_binding_eq_and_value_names_the_semicolon_rule() {
+        // Negative #23 (chelis#1267): the fourth separator position, in
+        // `parse_block_let_binding` between `=` and the value. `a = ; 1i64`
+        // is a legal v0.18 spelling the migrator rewrites to `a = 1i64`, so
+        // migrated-era source reaches it. Unguarded it left the value's token
+        // range empty and reported an offsetless "unexpected end of input".
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_on_its_own_line_before_a_binding_value_names_the_semicolon_rule() {
+        // Negative #24: the same position reached across newlines, where the
+        // separator count is already nonzero.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a =\n  ;\n  1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn block_semicolon_after_a_typed_binder_names_the_semicolon_rule() {
+        // Negative #25: the type annotation moves the `=` but not the rule.
+        assert_semicolon_rule_at("def f() -> int64 = {\n  a: int64 = ;1i64\n  a\n}\n", 0);
+    }
+
+    #[test]
+    fn legacy_v018_still_parses_a_semicolon_before_a_binding_value() {
+        // Positive parity for #23: `a = ; 1i64` is the v0.18 spelling the
+        // migrator accepts and rewrites, so the guard must stay canonical
+        // only or the migration path stops working on real source.
+        let decls = parse_str_legacy_v018("def f() -> int64 = {\n  a = ; 1i64\n  a\n}\n")
+            .expect("v0.18 accepts a `;` before a binding value");
+        assert_eq!(decls.len(), 1);
     }
 
     #[test]

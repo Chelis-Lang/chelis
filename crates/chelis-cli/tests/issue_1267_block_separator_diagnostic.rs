@@ -192,4 +192,17 @@ fn the_migrator_the_diagnostic_names_rewrites_the_reproducer() {
         output.status.success(),
         "migrator output must pass canonical fmt --check; migrated={migrated}"
     );
+    // fmt --check only proves it parses. Take it all the way to a clean
+    // check, so both halves of the advice are held to the same bar.
+    let checked = Command::cargo_bin("chelis")
+        .expect("binary")
+        .args(["check", &path])
+        .output()
+        .expect("run chelis check");
+    let stdout = String::from_utf8(checked.stdout).expect("utf8 stdout");
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "migrator output should check clean; migrated={migrated} stdout={stdout}"
+    );
 }
