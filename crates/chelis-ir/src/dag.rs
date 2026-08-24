@@ -825,7 +825,242 @@ pub enum RiscOp {
     },
 }
 
+/// Canonical semantic identities discovered from the RISC IR before Phase 4C
+/// table population. These identities contain no target support status. They
+/// exist so chelis#1294 can prove operation-atom closure from an exhaustive
+/// typed source instead of a Python allowlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RiscAtomIdentity {
+    Add,
+    Mul,
+    Div,
+    FloorDiv,
+    TruncDiv,
+    CmpLt,
+    MaxElem,
+    Neg,
+    Exp,
+    Log,
+    Sin,
+    Sqrt,
+    Cos,
+    Tan,
+    Atan,
+    Abs,
+    Floor,
+    Ceil,
+    Round,
+    Recip,
+    UniformLike,
+    Dropout,
+    Sum,
+    MaxReduce,
+    MinReduce,
+    ProdReduce,
+    ReduceWindowMax,
+    ReduceWindowMin,
+    ReduceWindowSum,
+    ReduceWindowMean,
+    ReduceWindowGrad,
+    ArgmaxReduce,
+    ArgminReduce,
+    Reshape,
+    Permute,
+    Expand,
+    Pad,
+    Shrink,
+    Stride,
+    Shape,
+    Cast,
+    CastTrunc,
+    Matmul,
+    Gather,
+    Scatter,
+    ScatterReplace,
+    ScatterElements,
+}
+
+impl RiscAtomIdentity {
+    pub const ALL: &[Self] = &[
+        Self::Add,
+        Self::Mul,
+        Self::Div,
+        Self::FloorDiv,
+        Self::TruncDiv,
+        Self::CmpLt,
+        Self::MaxElem,
+        Self::Neg,
+        Self::Exp,
+        Self::Log,
+        Self::Sin,
+        Self::Sqrt,
+        Self::Cos,
+        Self::Tan,
+        Self::Atan,
+        Self::Abs,
+        Self::Floor,
+        Self::Ceil,
+        Self::Round,
+        Self::Recip,
+        Self::UniformLike,
+        Self::Dropout,
+        Self::Sum,
+        Self::MaxReduce,
+        Self::MinReduce,
+        Self::ProdReduce,
+        Self::ReduceWindowMax,
+        Self::ReduceWindowMin,
+        Self::ReduceWindowSum,
+        Self::ReduceWindowMean,
+        Self::ReduceWindowGrad,
+        Self::ArgmaxReduce,
+        Self::ArgminReduce,
+        Self::Reshape,
+        Self::Permute,
+        Self::Expand,
+        Self::Pad,
+        Self::Shrink,
+        Self::Stride,
+        Self::Shape,
+        Self::Cast,
+        Self::CastTrunc,
+        Self::Matmul,
+        Self::Gather,
+        Self::Scatter,
+        Self::ScatterReplace,
+        Self::ScatterElements,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Mul => "mul",
+            Self::Div => "div",
+            Self::FloorDiv => "floor_div",
+            Self::TruncDiv => "trunc_div",
+            Self::CmpLt => "cmplt",
+            Self::MaxElem => "max_elem",
+            Self::Neg => "neg",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Sin => "sin",
+            Self::Sqrt => "sqrt",
+            Self::Cos => "cos",
+            Self::Tan => "tan",
+            Self::Atan => "atan",
+            Self::Abs => "abs",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Round => "round",
+            Self::Recip => "recip",
+            Self::UniformLike => "uniform_like",
+            Self::Dropout => "dropout",
+            Self::Sum => "sum",
+            Self::MaxReduce => "max_reduce",
+            Self::MinReduce => "min_reduce",
+            Self::ProdReduce => "prod_reduce",
+            Self::ReduceWindowMax => "reduce_window_max",
+            Self::ReduceWindowMin => "reduce_window_min",
+            Self::ReduceWindowSum => "reduce_window_sum",
+            Self::ReduceWindowMean => "reduce_window_mean",
+            Self::ReduceWindowGrad => "ReduceWindowGrad",
+            Self::ArgmaxReduce => "argmax_reduce",
+            Self::ArgminReduce => "argmin_reduce",
+            Self::Reshape => "reshape",
+            Self::Permute => "permute",
+            Self::Expand => "expand",
+            Self::Pad => "pad",
+            Self::Shrink => "shrink",
+            Self::Stride => "stride",
+            Self::Shape => "shape",
+            Self::Cast => "cast",
+            Self::CastTrunc => "cast_trunc",
+            Self::Matmul => "matmul",
+            Self::Gather => "gather",
+            Self::Scatter => "scatter",
+            Self::ScatterReplace => "scatter_replace",
+            Self::ScatterElements => "scatter_elements",
+        }
+    }
+}
+
+/// Exact pre-4C semantic disposition of a RISC variant. `Structural` is
+/// reserved for compiler/lifetime representation nodes that are not Table-A
+/// operation identities; it is explicit in the exhaustive match and cannot be
+/// inherited by a future variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiscAtomDisposition {
+    Semantic(RiscAtomIdentity),
+    Structural,
+}
+
 impl RiscOp {
+    pub const fn atom_disposition(&self) -> RiscAtomDisposition {
+        use RiscAtomDisposition::{Semantic, Structural};
+        use RiscAtomIdentity as Id;
+
+        match self {
+            Self::Add => Semantic(Id::Add),
+            Self::Mul => Semantic(Id::Mul),
+            Self::Div => Semantic(Id::Div),
+            Self::FloorDiv => Semantic(Id::FloorDiv),
+            Self::TruncDiv => Semantic(Id::TruncDiv),
+            Self::CmpLt => Semantic(Id::CmpLt),
+            Self::MaxElem => Semantic(Id::MaxElem),
+            Self::Neg => Semantic(Id::Neg),
+            Self::Exp => Semantic(Id::Exp),
+            Self::Log => Semantic(Id::Log),
+            Self::Sin => Semantic(Id::Sin),
+            Self::Sqrt => Semantic(Id::Sqrt),
+            Self::Cos => Semantic(Id::Cos),
+            Self::Tan => Semantic(Id::Tan),
+            Self::Atan => Semantic(Id::Atan),
+            Self::Abs => Semantic(Id::Abs),
+            Self::Floor => Semantic(Id::Floor),
+            Self::Ceil => Semantic(Id::Ceil),
+            Self::Round => Semantic(Id::Round),
+            Self::Recip => Semantic(Id::Recip),
+            Self::UniformLike { .. } => Semantic(Id::UniformLike),
+            Self::Dropout { .. } => Semantic(Id::Dropout),
+            Self::Sum { .. } => Semantic(Id::Sum),
+            Self::MaxReduce { .. } => Semantic(Id::MaxReduce),
+            Self::MinReduce { .. } => Semantic(Id::MinReduce),
+            Self::ProdReduce { .. } => Semantic(Id::ProdReduce),
+            Self::ReduceWindow { reducer, .. } => Semantic(match reducer {
+                ReduceWindowKind::Max => Id::ReduceWindowMax,
+                ReduceWindowKind::Min => Id::ReduceWindowMin,
+                ReduceWindowKind::Sum => Id::ReduceWindowSum,
+                ReduceWindowKind::Mean => Id::ReduceWindowMean,
+            }),
+            Self::ReduceWindowGrad { .. } => Semantic(Id::ReduceWindowGrad),
+            Self::Argmax { .. } => Semantic(Id::ArgmaxReduce),
+            Self::Argmin { .. } => Semantic(Id::ArgminReduce),
+            Self::Reshape { .. } => Semantic(Id::Reshape),
+            Self::Permute { .. } => Semantic(Id::Permute),
+            Self::Expand { .. } => Semantic(Id::Expand),
+            Self::Pad { .. } => Semantic(Id::Pad),
+            Self::Shrink { .. } => Semantic(Id::Shrink),
+            Self::Stride { .. } => Semantic(Id::Stride),
+            Self::Shape { .. } => Semantic(Id::Shape),
+            Self::Cast { .. } => Semantic(Id::Cast),
+            Self::CastTrunc { .. } => Semantic(Id::CastTrunc),
+            Self::BlasMatmul { .. } => Semantic(Id::Matmul),
+            Self::Gather { .. } => Semantic(Id::Gather),
+            Self::ScatterAdd { .. } => Semantic(Id::Scatter),
+            Self::Scatter { .. } => Semantic(Id::ScatterReplace),
+            Self::ScatterElements { .. } => Semantic(Id::ScatterElements),
+            Self::OneHot { .. }
+            | Self::Const { .. }
+            | Self::ConstTensor { .. }
+            | Self::Load { .. }
+            | Self::Store { .. }
+            | Self::Copy
+            | Self::Drop
+            | Self::Realize
+            | Self::FusedElem { .. } => Structural,
+        }
+    }
+
     /// Construct a pad from an already-finalized fill value. The dtype tag
     /// travels with the value, so a fill/output mismatch is verifier-visible.
     pub fn pad(padding: Vec<(RtDim, RtDim)>, fill: chelis_types::ScalarValue) -> Self {
@@ -3225,6 +3460,46 @@ mod tests {
             .is_verifier_targetable(),
             "cast_trunc is piecewise constant with an integer output; it has \
              no real-valued envelope, unlike the checked `cast`"
+        );
+    }
+
+    #[test]
+    fn every_risc_op_has_an_exact_pre_phase4c_atom_disposition() {
+        use std::collections::BTreeSet;
+
+        let all = one_of_every_risc_op();
+        let mut discovery_cases = all.clone();
+        discovery_cases.extend(
+            [
+                ReduceWindowKind::Min,
+                ReduceWindowKind::Sum,
+                ReduceWindowKind::Mean,
+            ]
+            .map(|reducer| RiscOp::ReduceWindow {
+                reducer,
+                window_shape: vec![2],
+                strides: vec![1],
+            }),
+        );
+        let semantic: BTreeSet<_> = discovery_cases
+            .iter()
+            .filter_map(|op| match op.atom_disposition() {
+                RiscAtomDisposition::Semantic(identity) => Some(identity),
+                RiscAtomDisposition::Structural => None,
+            })
+            .collect();
+        let expected: BTreeSet<_> = RiscAtomIdentity::ALL.iter().copied().collect();
+
+        assert_eq!(
+            semantic, expected,
+            "the exhaustive RiscOp disposition and canonical semantic identity universe drifted"
+        );
+        assert_eq!(
+            all.iter()
+                .filter(|op| matches!(op.atom_disposition(), RiscAtomDisposition::Structural))
+                .count(),
+            9,
+            "only the nine explicit compiler/lifetime representation variants are structural"
         );
     }
 }

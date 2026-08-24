@@ -49,7 +49,8 @@ mod builtins;
 mod source_arch;
 
 pub use builtins::{
-    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinDecl, BuiltinInferenceRule,
+    AxisArgumentLayout, BUILTIN_NAMES, BUILTINS, BuiltinCapabilityDecl, BuiltinDecl,
+    BuiltinInferenceRule, BuiltinSemanticDomain, BuiltinSiblingCaseDecl, BuiltinSiblingCaseId,
     InferenceDisposition, Realizability, ShapeClass, axis_argument_layout, builtin_decl,
     builtin_env, prelude_adt_defs, realizability, shape_class,
 };
