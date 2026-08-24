@@ -4727,11 +4727,18 @@ pub(crate) fn schema_stage_check(
     result: std::result::Result<(), WireDagSchemaError>,
 ) -> Result<()> {
     result.map_err(|err| {
-        let WireDagSchemaError::UnknownSchemaVersion { found, supported } = err;
+        let (found, supported) = match &err {
+            WireDagSchemaError::MissingSchemaVersion { supported } => {
+                ("missing".to_string(), *supported)
+            }
+            WireDagSchemaError::UnsupportedSchemaVersion { found, supported } => {
+                (found.to_string(), *supported)
+            }
+        };
         let mut error = stage_error("schema", err.to_string(), GeneralKind::UnknownSchemaVersion);
         if let Some(diagnostic) = error.errors.first_mut() {
-            diagnostic.expected = Some(format!("schema_version <= {supported}"));
-            diagnostic.got = Some(found.to_string());
+            diagnostic.expected = Some(format!("schema_version = {supported}"));
+            diagnostic.got = Some(found);
         }
         error
     })
@@ -7676,12 +7683,22 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
     }
 
     #[test]
-    fn schema_stage_check_accepts_legacy_lower_version() {
-        // A strictly-lower (pre-versioning) payload is forward-compatible under
-        // the additive-default guarantee and must not be rejected.
+    fn schema_stage_check_rejects_legacy_lower_version() {
         let legacy = wire_dag_at_version(0);
-        schema_stage_check(legacy.validate_schema_version())
-            .expect("a lower-than-baseline version is accepted");
+        let error = schema_stage_check(legacy.validate_schema_version())
+            .expect_err("a lower-than-current version is rejected");
+        let diagnostic = &error.errors[0];
+        assert_eq!(diagnostic.got.as_deref(), Some("0"));
+        assert_eq!(
+            diagnostic.expected.as_deref(),
+            Some(
+                format!(
+                    "schema_version = {}",
+                    crate::schema::WIRE_DAG_SCHEMA_VERSION
+                )
+                .as_str()
+            )
+        );
     }
 
     #[test]
@@ -7709,7 +7726,7 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
             diagnostic.expected.as_deref(),
             Some(
                 format!(
-                    "schema_version <= {}",
+                    "schema_version = {}",
                     crate::schema::WIRE_DAG_SCHEMA_VERSION
                 )
                 .as_str()
