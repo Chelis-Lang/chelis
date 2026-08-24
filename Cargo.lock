@@ -557,6 +557,7 @@ dependencies = [
  "chelis-validate",
  "chelis-vocab",
  "half",
+ "proc-macro2",
  "schemars",
  "serde",
  "serde_json",

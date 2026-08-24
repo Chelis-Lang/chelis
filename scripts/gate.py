@@ -199,6 +199,28 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_pipeline_core_compile_fail.py",
 ]
+# The chelis#908 unrepresentable-domain oracle. #908's "Constraint on every
+# fix in this class" requires it to run in a continuous job: before this it
+# was invoked by no workflow and no gate stage, so the only thing exercising
+# it was its own unit tests, which patch the command runners and therefore
+# never ran the behavioral oracle against a compiled binary. Every obligation
+# it carries drives real compiled artifacts: the built `chelis` binary over
+# `.dp` fixtures, and compiled test binaries through `cargo nextest`.
+# Acceptance is exit 0 with a final `ORACLE: PASS` line.
+#
+# It belongs to the `integration` stage, not `lint-and-unit`, because those
+# compiled obligations need `cargo nextest`. The lint-and-unit job
+# deliberately does not install it (that absence is what makes
+# `test_nextest_profile_partition` self-skip there), while the integration
+# job installs it and has already built the workspace, so the oracle's two
+# `nextest run` calls and its `cargo build -p chelis-cli` are warm. The
+# sibling `Verify nextest profile coverage` step in that job is the same
+# disposition for the same reason. `--local` keeps it: a developer machine
+# running the gate already has nextest.
+UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/unrepresentable_domain_oracle.py",
+]
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
@@ -216,6 +238,7 @@ STAGES: dict[str, list[list[str]]] = {
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
+        UNREPRESENTABLE_DOMAIN_ORACLE,
     ],
 }
 
@@ -237,6 +260,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CHECKPOINT_COMPILE_FAIL,
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
+    UNREPRESENTABLE_DOMAIN_ORACLE,
 ]
 
 LOCAL_ANNOTATION = "local + ci"
@@ -443,14 +467,22 @@ def materialize_command(command: list[str], python: Path) -> list[str]:
 
 
 def full_command_list() -> list[list[str]]:
-    """The complete developer gate.
+    """The complete developer gate: every stage, in stage order.
 
     CI runs the same lint-and-unit list, but its integration stage uses the
     split `ci` profile and delegates two census binaries to the required dtype
-    oracle. The developer command uses the default profile so those tests stay
-    present without requiring a hosted-only parallel job.
+    oracle. The developer command substitutes the default profile so those
+    tests stay present without requiring a hosted-only parallel job. Every
+    other stage member is taken verbatim, so a command added to any stage
+    appears in `--list` without a second edit here.
     """
-    return [*STAGES["lint-and-unit"], NEXTEST_WORKSPACE]
+    commands: list[list[str]] = []
+    for stage in STAGE_ORDER:
+        for command in STAGES[stage]:
+            commands.append(
+                NEXTEST_WORKSPACE if command == NEXTEST_WORKSPACE_CI else command
+            )
+    return commands
 
 
 def render(command: list[str]) -> str:

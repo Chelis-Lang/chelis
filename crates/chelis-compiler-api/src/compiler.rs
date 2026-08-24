@@ -217,54 +217,26 @@ pub fn desugar(request: DesugarRequest) -> Result<DesugarResult> {
 pub fn replace_function_body(
     request: crate::schema::ReplaceFunctionBodyRequest,
 ) -> Result<crate::schema::ReplaceFunctionBodyResult> {
-    // The new body must be exactly one Deep expression. Zero or many is a
-    // parse-stage rejection, not a check failure.
-    let new_body_exprs =
-        chelis_deep::parser::parse_str_strict(&request.new_body).map_err(|err| {
-            stage_error_with_span(
-                "replace",
-                err.to_string(),
-                GeneralKind::DeepParseError,
-                parse_error_span_deep(&err),
-            )
-        })?;
-    let new_body = match new_body_exprs.as_slice() {
-        [single] => single,
-        other => {
-            return Err(stage_error(
-                "replace",
-                format!(
-                    "`new_body` must be exactly one Deep expression, got {}",
-                    other.len()
-                ),
-                GeneralKind::DeepParseError,
-            ));
-        }
-    };
+    // The new body must be exactly one Deep expression, stamped in the
+    // RuntimeExpr role it will occupy. Zero or many is a parse-stage
+    // rejection, not a check failure.
+    let new_body = parse_one_deep_runtime_expr("replace", "new_body", &request.new_body)?;
 
-    // The module is parsed strictly too: a malformed `.dp` is a parse error.
-    let module = chelis_deep::parser::parse_str_strict(&request.module).map_err(|err| {
-        stage_error_with_span(
-            "replace",
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })?;
+    // The module goes through the stamped `.dp` ingress too: a malformed or
+    // role-invalid `.dp` is a parse error.
+    let module = parse_deep_authoring_module("replace", &request.module)?;
 
     // Whole-module body-replacement check: full `chelis check` of the rewritten
     // module. On rejection the error is tagged by the failing pass; on success
     // the report carries the full rewritten module the verdict equals.
-    let report = crate::fragment::check_body_replacement(&module, &request.function_name, new_body)
-        .map_err(replacement_error_to_compiler_error)?;
+    let report =
+        crate::fragment::check_body_replacement(&module, &request.function_name, &new_body)
+            .map_err(replacement_error_to_compiler_error)?;
 
     // The single rewritten def, for `changed_def_deep`. `spliced_function_def`
     // returns just the one `(def ...)` node; print it on its own line.
-    let changed_def =
-        chelis_deep::spliced_function_def(&module, &request.function_name, new_body.clone())
-            .map_err(|err| {
-                stage_error("replace", err.to_string(), GeneralKind::NameResolutionError)
-            })?;
+    let changed_def = chelis_deep::spliced_function_def(&module, &request.function_name, new_body)
+        .map_err(|err| stage_error("replace", err.to_string(), GeneralKind::NameResolutionError))?;
 
     Ok(crate::schema::ReplaceFunctionBodyResult {
         changed_def_deep: chelis_deep::printer::print_expr(&changed_def),
@@ -281,24 +253,9 @@ pub fn replace_function_body(
 /// duplicate `defsig`, type errors, effects, and linearity violations are
 /// surfaced from that whole-module pipeline.
 pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
-    let module = chelis_deep::parser::parse_str_strict(&request.module).map_err(|err| {
-        stage_error_with_span(
-            "add-function",
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })?;
+    let module = parse_deep_authoring_module("add-function", &request.module)?;
 
-    let new_decl_exprs =
-        chelis_deep::parser::parse_str_strict(&request.new_decls).map_err(|err| {
-            stage_error_with_span(
-                "add-function",
-                err.to_string(),
-                GeneralKind::DeepParseError,
-                parse_error_span_deep(&err),
-            )
-        })?;
+    let new_decl_exprs = parse_deep_authoring_decls("add-function", &request.new_decls)?;
     let parsed = parse_add_function_decls(new_decl_exprs)?;
 
     let rewritten = chelis_deep::insert_function_decls(
@@ -319,7 +276,7 @@ pub fn add_function(request: AddFunctionRequest) -> Result<AddFunctionResult> {
 }
 
 pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
-    let module = parse_deep_authoring("deep-outline", &request.module)?;
+    let module = parse_deep_authoring_module("deep-outline", &request.module)?;
     let outline = chelis_deep::authoring::outline(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-outline", err))?;
     Ok(DeepOutlineResult {
@@ -346,7 +303,7 @@ pub fn deep_outline(request: DeepOutlineRequest) -> Result<DeepOutlineResult> {
 }
 
 pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesResult> {
-    let module = parse_deep_authoring("deep-references", &request.module)?;
+    let module = parse_deep_authoring_module("deep-references", &request.module)?;
     let refs = chelis_deep::authoring::references(&module, &request.symbol)
         .map_err(|err| authoring_error_to_compiler_error("deep-references", err))?;
     Ok(DeepReferencesResult {
@@ -360,7 +317,7 @@ pub fn deep_references(request: DeepReferencesRequest) -> Result<DeepReferencesR
 }
 
 pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphResult> {
-    let module = parse_deep_authoring("deep-call-graph", &request.module)?;
+    let module = parse_deep_authoring_module("deep-call-graph", &request.module)?;
     let graph = chelis_deep::authoring::call_graph(&module)
         .map_err(|err| authoring_error_to_compiler_error("deep-call-graph", err))?;
     Ok(DeepCallGraphResult {
@@ -369,13 +326,13 @@ pub fn deep_call_graph(request: DeepCallGraphRequest) -> Result<DeepCallGraphRes
 }
 
 pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFunctionResult> {
-    let module = parse_deep_authoring("replace-function", &request.module)?;
+    let module = parse_deep_authoring_module("replace-function", &request.module)?;
     check_preimage(
         &module,
         &request.function_name,
         request.preimage_sha256.as_deref(),
     )?;
-    let new_decls = parse_deep_authoring("replace-function", &request.new_decls)?;
+    let new_decls = parse_deep_authoring_decls("replace-function", &request.new_decls)?;
     let edited =
         chelis_deep::authoring::replace_function(&module, &request.function_name, &new_decls)
             .map_err(|err| authoring_error_to_compiler_error("replace-function", err))?;
@@ -392,7 +349,7 @@ pub fn replace_function(request: ReplaceFunctionRequest) -> Result<ReplaceFuncti
 }
 
 pub fn rename(request: RenameRequest) -> Result<RenameResult> {
-    let module = parse_deep_authoring("rename", &request.module)?;
+    let module = parse_deep_authoring_module("rename", &request.module)?;
     check_preimage(
         &module,
         &request.function_name,
@@ -415,16 +372,20 @@ pub fn rename(request: RenameRequest) -> Result<RenameResult> {
 }
 
 pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatureResult> {
-    let module = parse_deep_authoring("change-signature", &request.module)?;
+    let module = parse_deep_authoring_module("change-signature", &request.module)?;
     check_preimage(
         &module,
         &request.function_name,
         request.preimage_sha256.as_deref(),
     )?;
     let new_defsig =
-        parse_one_deep_authoring("change-signature", "new_defsig", &request.new_defsig)?;
-    let new_params =
-        parse_one_deep_authoring("change-signature", "new_params", &request.new_params)?;
+        parse_one_deep_authoring_decl("change-signature", "new_defsig", &request.new_defsig)?;
+    let new_params = parse_one_deep_authoring_tagged(
+        "change-signature",
+        "new_params",
+        &request.new_params,
+        DeepTag::Params,
+    )?;
     let param_renames: Vec<(String, String)> = request.param_renames.into_iter().collect();
     let edited = chelis_deep::authoring::change_signature(
         &module,
@@ -446,8 +407,8 @@ pub fn change_signature(request: ChangeSignatureRequest) -> Result<ChangeSignatu
 }
 
 pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
-    let module = parse_deep_authoring("add-property", &request.module)?;
-    let new_decl_exprs = parse_deep_authoring("add-property", &request.new_decls)?;
+    let module = parse_deep_authoring_module("add-property", &request.module)?;
+    let new_decl_exprs = parse_deep_authoring_decls("add-property", &request.new_decls)?;
     let parsed = parse_add_function_decls(new_decl_exprs)?;
     if !deep_def_has_role(&parsed.def, "property") {
         return Err(stage_error(
@@ -471,28 +432,81 @@ pub fn add_property(request: AddPropertyRequest) -> Result<AddPropertyResult> {
     })
 }
 
-fn parse_deep_authoring(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
-    chelis_deep::parser::parse_str_strict(source).map_err(|err| {
-        stage_error_with_span(
-            stage,
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })
+/// Stamped whole-module text ingress for the authoring APIs (chelis#1088).
+///
+/// A `module` field is a `.dp` program, so a top-level `(module ...)` wrapper
+/// and bare declarations are both admissible and nothing else is. The
+/// tag-vocabulary sweep that `parse_str_strict` used to supply is applied
+/// explicitly afterwards, so an authoring request naming an unknown tag is
+/// still rejected at its own boundary rather than reaching a rewriter.
+fn parse_deep_authoring_module(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
+    let exprs =
+        chelis_deep::parse_and_stamp_file(source).map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    Ok(exprs)
 }
 
-fn parse_one_deep_authoring(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
-    let exprs = parse_deep_authoring(stage, source)?;
-    match exprs.as_slice() {
-        [single] => Ok(single.clone()),
-        other => Err(stage_error(
+/// Stamped declaration-bundle text ingress for the authoring APIs
+/// (chelis#1088). Every top-level form must be a declaration.
+fn parse_deep_authoring_decls(stage: &str, source: &str) -> Result<Vec<DeepExpr>> {
+    let exprs =
+        chelis_deep::parse_and_stamp(source).map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    Ok(exprs)
+}
+
+/// Stamped ingress for a field whose contract names one exact Deep tag.
+fn parse_one_deep_authoring_tagged(
+    stage: &str,
+    field: &str,
+    source: &str,
+    expected: DeepTag,
+) -> Result<DeepExpr> {
+    let exprs = chelis_deep::parse_and_stamp_tagged(source, expected)
+        .map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    exactly_one_deep(stage, field, exprs)
+}
+
+/// Stamped ingress for a field that must be exactly one declaration.
+fn parse_one_deep_authoring_decl(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
+    let exprs = parse_deep_authoring_decls(stage, source)?;
+    exactly_one_deep(stage, field, exprs)
+}
+
+/// Stamped ingress for a field that must be exactly one runtime expression.
+fn parse_one_deep_runtime_expr(stage: &str, field: &str, source: &str) -> Result<DeepExpr> {
+    let exprs = chelis_deep::parse_and_stamp_runtime_exprs(source)
+        .map_err(|err| deep_ingress_error(stage, &err))?;
+    require_valid_deep(stage, &exprs)?;
+    exactly_one_deep(stage, field, exprs)
+}
+
+fn exactly_one_deep(stage: &str, field: &str, exprs: Vec<DeepExpr>) -> Result<DeepExpr> {
+    let count = exprs.len();
+    match exprs.into_iter().next() {
+        Some(single) if count == 1 => Ok(single),
+        _ => Err(stage_error(
             stage,
-            format!(
-                "`{field}` must be exactly one Deep expression, got {}",
-                other.len()
-            ),
+            format!("`{field}` must be exactly one Deep expression, got {count}"),
             GeneralKind::DeepParseError,
+        )),
+    }
+}
+
+/// Apply the Deep structural/vocabulary sweep the editing surfaces have
+/// always run, now on the stamped carrier.
+fn require_valid_deep(stage: &str, exprs: &[DeepExpr]) -> Result<()> {
+    match chelis_deep::validate::validate(exprs).into_iter().next() {
+        None => Ok(()),
+        Some(warning) => Err(stage_error_with_span(
+            stage,
+            warning.message,
+            GeneralKind::DeepParseError,
+            Some(Span {
+                offset: warning.offset,
+                len: 0,
+            }),
         )),
     }
 }
@@ -2691,12 +2705,7 @@ pub(crate) fn pipeline_rejection_to_compiler_error(
             )
         }
         PipelineRejection::Preparation(PreparationError::DeepParse(error)) => {
-            stage_error_with_span(
-                "parse",
-                error.to_string(),
-                GeneralKind::DeepParseError,
-                parse_error_span_deep(&error),
-            )
+            deep_ingress_error("parse", &error)
         }
         PipelineRejection::Preparation(PreparationError::Expansion(error)) => {
             stage_error("desugar", error.to_string(), GeneralKind::MacroError)
@@ -2900,15 +2909,33 @@ fn parse_surf(source: &str) -> Result<Vec<Decl>> {
     })
 }
 
+/// The generic Deep text ingress for `parse` and `decompile` (chelis#1088).
+///
+/// Routes through the stamped `.dp` ingress, so a top-level form that is
+/// neither a `(module ...)` wrapper nor a declaration is a loud ingress
+/// rejection instead of an untyped `Expr::BareList` the consumer has to
+/// re-diagnose. Tag-vocabulary validation is deliberately NOT applied here:
+/// an unknown head stays an `Expr::UnknownForm` so the wire AST preserves it
+/// and the checker owns the rejection.
 fn parse_deep(source: &str) -> Result<Vec<DeepExpr>> {
-    chelis_deep::parser::parse_str(source).map_err(|err| {
-        stage_error_with_span(
-            "parse",
-            err.to_string(),
-            GeneralKind::DeepParseError,
-            parse_error_span_deep(&err),
-        )
-    })
+    chelis_deep::parse_and_stamp_file(source).map_err(|err| deep_ingress_error("parse", &err))
+}
+
+/// Render a stamped-ingress failure as a staged compiler error.
+///
+/// Both halves are Deep ingress rejections, so both carry
+/// [`GeneralKind::DeepParseError`]; the stamp half contributes the exact
+/// offending span rather than the whole-input offset a re-wrapped parse
+/// error would report.
+fn deep_ingress_error(stage: &str, error: &chelis_deep::StampOrParseError) -> CompilerError {
+    let span = match error {
+        chelis_deep::StampOrParseError::Parse(parse_error) => parse_error_span_deep(parse_error),
+        chelis_deep::StampOrParseError::Stamp(stamp_error) => Some(Span {
+            offset: stamp_error.span.offset,
+            len: stamp_error.span.len,
+        }),
+    };
+    stage_error_with_span(stage, error.to_string(), GeneralKind::DeepParseError, span)
 }
 
 fn canonicalize_decompiled_surf(source: &str) -> Result<String> {
@@ -4900,12 +4927,42 @@ fn wire_deep_expr(expr: &DeepExpr) -> WireDeepExpr {
             },
             span: Some(span(*s)),
         },
-        DeepExpr::UnknownForm(data) => WireDeepExpr {
-            kind: WireDeepExprKind::List {
-                elements: data.children.iter().map(wire_deep_expr).collect(),
-            },
-            span: Some(span(data.span)),
-        },
+        DeepExpr::UnknownForm(data) => {
+            // Unknown forms retain the same canonical list-shaped wire
+            // representation as known nodes: head, metadata, then children.
+            // Dropping either of the first two elements erases the identity
+            // and diagnostic context that UnknownForm exists to preserve
+            // (chelis#1088; salvaged from PR #1036).
+            let wire_span = Some(span(data.span));
+            let mut elements = Vec::with_capacity(data.children.len() + 2);
+            elements.push(WireDeepExpr {
+                kind: WireDeepExprKind::Atom {
+                    atom: WireDeepAtom::Symbol {
+                        value: data.head.clone(),
+                    },
+                },
+                span: wire_span,
+            });
+            elements.push(WireDeepExpr {
+                kind: WireDeepExprKind::Map {
+                    entries: data
+                        .meta
+                        .entries
+                        .iter()
+                        .map(|(key, value)| WireMetaEntry {
+                            key: key.clone(),
+                            value: wire_deep_expr(value),
+                        })
+                        .collect(),
+                },
+                span: wire_span,
+            });
+            elements.extend(data.children.iter().map(wire_deep_expr));
+            WireDeepExpr {
+                kind: WireDeepExprKind::List { elements },
+                span: wire_span,
+            }
+        }
     }
 }
 
@@ -5152,8 +5209,12 @@ mod tests {
 
     #[test]
     fn decompile_maps_resugaring_rejection_to_the_validation_kind() {
+        // The unknown form sits at a RuntimeExpr slot, so the stamped ingress
+        // admits it as an `UnknownForm` and the resugaring boundary is what
+        // rejects it (chelis#1088 moved the top-level spelling of this input
+        // to an ingress rejection; see the sibling test below).
         let error = decompile(DecompileRequest {
-            source: "(future-form {} value)".to_string(),
+            source: "(def {} value (future-form {} 1))".to_string(),
         })
         .expect_err("an unknown Deep form must fail closed during resugaring");
 
@@ -5162,6 +5223,28 @@ mod tests {
         assert_eq!(
             error.errors[0].kind(),
             chelis_vocab::DiagnosticKind::ValidationError
+        );
+    }
+
+    #[test]
+    fn decompile_rejects_a_non_declaration_top_level_at_ingress() {
+        // chelis#1088: `decompile` shares the stamped `.dp` ingress, so a
+        // top-level form that is not a declaration never reaches resugaring.
+        let error = decompile(DecompileRequest {
+            source: "(future-form {} value)".to_string(),
+        })
+        .expect_err("a non-declaration top-level form must fail at ingress");
+
+        assert_eq!(error.stage, "parse");
+        assert_eq!(error.errors.len(), 1);
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::DeepParseError
+        );
+        assert!(
+            error.errors[0].message.contains("expected declaration"),
+            "{}",
+            error.errors[0].message
         );
     }
 

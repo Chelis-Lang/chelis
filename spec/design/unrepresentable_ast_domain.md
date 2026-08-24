@@ -415,8 +415,14 @@ This file. All design forks resolved before implementation.
 
 ### Task 9: Wire the Oracle
 
-- Python `scripts/unrepresentable_domain_oracle.py` (behavioral)
-- Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests)
+- Python `scripts/unrepresentable_domain_oracle.py` (behavioral) - the
+  authoritative oracle, run by `scripts/gate.py`'s `integration` stage
+  (hosted CI's `workspace-tests` job) and its `--local` subset, and locked
+  there by `scripts/test_gate.py`. Acceptance is exit 0 with a final
+  `ORACLE: PASS` line.
+- Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests).
+  These patch the command runners, so they are evidence about the script's
+  decision logic and never a substitute for running the oracle.
 - trybuild (Task 3): API surface
 - deny-lint (Tasks 6-8): exhaustiveness
 
@@ -446,5 +452,52 @@ This file. All design forks resolved before implementation.
   `(DeepTag, usize, usize)`.
 
 ## Amendments
+
+**2026-08-24 (chelis#1088), Task 7's compiler-api half and one stale
+evidence line.** Every public Deep text boundary in `chelis-compiler-api`
+now consumes the role-stamped carrier, each field stamped in the role it
+occupies: `parse_and_stamp_file` for a `.dp` program (the generic
+`parse`/`check`/`decompile` door, the `prepare_source` pipeline door, and
+every authoring `module` field), `parse_and_stamp` for a declaration
+bundle, `parse_and_stamp_runtime_exprs` for a replacement body, and
+`parse_and_stamp_tagged` for a field whose contract names one tag. The
+named non-compiler-API readers moved with it
+(`chelis-validate::validate_deep`, the `opaque-domain-construction` lint
+rule, `chelis-e2e`'s snippet checker, `chelis-lsp`'s Deep document
+analysis, and the `chelis-cli` style-gate fallback), so
+`parse_str`/`parse_str_strict` are test-only spellings in the workspace.
+
+The top-level rule this enforces is decided in the numbered spec, not
+here: `spec/03-deep-syntax.md` §7.1 [03-PROG-1] enumerates the admissible
+top-level forms, and [03-PROG-2] states the rejection contract. Chapter
+03's PEG previously read `Program <- Spacing Node+ EOF`, which imposed no
+top-level role restriction at all.
+
+**The oracle is `scripts/unrepresentable_domain_oracle.py`**, wired into
+`scripts/gate.py`'s `integration` stage and its `--local` pre-push subset.
+Hosted CI runs that stage in the `workspace-tests` job
+(`Workspace Tests (Linux)`), on every pull request that is not docs-only.
+That stage rather than `lint-and-unit` because two obligations run `cargo
+nextest`, which the lint-and-unit job deliberately does not install.
+Acceptance is exit 0 with a final `ORACLE: PASS` line. Its obligations cover the compiler-API ingress:
+obligation 3 drives [03-PROG-1] and [03-PROG-2] through the built `chelis`
+binary over `.dp` fixtures, and obligation 5 executes the compiled
+`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` parity suite.
+That Rust suite is evidence the oracle executes, not a second oracle;
+`scripts/test_gate.py` locks the wiring so a future CI edit cannot drop
+it silently.
+
+The Evidence Record line "Macros Surf-only: `.dp` path uses
+`parse_str_strict` which rejects unknown tags" states a true conclusion on
+a reason that no longer holds, and did not hold for the pipeline door even
+when it was written: the compile path's `.dp` ingress ran no
+tag-vocabulary sweep. The conclusion stands for a different reason. `.dp`
+ingress produces `PreparedProgram` without invoking
+`chelis_macros::expand_program`, which only `prepare_surf_decls` calls, so
+no `.dp` path runs expansion regardless of what its parser accepts. An
+unknown head below a declaration is deliberately preserved as
+`Expr::UnknownForm` on the generic parse door so the wire AST keeps its
+identity and the checker owns the rejection; the authoring doors keep the
+vocabulary sweep, so an unknown head still cannot reach a rewriter.
 
 (To be recorded here if implementation diverges from the above.)

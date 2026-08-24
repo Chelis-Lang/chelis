@@ -840,7 +840,11 @@ than quoting it, rewriting it, or emitting text with changed meaning.
 ## 7. Grammar (PEG)
 
 ```peg
-Program     ← Spacing Node+ EOF
+Program     ← Spacing TopLevelForm+ EOF
+TopLevelForm ← &('(' Spacing TopLevelTag) Node        # §7.1
+TopLevelTag ← ('module' / 'import-all' / 'import' / 'export'
+            / 'defsig' / 'deftype' / 'defdim' / 'def'
+            / 'typealias') ![a-z0-9-]                 # longest-first; tag must end here
 Node        ← '(' Spacing Tag Spacing Meta Spacing Children ')' Spacing
 Tag         ← [a-z] [a-z0-9-]*                    # lowercase, hyphens allowed (pat-var, t-fn, etc.)
 Meta        ← '{' Spacing (MetaPair (',' Spacing MetaPair)*)? '}'
@@ -871,6 +875,73 @@ Comment     ← ';' (![\n] .)*
 EOF         ← !.
 ```
 
+### 7.1 Top-Level Form
+
+A Deep program is a namespace, not an expression. Deep has no top-level
+evaluation position: a form at top level either introduces a name into the
+program's namespace or declares module structure, and there is no other
+position for it to occupy. A value produced at top level could not be named,
+given a signature, exported, selected as a root, lowered, or observed, so a
+program whose top level is an expression carries no content a consumer can
+act on.
+
+> **[03-PROG-1]** A Deep program SHALL consist of one or more top-level
+> forms. Each top-level form SHALL be a `module` node (§2.1) or a declaration
+> node whose tag is one of `def`, `defsig`, `deftype`, `typealias`, `defdim`,
+> `import`, `import-all`, or `export`. Every other top-level form SHALL be
+> rejected: an expression node, a pattern node, a type-expression or
+> dimension-expression node, a transform node, a helper node, a bare
+> identifier, a bare literal, an untagged list, and a node whose head is
+> outside the closed vocabulary (§2). `variant` and `field` are structural
+> children of `deftype` and `variant`; they bind nothing on their own and are
+> not top-level forms.
+
+The declarations a program contains are the children of its `module`
+wrappers together with its bare top-level declarations; a program MAY mix
+both spellings and MAY contain more than one `module` wrapper, subject to the
+one-wrapper-per-module-name rule in §2.1.
+
+Most of what [03-PROG-1] rejects is a list headed by a tag symbol, which the
+rejection can name. Some of it has no head at all: a bare identifier, a bare
+literal, an empty list, and a list whose first element is not a symbol are all
+[03-PROG-1] rejections with nothing to quote. Those forms are identified by
+syntactic class instead, from a closed set, so that a reader of the diagnostic
+always learns which form was rejected.
+
+> **[03-PROG-2]** A rejection under [03-PROG-1] SHALL identify the offending
+> form and SHALL carry that form's source location. A form headed by a symbol
+> SHALL be identified by that symbol. A form with no head SHALL be identified
+> by its syntactic class, which SHALL be exactly one of: a bare identifier, a
+> bare integer literal, a bare float literal, a bare string literal, a bare
+> boolean literal, an empty list, a list without a tag symbol, a metadata map,
+> or a metadata-annotated form. An implementation SHALL NOT substitute a
+> placeholder for either identification. The rejection SHALL be reported at
+> the ingress boundary that reads the program text, before name resolution,
+> type checking, evaluation, lowering, or resugaring observes the program. An
+> implementation SHALL NOT skip, ignore, or silently reinterpret a top-level
+> form that [03-PROG-1] rejects.
+
+[03-PROG-1] requires at least one top-level form, so text that yields none is
+rejected too. That rejection is the one case with no offending form to
+identify and no form location to carry, so the contract states its own shape
+rather than leaving an implementation to invent a placeholder.
+
+> **[03-PROG-3]** Program text that yields no top-level form SHALL be rejected
+> under [03-PROG-1]. Text yields no top-level form when it is empty, when it
+> is entirely whitespace, when it is entirely comments, or when it is any
+> combination of those. That rejection SHALL identify itself as an empty
+> program and SHALL carry the source position at which a top-level form was
+> required, which is the end of the input. It is otherwise subject to
+> [03-PROG-2]'s reporting rules.
+
+The class set is closed because it partitions what the grammar can produce in
+top-level position: `Child`'s three alternatives (`Node`, `BareName`,
+`Literal`) plus the metadata forms a producer may emit. A bare identifier is
+the `BareName` production, admissible inside `params`, `bind`, and `field`
+contexts (§7) and never at top level; the four literal classes are `Literal`'s
+alternatives, with `IntLit` and `FloatLit` distinguished because a producer's
+mistake is usually specific to one.
+
 ---
 
 ## 8. Validation Rules
@@ -878,6 +949,8 @@ EOF         ← !.
 ### 8.1 Structural Validation (Parser)
 - Every node is a 3-tuple: `(tag meta children...)`.
 - Tag is from the closed vocabulary (§2).
+- Every top-level form satisfies [03-PROG-1]; a violation is rejected per
+  [03-PROG-2].
 - Meta is a valid `{}` map (may be empty).
 - A colon-prefixed keyword token such as `:type` is metadata-key syntax, not
   an expression atom or node child. Outside metadata-key position, the parser
@@ -894,7 +967,7 @@ EOF         ← !.
   headers and binder context are not available to the syntax parser.
 
 ### 8.3 Unknown Tags
-Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score.
+Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score. This distinction applies below the top level; an unknown tag in top-level position is a [03-PROG-1] rejection in every mode, because no unknown head is one of the top-level forms that rule enumerates.
 
 ---
 

@@ -3,6 +3,9 @@
 #[rustfmt::skip]
 pub(crate) const REGISTERED_SPEC_ATOMS: &[&str] = &[
     "[01-CID-1]",
+    "[03-PROG-1]",
+    "[03-PROG-2]",
+    "[03-PROG-3]",
     "[04-ADT-1]",
     "[04-ADT-2]",
     "[04-DTYPE-1]",

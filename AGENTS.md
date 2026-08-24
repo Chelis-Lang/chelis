@@ -491,6 +491,7 @@ python3 scripts/gate.py --list
 # <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
 # <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
 # cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
+# <managed-python> scripts/unrepresentable_domain_oracle.py  # local + ci
 # # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
 
@@ -524,6 +525,21 @@ The checkpoint script checks the raw-offset fixture against exact Rust
 diagnostics. Its Python unit tests use fake runners and do not execute
 the fixture.
 
+`scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
+completion oracle, and the tracker requires every fix in that class to run
+it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
+line. Every obligation drives compiled artifacts: the built `chelis`
+binary over `.dp` fixtures, and compiled test binaries through `cargo
+nextest`. Its Python unit tests patch the command runners, so they are
+evidence about the script's decision logic and never a substitute for
+running it. It runs in the `integration` stage, which hosted CI executes
+in the `workspace-tests` job (`Workspace Tests (Linux)`) on every
+non-docs-only pull request, and in the `--local` pre-push subset. That
+stage, not `lint-and-unit`, because two of its obligations run `cargo
+nextest`, which the lint-and-unit job deliberately does not install.
+`scripts/test_gate.py` locks both memberships and the pairing between the
+oracle's stage and a nextest-installing job.
+
 Local pre-push gate (chelis#360):
 
 ```sh
@@ -532,7 +548,8 @@ python3 scripts/gate.py --local
 
 `--local` runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
---check .`, all three explicit rustdoc commands, the checkpoint fixture, and
+--check .`, all three explicit rustdoc commands, the checkpoint fixture,
+the chelis#908 unrepresentable-domain oracle, and
 `cargo nextest run -p <crate> --no-fail-fast` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the

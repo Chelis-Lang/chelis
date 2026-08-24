@@ -763,12 +763,48 @@ each direction, with a positive control that an unshadowed reference is
 still found and a tripwire that the read-only paths call no normalization
 helper.
 
-The *ingress* half is NOT discharged. The generic compiler API Deep path
-still uses `parse_str_strict`, not `parse_and_stamp_file` ([#1088] owns
-that migration); mutating authoring normalization remains active; and the
-legacy `List` variant and consumer bridge remain active. Phase 3 MUST NOT
-be called successor-accepted until those remaining §C4.2 ingress and
-deletion clauses are executable and green.
+**Ingress (2026-08-24, [#1088]).** The *ingress* half is discharged for
+the compiler API. Every public Deep text boundary in `chelis-compiler-api`
+consumes the role-stamped carrier, and each boundary names the role its
+field actually occupies: `parse_and_stamp_file` for a `.dp` program (the
+generic `parse`/`check`/`decompile`/pipeline door and every authoring
+`module` field), `parse_and_stamp` for a declaration bundle,
+`parse_and_stamp_runtime_exprs` for a replacement body, and
+`parse_and_stamp_tagged` for a field whose contract names one tag. The
+weaker `parse_str`/`parse_str_strict` doors, which stamped every top-level
+form as a bare/syntax position with no declaration requirement, are gone
+from the crate, and the named non-compiler-API stragglers
+(`chelis-validate::validate_deep`, the `opaque-domain-construction` lint
+rule, `chelis-e2e`'s snippet checker, and the `chelis-cli` style-gate
+fallback) moved with them. Two consequences are worth recording. A stamp
+rejection now carries the offending form's span instead of the
+whole-input offset a re-wrapped parse error reported. And
+`validate --deep` and `check` accept one Deep language: the AST leg of
+`validate_deep` used to skip its module-identity forgery checks silently
+whenever its own parse failed.
+
+The top-level rule this enforces is decided by the numbered spec:
+`spec/03-deep-syntax.md` §7.1 [03-PROG-1] enumerates the admissible
+top-level forms and [03-PROG-2] states the rejection contract.
+
+The authoritative oracle is [#908]'s
+`scripts/unrepresentable_domain_oracle.py`, run by `scripts/gate.py`'s
+`integration` stage (hosted CI's `workspace-tests` job, on every
+non-docs-only pull request) and by its `--local` pre-push subset. It executes
+`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` as one of its
+obligations; that suite is evidence, not a second oracle. The suite's
+parity table drives every module-text door over one shared accept/reject
+corpus, so the two strengths cannot silently reappear, and a structural
+guard over the workspace's production sources fails the build if any of
+them reaches a weaker Deep ingress again. The guard resolves `use`
+imports, renames, module aliases, and glob imports rather than matching
+source lines, because a line-substring guard is blind to exactly the
+alias a regression would introduce.
+
+Still open at §C4.2: mutating authoring normalization remains active, and
+the legacy `List` variant and consumer bridge remain active ([#1029], in
+turn blocked on [#1082]). Phase 3 MUST NOT be called successor-accepted
+until those remaining deletion clauses are executable and green.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
@@ -1207,6 +1243,8 @@ continuous-oracle guarantees.
 [#874]: https://github.com/Chelis-Lang/chelis/issues/874
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
+[#1029]: https://github.com/Chelis-Lang/chelis/issues/1029
+[#1082]: https://github.com/Chelis-Lang/chelis/issues/1082
 [#1088]: https://github.com/Chelis-Lang/chelis/issues/1088
 [#1131]: https://github.com/Chelis-Lang/chelis/issues/1131
 [#1147]: https://github.com/Chelis-Lang/chelis/issues/1147

@@ -189,8 +189,9 @@ class LocalCommandListTests(unittest.TestCase):
     def test_static_subset_has_the_exact_compile_time_contracts(self):
         # `cargo nextest` does not execute doctests. The static subset
         # drives the chelis#731 `ErrorWitness` contracts, the compiler
-        # pipeline artifact contracts, the raw-checkpoint fixture, and the
-        # two cheap pipeline-core boundary guards (dependency + no_std doc).
+        # pipeline artifact contracts, the raw-checkpoint fixture, the
+        # two cheap pipeline-core boundary guards (dependency + no_std doc),
+        # and the chelis#908 unrepresentable-domain oracle.
         # Assert the exact list so no pre-push stage disappears silently.
         rendered = [gate.render(c) for c in gate.local_command_list([])]
         self.assertEqual(
@@ -206,6 +207,7 @@ class LocalCommandListTests(unittest.TestCase):
                 "<managed-python> scripts/check_checkpoint_compile_fail.py",
                 "<managed-python> scripts/pipeline_core_dependency_guard.py",
                 "<managed-python> scripts/pipeline_core_documentation_guard.py",
+                "<managed-python> scripts/unrepresentable_domain_oracle.py",
             ],
         )
 
