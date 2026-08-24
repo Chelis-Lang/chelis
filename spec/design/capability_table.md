@@ -364,15 +364,19 @@ Phase 4 deliberately separates authoring from generated consumption:
   registry before machine population. The authoritative
   oracle is `.venv/bin/python scripts/dtype_phase4b_oracle.py`, whose success
   line is `DTYPE PHASE 4B ORACLE: PASS`.
-- **Pre-4C - exact builtin-atom closure ([#1294]).** Discover every
-  `BuiltinDecl` domain and finite case, author every missing exact
+- **Pre-4C - exact builtin-atom closure ([#1294]).** Introduce the closed
+  builtin domain/case declaration types, attach a non-empty exhaustive
+  declaration to every `BuiltinDecl`, discover every declared domain and
+  finite case, author every missing exact
   `[05-OP-N]` authority, and prove a total bijection for every Table-A and
   sibling-builtin identity. The authoritative oracle is
   `.venv/bin/python scripts/dtype_builtin_atom_closure_oracle.py`, whose
   success line is `DTYPE BUILTIN ATOM CLOSURE ORACLE: PASS`. It admits no
   count allowlist, unnumbered authority, issue citation, default, alias, age,
   or compatibility exception. It must be green and merged before any Phase
-  4C key/cell type, macro, or row lands.
+  4C key/cell type, macro, or row lands. The domain and case declarations
+  themselves are [#1294] prerequisite artifacts; they are discovery metadata,
+  not Table-A/Table-B cells.
 - **Pre-4C - composite executable gate ([#1296]).** Wire the exact child
   behavior, storage, census, and atom-closure oracles into
   `.venv/bin/python scripts/dtype_pre_phase4c_oracle.py`. Its success line is
@@ -381,8 +385,8 @@ Phase 4 deliberately separates authoring from generated consumption:
   gate and is the only Phase 4C entry receipt.
 - **4C - machine authority population.** Add the closed key/cell types and
   compact authoring macros in `chelis-types`; expand them into a complete machine
-  table; give every `BuiltinDecl` an exhaustive domain declaration; populate
-  Tables A/B, the host primitive-leaf and constructor tables, sibling
+  table; consume every already-exhaustive `BuiltinDecl` domain/case declaration;
+  populate Tables A/B, the host primitive-leaf and constructor tables, sibling
   container/boundary
   registries, external target dispositions, and exact effect-disposition
   rows; and consume [#1294]'s already complete atom membership. Compact macros are an

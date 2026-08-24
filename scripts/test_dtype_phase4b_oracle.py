@@ -2553,6 +2553,36 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("sibling registry key")
 
+    def test_atom_closure_declares_builtin_domains_before_phase4c(self) -> None:
+        path = self.root / "spec/design/dtype_semantics.md"
+        original = path.read_text(encoding="utf-8")
+        old = (
+            "[#1294] first introduces the closed builtin domain/case declaration "
+            "types and\nattaches a non-empty exhaustive declaration to every "
+            "`BuiltinDecl`"
+        )
+        self.assertIn(old, original)
+        path.write_text(
+            original.replace(
+                old,
+                "Phase 4C may infer missing builtin domains from implementation code",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        try:
+            self.assert_contract_fails("pre-4C builtin domain declarations")
+        finally:
+            path.write_text(original, encoding="utf-8")
+
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "The domain and case declarations\n  themselves are [#1294] prerequisite "
+            "artifacts",
+            "Phase 4C invents the domain and case declarations while populating rows",
+        )
+        self.assert_contract_fails("capability pre-4C builtin declarations")
+
     def test_sibling_backend_product_is_required(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
@@ -2701,10 +2731,10 @@ class ContractValidationTests(unittest.TestCase):
                 "precedes every partial Phase 4C mechanism",
             ),
             (
-                "discovers the union of every canonical Table-A IR/RISC operation\n"
-                "identity and every `BuiltinDecl` sibling domain/case, then proves an "
-                "exact\nbijection from every Table-A and sibling-builtin identity to "
-                "one\nsemantically governing normative `[05-OP-N]` line",
+                "discovers the union of every canonical Table-A IR/RISC operation "
+                "identity and\nevery declared `BuiltinDecl` sibling domain/case and "
+                "proves an exact\nbijection from every Table-A and sibling-builtin "
+                "identity to one\nsemantically governing normative `[05-OP-N]` line",
                 "samples common BuiltinDecl cases and reports their nearest prose",
                 "total exact builtin-atom bijection",
             ),

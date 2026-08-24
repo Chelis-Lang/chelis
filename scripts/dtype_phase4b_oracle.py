@@ -56,10 +56,10 @@ FROZEN_FILE_DIGESTS = {
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "fc427889394a90fd849dd7c53b41ed4d2ba08bbbe6963492c7c71239f1ce97f9"
+        "a643bf65a28072265536030b36c9b123ecfb8e8b2f392e0b5181ab818891c2d7"
     ),
     "spec/design/dtype_semantics.md": (
-        "f3facdd47883bc56d4d45ab90b81fca05d14d8c142eba48a3c1babcfd1732270"
+        "ef88527c6212ce1402e8196093ef3588f5234a77443e28acab4a94f9636538ab"
     ),
     "spec/design/loud_unsupported.md": (
         "146cca6092dac7fd60c83bc4e519f653a07bfeee0a6fab385669e27f731f313e"
@@ -404,7 +404,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## The two-table design",
         "## Seed dispositions the table must ship with",
-        "67a8e811d680e50eea19cb741b94ba7b2f7e41f5509e69f6914b3fb8d9a49205",
+        "5c73ae55be30692ffbb88f37be36ec3ac27389fa1784773240fc3ab22363d7a8",
     ),
     "capability seed dispositions": (
         "spec/design/capability_table.md",
@@ -416,7 +416,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "9e3c9e6f5b33151a6f121d030e011fba3e90803494f145365bbbef09a0a32bff",
+        "028a4114bf4b0219680b1125d6e349f5b518f27ceef12cf7e3a0359d85d4daed",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -1888,6 +1888,11 @@ def validate_schema_and_consumers(
                 "survives",
                 "recursive to_string full domain",
             ),
+            (
+                "The domain and case declarations\n  themselves are [#1294] "
+                "prerequisite artifacts",
+                "capability pre-4C builtin declarations",
+            ),
             ("invokes the 4B, 4C, and 4D oracles", "nested Phase 4B oracle"),
         ),
         violations,
@@ -1956,10 +1961,16 @@ def validate_schema_and_consumers(
                 "atom closure precedes every partial Phase 4C mechanism",
             ),
             (
-                "discovers the union of every canonical Table-A IR/RISC operation\n"
-                "identity and every `BuiltinDecl` sibling domain/case, then proves an "
-                "exact\nbijection from every Table-A and sibling-builtin identity to "
-                "one\nsemantically governing normative `[05-OP-N]` line",
+                "[#1294] first introduces the closed builtin domain/case declaration "
+                "types and\nattaches a non-empty exhaustive declaration to every "
+                "`BuiltinDecl`",
+                "pre-4C builtin domain declarations",
+            ),
+            (
+                "discovers the union of every canonical Table-A IR/RISC operation "
+                "identity and\nevery declared `BuiltinDecl` sibling domain/case and "
+                "proves an exact\nbijection from every Table-A and sibling-builtin "
+                "identity to one\nsemantically governing normative `[05-OP-N]` line",
                 "total exact builtin-atom bijection",
             ),
             (

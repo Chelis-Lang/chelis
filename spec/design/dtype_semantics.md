@@ -1690,8 +1690,10 @@ Its success proves this freeze, not complete builtin-atom closure or any Phase
 ### Pre-4C - exact builtin-atom closure ([#1294])
 
 Before any Phase 4C key/cell type, authoring macro, or partial machine row may
-land, [#1294] discovers the union of every canonical Table-A IR/RISC operation
-identity and every `BuiltinDecl` sibling domain/case, then proves an exact
+land, [#1294] first introduces the closed builtin domain/case declaration types and
+attaches a non-empty exhaustive declaration to every `BuiltinDecl`. It then
+discovers the union of every canonical Table-A IR/RISC operation identity and
+every declared `BuiltinDecl` sibling domain/case and proves an exact
 bijection from every Table-A and sibling-builtin identity to one
 semantically governing normative `[05-OP-N]` line. It authors every missing
 atom, regenerates the rejection registry, and admits no count allowlist,
@@ -1878,7 +1880,7 @@ updates this section, `loud_unsupported.md` §I1, and
 | 2 | [#680], [#688], [#711], [#718] eval cells, [#722] eval half |
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
 | 4A-4B | §C6 capacity detection; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions; [05-OP-29] first-class `count` authority; canonical reduction-order authority; WireDag v6 schema freeze |
-| pre-4C authority and executable closure | [#1294] exact `[05-OP-N]` authority for every discovered Table-A IR/RISC operation and sibling-builtin identity; [#1296] one normal-gate composite over every prerequisite oracle and structural mutation; no machine type, macro, or row may land first |
+| pre-4C authority and executable closure | [#1294] closed exhaustive `BuiltinDecl` domain/case declarations plus exact `[05-OP-N]` authority for every discovered Table-A IR/RISC operation and sibling-builtin identity; [#1296] one normal-gate composite over every prerequisite oracle and structural mutation; no machine key/cell type, authoring macro, or row may land first |
 | v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] recursive `to_string` domain; [#1059] compiled recursive rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287]/[#1291] exact-only WireDag v6 plus first-class count delivery; [#1292] own-width tensor-close assertions; [#1293] the exact 83-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions |
 | 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] delivered the internal typed Pad carrier but not the exact-only v6 break owned by [#1287]; [#937] delivered the earlier f64 sampler repair but [#1295] owns the final same-dtype parameter contract; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
