@@ -238,7 +238,7 @@ class ContractValidationTests(unittest.TestCase):
             (
                 "| `f16` | exact decimal rounding of the exact binary value, one final "
                 "rounding to f16 | `f16` |",
-                "| `f16` | type error | — |",
+                "| `f16` | type error | n/a |",
                 "f16",
             ),
             (
@@ -252,7 +252,7 @@ class ContractValidationTests(unittest.TestCase):
                 "own storage width",
             ),
             (
-                "| integer, bool, tensor | type error | — |",
+                "| integer, bool, tensor | type error | n/a |",
                 "| integer, bool, tensor | convert to f64 | `f64` |",
                 "type error",
             ),
@@ -933,7 +933,7 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "Each exact [05-OP-36] identity —\n"
+                "Each exact [05-OP-36] identity:\n"
                 "`cmplt`, `lt`, `eq`, `neq`, `gt`, `gte`, and `lte`",
                 "Only cmplt and lt",
                 "comparison AD identity completeness",

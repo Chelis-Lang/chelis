@@ -1415,7 +1415,7 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > | `f32` | exact decimal rounding of the exact binary value, one final rounding to f32 | `f32` |
 > | `f16` | exact decimal rounding of the exact binary value, one final rounding to f16 | `f16` |
 > | `bf16` | exact decimal rounding of the exact binary value, one final rounding to bf16 | `bf16` |
-> | integer, bool, tensor | type error | — |
+> | integer, bool, tensor | type error | n/a |
 >
 > No lane may compute an operand at any width other than the operand's
 > own ([04-NUM-8]; the decimal rounding itself is exact, so the single
@@ -2549,7 +2549,7 @@ Every numeric callable states one of three contracts: an adjoint, a zero
 cotangent, or a structural `grad` rejection. No operation acquires an adjoint
 from a backend fallback.
 
-**Zero-cotangent predicates and sources.** Each exact [05-OP-36] identity —
+**Zero-cotangent predicates and sources.** Each exact [05-OP-36] identity:
 `cmplt`, `lt`, `eq`, `neq`, `gt`, `gte`, and `lte` — together with `is_nan`,
 `is_finite`, `is_infinite`, `const`, `load`, and `shape` contributes zero
 cotangent. This permits a predicate or metadata read to participate in a

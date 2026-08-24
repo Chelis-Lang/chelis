@@ -50,7 +50,7 @@ FROZEN_FILE_DIGESTS = {
         "a268d9702c77019a5845d274eaaff93434753bec94ce7798daae7636da3a3a3b"
     ),
     "spec/05-risc-primitives.md": (
-        "1cbf703fd818d5166b986138cfcb1d5b145b2edb38c3d1c343cbda89d7700650"
+        "13183ec5da6461758a5de262fa9db0a62327e68a4abd4aaf1ff30c3ea41ad990"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
@@ -312,7 +312,7 @@ FROZEN_ATOM_DIGESTS = {
     "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
     "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
     "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
-    "05-OP-1": "1050bbaea2e77d5eb5033b9c4ee7e97bd44d694c08ba4ede3f6a714c07839ace",
+    "05-OP-1": "c2fb6c19db7ada4f86af7436f4f531ee0adb1395c7080ea94b25fe2e0f0b8d6c",
     "05-OP-2": "eec48a56a7d47470f2ace881942927e9c0d47a5948c41f1ec8249b4c6a0d5eb6",
     "05-OP-3": "29e167f8d5fcdefa3141cda1edd6a3c32a4556f8ba29b398c4917e1c160b6ac0",
     "05-OP-4": "4f1e257aa0f5f7a9b80aac4b5d74a59cc5c93593074d14baea600dea86be0c85",
@@ -929,7 +929,7 @@ def validate_normative_contract(
             "rounding to f16 | `f16` |",
             "| `bf16` | exact decimal rounding of the exact binary value, one final "
             "rounding to bf16 | `bf16` |",
-            "| integer, bool, tensor | type error | — |",
+            "| integer, bool, tensor | type error | n/a |",
             "piecewise constant",
             "structurally rejected with `AdRejectionReason::PiecewiseConstant`",
             "rather than receiving a silent zero cotangent",
@@ -1725,7 +1725,7 @@ def validate_normative_contract(
                 "window extrema NaN adjoint",
             ),
             (
-                "Each exact [05-OP-36] identity —\n`cmplt`, `lt`, `eq`, `neq`, `gt`, "
+                "Each exact [05-OP-36] identity:\n`cmplt`, `lt`, `eq`, `neq`, `gt`, "
                 "`gte`, and `lte`",
                 "comparison AD identity completeness",
             ),
