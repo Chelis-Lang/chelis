@@ -21,97 +21,336 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PASS_LINE = "DTYPE PHASE 4B ORACLE: PASS"
 CONTRACT_FILES = (
+    "AGENTS.md",
     "spec/02-surf-syntax.md",
     "spec/03-deep-syntax.md",
     "spec/04-type-system.md",
     "spec/05-risc-primitives.md",
+    "spec/06-transformations.md",
+    "spec/10-serialization.md",
     "spec/design/capability_table.md",
     "spec/design/dtype_semantics.md",
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
     "spec/design/remediation_roadmap.md",
     "docs/investigations/remediation_status_2026_08_04.md",
+    "openspec/specs/risc-primitives/spec.md",
+    "openspec/specs/serialization/spec.md",
+    "openspec/specs/transformations/spec.md",
+    "openspec/specs/type-system/spec.md",
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
-        "011dfa865ff468dc6de6d8dcc43a02e95725c2d9e699546924d28d27bdd5012f"
+        "15e690f490c57d1a5a9629f87901900accb07ae14f7ec83d22195eea1d26904c"
     ),
     "spec/03-deep-syntax.md": (
-        "18a9cc5d9e90f0bc7453c94232ec170a90ce090a367b5bb69860d1cb2551b58f"
+        "d3ff8af2d85519ea71a48c84f05a1a230b20b6d4700d26d28912bc6a57ff2590"
     ),
     "spec/04-type-system.md": (
-        "c8f6deaee995ab41d7d606e9e4d577c30cc8eaf002cb00184db748e93e6bab9f"
+        "a268d9702c77019a5845d274eaaff93434753bec94ce7798daae7636da3a3a3b"
     ),
     "spec/05-risc-primitives.md": (
-        "87fea2e2fe76739d76f1f8a082424e481b05bf6ec41b08057db96e8618b6193d"
+        "1cbf703fd818d5166b986138cfcb1d5b145b2edb38c3d1c343cbda89d7700650"
+    ),
+    "spec/10-serialization.md": (
+        "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "88e13a4608baf5f1d449f32279f2dd9f295ccd3e980f7d462fbd2faf6176b557"
+        "fc427889394a90fd849dd7c53b41ed4d2ba08bbbe6963492c7c71239f1ce97f9"
     ),
     "spec/design/dtype_semantics.md": (
-        "7f4ae29cdc401316530d28cb160c112b3f1fbf23ae8318afc41009779f9770b8"
+        "f3facdd47883bc56d4d45ab90b81fca05d14d8c142eba48a3c1babcfd1732270"
     ),
     "spec/design/loud_unsupported.md": (
-        "08495fb167ec4a9f8202693d22b58aa2ada1a8f08c8cf58cfe1f31a1f4b6d6a9"
+        "146cca6092dac7fd60c83bc4e519f653a07bfeee0a6fab385669e27f731f313e"
     ),
     "spec/design/spec_provenance.md": (
         "a2a84ab3a4d2925fc7a79f482e296eb979aadc24a0ebf21872c1fb257f7ea3fe"
     ),
-    "spec/design/remediation_roadmap.md": (
-        "a309cae616c4e818a4f12fe453f7843912ee92da861eb3cc00bdff6047bd9755"
+    "openspec/specs/risc-primitives/spec.md": (
+        "f5e8a69a378285fcd2dec6966bcaf570893ade0aca1488967512f9bff099f5ca"
     ),
-    "docs/investigations/remediation_status_2026_08_04.md": (
-        "e298ec213b843739f2a16ad6bdcaf672f4fce420dd6b2bebcaba48d567b87243"
+    "openspec/specs/serialization/spec.md": (
+        "ef0139de7e1da5ec986ec5ec4bfb12710a5cee8e77e9c91840d478404907b5ed"
+    ),
+    "openspec/specs/transformations/spec.md": (
+        "c7b76d7749c930bf8beadf0663fd542c1d675ab6e503455bc32f2f00f25f1e57"
+    ),
+    "openspec/specs/type-system/spec.md": (
+        "91dd50f8eb408f3eab0881f6be405a1fba0d4c1f2eb9dd18b5b40f953bff385f"
     ),
 }
-OP_ATOM = re.compile(
-    r"^> \*\*\[05-OP-(\d+)\]\*\* `([a-z0-9_]+)", re.MULTILINE
-)
+OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
 ATOM_START = re.compile(
     r"^> \*\*\[(\d{2}-[A-Z]+-\d+)\]\*\*", re.MULTILINE
 )
-EXPECTED_PHASE4B_OPS = {
-    11: "mean",
-    12: "max_reduce",
-    13: "min_reduce",
-    14: "prod_reduce",
-    15: "argmax_reduce",
-    16: "argmin_reduce",
-    17: "wrap_add",
-    18: "wrap_sub",
-    19: "wrap_mul",
-    20: "is_nan",
-    21: "is_finite",
-    22: "is_infinite",
-    23: "cast_saturate",
-    24: "cast_wrap",
-    25: "to_string",
-    26: "and",
-    27: "or",
-    28: "not",
+EXPECTED_PHASE4B_OP_HEADINGS = {
+    1: "`round_to(x, places) -> r`",
+    2: "Ingestion preserves",
+    3: "`io/json::json_int`",
+    4: "`JsonFloat(value)`",
+    5: "`io/json::to_json`",
+    6: "`cast_trunc(source, target)`",
+    7: "The runtime extent read",
+    8: "`uniform_like(template, low, high) -> result`",
+    9: "`pad_sequences(sequences: List[List[T]], pad: T) ->",
+    10: "`pad_sequences_to(sequences: List[List[T]], width: int64,",
+    11: "`mean(x, axes...) -> result`",
+    12: "`max_reduce(x, axes...) -> result`",
+    13: "`min_reduce(x, axes...) -> result`",
+    14: "`prod_reduce(x, axes...) -> result`",
+    15: "`argmax_reduce(x, axis) -> result`",
+    16: "`argmin_reduce(x, axis) -> result`",
+    17: "`wrap_add(left, right) -> result`",
+    18: "`wrap_sub(left, right) -> result`",
+    19: "`wrap_mul(left, right) -> result`",
+    20: "`is_nan(x) -> result`",
+    21: "`is_finite(x) -> result`",
+    22: "`is_infinite(x) -> result`",
+    23: "`cast_saturate(source, target) -> result`",
+    24: "`cast_wrap(source, target) -> result`",
+    25: "`to_string(value) -> result`",
+    26: "`and(left, right) -> result`",
+    27: "`or(left, right) -> result`",
+    28: "`not(value) -> result`",
+    29: "`count(x, axes...) -> result`",
+    30: "`sum(x, axes..., accumulator = default(p)) -> result`",
+    31: "`scalar_carrier(value) -> result`",
+    32: "`shape_index(container, parameters...) -> result`",
+    33: "`runtime_tensor(value, parameters...) -> result`",
+    34: "`numeric_adt(fields...) -> value`",
+    35: "`stdlib_numeric_def(arguments...) -> result`",
+    36: "`comparison(left, right) -> result`",
+    37: "`dropout(input, rate) -> result`",
+    38: "`host_numeric_builtin(arguments...) -> result`",
+    39: "`window_reduction(arguments...) -> result`",
+}
+
+# These are independent, executable copies of the exact normative manifests.
+# The full-file and atom digests below make additive prose tamper-evident, while
+# these rows make a missing, renamed, duplicated, or retyped callable explain
+# itself as a manifest failure rather than only as an opaque hash mismatch.
+EXPECTED_OP_MANIFESTS = {
+    "05-OP-31": tuple(
+        """\
+> | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
+> | scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
+> | value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
+> | value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
+> | rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
+> | rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
+> | tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
+> | scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
+> | scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
+> | exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |""".splitlines()
+    ),
+    "05-OP-32": tuple(
+        """\
+> | string length | `int64_t chelis_string_len(chelis_string value)` |
+> | string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
+> | list length | `int64_t chelis_list_len(const chelis_list *list)` |
+> | list construction | `chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)` |
+> | list index | `chelis_value chelis_list_index(const chelis_list *list, int64_t index)` |
+> | list take | `chelis_list *chelis_list_take(const chelis_list *list, int64_t count)` |
+> | list drop | `chelis_list *chelis_list_drop(const chelis_list *list, int64_t count)` |
+> | list chunk | `chelis_list *chelis_list_chunk(const chelis_list *list, int64_t size)` |
+> | integer range | `chelis_list *chelis_range_i64(int64_t start, int64_t end)` |
+> | list enumerate | `chelis_list *chelis_list_enumerate(const chelis_list *list)` |
+> | tuple length | `int64_t chelis_tuple_len(const chelis_tuple *tuple)` |
+> | tuple construction | `chelis_tuple *chelis_tuple_from_values(const chelis_value *items, int64_t len)` |
+> | tuple index | `chelis_value chelis_tuple_get(const chelis_tuple *tuple, int64_t index)` |
+> | ADT construction | `chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len)` |
+> | ADT field count | `int64_t chelis_adt_field_count(const chelis_adt *adt)` |
+> | ADT field index | `chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index)` |
+> | dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
+> | dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
+> | dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
+> | dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
+> | dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
+> | dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
+> | dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |
+> | byte-file read | `chelis_list *chelis_read_bytes(chelis_string path)` |
+> | mapped byte read | `chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)` |
+> | mapped byte length | `int64_t chelis_mmap_len(const chelis_mapped_file *mapped)` |
+> | list print | `void chelis_print_list(const chelis_list *list)` |
+> | tuple print | `void chelis_print_tuple(const chelis_tuple *tuple)` |
+> | dictionary print | `void chelis_print_dict(const chelis_dict *dict)` |
+> | ADT print | `void chelis_print_adt(const chelis_adt *adt)` |""".splitlines()
+    ),
+    "05-OP-33": tuple(
+        """\
+> | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
+> | borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
+> | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
+> | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
+> | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
+> | contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
+> | typed list ingress | `chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype)` |
+> | row-major element egress | `chelis_list *chelis_tensor_elements(const chelis_tensor *tensor)` |
+> | inferred-width padding | `chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value)` |
+> | fixed-width padding | `chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value)` |
+> | concatenate | `chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis)` |
+> | split | `chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes)` |
+> | gather | `chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int32_t axis)` |
+> | replace scatter | `chelis_tensor *chelis_tensor_scatter_replace(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
+> | additive scatter | `chelis_tensor *chelis_tensor_scatter_add(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
+> | comparison | `chelis_tensor *chelis_tensor_cmplt(const chelis_tensor *left, const chelis_tensor *right)` |
+> | selection | `chelis_tensor *chelis_tensor_where(const chelis_tensor *condition, const chelis_tensor *then_tensor, const chelis_tensor *else_tensor)` |
+> | inclusive prefix sum | `chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int32_t axis)` |
+> | stable sort | `chelis_tuple *chelis_tensor_sort(const chelis_tensor *tensor, int32_t axis)` |
+> | diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
+> | trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
+> | clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
+> | contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |""".splitlines()
+    ),
+    "05-OP-34": tuple(
+        """\
+> | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+> | `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
+> | `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
+> | `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
+> | `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |""".splitlines()
+    ),
+    "05-OP-35": tuple(
+        """\
+> | 1 | `contracts::normal_cdf` | `(p_float)->p_float` |
+> | 2 | `contracts::normal_cdf_contract_samples` | `()->int64` |
+> | 3 | `contracts::normal_cdf_contract_seed` | `()->int64` |
+> | 4 | `contracts::standard_contract_tolerance` | `()->f32` |
+> | 5 | `decimal::decimal` | `(string)->Decimal` |
+> | 6 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
+> | 7 | `decimal::decimal_div` | `(Decimal,Decimal,int64,RoundingMode)->Decimal` |
+> | 8 | `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
+> | 9 | `decimal::decimal_from_int` | `(int64)->Decimal` |
+> | 10 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
+> | 11 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
+> | 12 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
+> | 13 | `decimal::decimal_lte` | `(Decimal,Decimal)->bool` |
+> | 14 | `decimal::decimal_mul` | `(Decimal,Decimal)->Decimal` |
+> | 15 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
+> | 16 | `decimal::decimal_to_float` | `(Decimal)->f64` |
+> | 17 | `decimal::decimal_to_string` | `(Decimal)->string` |
+> | 18 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
+> | 19 | `index::drop_list` | `(List[T],int64)->List[T]` |
+> | 20 | `index::list_index` | `(List[T],int64)->T` |
+> | 21 | `index::take_list` | `(List[T],int64)->List[T]` |
+> | 22 | `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
+> | 23 | `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
+> | 24 | `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+> | 25 | `init/xavierext::trunc_normal` | `(&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]!{Random}` |
+> | 26 | `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+> | 27 | `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+> | 28 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
+> | 29 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
+> | 30 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
+> | 31 | `io/json::json_get` | `(Json,string)->Option[Json]` |
+> | 32 | `io/json::json_int` | `(Option[Json])->Option[int64]` |
+> | 33 | `io/json::json_is_null` | `(Option[Json])->bool` |
+> | 34 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
+> | 35 | `io/json::json_string` | `(Option[Json])->Option[string]` |
+> | 36 | `io/json::load_json` | `(string)->Json!{IO}` |
+> | 37 | `io/json::parse_json` | `(string)->Json` |
+> | 38 | `io/json::to_json` | `(Json)->string` |
+> | 39 | `io/json::try_load_json` | `(string)->Option[Json]!{IO}` |
+> | 40 | `io/json::try_parse_json` | `(string)->Option[Json]` |
+> | 41 | `io/json::try_to_json` | `(Json)->Option[string]` |
+> | 42 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
+> | 43 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
+> | 44 | `io::mmap_size` | `(string)->int64!{IO}` |
+> | 45 | `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
+> | 46 | `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
+> | 47 | `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
+> | 48 | `scalar::abs` | `(p_numeric)->p_numeric` |
+> | 49 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
+> | 50 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
+> | 51 | `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
+> | 52 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
+> | 53 | `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
+> | 54 | `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
+> | 55 | `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
+> | 56 | `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
+> | 57 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
+> | 58 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
+> | 59 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
+> | 60 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
+> | 61 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
+> | 62 | `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
+> | 63 | `time::add_days` | `(Date,int64)->Date` |
+> | 64 | `time::date` | `(int64,int64,int64)->Date` |
+> | 65 | `time::date_gt` | `(Date,Date)->bool` |
+> | 66 | `time::date_gte` | `(Date,Date)->bool` |
+> | 67 | `time::date_lt` | `(Date,Date)->bool` |
+> | 68 | `time::date_lte` | `(Date,Date)->bool` |
+> | 69 | `time::date_to_string` | `(Date)->string` |
+> | 70 | `time::day_of_week` | `(Date)->DayOfWeek` |
+> | 71 | `time::day_of_week_name` | `(Date)->string` |
+> | 72 | `time::day_of_year` | `(Date)->int64` |
+> | 73 | `time::days_between` | `(Date,Date)->int64` |
+> | 74 | `time::duration` | `(int64,int64,int64,int64)->Duration` |
+> | 75 | `time::is_leap_year` | `(int64)->bool` |
+> | 76 | `time::parse_date` | `(string)->Option[Date]` |
+> | 77 | `time::sub_days` | `(Date,int64)->Date` |
+> | 78 | `time::try_date` | `(int64,int64,int64)->Option[Date]` |
+> | 79 | `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
+> | 80 | `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
+> | 81 | `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
+> | 82 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
+> | 83 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
+    ),
+    "05-OP-38": tuple(
+        """\
+> | `tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E` |
+> | `process_run` | `(string,List[string])->(int64,string,string)!{IO}` |
+> | `test_assert_eq` | `(Q,Q,string)->unit!{Test}` |
+> | `test_assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
+> | `test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |""".splitlines()
+    ),
 }
 
 FROZEN_ATOM_DIGESTS = {
-    "04-NUM-4": "b9f34c7d9113c094338a828eca087cacdca1c40321e930631eaf874b16ee3b3f",
-    "04-NUM-16": "55a463dbe522a0b653255742568038a375cee2cf3b9c113cc53d7b75953b7dfd",
-    "05-OP-11": "5723ecadeb87782d930839d557545eaa90d73b1204ba19e5e40f0c3242faef39",
-    "05-OP-12": "05c3af79686730379892ad267bfb4b35451213c138cc3f4bae7e123591b377e3",
-    "05-OP-13": "52a071e1e02febb3208f15d1b913de8370577fb7649f127d578c4619c7e8df31",
-    "05-OP-14": "7da6a49016d65e63223f270f0ef03c091f8ec893e2698c17a1fb5f3e0ca759c8",
+    "04-NUM-2": "1aab318622574c9505ec5e85472b27bf333318657407c38b2311325962e19a96",
+    "04-NUM-4": "685b5a3447a069f138877d357e65d1ab225e6b712e62b2a5bd38e1ef960636cb",
+    "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
+    "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
+    "05-OP-1": "1050bbaea2e77d5eb5033b9c4ee7e97bd44d694c08ba4ede3f6a714c07839ace",
+    "05-OP-2": "eec48a56a7d47470f2ace881942927e9c0d47a5948c41f1ec8249b4c6a0d5eb6",
+    "05-OP-3": "29e167f8d5fcdefa3141cda1edd6a3c32a4556f8ba29b398c4917e1c160b6ac0",
+    "05-OP-4": "4f1e257aa0f5f7a9b80aac4b5d74a59cc5c93593074d14baea600dea86be0c85",
+    "05-OP-5": "d348d7f49fa3fa347d268d8e45a42f417f534ae16360a0b921bef74f9c42e1ce",
+    "05-OP-6": "95d842566c76f85e0e89844029d7387921f57f6997e68107be92fe9b9cc1061c",
+    "05-OP-7": "d3c5120918a8de774833d776204d62c01b3eccd01ffc22e43ff5422d4e28e54b",
+    "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
+    "05-OP-9": "8359a6d8688f86f3818477c4d3fd8df04018e593fab9ad7ffa6fd0ebf5c1acf1",
+    "05-OP-10": "5d77be3eb92d9db44da15ea02a0706239f8f1c70b32ab0391d5dad6aff94cfa2",
+    "05-OP-11": "688952d434f31b332cd82a871a4da3e0a6e64e2d440f258ff9d24e5be8a37945",
+    "05-OP-12": "6e99f2ecbb3c7fbf3ae4f852104b03bdf65f5edf7ead1cae02c9e1d833708353",
+    "05-OP-13": "3fd84ffa594776abc51a8c277c5d9a0dbc2b7b8fc11ab1bf32209b30c7d97890",
+    "05-OP-14": "cba4686a8a31fb18cf9c5213af5ac4a545b03ce548b5c7bcd96e8f7f76648a40",
     "05-OP-15": "a9ad8cf1423e99bf092e6dd52ce273555cda77b4beb52ff3a78564db1800933e",
-    "05-OP-16": "ddced357a351860e42537449d526dfa3ba8cda0a2aa28073d3ea5b81eae2008f",
-    "05-OP-17": "1e4cc1b02acf4d527f3396a8acd49083b63bdc877270129b311bce6e3f7bb54d",
+    "05-OP-16": "b5ee19533f9f7241117f5958e092978446b49faacba312eec5781be548b3303d",
+    "05-OP-17": "7c85fa51323c9993bb63f97ee4728c8fc5c13bd2c30315f6bcf7a69a77a39304",
     "05-OP-18": "6cf5eaa4e1ab068d667ea1d8cc26ba366694329669cba39443a4878a6d04714a",
     "05-OP-19": "d84cd2202079d852ba918b99e2bae1c964650362dee200942a9addba954bd5e5",
-    "05-OP-20": "6facebb9f20f5072eb9e64b568161a9b968a526fd91107cbb87e0bdbe86d2d2f",
+    "05-OP-20": "302cee9a558337a469751b4a5ec3ef009a2ee5ef5d9c68e32fd40c23cf1479f1",
     "05-OP-21": "ced775b654a61c4d36d2313191145b3543e55ef75825a5066e04b3c114437545",
     "05-OP-22": "f7c7c00b0fbea5176eb3427b517f5fb9f7434e24caaacd86fc1408455658329a",
-    "05-OP-23": "bfc8198f2940f9d81c4dd3069568058974a39c1ddb37d0e51aadbfde226eb8bc",
-    "05-OP-24": "d9210188e6698e34ce8a82008db7eff1a34e674b5f92ddf63c77db5fdd5bf79f",
-    "05-OP-25": "8f400b1b3a5c1ba7a9f0f717fc6b41612949c708a21c053ef315883ab03652fb",
+    "05-OP-23": "1e0adc2fc7abf416c131f9ad5b6b054581eabf0365a9707b985fbaaa06e5e5b7",
+    "05-OP-24": "2f3009f8b80b944f11fa2cf378409d85eb7891a59cdc1024e58ce2b67af5b800",
+    "05-OP-25": "65133d4498f9e4e649d4932f162cd102b99e35c93160e0e4375429f60bec9480",
     "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
     "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
+    "05-OP-29": "3993f9bbfd12ac2e0123859ec2c4664ee9aac341090d31f217cd74e23ab23f50",
+    "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
+    "05-OP-31": "be9dd899970a14b9c1765671915e6c722215a2cee6384faab0992966a4561753",
+    "05-OP-32": "cec19e9042970ad05ded01aa3e9b5df670020f6fa192c1b8b0d000eb5c37d6db",
+    "05-OP-33": "61d98d7e69bb94d5199a6a3358211cd9e9de6258109da5aa45b8cec7dd3e9bba",
+    "05-OP-34": "ec98b43a4afe89384afd625ff6e71bb2bd0f4c4a9c7c8884f15d6857ec289102",
+    "05-OP-35": "2283f535f9b5690fd8e7f05320dc94243b1c9ef99ee466b9bd6f83b5de0bacaf",
+    "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
+    "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
+    "05-OP-38": "7393c5cac5f772eefa75cf079adea1be3b0f408c2bac57bbc305ff52e8534084",
+    "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
 }
 
 # The markers are part of the freeze contract: each must occur exactly once,
@@ -123,61 +362,61 @@ FROZEN_REGION_DIGESTS = {
         "spec/04-type-system.md",
         "## 9. Numeric Value Semantics",
         "## 10. Checker Totality",
-        "fb4c271dd4701058458ebb9f0bf2847e7d831bc71ee1a090634eb0a4b57ce5f9",
+        "436433f8e9f0ed1f4a3529d1135ff4c7e76181a3ce2c0684c6708382105dae9f",
     ),
     "numeric primitive contracts": (
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "907259b6cf97409e4a8a82f2c6d6bed64bf33bce73a151076f24c00681427a6d",
+        "32060a20400f7c982c109ff6a5072d3a286ee6ae72af02546358ae8d2c7c9fc6",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
         "### 3.2 Comparison and Logical Operations",
         "### 3.3 Activation Functions",
-        "9036535a7ae1af2dfa364eb580a55b0bcb822c0c9a79bc48cc7f1eeaae7a9d93",
+        "0f5112fa156d699d2bff79b65c0447d1075a381556b5f887f57d8dd0646dfd57",
     ),
     "name-preserving rank polymorphism": (
         "spec/04-type-system.md",
-        "#### 4.5.3 Name-Preserving Rank Polymorphism (Tier-3)",
-        "#### 4.5.4 Concat Result Typing (chelis#631, chelis#594)",
-        "13456e48646badbadd3beec4ecef5f554b0d7dd38695cae1b6042e8fddf7068e",
+        "#### 4.5.3 Name-Preserving Rank Polymorphism",
+        "#### 4.5.4 Concat Result Typing",
+        "8f7ed49ec2a00115a9fc9d423c0e56040f68b42d31580b259597da98ec859733",
     ),
     "window extrema contract": (
         "spec/05-risc-primitives.md",
         "### 2.3.1 Windowed Reduction",
         "### 2.4 Movement",
-        "84a55eed44492dfb38e76d81c11a40028d383712ac1ce1d2782a78e021be83ae",
+        "cc2096d327307abec84098d50e4788d1a599f8ce2fadd930541ee078e1d7c786",
     ),
     "to_string contract section": (
         "spec/05-risc-primitives.md",
         "### 3.6.3 Canonical value-to-string conversion",
         "### 3.7 Host-Lane Data I/O Numeric Operations",
-        "b59c3728307e626648d48bb39a5e8c2d6fe487c3c30d7512f739afce38eb5aac",
+        "80e8e151e92defa0e7f336e12f890abc3bf27c8326bc0d77415adb4bf04bb632",
     ),
     "named lossy cast section": (
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "959b507e38b24860cf66bb31698e0e25acfbcdb193225a8ee5e17a70c9584c12",
+        "520b865b52cbcadea0eb1c074094b7e4c585c20d6cdc85dda7bcab9299cf53ac",
     ),
     "capability schema": (
         "spec/design/capability_table.md",
         "## The two-table design",
         "## Seed dispositions the table must ship with",
-        "6f33014f59d784d876c9b5af0f9238de3576502a9d2a0da4f9ef8be54dae352c",
+        "67a8e811d680e50eea19cb741b94ba7b2f7e41f5509e69f6914b3fb8d9a49205",
     ),
     "capability seed dispositions": (
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "0988ef53973af79d96f91d42ffdf3b8dd96be97c90ffe0676ed15aa06e61c6b4",
+        "721aecd9ddabf8bf96af5222df58c691f849d258c4473a2bcabd36912248bdc2",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "502b59c4fbf6e9ae72ba7ef850ac94ab3fb898ec285ff13acc099a1a0ff65143",
+        "9e3c9e6f5b33151a6f121d030e011fba3e90803494f145365bbbef09a0a32bff",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -195,13 +434,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "7c3ac7dd809b1b69a41631b3738fd3d850ed17c3e775e8e0bb7c4c502c0a6347",
+        "96dbc48a16f60daa992f56e6091c86065647ce5c4dfb600504689660bacc9fbf",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
         "| **#729 dtype semantics** |",
         "| **#730 loud unsupported** |",
-        "b7f313b76d409e74f0b4aa9f13a1c28bb8f86335973bd1ff446794e0aec0e242",
+        "39eead2c2ed58e455a590c0c3c8409898f69a12d2db935fae3168c2b51a13173",
     ),
 }
 
@@ -239,6 +478,48 @@ def atom_blocks(text: str) -> dict[str, str]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         blocks[match.group(1)] = text[match.start() : end]
     return blocks
+
+
+def manifest_rows(block: str) -> tuple[str, ...]:
+    """Return normative Markdown data rows, excluding headers/separators."""
+
+    return tuple(
+        line
+        for line in block.splitlines()
+        if line.startswith("> | ") and "`" in line
+    )
+
+
+def validate_op_manifests(
+    blocks: dict[str, str], violations: list[str]
+) -> None:
+    for atom, expected in EXPECTED_OP_MANIFESTS.items():
+        actual = manifest_rows(blocks.get(atom, ""))
+        if actual == expected:
+            continue
+        missing = [row for row in expected if row not in actual]
+        extra = [row for row in actual if row not in expected]
+        detail: list[str] = []
+        if missing:
+            detail.append(f"missing {missing[0]}")
+        if extra:
+            detail.append(f"unexpected {extra[0]}")
+        if not detail:
+            detail.append("canonical row order changed")
+        violations.append(f"[{atom}] exact manifest mismatch: {'; '.join(detail)}")
+
+    stdlib_rows = re.findall(
+        r"^> \| (\d+) \| `([^`]+)` \| `([^`]+)` \|$",
+        blocks.get("05-OP-35", ""),
+        re.MULTILINE,
+    )
+    numbers = [int(number) for number, _identity, _signature in stdlib_rows]
+    identities = [identity for _number, identity, _signature in stdlib_rows]
+    if numbers != list(range(1, 84)) or len(set(identities)) != 83:
+        violations.append(
+            "[05-OP-35] stdlib numeric manifest must have exactly eighty-three "
+            "unique identities numbered 1 through 83"
+        )
 
 
 def strict_atom_block(text: str, atom: str) -> str:
@@ -333,6 +614,14 @@ def validate_frozen_contract(
             )
 
 
+def normalize_atom_body(body: str) -> str:
+    normalized = " ".join(
+        line[2:] if line.startswith("> ") else line
+        for line in body.splitlines()
+    )
+    return " ".join(normalized.split())
+
+
 def require_atom(
     blocks: dict[str, str],
     atom: str,
@@ -343,11 +632,7 @@ def require_atom(
     if body is None:
         violations.append(f"missing normative atom [{atom}]")
         return
-    normalized_body = " ".join(
-        line[2:] if line.startswith("> ") else line
-        for line in body.splitlines()
-    )
-    normalized_body = " ".join(normalized_body.split())
+    normalized_body = normalize_atom_body(body)
     for fragment in requirements:
         normalized_fragment = " ".join(
             line[2:] if line.startswith("> ") else line
@@ -361,30 +646,42 @@ def require_atom(
 def validate_normative_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
+    agents = docs["AGENTS.md"]
     spec02 = docs["spec/02-surf-syntax.md"]
     spec03 = docs["spec/03-deep-syntax.md"]
     spec04 = docs["spec/04-type-system.md"]
     spec05 = docs["spec/05-risc-primitives.md"]
+    spec06 = docs["spec/06-transformations.md"]
+    spec10 = docs["spec/10-serialization.md"]
 
-    atoms = [(int(number), name) for number, name in OP_ATOM.findall(spec05)]
-    counts = Counter(number for number, _name in atoms)
+    atoms = [int(number) for number in OP_ATOM.findall(spec05)]
+    counts = Counter(atoms)
     duplicates = sorted(number for number, count in counts.items() if count != 1)
     if duplicates:
         violations.append(f"duplicate normative OP atoms: {duplicates}")
-    for number, expected_name in EXPECTED_PHASE4B_OPS.items():
-        matches = [name for atom_number, name in atoms if atom_number == number]
-        actual_name = matches[0] if len(matches) == 1 else None
-        if actual_name != expected_name:
+    blocks = atom_blocks(spec05)
+    for number, expected_heading in EXPECTED_PHASE4B_OP_HEADINGS.items():
+        atom = f"05-OP-{number}"
+        body = blocks.get(atom)
+        normalized = normalize_atom_body(body) if body is not None else ""
+        expected_prefix = f"**[{atom}]** {expected_heading}"
+        if not normalized.startswith(expected_prefix):
             violations.append(
-                f"[05-OP-{number}] must govern {expected_name}, got "
-                f"{actual_name or 'missing'}"
+                f"[{atom}] must begin `{expected_heading}`, got "
+                f"{normalized.splitlines()[0] if normalized else 'missing'}"
             )
-    if any(name == "cast_round" for _number, name in atoms):
+    if re.search(r"^> \*\*\[05-OP-\d+\]\*\* `cast_round\b", spec05, re.MULTILINE):
         violations.append("cast_round must not be a normative operation atom")
 
     require_all(
         spec02,
-        (("Surf has no infinity or NaN literal.", "Surf literal exclusion"),),
+        (
+            ("Surf has no infinity or NaN literal.", "Surf literal exclusion"),
+            (
+                "`count`\nlowers once with its complete named-axis vector",
+                "Surf count multi-axis lowering",
+            ),
+        ),
         violations,
     )
     require_all(
@@ -394,11 +691,68 @@ def validate_normative_contract(
                 "Canonical Deep contains no non-finite float literal.",
                 "Deep literal exclusion",
             ),
+            ("**Reduce:** `sum`, `count`, `max_reduce`", "Deep count builtin"),
+        ),
+        violations,
+    )
+    require_all(
+        spec10,
+        (
+            ("Schema version 6 is explicitly\npresent", "wire v6 presence"),
+            ("the only accepted version", "wire v6 exactness"),
+            ("There is no versionless default", "wire versionless rejection"),
+            ("versionless default, legacy migration", "wire migration rejection"),
+            ("WireRiscOp::Count { axes }", "wire count variant"),
+            (
+                "complete\nnon-empty vector of unique normalized original-axis "
+                "positions in strictly\ndescending order",
+                "wire count canonical axes",
+            ),
+            (
+                "decoder rejects an empty,\nduplicate, increasing, or out-of-range "
+                "vector before IR construction",
+                "wire count axis rejection",
+            ),
+            ("WireRiscOp::Pad { fill: ScalarValue, ... }", "wire typed Pad variant"),
+            (
+                "raw JSON number, an untagged payload, a string-mode\nfill, or a "
+                "mismatched dtype is a decode error before IR construction",
+                "wire Pad payload rejection",
+            ),
+            (
+                "No v5\nnumeric-fill migration or inferred fill dtype exists",
+                "wire Pad no compatibility",
+            ),
+        ),
+        violations,
+    )
+    require_all(
+        agents,
+        (
+            (
+                "No grandfather, permanent-disposition,",
+                "agent zero-exception policy",
+            ),
         ),
         violations,
     )
 
     spec04_blocks = atom_blocks(spec04)
+    require_atom(
+        spec04_blocks,
+        "04-NUM-2",
+        (
+            "IEEE-754 round-to-nearest, ties-to-even, at the dtype's own STORAGE "
+            "width",
+            "canonical quiet NaN: f16 `0x7e00`, bf16 `0x7fc0`, f32 "
+            "`0x7fc00000`, or f64 `0x7ff8000000000000`",
+            "Arithmetic preserves the NaN class, not an input payload or sign",
+            "A pure bit-moving or selection operation preserves NaN payload bits "
+            "only when its governing operation atom explicitly says it is "
+            "bit-preserving",
+        ),
+        violations,
+    )
     require_atom(
         spec04_blocks,
         "04-NUM-16",
@@ -416,6 +770,70 @@ def validate_normative_contract(
         violations,
     )
     require_all(
+        spec06,
+        (
+            (
+                "If `A = List[T]` and `dT` is defined, then `dA = List[dT]`; the "
+                "cotangent\n  list has exactly the primal list's runtime length and "
+                "positional order",
+                "recursive List cotangent",
+            ),
+            (
+                "If `A` is an ADT/record, then `dA` has the same executed constructor "
+                "shape",
+                "recursive ADT cotangent",
+            ),
+            (
+                "never drops a tuple field,\nlist element, or ADT field merely because "
+                "its cotangent is unit",
+                "shape-preserving recursive cotangent",
+            ),
+            (
+                "`match` differentiates the arm executed by the forward program",
+                "match executed-arm adjoint",
+            ),
+            (
+                "Scalar `if` likewise differentiates the executed branch and gives its "
+                "boolean\ncondition zero cotangent",
+                "scalar-if executed-branch adjoint",
+            ),
+            (
+                "Recursive calls differentiate the finite recurrence actually executed "
+                "by the\nforward program and reverse that recorded call trajectory",
+                "recursive-call adjoint",
+            ),
+            (
+                "A missing host-ABI\ncarrier is a backend capability gap, not a language "
+                "restriction",
+                "recursive AD target independence",
+            ),
+            (
+                "Potentially effectful or trapping nodes are observable roots; purity alone "
+                "does\nnot make a possible trap dead",
+                "optimizer observable roots",
+            ),
+            (
+                "none of these\npatterns is unconditional",
+                "optimizer proof obligation",
+            ),
+            (
+                "Fusion preserves every primitive's declared arithmetic width and "
+                "stored-value\nfinalization boundary",
+                "fusion finalization boundary",
+            ),
+            (
+                "upstream = balanced_sum(\n"
+                "            exact_zero(cotangent_type(type_of(n))),",
+                "formal balanced cotangent accumulation",
+            ),
+            (
+                "return pack_wrt_gradients(grads)",
+                "formal gradient-only result",
+            ),
+        ),
+        violations,
+    )
+    require_all(
         spec04,
         (
             (
@@ -429,13 +847,207 @@ def validate_normative_contract(
                 "canonical composition authority",
             ),
             ("sum_result(p,a)", "sum result precision rule"),
+            (
+                "`sum_result(p, a) = p` exactly when `p` is `bf16` or `f16`;\n"
+                "otherwise `sum_result(p, a) = a`",
+                "total sum result precision rule",
+            ),
+            (
+                "`int32` | `int32`, `int64` | accumulator dtype `a`",
+                "explicit wider integer accumulator result",
+            ),
+            (
+                "An accumulator has the same numeric kind as its operands",
+                "same-kind accumulator rule",
+            ),
+            (
+                "Every literal or computed\naxis first adds the input rank exactly once when negative",
+                "shape negative-axis normalization",
+            ),
+            (
+                "A statically known normalized value outside `0..rank` is a type\n"
+                "error (`DimensionMismatch`)",
+                "shape post-normalization rejection",
+            ),
+            (
+                "| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any "
+                "active numeric dtype (both operands same dtype) → bool |",
+                "closed ordered-comparison precision row",
+            ),
+            (
+                "| Equality (`eq`, `neq`) | any active numeric dtype or bool (both "
+                "operands same dtype), plus the recursively comparable host-value "
+                "domain in [05-OP-36] → bool |",
+                "closed equality precision row",
+            ),
+            (
+                "Every tensor comparison preserves the operand surface: two "
+                "same-dtype tensors\nwith identical dimensions return a bool tensor "
+                "with those dimensions",
+                "comparison surface preservation",
+            ),
+            (
+                "Numeric\nor bool scalar equality returns a bool scalar; ordered "
+                "scalar comparison is\nnumeric only",
+                "scalar equality and ordered-comparison split",
+            ),
+            (
+                "Mixed tensor/scalar surfaces or tensor dimensions are type errors.\n"
+                "[05-OP-36] owns the exact values and the complete equality domain",
+                "comparison surface rejection and authority",
+            ),
+            (
+                "`cumsum(x, axis=k)`",
+                "cumsum result precision rule",
+            ),
+            (
+                "`trace(x, axis1, axis2)`",
+                "trace result precision rule",
+            ),
+            (
+                "`einsum(equation, left, right, accumulator=a)`",
+                "einsum result precision rule",
+            ),
             ("A typed operation-precondition guard", "typed reduction guard"),
+            (
+                "`count` is the bool-tensor counting operation",
+                "bool count operation",
+            ),
         ),
         violations,
     )
 
-    blocks = atom_blocks(spec05)
     atom_requirements: dict[str, tuple[str, ...]] = {
+        "05-OP-1": (
+            "nearest to the EXACT binary value of `x`",
+            "finalized ONCE to the operand's own storage width",
+            "| `f64` | exact decimal rounding of the exact binary value, one final "
+            "rounding to f64 | `f64` |",
+            "| `f32` | exact decimal rounding of the exact binary value, one final "
+            "rounding to f32 | `f32` |",
+            "| `f16` | exact decimal rounding of the exact binary value, one final "
+            "rounding to f16 | `f16` |",
+            "| `bf16` | exact decimal rounding of the exact binary value, one final "
+            "rounding to bf16 | `bf16` |",
+            "| integer, bool, tensor | type error | — |",
+            "piecewise constant",
+            "structurally rejected with `AdRejectionReason::PiecewiseConstant`",
+            "rather than receiving a silent zero cotangent",
+            "has no accumulator",
+        ),
+        "05-OP-2": (
+            "A JSON number token containing `.`, `e`, or `E`",
+            "ingest as `JsonFloat` carrying the correctly-rounded f64 of the token",
+            "any other number token",
+            "ingest as `JsonInt` carrying its exact int64 value",
+            "An integer-form token outside int64 range is a loud `Overflow` error",
+            "punctuation never selects a lossy float fallback for an integer",
+            "CSV cells are TEXT at parse time",
+            "integer accessors accept only its integer subset",
+            "An empty or non-conforming cell is a loud error",
+        ),
+        "05-OP-3": (
+            "`io/json::json_int` returns the stored `JsonInt` int64 exactly",
+            "`io/json::json_float` returns a stored `JsonFloat` f64 exactly",
+            "It never truncates or rounds a float into an integer",
+            "`csv_int` | `(List[Dict[string,string]], int64, string) -> int64`",
+            "`csv_ints` | `(List[Dict[string,string]], string) -> List[int64]`",
+            "`csv_f64` | `(List[Dict[string,string]], int64, string) -> f64`",
+            "`csv_f64s` | `(List[Dict[string,string]], string) -> List[f64]`",
+            "`csv_nrows` | `(List[Dict[string,string]]) -> int64`",
+            "no JSON variant or default cell is fabricated",
+            "structurally rejected inside `grad`",
+            "They have no accumulator",
+        ),
+        "05-OP-4": (
+            "`JsonFloat(value)` accepts exactly f64",
+            "`JsonInt(value)` accepts exactly int64",
+            "every other operand width is a type error",
+            "No construction path widens or narrows a numeric value",
+            "feeds the byte-exact serialization channel of [05-OP-5]",
+        ),
+        "05-OP-5": (
+            "emits a stored `JsonInt` int64 as its exact decimal digits",
+            "a stored f64 through the [05-OBS-1]",
+            "every finite emission parses back to the identical f64",
+            "A non-finite `JsonFloat` is a loud serialization error",
+            "Equal documents serialize to identical bytes",
+            "`to_csv` accepts only the text-table type `List[Dict[string,string]]`",
+            "without inferring, preserving, or serializing a numeric cell type",
+            "Numeric source values enter CSV only through explicit `to_string`",
+        ),
+        "05-OP-6": (
+            "explicit truncating narrowing cast from a float source dtype to an "
+            "integer target dtype",
+            "**finite** source value it yields the integer part truncated toward zero",
+            "outside the target range it traps `overflow`",
+            "A **non-finite** source (`NaN`, `±inf`) traps `Domain`",
+            "not float→integer, `cast_trunc` is a type error",
+            "never widens, never rounds, and never applies to `bool`",
+            "Semantics are identical on scalar and tensor surfaces",
+            "a gradient goal through it is a clean error, never a silent zero",
+            "has no accumulator",
+        ),
+        "05-OP-7": (
+            "returns the stored extent of `x` along `axis` as an exact `int64`",
+            "a negative value first normalizes by adding the rank exactly once",
+            "an axis still outside `0..rank` is a loud error",
+            "read has a zero-cotangent adjoint",
+            "contributes exact zero to the tensor input and to the discrete axis",
+            "does not block differentiation of a surrounding graph",
+        ),
+        "05-OP-8": (
+            "admits every active float template dtype `p` in spec/04 §1.1",
+            "requires `low` and `high` to have that same dtype `p`",
+            "returns `tensor[D, p]` with the template's dimensions",
+            "Both bounds must be finite and `low <= high`",
+            "At the selected arithmetic width, `high - low` must also be finite",
+            "complete before the operation consumes a Random call ordinal",
+            "failure traps `Domain` as `uniform_like` and consumes none",
+            "Equal bounds are valid and produce that stored value",
+            "For `p = f64`, the element is the one f64 fused multiply-add",
+            "For `p = f32`, it is the one f32 fused multiply-add",
+            "For `p = f16` or `bf16`, the stored bounds widen exactly to f32",
+            "their difference and the fused multiply-add execute once in f32",
+            "the result narrows exactly once to `p`",
+            "There is no f32 public-bound signature, default bound, or f64 "
+            "intermediate",
+            "introduces `Random`",
+            "does not observe the template's element values",
+            "pathwise adjoint contributes zero to the template",
+            "contributes `g_i * (1-u_i)` to `low` and `g_i * u_i` to `high`",
+            "canonical adjacent-pair balanced tree",
+            "has no accumulator parameter",
+        ),
+        "05-OP-9": (
+            "admits every active tensor element dtype `T` in spec/04 §1.1, "
+            "including `bool`",
+            "Every source and padding element is moved at its declared dtype `T`",
+            "no arithmetic, widening, narrowing, or other rounding",
+            "differentiable when `T` is a float dtype",
+            "source cotangent preserves the outer and inner runtime List shapes "
+            "exactly",
+            "source element `(r, c)` receives `g[r, c]`",
+            "sum of `g[r, c]` over padded result cells in increasing row-major "
+            "`(r, c)` order",
+            "canonical adjacent-pair balanced tree",
+            "exact positive-zero base leaf",
+            "When there are no padded cells that cotangent is positive zero",
+            "For integer or bool `T`, the operation is forward-only",
+            "has no public accumulator parameter",
+        ),
+        "05-OP-10": (
+            "has the same dtype, element-movement, float-domain differentiation, and "
+            "no-public-accumulator rules as [05-OP-9]",
+            "`width` SHALL be non-negative",
+            "source elements at index `width` or beyond do not appear",
+            "a source element `(r, c)` receives `g[r, c]` when `c < width` and "
+            "exact positive zero otherwise",
+            "truncated source cells remain present in the nested List cotangent",
+            "`pad` cotangent uses [05-OP-9]'s exact traversal, arithmetic, tree, "
+            "and positive-zero rule",
+            "`width` is non-differentiable",
+        ),
         "05-OP-11": (
             "`f16`, `bf16`, `f32`, or `f64`",
             "composition `div(sum(x, axis), divisor)`",
@@ -465,13 +1077,15 @@ def validate_normative_contract(
             "upstream cotangent divided by the number of equal\n> minima",
         ),
         "05-OP-14": (
-            "four product lanes initialized to one",
-            "element `i` updates lane `i mod 4`",
-            "`(p0 * p1) * (p2 * p3)`",
+            "canonical balanced tree",
+            "pairs adjacent values from left to right",
+            "carries an\n> odd final value unchanged",
+            "finalized once to the operand storage dtype before it enters the next level",
             "overflow is checked at every multiplication",
             "zero-length axis returns the multiplicative identity",
             "reverse-mode\n> derivative of that exact multiplication tree",
             "gradients at\n> zero operands are defined",
+            "`prod_reduce` never treats `bool` as integer",
         ),
         "05-OP-15": (
             "every active\n> signed integer and float tensor dtype",
@@ -507,7 +1121,7 @@ def validate_normative_contract(
             "finalized stored value\n> without conversion",
             "true exactly when that value is NaN",
             "contributes zero cotangent",
-            "Integer, `bool`, `string`, and deferred operands\n> are type errors",
+            "Integer, `bool`, `string`, and reserved dtype spellings are type errors",
         ),
         "05-OP-21": (
             "contract of\n> [05-OP-20]",
@@ -540,14 +1154,21 @@ def validate_normative_contract(
         "05-OP-25": (
             "`to_string(value) -> result` borrows exactly one value",
             "without consuming it and returns `string`",
-            "admits exactly an active numeric, `bool`, or `string` scalar",
-            "tensor whose element dtype is an active numeric dtype or `bool`",
-            "`List[T]` when `T` is recursively admitted",
-            "Every other value type is a type error",
+            "It admits unit; an active numeric, `bool`, or `string` scalar",
+            "a tensor whose element dtype is active",
+            "a `List`, tuple, `Dict`, `Option`, or ADT whose reachable values are "
+            "recursively admitted by this rule",
+            "Functions and resource handles are type errors",
             "returns `value` byte-for-byte unchanged",
             "dimensions `[d0, ..., d_(r-1)]` and `N` elements",
             "all `N` elements when `N <= 32`, otherwise the first 32",
             "A List boundary never truncates or elides elements",
+            "Unit renders `()`",
+            "A tuple renders `()`, `(x,)`, or `(x, y, ...)`",
+            "A dictionary renders `{}` or `{key: value, ...}` in [05-OP-32]'s "
+            "canonical key order",
+            "`None` renders `None` and `Some(x)` renders with that constructor spelling",
+            "An ADT renders its exact constructor name",
             "String elements are inserted verbatim, without quoting or escaping",
             "non-injective display form, not a serialization",
             "Every lane produces byte-identical text",
@@ -579,20 +1200,517 @@ def validate_normative_contract(
             "has no accumulator",
             "`grad` rejects it",
         ),
+        "05-OP-29": (
+            "admits exactly a `bool` tensor operand",
+            "returns an `int64` tensor",
+            "one or more unique named axes",
+            "Missing axes, mixed positional/named axes, duplicate normalized "
+            "positions or names",
+            "visited in original row-major order",
+            "checked `int64` addition",
+            "traps `Overflow` as operation `count`",
+            "result is `0i64`",
+            "dedicated reduction and is not a `cast` plus `sum` lowering",
+            "not a composition of nested `count` calls",
+            "Numeric, scalar `bool`, `string`, reserved dtype spellings",
+            "no accumulator",
+            "structurally rejected with `AdRejectionReason::IntegerIndexOutput`",
+            "never receives a silent zero cotangent",
+        ),
+        "05-OP-30": (
+            "active signed integer or active float",
+            "`bool`, `string`, reserved dtype spellings, scalar, and all other operands are",
+            "same numeric kind as `p`",
+            "§5.7.1's default",
+            "canonical balanced tree",
+            "integer overflow is checked at every addition",
+            "Empty slices return exact zero",
+            "`sum_result(p, accumulator)`",
+            "adjoint expands the upstream cotangent",
+            "Signed-integer forms are forward-only",
+            "stride-4 cascade",
+            "bool-to-integer promotion",
+        ),
+        "05-OP-31": (
+            "exactly the ten final public C callables",
+            "typedef struct { void *data; const int64_t *shape; const int64_t "
+            "*strides; int64_t size; int64_t byte_capacity; int32_t rank; "
+            "chelis_dtype dtype; uint8_t owns_data; uint8_t reserved[2]; } "
+            "chelis_tensor;",
+            "typedef struct { chelis_value key; chelis_value value; } "
+            "chelis_dict_entry;",
+            "rank in `0..=INT32_MAX`",
+            "rank zero has null `shape` and `strides` pointers",
+            "positive rank has non-null pointers to exactly `rank` int64 entries",
+            "There is no rank-eight limit",
+            "F32=0`, `F64=1`, `I32=2`, `Bool=3`, `I64=4",
+            "unused high bits are zero",
+            "bool payload is exactly `0` or `1`",
+            "NaN payload and signed-zero bits",
+            "Signed-decimal integer text is exactly an optional `+` or `-` "
+            "followed by one or more ASCII digits",
+            "a bare sign, internal whitespace, or non-ASCII digit is malformed",
+            "A finite float token is an optional `+` or `-`",
+            "optional exponent `[eE][+-]?[0-9]+`",
+            "a bare sign, bare point, internal whitespace, non-ASCII digit, hex "
+            "form, or suffix is malformed",
+            "Its exact decimal value rounds once at the requested float width",
+            "finite overflow returns `None` and underflow rounds normally, "
+            "including to signed zero",
+            "The only accepted NaN spelling is exactly `NaN`",
+            "f16 `0x7e00`, bf16 `0x7fc0`, f32 `0x7fc00000`, and f64 "
+            "`0x7ff8000000000000`",
+            "does not convert through `double`",
+            "rank-zero tensor with exactly one element",
+            "`None` only when the key is absent",
+            "no alias, wrapper, or deprecated spelling",
+            "has no accumulator and is outside AD",
+        ),
+        "05-OP-32": (
+            "exactly the container, extent, index, byte-read, and recursive-observation",
+            "chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)",
+            "chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)",
+            "chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)",
+            "chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)",
+            "All lengths, indices, offsets, sizes, and returned counts are exact `int64`",
+            "Negative lengths, indices, offsets, and counts trap `Domain`",
+            "result-length and allocation arithmetic traps `Overflow`",
+            "half-open increasing sequence",
+            "Unicode scalar values",
+            "A slice whose nonnegative start is at or beyond the scalar length "
+            "is empty",
+            "Dictionary keys are exactly `string`, `bool`, or a scalar of any active "
+            "signed-integer dtype",
+            "Equality includes the key kind and integer dtype",
+            "Float keys are rejected",
+            "later duplicate replaces the value",
+            "Recursive dictionary observation is canonical rather than "
+            "insertion-ordered",
+            "Each of `chelis_print_list`, `chelis_print_tuple`, "
+            "`chelis_print_dict`, and `chelis_print_adt` writes exactly "
+            "[05-OP-25]'s complete recursive rendering",
+            "followed by one byte `\\n` to standard output",
+            "adds no label, prefix, extra space, truncation beyond the nested "
+            "tensor rule, or additional newline",
+            "A short or failed write traps `IO`",
+            "Successful return means every required byte was written",
+            "[05-OBS-1..5] at each stored scalar's own dtype",
+            "outside AD and have no accumulator",
+        ),
+        "05-OP-33": (
+            "exactly the twenty-three final public C callable identities",
+            "axes and rank are `int32_t`",
+            "extents, sizes, offsets, counts, and element counts are `int64_t`",
+            "rank is nonnegative",
+            "before allocation or element access",
+            "Every signed axis accepted by this C family first applies §2.3's "
+            "one-step negative normalization",
+            "an axis still out of range then traps `Domain`",
+            "scalar leaves all have exactly the requested dtype",
+            "`chelis_tensor_elements` boxes every element as its exact scalar in "
+            "row-major order for every rank",
+            "Rank zero therefore returns a one-element list",
+            "any zero extent returns an empty list",
+            "There is no rank-specialized or recursively nested list-egress alias",
+            "Each destination's canonical balanced accumulation tree begins with "
+            "an exact positive-zero base leaf",
+            "not an omitted initializer",
+            "`chelis_tensor_scatter_replace`",
+            "`chelis_tensor_scatter_add`",
+            "`gather` admits an index tensor of any active signed-integer dtype",
+            "Scatter indices have any active signed-integer dtype",
+            "interpreted at their exact stored mathematical values",
+            "are zero-based",
+            "must lie in the selected base-axis extent",
+            "Any negative or out-of-range index traps `Domain` before any write",
+            "no int32/int64-only dispatch exception",
+            "Replace admits every active dtype, including bool",
+            "admits exactly active signed-integer and float dtypes",
+            "NaNs follow all non-NaNs",
+            "`sum_result(p, default(p))`",
+            "[05-OP-30]'s canonical balanced tree",
+            "`diagonal` admits every active dtype including bool",
+            "rejects a NaN bound or `lower > upper`",
+            "[a-z]*,[a-z]*->[a-z]*",
+            "same numeric kind as `p`",
+            "reverse derivative of this exact multiply-and-balanced-add graph",
+            "This atom's selection rule also governs exactly the language builtin",
+            "`where(condition, then, else)` with signature",
+            "`(&tensor[D,bool], &tensor[D,p], &tensor[D,p]) -> tensor[D,p]`",
+            "selection copies the chosen stored bits without numeric conversion",
+            "the condition has no cotangent",
+            "No operation in this family converts a stored element through `double`",
+            "supplies a compatibility alias",
+        ),
+        "05-OP-34": (
+            "exactly these five exported stdlib ADT identities",
+            "`io/json::Json`",
+            "`decimal::Decimal`",
+            "`time::Date`",
+            "`time::Duration`",
+            "`tokenizer::Tokenizer`",
+            "accepts every representable declared field tuple",
+            "validation and normalization belong to named stdlib functions",
+            "A public signature is numeric when any reachable field of an admitted ADT",
+            "expands\n> nominal ADT definitions recursively to a fixed point",
+            "scanning only primitives spelled directly in the signature\n> is nonconforming",
+            "There is no second prelude JSON identity or constructor registry",
+            "ordinary constructor and the executed matching arm preserve the recursive "
+            "cotangent shape",
+            "differentiable float fields receive their corresponding field cotangents",
+            "non-differentiable fields carry `unit`",
+            "`JsonFloat(x)` followed by an executed `JsonFloat(y)` match routes the "
+            "cotangent of `y` to `x`",
+            "integer-only ADTs naturally have only `unit` field cotangents",
+            "constructors have no accumulator",
+        ),
+        "05-OP-35": (
+            "exactly the eighty-three final exported stdlib numeric definitions",
+            "`process::run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`contracts::normal_cdf` | `(p_float)->p_float`",
+            "`init/random::normal_like` | "
+            "`(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
+            "`tensor/construct::linspace` | "
+            "`(p_float,p_float,int64)->tensor[n,p_float]`",
+            "`tensor/construct::arange` | "
+            "`(p_int,p_int)->tensor[n,p_int]`",
+            "`sort::sort` | `(&tensor[..r,p_numeric],int32)->"
+            "(tensor[..r,p_numeric],tensor[..r,int64])`",
+            "`scalar::abs` | `(p_numeric)->p_numeric`",
+            "`scalar::max` | `(p_numeric,p_numeric)->p_numeric`",
+            "`scalar::min` | `(p_numeric,p_numeric)->p_numeric`",
+            "`test::assert_close` | "
+            "`(p_float,p_float,p_float,string)->unit!{Test}`",
+            "`test::assert_close_tensor` | "
+            "`(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}`",
+            "`test::assert_eq` | `(Q,Q,string)->unit!{Test}`",
+            "`test::assert_eq_tensor` | "
+            "`(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}`",
+            "`tensor/construct::stack` | "
+            "`(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]`",
+            "Every primitive-width intermediate in a graph whose contract names a dtype",
+            "Decimal rational and calendar ordinal computations explicitly named as "
+            "mathematical below use an exact internal domain",
+            "integer primitive arithmetic is checked",
+            "JSON access follows [05-OP-2..5]",
+            "Numeric tokens follow [05-OP-2]",
+            "In this family `p` ranges over all active tensor element dtypes",
+            "`p_numeric` over all active numeric dtypes",
+            "`p_int` over all active signed integers",
+            "`p_float` over all four active floats",
+            "`Q` over one static type in [05-OP-36]'s scalar or recursive equality "
+            "domain",
+            "direct tensor arguments use `assert_eq_tensor`",
+            "Every repeated variable denotes one common static type",
+            "`standard_contract_tolerance` is deliberately the fixed f32 tolerance "
+            "policy of the named standard-contract property corpus",
+            "not an arithmetic operand, default dtype, or restriction on "
+            "`normal_cdf`",
+            "`normal_cdf(+inf)` is exact `1p`",
+            "`normal_cdf(-inf)` is exact `0p`",
+            "a NaN input returns [04-NUM-2]'s canonical NaN at `p_float`",
+            "infinities have zero cotangent and NaN propagates the canonical NaN "
+            "cotangent",
+            "no non-finite input traps `Domain`",
+            "A leading U+FEFF byte-order mark is not RFC 8259 whitespace and is "
+            "rejected",
+            "Every finitely nested valid document is in the language",
+            "there is no fixed semantic nesting depth such as 512",
+            "`scalar::abs` follows the unary abs rule at its active signed-integer "
+            "or float dtype",
+            "checked overflow at the signed minimum",
+            "Scalar min/max return the first NaN with its exact stored payload and "
+            "sign bits",
+            "preserve the first operand on every equality, including signed-zero "
+            "equality",
+            "`arange(start,stop)` admits one active signed-integer dtype `p_int` "
+            "for both endpoints",
+            "returns the increasing half-open same-dtype sequence",
+            "Its length and every step are checked in exact mathematical integers",
+            "an unrepresentable length or element traps `Overflow`",
+            "requires finite endpoints and int64 `count >= 1`",
+            "Squeeze removes the selected singleton dimension",
+            "Unsqueeze inserts a singleton dimension and stack inserts the "
+            "input-list length at the selected position",
+            "all three are rank-polymorphic, bit-preserving reshape/concat "
+            "operations",
+            "Squeeze normalizes a negative axis by adding the input rank once",
+            "requires `0 <= axis < rank`; its selected extent must be one",
+            "Unsqueeze and stack normalize a negative insertion axis by adding "
+            "the result rank once",
+            "require `0 <= axis <= input_rank`",
+            "The float `squeeze` and `unsqueeze` adjoints are the reverse reshape "
+            "graph",
+            "The float `stack` adjoint slices the output cotangent along the "
+            "inserted axis",
+            "returns a `List` of tensor cotangents with exactly the input list's "
+            "length, shapes, and dtype",
+            "`linspace` with count one, start receives the sole output cotangent "
+            "and stop receives exact zero",
+            "enumerated by increasing output index",
+            "separate canonical adjacent-pair balanced trees",
+            "Kaiming requires finite `fan_in > 0`",
+            "rejects a zero divisor or negative result scale",
+            "interpreted in exact arithmetic and normalized before either "
+            "representation check",
+            "removable trailing zeros do not cause `Overflow`",
+            "proleptic Gregorian calendar",
+            "lowest merge rank and then the leftmost pair",
+            "NaN is unequal to every value, including itself",
+            "Test tolerances have the same active float dtype as the values",
+            "`assert_close_tensor` admits exactly one common active float dtype `p`",
+            "comparison executes at `p`'s [04-NUM-8] arithmetic width",
+            "stored same-dtype tolerance converted exactly to that arithmetic width",
+            "never converts either tensor through f64",
+            "Scalar `assert_close` applies the same own-width rule to any active "
+            "float dtype",
+            "`assert_eq` uses [05-OP-36] equality for one common scalar or "
+            "recursively comparable `Q`",
+            "every container/ADT field follows the exact recursive rule",
+            "Direct tensor arguments use `assert_eq_tensor`",
+            "requires equal shapes and one common active element dtype",
+            "signed-integer and bool elements use exact equality",
+            "`assert_shape` requires its expected list to contain only nonnegative "
+            "int64 extents",
+            "compares its length and every entry to the tensor's complete shape "
+            "in axis order",
+            "Each finite element pair computes `abs(actual - expected)` at that "
+            "width and is close exactly when that difference is less than or equal "
+            "to the converted tolerance",
+            "without invoking a shell",
+            "every random stdlib callable has the pathwise adjoint of its exact "
+            "graph above",
+            "source units and mask comparisons contribute zero cotangent",
+            "rounded result equals the stored upper endpoint",
+            "computed denominator must be finite and strictly positive",
+            "`days_between(lhs,rhs) = ordinal(rhs) - ordinal(lhs)`",
+            "final normalized `days` field has no int64 representation",
+            "A negative year uses `-` followed by exactly "
+            "`max(4, digits(|year|))` decimal digits",
+            "`|year|` is the exact mathematical magnitude rather than an int64 `abs`",
+            "no token pair occurs at more than one merge rank",
+            "repeatedly selects the lowest merge rank and then the leftmost pair",
+            "`encode` maps each final token through `vocab`",
+            "`decode` maps each ID through the inverse vocabulary",
+            "No callable derives authority from its implementation body or age",
+        ),
+        "05-OP-36": (
+            "exactly the seven language identities `cmplt`, `lt`, `eq`, `neq`, "
+            "`gt`, `gte`, and `lte`",
+            "The five ordered identities `cmplt`, `lt`, `gt`, `gte`, and `lte`",
+            "two active-numeric scalars of one dtype",
+            "two tensors of one active numeric dtype and identical dimensions",
+            "`eq` and `neq` additionally admit bool scalars and same-shaped bool "
+            "tensors, string scalars, unit",
+            "two `List`, tuple, `Dict`, `Option`, or ADT values of one static type",
+            "Functions and resource handles are not "
+            "equality-comparable",
+            "Ordered comparison of bool, string, or a structured value is a type "
+            "error",
+            "Scalar and recursive equality return one bool scalar",
+            "tensor comparisons are element-wise and return a bool tensor",
+            "Mixed surfaces, numeric dtypes, static structured types, or tensor "
+            "dimensions are type errors",
+            "Signed integers use exact mathematical order at their stored width",
+            "Bool and string equality compare their exact stored values without "
+            "Unicode normalization",
+            "Dictionaries compare key/value sets independent of insertion order",
+            "any NaN makes `cmplt`, `lt`, `eq`, `gt`, `gte`, and `lte` false "
+            "and makes `neq` true",
+            "signed zeros equal",
+            "`neq` is the logical complement of `eq` for every non-float admitted "
+            "value",
+            "may use [05-OP-20] plus [05-OP-26..28] without sending bool through "
+            "arithmetic IR",
+            "These seven operations remain distinct typed comparison identities "
+            "through AD and other semantic transforms",
+            "logical expansion may occur only after the zero-cotangent adjoint is "
+            "registered for the exact identity",
+            "[05-OP-26..28]'s structural `grad` rejection does not replace this "
+            "family's adjoint",
+            "No identity has an alias, grandfathered path, deprecated spelling, or "
+            "compatibility wrapper",
+            "performs no numeric conversion, has no accumulator",
+            "contributes zero cotangent to every differentiable leaf",
+        ),
+        "05-OP-37": (
+            "admits every active float dtype `p`",
+            "requires `input: &tensor[D,p]` and a scalar `rate: p`",
+            "rate must be finite and satisfy `0 <= rate < 1`",
+            "validation completes before Random consumption",
+            "failure traps `Domain` as `dropout` while consuming no call ordinal",
+            "accepted call consumes exactly one ordinal",
+            "including for an empty tensor or `rate = 0`",
+            "saved forward mask drops the element exactly when that value is less "
+            "than the rate",
+            "A dropped element is positive zero at `p`",
+            "A kept element computes the exact graph `denom = sub(1p, rate)` then "
+            "`div(input[i], denom)`",
+            "For f16 and bf16, `sub` exact-widens its stored operands to f32 and "
+            "narrows its result to `p`",
+            "`div` then exact-widens the stored `input[i]` and `denom` to f32 and "
+            "narrows its result to `p`",
+            "no f32 public-rate signature, f64 funnel, unscaled-dropout alias, or "
+            "special `rate >= 1` default exists",
+            "pathwise adjoint reuses the exact saved mask",
+            "Dropped elements contribute positive zero",
+            "contributions combine by the canonical adjacent-pair balanced tree",
+            "mask comparison itself has zero cotangent",
+            "has no accumulator parameter",
+        ),
+        "05-OP-38": (
+            "governs exactly these five numeric-capacity identities and signatures",
+            "`tensor_scan` | `(T,((T,int64)->T!E),int64)->tensor[n,T]!E`",
+            "`process_run` | `(string,List[string])->(int64,string,string)!{IO}`",
+            "`test_assert_eq` | `(Q,Q,string)->unit!{Test}`",
+            "`test_assert_close_tensor` | `(&tensor[..r,p_float],"
+            "&tensor[..r,p_float],p_float,string)->unit!{Test}`",
+            "`test_assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)"
+            "->unit!{Test}`",
+            "`T` is one active numeric or bool scalar type",
+            "`Q` is one static type in [05-OP-36]'s scalar or recursive equality "
+            "domain",
+            "Repeated variables denote the same type, dtype, rank, and dimensions",
+            "`tensor_scan` has [05-HOST-1]'s exact-width recurrence and adjoint",
+            "`process_run` has §2.6's argv, exit-code, capture, `Io`, and outside-AD "
+            "contract",
+            "assertion family has [05-HOST-3] and [05-OP-35]'s equality, own-width "
+            "closeness, left-to-right evaluation, zero-cotangent, and `Test` behavior",
+            "No dtype-named, rank-named, evaluator-only, legacy, or compatibility "
+            "identity is part of this atom",
+        ),
+        "05-OP-39": (
+            "governs exactly `reduce_window_sum`, `reduce_window_mean`, "
+            "`reduce_window_max`, `reduce_window_min`, and the internal "
+            "`ReduceWindowGrad` identity",
+            "Sum, max, and min admit every active numeric tensor dtype",
+            "mean admits every active float tensor dtype",
+            "bool, scalar, string, and reserved dtype spellings are type errors",
+            "Each forward result has the input dtype and [05-RWIN-1]'s output "
+            "dimensions",
+            "exact valid-padding signature, reducer identity, window/stride "
+            "validation",
+            "per-dtype arithmetic width, no-user-accumulator rule, canonical balanced "
+            "tree",
+            "overflow/NaN/tie behavior, first-order adjoint, overlap accumulation, "
+            "and higher-order rule",
+            "Integer forms are forward-only",
+            "float forms use the exact `ReduceWindowGrad` graph",
+            "No target-specific rank, reducer, dtype, first-order-only, host-fallback, "
+            "alias, or compatibility identity belongs to this atom",
+        ),
+        "05-RNG-1": (
+            "Every conforming evaluation of a `with seed(N)` program produces "
+            "byte-identical random results",
+            "compiler version and target do not vary this result",
+            "high 53 bits divided by `2^53`",
+            "Each entered random primitive consumes exactly one call ordinal",
+            "validation that precedes Random consumption consumes none",
+        ),
+        "05-OBS-1": (
+            "every NaN payload renders as the exact spelling `NaN`",
+            "parses to §3.7's canonical quiet-NaN image at that dtype",
+            "NaN text round-trips at the class level and deliberately loses "
+            "payload bits",
+        ),
+        "05-HOST-1": (
+            "A host-runtime operation SHALL preserve its complete checked signature",
+            "effects, exact dtype identity, evaluation order, traps, and value result",
+            "in every language execution mode",
+            "SHALL NOT substitute a stub, default value, null pointer, erased dtype, "
+            "or alternate helper contract",
+            "Device-kernel nesting is governed by the operation's effect and "
+            "device-boundary rules",
+            "it does not make the host operation illegal",
+        ),
+        "05-HOST-2": (
+            "JSON and CSV operations, `round_to`, and `process_run` are legal "
+            "host-runtime operations in every language execution mode",
+            "Pure parsing, projection, serialization, and rounding retain their "
+            "stated purity",
+            "file and process operations retain their declared `Io` effect and "
+            "observable order",
+            "compiled host execution SHALL produce the same typed result or language "
+            "trap as evaluation",
+            "device-only kernel may not perform `Io`",
+            "effect-boundary fact SHALL NOT be represented as a language-wide "
+            "rejection, inert stub, default value, or evaluator-only signature",
+        ),
+        "05-HOST-3": (
+            "`test_assert` admits bool",
+            "`test_assert_eq` admits exactly [05-OP-36]'s scalar and recursive "
+            "equality domain",
+            "`test_assert_eq_tensor` admits two same-shaped tensors of one active "
+            "tensor element dtype",
+            "`test_assert_close_tensor` admits two same-shaped tensors and a "
+            "tolerance at one active float dtype",
+            "assertion identities are generic",
+            "dtype-named or rank-named aliases do not exist",
+            "SHALL NOT emit an inert assertion, default value, compatibility helper, "
+            "or whole-module rejection based on an unreachable assertion",
+        ),
+        "05-UNS-5": (
+            "An unsupported diagnostic SHALL carry the authority for its disposition",
+            "A language-rejected case cites the normative atom that decides it",
+            "A legal operation unavailable on the selected target identifies the exact "
+            "typed capability cell",
+            "Those categories SHALL be distinguishable at the diagnostic surface",
+            "a rejection carrying neither authority is a defect",
+            "Project scheduling or issue metadata may be associated with a capability "
+            "cell outside this normative contract",
+            "it is not semantic authority and does not alter legality",
+        ),
     }
     for atom, requirements in atom_requirements.items():
         require_atom(blocks, atom, requirements, violations)
+    validate_op_manifests(blocks, violations)
 
     require_all(
         spec05,
         (
             (
+                "| `cmplt(a, b)` | `cmplt(a, b)` | "
+                "`and(not(nan), cmplt(a, b))` |",
+                "ordered cmplt lowering",
+            ),
+            (
+                "| `lt(a, b)` | `cmplt(a, b)` | "
+                "`and(not(nan), cmplt(a, b))` |",
+                "ordered lt lowering",
+            ),
+            (
+                "| `eq(a, b)` | `not(or(lt, gt))` | "
+                "`and(not(nan), not(or(lt, gt)))` |",
+                "ordered eq lowering",
+            ),
+            (
+                "| `neq(a, b)` | `or(lt, gt)` | `or(nan, or(lt, gt))` |",
+                "ordered neq lowering",
+            ),
+            (
+                "| `gt(a, b)` | `gt` | `and(not(nan), gt)` |",
+                "ordered gt lowering",
+            ),
+            (
+                "| `gte(a, b)` | `not(lt)` | `and(not(nan), not(lt))` |",
+                "ordered gte lowering",
+            ),
+            (
+                "| `lte(a, b)` | `not(gt)` | `and(not(nan), not(gt))` |",
+                "ordered lte lowering",
+            ),
+            (
+                "Here `lt = cmplt(a,b)`, `gt = cmplt(b,a)`, and, on floats only,\n"
+                "`nan = or(is_nan(a),is_nan(b))`",
+                "ordered comparison helper definitions",
+            ),
+            (
                 "`print`, `to_string`, `to_list`, diagnostics",
                 "to_string observation exit",
             ),
             (
-                "Not fully implemented; see chelis#1282 and chelis#1059",
-                "to_string implementation owners",
+                "`tensor_scan` accumulator and emitted elements remain at `T`",
+                "tensor_scan exact carrier",
             ),
             (
                 "The first NaN is the forward result when any NaN is\npresent",
@@ -606,7 +1724,17 @@ def validate_normative_contract(
                 "route the full `g` to the first\n  NaN in row-major window order",
                 "window extrema NaN adjoint",
             ),
-            ("Not fully implemented; see chelis#1281", "window work owner"),
+            (
+                "Each exact [05-OP-36] identity —\n`cmplt`, `lt`, `eq`, `neq`, `gt`, "
+                "`gte`, and `lte`",
+                "comparison AD identity completeness",
+            ),
+            (
+                "`cast_trunc`,\n"
+                "`cast_saturate`, `cast_wrap`, `and`, `or`, `not`,\n"
+                "`count`, `argmax_reduce`, and `argmin_reduce` likewise reject `grad`",
+                "count structural AD rejection",
+            ),
         ),
         violations,
     )
@@ -659,11 +1787,11 @@ def validate_schema_and_consumers(
                 "disjoint to_string cases",
             ),
             (
-                "Supported` exactly for [05-OP-25]'s scalar, tensor, and "
-                "recursively admitted List domains",
+                "exact case enumerator covers unit, scalar, tensor, List, tuple, "
+                "Dict, Option, and ADT values",
                 "to_string semantic authority",
             ),
-            ("[#1282] owns aligning the pre-table", "to_string checker owner"),
+            ("[#1282] owns checker/evaluator alignment", "to_string checker owner"),
             (
                 "Every sibling `Supported` row expands across\n"
                 "the same exact backend set",
@@ -720,12 +1848,45 @@ def validate_schema_and_consumers(
                 "reduction implementation owner",
             ),
             (
-                "Unimplemented { issue: #170, diagnostic_kind: UnsupportedFeature }",
+                "Unimplemented { issue: #1290, diagnostic_kind: UnsupportedFeature }",
                 "product implementation owner",
             ),
             (
                 "Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }",
                 "logical implementation owner",
+            ),
+            (
+                "arithmetic reductions x (any) x bool",
+                "bool reduction rejection",
+            ),
+            ("[05-OP-29], [#1287], [#1291]", "count capability owner"),
+            (
+                "They do not prescribe an explicit cast or arithmetic lowering",
+                "no cast counting compatibility",
+            ),
+            (
+                "axis values are not table axes",
+                "count axes stay in the signature rule",
+            ),
+            (
+                "runtime-axis `shape`, `ReduceWindow`, and `ReduceWindowGrad` "
+                "([05-OP-7], [05-SHAPE-1], [05-OP-39], [#1298])",
+                "runtime-axis and window capability owner",
+            ),
+            (
+                "no host fallback, permanent target rejection, zero adjoint, or "
+                "signature narrowing is an implementation receipt",
+                "runtime-axis target-independent signature",
+            ),
+            (
+                "host numeric builtins `tensor_scan`, `process_run`, and generic "
+                "assertions ([05-OP-38], [#1297])",
+                "host numeric capability owner",
+            ),
+            (
+                "No narrow case allowlist or unsupported-nested-carrier exception "
+                "survives",
+                "recursive to_string full domain",
             ),
             ("invokes the 4B, 4C, and 4D oracles", "nested Phase 4B oracle"),
         ),
@@ -738,7 +1899,10 @@ def validate_schema_and_consumers(
     require_all(
         plan,
         (
-            ("### Phase 4B - semantic and schema freeze", "Phase 4B plan"),
+            (
+                "### Phase 4B - decided-contract and schema freeze (this change)",
+                "Phase 4B plan",
+            ),
             (
                 ".venv/bin/python scripts/dtype_phase4b_oracle.py",
                 "Phase 4B oracle command",
@@ -762,20 +1926,114 @@ def validate_schema_and_consumers(
                 "dtype-plan explicit effect purity",
             ),
             ("invokes the 4B, 4C, and 4D oracles", "dtype-plan final nesting"),
-            ("[#170] product-tree/backend work", "dtype-plan product owner"),
+            ("[#1290] balanced sum/product backend work", "dtype-plan product owner"),
             ("[#1281] mean/extrema/argument-reduction", "dtype-plan reduction owner"),
             ("[#1284]\n   owns replacing", "dtype-plan logical owner"),
             (
-                "canonical `to_string`, and boolean",
+                "recursive `to_string`; boolean\n   `and`/`or`/`not`; NaN-aware "
+                "comparison/equality; exact scalar/container/C\n   tensor carriers",
                 "dtype-plan to_string semantics",
             ),
             (
-                "[#1282] [05-OP-25] `to_string` checker/eval domain",
+                "This is the executable requirement for zero capacity exceptions.",
+                "zero capacity exceptions",
+            ),
+            (
+                "[#1282] [05-OP-25] recursive `to_string` domain",
                 "dtype-plan to_string checker owner",
             ),
             (
-                "[#1059] compiled tensor/List cells",
+                "[#1059] compiled recursive rendering cells",
                 "dtype-plan to_string backend owner",
+            ),
+            (
+                "### Pre-4C - exact builtin-atom closure ([#1294])",
+                "pre-4C atom-closure gate",
+            ),
+            (
+                "Before any Phase 4C key/cell type, authoring macro, or partial "
+                "machine row may\nland",
+                "atom closure precedes every partial Phase 4C mechanism",
+            ),
+            (
+                "discovers the union of every canonical Table-A IR/RISC operation\n"
+                "identity and every `BuiltinDecl` sibling domain/case, then proves an "
+                "exact\nbijection from every Table-A and sibling-builtin identity to "
+                "one\nsemantically governing normative `[05-OP-N]` line",
+                "total exact builtin-atom bijection",
+            ),
+            (
+                "authors every missing\natom, regenerates the rejection registry",
+                "atom closure authors and regenerates",
+            ),
+            (
+                "admits no count allowlist,\nunnumbered table/prose authority, issue "
+                "citation, default, alias, age, or\ncompatibility exception",
+                "atom closure has zero authority exceptions",
+            ),
+            (
+                "An open implementation issue can authorize only a\nlater Table-B "
+                "`Unimplemented` receipt; it never satisfies semantic closure",
+                "implementation issues are Table-B-only",
+            ),
+            (
+                ".venv/bin/python scripts/dtype_builtin_atom_closure_oracle.py",
+                "builtin atom-closure oracle command",
+            ),
+            (
+                "DTYPE BUILTIN ATOM CLOSURE ORACLE: PASS",
+                "builtin atom-closure oracle success line",
+            ),
+            (
+                "The oracle and its\nadversarial mutations must be green and merged "
+                "before Phase 4C begins",
+                "atom-closure merge gate",
+            ),
+            (
+                "### Pre-4C - composite executable gate ([#1296])",
+                "pre-4C composite gate",
+            ),
+            (
+                "After the individual behavior, storage, census, and [#1294] "
+                "atom-closure\noracles land",
+                "composite gate follows all prerequisite oracles",
+            ),
+            (
+                ".venv/bin/python scripts/dtype_pre_phase4c_oracle.py",
+                "composite pre-4C oracle command",
+            ),
+            (
+                "DTYPE PRE-PHASE-4C ORACLE: PASS",
+                "composite pre-4C oracle success line",
+            ),
+            (
+                "fails for a missing, duplicate,\nskipped, stale, nonzero, or "
+                "success-line-free leg",
+                "composite pre-4C runner totality",
+            ),
+            (
+                "It is wired to the normal gate; prose coverage\nor a manual waiver "
+                "is not an entry receipt",
+                "composite pre-4C normal-gate wiring",
+            ),
+            (
+                "**Entry condition:** the [#1296] composite pre-4C oracle is green, "
+                "merged, and\nwired to the normal gate",
+                "Phase 4C composite entry condition",
+            ),
+            (
+                "It includes [#1294]'s exact builtin-atom closure",
+                "Phase 4C entry includes exact atom closure",
+            ),
+            (
+                "[#1284], and [#1287]-[#1298]",
+                "composite gate includes every late prerequisite",
+            ),
+            (
+                "chelis#1295's all-active-float random/rounding rules, chelis#1297's "
+                "compiled\nhost effects, and chelis#1298's runtime-axis/window "
+                "operations have landed",
+                "Phase 4C issue-owned behavior prerequisites",
             ),
         ),
         violations,
@@ -783,6 +2041,21 @@ def validate_schema_and_consumers(
     require_all(
         loud,
         (
+            (
+                "consume `chelis_vocab::EffectKind` directly; no "
+                "`chelis_types` re-export",
+                "EffectKind direct ownership",
+            ),
+            ("`chelis_scalar { chelis_dtype dtype; uint64_t bits; }`", "C scalar carrier"),
+            ("`chelis_tensor` pairs `void *data` with `chelis_dtype`", "C tensor carrier"),
+            ("rank and positional axes are `int32_t`", "C axis domain"),
+            ("require compiled-artifact ABI version 2", "artifact ABI v2"),
+            (
+                "Under [05-OP-32], dictionary keys are exactly `string`, `bool`, or "
+                "any active\nsigned-integer scalar dtype",
+                "dict key domain",
+            ),
+            ("No compatibility bridge is permitted", "no host compatibility bridge"),
             (
                 "BuiltinId × SiblingDomain × SiblingCaseId × SemanticParams",
                 "loud sibling key",
@@ -835,20 +2108,42 @@ def validate_schema_and_consumers(
     require_all(
         roadmap,
         (
-            ("[#170] owns the product-tree/backend rows", "roadmap product owner"),
+            ("[#1290] replaces noncanonical product/sum trees", "roadmap product owner"),
             ("[#1281] owns the remaining reduction rows", "roadmap reduction owner"),
             ("Phase 4B froze semantics", "roadmap Phase 4B boundary"),
             (
-                "checker/eval domain ([#1282])",
+                "recursive canonical `to_string` and compiled rendering "
+                "([#1282]/[#1059])",
                 "roadmap to_string checker owner",
             ),
-            ("[05-OP-25] ([#1059])", "roadmap to_string backend owner"),
+            (
+                "recursive canonical `to_string` and compiled rendering "
+                "([#1282]/[#1059])",
+                "roadmap to_string backend owner",
+            ),
             (
                 "external-target/effect dispositions",
                 "roadmap external target authority",
             ),
             ("effect dispositions", "roadmap effect authority"),
-            ("non-numeric logical/`where` lowering ([#1284])", "roadmap logical owner"),
+            (
+                "full comparison/equality [05-OP-36] and typed logical/`where` "
+                "lowering ([#1284])",
+                "roadmap logical owner",
+            ),
+            ("first-class `count` [05-OP-29]", "roadmap count contract"),
+            ("zero-exception census ([#1288])", "roadmap census prerequisite"),
+            ("WireDag v6 exact-only break", "roadmap wire v6 break"),
+            (
+                "[#1295] owns all-active-float rounding/random parameter contracts "
+                "and all-dtype padding",
+                "roadmap random owner",
+            ),
+            ("[#1297] owns legal compiled host-effect execution", "roadmap host-effect owner"),
+            (
+                "[#1298] owns runtime-axis shape and complete window cells",
+                "roadmap runtime-axis owner",
+            ),
             (
                 "exported-stdlib dependency closure",
                 "roadmap stdlib derivation",
@@ -860,17 +2155,28 @@ def validate_schema_and_consumers(
         status,
         (
             ("This change is Phase 4B", "status Phase 4B statement"),
-            ("[05-OP-11..28]", "status Phase 4B atom range"),
-            ("#170 owns the product-tree/backend rows", "status product owner"),
-            ("#1281 owns the remaining reduction rows", "status reduction owner"),
-            ("logical/`where` lowering (#1284)", "status logical owner"),
+            ("[05-OP-1..39]", "status Phase 4B atom range"),
+            ("canonical balanced sum/product/count tree", "status balanced tree"),
+            ("#893/#1289 seal tensor access", "status carrier prerequisite"),
             (
-                "`to_string` checker/eval domain (#1282)",
-                "status to_string checker owner",
+                "#1288 replaces every frozen capacity disposition",
+                "status census prerequisite",
             ),
-            ("C-host cells (#1059)", "status to_string backend owner"),
-            ("Of the 127 issues parented", "status parented count"),
-            ("#729 | 15 / 53", "status #729 count"),
+            ("#1287 lands `count` in eval/C", "status count owner"),
+            ("#1291 owns loud HIP/Metal count cells", "status count GPU owner"),
+            ("#1295", "status random and padding owner"),
+            ("#1296", "status composite gate owner"),
+            ("#1297", "status host-effect owner"),
+            ("#1298", "status runtime-axis owner"),
+            ("No compatibility wrapper, reader", "status no compatibility"),
+            ("Of the 138 issues parented", "status parented count"),
+            ("53 remain open", "status open count"),
+            ("#729 | 26 / 64", "status #729 count"),
+            (
+                "#1293 aligns all 83 recursively discovered stdlib numeric "
+                "definitions",
+                "status stdlib alignment owner",
+            ),
             (
                 "external target dispositions, and exact effect-disposition rows",
                 "status Phase 4C external target delivery",
@@ -895,6 +2201,21 @@ def validate_schema_and_consumers(
         ),
         violations,
     )
+
+    tracker_counts = [
+        (int(open_count), int(total_count))
+        for open_count, total_count in re.findall(
+            r"^\| #7\d+(?: \(closed\))? \| (\d+) / (\d+)",
+            status,
+            re.MULTILINE,
+        )
+    ]
+    if len(tracker_counts) != 5:
+        violations.append("status issue graph must contain exactly five tracker rows")
+    elif sum(open_count for open_count, _total in tracker_counts) != 53:
+        violations.append("status issue graph tracker rows must sum to 53 open issues")
+    elif sum(total for _open_count, total in tracker_counts) != 138:
+        violations.append("status issue graph tracker rows must sum to 138 total issues")
 
 
 def validate_contract(root: Path = REPO_ROOT) -> None:

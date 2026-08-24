@@ -60,7 +60,7 @@ portable across Surf and Reef boundaries.
 The `surf_*` namespace is closed. A public Deep parser or programmatic
 validator MUST reject an unknown `surf_*` key. Resugaring MUST also reject a
 known key with any value or placement outside the table above; a standalone
-metadata map or legacy metadata-expression wrapper is not a permitted
+metadata map or metadata-expression wrapper is not a permitted
 placement. These five keys preserve only surface distinctions that canonical
 Deep otherwise erases; they do not change evaluation. Producers MUST NOT use
 the namespace for arbitrary provenance.
@@ -454,7 +454,7 @@ wildcard spelling); it does not allocate an inference variable.
 | `vmap` | `(vmap {} expr dim)` | Vectorization |
 | `jit` | `(jit {} expr)` | Compilation trigger |
 | `realize` | `(realize {} expr)` | Force DAG evaluation |
-| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional mode selector names a chelis#759 ladder rung (`trunc` = [05-OP-6]) |
+| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional `trunc` mode selects [05-OP-6] |
 | `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
 
@@ -511,15 +511,19 @@ These names are available without import. They are NOT tags — they are functio
 The irreducible computational basis. All tensor computation decomposes to these during IR lowering.
 
 **Elementwise:** `add`, `mul`, `exp`, `log`, `sin`, `sqrt`, `cmplt`, `max_elem`
-**Reduce:** `sum`, `max_reduce` (over axis)
+**Reduce:** `sum`, `count`, `max_reduce` (over one-or-more positional or
+one-or-more named axes, never a mixture)
 **Movement:** `reshape`, `permute`, `expand`, `pad`, `shrink`, `stride`
 **Memory:** `const`, `load`
 
 ### 3.2 Derived Functions
 
-Convenience functions that the compiler lowers to RISC primitive compositions during IR construction. The desugarer emits these; the IR pass decomposes them.
+Convenience functions with ordinary call syntax and operation-specific lowering
+points. The desugarer emits their typed identities. An identity remains intact
+through every semantic transform its governing atom names, including AD, and
+only then may the IR passes decompose it to RISC primitives.
 
-`sub`, `div`, `neg`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`
+`sub`, `div`, `neg`, `lt`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`
 
 ### 3.3 Standard Library (imported)
 
@@ -653,8 +657,6 @@ Resolved ordinary calls to the fixed operator builtins use Surf infix/prefix
 notation, while the same builtin name remains a value or pipe stage. A finite
 `Cons`/`Nil` chain uses bracket-list syntax; an open-tail `Cons` remains an
 explicit call. Explicit `borrow` and `copy` nodes remain explicit.
-
-(The typed `app`-to-pipe promotion is not fully implemented; see chelis#1171.)
 
 Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
 `base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use

@@ -6,9 +6,8 @@ Define the Chelis type system: the checked-Deep contract, the active primitive d
 and per-backend support matrix, tensor/function/ADT types, Hindley-Milner inference, the
 named-tensor-dimension algebra with no implicit broadcasting, dimension and rank
 polymorphism, opaque-type module identity and invariants, precision rules and mixed-precision
-accumulators, runtime shape semantics, fitness scoring, the Phase-2a effect subset, linearity,
-and the decided numeric-value-semantics and checker-totality atoms. This is the current and
-decided truth of how Chelis programs are type-checked.
+accumulators, runtime shape semantics, fitness scoring, effects, linearity,
+and the decided numeric-value-semantics and checker-totality atoms.
 
 **Source:** captured from [`spec/04-type-system.md`](../../../spec/04-type-system.md).
 
@@ -31,22 +30,24 @@ raw Deep, and effect inference SHALL run after HM type inference on the same ann
 - **WHEN** effect inference runs
 - **THEN** it operates on the checker's annotated tree, not the pre-check raw Deep
 
-### Requirement: Active primitive dtype set
+### Requirement: Active primitive set and dtype subsets
 
-The active numeric primitive set SHALL be exactly `f32`, `f64`, `bf16`, `f16`, `int8`,
-`int16`, `int32`, `int64`, `bool`, and `string`. `f8e4m3` SHALL be deferred and rejected by
-the checker (and `cast(x, f8e4m3)`) with a diagnostic pointing at §1.1.1; unsigned integer
-types SHALL be out of scope and rejected per §1.1.2.
+The active primitive set SHALL be exactly `f32`, `f64`, `bf16`, `f16`, `int8`,
+`int16`, `int32`, `int64`, `bool`, and `string`. Its numeric subset SHALL be
+the four floats and four signed integers; its tensor-element subset SHALL add
+`bool`; `string` SHALL be host-only. `f8e4m3` and the `uint*` names SHALL be
+reserved and rejected by the checker, including as cast targets. The short
+`u8`/`u16`/`u32`/`u64` spellings SHALL be unknown types, not aliases.
 
 #### Scenario: Active primitive resolves
 
 - **WHEN** a type expression is `(t-prim {} bf16)`
 - **THEN** the checker accepts it as an active dtype
 
-#### Scenario: Deferred and out-of-scope primitives rejected
+#### Scenario: Reserved and unknown primitives rejected
 
 - **WHEN** a program uses `(t-prim {} f8e4m3)` or a `u32` type
-- **THEN** the checker rejects it, pointing at §1.1.1 (deferred) or §1.1.2 (out of scope)
+- **THEN** the checker rejects `f8e4m3` as reserved and `u32` as unknown
 
 ### Requirement: Per-backend dtype support matrix
 
@@ -225,22 +226,23 @@ name-trackable operations, rejecting positional shape-rewriters.
 
 ### Requirement: Runtime shape semantics
 
-`shape(x, axis)` SHALL require a concrete non-negative integer axis and return an `int64`
-runtime scalar (`spec/05-risc-primitives.md` [05-DIM-2]; not fully implemented,
-chelis#1112); a negative or out-of-range axis SHALL be a `DimensionMismatch`. An `expand`
-runtime `size` SHALL be accepted only when it folds to a compile-time constant or derives from
-an in-scope tensor's shape; a sourceless runtime size SHALL be rejected identically at check,
-build, and eval.
+`shape(x, axis)` SHALL accept any expression of exactly type `int32` and return
+an exact `int64` runtime scalar. Literal axes are normalized and rejected at
+check time when out of range; computed axes use the same one-step negative
+normalization and trap `Domain` at execution when still out of range. `expand`
+SHALL accept any `int64` runtime size, and `reshape` SHALL accept arbitrary
+runtime int64 elements in a statically ranked shape list. Expression provenance,
+binding scope, and backend do not narrow these signatures.
 
 #### Scenario: Shape-sourced expand preserves the symbolic dim
 
 - **WHEN** `expand(b, 0, shape(x, cast(0, int32)))` is used with a declared `tensor[n, 4, f32]` return
 - **THEN** the symbolic batch dim `n` is preserved through unification
 
-#### Scenario: Sourceless expand size is rejected
+#### Scenario: Runtime parameter expand size is executed
 
-- **WHEN** an `expand` size is a bare runtime scalar parameter `a_dim: int32`
-- **THEN** it is rejected at check, build, and eval with the §4.7.2 sourceless-size diagnostic
+- **WHEN** an `expand` size is a bare runtime scalar parameter `a_dim: int64`
+- **THEN** every execution mode uses that exact value and applies the same nonnegative/equality guards
 
 ### Requirement: No implicit precision promotion
 
@@ -296,11 +298,13 @@ be a type error.
 
 ### Requirement: Mixed-precision accumulator
 
-`matmul` and `reduce_sum` SHALL carry an optional accumulator-precision parameter that is the
+`matmul` and `sum` SHALL carry an optional accumulator-precision parameter that is the
 only mixed-precision mechanism; when omitted the compiler SHALL resolve the documented default
 (bf16/f16 → f32, int8/int16 → int32) before any backend is invoked. An accumulator narrower
 than the operand or the default SHALL be a type error; integer `matmul` operand precisions
-SHALL NOT be admitted.
+SHALL NOT be admitted. `sum_result(p,a)` SHALL equal `p` for bf16/f16 and
+otherwise equal the selected accumulator: f32 may explicitly select f64 and
+return f64; int8/int16/int32 may explicitly select int64 and return int64.
 
 #### Scenario: bf16 matmul uses an f32 accumulator by default
 

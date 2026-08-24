@@ -790,7 +790,7 @@ checker. These are the permitted edges:
 |---|---|---|
 | `chelis-deep` | `chelis-vocab`; adapt Deep metadata into `EffectKindInput` | vocab has no reverse edge |
 | `chelis-surf` | `chelis-vocab`; canonical effect serialization/decompilation | already depends on Deep, never on types |
-| `chelis-types` | `chelis-vocab`; checker dispatch; temporarily re-export `EffectKind` for source compatibility | vocab does not depend on Deep/Pred/types |
+| `chelis-types` | `chelis-vocab`; checker dispatch; consume `chelis_vocab::EffectKind` directly; no `chelis_types` re-export | vocab does not depend on Deep/Pred/types |
 | `chelis-effects` | `chelis-vocab`; direct semantic dispatch | its existing types/Deep edges remain above vocab |
 | `chelis-ir` | `chelis-vocab`; IR and host lowering dispatch | its existing types/Deep edges remain above vocab |
 | `chelis-compiler-api` | `chelis-vocab`; evaluator dispatch and wire adapters | already sits above effects/IR/types |
@@ -831,27 +831,39 @@ outside that rustc oracle; it is not itself the exhaustiveness mechanism.
 `RuntimeDType` owns the stable ABI IDs `F32=0`, `F64=1`, `I32=2`, `Bool=3`,
 `I64=4`, `Bf16=5`, `F16=6`, `I8=7`, and `I16=8`. It also owns the canonical
 language spellings, C macro spellings, and mapping to `Repr`. `Repr` names the
-active physical encodings and owns their byte widths. `RuntimeDType` derives
-its byte width from `Repr`. These are current representation facts, not dtype
-semantics or storage decisions. `dtype_semantics.md` §C3 owns the storage
-decision. `chelis_tensor.dtype` and the C ABI arguments remain `int`; that is
-the wire representation, not the internal type. Each element consumer must
+active physical encodings and owns their byte widths; bool is native `Bool8`.
+`RuntimeDType` derives its byte width from `Repr`. The generated C spelling is
+the closed `chelis_dtype` enum. Rust FFI layouts store its integer-backed
+validated `RuntimeDTypeId`, never a Rust enum discriminant supplied by foreign
+code. `chelis_scalar { chelis_dtype dtype; uint64_t bits; }` is the exact
+scalar carrier, and `chelis_tensor` pairs `void *data` with `chelis_dtype`.
+Each element consumer must
 use a pointer or value type that is compatible with `RuntimeDType::repr()`.
 Equal byte widths do not permit one shared element view.
 
 | boundary/consumer | required typed behavior |
 |---|---|
 | `chelis_runtime::dtype_header` and the runtime headers | render the checked-in C fragment from the vocab declarations; include it in the C, HIP, and Metal headers; remove handwritten ID/size copies |
-| `chelis-runtime::{CHELIS_*}` | compatibility constants derive from `RuntimeDType::id()`, never literal integers |
+| generated `chelis_dtype` constants | derive from `RuntimeDType::id()`; no duplicate compatibility constants or raw integer dtype parameters remain |
 | `TensorElement::DTYPE` / `DtypeMismatch` | carry `RuntimeDType`; decode the tensor field before comparing or accessing |
-| `chelis_alloc`, `chelis_alloc_view`, `chelis_dtype_size`, `chelis_tensor_from_value_list_typed` | decode the inbound `c_int` immediately; invalid IDs abort with the raw ID before allocation, sizing, or element access |
+| `chelis_alloc`, `chelis_alloc_view`, `chelis_dtype_size`, typed list/tensor construction | accept `chelis_dtype`; the Rust boundary validates the integer representation before allocation, sizing, or element access |
 | `tensor_elem_size` | signature is `fn(RuntimeDType) -> usize`; exhaustive, no fallback |
-| `read_index_slot`, `chelis_tensor_to_f64`, list-from-tensor, comparison/where/cumsum/sort/trace/clamp/einsum, and tensor formatting | decode once, pass `RuntimeDType` into typed helpers, and select an element type that matches `repr()` |
-| `data_as_f32` and `data_as_f32_const` | accept F32 and the current `BoolInBinary32` payload. Reject I32 with a debug assertion before access |
-| clone/concat/split/gather/scatter/diagonal/contiguous byte-copy paths | decode before byte-width calculation; pass `RuntimeDType` to sizing; raw integers may be copied back only into the ABI field via `id()` |
+| exact scalar construction, observation, formatting, fills, and options | consume or return `chelis_scalar`; unused high bits are zero, bool bits are exactly 0/1, and floating bits preserve NaN payloads and signed zero |
+| `read_index_slot`, list-from-tensor, comparison/where/cumsum/sort/trace/clamp/einsum, and tensor formatting | decode once, pass `RuntimeDType` into typed helpers, and select an element type that matches `repr()` |
+| typed `Tensor<T>` access | one checked constructor and one exhaustive dtype dispatcher; `Tensor<f32>` cannot be formed from bool, integer, or reduced-float storage; the old `data_as_f32` helpers do not exist |
+| clone/concat/split/gather/scatter/diagonal/contiguous byte-copy paths | decode before byte-width calculation; pass `RuntimeDType` to sizing; write only the validated `chelis_dtype` field |
 | C/HIP/Metal `dtype_macro` and sparse/dtype-arm helpers | return `RuntimeDType` first and obtain the C spelling from the vocab declaration; no repeated `Prim -> "CHELIS_*"` tables |
-| generated C element access | use `int32_t` for `TwosComplement32`. Keep `float` for `Ieee754Binary32` and the current `BoolInBinary32` payload |
-| `chelis-python` tensor construction | use `RuntimeDType::F32.id()`; remove the local numeric constant |
+| generated C/HIP/Metal element access | use the exact `Repr` spelling: `int32_t` for `TwosComplement32`, `float` for `Ieee754Binary32`, and one byte for `Bool8` |
+| axis and extent ABI domains | rank and positional axes are `int32_t`; extents, shapes, strides, offsets, counts, and storage sizes are `int64_t` |
+| `chelis-python` construction and artifact loading | use the typed dtype/scalar carriers and require compiled-artifact ABI version 2 before loading; versionless, v1, and future manifests are rejected |
+
+`chelis_value` has one scalar arm instead of separate bool/int64/f64 arms.
+Under [05-OP-32], dictionary keys are exactly `string`, `bool`, or any active
+signed-integer scalar dtype. Integer key identity includes its dtype and exact
+stored value, so equal mathematical integers at different widths are not the
+same key. Float keys and every other scalar dtype are rejected. Scalar
+extraction, equality, and observation are dtype-exact and never implicitly
+widen an integer to f64.
 
 The negative suite covers `-1`, the first unused ID (`9` for this frozen
 table), `i32::MIN`, and `i32::MAX`. Each must fail at the decoder. Runtime
@@ -860,8 +872,9 @@ assert nonzero exit before any allocation-size result or buffer read can be
 observed. Positive coverage round-trips every ID and compares the generated C
 fragment byte-for-byte with its checked-in artifact.
 
-The runtime subprocess suite drives every raw dtype argument boundary plus a
-tensor-field read with ID `9` and requires nonzero exit carrying the raw ID.
+The runtime subprocess suite forges invalid underlying enum integers through
+the FFI plus a tensor-field read with ID `9` and requires nonzero exit carrying
+the raw ID.
 The added-dtype mutation oracle requires a compile error at every exhaustive
 consumer until the new representation identity is handled explicitly. It is
 executed by the Phase 2 oracle's controlled vocabulary mutation, which adds a
@@ -902,11 +915,10 @@ The staged source contract is:
    call, and callback matches are exhaustive and cannot observe a term or
    resolution error.
 
-Any compatibility bridge used while implementing this boundary is private,
-cannot convert to `ConcreteHostType` or `HostAbiType`, and cannot be passed to
-emission. The Phase 2 endpoint contains no legacy `HostType::Unknown` and no
-such bridge. Compile-time function signatures, not a source count, prove that
-only resolved types reach codegen.
+No compatibility bridge is permitted at this boundary. Callers migrate to the
+typed states atomically; the endpoint contains no legacy `HostType::Unknown`,
+adapter, alias, or wrapper. Compile-time function signatures, not a source
+count, prove that only resolved types reach codegen.
 
 Every production compiler entry point returns host decode, inference,
 resolution, and target-selection failures through its declared `Result`.

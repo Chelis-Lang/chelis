@@ -8,7 +8,7 @@ with their AD adjoints, the Tier-2 derived built-ins, division and reduction sem
 windowed reductions, movement and memory ops, effectful primitives with seed determinism,
 scatter determinism and AD policy, host-only builtins, the standard ML-op lowerings, AD
 completeness and the reference oracle, and the decided unsupported-case and observation
-contracts. This is the current and decided truth of how tensor computation lowers and runs.
+contracts.
 
 **Source:** captured from [`spec/05-risc-primitives.md`](../../../spec/05-risc-primitives.md).
 
@@ -106,11 +106,13 @@ SHALL be valid on float types only, and each SHALL carry its defined AD adjoint.
 
 ### Requirement: Reduction axis and accumulator
 
-A reduction axis SHALL be a compile-time constant (literal or `cast(N, int32)`); a runtime axis
-SHALL be rejected at the call site. Negative axes SHALL index from the end uniformly across
-axis-taking primitives. `sum` SHALL carry a populated accumulator-precision field resolved to
-the documented default when omitted; an explicitly narrower-than-default accumulator SHALL be a
-type error.
+A reduction SHALL take one or more unique compile-time positional int32 axes
+or one or more unique named axes, never a mixture. Negative positional axes
+SHALL normalize once against original rank. Value reductions execute the
+highest-original-position-first single-axis composition; `count` executes one
+dedicated multi-axis bool reduction. `sum` SHALL carry a populated
+accumulator-precision field resolved to the documented default when omitted;
+an explicitly narrower-than-default accumulator SHALL be a type error.
 
 #### Scenario: Constant axis reduction
 
@@ -124,29 +126,32 @@ type error.
 
 ### Requirement: Windowed reductions
 
-`reduce_window_max/min/sum/mean` SHALL implement `Valid`-padding-only strided windowed
-reductions over the trailing axes, with output extent
-`floor((input_dim - window) / stride) + 1`; a non-positive output extent SHALL be a type error.
-They SHALL be differentiable via `ReduceWindowGrad`; HIP codegen SHALL be deferred and rejected
-before codegen with an `unsupported_feature` diagnostic.
+`reduce_window_max/min/sum/mean` SHALL accept runtime `List[int64]`
+`window_shape` and `strides`, validate lengths/positive values before access,
+and implement the exact target-independent output-shape, arithmetic,
+tie/NaN, accumulation, adjoint, and second-derivative graph of
+[05-RWIN-1..2]/[05-OP-39]. Statically proven invalid inputs are type errors;
+runtime invalid inputs trap `Domain` before allocation or reads.
 
 #### Scenario: Valid-padding output extent
 
 - **WHEN** `reduce_window_max` runs with input 8, window 2, stride 2 on an axis
 - **THEN** the output extent is 4 (`floor((8-2)/2)+1`)
 
-#### Scenario: HIP target rejects windowed reduction
+#### Scenario: Device targets execute windowed reduction
 
 - **WHEN** `chelis build --target hip` compiles a program using `reduce_window_*`
-- **THEN** it is rejected at compile time with a clean `unsupported_feature` error
+- **THEN** it executes the same runtime window values, results, traps, and adjoints as eval and C
 
 ### Requirement: Movement ops and runtime bounds
 
-`reshape`, `permute`, `expand`, `pad`, `shrink`, and `stride` SHALL each carry their defined AD
-adjoint. Runtime (node-valued) movement bounds and reshape targets SHALL be validated at run
-time in both the eval and C lanes with matching abort/error paths for negative bounds, range
-overshoot, non-positive stride, and reshape numel disagreement; the HIP and Metal targets SHALL
-reject them naming `--target c`.
+`reshape`, `permute`, `expand`, `pad`, `shrink`, and `stride` SHALL each carry
+their exact AD adjoint. Runtime movement bounds and reshape targets SHALL be
+validated in every execution mode with matching language traps for negative
+bounds, range overshoot, non-positive stride, and reshape numel disagreement.
+Stride reverse mode SHALL zero-fill the original shape and route each output
+cotangent to its unique forward-selected source index; runtime steps carry
+zero cotangent.
 
 #### Scenario: Movement adjoint is defined
 
@@ -156,13 +161,13 @@ reject them naming `--target c`.
 #### Scenario: Runtime reshape numel mismatch aborts
 
 - **WHEN** a runtime reshape target's element product disagrees with the input
-- **THEN** both the eval lane and the C backend's emitted guard abort loudly rather than allocate a wrong view
+- **THEN** every execution mode traps before allocating a wrong view
 
 ### Requirement: Memory and shape-query primitives
 
-`const` and `load` SHALL be the pure tensor constructors and SHALL be non-differentiable
-(`const` gradient zero, `load` non-differentiable). `shape(x, axis)` SHALL read the runtime
-extent along a compile-time-constant axis as a rank-0 integer scalar contributing a zero
+`const` and `load` SHALL be the pure tensor constructors and contribute zero
+cotangent. `shape(x, axis)` SHALL read the runtime extent along any literal or
+computed int32 axis as a rank-0 int64 scalar contributing a zero
 cotangent; a non-constant axis forced into DAG construction (e.g. via `grad`) SHALL fail loudly.
 
 #### Scenario: const is non-differentiable
@@ -172,25 +177,27 @@ cotangent; a non-constant axis forced into DAG construction (e.g. via `grad`) SH
 
 #### Scenario: Non-constant shape axis under grad fails loudly
 
-- **WHEN** `grad` forces DAG construction of `shape(x, axis)` with a runtime axis
-- **THEN** it fails with a clean source-located diagnostic requiring a compile-time-constant axis, not a fabricated gradient
+- **WHEN** `grad` constructs `shape(x, axis)` with a computed runtime axis
+- **THEN** it preserves that axis, executes one-step normalization, and contributes exact zero cotangent
 
 ### Requirement: Effectful primitives
 
 `dropout` and `uniform_like` SHALL introduce the `Random` effect drawing from the active
 `with seed(...)` handler. `process_run` SHALL introduce `IO`, pass its argv straight to the OS
-with no shell or interpolation, report a signal-killed process as exit code `-1`, and be
-eval/test-only — rejected by the C/HIP/Metal build backends with a clean diagnostic.
+with no shell or interpolation, and report a signal-killed process as exit code `-1`.
+Every legal host execution mode SHALL provide the same typed result/trap; a
+device-only kernel cannot perform IO but that boundary SHALL NOT become a
+whole-module or language-wide rejection.
 
 #### Scenario: dropout introduces Random under a seed
 
 - **WHEN** `dropout(x, rate)` runs inside `with seed(42i64)`
 - **THEN** it draws its mask from the handled seed and reuses it on the backward pass
 
-#### Scenario: process_run rejected by a build backend
+#### Scenario: process_run compiles as a host effect
 
 - **WHEN** a program applying `process_run` is compiled with `--target c`
-- **THEN** it is rejected with a clean build error rather than a silent zero, because a compiled artifact has no host interpreter
+- **THEN** the host execution performs the exact argv call and returns `(int64,string,string)!{IO}`
 
 ### Requirement: Seed determinism
 
@@ -226,22 +233,22 @@ AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
 - **WHEN** `grad` is applied through `Scatter`
 - **THEN** it is rejected with `AdError::NotSupported` because the forward result depends on iteration order at duplicate indices
 
-### Requirement: Host-only builtins
+### Requirement: Host-executed builtins
 
-`tensor_scan` and the `test_*` assertion family SHALL be host-only, running inside the
-`chelis test`/`chelis eval` interpreter with no compiled-lane emission. `tensor_scan` SHALL be
-rejected whole-program at `chelis build --target c`/`hip`, and `grad`/`vmap` over a function
-reaching it SHALL be rejected at the transform boundary (reachability-scoped).
+`tensor_scan` and the `test_*` assertion family SHALL execute on the host in
+evaluation and compiled artifacts with [05-HOST-1..3]/[05-OP-38]'s exact
+signatures, effects, recurrence, equality/closeness, and AD/vmap rules. An
+unreachable call SHALL neither emit a stub nor cause whole-module rejection.
 
 #### Scenario: tensor_scan runs under eval
 
 - **WHEN** `tensor_scan` builds a rank-1 tensor under `chelis eval`
 - **THEN** it iterates on the host with constant worker-stack usage
 
-#### Scenario: tensor_scan build is rejected
+#### Scenario: tensor_scan builds as a host operation
 
 - **WHEN** a program calling `tensor_scan` (even in an entry-unreachable helper) is built with `--target c`
-- **THEN** it is rejected at compile time with a `tensor_scan`-tagged `unsupported_feature` diagnostic
+- **THEN** the reachable host call executes its exact recurrence; an unreachable helper has no effect on the artifact
 
 ### Requirement: Standard lowerings
 

@@ -3,9 +3,9 @@
 ## Purpose
 
 Define Chelis serialization: the `.ch`/`.dp` UTF-8 text forms, the `.chb` binary Shell metadata
-artifact with its implementation-owned wire layout, the additive compiler-API JSON
-wire-compatibility policy, and the normative decode-boundary invariant-revalidation contract for
-invariant-carrying opaque types. This is the current truth of how Chelis serializes and decodes.
+artifact with its implementation-owned wire layout, the exact-version compiler-API JSON
+wire policy, and the normative decode-boundary invariant-revalidation contract for
+invariant-carrying opaque types.
 
 **Source:** captured from [`spec/10-serialization.md`](../../../spec/10-serialization.md).
 
@@ -43,22 +43,30 @@ NOT be published as a frozen low-level guarantee while the implementation evolve
 - **WHEN** documenting `.chb`
 - **THEN** the project does not publish a frozen low-level layout guarantee while the format is still expected to evolve
 
-### Requirement: Additive wire-schema compatibility
+### Requirement: Exact WireDag schema version 6
 
-The compiler-API JSON wire models SHALL be the machine-facing surface, with new tagged variants
-(e.g. `WireRiscOp::Gather`) being additive changes producers may emit after the owning behavior
-lands. Consumers SHOULD tolerate unknown additive variants and report a clear unsupported-variant
-diagnostic; the transient `OneHot` marker SHALL NOT reach backends after specialization.
+The compiler-API JSON WireDag surface SHALL carry explicit schema version 6,
+and version 6 SHALL be the only accepted version. Missing, versionless,
+versions 1 through 5, future, unknown-variant, and best-effort payloads SHALL
+fail before IR construction. `Count.axes` SHALL already be the complete
+non-empty unique normalized original-axis vector in strictly descending order;
+encoder and decoder both reject a noncanonical vector. `Pad.fill` SHALL be a
+tagged `ScalarValue` whose dtype and bits exactly match the padded tensor.
 
-#### Scenario: Consumer tolerates an unknown additive variant
+#### Scenario: Unknown or older schema fails before IR construction
 
-- **WHEN** a consumer receives a wire variant newer than its build
-- **THEN** it reports a clear unsupported-variant diagnostic rather than failing only because the enum grew
+- **WHEN** a consumer receives a versionless, v1-v5, future-version, or unknown-variant WireDag payload
+- **THEN** decoding fails before any IR node is materialized
 
-#### Scenario: OneHot marker does not reach backends
+#### Scenario: Noncanonical Count axes are not rewritten
 
-- **WHEN** specialization completes
-- **THEN** the transient `WireRiscOp::OneHot` marker is not delivered to any backend
+- **WHEN** an encoder or decoder receives empty, duplicate, increasing, source-order, or out-of-range `Count.axes`
+- **THEN** it rejects the payload rather than canonicalizing or guessing
+
+#### Scenario: Pad fill is exact and tagged
+
+- **WHEN** `WireRiscOp::Pad` crosses the wire
+- **THEN** its fill is a dtype-tagged `ScalarValue` matching the tensor, never a raw number or inferred dtype
 
 ### Requirement: Decode-boundary invariant revalidation
 
