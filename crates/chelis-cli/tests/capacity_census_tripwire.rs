@@ -52,6 +52,96 @@ const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
 const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_math.h"];
 const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
+/// The final exported stdlib numeric identities decided by [05-OP-35].
+///
+/// Signatures remain enforced by the ordinary census row identity. This
+/// separate closed set makes removals, aliases, and recursive-discovery holes
+/// fail under the operation names a cold reviewer recognizes.
+const FINAL_STDLIB_NUMERIC_IDENTITIES: &[&str] = &[
+    "contracts::normal_cdf",
+    "contracts::normal_cdf_contract_samples",
+    "contracts::normal_cdf_contract_seed",
+    "contracts::standard_contract_tolerance",
+    "decimal::decimal",
+    "decimal::decimal_add",
+    "decimal::decimal_div",
+    "decimal::decimal_eq",
+    "decimal::decimal_from_int",
+    "decimal::decimal_gt",
+    "decimal::decimal_gte",
+    "decimal::decimal_lt",
+    "decimal::decimal_lte",
+    "decimal::decimal_mul",
+    "decimal::decimal_sub",
+    "decimal::decimal_to_float",
+    "decimal::decimal_to_string",
+    "decimal::try_decimal",
+    "index::drop_list",
+    "index::list_index",
+    "index::take_list",
+    "init/kaiming::kaiming_normal",
+    "init/kaiming::kaiming_uniform",
+    "init/random::normal_like",
+    "init/xavierext::trunc_normal",
+    "init/xavierext::xavier_normal",
+    "init/xavierext::xavier_uniform",
+    "io/json::json_array",
+    "io/json::json_bool",
+    "io/json::json_float",
+    "io/json::json_get",
+    "io/json::json_int",
+    "io/json::json_is_null",
+    "io/json::json_object",
+    "io/json::json_string",
+    "io/json::load_json",
+    "io/json::parse_json",
+    "io/json::to_json",
+    "io/json::try_load_json",
+    "io/json::try_parse_json",
+    "io/json::try_to_json",
+    "io/json::try_write_json",
+    "io/json::write_json",
+    "io::mmap_size",
+    "io::read_head_bytes",
+    "process::run",
+    "process::run_chelis",
+    "scalar::abs",
+    "scalar::max",
+    "scalar::min",
+    "sort::sort",
+    "tensor/construct::arange",
+    "tensor/construct::linspace",
+    "tensor/construct::squeeze",
+    "tensor/construct::stack",
+    "tensor/construct::unsqueeze",
+    "tensor/mask::where_indices",
+    "test::assert_close",
+    "test::assert_close_tensor",
+    "test::assert_eq",
+    "test::assert_eq_tensor",
+    "test::assert_shape",
+    "time::add_days",
+    "time::date",
+    "time::date_gt",
+    "time::date_gte",
+    "time::date_lt",
+    "time::date_lte",
+    "time::date_to_string",
+    "time::day_of_week",
+    "time::day_of_week_name",
+    "time::day_of_year",
+    "time::days_between",
+    "time::duration",
+    "time::is_leap_year",
+    "time::parse_date",
+    "time::sub_days",
+    "time::try_date",
+    "tokenizer::batch_encode",
+    "tokenizer::decode",
+    "tokenizer::encode",
+    "tokenizer::load_tokenizer",
+    "tokenizer::try_load_tokenizer",
+];
 const NUMERIC_PRIMS: &[&str] = &[
     "f64", "f32", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64",
 ];
@@ -6131,6 +6221,95 @@ fn planted_stdlib_rows(label: &str, source: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     scan_deftypes(&exprs, label, &mut rows);
     rows
+}
+
+fn stdlib_callable_names(rows: &[Row]) -> BTreeSet<String> {
+    rows.iter()
+        .filter(|row| row.kind == "std-def-numeric")
+        .map(|row| {
+            row.id
+                .split_once(": (")
+                .map_or_else(|| row.id.clone(), |(name, _)| name.to_string())
+        })
+        .collect()
+}
+
+/// [05-OP-35] is a closed surface, not a lower bound. This catches missing
+/// ADT-mediated definitions, fixed-rank successor aliases, and obsolete
+/// exports with the same assertion.
+#[test]
+fn final_stdlib_numeric_surface_is_exactly_op35() {
+    let actual = stdlib_callable_names(&stdlib_rows(&repo_root()));
+    let expected: BTreeSet<String> = FINAL_STDLIB_NUMERIC_IDENTITIES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the recursive stdlib census must discover exactly the 83 [05-OP-35] identities"
+    );
+}
+
+/// Direct primitive scanning misses definitions whose public numeric payload
+/// is reachable only through a nominal ADT. Removing the fixed-point ADT
+/// expansion must make this mutation fail.
+#[test]
+fn stdlib_numeric_discovery_expands_nominal_adts_recursively() {
+    let rows = planted_stdlib_rows(
+        "planted",
+        "module Std.Planted\n\
+         export (Outer, expose)\n\
+         type Inner = | InnerValue(int64)\n\
+         type Outer = | OuterValue(Option[Inner])\n\
+         def expose(text: string) -> Outer = OuterValue(Some(InnerValue(to_int(text))))\n",
+    );
+    assert!(
+        stdlib_callable_names(&rows).contains("planted::expose"),
+        "a numeric payload reachable through Outer -> Option -> Inner -> int64 must enumerate: {rows:?}"
+    );
+}
+
+/// The source-faithful `Std.Io.Json.Json` is the one public JSON value type.
+/// A second prelude representation is duplicate numeric surface even if all
+/// of its constructors happen to retain the old spellings.
+#[test]
+fn final_surface_has_no_duplicate_prelude_json_or_legacy_builtin_aliases() {
+    assert!(
+        prelude_adt_rows().is_empty(),
+        "the final language has no prelude numeric ADT: {:?}",
+        prelude_adt_rows()
+    );
+
+    const FORBIDDEN_BUILTINS: &[&str] = &[
+        "parse_json",
+        "to_json",
+        "json_f64",
+        "json_int",
+        "json_str",
+        "json_list",
+        "json_f64s",
+        "json_ints",
+        "jnum",
+        "jint",
+        "jstr",
+        "jlist",
+        "jdict",
+        "json_set",
+        "test_assert_eq_f32",
+        "test_assert_eq_int",
+        "test_assert_eq_bool",
+        "test_assert_eq_string",
+        "test_assert_eq_tensor_int64",
+    ];
+    let remaining: Vec<&str> = FORBIDDEN_BUILTINS
+        .iter()
+        .copied()
+        .filter(|name| chelis_types::builtin_decl(name).is_some())
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "legacy prelude JSON and dtype-named assertion builtins must not exist: {remaining:?}"
+    );
 }
 
 /// N3: an exported `def` with no declared signature produced NO row and no
