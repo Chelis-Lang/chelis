@@ -521,6 +521,22 @@ pub(super) fn check_reduction_signature(
         }
     };
 
+    if name == "count"
+        && !matches!(prec, TensorPrec::Concrete(Prim::Bool) | TensorPrec::Var(_))
+    {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "count expects exactly a bool tensor, got tensor precision {}",
+                    prec.render()
+                ),
+                vec!["Use count for bool tensors; numeric reductions use sum/prod_reduce.".into()],
+            ),
+        );
+    }
+
     // Resolve which axis (or axes) the reduction removes. Two modes:
     //
     //  * Positional (legacy): a single compile-time-constant integer axis on a
@@ -544,13 +560,13 @@ pub(super) fn check_reduction_signature(
     // names, ambiguity, and duplicates. Composition
     // (`sum(sum(x, head), seq)`) remains equivalent and order-insensitive.
     let mut remove: Vec<usize> = Vec::new();
-    if axis_exprs.len() == 1
-        && !has_spread
-        && let Some(raw) = extract_int_for_dim(&axis_exprs[0])
+    if !has_spread
+        && (axis_exprs.len() == 1 || name == "count")
+        && axis_exprs.iter().all(|axis| extract_int_for_dim(axis).is_some())
     {
-        match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => remove.push(axis),
-            None => {
+        for axis_expr in axis_exprs {
+            let raw = extract_int_for_dim(axis_expr).expect("guarded static axis");
+            let Some(axis) = normalize_static_axis(dims.len(), raw) else {
                 return report(
                     errors,
                     CheckError::new(
@@ -562,7 +578,20 @@ pub(super) fn check_reduction_signature(
                         vec![],
                     ),
                 );
+            };
+            if remove.contains(&axis) {
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: duplicate reduction axis {raw}; each normalized axis may appear at most once"
+                        ),
+                        vec![],
+                    ),
+                );
             }
+            remove.push(axis);
         }
     } else {
         for ax in axis_exprs {
@@ -717,7 +746,9 @@ pub(super) fn check_reduction_signature(
     // (TensorPrec::Var), defer the decision until the precision is
     // resolved by unification — return the canonical-but-still-poly
     // result type and let the standard unify path proceed.
-    let result_prec: TensorPrec = if name == "sum" {
+    let result_prec: TensorPrec = if name == "count" {
+        TensorPrec::Concrete(Prim::Int64)
+    } else if name == "sum" {
         match &prec {
             TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
                 Ok(rp) => TensorPrec::Concrete(rp),

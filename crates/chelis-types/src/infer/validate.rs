@@ -1732,6 +1732,7 @@ pub(super) fn is_ir_shape_sensitive_builtin(name: &str) -> bool {
             | "layer_norm"
             | "conv2d"
             | "sum"
+            | "count"
             | "max_reduce"
             | "min_reduce"
             | "prod_reduce"

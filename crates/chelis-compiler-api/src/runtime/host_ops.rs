@@ -1504,6 +1504,13 @@ pub(super) fn tensor_reduce_host(
     )))
 }
 
+pub(super) fn tensor_count_host(
+    tensor: &RuntimeTensorValue,
+    axes: &[usize],
+) -> Result<RuntimeTensorValue, String> {
+    chelis_ir::eval::count_tensor(&tensor.value, axes).map(RuntimeTensorValue::new)
+}
+
 /// Permute axes of a tensor, given an `axes` permutation. `axes[i]` is the
 /// source axis for output axis `i`.
 pub(super) fn tensor_permute_host(

@@ -33,6 +33,9 @@ pub enum AdRejectionReason {
     /// The op is non-differentiable because its output is an integer
     /// index (e.g. `Argmax`, `Argmin`).
     IntegerIndexOutput,
+    /// `count` maps discrete bool values to an integer cardinality and has no
+    /// differentiable extension in the language contract.
+    DiscreteCountOutput,
     /// The op is piecewise constant; the analytic derivative is zero
     /// almost everywhere and undefined at the breakpoints (e.g.
     /// `Floor`, `Ceil`).
@@ -92,6 +95,11 @@ impl fmt::Display for AdError {
                 AdRejectionReason::IntegerIndexOutput => write!(
                     f,
                     "grad: {op} is non-differentiable (integer-index output); \
+                     remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::DiscreteCountOutput => write!(
+                    f,
+                    "grad: count is non-differentiable (discrete bool cardinality); \
                      remove it from the gradient path or wrap it in a stop-gradient"
                 ),
                 AdRejectionReason::PiecewiseConstant => write!(
@@ -194,6 +202,12 @@ pub fn grad_dag_checked(
                 return Err(AdError::NotSupported {
                     op: "argmin",
                     reason: AdRejectionReason::IntegerIndexOutput,
+                });
+            }
+            RiscOp::Count { .. } => {
+                return Err(AdError::NotSupported {
+                    op: "count",
+                    reason: AdRejectionReason::DiscreteCountOutput,
                 });
             }
             RiscOp::Floor => {
@@ -306,6 +320,7 @@ fn risc_op_name(op: &RiscOp) -> &'static str {
         RiscOp::UniformLike { .. } => "uniform_like",
         RiscOp::Dropout { .. } => "dropout",
         RiscOp::Sum { .. } => "sum",
+        RiscOp::Count { .. } => "count",
         RiscOp::MaxReduce { .. } => "max_reduce",
         RiscOp::MinReduce { .. } => "min_reduce",
         RiscOp::ProdReduce { .. } => "prod_reduce",
@@ -1151,7 +1166,7 @@ fn compute_adjoints(
             let dx = dag.add_node(RiscOp::Mul, vec![expanded_g, local_grad], input_ty, None);
             Some(vec![(x, dx)])
         }
-        RiscOp::Argmax { .. } | RiscOp::Argmin { .. } => {
+        RiscOp::Argmax { .. } | RiscOp::Argmin { .. } | RiscOp::Count { .. } => {
             // Non-differentiable: integer-index outputs have zero gradient
             // almost everywhere and undefined gradient on ties. Returning
             // None here means grad_dag propagates a "cannot differentiate"

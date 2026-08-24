@@ -62,6 +62,7 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "layer_norm",
     "conv2d",
     "sum",
+    "count",
     "max_reduce",
     "min_reduce",
     "prod_reduce",
@@ -250,6 +251,7 @@ pub enum BuiltinInferenceRule {
 const SHAPE_COMPUTED_INFERENCE_BUILTINS: &[&str] = &[
     "matmul",
     "sum",
+    "count",
     "max_reduce",
     "min_reduce",
     "prod_reduce",
@@ -828,6 +830,13 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "sum",
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
+        realizability: Realizability::Universal,
+        shape_class: ShapeClass::NameTracked,
+        axis_arguments: AxisArgumentLayout::VariadicFrom(1),
+    },
+    BuiltinDecl {
+        name: "count",
         inference: InferenceDisposition::Checked(BuiltinInferenceRule::ShapeComputed),
         realizability: Realizability::Universal,
         shape_class: ShapeClass::NameTracked,
@@ -1775,7 +1784,7 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // and the procedural arm (`check_expand_signature`) computes the
         // symbolic output row, rejecting positional axes at symbolic rank —
         // the same gate structure as the reductions.
-        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
+        "sum" | "count" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
         | "argmin_reduce" | "expand" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
@@ -2332,6 +2341,7 @@ pub fn builtin_env() -> (Env, VarGen) {
     tensor_triop_return_first("layer_norm", &mut env, &mut vg);
     tensor_conv2d("conv2d", &mut env, &mut vg);
     tensor_reduce_to_out("sum", &mut env, &mut vg);
+    tensor_reduce_to_out("count", &mut env, &mut vg);
     tensor_reduce_to_out("max_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("min_reduce", &mut env, &mut vg);
     tensor_reduce_to_out("prod_reduce", &mut env, &mut vg);
@@ -2985,6 +2995,7 @@ mod tests {
         // end-to-end in a rank-poly body.
         let name_tracked: &[&str] = &[
             "sum",
+            "count",
             "mean",
             "max_reduce",
             "min_reduce",
@@ -3021,6 +3032,7 @@ mod tests {
         // rejects positional axes at symbolic rank, so admitting it in a
         // `..r` body cannot hide a transposition.
         assert_eq!(shape_class("sum"), ShapeClass::NameTracked);
+        assert_eq!(shape_class("count"), ShapeClass::NameTracked);
         assert_eq!(shape_class("mean"), ShapeClass::NameTracked);
         assert_eq!(shape_class("expand"), ShapeClass::NameTracked);
         // chelis#340: the rest of the reduction family is name-tracked too.

@@ -1103,6 +1103,71 @@ fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<Te
     Ok(TensorValue::from_storage(out_shape, storage))
 }
 
+/// [05-OP-29] multi-axis bool count. Source elements are partitioned into
+/// result groups by removing the selected coordinates. Each group is filled
+/// by scanning the input in its original row-major order, then folded through
+/// the canonical adjacent-pair balanced checked-int64 tree.
+pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
+    if input.prim() != Prim::Bool {
+        return Err(format!(
+            "count expects bool storage, got {}",
+            input.prim().name()
+        ));
+    }
+    if axes.is_empty()
+        || axes.iter().any(|&axis| axis >= input.shape.len())
+        || axes.windows(2).any(|pair| pair[0] <= pair[1])
+    {
+        return Err(format!(
+            "count axes must be non-empty, unique, in range, and strictly descending; got {axes:?}"
+        ));
+    }
+
+    let selected: HashSet<usize> = axes.iter().copied().collect();
+    let out_shape: Vec<usize> = input
+        .shape
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, &extent)| (!selected.contains(&axis)).then_some(extent))
+        .collect();
+    let mut groups = vec![Vec::<i64>::new(); numel(&out_shape)];
+    for flat in 0..input.len() {
+        let input_coord = linear_to_index(flat, &input.shape);
+        let output_coord: Vec<usize> = input_coord
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, &coord)| (!selected.contains(&axis)).then_some(coord))
+            .collect();
+        let group = index_to_linear(&output_coord, &out_shape);
+        let bit = input
+            .storage()
+            .scalar_at(flat)
+            .as_bool_exact()
+            .ok_or_else(|| format!("count input element {flat} is not an exact bool"))?;
+        groups[group].push(i64::from(bit));
+    }
+
+    let mut output = Vec::with_capacity(groups.len());
+    for mut level in groups {
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len().div_ceil(2));
+            for pair in level.chunks(2) {
+                let value = if pair.len() == 2 {
+                    pair[0]
+                        .checked_add(pair[1])
+                        .ok_or_else(|| "count/int64 overflow".to_string())?
+                } else {
+                    pair[0]
+                };
+                next.push(value);
+            }
+            level = next;
+        }
+        output.push(level.first().copied().unwrap_or(0));
+    }
+    finalize_wide_int("count", Prim::Int64, out_shape, output)
+}
+
 fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
     assert_eq!(input.len(), numel(&shape));
     // reuse_* contract: reshape is element-preserving (section C3); the
@@ -2047,6 +2112,7 @@ where
                     result: out_prim,
                 },
             )?,
+            RiscOp::Count { axes } => count_tensor(&values[&node.inputs[0]], axes)?,
             RiscOp::MaxReduce { axis } => {
                 reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MaxReduce)?
             }

@@ -570,6 +570,9 @@ impl CEmitter {
                     );
                 }
             }
+            RiscOp::Count { axes } => {
+                self.emit_count(id, axes, &node.inputs, &node.output_type, dag);
+            }
             RiscOp::MaxReduce { axis } => {
                 let input_id = node.inputs[0];
                 if self.reduction_inlined.contains(&input_id.0) {
@@ -4382,6 +4385,135 @@ impl CEmitter {
         // C backend's helpers know about lowers correctly without a
         // dedicated specialization.
         self.emit_reduce_sum_general(id, axis, inputs, ty, dag);
+    }
+
+    /// [05-OP-29] dedicated multi-axis bool count. The input is visited in
+    /// original row-major order within each result group, then folded through
+    /// an adjacent-pair balanced checked-int64 tree. No cast+sum lowering is
+    /// used, and the first typed boundary validates both the bool tag and its
+    /// exact 0/1 payload.
+    fn emit_count(
+        &mut self,
+        id: usize,
+        axes: &[usize],
+        inputs: &[NodeId],
+        ty: &TensorType,
+        dag: &Dag,
+    ) {
+        let a = inputs[0].0;
+        let input_ty = &dag.get(inputs[0]).expect("count input exists").output_type;
+        assert_eq!(input_ty.precision, Prim::Bool, "verified count input dtype");
+        assert_eq!(ty.precision, Prim::Int64, "verified count output dtype");
+        assert!(!axes.is_empty(), "verified count axes are non-empty");
+        assert!(
+            axes.windows(2).all(|pair| pair[0] > pair[1]),
+            "verified count axes are strictly descending"
+        );
+
+        self.emit_slot_wrapper(id, ty);
+        self.line(&format!("if (t{a}->dtype != CHELIS_BOOL) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "fprintf(stderr, \"count expected CHELIS_BOOL input at node {id}\\n\");"
+        ));
+        self.line("abort();");
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "const float* restrict __count_in_{id} = (const float*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "int64_t* restrict __count_out_{id} = (int64_t*)t{id}->data;"
+        ));
+        self.line(&format!("int64_t __count_n_{id} = 1;"));
+        for axis in axes.iter().rev() {
+            self.line(&format!(
+                "if (t{a}->shape[{axis}] != 0 && __count_n_{id} > INT64_MAX / t{a}->shape[{axis}]) {{ fprintf(stderr, \"count reduction extent overflow\\n\"); abort(); }}"
+            ));
+            self.line(&format!(
+                "__count_n_{id} *= t{a}->shape[{axis}];"
+            ));
+        }
+        self.line("#pragma omp parallel for");
+        self.line(&format!(
+            "for (int64_t outer = 0; outer < t{id}->size; outer++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!(
+            "int64_t* __level_{id} = __count_n_{id} == 0 ? NULL : (int64_t*)malloc((size_t)__count_n_{id} * sizeof(int64_t));"
+        ));
+        self.line(&format!(
+            "if (__count_n_{id} != 0 && __level_{id} == NULL) {{ fprintf(stderr, \"count allocation failed\\n\"); abort(); }}"
+        ));
+        self.line("int64_t __out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, __out_indices);"
+        ));
+        self.line(&format!(
+            "for (int64_t __r_{id} = 0; __r_{id} < __count_n_{id}; __r_{id}++) {{"
+        ));
+        self.indent += 1;
+        self.line("int64_t __full_indices[CHELIS_MAX_DIM];");
+        self.line("int __out_d = 0;");
+        for axis in 0..input_ty.dims.len() {
+            if !axes.contains(&axis) {
+                self.line(&format!(
+                    "__full_indices[{axis}] = __out_indices[__out_d++];"
+                ));
+            }
+        }
+        self.line(&format!("int64_t __rem_{id} = __r_{id};"));
+        for axis in (0..input_ty.dims.len()).rev() {
+            if axes.contains(&axis) {
+                self.line(&format!(
+                    "__full_indices[{axis}] = __rem_{id} % t{a}->shape[{axis}];"
+                ));
+                self.line(&format!("__rem_{id} /= t{a}->shape[{axis}];"));
+            }
+        }
+        self.line(&format!(
+            "int64_t __src_{id} = chelis_indices_to_flat(__full_indices, t{a}->strides, t{a}->ndim);"
+        ));
+        self.line(&format!("float __bit_{id} = __count_in_{id}[__src_{id}];"));
+        self.line(&format!(
+            "if (__bit_{id} != 0.0f && __bit_{id} != 1.0f) {{ fprintf(stderr, \"count input is not an exact bool\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "__level_{id}[__r_{id}] = (__bit_{id} == 1.0f) ? 1 : 0;"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("int64_t __level_n_{id} = __count_n_{id};"));
+        self.line(&format!("while (__level_n_{id} > 1) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "int64_t __next_n_{id} = (__level_n_{id} + 1) / 2;"
+        ));
+        self.line(&format!(
+            "for (int64_t __j_{id} = 0; __j_{id} < __next_n_{id}; __j_{id}++) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("int64_t __left_{id} = 2 * __j_{id};"));
+        self.line(&format!("int64_t __right_{id} = __left_{id} + 1;"));
+        let trap = NumericTrap::Overflow {
+            op: "count",
+            prim: Prim::Int64,
+        }
+        .to_string();
+        self.line(&format!(
+            "__level_{id}[__j_{id}] = (__right_{id} < __level_n_{id}) ? chelis_int_checked_add(__level_{id}[__left_{id}], __level_{id}[__right_{id}], 64, {trap:?}) : __level_{id}[__left_{id}];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!("__level_n_{id} = __next_n_{id};"));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "__count_out_{id}[outer] = (__count_n_{id} == 0) ? 0 : __level_{id}[0];"
+        ));
+        self.line(&format!("free(__level_{id});"));
+        self.indent -= 1;
+        self.line("}");
     }
 
     /// WS-A1 dtype-parameterized reduce_sum. Drives accumulator type

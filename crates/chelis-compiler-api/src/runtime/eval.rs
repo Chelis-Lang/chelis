@@ -2373,6 +2373,28 @@ impl<'a> EvalContext<'a> {
                 let axis = expect_int_arg(args, 1)?;
                 tensor_reduce_host(&tensor, axis, ReduceOp::Sum).map(RuntimeValue::Tensor)
             }
+            "count" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let rank = tensor.value.shape.len();
+                let mut axes = Vec::with_capacity(args.len().saturating_sub(1));
+                for index in 1..args.len() {
+                    let raw = expect_int_arg(args, index)?;
+                    let axis = if raw < 0 {
+                        rank.checked_sub(raw.unsigned_abs() as usize)
+                    } else {
+                        usize::try_from(raw).ok().filter(|&axis| axis < rank)
+                    }
+                    .ok_or_else(|| {
+                        format!("count axis {raw} is out of bounds for rank {rank} tensor")
+                    })?;
+                    if axes.contains(&axis) {
+                        return Err(format!("count has duplicate normalized axis {raw}"));
+                    }
+                    axes.push(axis);
+                }
+                axes.sort_unstable_by(|a, b| b.cmp(a));
+                tensor_count_host(&tensor, &axes).map(RuntimeValue::Tensor)
+            }
             "matmul" => {
                 let lhs = expect_tensor_arg(args, 0)?;
                 let rhs = expect_tensor_arg(args, 1)?;

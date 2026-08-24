@@ -4159,6 +4159,19 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Count { .. }) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target metal` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated Metal kernel; use `--target c`.",
+                    node.id.0
+                ),
+                "metal",
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
+                ),
+            ));
+        }
         let node_valued = match &node.op {
             RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
             RiscOp::Pad { padding, .. } => padding.iter().any(pair_has_node_bound),
@@ -4318,6 +4331,19 @@ mod metal_runtime_dim_reject_tests {
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
     for node in dag.nodes() {
         match &node.op {
+            RiscOp::Count { .. } => {
+                return Err(unsupported_gate_error(
+                    format!(
+                        "`chelis build --target hip` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated HIP kernel; use `--target c`.",
+                        node.id.0
+                    ),
+                    "hip",
+                    chelis_types::unimplemented_rejection!(
+                        729,
+                        "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
+                    ),
+                ));
+            }
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
             // `gpu_correctness` manual oracle). No reject arm: they fall
@@ -5523,6 +5549,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             axis: *axis,
             accumulator: accumulator.name().to_string(),
         },
+        RiscOp::Count { axes } => WireRiscOp::Count { axes: axes.clone() },
         RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
         RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
         RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },

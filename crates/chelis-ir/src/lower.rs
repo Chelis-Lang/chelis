@@ -3412,6 +3412,7 @@ fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
                 | "layer_norm"
                 | "conv2d"
                 | "sum"
+                | "count"
                 | "max_reduce"
                 | "min_reduce"
                 | "prod_reduce"
@@ -7929,6 +7930,46 @@ impl LowerCtx {
             // Only bare-name axes reach this arm (the checker rejects
             // positional integers in the variadic form); anything else falls
             // through to the 2-arg arms or the generic fallback.
+            "count" if args.len() >= 2 => {
+                let x = self.lower_expr_node(&args[0], "count input");
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let mut axes: Vec<usize> = args[1..]
+                    .iter()
+                    .map(|axis| self.resolve_reduce_axis(axis, x, x_ty.dims.len(), "count"))
+                    .collect();
+                axes.sort_unstable_by(|a, b| b.cmp(a));
+                if axes.is_empty()
+                    || axes.windows(2).any(|pair| pair[0] <= pair[1])
+                    || axes.iter().any(|&axis| axis >= x_ty.dims.len())
+                {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "count axes must resolve exactly once, in range, against the original input rank; got {axes:?}"
+                        ),
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
+                }
+                let dims = x_ty
+                    .dims
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim.clone()))
+                    .collect();
+                self.dag.add_node(
+                    RiscOp::Count { axes },
+                    vec![x],
+                    TensorType {
+                        dims,
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                )
+            }
             "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
                 if args.len() >= 3 && args[1..].iter().all(|a| bare_var_name(a).is_some()) =>
             {

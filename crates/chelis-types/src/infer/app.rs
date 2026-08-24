@@ -74,6 +74,7 @@ pub(super) fn infer_app(
         func_name.as_deref(),
         Some(
             "sum"
+                | "count"
                 | "mean"
                 | "max_reduce"
                 | "min_reduce"
@@ -134,6 +135,7 @@ pub(super) fn infer_app(
         func_name.as_deref(),
         Some(
             "sum"
+                | "count"
                 | "mean"
                 | "max_reduce"
                 | "min_reduce"

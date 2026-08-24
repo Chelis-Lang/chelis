@@ -195,12 +195,33 @@ impl HipEmitter {
         Ok(())
     }
 
+    fn reject_count(dag: &Dag) -> Result<(), Unsupported> {
+        if let Some(node) = dag
+            .nodes()
+            .iter()
+            .find(|node| matches!(node.op, RiscOp::Count { .. }))
+        {
+            return Err(Unsupported::new(
+                UnsupportedKind::Op("count".to_string()),
+                format!("the HIP kernel set (node {})", node.id.0),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; \
+                     chelis#1291 owns the dedicated HIP/Metal kernels"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Emit complete C/HIP source for a DAG as a function.
     pub(crate) fn emit_dag(
         dag: &Dag,
         func_name: &str,
     ) -> Result<(String, PeakDeviceBytesBreakdown), Unsupported> {
         Self::reject_integer_abs(dag)?;
+        Self::reject_count(dag)?;
         // F1 (WS-A0 RT-1 fixup, tactical) — lifted by WS-A2 (HIP f32/f64)
         // and WS-A3 (HIP bf16/f16).
         //
@@ -1093,6 +1114,7 @@ impl HipEmitter {
             // emitter arms below are the backstop if a future caller
             // reaches the backend without passing a gate.
             RiscOp::CastTrunc { .. } => None,
+            RiscOp::Count { .. } => None,
             // `pad` / `shrink` materialize a fresh buffer via a typed
             // per-output-element kernel (see `kernels::pad_typed` /
             // `kernels::shrink_typed`); the kernel name carries the output
@@ -1768,6 +1790,15 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
+            RiscOp::Count { .. } => return Err(Unsupported::new(
+                UnsupportedKind::Op("count".to_string()),
+                format!("the HIP kernel set (node {})", node.id.0),
+                Stage::Codegen("hip"),
+                chelis_types::unimplemented_rejection!(
+                    729,
+                    "chelis#1291 owns the dedicated HIP/Metal count kernels"
+                ),
+            )),
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
             }
@@ -3538,6 +3569,7 @@ impl HipEmitter {
             // contiguous). It is HIP-rejected before codegen under
             // [05-SHAPE-1], so this arm is only for classification completeness.
             | RiscOp::Shape { .. } => true,
+            RiscOp::Count { .. } => true,
             RiscOp::Reshape { .. } | RiscOp::Store { .. } => {
                 Self::node_is_statically_contiguous(dag, dag.get(id).unwrap().inputs[0])
             }
