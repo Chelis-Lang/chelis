@@ -1155,6 +1155,10 @@ pub(super) const FLOAT_ONLY_DIV_OPS: &[&str] = &["div"];
 /// C/Rust truncating quotient and is not defined on float operands.
 pub(super) const INTEGER_ONLY_DIV_OPS: &[&str] = &["trunc_div"];
 
+/// Float-only Test-effect assertions whose dtype rule is [05-OP-35], not
+/// the transcendental rule in spec/04 section 5.4.
+pub(super) const FLOAT_ONLY_TENSOR_ASSERTION_OPS: &[&str] = &["test_assert_close_tensor"];
+
 pub(super) const INTEGER_REJECTED_OPS: &[&str] = &["matmul"];
 
 pub(super) fn check_restricted_op_in_body(
@@ -1170,6 +1174,7 @@ pub(super) fn check_restricted_op_in_body(
         && !TRANSCENDENTAL_FLOAT_ONLY_OPS.contains(&op_name)
         && !FLOAT_ONLY_DIV_OPS.contains(&op_name)
         && !INTEGER_ONLY_DIV_OPS.contains(&op_name)
+        && !FLOAT_ONLY_TENSOR_ASSERTION_OPS.contains(&op_name)
         && !BOOL_REJECTED_ARITH_OPS.contains(&op_name)
         && op_name != "mean"
     {
@@ -1239,6 +1244,18 @@ pub(super) fn check_restricted_op_in_body(
                     "spec/04-type-system.md \u{00a7}5.4: cast to a float precision \
                      before applying `{op_name}`, or pick a float instantiation of \
                      `{callee_name}`."
+                )],
+            ));
+            return;
+        }
+        if FLOAT_ONLY_TENSOR_ASSERTION_OPS.contains(&op_name) && !prim.is_float() {
+            errors.push(CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "test_assert_close_tensor on operand precision `{prim_name}` is not admitted per spec/05-risc-primitives.md [05-OP-35]: tensors and tolerance must share one active float dtype. Reached through the polymorphic sig for `{callee_name}` instantiated at `{prim_name}`; the restriction fires on every non-float instantiation, including via stdlib wrappers."
+                ),
+                vec![format!(
+                    "Use f16, bf16, f32, or f64 tensors with a tolerance of the same dtype in `{callee_name}`."
                 )],
             ));
             return;

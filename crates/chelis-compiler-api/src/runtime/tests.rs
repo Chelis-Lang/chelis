@@ -443,6 +443,137 @@ x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
     );
 }
 
+#[test]
+fn test_assert_close_tensor_f32_uses_f32_subtraction() {
+    // These are exact f32 values. Their exact widened difference is
+    // 0.9999999701976741, but f32 subtraction rounds it to the tolerance
+    // 0.9999999403953552. [05-OP-35] therefore accepts the f32 pair; an f64
+    // funnel rejects it.
+    let actual = tensor_value(Prim::F32, vec![1], vec![2.980232594040899e-8]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, 0.9999999403953552);
+    let rendered = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "f32-width")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect("the f32-width comparison must accept the rounded difference");
+    assert_eq!(rendered, "()");
+}
+
+#[test]
+fn test_assert_close_tensor_f64_keeps_the_f64_boundary_distinct() {
+    let actual = tensor_value(Prim::F64, vec![1], vec![2.980232594040899e-8]);
+    let expected = tensor_value(Prim::F64, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F64, 0.9999999403953552);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "f64-width")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("the exact f64 difference is greater than the tolerance");
+    assert!(error.contains("at index 0") && error.contains("f64-width"));
+}
+
+#[test]
+fn test_assert_close_tensor_accepts_each_active_float_dtype() {
+    for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        let actual = tensor_value(dtype, vec![2], vec![-0.0, 1.0]);
+        let expected = tensor_value(dtype, vec![2], vec![0.0, 1.001]);
+        let tolerance = scalar_of(dtype, 0.01);
+        eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "matrix")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("{dtype:?} own-width comparison failed: {error}"));
+    }
+}
+
+#[test]
+fn test_assert_close_tensor_rejects_infinite_tolerance() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, f64::INFINITY);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "infinite-tol")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("the tolerance must be finite");
+    assert!(error.contains("invalid tolerance") && error.contains("infinite-tol"));
+}
+
+#[test]
+fn test_assert_close_tensor_infinity_and_signed_zero_contract() {
+    for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
+        let actual = tensor_value(dtype, vec![3], vec![f64::INFINITY, f64::NEG_INFINITY, -0.0]);
+        let expected = tensor_value(dtype, vec![3], vec![f64::INFINITY, f64::NEG_INFINITY, 0.0]);
+        let tolerance = scalar_of(dtype, 0.0);
+        eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "special")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .unwrap_or_else(|error| panic!("{dtype:?} equal infinities/zeros failed: {error}"));
+
+        let actual = tensor_value(dtype, vec![2], vec![f64::INFINITY, 1.0]);
+        let expected = tensor_value(dtype, vec![2], vec![f64::NEG_INFINITY, f64::INFINITY]);
+        let finite_tolerance = match dtype {
+            Prim::F16 => 65_504.0,
+            Prim::Bf16 | Prim::F32 => 3.0e38,
+            Prim::F64 => 1.0e300,
+            _ => unreachable!("test loops active float dtypes"),
+        };
+        let tolerance = scalar_of(dtype, finite_tolerance);
+        let error = eval_deep_with_bindings(
+            r#"test_assert_close_tensor(actual, expected, tolerance, "nonfinite")"#,
+            &[
+                ("actual", actual),
+                ("expected", expected),
+                ("tolerance", tolerance),
+            ],
+        )
+        .expect_err("opposite or finite/infinite pairs are never close");
+        assert!(error.contains("at index 0") && error.contains("nonfinite"));
+    }
+}
+
+#[test]
+fn test_assert_close_tensor_arm_has_no_lossy_f64_tensor_funnel() {
+    let source = include_str!("eval.rs");
+    let arm = source
+        .split_once("\"test_assert_close_tensor\" =>")
+        .expect("assert-close dispatch arm")
+        .1
+        .split_once("\n            \"debug\" =>")
+        .expect("next dispatch arm")
+        .0;
+    assert!(arm.contains("StorageView::F32"));
+    assert!(arm.contains("StorageView::F16"));
+    assert!(arm.contains("StorageView::Bf16"));
+    assert!(arm.contains("StorageView::F64"));
+    assert!(
+        !arm.contains("to_f64_lossy_vec"),
+        "[05-OP-35] forbids a whole-tensor f64 comparison funnel"
+    );
+}
+
 // ----- N2 fix: matmul / permute / sum host evaluator coverage -----
 //
 // Pins the closure of the upstream-reported gap: native `chelis test`

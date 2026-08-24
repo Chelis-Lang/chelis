@@ -298,6 +298,7 @@ const SPECIALIZED_INFERENCE_BUILTINS: &[&str] = &[
     "print",
     "fail",
     "debug",
+    "test_assert_close_tensor",
     "string_len",
     "string_concat",
     "string_slice",
@@ -1522,9 +1523,7 @@ pub const BUILTINS: &[BuiltinDecl] = &[
     },
     BuiltinDecl {
         name: "test_assert_close_tensor",
-        inference: InferenceDisposition::GenericAccepted {
-            reason: "the polymorphic signature fully determines this builtin type",
-        },
+        inference: InferenceDisposition::Checked(BuiltinInferenceRule::Specialized),
         realizability: Realizability::HostOnly,
         shape_class: ShapeClass::Rewriting,
         axis_arguments: AxisArgumentLayout::NoAxes,
@@ -2248,19 +2247,23 @@ pub fn builtin_env() -> (Env, VarGen) {
         );
     }
     {
-        // test_assert_close_tensor: (tensor a, tensor a, f32, string) -> unit
+        // test_assert_close_tensor: (tensor[D,p_float], tensor[D,p_float],
+        //                            p_float, string) -> unit
+        // The whole-tensor variable preserves arbitrary rank and exact shape;
+        // the specialized checker links its element dtype to the tolerance.
         let tensor_tv = vg.fresh_tvar();
+        let tolerance_tv = vg.fresh_tvar();
         env.bind(
             "test_assert_close_tensor".to_string(),
             Scheme {
-                tvars: vec![tensor_tv],
+                tvars: vec![tensor_tv, tolerance_tv],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
                     vec![
                         borrowed(Type::Var(tensor_tv)),
                         borrowed(Type::Var(tensor_tv)),
-                        Type::Prim(Prim::F32),
+                        Type::Var(tolerance_tv),
                         Type::Prim(Prim::String),
                     ],
                     Box::new(Type::Unit),

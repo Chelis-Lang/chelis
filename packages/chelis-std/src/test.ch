@@ -17,7 +17,7 @@ def assert_close[p_float](actual: p_float, expected: p_float, tol: p_float, labe
     test_assert(ok, string_concat("assert_close (", string_concat(label, string_concat("): expected ", string_concat(to_string(expected), string_concat(", got ", string_concat(to_string(actual), string_concat(", tol ", to_string(tol)))))))))
   }
 }
-def assert_close_tensor[n, p](actual: &tensor[n, p], expected: &tensor[n, p], tol: f32, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
+def assert_close_tensor[n, p](actual: &tensor[n, p], expected: &tensor[n, p], tol: p, label: string) -> unit ! { Test } = test_assert_close_tensor(actual, expected, tol, label)
 def assert_eq_tensor[p](actual: &tensor[..r, p], expected: &tensor[..r, p], label: string) -> unit ! { Test } = test_assert_eq_tensor(actual, expected, label)
 def assert_shape[p](t: &tensor[..r, p], expected: List[int64], label: string) -> unit ! { Test } = {
   actual_rank = cast(rank(t), int64)

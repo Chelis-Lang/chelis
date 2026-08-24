@@ -6,13 +6,69 @@ use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::tier2;
-use chelis_types::{CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, types::Prim};
+use chelis_types::{CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, StorageView, types::Prim};
 use chelis_vocab::EffectKind;
 
 use super::host_ops::*;
 use super::named_axis::*;
 use super::transforms::*;
 use super::*;
+
+fn close_at_f32_width(actual: f32, expected: f32, tolerance: f32) -> bool {
+    if actual.is_nan() || expected.is_nan() {
+        return false;
+    }
+    if actual == expected {
+        return true;
+    }
+    if !actual.is_finite() || !expected.is_finite() {
+        return false;
+    }
+    (actual - expected).abs() <= tolerance
+}
+
+fn close_at_f64_width(actual: f64, expected: f64, tolerance: f64) -> bool {
+    if actual.is_nan() || expected.is_nan() {
+        return false;
+    }
+    if actual == expected {
+        return true;
+    }
+    if !actual.is_finite() || !expected.is_finite() {
+        return false;
+    }
+    (actual - expected).abs() <= tolerance
+}
+
+fn first_f32_mismatch(
+    actual: impl Iterator<Item = f32>,
+    expected: impl Iterator<Item = f32>,
+    tolerance: f32,
+) -> Option<(usize, f64, f64)> {
+    actual
+        .zip(expected)
+        .enumerate()
+        .find_map(|(index, (actual, expected))| {
+            (!close_at_f32_width(actual, expected, tolerance)).then_some((
+                index,
+                f64::from(actual),
+                f64::from(expected),
+            ))
+        })
+}
+
+fn first_f64_mismatch(
+    actual: impl Iterator<Item = f64>,
+    expected: impl Iterator<Item = f64>,
+    tolerance: f64,
+) -> Option<(usize, f64, f64)> {
+    actual
+        .zip(expected)
+        .enumerate()
+        .find_map(|(index, (actual, expected))| {
+            (!close_at_f64_width(actual, expected, tolerance)).then_some((index, actual, expected))
+        })
+}
 
 impl<'a> EvalContext<'a> {
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
@@ -2107,35 +2163,82 @@ impl<'a> EvalContext<'a> {
             "test_assert_close_tensor" => {
                 let actual = expect_tensor_arg(args, 0)?;
                 let expected = expect_tensor_arg(args, 1)?;
-                let tol = expect_float_arg(args, 2)?;
+                let tolerance = match args.get(2) {
+                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => *payload,
+                    other => {
+                        return Err(format!(
+                            "assert_close_tensor: expected float tolerance, got {other:?}"
+                        ));
+                    }
+                };
                 let label = expect_string_arg(args, 3)?;
-                if tol.is_nan() || tol < 0.0 {
+                let tensor_prim = actual.value.prim();
+                if tensor_prim != expected.value.prim() || tensor_prim != tolerance.dtype() {
                     return Err(format!(
-                        "assert_close_tensor ({label}): invalid tolerance {tol} (must be finite and non-negative)"
+                        "assert_close_tensor ({label}): actual, expected, and tolerance must have one common active float dtype"
                     ));
                 }
-                let actual_data = actual.value.to_f64_lossy_vec();
-                let expected_data = expected.value.to_f64_lossy_vec();
-                if actual_data.len() != expected_data.len() {
+                if !tensor_prim.is_float() {
+                    return Err(format!(
+                        "assert_close_tensor ({label}): tensor dtype {} is not an active float dtype",
+                        tensor_prim.name()
+                    ));
+                }
+                if actual.value.shape != expected.value.shape {
+                    return Err(format!(
+                        "assert_close_tensor ({label}): shape mismatch, expected {:?}, got {:?}",
+                        expected.value.shape, actual.value.shape
+                    ));
+                }
+                let tolerance_f64 = tolerance.as_f64_lossy();
+                if !tolerance_f64.is_finite() || tolerance_f64 < 0.0 {
+                    return Err(format!(
+                        "assert_close_tensor ({label}): invalid tolerance {tolerance_f64} (must be finite and non-negative)"
+                    ));
+                }
+                if actual.value.len() != expected.value.len() {
                     return Err(format!(
                         "assert_close_tensor ({label}): length mismatch, expected {} elements, got {}",
-                        expected_data.len(),
-                        actual_data.len()
+                        expected.value.len(),
+                        actual.value.len()
                     ));
                 }
-                for (i, (&a, &e)) in actual_data.iter().zip(expected_data.iter()).enumerate() {
-                    if a.is_nan() || e.is_nan() {
-                        return Err(format!(
-                            "assert_close_tensor ({label}): at index {i} expected {e}, got {a}, tol {tol} (NaN is never close)"
-                        ));
-                    }
-                    let diff = (a - e).abs();
-                    let mismatch = if tol == 0.0 { a != e } else { diff > tol };
-                    if mismatch {
-                        return Err(format!(
-                            "assert_close_tensor ({label}): at index {i} expected {e}, got {a}, tol {tol}"
-                        ));
-                    }
+
+                let mismatch = match (
+                    actual.value.storage().view(),
+                    expected.value.storage().view(),
+                ) {
+                    (StorageView::F64(actual), StorageView::F64(expected)) => first_f64_mismatch(
+                        actual.iter().copied(),
+                        expected.iter().copied(),
+                        tolerance_f64,
+                    ),
+                    (StorageView::F32(actual), StorageView::F32(expected)) => first_f32_mismatch(
+                        actual.iter().copied(),
+                        expected.iter().copied(),
+                        tolerance_f64 as f32,
+                    ),
+                    (StorageView::F16(actual), StorageView::F16(expected)) => first_f32_mismatch(
+                        actual.iter().map(|value| value.to_f32()),
+                        expected.iter().map(|value| value.to_f32()),
+                        tolerance_f64 as f32,
+                    ),
+                    (StorageView::Bf16(actual), StorageView::Bf16(expected)) => first_f32_mismatch(
+                        actual.iter().map(|value| value.to_f32()),
+                        expected.iter().map(|value| value.to_f32()),
+                        tolerance_f64 as f32,
+                    ),
+                    _ => unreachable!("common active-float dtype check makes storage exhaustive"),
+                };
+                if let Some((index, actual, expected)) = mismatch {
+                    let nan_suffix = if actual.is_nan() || expected.is_nan() {
+                        " (NaN is never close)"
+                    } else {
+                        ""
+                    };
+                    return Err(format!(
+                        "assert_close_tensor ({label}): at index {index} expected {expected}, got {actual}, tol {tolerance_f64}{nan_suffix}"
+                    ));
                 }
                 Ok(RuntimeValue::Unit)
             }
