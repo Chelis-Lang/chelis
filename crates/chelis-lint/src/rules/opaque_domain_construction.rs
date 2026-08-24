@@ -440,7 +440,11 @@ fn check_surf_expr(
 }
 
 fn check_deep(ctx: &Context<'_>, source: &str) -> Vec<Violation> {
-    let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) else {
+    // chelis#1088: the rule reads the same stamped `.dp` carrier the compiler
+    // does. A `.dp` the compiler will not accept produces no violations here;
+    // the compile path reports it, and a lint has never been the surface that
+    // announces malformed Deep.
+    let Ok(exprs) = chelis_deep::parse_and_stamp_file(source) else {
         return Vec::new();
     };
     let catalog = collect_deep_catalog(&exprs);

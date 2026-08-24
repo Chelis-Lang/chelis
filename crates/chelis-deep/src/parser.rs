@@ -596,6 +596,11 @@ impl From<crate::stamp_to_typed::StampError> for StampOrParseError {
 /// Lex, parse to `RawExpr`, then stamp via `stamp_to_typed` to produce
 /// typed `Expr` nodes. This is the preferred entry point for new code
 /// that wants the role-directed AST.
+///
+/// Every top-level form must be a *declaration*: this is the entry point for
+/// a declaration-bundle fragment (`new_decls`, a replacement `defsig`), not
+/// for a whole `.dp` file. Use [`parse_and_stamp_file`] when a top-level
+/// `(module ...)` wrapper is also admissible.
 pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let raw_exprs = parse_raw(&tokens)?;
@@ -613,7 +618,47 @@ pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError
     Ok(typed)
 }
 
+/// Lex, parse, then stamp every top-level form as a RuntimeExpr
+/// (chelis#1088).
+///
+/// The role-directed ingress for an *expression* text fragment. A bare name
+/// is rejected here exactly as it would be inside a declaration body, so a
+/// caller that accepts an expression from outside the process never has to
+/// re-diagnose an untyped `Atom::Name`.
+pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_runtime_exprs(raw_exprs)?;
+    Ok(typed)
+}
+
+/// Lex, parse, then require every top-level form to carry `expected` as its
+/// head tag (chelis#1088).
+///
+/// The role-directed ingress for a text fragment whose contract names one
+/// exact Deep tag, such as a replacement `(params {} ...)`.
+pub fn parse_and_stamp_tagged(
+    source: &str,
+    expected: crate::tag::DeepTag,
+) -> Result<Vec<Expr>, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let raw_exprs = parse_raw(&tokens)?;
+    let typed = crate::stamp_to_typed::stamp_as_tagged(raw_exprs, expected)?;
+    Ok(typed)
+}
+
 /// Convenience: lex and parse a source string in one step.
+///
+/// **Not an ingress boundary** (chelis#1088). Every top-level form is
+/// stamped as a bare/syntax position, with no declaration requirement, so a
+/// top-level non-declaration reaches the caller as an `Expr::BareList` or
+/// `Expr::Atom`. That is the weaker of the two strengths this repository
+/// used to run side by side. A public text boundary uses the role-directed
+/// entry point that names what it actually accepts: [`parse_and_stamp_file`]
+/// for a `.dp` program, [`parse_and_stamp`] for a declaration bundle,
+/// [`parse_and_stamp_runtime_exprs`] for an expression, or
+/// [`parse_and_stamp_tagged`] for one named tag. This spelling survives for
+/// in-crate fixtures that build a fragment in no particular role.
 pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
     let exprs = parse(&tokens)?;
@@ -622,6 +667,13 @@ pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
 
 /// Strict parse: lex, parse, then validate tag vocabulary.
 /// Returns error if any unknown tags are found.
+///
+/// **Not an ingress boundary** (chelis#1088). "Strict" here means the tag
+/// vocabulary only: the top-level stamp is [`parse_str`]'s lenient one, so
+/// this admits a top-level non-declaration too. See [`parse_str`] for the
+/// role-directed entry point to use instead; a caller that wants the
+/// vocabulary sweep as well runs `crate::validate::validate` over the
+/// stamped result.
 pub fn parse_str_strict(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;
     let exprs = parse(&tokens)?;

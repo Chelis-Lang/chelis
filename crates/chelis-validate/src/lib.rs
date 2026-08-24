@@ -77,28 +77,35 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
     // identity (the checker rejects them too). `validate --deep` only
     // ever processes hand-authored `.dp` (the linker feeds Deep to the
     // checker in-process and never writes `.dp`), so the reserved-name
-    // rejection here is unconditional. Parse through the AST parser (the
-    // grammar already validated above, so this succeeds).
-    if let Ok(exprs) = chelis_deep::parser::parse_str_strict(source) {
-        if let Some(name) = first_forged_linker_name(&exprs) {
-            return Err(ValidationError::Failed(format!(
-                "`{name}` uses the reef package-linker's reserved internal-name \
-                 format (`Pkg__`/`pkg__`...), which only the linker may produce; \
-                 rename the declaration"
-            )));
-        }
-        if let Some(name) = first_reopened_module(&exprs) {
-            return Err(ValidationError::Failed(format!(
-                "module `{name}` is opened by more than one module wrapper; \
-                 a named module may be opened at most once"
-            )));
-        }
-        if let Some(name) = first_duplicate_defsig(&exprs) {
-            return Err(ValidationError::Failed(format!(
-                "duplicate signature: `{name}` has more than one `defsig`; \
-                 Chelis does not dispatch same-name functions by argument type, arity, or rank"
-            )));
-        }
+    // rejection here is unconditional.
+    //
+    // chelis#1088: the AST leg uses the stamped `.dp` ingress, the same one
+    // `chelis check` uses. Two things follow. A source the stamp rejects is a
+    // validation failure rather than a silent skip of the forgery checks --
+    // the skip was the hole, because a forged name in a source that happened
+    // not to stamp passed unreported. And `validate --deep` and `check` now
+    // accept one Deep language: a top-level form must be a `(module ...)`
+    // wrapper or a declaration.
+    let exprs = chelis_deep::parse_and_stamp_file(source)
+        .map_err(|err| ValidationError::Failed(err.to_string()))?;
+    if let Some(name) = first_forged_linker_name(&exprs) {
+        return Err(ValidationError::Failed(format!(
+            "`{name}` uses the reef package-linker's reserved internal-name \
+             format (`Pkg__`/`pkg__`...), which only the linker may produce; \
+             rename the declaration"
+        )));
+    }
+    if let Some(name) = first_reopened_module(&exprs) {
+        return Err(ValidationError::Failed(format!(
+            "module `{name}` is opened by more than one module wrapper; \
+             a named module may be opened at most once"
+        )));
+    }
+    if let Some(name) = first_duplicate_defsig(&exprs) {
+        return Err(ValidationError::Failed(format!(
+            "duplicate signature: `{name}` has more than one `defsig`; \
+             Chelis does not dispatch same-name functions by argument type, arity, or rank"
+        )));
     }
     Ok(())
 }
@@ -555,8 +562,8 @@ mod tests {
                 "`{bogus}` must be rejected by the executable-grammar validator"
             );
             assert!(
-                chelis_deep::parser::parse_str_strict(&source).is_err(),
-                "`{bogus}` must be rejected by the compiler's strict parser"
+                chelis_deep::parse_and_stamp_file(&source).is_err(),
+                "`{bogus}` must be rejected by the compiler's stamped ingress"
             );
         }
         assert_eq!(
@@ -742,18 +749,19 @@ mod tests {
     //
     // Each positive case asserts that the commented form validates AND
     // that it accepts exactly what the comment-free form does, so the two
-    // surfaces stay in parity with `chelis_deep::parser::parse_str_strict`.
+    // surfaces stay in parity with `chelis_deep::parse_and_stamp_file`
+    // (chelis#1088: that is now the one Deep ingress both surfaces use).
 
     /// The base program these comment cases wrap, comment-free.
     const BASE: &str = "(module {} hello)\n";
 
     fn assert_validates(source: &str, label: &str) {
         // Both the commented and the bare form must validate, and the
-        // strict hand-rolled parser must also accept the source, so the
+        // stamped hand-rolled ingress must also accept the source, so the
         // two Deep surfaces agree (the core complaint of #167).
         validate_deep(source).unwrap_or_else(|err| panic!("{label} should validate: {err}"));
         validate_deep(BASE).expect("base program should validate");
-        chelis_deep::parser::parse_str_strict(source)
+        chelis_deep::parse_and_stamp_file(source)
             .unwrap_or_else(|err| panic!("{label} should parse strictly: {err}"));
     }
 
@@ -863,12 +871,12 @@ mod tests {
     // a `;` comment in its first internal `spacing`, which surfaces as a
     // visible `comment` pair ahead of the tag. If the introspection does
     // not skip it, the validator reads the comment text as the tag and
-    // wrongly rejects source that `parse_str_strict` accepts.
+    // wrongly rejects source that the stamped ingress accepts.
 
     #[test]
     fn deep_accepts_comment_before_params_tag_in_fn() {
         assert_validates(
-            "(fn {} (; note\nparams {}) (var {} x))\n",
+            "(def {} f (fn {} (; note\nparams {}) (var {} x)))\n",
             "comment before nested `params` tag",
         );
     }
@@ -876,7 +884,7 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_bind_tag_in_let() {
         assert_validates(
-            "(let {} (; note\nbind {}) (var {} x))\n",
+            "(def {} f (let {} (; note\nbind {}) (var {} x)))\n",
             "comment before nested `bind` tag",
         );
     }
@@ -884,8 +892,64 @@ mod tests {
     #[test]
     fn deep_accepts_comment_before_resource_tag_in_effects() {
         assert_validates(
-            "(effects {} (; note\nresource {} foo))\n",
+            "(defsig {} f (t-fn {eff: (effects {} (; note\nresource {} foo))} (t-prim {} f32)))\n",
             "comment before nested `resource` tag",
+        );
+    }
+
+    // ---- ingress parity with `chelis check` (chelis#1088) ----------------
+
+    #[test]
+    fn deep_rejects_a_top_level_form_that_is_not_a_declaration() {
+        // The pest grammar admits any top-level tagged node, and the AST leg
+        // used to skip its checks silently whenever its own parse failed.
+        // Both legs now agree with `chelis check`: a top-level form is a
+        // `(module ...)` wrapper or a declaration.
+        for source in [
+            "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))\n",
+            "(var {} x)\n",
+            "(app {} (var {} f) (var {} x))\n",
+        ] {
+            let error =
+                validate_deep(source).expect_err("a top-level non-declaration must be rejected");
+            assert!(
+                error.to_string().contains("expected declaration"),
+                "wrong reason for `{source}`: {error}"
+            );
+            assert!(
+                chelis_deep::parse_and_stamp_file(source).is_err(),
+                "the compiler's stamped ingress must agree about `{source}`"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_accepts_both_module_wrappers_and_bare_declarations() {
+        // The positive control for the rule above: the two admissible
+        // top-level shapes still validate, and the compiler's stamped
+        // ingress agrees.
+        for source in [
+            "(module {} hello (def {} f (var {} x)))\n",
+            "(def {} f (var {} x))\n",
+            "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} f32)))\n",
+        ] {
+            validate_deep(source).unwrap_or_else(|err| panic!("`{source}` should validate: {err}"));
+            chelis_deep::parse_and_stamp_file(source)
+                .unwrap_or_else(|err| panic!("`{source}` should stamp: {err}"));
+        }
+    }
+
+    #[test]
+    fn deep_reports_a_forged_linker_name_it_used_to_skip_silently() {
+        // The forgery checks used to run only when the AST leg's own parse
+        // succeeded, so a source that failed it passed unreported. Now the
+        // parse failure is itself a rejection, and a forged name in a source
+        // that does stamp is still named.
+        let error = validate_deep("(def {} Pkg__p__M__forged (var {} x))\n")
+            .expect_err("a reserved linker-format name must be rejected");
+        assert!(
+            error.to_string().contains("reserved internal-name"),
+            "wrong reason: {error}"
         );
     }
 

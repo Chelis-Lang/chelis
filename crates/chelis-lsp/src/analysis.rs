@@ -290,10 +290,13 @@ fn analyze_surf_document(text: &str) -> DocumentAnalysis {
 }
 
 fn analyze_deep_document(text: &str) -> DocumentAnalysis {
-    let diagnostics = match chelis_deep::parser::parse_str(text) {
+    // chelis#1088: the editor reports what the compiler decides. Both use the
+    // stamped `.dp` ingress, so a document the compiler rejects is underlined
+    // here instead of looking clean until the user runs `chelis check`.
+    let diagnostics = match chelis_deep::parse_and_stamp_file(text) {
         Ok(_) => Vec::new(),
         Err(err) => vec![Diagnostic {
-            range: range_for_offset(text, parse_error_offset_deep(&err)),
+            range: range_for_offset(text, deep_ingress_error_offset(&err)),
             severity: Some(DiagnosticSeverity::ERROR),
             message: err.to_string(),
             source: Some("chelis".to_string()),
@@ -1341,6 +1344,15 @@ fn parse_error_offset_deep(err: &chelis_deep::parser::ParseError) -> usize {
     }
 }
 
+/// The byte offset a stamped Deep ingress rejection points at: the parse
+/// position for a lex/parse failure, the offending form for a stamp failure.
+fn deep_ingress_error_offset(err: &chelis_deep::StampOrParseError) -> usize {
+    match err {
+        chelis_deep::StampOrParseError::Parse(parse_error) => parse_error_offset_deep(parse_error),
+        chelis_deep::StampOrParseError::Stamp(stamp_error) => stamp_error.span.offset,
+    }
+}
+
 fn range_for_expr(text: &str, expr: &Expr) -> Range {
     let span = match expr {
         Expr::Lit(_, span)
@@ -1552,6 +1564,43 @@ mod tests {
 
     fn surf_uri() -> Url {
         Url::parse("file:///tmp/test.ch").expect("uri")
+    }
+
+    fn deep_uri() -> Url {
+        Url::parse("file:///tmp/test.dp").expect("uri")
+    }
+
+    #[test]
+    fn deep_analysis_underlines_what_the_stamped_ingress_rejects() {
+        // chelis#1088: the editor and the compiler share one Deep ingress. A
+        // top-level non-declaration used to look clean here while `chelis
+        // check` rejected it.
+        let text = "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))\n";
+        let analysis = analyze_document(&deep_uri(), text);
+        assert_eq!(analysis.source_kind, SourceKind::Deep);
+        assert_eq!(analysis.diagnostics.len(), 1);
+        assert!(
+            analysis.diagnostics[0]
+                .message
+                .contains("expected declaration"),
+            "{}",
+            analysis.diagnostics[0].message
+        );
+        assert!(chelis_deep::parse_and_stamp_file(text).is_err());
+    }
+
+    #[test]
+    fn deep_analysis_reports_nothing_for_an_accepted_program() {
+        // The positive control: what the compiler accepts is clean here too.
+        let text = "(module {} m (def {} f (var {} x)))\n";
+        let analysis = analyze_document(&deep_uri(), text);
+        assert_eq!(analysis.source_kind, SourceKind::Deep);
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        assert!(chelis_deep::parse_and_stamp_file(text).is_ok());
     }
 
     #[test]

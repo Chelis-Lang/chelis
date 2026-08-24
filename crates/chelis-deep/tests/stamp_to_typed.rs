@@ -393,3 +393,92 @@ fn parse_raw_no_tag_decode() {
         panic!("expected List");
     }
 }
+
+// -- Role-directed fragment ingress (chelis#1088) ---------------------
+//
+// A public text boundary that takes a Deep *fragment* names the role that
+// fragment occupies, so the fragment is stamped exactly as it would be in
+// place. Each role has both polarities here.
+
+#[test]
+fn runtime_expression_ingress_accepts_an_expression() {
+    let exprs = chelis_deep::parse_and_stamp_runtime_exprs("(app {} (var {} f) (var {} x))")
+        .expect("an application is a runtime expression");
+    assert_eq!(exprs.len(), 1);
+    assert!(
+        matches!(&exprs[0], Expr::Node(node, _) if node.tag() == DeepTag::App),
+        "expected an App Node, got: {:?}",
+        exprs[0]
+    );
+}
+
+#[test]
+fn runtime_expression_ingress_rejects_a_bare_name() {
+    let error = chelis_deep::parse_and_stamp_runtime_exprs("unwrapped_name")
+        .expect_err("a bare name is not a runtime expression");
+    let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
+        panic!("expected a stamp rejection, got: {error:?}");
+    };
+    assert!(
+        matches!(
+            stamp.kind,
+            StampErrorKind::NameAtExprSlot { ref name } if name == "unwrapped_name"
+        ),
+        "expected NameAtExprSlot, got: {:?}",
+        stamp.kind
+    );
+    assert_eq!(stamp.span.offset, 0);
+}
+
+#[test]
+fn tagged_ingress_accepts_the_named_tag() {
+    let exprs = chelis_deep::parse_and_stamp_tagged(
+        "(params {} (x {type: (t-prim {} f32)}))",
+        DeepTag::Params,
+    )
+    .expect("a params node satisfies the params contract");
+    assert_eq!(exprs.len(), 1);
+    assert!(
+        matches!(&exprs[0], Expr::Node(node, _) if node.tag() == DeepTag::Params),
+        "expected a Params Node, got: {:?}",
+        exprs[0]
+    );
+}
+
+#[test]
+fn tagged_ingress_rejects_a_different_tag() {
+    let error = chelis_deep::parse_and_stamp_tagged("(var {} x)", DeepTag::Params)
+        .expect_err("a var node does not satisfy the params contract");
+    let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
+        panic!("expected a stamp rejection, got: {error:?}");
+    };
+    assert!(
+        matches!(
+            stamp.kind,
+            StampErrorKind::RequiresTag {
+                expected: DeepTag::Params,
+                ref got
+            } if got == "var"
+        ),
+        "expected RequiresTag, got: {:?}",
+        stamp.kind
+    );
+}
+
+#[test]
+fn declaration_ingress_rejects_a_module_wrapper_a_file_ingress_admits() {
+    // The two whole-text entry points are deliberately different languages:
+    // `parse_and_stamp` is a declaration bundle, `parse_and_stamp_file` is a
+    // `.dp` program. A caller that picks the wrong one is told so.
+    let module = "(module {} m (def {} f (var {} x)))";
+    chelis_deep::parse_and_stamp_file(module).expect("a `.dp` program admits a module wrapper");
+    let error = parse_and_stamp(module).expect_err("a declaration bundle does not");
+    let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
+        panic!("expected a stamp rejection, got: {error:?}");
+    };
+    assert!(
+        matches!(stamp.kind, StampErrorKind::RequiresDeclaration { ref head } if head == "module"),
+        "expected RequiresDeclaration, got: {:?}",
+        stamp.kind
+    );
+}

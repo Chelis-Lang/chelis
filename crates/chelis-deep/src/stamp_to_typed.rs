@@ -96,6 +96,39 @@ pub fn stamp_exprs_lenient(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampEr
     Ok(out)
 }
 
+/// Stamp raw expressions where every top-level form occupies a RuntimeExpr
+/// slot (chelis#1088).
+///
+/// A public text boundary that takes an *expression* fragment (a replacement
+/// function body, for instance) names that role here rather than falling
+/// through to the lenient bare/syntax stamp. A bare name is then the same
+/// ingress rejection it is inside a `(def ...)`, not an `Atom::Name` the
+/// consumer has to re-diagnose.
+pub fn stamp_runtime_exprs(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    let mut out = Vec::with_capacity(raw_exprs.len());
+    for raw in raw_exprs {
+        out.push(stamp_runtime_expr(raw)?);
+    }
+    Ok(out)
+}
+
+/// Stamp raw expressions where every top-level form must carry `expected`
+/// as its head tag (chelis#1088).
+///
+/// The role-directed counterpart for a text boundary whose contract names one
+/// exact tag — a `(params {} ...)` replacement, for instance. Anything else
+/// is a [`StampErrorKind::RequiresTag`] rejection at ingress.
+pub fn stamp_as_tagged(
+    raw_exprs: Vec<RawExpr>,
+    expected: DeepTag,
+) -> Result<Vec<Expr>, StampError> {
+    let mut out = Vec::with_capacity(raw_exprs.len());
+    for raw in raw_exprs {
+        out.push(stamp_as_bypass_tag(raw, expected)?);
+    }
+    Ok(out)
+}
+
 /// Stamp a `.dp` file's raw expressions into typed AST.
 ///
 /// `.dp` files may contain:
