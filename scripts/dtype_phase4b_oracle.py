@@ -87,6 +87,18 @@ FROZEN_ATOM_DIGESTS = {
 # mechanism. An intentional change owes the owning spec/design update, every
 # consuming contract, and an adversarial mutation before this manifest moves.
 FROZEN_REGION_DIGESTS = {
+    "numeric value semantics": (
+        "spec/04-type-system.md",
+        "## 9. Numeric Value Semantics",
+        "## 10. Checker Totality",
+        "fb4c271dd4701058458ebb9f0bf2847e7d831bc71ee1a090634eb0a4b57ce5f9",
+    ),
+    "numeric primitive contracts": (
+        "spec/05-risc-primitives.md",
+        "### 2.1 Elementwise Binary",
+        "### 2.4 Movement",
+        "907259b6cf97409e4a8a82f2c6d6bed64bf33bce73a151076f24c00681427a6d",
+    ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
         "### 3.2 Comparison and Logical Operations",
@@ -104,6 +116,18 @@ FROZEN_REGION_DIGESTS = {
         "### 2.3.1 Windowed Reduction",
         "### 2.4 Movement",
         "84a55eed44492dfb38e76d81c11a40028d383712ac1ce1d2782a78e021be83ae",
+    ),
+    "to_string contract section": (
+        "spec/05-risc-primitives.md",
+        "### 3.6.3 Canonical value-to-string conversion",
+        "### 3.7 Host-Lane Data I/O Numeric Operations",
+        "b59c3728307e626648d48bb39a5e8c2d6fe487c3c30d7512f739afce38eb5aac",
+    ),
+    "named lossy cast section": (
+        "spec/05-risc-primitives.md",
+        "### 3.8 Named Lossy Cast Forms",
+        "## 4. Standard Lowerings",
+        "959b507e38b24860cf66bb31698e0e25acfbcdb193225a8ee5e17a70c9584c12",
     ),
     "capability schema": (
         "spec/design/capability_table.md",

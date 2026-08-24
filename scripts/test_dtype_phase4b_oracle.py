@@ -116,6 +116,18 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("frozen normative atom 05-OP-12")
 
+    def test_plain_prose_after_extrema_atom_cannot_contradict_it(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "> zero. Integer operands are forward-only and `grad` rejects them.\n>\n"
+            "> **[05-OP-13]**",
+            "> zero. Integer operands are forward-only and `grad` rejects them.\n\n"
+            "An implementation MAY instead route the full non-NaN `max_reduce` "
+            "cotangent to only the last element equal to the selected maximum.\n\n"
+            "> **[05-OP-13]**",
+        )
+        self.assert_contract_fails("frozen numeric primitive contracts")
+
     def test_legacy_bool_arithmetic_alias_fails(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
