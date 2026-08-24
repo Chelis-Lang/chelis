@@ -48,6 +48,21 @@ class ContractValidationTests(unittest.TestCase):
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
 
+    def test_additive_prose_anywhere_in_a_contract_file_fails(self) -> None:
+        for relative in CONTRACT_FILES:
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                original = path.read_text(encoding="utf-8")
+                path.write_text(
+                    "An implementation MAY ignore the frozen Phase 4B contract.\n\n"
+                    + original,
+                    encoding="utf-8",
+                )
+                try:
+                    self.assert_contract_fails("frozen contract file")
+                finally:
+                    path.write_text(original, encoding="utf-8")
+
     def test_missing_operation_atom_fails(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
@@ -127,6 +142,17 @@ class ContractValidationTests(unittest.TestCase):
             "> **[05-OP-13]**",
         )
         self.assert_contract_fails("frozen numeric primitive contracts")
+
+    def test_plain_prose_before_multi_axis_contract_cannot_contradict_it(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "Multiple **named** axes may be reduced in one call",
+            "For multiple named-axis reductions, source spelling order controls "
+            "evaluation order and therefore owns exact values, traps, NaN selection, "
+            "and adjoints.\n\n"
+            "Multiple **named** axes may be reduced in one call",
+        )
+        self.assert_contract_fails("frozen name-preserving rank polymorphism")
 
     def test_legacy_bool_arithmetic_alias_fails(self) -> None:
         self.replace(

@@ -32,6 +32,38 @@ CONTRACT_FILES = (
     "spec/design/remediation_roadmap.md",
     "docs/investigations/remediation_status_2026_08_04.md",
 )
+FROZEN_FILE_DIGESTS = {
+    "spec/02-surf-syntax.md": (
+        "011dfa865ff468dc6de6d8dcc43a02e95725c2d9e699546924d28d27bdd5012f"
+    ),
+    "spec/03-deep-syntax.md": (
+        "18a9cc5d9e90f0bc7453c94232ec170a90ce090a367b5bb69860d1cb2551b58f"
+    ),
+    "spec/04-type-system.md": (
+        "c8f6deaee995ab41d7d606e9e4d577c30cc8eaf002cb00184db748e93e6bab9f"
+    ),
+    "spec/05-risc-primitives.md": (
+        "87fea2e2fe76739d76f1f8a082424e481b05bf6ec41b08057db96e8618b6193d"
+    ),
+    "spec/design/capability_table.md": (
+        "88e13a4608baf5f1d449f32279f2dd9f295ccd3e980f7d462fbd2faf6176b557"
+    ),
+    "spec/design/dtype_semantics.md": (
+        "7f4ae29cdc401316530d28cb160c112b3f1fbf23ae8318afc41009779f9770b8"
+    ),
+    "spec/design/loud_unsupported.md": (
+        "08495fb167ec4a9f8202693d22b58aa2ada1a8f08c8cf58cfe1f31a1f4b6d6a9"
+    ),
+    "spec/design/spec_provenance.md": (
+        "a2a84ab3a4d2925fc7a79f482e296eb979aadc24a0ebf21872c1fb257f7ea3fe"
+    ),
+    "spec/design/remediation_roadmap.md": (
+        "a309cae616c4e818a4f12fe453f7843912ee92da861eb3cc00bdff6047bd9755"
+    ),
+    "docs/investigations/remediation_status_2026_08_04.md": (
+        "e298ec213b843739f2a16ad6bdcaf672f4fce420dd6b2bebcaba48d567b87243"
+    ),
+}
 OP_ATOM = re.compile(
     r"^> \*\*\[05-OP-(\d+)\]\*\* `([a-z0-9_]+)", re.MULTILINE
 )
@@ -105,11 +137,11 @@ FROZEN_REGION_DIGESTS = {
         "### 3.3 Activation Functions",
         "9036535a7ae1af2dfa364eb580a55b0bcb822c0c9a79bc48cc7f1eeaae7a9d93",
     ),
-    "multi-axis reduction contract": (
+    "name-preserving rank polymorphism": (
         "spec/04-type-system.md",
-        "Multiple **named** axes may be reduced in one call",
-        "**Unification (unitary).**",
-        "7e8cd63034ea341f5a338ed39c0c339e3c80894fca2cf864b6a3c35d8faaff9f",
+        "#### 4.5.3 Name-Preserving Rank Polymorphism (Tier-3)",
+        "#### 4.5.4 Concat Result Typing (chelis#631, chelis#594)",
+        "13456e48646badbadd3beec4ecef5f554b0d7dd38695cae1b6042e8fddf7068e",
     ),
     "window extrema contract": (
         "spec/05-risc-primitives.md",
@@ -145,7 +177,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "ceaeef17c214b61fb634bd7e5feb0cc54df413fd92f0bfe56e9b1102f3b26732",
+        "502b59c4fbf6e9ae72ba7ef850ac94ab3fb898ec285ff13acc099a1a0ff65143",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -258,6 +290,21 @@ def frozen_region(text: str, start: str, end: str, label: str) -> str:
 def validate_frozen_contract(
     docs: dict[str, str], violations: list[str]
 ) -> None:
+    # A region digest cannot defend its own boundaries: contradictory prose can
+    # otherwise be inserted immediately before its start or after its end. The
+    # file snapshot is therefore the additive-contradiction gate. Narrower
+    # atom and region digests remain below to identify the owning contract when
+    # an existing clause changes. Moving a file digest is a semantic freeze
+    # change and owes the same spec, consumer, and adversarial-test review as a
+    # region-digest change.
+    for relative, expected in FROZEN_FILE_DIGESTS.items():
+        actual = frozen_digest(docs[relative])
+        if actual != expected:
+            violations.append(
+                f"frozen contract file {relative} digest mismatch: "
+                f"expected {expected}, got {actual}"
+            )
+
     for atom, expected in FROZEN_ATOM_DIGESTS.items():
         relative = (
             "spec/04-type-system.md" if atom.startswith("04-") else "spec/05-risc-primitives.md"

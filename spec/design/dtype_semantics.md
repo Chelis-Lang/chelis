@@ -1709,6 +1709,13 @@ either follows §B1; table implementation may not reinterpret them.
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the exact normative atom set,
 named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
 contract digests, phase naming, and generated rejection-registry agreement.
+Every contract input is fingerprinted as a complete file. The narrower atom
+and section fingerprints supply an owning diagnostic, but they are not the
+additive-contradiction boundary: prose immediately before a section start or
+after its end can otherwise override the frozen rule while every section
+fingerprint remains green. Moving a complete-file fingerprint therefore
+follows §B1 and owes the controlling contract, all consumers, and an
+adversarial mutation in the same change.
 Its success proves this freeze, not any Phase 4C implementation.
 
 ### Phase 4C - populate the machine authorities
