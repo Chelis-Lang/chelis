@@ -33,4 +33,5 @@ tempfile = "3"
 chelis-reef.workspace = true
 bincode = "1"
 serde_json = "1"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = "1"

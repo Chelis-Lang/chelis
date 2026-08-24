@@ -61,6 +61,33 @@ pub fn validate_surf(source: &str) -> Result<(), ValidationError> {
 }
 
 pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
+    // chelis#1088: the stamped `.dp` ingress runs FIRST, so `validate --deep`
+    // reaches the same program-level verdict `chelis check` does, in the same
+    // words. The order is the whole point. This auxiliary Pest grammar admits
+    // only `node+`, so when it ran first a headless top-level form died as
+    // `expected program` before anything could name it, and a reader got a
+    // caret instead of the [03-PROG-2] class the rule requires. Running the
+    // stamped ingress first means [03-PROG-1], [03-PROG-2], and [03-PROG-3]
+    // decide top-level acceptance, and the grammar keeps the structural
+    // checks below the top level that it alone performs.
+    //
+    // The second thing this ordering buys: a source the stamp rejects is a
+    // validation failure rather than a silent skip of the forgery checks
+    // below. That skip was the original hole, because a forged name in a
+    // source that happened not to stamp passed unreported.
+    let exprs = chelis_deep::parse_and_stamp_file(source)
+        .map_err(|err| ValidationError::Failed(err.to_string()))?;
+
+    // The AST-side structural sweep, on the stamped tree. The Pest leg below
+    // walks node children only, so a malformed shape inside a metadata value
+    // -- `(effects {} 1)` under a `t-fn`'s `eff:`, say -- is structurally
+    // invisible to it. `chelis check` has always caught those through this
+    // validator; running it here is what stops the two surfaces disagreeing
+    // about anything but the top-level rule.
+    if let Some(warning) = chelis_deep::validate::validate(&exprs).into_iter().next() {
+        return Err(ValidationError::Failed(warning.message));
+    }
+
     let mut parsed = deep::Grammar::parse(deep::Rule::program, source)
         .map_err(|err| ValidationError::Failed(err.to_string()))?;
     let Some(program) = parsed.next() else {
@@ -71,6 +98,7 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
             validate_deep_node(pair)?;
         }
     }
+
     // RFC v4b (RT-1 F2) + v5 (RT-1 F2 bypass): structural module-identity
     // forgery checks. The grammar admits two same-name wrappers and the
     // reef linker's reserved internal-name format, but both forge module
@@ -78,16 +106,6 @@ pub fn validate_deep(source: &str) -> Result<(), ValidationError> {
     // ever processes hand-authored `.dp` (the linker feeds Deep to the
     // checker in-process and never writes `.dp`), so the reserved-name
     // rejection here is unconditional.
-    //
-    // chelis#1088: the AST leg uses the stamped `.dp` ingress, the same one
-    // `chelis check` uses. Two things follow. A source the stamp rejects is a
-    // validation failure rather than a silent skip of the forgery checks --
-    // the skip was the hole, because a forged name in a source that happened
-    // not to stamp passed unreported. And `validate --deep` and `check` now
-    // accept one Deep language: a top-level form must be a `(module ...)`
-    // wrapper or a declaration.
-    let exprs = chelis_deep::parse_and_stamp_file(source)
-        .map_err(|err| ValidationError::Failed(err.to_string()))?;
     if let Some(name) = first_forged_linker_name(&exprs) {
         return Err(ValidationError::Failed(format!(
             "`{name}` uses the reef package-linker's reserved internal-name \
@@ -698,9 +716,15 @@ mod tests {
 
     #[test]
     fn deep_rejects_unknown_tag() {
-        let source = "(mystery {} x)";
+        // chelis#1088: the fixture moved inside a declaration. A top-level
+        // `(mystery {} x)` is now a [03-PROG-1] rejection, which would make
+        // this test pass for the wrong reason; below a `def` the unknown
+        // head is what the validator is left to decide.
+        let source = "(def {} f (mystery {} x))";
         let error = validate_deep(source).expect_err("unknown tag should fail");
-        assert!(error.to_string().contains("unknown Deep tag"));
+        let rendered = error.to_string();
+        assert!(rendered.contains("unknown tag"), "{rendered}");
+        assert!(rendered.contains("mystery"), "{rendered}");
     }
 
     #[test]
@@ -711,20 +735,29 @@ mod tests {
 
     #[test]
     fn deep_rejects_invalid_effects_children() {
-        let source = "(effects {} 1)";
+        // chelis#1088: `(effects ...)` is only ever a metadata value in real
+        // Deep, never a top-level form, so the fixture now sits where it
+        // actually occurs. That position is invisible to the Pest leg, which
+        // walks node children; the AST-side sweep is what reaches it, and
+        // running that sweep here is what keeps `validate --deep` agreeing
+        // with `check` below the top level too.
+        let source = "(defsig {} f (t-fn {eff: (effects {} 1)} (t-prim {} f32)))";
         let error = validate_deep(source).expect_err("non-symbol effects child should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("`effects` must contain bare names")
-        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("`effects` must contain"), "{rendered}");
     }
 
     #[test]
     fn deep_rejects_invalid_resource_arity() {
-        let source = "(resource {} x y)";
+        // chelis#1088: likewise nested where a `resource` entry really
+        // appears. The stamped ingress reaches the arity first and says so
+        // in the node vocabulary's own terms; the Pest arity arm remains as
+        // the second line of defence.
+        let source = "(defsig {} f (t-fn {eff: (effects {} (resource {} x y))} (t-prim {} f32)))";
         let error = validate_deep(source).expect_err("resource arity should fail");
-        assert!(error.to_string().contains("expected exactly 1 child"));
+        let rendered = error.to_string();
+        assert!(rendered.contains("resource"), "{rendered}");
+        assert!(rendered.contains("wrong child count"), "{rendered}");
     }
 
     #[test]
@@ -898,6 +931,60 @@ mod tests {
     }
 
     // ---- ingress parity with `chelis check` (chelis#1088) ----------------
+
+    #[test]
+    fn deep_rejects_a_program_with_no_top_level_form() {
+        // [03-PROG-3]. Empty, whitespace-only, and comments-only text all
+        // yield zero forms, and all three are the same rejection.
+        for source in ["", "   \n\t\n", "; just a comment\n", "\n; a\n; b\n\n"] {
+            let error = validate_deep(source)
+                .expect_err("[03-PROG-3] rejects text yielding no top-level form");
+            assert!(
+                error.to_string().contains("empty program"),
+                "{source:?}: {error}"
+            );
+            assert!(
+                chelis_deep::parse_and_stamp_file(source).is_err(),
+                "the compiler's stamped ingress must agree about {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_identifies_every_headless_class_the_way_check_does() {
+        // chelis#1088: the Pest grammar admits only `node+`, so before the
+        // stamped ingress ran first a headless top-level form died as
+        // `expected program` and the reader never learned its class. These
+        // are the nine [03-PROG-2] classes, through `validate --deep`.
+        let cases: [(&str, &str); 9] = [
+            ("some_name", "a bare identifier"),
+            ("42", "a bare integer literal"),
+            ("1.5", "a bare float literal"),
+            ("\"text\"", "a bare string literal"),
+            ("true", "a bare boolean literal"),
+            ("()", "an empty list"),
+            ("((var {} f) (var {} x))", "a list without a tag symbol"),
+            ("{key: 1}", "a metadata map"),
+            (
+                "^{:surf_literal_style \"explicit\"} (var {} x)",
+                "a metadata-annotated form",
+            ),
+        ];
+        for (source, identification) in cases {
+            let error = validate_deep(source)
+                .expect_err("[03-PROG-1] rejects every headless top-level form");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(identification),
+                "[03-PROG-2] requires {source:?} to be identified as \
+                 {identification}, got: {rendered}"
+            );
+            assert!(
+                !rendered.contains('<') && !rendered.contains('>'),
+                "[03-PROG-2] forbids a placeholder identification: {rendered}"
+            );
+        }
+    }
 
     #[test]
     fn deep_rejects_a_top_level_form_that_is_not_a_declaration() {

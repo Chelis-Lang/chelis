@@ -257,6 +257,15 @@ class TestTopLevelFormRule(unittest.TestCase):
                     source.startswith(f"({head} ") or source.startswith(f"({head}{{"),
                     f"{name}: `{head}` is not the head of {source!r}",
                 )
+            elif identification == oracle.EMPTY_PROGRAM_IDENTIFICATION:
+                # [03-PROG-3]: text that yields no top-level form at all,
+                # which is exactly whitespace and `;` comment lines.
+                for line in source.splitlines():
+                    stripped = line.strip()
+                    self.assertTrue(
+                        stripped == "" or stripped.startswith(";"),
+                        f"{name}: {line!r} is not whitespace or a comment",
+                    )
             else:
                 # A headless form is identified by one of the closed classes
                 # [03-PROG-2] fixes, never by an ad-hoc phrase.
@@ -280,6 +289,8 @@ class TestTopLevelFormRule(unittest.TestCase):
         # class label.
         for name, source, identification in oracle.TOP_LEVEL_REJECTED_FIXTURES:
             if identification.startswith("`"):
+                continue
+            if identification == oracle.EMPTY_PROGRAM_IDENTIFICATION:
                 continue
             stripped = source.strip()
             headed = (
@@ -451,6 +462,7 @@ class TestObligationRoster(unittest.TestCase):
                 oracle.check_keyword_in_expr_rejected,
                 oracle.check_score_one_controls,
                 oracle.check_top_level_form_rule,
+                oracle.check_validate_agrees_with_check,
                 oracle.check_stamp_pass_integration_tests,
                 oracle.check_compiler_api_ingress,
             ],

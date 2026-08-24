@@ -6069,9 +6069,13 @@ fn validate_desugar_accepts_dotted_module_paths() {
 
 #[test]
 fn validate_deep_rejects_unknown_tag() {
+    // chelis#1088: the fixture moved inside a declaration. A top-level
+    // `(mystery {} x)` is now a [03-PROG-1] rejection, so leaving it at top
+    // level would make this test pass for a reason unrelated to the unknown
+    // head it is about.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad.dp");
-    write_file(&path, "(mystery {} x)\n");
+    write_file(&path, "(def {} f (mystery {} x))\n");
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -6079,14 +6083,51 @@ fn validate_deep_rejects_unknown_tag() {
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unknown Deep tag"));
+        .stderr(predicate::str::contains("unknown tag"))
+        .stderr(predicate::str::contains("mystery"));
+}
+
+#[test]
+fn validate_deep_identifies_a_headless_top_level_form_like_check_does() {
+    // chelis#1088: `validate --deep` used to run its Pest grammar first, so a
+    // headless top-level form died as `expected program` and the reader never
+    // learned its [03-PROG-2] class. The stamped ingress now decides first.
+    let dir = tempdir().expect("tempdir");
+    for (name, source, identification) in [
+        ("bare_int.dp", "42\n", "a bare integer literal"),
+        (
+            "untagged.dp",
+            "((var {} f) (var {} x))\n",
+            "a list without a tag symbol",
+        ),
+        ("empty.dp", "", "empty program"),
+        ("comments.dp", "; only a comment\n", "empty program"),
+    ] {
+        let path = dir.path().join(name);
+        write_file(&path, source);
+        Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["validate", "--deep", path.to_str().unwrap()])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(identification));
+    }
 }
 
 #[test]
 fn validate_deep_rejects_invalid_effects_children() {
+    // chelis#1088: `(effects ...)` is a metadata value in real Deep, never a
+    // top-level form, so the fixture now sits where it actually occurs. That
+    // position is invisible to the Pest leg, which walks node children; the
+    // AST-side sweep `check` has always used is what reaches it, and
+    // `validate --deep` now runs that sweep too.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad_effects.dp");
-    write_file(&path, "(effects {} 1)\n");
+    write_file(
+        &path,
+        "(defsig {} f (t-fn {eff: (effects {} 1)} (t-prim {} f32)))\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -6094,16 +6135,20 @@ fn validate_deep_rejects_invalid_effects_children() {
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "`effects` must contain bare names or `(resource {} ...)` entries",
-        ));
+        .stderr(predicate::str::contains("`effects` must contain"));
 }
 
 #[test]
 fn validate_deep_rejects_invalid_resource_arity() {
+    // chelis#1088: likewise nested where a `resource` entry really appears.
+    // The stamped ingress reaches the arity first and names the tag; the Pest
+    // arity arm remains the second line of defence.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("bad_resource.dp");
-    write_file(&path, "(resource {} x y)\n");
+    write_file(
+        &path,
+        "(defsig {} f (t-fn {eff: (effects {} (resource {} x y))} (t-prim {} f32)))\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -6111,7 +6156,8 @@ fn validate_deep_rejects_invalid_resource_arity() {
         .args(["validate", "--deep", path.to_str().unwrap()])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("expected exactly 1 child"));
+        .stderr(predicate::str::contains("resource"))
+        .stderr(predicate::str::contains("wrong child count"));
 }
 
 #[test]

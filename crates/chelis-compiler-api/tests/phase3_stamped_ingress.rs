@@ -23,7 +23,7 @@ use chelis_compiler_api::compiler::{self, CompilerError};
 use chelis_compiler_api::schema::{
     AddFunctionRequest, AddPropertyRequest, ChangeSignatureRequest, CheckRequest, DecompileRequest,
     DeepCallGraphRequest, DeepOutlineRequest, DeepReferencesRequest, ParseRequest, RenameRequest,
-    ReplaceFunctionBodyRequest, ReplaceFunctionRequest, SourceKind,
+    ReplaceFunctionBodyRequest, ReplaceFunctionRequest, SourceKind, ValidateMode, ValidateRequest,
 };
 
 /// A well-formed module every door accepts at ingress. It carries the
@@ -63,14 +63,56 @@ const TOP_LEVEL_UNKNOWN_TAG: &str = "(future-form {} value)";
 /// A declaration missing its metadata map at index 1.
 const MISSING_META_MAP: &str = "(module {} phase3.ingress (def target (lit {} 1)))";
 
-/// Every module text that must be rejected at ingress by every door.
-const REJECTED_MODULES: &[(&str, &str)] = &[
-    ("bare name at a RuntimeExpr slot", BARE_NAME_BODY_MODULE),
-    ("top-level non-declaration node", TOP_LEVEL_NON_DECLARATION),
-    ("top-level bare atom", TOP_LEVEL_ATOM),
-    ("top-level untagged list", TOP_LEVEL_UNTAGGED_LIST),
-    ("top-level unknown tag", TOP_LEVEL_UNKNOWN_TAG),
-    ("declaration missing its metadata map", MISSING_META_MAP),
+/// Text that yields no top-level form at all ([03-PROG-3]).
+const EMPTY_PROGRAM: &str = "";
+
+/// Comments and whitespace also yield no top-level form ([03-PROG-3]).
+const COMMENTS_ONLY_PROGRAM: &str = "; a comment\n\n; another\n";
+
+/// Every module text that must be rejected at ingress by every door, paired
+/// with the identification [03-PROG-2] or [03-PROG-3] requires the diagnostic
+/// to carry.
+const REJECTED_MODULES: &[(&str, &str, &str)] = &[
+    (
+        "bare name at a RuntimeExpr slot",
+        BARE_NAME_BODY_MODULE,
+        "bare name",
+    ),
+    (
+        "top-level non-declaration node",
+        TOP_LEVEL_NON_DECLARATION,
+        "`fn`",
+    ),
+    (
+        "top-level bare atom",
+        TOP_LEVEL_ATOM,
+        "a bare integer literal",
+    ),
+    (
+        "top-level untagged list",
+        TOP_LEVEL_UNTAGGED_LIST,
+        "a list without a tag symbol",
+    ),
+    (
+        "top-level unknown tag",
+        TOP_LEVEL_UNKNOWN_TAG,
+        "`future-form`",
+    ),
+    (
+        "declaration missing its metadata map",
+        MISSING_META_MAP,
+        "metadata map",
+    ),
+    (
+        "program with no top-level form",
+        EMPTY_PROGRAM,
+        "empty program",
+    ),
+    (
+        "program of comments and whitespace only",
+        COMMENTS_ONLY_PROGRAM,
+        "empty program",
+    ),
 ];
 
 fn deep_parse_kind() -> chelis_vocab::DiagnosticKind {
@@ -111,9 +153,22 @@ fn assert_not_a_deep_ingress_rejection(error: &CompilerError, label: &str) {
 
 // ── The parity table ─────────────────────────────────────────────────
 
+/// Whether a door reports an ingress rejection in the Deep-parse vocabulary.
+/// `compiler::validate` is a validation operation, so its rejection carries
+/// the validation kind; the [03-PROG-2] identification contract binds both.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DoorKind {
+    DeepParse,
+    Validation,
+}
+
 /// One public door, invoked so that only its ingress decision varies with the
 /// module text it is handed.
-type ModuleTextDoor = (&'static str, fn(&str) -> Result<(), CompilerError>);
+type ModuleTextDoor = (
+    &'static str,
+    fn(&str) -> Result<(), CompilerError>,
+    DoorKind,
+);
 
 /// Every public compiler-API door that takes whole-module Deep text.
 fn module_text_doors() -> Vec<ModuleTextDoor> {
@@ -202,6 +257,13 @@ fn module_text_doors() -> Vec<ModuleTextDoor> {
         })
         .map(|_| ())
     }
+    fn validate_door(module: &str) -> Result<(), CompilerError> {
+        compiler::validate(ValidateRequest {
+            mode: ValidateMode::Deep,
+            source: module.to_string(),
+        })
+        .map(|_| ())
+    }
     fn add_property_door(module: &str) -> Result<(), CompilerError> {
         compiler::add_property(AddPropertyRequest {
             module: module.to_string(),
@@ -212,18 +274,35 @@ fn module_text_doors() -> Vec<ModuleTextDoor> {
     }
 
     vec![
-        ("parse", parse_door),
-        ("check", check_door),
-        ("decompile", decompile_door),
-        ("deep_outline", outline_door),
-        ("deep_references", references_door),
-        ("deep_call_graph", call_graph_door),
-        ("rename", rename_door),
-        ("replace_function", replace_function_door),
-        ("replace_function_body", replace_function_body_door),
-        ("change_signature", change_signature_door),
-        ("add_function", add_function_door),
-        ("add_property", add_property_door),
+        (
+            "parse",
+            parse_door as fn(&str) -> Result<(), CompilerError>,
+            DoorKind::DeepParse,
+        ),
+        ("check", check_door, DoorKind::DeepParse),
+        ("decompile", decompile_door, DoorKind::DeepParse),
+        ("validate", validate_door, DoorKind::Validation),
+        ("deep_outline", outline_door, DoorKind::DeepParse),
+        ("deep_references", references_door, DoorKind::DeepParse),
+        ("deep_call_graph", call_graph_door, DoorKind::DeepParse),
+        ("rename", rename_door, DoorKind::DeepParse),
+        (
+            "replace_function",
+            replace_function_door,
+            DoorKind::DeepParse,
+        ),
+        (
+            "replace_function_body",
+            replace_function_body_door,
+            DoorKind::DeepParse,
+        ),
+        (
+            "change_signature",
+            change_signature_door,
+            DoorKind::DeepParse,
+        ),
+        ("add_function", add_function_door, DoorKind::DeepParse),
+        ("add_property", add_property_door, DoorKind::DeepParse),
     ]
 }
 
@@ -267,19 +346,27 @@ const ADDED_PROPERTY_DECLS: &str = r#"(defsig {}
 
 #[test]
 fn every_module_text_door_rejects_the_same_ingress_corpus() {
-    for (label, module) in REJECTED_MODULES {
-        for (door, invoke) in module_text_doors() {
+    for (label, module, identification) in REJECTED_MODULES {
+        for (door, invoke, kind) in module_text_doors() {
             let Err(error) = invoke(module) else {
                 panic!("{door} accepted `{label}`; every door shares one Deep ingress");
             };
-            assert_deep_ingress_rejection(&error, &format!("{door} / {label}"));
+            let context = format!("{door} / {label}");
+            // The cross-door invariant is the [03-PROG-2] identification, not
+            // a diagnostic kind: `validate` is a validation operation and
+            // says so, while the Deep-parse doors carry the parse kind and an
+            // exact span.
+            assert_identifies_the_offending_form(&error, identification, &context);
+            if kind == DoorKind::DeepParse {
+                assert_deep_ingress_rejection(&error, &context);
+            }
         }
     }
 }
 
 #[test]
 fn no_module_text_door_rejects_the_well_formed_control_at_ingress() {
-    for (door, invoke) in module_text_doors() {
+    for (door, invoke, _) in module_text_doors() {
         if let Err(error) = invoke(VALID_MODULE) {
             assert_not_a_deep_ingress_rejection(&error, door);
         }
@@ -364,6 +451,15 @@ const REJECTED_TOP_LEVEL_FORMS: &[(&str, &str, &str)] = &[
         "metadata-annotated form",
         "^{:surf_literal_style \"explicit\"} (var {} x)",
         "a metadata-annotated form",
+    ),
+    // [03-PROG-3]: text yielding no top-level form at all.
+    ("empty text", "", "empty program"),
+    ("whitespace only", "   \n\t\n", "empty program"),
+    ("comments only", "; a comment\n", "empty program"),
+    (
+        "comments and whitespace",
+        "\n; a\n\n; b\n\n",
+        "empty program",
     ),
 ];
 
@@ -698,7 +794,10 @@ mod weak_ingress {
     }
 
     impl CrateAliasCollector {
-        fn walk_tree(&mut self, tree: &syn::UseTree, depth: usize) {
+        /// `prefix_is_crate` says whether the tree walked so far names the
+        /// owning crate, which is what makes a `self` below it an alias of
+        /// the crate rather than of some nested module.
+        fn walk_tree(&mut self, tree: &syn::UseTree, depth: usize, prefix_is_crate: bool) {
             match tree {
                 // `use chelis_deep as deep;` binds the crate only at the
                 // root of the tree; `use a::chelis_deep as deep;` names some
@@ -706,12 +805,24 @@ mod weak_ingress {
                 syn::UseTree::Rename(rename) if depth == 0 && rename.ident == CRATE => {
                     self.aliases.insert(rename.rename.to_string());
                 }
+                // `use chelis_deep::{self as deep};` and `use chelis_deep::{self};`.
+                // The `self` sits one level below the crate prefix, so the
+                // depth-0 arm above never sees it.
+                syn::UseTree::Rename(rename) if prefix_is_crate && rename.ident == "self" => {
+                    self.aliases.insert(rename.rename.to_string());
+                }
+                syn::UseTree::Name(name) if prefix_is_crate && name.ident == "self" => {
+                    self.aliases.insert(CRATE.to_string());
+                }
                 syn::UseTree::Group(group) => {
                     for item in &group.items {
-                        self.walk_tree(item, depth);
+                        self.walk_tree(item, depth, prefix_is_crate);
                     }
                 }
-                syn::UseTree::Path(path) => self.walk_tree(&path.tree, depth + 1),
+                syn::UseTree::Path(path) => {
+                    let names_crate = depth == 0 && path.ident == CRATE;
+                    self.walk_tree(&path.tree, depth + 1, names_crate);
+                }
                 _ => {}
             }
         }
@@ -719,7 +830,25 @@ mod weak_ingress {
 
     impl<'ast> Visit<'ast> for CrateAliasCollector {
         fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-            self.walk_tree(&item.tree, 0);
+            // Visibility is irrelevant: `pub use` binds the same local name
+            // that `use` does, and additionally re-exports it.
+            self.walk_tree(&item.tree, 0, false);
+        }
+
+        /// `extern crate chelis_deep as deep;` binds a crate alias without a
+        /// `use` tree at all.
+        fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+            if item.ident != CRATE {
+                return;
+            }
+            match &item.rename {
+                Some((_, rename)) => {
+                    self.aliases.insert(rename.to_string());
+                }
+                None => {
+                    self.aliases.insert(CRATE.to_string());
+                }
+            }
         }
 
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
@@ -897,6 +1026,65 @@ mod weak_ingress {
         }
     }
 
+    /// A `macro_rules!` body is a token stream, not a resolved path, so the
+    /// path visitor above cannot see through it: a macro that expands to
+    /// `chelis_deep::parser::parse_str($source)` reopens the ingress at every
+    /// call site while every call site reads as an innocuous `parse_weakly!`.
+    ///
+    /// The policy here is deliberately conservative and deliberately not
+    /// clever: scan the macro definition's tokens for a forbidden function
+    /// identifier, and flag ANY occurrence. No attempt is made to decide
+    /// whether the occurrence would really expand into a call, or which crate
+    /// it would resolve against. A macro that mentions `parse_str` at all is
+    /// reported. Resolving macro expansion properly needs the compiler, and a
+    /// guard that guesses is worse than one that over-reports: the false
+    /// positive costs a rename, the false negative costs the invariant.
+    struct MacroBodyScanner {
+        findings: Vec<String>,
+    }
+
+    impl MacroBodyScanner {
+        fn scan_tokens(&mut self, macro_name: &str, tokens: proc_macro2::TokenStream) {
+            for token in tokens {
+                match token {
+                    proc_macro2::TokenTree::Ident(ident) => {
+                        let name = ident.to_string();
+                        if is_weak_function(&name) {
+                            self.findings.push(format!(
+                                "macro `{macro_name}!` mentions the weak Deep ingress \
+                                 `{name}` in its body; a macro body is opaque to path \
+                                 resolution, so this is reported wherever it appears"
+                            ));
+                        }
+                    }
+                    proc_macro2::TokenTree::Group(group) => {
+                        self.scan_tokens(macro_name, group.stream())
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for MacroBodyScanner {
+        fn visit_item_macro(&mut self, item: &'ast syn::ItemMacro) {
+            let name = item
+                .ident
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            self.scan_tokens(&name, item.mac.tokens.clone());
+            visit::visit_item_macro(self, item);
+        }
+
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if is_cfg_test(&item.attrs) {
+                return;
+            }
+            visit::visit_item_mod(self, item);
+        }
+    }
+
     /// Report every way `source` reaches a weak Deep ingress from production
     /// code. An empty vector means the file is clean.
     ///
@@ -906,22 +1094,34 @@ mod weak_ingress {
     ///
     /// **What this resolves:** fully qualified paths; `use` imports of a
     /// weak function under any local name; module aliases
-    /// (`use chelis_deep::parser as p`), including the grouped and
-    /// grouped-`self` spellings; crate aliases (`use chelis_deep as deep`);
-    /// and glob imports of a weak module. Bindings are collected file-wide
-    /// before paths are checked, so a `use` below its first use still
-    /// resolves, and an inline module's import is treated as visible to the
-    /// whole file. That last one over-approximates, which errs toward a
+    /// (`use chelis_deep::parser as p`), in the plain, grouped, and
+    /// grouped-`self` spellings; crate aliases, whether written
+    /// `use chelis_deep as deep`, `use chelis_deep::{self as deep}`,
+    /// `use chelis_deep::{self}`, or `extern crate chelis_deep as deep`;
+    /// `pub use` at any of those, which binds the same local name a private
+    /// `use` does; and glob imports of a weak module. Bindings are collected
+    /// file-wide before paths are checked, so a `use` below its first use
+    /// still resolves, and an inline module's import is treated as visible to
+    /// the whole file. That last one over-approximates, which errs toward a
     /// false positive rather than a miss.
+    ///
+    /// **Macro bodies are handled by policy, not by resolution.** A
+    /// `macro_rules!` body is a token stream; the path visitor cannot see
+    /// through it. Any mention of a forbidden function identifier anywhere in
+    /// a macro definition is reported, without deciding whether it would
+    /// expand into a call. See `MacroBodyScanner` for why that conservatism
+    /// is the right trade here.
     ///
     /// **What it does not resolve, and cannot from one file:** a re-export
     /// chain, where module A does `pub use chelis_deep::parser::parse_str;`
     /// and module B in a *different* file calls `crate::a::parse_str`. The
     /// `pub use` itself is reported at its own site, so the chain cannot be
     /// introduced without one finding; a caller of an already-existing
-    /// re-export in another file is the residual blind spot. Closing it
-    /// needs cross-file name resolution, which is the visibility-restriction
-    /// work under chelis#1029 rather than a source census.
+    /// re-export in another file is the residual blind spot. A procedural
+    /// macro from another crate is outside the census entirely. Closing
+    /// either needs cross-file name resolution or a visibility chokepoint,
+    /// which is the carrier-retirement work under chelis#1029 rather than a
+    /// source census.
     pub fn findings_in(source: &str, in_owning_crate: bool) -> Vec<String> {
         let file = match syn::parse_file(source) {
             Ok(file) => file,
@@ -940,8 +1140,13 @@ mod weak_ingress {
             findings: Vec::new(),
         };
         checker.visit_file(&file);
+        let mut macros = MacroBodyScanner {
+            findings: Vec::new(),
+        };
+        macros.visit_file(&file);
         let mut all = bindings.findings.clone();
         all.extend(checker.findings);
+        all.extend(macros.findings);
         all.sort();
         all.dedup();
         all
@@ -1231,6 +1436,169 @@ fn the_guard_does_not_flag_an_alias_of_an_unrelated_crate() {
     // The crate-alias rule must anchor on `chelis_deep` specifically.
     let source = r#"
         use chelis_surf as surf;
+
+        fn ingest(source: &str) {
+            let _ = surf::parser::parse_str(source);
+        }
+    "#;
+    assert!(
+        weak_ingress::findings(source).is_empty(),
+        "{:?}",
+        weak_ingress::findings(source)
+    );
+}
+
+#[test]
+fn the_guard_catches_a_grouped_crate_self_alias() {
+    // Red-team mutation A, verbatim: `use chelis_deep::{self as deep};`. The
+    // crate-alias pass only looked at the root of a use tree, so a `self` one
+    // level below the crate prefix was invisible.
+    let source = r#"
+        #[allow(dead_code)]
+        mod redteam_grouped_crate_self {
+            use chelis_deep::{self as deep};
+
+            pub(super) fn ingest(source: &str) {
+                let _ = deep::parser::parse_str(source);
+            }
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("deep::parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_public_grouped_crate_self_alias() {
+    // Red-team mutation B, verbatim. Visibility never changed what a `use`
+    // binds locally, so `pub use` must be treated exactly like `use`.
+    let source = r#"
+        #[allow(dead_code)]
+        mod redteam_public_grouped_crate_self {
+            pub use chelis_deep::{self as deep};
+
+            pub(super) fn ingest(source: &str) {
+                let _ = deep::parser::parse_str(source);
+            }
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("deep::parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_an_extern_crate_alias() {
+    // Red-team mutation C, verbatim: `extern crate` binds a crate alias with
+    // no use tree at all, so no `UseTree` visitor could ever have seen it.
+    let source = r#"
+        #[allow(dead_code)]
+        mod redteam_extern_crate_alias {
+            extern crate chelis_deep as deep;
+
+            pub(super) fn ingest(source: &str) {
+                let _ = deep::parser::parse_str(source);
+            }
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("deep::parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_macro_that_expands_to_the_weak_ingress() {
+    // Red-team mutation D, verbatim. A macro body is a token stream, opaque
+    // to path resolution, and every call site reads as `parse_weakly!`.
+    let source = r#"
+        macro_rules! parse_weakly {
+            ($source:expr) => {
+                chelis_deep::parser::parse_str($source)
+            };
+        }
+
+        #[allow(dead_code)]
+        fn ingest(source: &str) {
+            let _ = parse_weakly!(source);
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("macro `parse_weakly!`")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_macro_policy_is_deliberately_conservative() {
+    // The policy flags a mention, not a resolved call. This is the documented
+    // over-report: a macro that merely names the identifier is reported even
+    // though nothing here would expand into a weak ingress call. Locking it
+    // keeps the conservatism a decision rather than an accident, and stops
+    // someone "fixing" it into a resolution attempt that a token stream
+    // cannot support.
+    let source = r#"
+        macro_rules! describe {
+            () => {
+                "parse_str is the weak ingress"
+            };
+        }
+
+        macro_rules! mentions_the_identifier {
+            () => {
+                let parse_str = 1;
+            };
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("mentions_the_identifier")),
+        "an identifier mention in a macro body is reported: {findings:?}"
+    );
+    assert!(
+        !findings.iter().any(|finding| finding.contains("describe")),
+        "a string literal is not an identifier token: {findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_bare_grouped_crate_self_import() {
+    // `use chelis_deep::{self};` binds the crate under its own name, so the
+    // call spells the canonical path and is caught by the ordinary rule; the
+    // control exists so the grouped-`self` handling cannot regress into
+    // treating `self` as an item named `self`.
+    let source = r#"
+        use chelis_deep::{self};
+
+        fn ingest(source: &str) {
+            let _ = chelis_deep::parser::parse_str(source);
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(!findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn the_guard_does_not_flag_an_extern_crate_for_another_crate() {
+    // The anchoring control for `extern crate`.
+    let source = r#"
+        extern crate chelis_surf as surf;
 
         fn ingest(source: &str) {
             let _ = surf::parser::parse_str(source);

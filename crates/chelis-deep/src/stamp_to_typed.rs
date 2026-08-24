@@ -127,6 +127,8 @@ pub enum StampErrorKind {
     RequiresPattern { form: FormIdentity },
     /// A list was missing the metadata map at element 1.
     MissingMetaMap,
+    /// The program text yielded no top-level form ([03-PROG-3]).
+    EmptyProgram,
     /// Node construction failed (arity or role violation).
     NodeError(crate::node::NodeError),
 }
@@ -153,6 +155,13 @@ impl std::fmt::Display for StampError {
                 write!(f, "expected pattern, got {form}")
             }
             StampErrorKind::MissingMetaMap => write!(f, "list missing metadata map at index 1"),
+            // [03-PROG-3] fixes this rejection's self-identification. The
+            // `empty program` prefix is also the canonical CLI spelling for
+            // the same verdict, so `check` and `build` keep agreeing.
+            StampErrorKind::EmptyProgram => write!(
+                f,
+                "empty program: a Deep program requires at least one top-level form"
+            ),
             StampErrorKind::NodeError(e) => write!(f, "{e}"),
         }
     }
@@ -228,6 +237,21 @@ pub fn stamp_as_tagged(
 /// Each top-level form is stamped as either a module Node (if headed by
 /// `module`) or a declaration Node (via `stamp_as_bypass_declaration`).
 pub fn stamp_deep_file(raw_exprs: Vec<RawExpr>) -> Result<Vec<Expr>, StampError> {
+    // [03-PROG-1] requires at least one top-level form, and [03-PROG-3]
+    // fixes how the zero-form rejection identifies itself. Enforcing the
+    // cardinality here rather than in each consumer is what makes every
+    // door that reads a `.dp` program inherit it: the generic
+    // `compiler::parse`/`decompile` ingress, the check/compile/eval
+    // pipeline, `validate --deep`, the authoring surfaces, the lint rule,
+    // the snippet checker, and the editor.
+    if raw_exprs.is_empty() {
+        return Err(StampError {
+            kind: StampErrorKind::EmptyProgram,
+            // The position at which a top-level form was required: the end
+            // of the input, which for empty text is offset 0.
+            span: Span::new(0, 0),
+        });
+    }
     let mut out = Vec::with_capacity(raw_exprs.len());
     for raw in raw_exprs {
         if top_level_tag(&raw) == Some(DeepTag::Module) {

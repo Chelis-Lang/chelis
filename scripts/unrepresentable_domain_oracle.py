@@ -19,15 +19,22 @@ Obligations:
    accidentally break programs that legitimately use names at structural
    positions.
 3. `spec/03-deep-syntax.md` [03-PROG-1]: a top-level form is a `module`
-   wrapper or a declaration. Non-declaration top-level forms are rejected by
-   the ingress boundary, naming the offending head per [03-PROG-2], and the
-   admissible spellings still score 1.0.
-4. The stamp pass and successor-carrier validation suites cover the headline
+   wrapper or a declaration. Every other top-level form is rejected by the
+   ingress boundary, identified per [03-PROG-2] by its head symbol or by one
+   of the nine syntactic classes that rule fixes, and text yielding no
+   top-level form at all is the [03-PROG-3] rejection. The admissible
+   spellings still score 1.0.
+4. `chelis validate --deep` reaches the same program-level verdict as
+   `chelis check`, in the same words. That command runs its own Pest grammar,
+   which admits only `node+`, so the stamped ingress has to decide top-level
+   acceptance before it or a headless form dies as `expected program` with
+   its class unnamed.
+5. The stamp pass and successor-carrier validation suites cover the headline
    criterion — bare Name at a RuntimeExpr slot produces a StampError — and
    the chelis#731 Phase 3 obligation that the gated `Node` carrier refuses to
    construct a raw closed-vocabulary tag below itself, in metadata or in a
    child.
-5. chelis#1088: the compiler-API embedding surface consumes the same stamped
+6. chelis#1088: the compiler-API embedding surface consumes the same stamped
    carrier. Its parity suite drives one accept/reject corpus through every
    public Deep text door and structurally forbids reopening the weaker
    ingress anywhere in the workspace's production sources.
@@ -133,7 +140,15 @@ TOP_LEVEL_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
         '^{:surf_literal_style "explicit"} (var {} x)',
         "a metadata-annotated form",
     ),
+    # [03-PROG-3]: text yielding no top-level form at all.
+    ("empty text", "", "empty program"),
+    ("whitespace only", "   \n\t\n", "empty program"),
+    ("comments only", "; a comment\n", "empty program"),
+    ("comments and whitespace", "\n; a\n\n; b\n\n", "empty program"),
 ]
+
+# [03-PROG-3]'s self-identification for text that yields no top-level form.
+EMPTY_PROGRAM_IDENTIFICATION = "empty program"
 
 # The exact class spellings [03-PROG-2] fixes. The oracle asserts the set is
 # fully covered above, so a class added to the rule without a fixture here is
@@ -276,6 +291,52 @@ def run_chelis_check(fixture_path: Path) -> subprocess.CompletedProcess[str]:
         )
     else:
         cmd = chelis_check_command() + (str(fixture_path),)
+    return subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def chelis_validate_command() -> tuple[str, ...]:
+    """The cargo command for `chelis validate --deep`.
+
+    The fallback spelling, used only when the build-once binary resolution
+    fails. Mirrors `chelis_check_command`, including
+    `--allow-style-violations`: these are synthetic fixtures that need not be
+    canonically formatted, and the obligation tests the program-level verdict,
+    not formatting.
+    """
+    return (
+        "cargo",
+        "run",
+        "-p",
+        "chelis-cli",
+        "--bin",
+        "chelis",
+        "--quiet",
+        "--",
+        "validate",
+        "--deep",
+        "--allow-style-violations",
+    )
+
+
+def run_chelis_validate(fixture_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run `chelis validate --deep` on a fixture and return the process."""
+    binary = resolve_chelis_binary()
+    if binary is not None:
+        cmd: tuple[str, ...] = (
+            str(binary),
+            "validate",
+            "--deep",
+            "--allow-style-violations",
+            str(fixture_path),
+        )
+    else:
+        cmd = chelis_validate_command() + (str(fixture_path),)
     return subprocess.run(
         cmd,
         cwd=REPO_ROOT,
@@ -437,6 +498,57 @@ def check_top_level_form_rule() -> None:
             fixture.unlink(missing_ok=True)
 
 
+def check_validate_agrees_with_check() -> None:
+    """Obligation 4: `validate --deep` reaches the same program-level verdict.
+
+    `chelis validate --deep` runs its own Pest grammar, which admits only
+    `node+`. Before the stamped ingress ran first, a headless top-level form
+    died there as `expected program` and the reader never learned its
+    [03-PROG-2] class. This obligation drives the same corpus obligation 3
+    drives, through the other public command, behind the same real binary.
+    """
+    print("── Obligation 4: `validate --deep` shares the program-level verdict ──")
+    for name, source, identification in TOP_LEVEL_REJECTED_FIXTURES:
+        fixture = write_fixture(source)
+        try:
+            result = run_chelis_validate(fixture)
+            if result.returncode == 0:
+                raise OracleFailure(
+                    f"[{name}] `validate --deep` must reject what `check` "
+                    f"rejects, got exit 0.\nSource: {source}\n"
+                    f"Stdout: {result.stdout}"
+                )
+            rendered = result.stdout + result.stderr
+            if identification not in rendered:
+                raise OracleFailure(
+                    f"[{name}] [03-PROG-2] requires `validate --deep` to "
+                    f"identify the offending form as {identification}.\n"
+                    f"Output: {rendered}"
+                )
+            if "<" in rendered or ">" in rendered:
+                raise OracleFailure(
+                    f"[{name}] [03-PROG-2] forbids a placeholder "
+                    f"identification.\nOutput: {rendered}"
+                )
+            print(f"  PASS: {name} (identified as {identification})")
+        finally:
+            fixture.unlink(missing_ok=True)
+
+    for name, source in TOP_LEVEL_ACCEPTED_FIXTURES:
+        fixture = write_fixture(source)
+        try:
+            result = run_chelis_validate(fixture)
+            if result.returncode != 0:
+                raise OracleFailure(
+                    f"[{name}] [03-PROG-1] admits this top-level form; "
+                    f"`validate --deep` gave exit {result.returncode}.\n"
+                    f"Source: {source}\nStderr: {result.stderr}"
+                )
+            print(f"  PASS: {name} (validated)")
+        finally:
+            fixture.unlink(missing_ok=True)
+
+
 def run_compiled_suite(label: str, cmd: tuple[str, ...], timeout: int = 300) -> None:
     """Execute a compiled test binary through nextest and require green."""
     print(f"  + {' '.join(cmd)}")
@@ -461,25 +573,25 @@ def run_compiled_suite(label: str, cmd: tuple[str, ...], timeout: int = 300) -> 
 
 
 def check_stamp_pass_integration_tests() -> None:
-    """Obligation 4: the stamp pass and successor-carrier suites are green.
+    """Obligation 5: the stamp pass and successor-carrier suites are green.
 
     The headline criterion (Name at RuntimeExpr slot → StampError) is
     enforced by the compiled integration tests in
     `crates/chelis-deep/tests/stamp_to_typed.rs`.
     """
-    print("── Obligation 4: stamp pass integration tests green ──")
+    print("── Obligation 5: stamp pass integration tests green ──")
     run_compiled_suite("stamp_to_typed + phase3_successor_validation", STAMP_NEXTEST_COMMAND)
 
 
 def check_compiler_api_ingress() -> None:
-    """Obligation 5: the compiler-API embedding surface shares the carrier.
+    """Obligation 6: the compiler-API embedding surface shares the carrier.
 
     chelis#1088. `crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs`
     drives one accept/reject corpus through every public Deep text door and
     carries the structural guard forbidding a weaker ingress in any of the
     workspace's production sources.
     """
-    print("── Obligation 5: compiler-API stamped ingress parity ──")
+    print("── Obligation 6: compiler-API stamped ingress parity ──")
     run_compiled_suite(
         "phase3_stamped_ingress",
         COMPILER_API_INGRESS_NEXTEST_COMMAND,
@@ -493,6 +605,7 @@ OBLIGATIONS = (
     check_keyword_in_expr_rejected,
     check_score_one_controls,
     check_top_level_form_rule,
+    check_validate_agrees_with_check,
     check_stamp_pass_integration_tests,
     check_compiler_api_ingress,
 )

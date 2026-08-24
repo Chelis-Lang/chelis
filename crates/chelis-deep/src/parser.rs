@@ -614,7 +614,19 @@ pub fn parse_and_stamp(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
 pub fn parse_and_stamp_file(source: &str) -> Result<Vec<Expr>, StampOrParseError> {
     let tokens = lexer::lex(source).map_err(ParseError::from)?;
     let raw_exprs = parse_raw(&tokens)?;
-    let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs)?;
+    let typed = crate::stamp_to_typed::stamp_deep_file(raw_exprs).map_err(|mut error| {
+        // [03-PROG-3] puts the zero-form rejection at the position where a
+        // top-level form was required, the end of the input.
+        // `stamp_deep_file` sees only the form vector, so the byte offset is
+        // supplied here, where the source text is in hand.
+        if matches!(
+            error.kind,
+            crate::stamp_to_typed::StampErrorKind::EmptyProgram
+        ) {
+            error.span = crate::span::Span::new(source.len(), 0);
+        }
+        error
+    })?;
     Ok(typed)
 }
 

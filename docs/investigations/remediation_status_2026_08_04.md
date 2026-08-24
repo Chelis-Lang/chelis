@@ -761,10 +761,17 @@ and the `chelis-cli` style-gate fallback) onto the stamped carrier, each
 field stamped in the role it occupies. It carries the requested parity
 oracle, `crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs`: one
 accept/reject corpus driven through every module-text door, plus a
-`syn`-based structural guard that fails the build if any production source
-in the workspace reaches a weaker Deep ingress through an import, a rename,
-a module alias, a crate alias, or a glob. It decides the top-level form rule
-in the controlling numbered spec ([03-PROG-1] and [03-PROG-2] in
+`syn`-based recurrence guard over the workspace's production sources. What
+that guard actually covers is worth stating precisely, because a census is
+not a proof: it resolves qualified paths, `use` imports under any local
+name, module aliases, crate aliases (including the grouped-`self`,
+`pub use`, and `extern crate` spellings), and glob imports, and it applies a
+deliberately conservative fail-closed policy to `macro_rules!` bodies, whose
+tokens no path resolution can see through. It does not resolve a cross-file
+re-export chain or a procedural macro from another crate; closing those
+needs the visibility chokepoint that carrier retirement (#1029) brings, not
+a source census. It decides the top-level form rule in the controlling
+numbered spec ([03-PROG-1] through [03-PROG-3] in
 `spec/03-deep-syntax.md`), which chapter 03's PEG had left unrestricted. And
 it wires #908's own oracle continuously; see the "Guards existing but not
 running" row for that wiring. The #1036 re-salvage that #1129 holds is

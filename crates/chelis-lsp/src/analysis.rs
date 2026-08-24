@@ -1590,6 +1590,27 @@ mod tests {
     }
 
     #[test]
+    fn deep_analysis_reports_an_empty_buffer_the_way_the_compiler_does() {
+        // [03-PROG-3]. A `.dp` buffer with no top-level form is not a Deep
+        // program, and the editor says the same thing `chelis check` says
+        // rather than looking clean until the user runs it. No carve-out for
+        // the empty buffer: the moment the editor and the compiler disagree
+        // about what a document means is the moment the editor stops being
+        // worth trusting, and chelis#1088 is that lesson.
+        for text in ["", "   \n", "; a comment\n"] {
+            let analysis = analyze_document(&deep_uri(), text);
+            assert_eq!(analysis.source_kind, SourceKind::Deep);
+            assert_eq!(analysis.diagnostics.len(), 1, "{text:?}");
+            assert!(
+                analysis.diagnostics[0].message.contains("empty program"),
+                "{text:?}: {}",
+                analysis.diagnostics[0].message
+            );
+            assert!(chelis_deep::parse_and_stamp_file(text).is_err(), "{text:?}");
+        }
+    }
+
+    #[test]
     fn deep_analysis_reports_nothing_for_an_accepted_program() {
         // The positive control: what the compiler accepts is clean here too.
         let text = "(module {} m (def {} f (var {} x)))\n";

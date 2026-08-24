@@ -921,6 +921,19 @@ always learns which form was rejected.
 > implementation SHALL NOT skip, ignore, or silently reinterpret a top-level
 > form that [03-PROG-1] rejects.
 
+[03-PROG-1] requires at least one top-level form, so text that yields none is
+rejected too. That rejection is the one case with no offending form to
+identify and no form location to carry, so the contract states its own shape
+rather than leaving an implementation to invent a placeholder.
+
+> **[03-PROG-3]** Program text that yields no top-level form SHALL be rejected
+> under [03-PROG-1]. Text yields no top-level form when it is empty, when it
+> is entirely whitespace, when it is entirely comments, or when it is any
+> combination of those. That rejection SHALL identify itself as an empty
+> program and SHALL carry the source position at which a top-level form was
+> required, which is the end of the input. It is otherwise subject to
+> [03-PROG-2]'s reporting rules.
+
 The class set is closed because it partitions what the grammar can produce in
 top-level position: `Child`'s three alternatives (`Node`, `BareName`,
 `Literal`) plus the metadata forms a producer may emit. A bare identifier is
