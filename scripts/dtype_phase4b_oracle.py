@@ -52,6 +52,9 @@ FROZEN_FILE_DIGESTS = {
     "spec/05-risc-primitives.md": (
         "13183ec5da6461758a5de262fa9db0a62327e68a4abd4aaf1ff30c3ea41ad990"
     ),
+    "spec/06-transformations.md": (
+        "68628d2039fa364b6eafb7fa73cc868e5520b0fb6f00950f5639b3f160638dbf"
+    ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
@@ -68,7 +71,7 @@ FROZEN_FILE_DIGESTS = {
         "a2a84ab3a4d2925fc7a79f482e296eb979aadc24a0ebf21872c1fb257f7ea3fe"
     ),
     "openspec/specs/risc-primitives/spec.md": (
-        "f5e8a69a378285fcd2dec6966bcaf570893ade0aca1488967512f9bff099f5ca"
+        "65e22be4079ad0d19fef546a1fb392c5890fd1ccefc7c73d3b31e7ed025b8823"
     ),
     "openspec/specs/serialization/spec.md": (
         "ef0139de7e1da5ec986ec5ec4bfb12710a5cee8e77e9c91840d478404907b5ed"
@@ -358,6 +361,12 @@ FROZEN_ATOM_DIGESTS = {
 # mechanism. An intentional change owes the owning spec/design update, every
 # consuming contract, and an adversarial mutation before this manifest moves.
 FROZEN_REGION_DIGESTS = {
+    "agent numeric surface discipline": (
+        "AGENTS.md",
+        "### Numeric Surface Discipline",
+        "### Public-Surface Change Rule",
+        "684040ee468e9c95f40306d2eb4bcbd48a4785526259f9af4b02e509e5ca322f",
+    ),
     "numeric value semantics": (
         "spec/04-type-system.md",
         "## 9. Numeric Value Semantics",

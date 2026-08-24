@@ -168,14 +168,15 @@ zero cotangent.
 `const` and `load` SHALL be the pure tensor constructors and contribute zero
 cotangent. `shape(x, axis)` SHALL read the runtime extent along any literal or
 computed int32 axis as a rank-0 int64 scalar contributing a zero
-cotangent; a non-constant axis forced into DAG construction (e.g. via `grad`) SHALL fail loudly.
+cotangent. Literal and computed axes SHALL remain ordinary checked runtime
+values when `shape` participates in a graph constructed by `grad`.
 
 #### Scenario: const is non-differentiable
 
 - **WHEN** `grad` reaches a `const` node
 - **THEN** its gradient contribution is zero and it does not block AD
 
-#### Scenario: Non-constant shape axis under grad fails loudly
+#### Scenario: Computed shape axis under grad remains a runtime value
 
 - **WHEN** `grad` constructs `shape(x, axis)` with a computed runtime axis
 - **THEN** it preserves that axis, executes one-step normalization, and contributes exact zero cotangent

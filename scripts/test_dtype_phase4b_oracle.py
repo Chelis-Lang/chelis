@@ -71,6 +71,32 @@ class ContractValidationTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
+    def test_spec06_additive_count_grad_contradiction_fails(self) -> None:
+        path = self.root / "spec/06-transformations.md"
+        original = path.read_text(encoding="utf-8")
+        path.write_text(
+            original
+            + "\nCount may return a silent zero cotangent when used under grad.\n",
+            encoding="utf-8",
+        )
+        self.assert_contract_fails("frozen contract file spec/06-transformations.md")
+
+    def test_agent_numeric_surface_additive_successor_exception_fails(self) -> None:
+        path = self.root / "AGENTS.md"
+        original = path.read_text(encoding="utf-8")
+        marker = "### Public-Surface Change Rule"
+        self.assertIn(marker, original)
+        path.write_text(
+            original.replace(
+                marker,
+                "A predecessor census disposition may be copied onto its successor.\n\n"
+                + marker,
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assert_contract_fails("frozen agent numeric surface discipline")
+
     def test_missing_operation_atom_fails(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),

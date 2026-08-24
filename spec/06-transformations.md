@@ -349,7 +349,7 @@ well-typed. Runtime scrutinees, guarded arms, nested patterns, and compiled ADT
 parameters follow the same rule in every execution mode. A missing host-ABI
 carrier is a backend capability gap, not a language restriction.
 
-### 2.11 Interaction With Phase 2a Effects
+### 2.11 Interaction With Effects
 
 `grad` remains a compiler transform, not a user-visible effect handler.
 
