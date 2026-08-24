@@ -85,11 +85,26 @@ pub(crate) fn split_shell_local(content: &str) -> (&str, Option<&str>) {
 /// changed underneath a shell-local override, and any un-materialized skill it
 /// pruned.
 pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
-    let local_skills = fs::read_to_string(root.join("reef.toml"))
-        .ok()
-        .map(|t| crate::audit::parse_local_skills(&t))
-        .unwrap_or_default();
+    // The `[conform] local_skills` allowlist, read from the PARSED manifest so
+    // `sync` and `audit` cannot disagree about what the shell declared
+    // (chelis#1262). An absent reef.toml declares nothing; a PRESENT one that
+    // does not parse is an error, not an empty declaration, because silently
+    // reading it as empty would prune a repo-local skill the shell did declare.
+    let local_skills = match fs::read_to_string(root.join("reef.toml")) {
+        Ok(text) => crate::conform::parse(&text)
+            .map_err(|e| {
+                format!("reef.toml does not parse as TOML, so `[conform] local_skills` cannot be read: {e}")
+            })?
+            .local_skills,
+        Err(_) => Vec::new(),
+    };
     let mut notices = Vec::new();
+    // Sampled ONCE, before the loop: the first written skill creates
+    // `agent-skills/`, so testing it inside the loop would report every skill
+    // after the first as "restored" on a fresh `init`. A tree with no
+    // `agent-skills/` at all is being materialized for the first time, which is
+    // not a restoration and gets no notice.
+    let skills_dir_existed = root.join("agent-skills").is_dir();
 
     for (skill_name, body) in skills::EMBEDDED_SKILLS {
         let rel = format!("agent-skills/{skill_name}/SKILL.md");
@@ -108,6 +123,17 @@ pub fn materialize_skills(root: &Path) -> Result<Vec<String>, String> {
                     "{skill_name}: upstream skill body changed and a shell-local override is present; re-check it"
                 ));
             }
+        }
+        // A shared skill that was ABSENT is being (re)created. Say so. §8 makes
+        // the set uniform with no exclusion control (chelis#1262), so a shell
+        // that pruned a skill it judged inapplicable gets it back on the next
+        // sync; restoring it silently is what let that decision degrade into
+        // AGENTS.md lore the tree then contradicted. The notice names the
+        // sanctioned alternative at the moment the author is looking.
+        if existing.is_none() && skills_dir_existed {
+            notices.push(format!(
+                "{skill_name}: re-materialized (the shared set is uniform; §8 has no exclusion control). To record that it does not fit this shell, append a shell-local block to its SKILL.md rather than deleting it."
+            ));
         }
         let content = match &block {
             Some(b) => format!(
@@ -197,6 +223,114 @@ fn remove_path(path: &Path) -> Result<(), String> {
         fs::remove_file(path)
     };
     res.map_err(|e| format!("remove {}: {e}", path.display()))
+}
+
+/// The documents `conform sync` / `conform bump` **restamp in place** and
+/// therefore cannot create: each is read, edited, and written back. Distinct
+/// from `agent-skills/`, which the write path *materializes* from the embedded
+/// set, so its absence is normal work rather than a missing prerequisite.
+///
+/// `reef.toml` is listed because [`crate::bump::rewrite_pins`] reads its
+/// `compiler` pin before rewriting anything, and because both verbs derive the
+/// version they stamp from that pin.
+const RESTAMPED_ARTIFACTS: &[(&str, &str)] = &[
+    ("reef.toml", "the compiler pin `conform bump` rewrites"),
+    (
+        "AGENTS.md",
+        "carries the `agents-inheritance` managed block sync restamps",
+    ),
+    (
+        "docs/CHELIS_SURFACE.md",
+        "carries the `chelis-surface-header` managed block sync restamps",
+    ),
+];
+
+/// One prerequisite the write path cannot proceed without.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightGap {
+    /// Repo-relative path of the artifact.
+    pub rel: &'static str,
+    /// Why the verb needs it, and what is wrong with it here.
+    pub reason: String,
+}
+
+/// Preflight the write path on a shell root: every artifact `sync`/`bump`
+/// restamps must already exist, and `reef.toml` must carry a pin they can read
+/// (chelis#1263).
+///
+/// **Why this is a separate pass rather than better error handling.** `bump`'s
+/// edit sequence is repin -> materialize skills -> restamp blocks, and each step
+/// writes as it goes. On a never-conformed repo the sequence used to die
+/// partway: measured on chelis 0.18.5, a tree missing `AGENTS.md` came back with
+/// `reef.toml` and `ci.yml` already repinned to the new version and
+/// `agent-skills/` fully materialized, and a tree missing
+/// `docs/CHELIS_SURFACE.md` came back with all of that *plus* a restamped
+/// `AGENTS.md`. Both then failed. A nonzero exit is the right verdict, but a
+/// half-bumped tree is not a state any caller asked for, and the wave also
+/// observed the same shapes reported as success. Checking every prerequisite
+/// before the first write makes "nothing was written" a structural fact instead
+/// of a claim, so there is nothing to roll back or enumerate.
+///
+/// **Existence is not enough for `reef.toml`.** A shell whose pin is unreadable
+/// (a truncated file, a hand-edit that lost the `=`, a range instead of an exact
+/// pin) has no version for `sync` to stamp. `sync` used to fall back to the
+/// *toolchain's own* version there and stamp the managed blocks with it, exit 0,
+/// which is the same defect class in a quieter form: the shell then carries
+/// blocks claiming a version it never adopted. Requiring a parseable pin makes
+/// the version the shell's, always.
+pub fn preflight_restamp_targets(root: &Path) -> Result<(), Vec<PreflightGap>> {
+    let mut gaps = Vec::new();
+    for (rel, why) in RESTAMPED_ARTIFACTS.iter().copied() {
+        if !root.join(rel).is_file() {
+            gaps.push(PreflightGap {
+                rel,
+                reason: format!("missing: {why}"),
+            });
+        } else if rel == "reef.toml" {
+            let text = fs::read_to_string(root.join(rel)).unwrap_or_default();
+            if let Err(e) = crate::conform::parse(&text) {
+                // A manifest this tool cannot parse is not a manifest it may
+                // half-apply a bump to: `materialize_skills` reads the
+                // `[conform] local_skills` allowlist out of it, so proceeding
+                // would prune a repo-local skill the shell did declare.
+                gaps.push(PreflightGap {
+                    rel,
+                    reason: format!("does not parse as TOML: {e}"),
+                });
+            } else if crate::audit::parse_compiler_pin(&text).is_none() {
+                gaps.push(PreflightGap {
+                    rel,
+                    reason: "has no readable `compiler = \"=X.Y.Z\"` pin, so there is no version \
+                             to stamp the managed blocks with"
+                        .to_string(),
+                });
+            }
+        }
+    }
+    if gaps.is_empty() { Ok(()) } else { Err(gaps) }
+}
+
+/// Render [`preflight_restamp_targets`]'s failure as the message the CLI prints
+/// before exiting nonzero. Lives here so `sync` and `bump` cannot drift into two
+/// different explanations of the same refusal.
+pub fn preflight_failure_message(verb: &str, root: &Path, gaps: &[PreflightGap]) -> String {
+    let mut out = format!(
+        "conform {verb} refuses to run on {}: it restamps files in place, and these are missing or unusable:\n",
+        root.display()
+    );
+    for gap in gaps {
+        out.push_str(&format!("  {}  ({})\n", gap.rel, gap.reason));
+    }
+    out.push_str(
+        "Nothing was written. This repo is not conformed yet. For a NEW shell, stamp it with \
+         `chelis reef conform init <name> --module-prefix <Prefix> --output <path>`. On an \
+         EXISTING repo, repair the files above by hand first, then re-run this command: \
+         `conform init` writes the WHOLE scaffold from its templates and overwrites every file \
+         it owns, including reef.toml, AGENTS.md, docs/, .github/workflows/, src/main.ch, \
+         tests_neg/, and tests_blocked/, so pointing it at a repo with real source loses that \
+         source.",
+    );
+    out
 }
 
 /// Regenerate every managed block in the shell's documents to `version` (the

@@ -572,6 +572,7 @@ dependencies = [
  "chelis-version",
  "sha2",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

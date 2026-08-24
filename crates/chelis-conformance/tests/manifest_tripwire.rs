@@ -139,19 +139,43 @@ fn manifest_matches_contract_doc() {
     );
 }
 
+/// Every matrix leg's `repo:` name paired with the sibling repo names its
+/// `reef_deps:` line lists, in file order. `reef_deps` entries are
+/// `Chelis-Lang/<repo>@<tag>`, space separated; only the repo name is returned
+/// (the tags are each shell's own release cadence and drift independently of the
+/// dependency graph).
+fn drift_matrix_legs(yaml: &str) -> Vec<(String, Vec<String>)> {
+    let mut legs: Vec<(String, Vec<String>)> = Vec::new();
+    for line in yaml.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("- repo:") {
+            legs.push((rest.trim().to_string(), Vec::new()));
+        } else if let Some(rest) = t.strip_prefix("reef_deps:")
+            && let Some((_, deps)) = legs.last_mut()
+        {
+            *deps = rest
+                .trim()
+                .trim_matches('"')
+                .split_whitespace()
+                .map(|entry| {
+                    let repo = entry.rsplit('/').next().unwrap_or(entry);
+                    repo.split('@').next().unwrap_or(repo).to_string()
+                })
+                .collect();
+        }
+    }
+    legs
+}
+
 #[test]
 fn registry_matches_drift_matrix() {
     let yaml = read(&repo_root().join(".github/workflows/ecosystem-drift.yml"));
 
     // Every matrix leg is a `- repo: <name>` line; nothing else in the file uses
     // that exact key (checkouts use `repository:`, tokens use `repositories:`).
-    let mut matrix: Vec<String> = yaml
-        .lines()
-        .filter_map(|l| {
-            let t = l.trim_start();
-            t.strip_prefix("- repo:")
-                .map(|rest| rest.trim().to_string())
-        })
+    let mut matrix: Vec<String> = drift_matrix_legs(&yaml)
+        .into_iter()
+        .map(|(repo, _)| repo)
         .collect();
     matrix.sort();
     matrix.dedup();
@@ -177,5 +201,44 @@ fn registry_matches_drift_matrix() {
          only in REGISTRY (status Active): {only_in_registry:?}\n\n\
          Reconcile crates/chelis-conformance/src/registry.rs with the canary \
          matrix (the ground-truth active set).",
+    );
+}
+
+/// The dependency half of the same lock (chelis#1259). The shell-name test above
+/// compared only the *set of legs*, so `Shell { name: "hello-chelis", deps: &[] }`
+/// could sit beside a canary leg that also said `reef_deps: ""` and neither side
+/// contradicted the other while both were wrong about the real graph. Comparing
+/// the edges too is what makes "edit both in one change set" a build-enforced
+/// statement rather than a convention.
+#[test]
+fn registry_deps_match_drift_matrix() {
+    let yaml = read(&repo_root().join(".github/workflows/ecosystem-drift.yml"));
+    let legs = drift_matrix_legs(&yaml);
+
+    let mut mismatches = Vec::new();
+    for (repo, matrix_deps) in &legs {
+        let Some(entry) = registry::shell(repo) else {
+            continue; // membership disagreements are the sibling test's job
+        };
+        let mut from_matrix: Vec<&str> = matrix_deps.iter().map(String::as_str).collect();
+        from_matrix.sort_unstable();
+        from_matrix.dedup();
+        let mut from_registry: Vec<&str> = entry.deps.to_vec();
+        from_registry.sort_unstable();
+        if from_matrix != from_registry {
+            mismatches.push(format!(
+                "{repo}: canary reef_deps {from_matrix:?} vs REGISTRY deps {from_registry:?}"
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "REGISTRY `deps` and the ecosystem-drift.yml `reef_deps` disagree:\n  {}\n\n\
+         Both name the same thing: the transitive closure of sibling shells a leg \
+         must install. Fix crates/chelis-conformance/src/registry.rs and \
+         .github/workflows/ecosystem-drift.yml together (a one-sided edit is what \
+         this tripwire exists to stop).",
+        mismatches.join("\n  ")
     );
 }
