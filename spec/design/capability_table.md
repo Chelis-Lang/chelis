@@ -50,10 +50,10 @@ regenerates the projection.
 
 The root manifest may combine those generated projections with the checked
 program's root set, which is [#912]'s subject. It SHALL NOT author operation
-legality or backend support itself. Conversely, the manual `KNOWN_TAGS` table
-is not a capability-table input at all: Deep structural classification belongs
-to the typed `DeepTag` successor governed by [#908]/[#731]. Replacing that raw
-string table with exhaustive typed dispositions is a structural-AST handoff,
+legality or backend support itself. Conversely, the wildcard-free typed
+`DeepTag` lane disposition is not a capability-table input at all: Deep
+structural classification belongs to the successor governed by [#908]/[#731].
+Maintaining that exhaustive typed disposition is a structural-AST handoff,
 not a Table-A or Table-B row expansion.
 
 ### Table A - the semantic table (target-independent; the checker's law)

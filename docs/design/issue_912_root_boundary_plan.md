@@ -172,15 +172,17 @@ Tested: `add(a, b)` over int32 and int64 tensors.
 - Shape-class lookup backed by `HashMap` for hot-path performance.
 - Exit: single source of truth, compile-fail test green.
 
-### Task 5: Const tag table `KNOWN_TAGS` in `chelis-types` (standalone reviewable diff)
+### Task 5: Total typed `DeepTag` lane disposition in `chelis-types` (standalone reviewable diff)
 
-- `TagDecl { tag: &'static str, lane_contribution: LaneContribution }`.
 - `enum LaneContribution { ForcesHost, Propagates }`.
-- Both realizability walker and lowering walker look up from `KNOWN_TAGS`.
-- Unknown tag → `Host` + diagnostic ("unrecognized form routes host; add to
-  KNOWN_TAGS if intentional").
-- Drift test: every tag the lowering walker handles is in `KNOWN_TAGS`.
-- Exit: one table, both walkers, drift test green.
+- `deep_tag_lane_contribution(DeepTag) -> LaneContribution` uses a wildcard-free
+  exhaustive match. Adding a `DeepTag` without a disposition stops compilation.
+- The four Host-forcing forms match the target-independent lowering classifier;
+  every other recognized form propagates to its children.
+- A raw-name, empty, or otherwise untyped form never enters the typed classifier;
+  the realizability walker routes it to `Host` with an `UnrecognizedTag` reason.
+- Exit: no raw-string tag authority remains, every `DeepTag` is decided, and the
+  fail-closed carrier tests are green.
 
 ### Task 6: Realizability inference
 
@@ -208,8 +210,8 @@ Tested: `add(a, b)` over int32 and int64 tensors.
 - Def-level precision check: return type + intermediates vs `target_prims`.
 - Builtin resolution via `BUILTINS` lookup. `TensorAtTensorType` + scalar
   resolved type → Host with `ScalarTypedOp`.
-- Tag resolution via `KNOWN_TAGS`. Unknown → Host + diagnostic +
-  `UnrecognizedTag`.
+- Tag resolution via the total typed `DeepTag` disposition. A form without a
+  decoded tag routes Host with `UnrecognizedTag`.
 - Reference closure for required-inputs (free tensor-typed variables,
   accumulated transitively).
 - Effects and realizability share one call-graph build.
@@ -299,7 +301,8 @@ Fresh-context adversarial review. Probes:
 - (a) `BuiltinDecl` missing field → compile error (`trybuild`).
 - (b) `Target` variant without capability mapping → compile error.
 - (c) Unknown tag → Host + diagnostic.
-- (d) Tag in lowering not in `KNOWN_TAGS` → drift test failure.
+- (d) New `DeepTag` without a lane disposition → compile failure at the
+  wildcard-free match.
 - (e) f64-returning def with Universal-only ops → Host for C target, Tensor for
   eval target.
 - (f) `chelis eval --target c` on f64 program → Host lane → numeric agreement
@@ -366,7 +369,8 @@ residue as own issue.
   honesty, golden-gate scope, coordination handoffs, sequencing ratification
   reference, within-lane measurement result.
 - **Self-review checklist** (promote to PR template for root-semantics area):
-  - No routing-context name matches beyond `BuiltinDecl`/`KNOWN_TAGS`.
+  - No routing-context name matches beyond raw-boundary diagnostics; builtin
+    dispatch uses `BuiltinDecl` and structural dispatch uses `DeepTag`.
   - `chelis-types` doesn't import `chelis-ir`.
   - Expectation sweep is a separate diff.
   - Migration diff classified per target, no unintended regressions.

@@ -876,8 +876,8 @@ Deliverables, with phase homes:
    for root identity, manifest order, dotted-root expansion, `requires_main`,
    artifact routing, or `HostReason`; those remain chelis#912 work. The PyO3
    leg freezes registered signatures and rejects raw dtype ingress; it does
-   not inspect or redesign private runtime-dtype decoding. `KNOWN_TAGS` and
-   Deep stamping are outside this task entirely.
+   not inspect or redesign private runtime-dtype decoding. The typed `DeepTag`
+   lane disposition and Deep stamping are outside this task entirely.
 
    Binding-baseline dispositions (each entry is the C6 review a frozen
    descriptor-manifest update cites):
@@ -1769,9 +1769,10 @@ different decisions:
   operation legality. Its pre-table builtin realizability and target sets are
   exhaustive adapters; Phase 4 replaces their hand-authored decisions with
   generated Table-A/Table-B projections.
-- `KNOWN_TAGS` is deliberately outside this interlock. It classifies Deep
-  syntax and must become an exhaustive typed `DeepTag` disposition under
-  [#908]/[#731], rather than being generated from numeric capability rows.
+- `deep_tag_lane_contribution` is deliberately outside this interlock. It
+  classifies Deep syntax through an exhaustive typed `DeepTag` disposition
+  under [#908]/[#731], rather than being generated from numeric capability
+  rows.
 
 Neither plan may duplicate the other's authority. Any change to this boundary
 updates this section, `loud_unsupported.md` §I1, and

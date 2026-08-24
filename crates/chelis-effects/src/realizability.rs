@@ -2,15 +2,19 @@
 //!
 //! Computes per-def lane assignment (Tensor vs Host) via transitive
 //! fixed-point, in a separate lattice from algebraic effects. The inference
-//! consults per-builtin declarations (`BUILTINS`), per-tag declarations
-//! (`KNOWN_TAGS`), and a def-level precision check against backend capability.
+//! consults per-builtin declarations (`BUILTINS`), the exhaustive typed
+//! `DeepTag` lane disposition, and a def-level precision check against backend
+//! capability.
 //!
 //! This module does NOT modify `enum Effect` or the mechanized `EffectRow`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use chelis_deep::ast::{Atom, Expr, List};
-use chelis_types::known_tags::{LaneContribution, tag_lane_contribution};
+use chelis_deep::{
+    DeepTag,
+    ast::{Atom, Expr, List},
+};
+use chelis_types::known_tags::{LaneContribution, deep_tag_lane_contribution};
 use chelis_types::manifest::HostReason;
 use chelis_types::types::{Lane, Prim};
 use chelis_types::{CheckedProgram, Realizability, builtin_decl};
@@ -151,9 +155,9 @@ fn expr_needs_host(
         }
         // Fail-closed (#1086): a headless list or an unrecognized form has no
         // tag to classify, so it must not silently route Tensor. Force Host and
-        // record a reason, matching the KNOWN_TAGS "unknown tag → Host +
-        // diagnostic" contract (known_tags.rs) and the #731/#908
-        // exhaustive-disposition principle. These forms do not survive
+        // record a reason, matching the typed DeepTag disposition's raw-form
+        // boundary and the #731/#908 exhaustive-disposition principle. These
+        // forms do not survive
         // `chelis check` today (they score < 1 as UnknownForm), so this is
         // defensive alignment with the stated contract rather than a live
         // wrong-answer path — but a silent `false` here is exactly the
@@ -195,44 +199,33 @@ fn list_needs_host(
     let tag = get_tag(list);
     let children = get_children(list);
 
-    // Check tag against KNOWN_TAGS.
-    if let Some(tag_str) = tag {
-        match tag_lane_contribution(tag_str) {
-            Some(LaneContribution::ForcesHost) => {
-                reasons.push(HostReason::StructuralForm {
-                    tag: tag_str.to_string(),
-                });
-                return true;
-            }
-            Some(LaneContribution::Propagates) => {
-                // Fall through to check children.
-            }
-            None => {
-                // Unknown tag → Host + reason.
-                reasons.push(HostReason::UnrecognizedTag {
-                    tag: tag_str.to_string(),
-                });
-                return true;
-            }
-        }
-    } else if !list.elements.is_empty() {
-        // Fail-closed (#1086): a non-empty list whose head is not a Deep tag
-        // (element 0 is a literal or nested form, so `get_tag` is None) cannot
-        // be classified against KNOWN_TAGS. Do not fall through to a silent
-        // Tensor routing — force Host with a reason, the same discipline as the
-        // BareList/UnknownForm arms in expr_needs_host. Like those, this form
-        // does not survive `chelis check` today, so it is defensive alignment
-        // with the fail-closed contract rather than a live wrong-answer path.
+    let Some(tag) = tag else {
+        // Fail-closed (#1086, #1080): an empty legacy List or a List whose head
+        // is not a decoded DeepTag has no typed disposition. Do not re-decode a
+        // raw Name here; ingress owns that boundary.
         reasons.push(HostReason::UnrecognizedTag {
-            tag: "<untagged-list>".to_string(),
+            tag: list
+                .unknown_tag_symbol()
+                .unwrap_or("<untagged-list>")
+                .to_string(),
         });
         return true;
+    };
+
+    match deep_tag_lane_contribution(tag) {
+        LaneContribution::ForcesHost => {
+            reasons.push(HostReason::StructuralForm {
+                tag: tag.as_str().to_string(),
+            });
+            return true;
+        }
+        LaneContribution::Propagates => {
+            // Fall through to check children.
+        }
     }
 
-    let tag_str = tag.unwrap_or("");
-
     // Uppercase var references (ADT constructors) → Host.
-    if tag_str == "var"
+    if tag == DeepTag::Var
         && let Some(name) = children.first().and_then(symbol_name)
     {
         if name.chars().next().is_some_and(|c| c.is_uppercase()) {
@@ -248,7 +241,7 @@ fn list_needs_host(
     }
 
     // App: check the callee builtin.
-    if tag_str == "app"
+    if tag == DeepTag::App
         && let Some(callee_name) = app_callee_name(list)
     {
         // Uppercase callee (ADT constructor call) → Host.
@@ -311,12 +304,8 @@ fn list_needs_host(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn get_tag(list: &List) -> Option<&str> {
-    list.elements.first().and_then(|e| match e {
-        Expr::Atom(Atom::Name(s), _) => Some(s.as_str()),
-        Expr::Atom(Atom::Tag(t), _) => Some(t.as_str()),
-        _ => None,
-    })
+fn get_tag(list: &List) -> Option<DeepTag> {
+    list.tag()
 }
 
 fn get_children(list: &List) -> &[Expr] {
@@ -344,7 +333,7 @@ fn app_callee_name(list: &List) -> Option<String> {
     let children = get_children(list);
     let callee = children.first()?;
     match callee {
-        Expr::List(callee_list, _) if get_tag(callee_list) == Some("var") => {
+        Expr::List(callee_list, _) if get_tag(callee_list) == Some(DeepTag::Var) => {
             get_children(callee_list)
                 .first()
                 .and_then(symbol_name)
@@ -363,7 +352,7 @@ fn app_type_is_scalar(list: &List) -> bool {
             if key == "type"
                 && let Expr::List(ty_list, _) = value
             {
-                return get_tag(ty_list) == Some("t-prim");
+                return get_tag(ty_list) == Some(DeepTag::TPrim);
             }
         }
     }
@@ -375,7 +364,7 @@ fn extract_def(expr: &Expr) -> Option<(String, &Expr)> {
     let Expr::List(list, _) = expr else {
         return None;
     };
-    if get_tag(list) != Some("def") {
+    if get_tag(list) != Some(DeepTag::Def) {
         return None;
     }
     let children = get_children(list);
@@ -383,7 +372,7 @@ fn extract_def(expr: &Expr) -> Option<(String, &Expr)> {
     let body = children.get(1)?;
     // Skip fn-typed defs (they're callable, not roots).
     if let Expr::List(body_list, _) = body
-        && get_tag(body_list) == Some("fn")
+        && get_tag(body_list) == Some(DeepTag::Fn)
     {
         // Still register the def for transitive analysis, but the body
         // is the fn body, not the fn itself.
@@ -452,14 +441,14 @@ fn collect_manifest_entries(
     let Expr::List(list, _) = expr else { return };
     let tag = get_tag(list);
 
-    if tag == Some("module") {
+    if tag == Some(DeepTag::Module) {
         for child in get_children(list).iter().skip(1) {
             collect_manifest_entries(child, type_env, realizability, out);
         }
         return;
     }
 
-    if tag != Some("def") {
+    if tag != Some(DeepTag::Def) {
         return;
     }
 
@@ -471,7 +460,7 @@ fn collect_manifest_entries(
 
     // Skip fn-typed defs (they're callable, not roots).
     if let Some(Expr::List(body_list, _)) = body
-        && get_tag(body_list) == Some("fn")
+        && get_tag(body_list) == Some(DeepTag::Fn)
     {
         return;
     }
@@ -731,6 +720,62 @@ mod tests {
         assert!(
             !reasons.is_empty(),
             "untagged-list Host routing must record a reason, not be silent"
+        );
+    }
+
+    #[test]
+    fn empty_legacy_list_routes_host_fail_closed() {
+        let expr = Expr::List(List { elements: vec![] }, chelis_deep::Span::new(0, 0));
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+
+        assert!(expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        ));
+        assert_eq!(
+            reasons,
+            [HostReason::UnrecognizedTag {
+                tag: "<untagged-list>".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn raw_name_that_spells_a_known_tag_routes_host_fail_closed() {
+        let span = chelis_deep::Span::new(0, 0);
+        let expr = Expr::List(
+            List {
+                elements: vec![Expr::Atom(Atom::Name("app".to_string()), span)],
+            },
+            span,
+        );
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+
+        assert!(expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        ));
+        assert_eq!(
+            reasons,
+            [HostReason::UnrecognizedTag {
+                tag: "app".to_string(),
+            }]
         );
     }
 
