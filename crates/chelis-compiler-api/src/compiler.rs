@@ -4167,7 +4167,7 @@ pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), Compil
                 ),
                 "metal",
                 chelis_types::unimplemented_rejection!(
-                    729,
+                    1291,
                     "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
                 ),
             ));
@@ -4326,6 +4326,36 @@ mod metal_runtime_dim_reject_tests {
         );
         reject_unsupported_metal_ops(&dag).expect("literal bounds must pass the Metal seam");
     }
+
+    #[test]
+    fn metal_seam_rejects_count_with_issue_1291_receipt() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[2, 3], Prim::Bool),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Count { axes: vec![1] },
+            vec![input],
+            ty(&[2], Prim::Int64),
+            None,
+        );
+
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal must reject Count until its dedicated kernel lands");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
+        assert!(
+            message.contains("count") && message.contains("--target c"),
+            "{message}"
+        );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
@@ -4339,7 +4369,7 @@ pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), Compiler
                     ),
                     "hip",
                     chelis_types::unimplemented_rejection!(
-                        729,
+                        1291,
                         "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
                     ),
                 ));
@@ -5891,6 +5921,36 @@ mod tests {
         dag.add_root(gather);
 
         reject_unsupported_hip_ops(&dag).expect("HIP should allow sparse gather");
+    }
+
+    #[test]
+    fn hip_rejects_count_with_issue_1291_receipt() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![2, 3], chelis_types::types::Prim::Bool),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Count { axes: vec![1] },
+            vec![input],
+            tensor_type(vec![2], chelis_types::types::Prim::Int64),
+            None,
+        );
+
+        let error = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject Count until its dedicated kernel lands");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
+        assert!(
+            message.contains("count") && message.contains("--target c"),
+            "{message}"
+        );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
     }
 
     #[test]

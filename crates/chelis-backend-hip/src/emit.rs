@@ -206,7 +206,7 @@ impl HipEmitter {
                 format!("the HIP kernel set (node {})", node.id.0),
                 Stage::Codegen("hip"),
                 chelis_types::unimplemented_rejection!(
-                    729,
+                    1291,
                     "first-class count ships on eval and C-host/C-DAG in chelis#1287; \
                      chelis#1291 owns the dedicated HIP/Metal kernels"
                 ),
@@ -1796,7 +1796,7 @@ impl HipEmitter {
                     format!("the HIP kernel set (node {})", node.id.0),
                     Stage::Codegen("hip"),
                     chelis_types::unimplemented_rejection!(
-                        729,
+                        1291,
                         "chelis#1291 owns the dedicated HIP/Metal count kernels"
                     ),
                 ));

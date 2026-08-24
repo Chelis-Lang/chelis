@@ -94,4 +94,34 @@ def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = 
 "#,
         "rank-spread",
     );
+    assert_rejects(
+        r#"
+def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, seq, seq)
+"#,
+        "duplicate",
+    );
+    assert_rejects(
+        r#"
+def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, missing)
+"#,
+        "no named `missing` axis",
+    );
+    assert_rejects(
+        r#"
+def bad(x: &tensor[..pre, seq, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, seq)
+"#,
+        "ambiguous",
+    );
+    assert_rejects(
+        r#"
+def bad(x: &tensor[..pre, seq, ..post, bool]) -> tensor[..pre, ..post, int64] = count(&x, seq, 0)
+"#,
+        "positional and named axes cannot be mixed",
+    );
+    assert_rejects(
+        r#"
+def bad(x: &tensor[row, col, bool]) -> tensor[row, int64] = count(&x, col)
+"#,
+        "concrete-rank operand requires",
+    );
 }

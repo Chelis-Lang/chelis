@@ -594,6 +594,24 @@ pub(super) fn check_reduction_signature(
             remove.push(axis);
         }
     } else {
+        let selects_concrete_named_axis = name == "count"
+            && !has_spread
+            && axis_exprs.iter().any(|axis| {
+                symbolic_dim_ref_name(axis).is_some_and(|axis_name| {
+                    dims.iter()
+                        .any(|dim| matches!(dim, Dim::Name(name) if name == axis_name))
+                })
+            });
+        if selects_concrete_named_axis {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    "count on a concrete-rank operand requires one or more positional int32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
+                    vec!["Use the selected dimensions' positional indices, or make the operand rank-polymorphic and name every selected axis.".to_string()],
+                ),
+            );
+        }
         for ax in axis_exprs {
             // A positional integer that reaches the named path: either the
             // operand is rank-spread (index meaningless at symbolic rank) or it

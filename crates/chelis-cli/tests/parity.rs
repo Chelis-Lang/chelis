@@ -375,6 +375,11 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_count_bool_axes() {
+    drive_parity(&examples_root().join("count_bool_axes.ch"), true);
+}
+
+#[test]
 fn parity_constraint_directed_risk_guards_library_only() {
     drive_parity(
         &examples_root().join("constraint_directed_risk_guards.ch"),
@@ -487,6 +492,7 @@ fn parity_rank_poly_borrow_library_only() {
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
         "constraint_directed_risk_guards.ch",
+        "count_bool_axes.ch",
         "dict_foundation.ch",
         "hello_tensor.ch",
         "induction_bond.ch",

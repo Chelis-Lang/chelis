@@ -1737,6 +1737,14 @@ skipped, stale, nonzero, or success-line-free leg and includes the structural
 mutations named by each child. It is wired to the normal gate; prose coverage
 or a manual waiver is not an entry receipt.
 
+The [#1287] child command is
+`.venv/bin/python scripts/dtype_count_oracle.py`; success ends with
+`DTYPE COUNT ORACLE: PASS`. It owns the checker grammar, dedicated non-alias
+`Count` IR, evaluator/C execution, exact WireDag v6 boundary, registered wire
+capacity, loud [#1291] device receipts, semantic registration, and executable
+example parity. [#1291] later replaces those device receipts with its hardware
+execution oracle; it does not weaken or bypass the [#1287] core receipt.
+
 ### Phase 4C - populate the machine authorities
 
 **Entry condition:** the [#1296] composite pre-4C oracle is green, merged, and

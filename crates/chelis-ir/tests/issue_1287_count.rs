@@ -138,6 +138,13 @@ def main() -> tensor[3, int64] = {
         "lowered ops: {:#?}",
         dag.nodes().iter().map(|node| &node.op).collect::<Vec<_>>()
     );
+    assert!(
+        dag.nodes().iter().all(|node| !matches!(
+            node.op,
+            RiscOp::Sum { .. } | RiscOp::Cast { .. } | RiscOp::CastTrunc { .. }
+        )),
+        "Count must not regress to cast-plus-sum or a cast compatibility alias"
+    );
     assert!(verify::verify(&dag).is_empty());
 }
 
@@ -191,7 +198,7 @@ fn grad_rejects_a_live_count_with_a_structured_reason() {
         err,
         AdError::NotSupported {
             op: "count",
-            reason: AdRejectionReason::DiscreteCountOutput,
+            reason: AdRejectionReason::IntegerIndexOutput,
         }
     );
 }
