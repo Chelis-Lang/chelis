@@ -173,7 +173,13 @@ jobs:
           # resolves them (its reef.toml dependency tags). chelis-std is
           # NOT listed — it comes from the HEAD toolchain. Mind the dep
           # graph: coral->nautilus, shoals->nautilus+coral, whale->shoals
-          # (transitively nautilus+coral).
+          # (transitively nautilus+coral), hello-chelis->coral+nautilus+school
+          # (the leaf). Each leg lists the TRANSITIVE closure, because
+          # `reef install --from-github` resolves one release artifact at a
+          # time. The same closure is mirrored in
+          # `chelis_conformance::registry::REGISTRY`'s `deps`, and
+          # `registry_deps_match_drift_matrix` fails the build if the two
+          # disagree — so this list and that table move together.
           #
           # `token_repos` is the newline-separated set of repos the minted
           # App token must read: the shell ITSELF (checkout) PLUS every
@@ -334,9 +340,22 @@ jobs:
           # repo the Dockerfile's `reef install --from-github` reads
           # (chelis/coral/nautilus/octant/c-earchin/school) plus the octant release
           # tarball it downloads, plus hello-chelis itself.
+          #
+          # `reef_deps` here is DECLARATIVE only. The docker leg never runs the
+          # host-side "Install released reef dependencies" step (it is gated to
+          # reef/cargo legs); hello-chelis's own Dockerfile performs those
+          # installs inside the image from its `ARG *_VERSION` pins. The list is
+          # still written out because it is the shell's real dependency closure
+          # and the registry<->matrix tripwire reads it: recording `""` here is
+          # what let `Shell { name: "hello-chelis", deps: &[] }` stand while
+          # hello-chelis was in fact the LEAF of the cascade, blocked on all
+          # three siblings (chelis#1259). octant and c-earchin are installed by
+          # the Dockerfile as tool packages rather than reef.toml
+          # `[dependencies]`, so they stay out of `reef_deps` and are covered by
+          # `token_repos` alone.
           - repo: hello-chelis
             type: docker
-            reef_deps: ""
+            reef_deps: "Chelis-Lang/coral@v0.7.32 Chelis-Lang/nautilus@v0.7.35 Chelis-Lang/school@v0.1.12"
             token_repos: |-
               hello-chelis
               chelis

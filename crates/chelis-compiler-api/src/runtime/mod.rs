@@ -191,35 +191,6 @@ pub enum RuntimeValue {
     Unit,
 }
 
-/// Debug-render a runtime value for an error message, truncating huge
-/// payloads (tensors, long lists) so a shape diagnostic stays readable
-/// instead of dumping the whole value (chelis#903 review). Values whose
-/// debug form fits the cap render byte-identically to `{value:?}`, so
-/// small-value diagnostics read as before. Used by the chelis#890/#903
-/// JSON/CSV runtime modules only -- the crate-wide `expect_*_arg`
-/// diagnostics keep their existing rendering.
-pub(crate) fn truncated_debug(value: &RuntimeValue) -> String {
-    truncate_rendered(format!("{value:?}"))
-}
-
-/// String-level half of [`truncated_debug`], for call sites that render
-/// something other than a single value (e.g. an ADT's field list).
-pub(crate) fn truncate_rendered(full: String) -> String {
-    const MAX_LEN: usize = 160;
-    if full.len() <= MAX_LEN {
-        return full;
-    }
-    let mut cut = MAX_LEN;
-    while !full.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!(
-        "{}... ({} more bytes elided)",
-        &full[..cut],
-        full.len() - cut
-    )
-}
-
 impl RuntimeValue {
     /// Wrap a module-finalized scalar (the WS-A0 invariant holds by
     /// construction: the storage variant IS the dtype).

@@ -60,9 +60,9 @@ rather than an alias of a shared source. That is what disqualifies it from copy
 insertion, which the rest of this section justifies by the source and the copy sharing
 one DAG node.
 
-The exception is a property of the **binding**, not of a region of the program. It
-attaches to each name the destructuring `let` introduces and to nothing else. In
-particular it does not attach to:
+The exception is a property of the **binding**, not of a region of the program and
+not of a name. It attaches to each binding the destructuring `let` introduces and to
+nothing else. In particular it does not attach to:
 
 - the value that was destructured. That value is consumed in the enclosing scope
   where the destructuring `let`'s right-hand side was evaluated, and its own fan-out
@@ -116,6 +116,30 @@ such aliases is not fan-out. A *consuming* use resolves through the alias chain 
 component, so a component consumed twice through aliases is the same hard error as one
 consumed twice directly, and the diagnostic names the binding the source actually
 wrote.
+
+An alias binds to the **binding generation** it was taken against, per
+`spec/04-type-system.md` [04-LIN-1], and the link never re-resolves. The checker
+implements this by minting a unique id per binding event (`BindingId` in
+`linearity.rs`) and keying every alias link, consumption mark, and component mark on
+ids; a name is resolved to its innermost live generation exactly once, at the use
+site that records the fact. Two consequences the name-keyed implementation got wrong
+(chelis#1209), both now structural:
+
+- Re-binding the source's name after `y = a` leaves `y` pointing at the original
+  `a`. A double consume of `y` lands on that generation's carrier and is reported
+  against `y`; the fresh `a` is untouched and stays consumable.
+- A later destructuring `let` that reuses the source's name marks its own new
+  generation. An alias taken against the ordinary older generation never inherits
+  the component restriction, so the fan-out it always had stays copyable.
+
+The same identity dissolves the authored-carrier collision (chelis#1212): a
+user-written `__chelis_tmp0` and a desugarer-minted carrier of the same spelling are
+distinct generations, so the collision is ordinary shadowing and hides nothing. The
+capture rule stays deliberately narrow under generation identity: per [04-LIN-2] a
+closure capture consumes the binding it names, ordinary aliases are distinct for
+capture, and only a component (or an alias of one) forwards to its carrier. Because
+that carve-out keeps two captures on one alias chain order-sensitive, the sorted
+`free_vars` order in `check_fn` remains semantically necessary, not cosmetic.
 
 ## Tensor-Carrying ADTs
 

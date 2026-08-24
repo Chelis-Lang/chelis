@@ -207,8 +207,28 @@ chelis test tests_blocked/ --expect blocked
 Directory runs use `--batch-mode auto` by default: eligible files are compiled
 as one suite batch so the fixed Reef context and test-source compile costs are
 paid once. Files with top-level module-init bindings or top-level name
-collisions use the per-file worker path. If a batch worker crashes, times out,
-or emits incomplete rows, the parent falls back to per-file workers.
+collisions use the per-file worker path.
+
+The batch is one compilation unit with one top-level scope, so a name
+collision is any way two batched files can disagree about what a name means:
+both declaring it, one declaring what another explicitly imported (in either
+order), both importing it from different modules, or a wildcard import whose
+names cannot be enumerated without resolving the package graph. Importing the
+same name from the same module is not a collision. Demotion is not reported by
+default, because the per-file path gives the same rows and the same exit code.
+Set `CHELIS_TEST_EXPLAIN_BATCHING=1` to print one stderr line per demoted file
+naming its reason, which is what to reach for when a suite has quietly lost the
+batch path and you need to know which names to rename.
+
+If a batch worker cannot be started, crashes, times out, or exits without
+usable rows, the parent falls back to per-file workers and says so on every
+channel that a reader might be capturing: an attributed stderr note naming the
+reason and every file the batch had claimed, a ` (batch abandoned: ran
+per-file)` marker on the plain summary line, and under `--json` a
+`batch_fallback` record before the rows plus a `batch_fallback` flag on the
+summary. All three are absent when the batch completes, and a clean run's
+summary line and summary record are unchanged. The exit code still tracks test
+outcomes only, because every selected test still ran.
 
 Use `--batch-mode file` to force per-file subprocess isolation while debugging.
 `--jobs auto` caps worker concurrency on file-worker paths; pass `--jobs 1` for

@@ -677,7 +677,7 @@ fn lower_pred_bool(
             exprs,
             binder_fields,
         )?))),
-        "eq" | "neq" | "cmplt" | "lte" | "gte" => {
+        "eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" => {
             let op = cmp_op(name)?;
             let lhs_arg = args.first()?;
             let rhs_arg = args.get(1)?;
@@ -880,7 +880,7 @@ fn lower_field_bool(expr: &Expr) -> Option<SmtExpr> {
                 .collect::<Option<Vec<_>>>()?,
         )),
         "not" => Some(SmtExpr::Not(Box::new(lower_field_bool(args.first()?)?))),
-        "eq" | "neq" | "cmplt" | "lte" | "gte" => {
+        "eq" | "neq" | "cmplt" | "gt" | "lte" | "gte" => {
             let op = cmp_op(name)?;
             let l = lower_field_expr(args.first()?)?;
             let r = lower_field_expr(args.get(1)?)?;
@@ -895,6 +895,7 @@ fn cmp_op(name: &str) -> Option<CmpOp> {
         "eq" => CmpOp::Eq,
         "neq" => CmpOp::Ne,
         "cmplt" => CmpOp::Lt,
+        "gt" => CmpOp::Gt,
         "lte" => CmpOp::Le,
         "gte" => CmpOp::Ge,
         _ => return None,

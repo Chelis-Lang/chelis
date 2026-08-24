@@ -119,7 +119,7 @@ Final. Binding power from lowest to highest:
 | 2 | `\|\|` | left | `(app {} (var {} or) ...)` |
 | 3 | `&&` | left | `(app {} (var {} and) ...)` |
 | 4 | `==` `!=` | none | `eq` / `neq` |
-| 5 | `<` `>` `<=` `>=` | none | `cmplt` / swapped `cmplt` / `lte` / `gte` |
+| 5 | `<` `>` `<=` `>=` | none | `cmplt` / `gt` / `lte` / `gte` |
 | 6 | `+` `-` | left | `add` / `sub` |
 | 7 | `*` `/` `%` | left | `mul` / `div` / `mod` |
 | 8 | unary `-` `!` | prefix | `neg` / `not` |
@@ -127,6 +127,18 @@ Final. Binding power from lowest to highest:
 | 10 | `.` field access | left | `(access {} ...)` / `(tuple-get {} ...)` |
 
 Non-associative operators (BP 4, 5) produce a parse error on chaining: `a == b == c` is rejected.
+
+Every operator row desugars with the authored operand order preserved: an
+application row `a OP b` becomes `(app {} (var {} op) a' b')` with `a'`
+first, no row swaps its operands, and `|>` keeps its stage order in the
+`pipe` node. `a > b` therefore desugars to the `gt` built-in, whose result
+is defined as `cmplt(b, a)` over the already-evaluated operand values
+(`spec/05-risc-primitives.md` §3.2), not to an operand-swapped `cmplt`
+application. Combined with Deep's left-to-right application-argument
+evaluation (`spec/03-deep-syntax.md` §4.4), the effects and traps of
+operand expressions are observed in authored order. (`&&` and `||` are
+eager like every other application; there is no short-circuit special
+case.)
 
 No operator overloading. No infix bitwise operators. Host-side integer bitwise work uses
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
@@ -1128,7 +1140,14 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType (S ',')? S ']'
                / '(' S TypeExpr S ')'
                / TypeName TypeArgs?
 
-TypeArgs      <- '[' S TypeExpr (S ',' S TypeExpr)* (S ',')? S ']'
+TypeArgs      <- '[' S TypeArg (S ',' S TypeArg)* (S ',')? S ']'
+
+# An IntLit type-application argument is the concrete dimension
+# instantiation of a dimension-parameterized ADT (`Frame[2]` whose
+# parameter reaches a tensor dimension slot). Bare type positions
+# have no integer production. (Checker-side enforcement of the
+# argument's kind and extent is not fully implemented; chelis#1247.)
+TypeArg       <- TypeExpr / IntLit
 
 # Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
 TypeName      <- TypeIdent ('.' TypeIdent)*
@@ -1423,7 +1442,7 @@ a % b                             ⟹  (app {} (var {} mod) a' b')
 a == b                            ⟹  (app {} (var {} eq) a' b')
 a != b                            ⟹  (app {} (var {} neq) a' b')
 a < b                             ⟹  (app {} (var {} cmplt) a' b')
-a > b                             ⟹  (app {} (var {} cmplt) b' a')
+a > b                             ⟹  (app {} (var {} gt) a' b')
 a <= b                            ⟹  (app {} (var {} lte) a' b')
 a >= b                            ⟹  (app {} (var {} gte) a' b')
 

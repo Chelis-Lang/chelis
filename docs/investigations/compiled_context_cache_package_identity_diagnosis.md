@@ -57,6 +57,8 @@ semantics.
 
 Add package + build identity to the Phase K cache. `CacheIdentity`
 holds the canonicalized `package_root` plus `COMPILER_VERSION`.
+(Superseded by chelis#1156: that component is now `build_fingerprint()`.
+This document records the state at the time of the investigation.)
 
 - It is stored on `CompiledContext` and in the on-disk `CacheEnvelope`.
 - `cache_file_name` / `cache_path_for` fold an identity fingerprint
@@ -71,6 +73,7 @@ holds the canonicalized `package_root` plus `COMPILER_VERSION`.
   recompiled.
 
 `stdlib_cache_key` folds `COMPILER_VERSION` in directly.
+(Superseded by chelis#1156: it folds `build_fingerprint()` now.)
 
 The fix does not re-gate the cache behind `CHELIS_REEF_HOME` (that
 would discard the test-worker speedup PR #127 added) and does not make

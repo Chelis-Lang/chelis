@@ -608,16 +608,22 @@ fn stdlib_cache_key_depends_on_the_decls_themselves() {
 
 #[test]
 fn stdlib_cache_key_folds_the_compiler_version() {
-    // Post-#130 `stdlib_cache_key` folds `COMPILER_VERSION` directly, so a
-    // chelis binary built from different compiler source does NOT
+    // `stdlib_cache_key` folds the compiler BUILD fingerprint directly, so
+    // a chelis binary built from different compiler source does NOT
     // stale-hit an older binary's StdLibContext even when the bundled
     // chelis-std bytes are identical. We cannot rebuild the compiler
     // mid-test; instead we re-derive the key the way `stdlib_cache_key`
-    // does and confirm (a) the real compiler version reproduces the real
-    // key byte-for-byte, proving the mirror is faithful, and (b) a
-    // different compiler version flips it. If a future refactor drops
-    // COMPILER_VERSION from the key, assertion (a) breaks and this test
-    // is the tripwire.
+    // does and confirm (a) the real fingerprint reproduces the real key
+    // byte-for-byte, proving the mirror is faithful, and (b) a different
+    // one flips it. If a future refactor drops the build identity from
+    // the key, assertion (a) breaks and this test is the tripwire.
+    //
+    // chelis#1156: this input used to be `COMPILER_VERSION`. That is a
+    // release identity — every build of an unreleased version shares it —
+    // so two binaries with different type semantics shared this cache.
+    // The stdlib sub-context is keyed WITHOUT a package root, so it is
+    // shared by every package on the machine; a stale hit here reaches
+    // further than the per-package context cache.
     use sha2::{Digest, Sha256};
 
     let decls = chelis_surf::parser::parse_str("module Rt.Sample\ndef rt_sample() -> int32 = 1\n")
@@ -657,22 +663,32 @@ fn stdlib_cache_key_folds_the_compiler_version() {
         hasher.finalize().into()
     };
 
-    // (a) the mirror reproduces the real key for the real compiler
-    // version: this both proves the mirror is faithful AND proves
-    // COMPILER_VERSION is genuinely an input (a key that ignored it could
-    // not be reproduced by a derivation that feeds it in).
+    // (a) the mirror reproduces the real key for the real build
+    // fingerprint: this both proves the mirror is faithful AND proves the
+    // fingerprint is genuinely an input (a key that ignored it could not
+    // be reproduced by a derivation that feeds it in).
     assert_eq!(
         real,
-        recompute(COMPILER_VERSION),
+        recompute(chelis_compiler_api::build_fingerprint()),
         "the recompute mirror must reproduce the real stdlib_cache_key for the \
-         running compiler version; if this breaks, stdlib_cache_key's inputs changed"
+         running build fingerprint; if this breaks, stdlib_cache_key's inputs changed"
     );
-    // (b) a different compiler version flips the key.
+    // (b) a different build fingerprint flips the key.
     assert_ne!(
         real,
         recompute("0.0.0-some-other-compiler-build"),
-        "a different compiler version must produce a different stdlib cache key, so \
+        "a different build fingerprint must produce a different stdlib cache key, so \
          a differently-built binary cannot stale-hit an older StdLibContext"
+    );
+    // (c) chelis#1156 regression: the bare release version must NOT be
+    // what the key folds in, or every build of one version collides.
+    // Unconditional: both arms of the fingerprint (digest and degraded)
+    // extend `COMPILER_VERSION`, so it is never the bare release string.
+    assert_ne!(
+        real,
+        recompute(COMPILER_VERSION),
+        "the stdlib cache key must fold the BUILD fingerprint, not the bare \
+         release version; two builds of one version must not share this cache"
     );
 }
 
