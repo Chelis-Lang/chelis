@@ -38,9 +38,14 @@ Usage:
 
 Acceptance is exit 0 with the final line ``ORACLE: PASS``.
 
-This oracle is wired into `scripts/gate.py`'s `lint-and-unit` stage and its
-`--local` subset, so it runs on every pull request. `scripts/test_gate.py`
-locks that wiring.
+Wiring: `scripts/gate.py`'s `integration` stage and its `--local` pre-push
+subset. Hosted CI runs that stage in the `workspace-tests` job
+(`Workspace Tests (Linux)`), on every pull request that is not docs-only.
+The stage choice is not incidental: obligations 4 and 5 run `cargo nextest`,
+which the `lint-and-unit` job deliberately does not install, so the oracle
+would fail there with `no such command: nextest`. `scripts/test_gate.py`
+locks both memberships and the pairing between the oracle's stage and a job
+that installs cargo-nextest.
 """
 
 from __future__ import annotations
@@ -86,23 +91,64 @@ SCORE_ONE_CONTROL_FIXTURES: list[tuple[str, str]] = [
 
 # `spec/03-deep-syntax.md` [03-PROG-1] enumerates the admissible top-level
 # forms. Every other top-level form is rejected, and [03-PROG-2] requires the
-# rejection to name the offending head.
+# rejection to identify the offending form: by its head symbol when it has
+# one, and otherwise by one of the nine syntactic classes that rule fixes.
+# All nine appear below, so this table walks the whole closed set rather than
+# the headed half of it.
 TOP_LEVEL_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
-    # (name, source, the head the diagnostic must name)
+    # (name, source, the identification the diagnostic must carry)
+    # Headed forms: identified by the backtick-quoted head symbol.
     (
         "top-level fn expression",
         "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))",
-        "fn",
+        "`fn`",
     ),
-    ("top-level var expression", "(var {} x)", "var"),
-    ("top-level application", "(app {} (var {} f) (var {} x))", "app"),
-    ("top-level type expression", "(t-prim {} f32)", "t-prim"),
-    ("top-level pattern", "(pat-var {} x)", "pat-var"),
+    ("top-level var expression", "(var {} x)", "`var`"),
+    ("top-level application", "(app {} (var {} f) (var {} x))", "`app`"),
+    ("top-level type expression", "(t-prim {} f32)", "`t-prim`"),
+    ("top-level pattern", "(pat-var {} x)", "`pat-var`"),
     # `variant` and `field` table under §2.2 but are structural children.
-    ("top-level variant", "(variant {} Some (field {} value (t-prim {} f32)))", "variant"),
-    ("top-level helper", "(params {} (x {type: (t-prim {} f32)}))", "params"),
-    ("top-level unknown tag", "(future-form {} value)", "future-form"),
+    (
+        "top-level variant",
+        "(variant {} Some (field {} value (t-prim {} f32)))",
+        "`variant`",
+    ),
+    ("top-level helper", "(params {} (x {type: (t-prim {} f32)}))", "`params`"),
+    ("top-level unknown tag", "(future-form {} value)", "`future-form`"),
+    # Headless forms: the closed [03-PROG-2] class set, all nine.
+    ("bare identifier", "some_name", "a bare identifier"),
+    ("bare integer literal", "42", "a bare integer literal"),
+    ("bare float literal", "1.5", "a bare float literal"),
+    ("bare string literal", '"text"', "a bare string literal"),
+    ("bare boolean literal", "true", "a bare boolean literal"),
+    ("empty list", "()", "an empty list"),
+    (
+        "list without a tag symbol",
+        "((var {} f) (var {} x))",
+        "a list without a tag symbol",
+    ),
+    ("metadata map", "{key: 1}", "a metadata map"),
+    (
+        "metadata-annotated form",
+        '^{:surf_literal_style "explicit"} (var {} x)',
+        "a metadata-annotated form",
+    ),
 ]
+
+# The exact class spellings [03-PROG-2] fixes. The oracle asserts the set is
+# fully covered above, so a class added to the rule without a fixture here is
+# a loud failure rather than silent under-enforcement.
+TOP_LEVEL_HEADLESS_CLASSES: tuple[str, ...] = (
+    "a bare identifier",
+    "a bare integer literal",
+    "a bare float literal",
+    "a bare string literal",
+    "a bare boolean literal",
+    "an empty list",
+    "a list without a tag symbol",
+    "a metadata map",
+    "a metadata-annotated form",
+)
 
 # The admissible spellings: a `module` wrapper, bare declarations, and a mix.
 TOP_LEVEL_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
@@ -329,7 +375,14 @@ def check_top_level_form_rule() -> None:
     names the offending head.
     """
     print("── Obligation 3: [03-PROG-1] top-level form rule ──")
-    for name, source, head in TOP_LEVEL_REJECTED_FIXTURES:
+    covered = {identification for _, _, identification in TOP_LEVEL_REJECTED_FIXTURES}
+    missing = [cls for cls in TOP_LEVEL_HEADLESS_CLASSES if cls not in covered]
+    if missing:
+        raise OracleFailure(
+            "[03-PROG-2] classes with no coverage fixture: " + ", ".join(missing)
+        )
+
+    for name, source, identification in TOP_LEVEL_REJECTED_FIXTURES:
         fixture = write_fixture(source)
         try:
             result = run_chelis_check(fixture)
@@ -346,13 +399,19 @@ def check_top_level_form_rule() -> None:
                     f"Source: {source}\nReport: {report}"
                 )
             error_text = json.dumps(errors)
-            # [03-PROG-2]: the rejection names the offending form's head.
-            if f"`{head}`" not in error_text:
+            # [03-PROG-2]: the rejection identifies the offending form.
+            if identification not in error_text:
                 raise OracleFailure(
-                    f"[{name}] [03-PROG-2] requires the diagnostic to name the "
-                    f"offending head `{head}`.\nErrors: {errors}"
+                    f"[{name}] [03-PROG-2] requires the diagnostic to identify "
+                    f"the offending form as {identification}.\nErrors: {errors}"
                 )
-            print(f"  PASS: {name} (names `{head}`)")
+            # [03-PROG-2] forbids substituting a placeholder.
+            if "<" in error_text or ">" in error_text:
+                raise OracleFailure(
+                    f"[{name}] [03-PROG-2] forbids a placeholder identification."
+                    f"\nErrors: {errors}"
+                )
+            print(f"  PASS: {name} (identified as {identification})")
         finally:
             fixture.unlink(missing_ok=True)
 

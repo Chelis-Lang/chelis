@@ -484,7 +484,7 @@ NON_GATE_WORKFLOWS = {
 
 class StageUnionTests(unittest.TestCase):
     def test_full_gate_keeps_censuses_while_ci_uses_the_split_profile(self):
-        self.assertEqual(gate.STAGES["integration"], [gate.NEXTEST_WORKSPACE_CI])
+        self.assertIn(gate.NEXTEST_WORKSPACE_CI, gate.STAGES["integration"])
         self.assertIn(gate.NEXTEST_WORKSPACE, gate.full_command_list())
         self.assertNotIn(gate.NEXTEST_WORKSPACE_CI, gate.full_command_list())
         self.assertNotIn("--profile", gate.NEXTEST_WORKSPACE)
@@ -604,20 +604,55 @@ class ListOutputTests(unittest.TestCase):
         # must run in a continuous job. It was referenced by no workflow and
         # no gate stage, so the only thing exercising it was its own unit
         # tests, which patch the command runners; the behavioral oracle never
-        # reached a compiled binary. Hosted CI runs `gate.py lint-and-unit`,
-        # so membership in that stage is what makes it continuous, and
+        # reached a compiled binary. Hosted CI runs one `gate.py <stage>` per
+        # job, so membership in a stage is what makes it continuous, and
         # membership in the local subset is what makes it pre-push. Removing
         # either turns the oracle dark silently, which is the exact failure
         # mode #1089 inventories -- hence an explicit lock.
         command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
         self.assertIn(
             command,
-            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+            [gate.render(entry) for entry in gate.STAGES["integration"]],
         )
         self.assertIn(
             command,
             [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
         )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+
+    def test_the_oracles_stage_is_a_job_that_installs_nextest(self):
+        # Both of the oracle's compiled obligations run `cargo nextest`. The
+        # lint-and-unit job deliberately does not install it, so placing the
+        # oracle there produces a deterministic `no such command: nextest`.
+        # Assert the pairing structurally: the stage the oracle lives in must
+        # be run by a job that installs cargo-nextest.
+        command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
+        owning_stages = [
+            stage
+            for stage, entries in gate.STAGES.items()
+            if command in [gate.render(entry) for entry in entries]
+        ]
+        self.assertEqual(
+            owning_stages,
+            ["integration"],
+            "the oracle must live in exactly one stage, and it must be a "
+            "nextest-installing one",
+        )
+        workflow = CI_YML.read_text()
+        blocks = _workflow_job_blocks(workflow)
+        owning_jobs = [
+            name
+            for name, block in blocks.items()
+            if "gate.py integration" in block
+        ]
+        self.assertTrue(owning_jobs, "some job must run `gate.py integration`")
+        for name in owning_jobs:
+            self.assertIn(
+                "taiki-e/install-action@nextest",
+                blocks[name],
+                f"job `{name}` runs the oracle's stage but does not install "
+                "cargo-nextest",
+            )
 
     def test_unrepresentable_domain_oracle_script_exists_and_documents_acceptance(self):
         # The wiring above is worthless if the script it names is gone or

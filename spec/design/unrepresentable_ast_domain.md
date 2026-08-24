@@ -416,9 +416,10 @@ This file. All design forks resolved before implementation.
 ### Task 9: Wire the Oracle
 
 - Python `scripts/unrepresentable_domain_oracle.py` (behavioral) - the
-  authoritative oracle, run by `scripts/gate.py`'s `lint-and-unit` stage
-  and its `--local` subset, and locked there by `scripts/test_gate.py`.
-  Acceptance is exit 0 with a final `ORACLE: PASS` line.
+  authoritative oracle, run by `scripts/gate.py`'s `integration` stage
+  (hosted CI's `workspace-tests` job) and its `--local` subset, and locked
+  there by `scripts/test_gate.py`. Acceptance is exit 0 with a final
+  `ORACLE: PASS` line.
 - Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests).
   These patch the command runners, so they are evidence about the script's
   decision logic and never a substitute for running the oracle.
@@ -473,9 +474,12 @@ top-level forms, and [03-PROG-2] states the rejection contract. Chapter
 top-level role restriction at all.
 
 **The oracle is `scripts/unrepresentable_domain_oracle.py`**, wired into
-`scripts/gate.py`'s `lint-and-unit` stage and its `--local` subset, so it
-runs on every pull request. Acceptance is exit 0 with a final
-`ORACLE: PASS` line. Its obligations cover the compiler-API ingress:
+`scripts/gate.py`'s `integration` stage and its `--local` pre-push subset.
+Hosted CI runs that stage in the `workspace-tests` job
+(`Workspace Tests (Linux)`), on every pull request that is not docs-only.
+That stage rather than `lint-and-unit` because two obligations run `cargo
+nextest`, which the lint-and-unit job deliberately does not install.
+Acceptance is exit 0 with a final `ORACLE: PASS` line. Its obligations cover the compiler-API ingress:
 obligation 3 drives [03-PROG-1] and [03-PROG-2] through the built `chelis`
 binary over `.dp` fixtures, and obligation 5 executes the compiled
 `crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` parity suite.

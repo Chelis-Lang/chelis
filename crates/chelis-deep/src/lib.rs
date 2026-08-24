@@ -36,7 +36,7 @@ pub use pattern::pattern_binder_names;
 pub use raw::{RawAtom, RawExpr};
 pub use span::Span;
 pub use stamp_to_typed::{
-    StampError, StampErrorKind, stamp_as_tagged, stamp_deep_file, stamp_runtime_exprs,
-    stamp_to_typed,
+    FormClass, FormIdentity, StampError, StampErrorKind, stamp_as_tagged, stamp_deep_file,
+    stamp_runtime_exprs, stamp_to_typed,
 };
 pub use tag::DeepTag;

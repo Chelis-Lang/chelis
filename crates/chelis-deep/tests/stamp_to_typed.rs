@@ -5,7 +5,10 @@
 //! child).
 
 use chelis_deep::tag::DeepTag;
-use chelis_deep::{Expr, RawExpr, StampErrorKind, parse_and_stamp, parse_raw_str, stamp_to_typed};
+use chelis_deep::{
+    Expr, FormClass, FormIdentity, RawExpr, StampErrorKind, parse_and_stamp, parse_raw_str,
+    stamp_to_typed,
+};
 
 // ── Headline: (var {} x) → Expr::Node with tag Var ──────────────────
 
@@ -258,7 +261,8 @@ fn misspelled_module_child_produces_stamp_error() {
     assert!(result.is_err(), "expected StampError for misspelled child");
     let err = result.unwrap_err();
     assert!(
-        matches!(&err.kind, StampErrorKind::RequiresDeclaration { head } if head == "dfe"),
+        matches!(&err.kind, StampErrorKind::RequiresDeclaration { form }
+            if *form == FormIdentity::Head("dfe".to_string())),
         "expected RequiresDeclaration for 'dfe', got: {err:?}"
     );
 }
@@ -273,7 +277,8 @@ fn non_declaration_at_top_level_is_error() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        matches!(&err.kind, StampErrorKind::RequiresDeclaration { head } if head == "app"),
+        matches!(&err.kind, StampErrorKind::RequiresDeclaration { form }
+            if *form == FormIdentity::Head("app".to_string())),
         "expected RequiresDeclaration for 'app', got: {err:?}"
     );
 }
@@ -458,7 +463,7 @@ fn tagged_ingress_rejects_a_different_tag() {
             StampErrorKind::RequiresTag {
                 expected: DeepTag::Params,
                 ref got
-            } if got == "var"
+            } if *got == FormIdentity::Head("var".to_string())
         ),
         "expected RequiresTag, got: {:?}",
         stamp.kind
@@ -477,8 +482,163 @@ fn declaration_ingress_rejects_a_module_wrapper_a_file_ingress_admits() {
         panic!("expected a stamp rejection, got: {error:?}");
     };
     assert!(
-        matches!(stamp.kind, StampErrorKind::RequiresDeclaration { ref head } if head == "module"),
+        matches!(stamp.kind, StampErrorKind::RequiresDeclaration { ref form }
+            if *form == FormIdentity::Head("module".to_string())),
         "expected RequiresDeclaration, got: {:?}",
         stamp.kind
     );
+}
+
+// -- spec/03-deep-syntax.md [03-PROG-2] form identification -----------
+//
+// A rejection identifies the offending form: by its head symbol when it has
+// one, and otherwise by one of the nine syntactic classes [03-PROG-2] fixes.
+// A placeholder is forbidden for either. These cases walk the whole closed
+// class set, plus the headed control.
+
+/// Every headless class [03-PROG-2] names, with the source that produces it
+/// at top level and the exact spelling the rule fixes.
+const HEADLESS_TOP_LEVEL_FORMS: &[(FormClass, &str, &str)] = &[
+    (FormClass::BareIdentifier, "some_name", "a bare identifier"),
+    (
+        FormClass::BareIntegerLiteral,
+        "42",
+        "a bare integer literal",
+    ),
+    (FormClass::BareFloatLiteral, "1.5", "a bare float literal"),
+    (
+        FormClass::BareStringLiteral,
+        "\"text\"",
+        "a bare string literal",
+    ),
+    (
+        FormClass::BareBooleanLiteral,
+        "true",
+        "a bare boolean literal",
+    ),
+    (FormClass::EmptyList, "()", "an empty list"),
+    (
+        FormClass::ListWithoutTagSymbol,
+        "((var {} f) (var {} x))",
+        "a list without a tag symbol",
+    ),
+    (FormClass::MetadataMap, "{key: 1}", "a metadata map"),
+    (
+        FormClass::MetadataAnnotatedForm,
+        "^{:surf_literal_style \"explicit\"} (var {} x)",
+        "a metadata-annotated form",
+    ),
+];
+
+#[test]
+fn every_headless_class_is_identified_by_its_spec_spelling() {
+    for (class, source, spelling) in HEADLESS_TOP_LEVEL_FORMS {
+        let error = chelis_deep::parse_and_stamp_file(source)
+            .expect_err("[03-PROG-1] rejects every one of these at top level");
+        let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
+            panic!("{class:?}: expected a stamp rejection for {source:?}, got {error:?}");
+        };
+        let StampErrorKind::RequiresDeclaration { form } = &stamp.kind else {
+            panic!(
+                "{class:?}: expected RequiresDeclaration, got {:?}",
+                stamp.kind
+            );
+        };
+        assert_eq!(
+            *form,
+            FormIdentity::Class(*class),
+            "{class:?}: wrong identification for {source:?}"
+        );
+        assert_eq!(class.as_str(), *spelling, "{class:?}: spelling drifted");
+        let rendered = stamp.to_string();
+        assert_eq!(
+            rendered,
+            format!("expected declaration, got {spelling}"),
+            "{class:?}: rendered diagnostic"
+        );
+        // [03-PROG-2] forbids substituting a placeholder.
+        assert!(
+            !rendered.contains('<') && !rendered.contains('>'),
+            "{class:?}: placeholder leaked into {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn the_class_set_is_closed_and_each_member_is_covered() {
+    // A negative control on the table above: adding a class to `FormClass`
+    // without covering it here must fail, so the walk cannot silently stop
+    // being exhaustive. The match is deliberately exhaustive with no
+    // wildcard arm, so a new variant stops this test compiling.
+    let all = [
+        FormClass::BareIdentifier,
+        FormClass::BareIntegerLiteral,
+        FormClass::BareFloatLiteral,
+        FormClass::BareStringLiteral,
+        FormClass::BareBooleanLiteral,
+        FormClass::EmptyList,
+        FormClass::ListWithoutTagSymbol,
+        FormClass::MetadataMap,
+        FormClass::MetadataAnnotatedForm,
+    ];
+    for class in all {
+        // Exhaustiveness tripwire: a new variant breaks this match.
+        match class {
+            FormClass::BareIdentifier
+            | FormClass::BareIntegerLiteral
+            | FormClass::BareFloatLiteral
+            | FormClass::BareStringLiteral
+            | FormClass::BareBooleanLiteral
+            | FormClass::EmptyList
+            | FormClass::ListWithoutTagSymbol
+            | FormClass::MetadataMap
+            | FormClass::MetadataAnnotatedForm => {}
+        }
+        assert!(
+            HEADLESS_TOP_LEVEL_FORMS
+                .iter()
+                .any(|(covered, _, _)| covered == &class),
+            "{class:?} has no [03-PROG-2] coverage case"
+        );
+    }
+    assert_eq!(HEADLESS_TOP_LEVEL_FORMS.len(), all.len());
+}
+
+#[test]
+fn a_headed_form_is_still_identified_by_its_head() {
+    // The positive control for the other half of [03-PROG-2]: a form that
+    // does have a head is named by that head, backtick-quoted, and never by
+    // a class.
+    for (source, head) in [
+        ("(fn {} (params {}) (lit {} 1))", "fn"),
+        ("(var {} x)", "var"),
+        ("(future-form {} v)", "future-form"),
+    ] {
+        let error = chelis_deep::parse_and_stamp_file(source).expect_err("rejected at top level");
+        let chelis_deep::StampOrParseError::Stamp(stamp) = error else {
+            panic!("expected a stamp rejection for {source:?}");
+        };
+        let StampErrorKind::RequiresDeclaration { form } = &stamp.kind else {
+            panic!("expected RequiresDeclaration, got {:?}", stamp.kind);
+        };
+        assert_eq!(*form, FormIdentity::Head(head.to_string()));
+        assert_eq!(
+            stamp.to_string(),
+            format!("expected declaration, got `{head}`")
+        );
+    }
+}
+
+#[test]
+fn an_admissible_top_level_form_is_not_identified_at_all() {
+    // The negative-parity control: [03-PROG-2] only governs rejections, so
+    // an admissible program produces no identification.
+    for source in [
+        "(module {} m (def {} f (lit {} 1)))",
+        "(def {} f (lit {} 1))",
+        "(export {} f)",
+    ] {
+        chelis_deep::parse_and_stamp_file(source)
+            .unwrap_or_else(|error| panic!("{source:?} is admissible: {error}"));
+    }
 }

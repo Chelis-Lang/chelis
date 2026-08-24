@@ -901,12 +901,33 @@ wrappers together with its bare top-level declarations; a program MAY mix
 both spellings and MAY contain more than one `module` wrapper, subject to the
 one-wrapper-per-module-name rule in §2.1.
 
-> **[03-PROG-2]** A rejection under [03-PROG-1] SHALL name the offending
-> form's head and SHALL carry that form's source location. It SHALL be
-> reported at the ingress boundary that reads the program text, before name
-> resolution, type checking, evaluation, lowering, or resugaring observes the
-> program. An implementation SHALL NOT skip, ignore, or silently reinterpret
-> a top-level form that [03-PROG-1] rejects.
+Most of what [03-PROG-1] rejects is a list headed by a tag symbol, which the
+rejection can name. Some of it has no head at all: a bare identifier, a bare
+literal, an empty list, and a list whose first element is not a symbol are all
+[03-PROG-1] rejections with nothing to quote. Those forms are identified by
+syntactic class instead, from a closed set, so that a reader of the diagnostic
+always learns which form was rejected.
+
+> **[03-PROG-2]** A rejection under [03-PROG-1] SHALL identify the offending
+> form and SHALL carry that form's source location. A form headed by a symbol
+> SHALL be identified by that symbol. A form with no head SHALL be identified
+> by its syntactic class, which SHALL be exactly one of: a bare identifier, a
+> bare integer literal, a bare float literal, a bare string literal, a bare
+> boolean literal, an empty list, a list without a tag symbol, a metadata map,
+> or a metadata-annotated form. An implementation SHALL NOT substitute a
+> placeholder for either identification. The rejection SHALL be reported at
+> the ingress boundary that reads the program text, before name resolution,
+> type checking, evaluation, lowering, or resugaring observes the program. An
+> implementation SHALL NOT skip, ignore, or silently reinterpret a top-level
+> form that [03-PROG-1] rejects.
+
+The class set is closed because it partitions what the grammar can produce in
+top-level position: `Child`'s three alternatives (`Node`, `BareName`,
+`Literal`) plus the metadata forms a producer may emit. A bare identifier is
+the `BareName` production, admissible inside `params`, `bind`, and `field`
+contexts (§7) and never at top level; the four literal classes are `Literal`'s
+alternatives, with `IntLit` and `FloatLit` distinguished because a producer's
+mistake is usually specific to one.
 
 ---
 

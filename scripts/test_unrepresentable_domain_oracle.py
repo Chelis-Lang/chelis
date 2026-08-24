@@ -244,17 +244,50 @@ class TestStampPassObligation(unittest.TestCase):
 class TestTopLevelFormRule(unittest.TestCase):
     """Test obligation 3 logic (spec/03 [03-PROG-1]) with mocked runners."""
 
-    def test_rejected_fixtures_carry_the_head_the_diagnostic_must_name(self) -> None:
+    def test_rejected_fixtures_carry_the_identification_the_rule_requires(self) -> None:
         self.assertTrue(oracle.TOP_LEVEL_REJECTED_FIXTURES)
-        for name, source, head in oracle.TOP_LEVEL_REJECTED_FIXTURES:
+        for name, source, identification in oracle.TOP_LEVEL_REJECTED_FIXTURES:
             self.assertTrue(name)
-            # The named head must be the fixture's actual top-level head, or
-            # the obligation would assert against a diagnostic that could not
-            # be about this input.
-            self.assertTrue(
-                source.startswith(f"({head} ") or source.startswith(f"({head}{{"),
-                f"{name}: `{head}` is not the head of {source!r}",
+            if identification.startswith("`"):
+                # A headed form is identified by its own head, or the
+                # obligation would assert against a diagnostic that could not
+                # be about this input.
+                head = identification.strip("`")
+                self.assertTrue(
+                    source.startswith(f"({head} ") or source.startswith(f"({head}{{"),
+                    f"{name}: `{head}` is not the head of {source!r}",
+                )
+            else:
+                # A headless form is identified by one of the closed classes
+                # [03-PROG-2] fixes, never by an ad-hoc phrase.
+                self.assertIn(
+                    identification,
+                    oracle.TOP_LEVEL_HEADLESS_CLASSES,
+                    f"{name}: {identification!r} is not a [03-PROG-2] class",
+                )
+
+    def test_every_headless_class_has_a_coverage_fixture(self) -> None:
+        # The rule's class set is closed; the oracle must walk all of it.
+        covered = {
+            identification for _, _, identification in oracle.TOP_LEVEL_REJECTED_FIXTURES
+        }
+        for spelling in oracle.TOP_LEVEL_HEADLESS_CLASSES:
+            self.assertIn(spelling, covered, f"{spelling} has no oracle fixture")
+
+    def test_headless_fixtures_are_not_headed_forms(self) -> None:
+        # A negative control on the table: a headless row must not be a
+        # `(tag ...)` node, or it would be exercising the headed half under a
+        # class label.
+        for name, source, identification in oracle.TOP_LEVEL_REJECTED_FIXTURES:
+            if identification.startswith("`"):
+                continue
+            stripped = source.strip()
+            headed = (
+                stripped.startswith("(")
+                and len(stripped) > 1
+                and (stripped[1].isalpha() or stripped[1] == "_")
             )
+            self.assertFalse(headed, f"{name}: {source!r} has a head")
 
     def test_accepted_fixtures_are_modules_or_declarations(self) -> None:
         admissible = (
@@ -294,18 +327,21 @@ class TestTopLevelFormRule(unittest.TestCase):
             stderr="",
         )
 
-    def _heads(self) -> dict[str, str]:
-        return {source: head for _, source, head in oracle.TOP_LEVEL_REJECTED_FIXTURES}
+    def _identifications(self) -> dict[str, str]:
+        return {
+            source: identification
+            for _, source, identification in oracle.TOP_LEVEL_REJECTED_FIXTURES
+        }
 
     @patch("unrepresentable_domain_oracle.run_chelis_check")
-    def test_a_rejection_naming_the_head_passes(self, mock_check: MagicMock) -> None:
-        heads = self._heads()
+    def test_a_rejection_identifying_the_form_passes(self, mock_check: MagicMock) -> None:
+        identifications = self._identifications()
 
         def respond(fixture_path: Path) -> subprocess.CompletedProcess[str]:
-            head = heads.get(Path(fixture_path).read_text())
-            if head is not None:
+            identification = identifications.get(Path(fixture_path).read_text())
+            if identification is not None:
                 return self._rejection(
-                    f"stamp error: expected declaration, got `{head}`"
+                    f"stamp error: expected declaration, got {identification}"
                 )
             return self._accepted()
 
@@ -320,24 +356,49 @@ class TestTopLevelFormRule(unittest.TestCase):
             oracle.check_top_level_form_rule()
 
     @patch("unrepresentable_domain_oracle.run_chelis_check")
-    def test_a_rejection_that_does_not_name_the_head_fails(
+    def test_a_rejection_that_does_not_identify_the_form_fails(
         self, mock_check: MagicMock
     ) -> None:
-        """[03-PROG-2] requires the diagnostic to name the offending head."""
+        """[03-PROG-2] requires the diagnostic to identify the form."""
         mock_check.return_value = self._rejection("stamp error: something went wrong")
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_top_level_form_rule()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_a_placeholder_identification_fails(self, mock_check: MagicMock) -> None:
+        """[03-PROG-2] forbids substituting a placeholder.
+
+        This is the exact regression the red team found: the implementation
+        leaked `<non-list>` and `<non-symbol>` while the oracle stayed green
+        because its table only covered headed forms.
+        """
+        identifications = self._identifications()
+
+        def respond(fixture_path: Path) -> subprocess.CompletedProcess[str]:
+            source = Path(fixture_path).read_text()
+            identification = identifications.get(source)
+            if identification is None:
+                return self._accepted()
+            if identification.startswith("`"):
+                return self._rejection(
+                    f"stamp error: expected declaration, got {identification}"
+                )
+            return self._rejection("stamp error: expected declaration, got `<non-list>`")
+
+        mock_check.side_effect = respond
         with self.assertRaises(oracle.OracleFailure):
             oracle.check_top_level_form_rule()
 
     @patch("unrepresentable_domain_oracle.run_chelis_check")
     def test_a_rejected_admissible_form_fails(self, mock_check: MagicMock) -> None:
         """A `module` wrapper or declaration must not be rejected."""
-        heads = self._heads()
+        identifications = self._identifications()
 
         def respond(fixture_path: Path) -> subprocess.CompletedProcess[str]:
-            head = heads.get(Path(fixture_path).read_text())
-            if head is not None:
+            identification = identifications.get(Path(fixture_path).read_text())
+            if identification is not None:
                 return self._rejection(
-                    f"stamp error: expected declaration, got `{head}`"
+                    f"stamp error: expected declaration, got {identification}"
                 )
             # Every admissible form is rejected too; the obligation must
             # notice rather than reporting a pass.

@@ -21,22 +21,112 @@ pub struct StampError {
     pub span: Span,
 }
 
+/// The syntactic class of a rejected form that has no head to name
+/// (`spec/03-deep-syntax.md` [03-PROG-2]).
+///
+/// The set is closed by that rule: it partitions what the grammar can put in
+/// a position where a tagged node was required. A rejection identifies the
+/// offending form by its head symbol when it has one and by its class when it
+/// does not; [03-PROG-2] forbids substituting a placeholder for either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormClass {
+    BareIdentifier,
+    BareIntegerLiteral,
+    BareFloatLiteral,
+    BareStringLiteral,
+    BareBooleanLiteral,
+    EmptyList,
+    ListWithoutTagSymbol,
+    MetadataMap,
+    MetadataAnnotatedForm,
+}
+
+impl FormClass {
+    /// The exact spelling [03-PROG-2] fixes for this class.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BareIdentifier => "a bare identifier",
+            Self::BareIntegerLiteral => "a bare integer literal",
+            Self::BareFloatLiteral => "a bare float literal",
+            Self::BareStringLiteral => "a bare string literal",
+            Self::BareBooleanLiteral => "a bare boolean literal",
+            Self::EmptyList => "an empty list",
+            Self::ListWithoutTagSymbol => "a list without a tag symbol",
+            Self::MetadataMap => "a metadata map",
+            Self::MetadataAnnotatedForm => "a metadata-annotated form",
+        }
+    }
+
+    /// Classify a raw form that reached a slot requiring a tagged node.
+    pub fn of(raw: &RawExpr) -> Self {
+        match raw {
+            RawExpr::Atom(RawAtom::Symbol(_), _) => Self::BareIdentifier,
+            RawExpr::Atom(RawAtom::Int(_), _) => Self::BareIntegerLiteral,
+            RawExpr::Atom(RawAtom::Float(_), _) => Self::BareFloatLiteral,
+            RawExpr::Atom(RawAtom::Str(_), _) => Self::BareStringLiteral,
+            RawExpr::Atom(RawAtom::Bool(_), _) => Self::BareBooleanLiteral,
+            RawExpr::List(elements, _) if elements.is_empty() => Self::EmptyList,
+            RawExpr::List(..) => Self::ListWithoutTagSymbol,
+            RawExpr::Map(..) => Self::MetadataMap,
+            RawExpr::MetaExpr { .. } => Self::MetadataAnnotatedForm,
+        }
+    }
+}
+
+impl std::fmt::Display for FormClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How a rejected form is identified in a diagnostic
+/// (`spec/03-deep-syntax.md` [03-PROG-2]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormIdentity {
+    /// A form headed by a symbol, identified by that symbol.
+    Head(String),
+    /// A form with no head, identified by its syntactic class.
+    Class(FormClass),
+}
+
+impl FormIdentity {
+    /// Identify a raw form that reached a slot requiring a tagged node.
+    pub fn of(raw: &RawExpr) -> Self {
+        if let RawExpr::List(elements, _) = raw
+            && let Some(RawExpr::Atom(RawAtom::Symbol(head), _)) = elements.first()
+        {
+            return Self::Head(head.clone());
+        }
+        Self::Class(FormClass::of(raw))
+    }
+}
+
+impl std::fmt::Display for FormIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Head(symbol) => write!(f, "`{symbol}`"),
+            Self::Class(class) => write!(f, "{class}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StampErrorKind {
     /// A bare name appeared at a RuntimeExpr position.
     NameAtExprSlot { name: String },
     /// A list at a Type position had an undecodable head.
-    UndecodableTypeHead { head: String },
-    /// A bypass slot required a declaration but the head was not one.
-    RequiresDeclaration { head: String },
+    UndecodableTypeHead { form: FormIdentity },
+    /// A bypass slot required a declaration but the form was not one.
+    RequiresDeclaration { form: FormIdentity },
     /// A bypass slot required a specific tag but got something else.
-    RequiresTag { expected: DeepTag, got: String },
-    /// A bypass slot required a pattern but the head was not one.
-    RequiresPattern { head: String },
+    RequiresTag {
+        expected: DeepTag,
+        got: FormIdentity,
+    },
+    /// A bypass slot required a pattern but the form was not one.
+    RequiresPattern { form: FormIdentity },
     /// A list was missing the metadata map at element 1.
     MissingMetaMap,
-    /// A list was empty where a tagged node was expected.
-    EmptyList,
     /// Node construction failed (arity or role violation).
     NodeError(crate::node::NodeError),
 }
@@ -50,20 +140,19 @@ impl std::fmt::Display for StampError {
                     "bare name `{name}` at expression slot; use `(var {{}} {name})`"
                 )
             }
-            StampErrorKind::UndecodableTypeHead { head } => {
-                write!(f, "undecodable type head `{head}`")
+            StampErrorKind::UndecodableTypeHead { form } => {
+                write!(f, "undecodable type head {form}")
             }
-            StampErrorKind::RequiresDeclaration { head } => {
-                write!(f, "expected declaration, got `{head}`")
+            StampErrorKind::RequiresDeclaration { form } => {
+                write!(f, "expected declaration, got {form}")
             }
             StampErrorKind::RequiresTag { expected, got } => {
-                write!(f, "expected `{}`, got `{got}`", expected.as_str())
+                write!(f, "expected `{}`, got {got}", expected.as_str())
             }
-            StampErrorKind::RequiresPattern { head } => {
-                write!(f, "expected pattern, got `{head}`")
+            StampErrorKind::RequiresPattern { form } => {
+                write!(f, "expected pattern, got {form}")
             }
             StampErrorKind::MissingMetaMap => write!(f, "list missing metadata map at index 1"),
-            StampErrorKind::EmptyList => write!(f, "empty list where tagged node expected"),
             StampErrorKind::NodeError(e) => write!(f, "{e}"),
         }
     }
@@ -220,11 +309,11 @@ fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
                 // Empty list at type position (e.g. empty type-params `()`).
                 return Ok(Expr::BareList(vec![], span));
             }
-            let (head_str, tag_opt) = decode_list_head(&elements, span)?;
+            let (form, tag_opt) = decode_list_head(&elements);
             match tag_opt {
                 Some(tag) => build_node(tag, elements, span),
                 None => Err(StampError {
-                    kind: StampErrorKind::UndecodableTypeHead { head: head_str },
+                    kind: StampErrorKind::UndecodableTypeHead { form },
                     span,
                 }),
             }
@@ -308,75 +397,72 @@ fn stamp_bypass(raw: RawExpr, expectation: BypassExpectation) -> Result<Expr, St
 }
 
 fn stamp_as_bypass_declaration(raw: RawExpr) -> Result<Expr, StampError> {
+    let span = raw.span();
     match raw {
         RawExpr::List(elements, span) => {
-            let (head_str, tag_opt) = decode_list_head(&elements, span)?;
+            let (form, tag_opt) = decode_list_head(&elements);
             match tag_opt {
                 Some(tag) if is_declaration_tag(tag) => build_node(tag, elements, span),
                 _ => Err(StampError {
-                    kind: StampErrorKind::RequiresDeclaration { head: head_str },
+                    kind: StampErrorKind::RequiresDeclaration { form },
                     span,
                 }),
             }
         }
-        RawExpr::Atom(_, span) | RawExpr::Map(_, span) | RawExpr::MetaExpr { span, .. } => {
-            Err(StampError {
-                kind: StampErrorKind::RequiresDeclaration {
-                    head: "<non-list>".to_string(),
-                },
-                span,
-            })
-        }
+        other => Err(StampError {
+            kind: StampErrorKind::RequiresDeclaration {
+                form: FormIdentity::of(&other),
+            },
+            span,
+        }),
     }
 }
 
 fn stamp_as_bypass_tag(raw: RawExpr, expected_tag: DeepTag) -> Result<Expr, StampError> {
+    let span = raw.span();
     match raw {
         RawExpr::List(elements, span) => {
-            let (head_str, tag_opt) = decode_list_head(&elements, span)?;
+            let (form, tag_opt) = decode_list_head(&elements);
             match tag_opt {
                 Some(tag) if tag == expected_tag => build_node(tag, elements, span),
                 _ => Err(StampError {
                     kind: StampErrorKind::RequiresTag {
                         expected: expected_tag,
-                        got: head_str,
+                        got: form,
                     },
                     span,
                 }),
             }
         }
-        RawExpr::Atom(_, span) | RawExpr::Map(_, span) | RawExpr::MetaExpr { span, .. } => {
-            Err(StampError {
-                kind: StampErrorKind::RequiresTag {
-                    expected: expected_tag,
-                    got: "<non-list>".to_string(),
-                },
-                span,
-            })
-        }
+        other => Err(StampError {
+            kind: StampErrorKind::RequiresTag {
+                expected: expected_tag,
+                got: FormIdentity::of(&other),
+            },
+            span,
+        }),
     }
 }
 
 fn stamp_as_bypass_pattern(raw: RawExpr) -> Result<Expr, StampError> {
+    let span = raw.span();
     match raw {
         RawExpr::List(elements, span) => {
-            let (head_str, tag_opt) = decode_list_head(&elements, span)?;
+            let (form, tag_opt) = decode_list_head(&elements);
             match tag_opt {
                 Some(tag) if is_pattern_tag(tag) => build_node(tag, elements, span),
                 _ => Err(StampError {
-                    kind: StampErrorKind::RequiresPattern { head: head_str },
+                    kind: StampErrorKind::RequiresPattern { form },
                     span,
                 }),
             }
         }
-        RawExpr::Atom(_, span) | RawExpr::Map(_, span) | RawExpr::MetaExpr { span, .. } => {
-            Err(StampError {
-                kind: StampErrorKind::RequiresPattern {
-                    head: "<non-list>".to_string(),
-                },
-                span,
-            })
-        }
+        other => Err(StampError {
+            kind: StampErrorKind::RequiresPattern {
+                form: FormIdentity::of(&other),
+            },
+            span,
+        }),
     }
 }
 
@@ -404,22 +490,19 @@ fn stamp_form_expecting(raw: RawExpr) -> Result<Expr, StampError> {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn decode_list_head(
-    elements: &[RawExpr],
-    span: Span,
-) -> Result<(String, Option<DeepTag>), StampError> {
-    let Some(first) = elements.first() else {
-        return Err(StampError {
-            kind: StampErrorKind::EmptyList,
-            span,
-        });
-    };
-    match first {
-        RawExpr::Atom(RawAtom::Symbol(s), _) => {
-            let tag = DeepTag::parse(s);
-            Ok((s.clone(), tag))
+/// Identify a list's head for a slot that required a tagged node, and decode
+/// it when it names one ([03-PROG-2]).
+///
+/// A list with no first element and a list whose first element is not a
+/// symbol both have no head to name, so each is identified by its syntactic
+/// class rather than by a placeholder string.
+fn decode_list_head(elements: &[RawExpr]) -> (FormIdentity, Option<DeepTag>) {
+    match elements.first() {
+        None => (FormIdentity::Class(FormClass::EmptyList), None),
+        Some(RawExpr::Atom(RawAtom::Symbol(symbol), _)) => {
+            (FormIdentity::Head(symbol.clone()), DeepTag::parse(symbol))
         }
-        _ => Ok(("<non-symbol>".to_string(), None)),
+        Some(_) => (FormIdentity::Class(FormClass::ListWithoutTagSymbol), None),
     }
 }
 
@@ -496,12 +579,24 @@ fn stamp_meta_expr(
 }
 
 fn stamp_list_as_node_or_unknown(elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampError> {
-    let (head_str, tag_opt) = decode_list_head(&elements, span)?;
+    // This is an *acceptance* path, not a [03-PROG-2] rejection: an unknown
+    // head is preserved verbatim in `UnknownFormData::head` so the wire AST
+    // keeps the producer's spelling and a downstream consumer can name it.
+    // The identity vocabulary belongs to rejections and is not used here.
+    let (head, tag_opt) = match elements.first() {
+        Some(RawExpr::Atom(RawAtom::Symbol(symbol), _)) => (symbol.clone(), DeepTag::parse(symbol)),
+        _ => (UNKNOWN_FORM_NON_SYMBOL_HEAD.to_string(), None),
+    };
     match tag_opt {
         Some(tag) => build_node(tag, elements, span),
-        None => build_unknown_form(head_str, elements, span),
+        None => build_unknown_form(head, elements, span),
     }
 }
+
+/// The placeholder recorded for an `UnknownForm` built from a list whose head
+/// is not a symbol. It is wire data on an acceptance path, not a [03-PROG-2]
+/// rejection identification (chelis#1088 review residue).
+const UNKNOWN_FORM_NON_SYMBOL_HEAD: &str = "<non-symbol>";
 
 fn build_unknown_form(
     head: String,

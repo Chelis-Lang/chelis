@@ -490,8 +490,8 @@ python3 scripts/gate.py --list
 # <managed-python> scripts/pipeline_core_dependency_guard.py  # local + ci
 # <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
 # <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
-# <managed-python> scripts/unrepresentable_domain_oracle.py  # local + ci
 # cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
+# <managed-python> scripts/unrepresentable_domain_oracle.py  # local + ci
 # # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
 
@@ -532,8 +532,13 @@ line. Every obligation drives compiled artifacts: the built `chelis`
 binary over `.dp` fixtures, and compiled test binaries through `cargo
 nextest`. Its Python unit tests patch the command runners, so they are
 evidence about the script's decision logic and never a substitute for
-running it. `scripts/test_gate.py` locks its membership in both the
-`lint-and-unit` stage and the `--local` subset.
+running it. It runs in the `integration` stage, which hosted CI executes
+in the `workspace-tests` job (`Workspace Tests (Linux)`) on every
+non-docs-only pull request, and in the `--local` pre-push subset. That
+stage, not `lint-and-unit`, because two of its obligations run `cargo
+nextest`, which the lint-and-unit job deliberately does not install.
+`scripts/test_gate.py` locks both memberships and the pairing between the
+oracle's stage and a nextest-installing job.
 
 Local pre-push gate (chelis#360):
 

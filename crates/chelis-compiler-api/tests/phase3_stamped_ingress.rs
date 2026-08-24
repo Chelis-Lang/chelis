@@ -318,25 +318,52 @@ const ADMITTED_TOP_LEVEL_FORMS: &[(&str, &str)] = &[
 /// Everything [03-PROG-1] rejects, paired with the head [03-PROG-2]
 /// requires the diagnostic to name.
 const REJECTED_TOP_LEVEL_FORMS: &[(&str, &str, &str)] = &[
+    // Headed forms.
     (
         "expression node",
         "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))",
-        "fn",
+        "`fn`",
     ),
-    ("application node", "(app {} (var {} f) (var {} x))", "app"),
-    ("pattern node", "(pat-var {} x)", "pat-var"),
-    ("type-expression node", "(t-prim {} f32)", "t-prim"),
-    ("dimension-expression node", "(d-lit {} 4)", "d-lit"),
-    ("structural child of deftype", "(variant {} Red)", "variant"),
+    (
+        "application node",
+        "(app {} (var {} f) (var {} x))",
+        "`app`",
+    ),
+    ("pattern node", "(pat-var {} x)", "`pat-var`"),
+    ("type-expression node", "(t-prim {} f32)", "`t-prim`"),
+    ("dimension-expression node", "(d-lit {} 4)", "`d-lit`"),
+    (
+        "structural child of deftype",
+        "(variant {} Red)",
+        "`variant`",
+    ),
     (
         "helper node",
         "(params {} (x {type: (t-prim {} f32)}))",
-        "params",
+        "`params`",
     ),
     (
         "node outside the closed vocabulary",
         "(future-form {} v)",
-        "future-form",
+        "`future-form`",
+    ),
+    // Headless forms: the closed [03-PROG-2] class set, all nine.
+    ("bare identifier", "some_name", "a bare identifier"),
+    ("bare integer literal", "42", "a bare integer literal"),
+    ("bare float literal", "1.5", "a bare float literal"),
+    ("bare string literal", "\"text\"", "a bare string literal"),
+    ("bare boolean literal", "true", "a bare boolean literal"),
+    ("empty list", "()", "an empty list"),
+    (
+        "list without a tag symbol",
+        "((var {} f) (var {} x))",
+        "a list without a tag symbol",
+    ),
+    ("metadata map", "{key: 1}", "a metadata map"),
+    (
+        "metadata-annotated form",
+        "^{:surf_literal_style \"explicit\"} (var {} x)",
+        "a metadata-annotated form",
     ),
 ];
 
@@ -355,7 +382,7 @@ fn parse_admits_exactly_the_top_level_forms_the_spec_enumerates() {
 
 #[test]
 fn parse_rejects_every_other_top_level_form_naming_its_head() {
-    for (label, source, head) in REJECTED_TOP_LEVEL_FORMS {
+    for (label, source, identification) in REJECTED_TOP_LEVEL_FORMS {
         let error = require_rejection(
             compiler::parse(ParseRequest {
                 source_kind: SourceKind::Deep,
@@ -364,12 +391,7 @@ fn parse_rejects_every_other_top_level_form_naming_its_head() {
             &format!("[03-PROG-1] rejects a {label} at top level"),
         );
         assert_deep_ingress_rejection(&error, &format!("parse / {label}"));
-        // [03-PROG-2]: the rejection names the offending form's head.
-        assert!(
-            error.errors[0].message.contains(&format!("`{head}`")),
-            "[03-PROG-2] requires the diagnostic to name `{head}`, got: {}",
-            error.errors[0].message
-        );
+        assert_identifies_the_offending_form(&error, identification, label);
         // [03-PROG-2]: reported at ingress, before anything else observes
         // the program.
         assert_eq!(error.stage, "parse", "{label}");
@@ -388,7 +410,7 @@ fn decompile_shares_the_same_top_level_acceptance_language() {
             assert_not_a_deep_ingress_rejection(&error, &format!("decompile / {label}"));
         }
     }
-    for (label, source, head) in REJECTED_TOP_LEVEL_FORMS {
+    for (label, source, identification) in REJECTED_TOP_LEVEL_FORMS {
         let error = require_rejection(
             compiler::decompile(DecompileRequest {
                 source: source.to_string(),
@@ -396,13 +418,24 @@ fn decompile_shares_the_same_top_level_acceptance_language() {
             &format!("[03-PROG-1] rejects a {label} at top level"),
         );
         assert_deep_ingress_rejection(&error, &format!("decompile / {label}"));
-        assert!(
-            error.errors[0].message.contains(&format!("`{head}`")),
-            "[03-PROG-2] requires the diagnostic to name `{head}`, got: {}",
-            error.errors[0].message
-        );
+        assert_identifies_the_offending_form(&error, identification, label);
         assert_eq!(error.stage, "parse", "{label}");
     }
+}
+
+/// [03-PROG-2]: the rejection identifies the offending form, by its head
+/// symbol when it has one and by its syntactic class when it does not, and
+/// never by a placeholder.
+fn assert_identifies_the_offending_form(error: &CompilerError, identification: &str, label: &str) {
+    let message = &error.errors[0].message;
+    assert!(
+        message.contains(identification),
+        "[03-PROG-2] requires {label} to be identified as {identification}, got: {message}"
+    );
+    assert!(
+        !message.contains('<') && !message.contains('>'),
+        "[03-PROG-2] forbids a placeholder identification, got: {message}"
+    );
 }
 
 /// `expect_err` whose panic names the spec obligation that was violated.
@@ -613,7 +646,7 @@ fn a_replacement_signature_must_be_a_declaration() {
 // already does for the `reject_*` census in `phase3_gate_inventory.rs`.
 
 mod weak_ingress {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use syn::visit::{self, Visit};
 
     /// The `chelis-deep` entry points whose top-level stamp is the lenient
@@ -638,12 +671,6 @@ mod weak_ingress {
         MODULES.contains(&name)
     }
 
-    /// True when a path's root names the owning crate. Inside `chelis-deep`
-    /// itself the crate-relative roots name the same crate.
-    fn roots_at_owning_crate(root: &str, in_owning_crate: bool) -> bool {
-        root == CRATE || (in_owning_crate && matches!(root, "crate" | "self" | "super"))
-    }
-
     /// A `#[cfg(test)]` item is test code, which may still build lenient
     /// fixtures. The guard governs production paths.
     fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
@@ -662,10 +689,52 @@ mod weak_ingress {
         })
     }
 
-    /// Pass 1: resolve `use` trees into local bindings.
+    /// Local names bound to the owning crate itself, from `use chelis_deep
+    /// as deep;`. Collected in their own pass because `use` items are
+    /// order-independent: an alias may be declared below its first use.
+    #[derive(Default)]
+    struct CrateAliasCollector {
+        aliases: BTreeSet<String>,
+    }
+
+    impl CrateAliasCollector {
+        fn walk_tree(&mut self, tree: &syn::UseTree, depth: usize) {
+            match tree {
+                // `use chelis_deep as deep;` binds the crate only at the
+                // root of the tree; `use a::chelis_deep as deep;` names some
+                // other item.
+                syn::UseTree::Rename(rename) if depth == 0 && rename.ident == CRATE => {
+                    self.aliases.insert(rename.rename.to_string());
+                }
+                syn::UseTree::Group(group) => {
+                    for item in &group.items {
+                        self.walk_tree(item, depth);
+                    }
+                }
+                syn::UseTree::Path(path) => self.walk_tree(&path.tree, depth + 1),
+                _ => {}
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for CrateAliasCollector {
+        fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+            self.walk_tree(&item.tree, 0);
+        }
+
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if is_cfg_test(&item.attrs) {
+                return;
+            }
+            visit::visit_item_mod(self, item);
+        }
+    }
+
+    /// Pass 2: resolve `use` trees into local bindings.
     #[derive(Default)]
     struct UseCollector {
         in_owning_crate: bool,
+        crate_aliases: BTreeSet<String>,
         /// local name -> the weak function it names.
         function_aliases: BTreeMap<String, String>,
         /// local name -> the weak module it names.
@@ -674,25 +743,43 @@ mod weak_ingress {
     }
 
     impl UseCollector {
-        /// True when `prefix` is a `chelis-deep` path ending in a module
+        /// True when a path's root names the owning crate: spelled out, via
+        /// a `use chelis_deep as ...` alias, or crate-relative inside
+        /// `chelis-deep` itself.
+        fn roots_at_owning_crate(&self, root: &str) -> bool {
+            root == CRATE
+                || self.crate_aliases.contains(root)
+                || (self.in_owning_crate && matches!(root, "crate" | "self" | "super"))
+        }
+
+        /// True when `prefix` is an owning-crate path ending in a module
         /// that holds a weak entry point.
         fn prefix_is_weak_module(&self, prefix: &[String]) -> bool {
             let [root, .., last] = prefix else {
                 return false;
             };
-            roots_at_owning_crate(root, self.in_owning_crate) && is_weak_module(last)
+            self.roots_at_owning_crate(root) && is_weak_module(last)
         }
 
-        /// True when `prefix` is a `chelis-deep` path one segment short of a
-        /// weak module, so the name being bound is that module.
+        /// True when `prefix` is rooted at the owning crate.
         fn prefix_is_owning_crate(&self, prefix: &[String]) -> bool {
             let [root, ..] = prefix else {
                 return false;
             };
-            roots_at_owning_crate(root, self.in_owning_crate)
+            self.roots_at_owning_crate(root)
         }
 
         fn record(&mut self, prefix: &[String], original: &str, local: &str) {
+            // `use a::b::{self as x}` binds `b`, not an item called `self`.
+            let (prefix, original) = if original == "self" {
+                match prefix.split_last() {
+                    Some((last, head)) => (head, last.as_str()),
+                    None => return,
+                }
+            } else {
+                (prefix, original)
+            };
+
             if is_weak_function(original) && self.prefix_is_weak_module(prefix) {
                 let path = prefix.join("::");
                 self.function_aliases
@@ -717,7 +804,13 @@ mod weak_ingress {
                 }
                 syn::UseTree::Name(name) => {
                     let ident = name.ident.to_string();
-                    self.record(prefix, &ident, &ident);
+                    // `use a::b::{self}` binds `b` under its own name.
+                    let local = if ident == "self" {
+                        prefix.last().cloned().unwrap_or_else(|| ident.clone())
+                    } else {
+                        ident.clone()
+                    };
+                    self.record(prefix, &ident, &local);
                 }
                 syn::UseTree::Rename(rename) => {
                     self.record(
@@ -758,9 +851,8 @@ mod weak_ingress {
         }
     }
 
-    /// Pass 2: check every path expression against the resolved bindings.
+    /// Pass 3: check every path expression against the resolved bindings.
     struct CallChecker<'a> {
-        in_owning_crate: bool,
         bindings: &'a UseCollector,
         findings: Vec<String>,
     }
@@ -789,13 +881,11 @@ mod weak_ingress {
                 } else if is_weak_function(tail) {
                     let qualifier = &segments[segments.len() - 2];
                     let root = &segments[0];
-                    // Either the path spells the owning crate itself
-                    // (`chelis_deep::parser::parse_str`, or a crate-relative
-                    // root inside `chelis-deep`), or its qualifier is a local
-                    // alias this file bound to one of the owning crate's weak
-                    // modules.
-                    let qualified = is_weak_module(qualifier)
-                        && roots_at_owning_crate(root, self.in_owning_crate);
+                    // Either the path spells the owning crate (directly, via
+                    // a crate alias, or crate-relative inside it), or its
+                    // qualifier is a local alias for one of its weak modules.
+                    let qualified =
+                        is_weak_module(qualifier) && self.bindings.roots_at_owning_crate(root);
                     let aliased = self.bindings.module_aliases.contains_key(qualifier);
                     if qualified || aliased {
                         self.findings
@@ -813,18 +903,39 @@ mod weak_ingress {
     /// `in_owning_crate` says whether the file belongs to `chelis-deep`,
     /// where `crate::parser::parse_str` names the same function that
     /// `chelis_deep::parser::parse_str` names elsewhere.
+    ///
+    /// **What this resolves:** fully qualified paths; `use` imports of a
+    /// weak function under any local name; module aliases
+    /// (`use chelis_deep::parser as p`), including the grouped and
+    /// grouped-`self` spellings; crate aliases (`use chelis_deep as deep`);
+    /// and glob imports of a weak module. Bindings are collected file-wide
+    /// before paths are checked, so a `use` below its first use still
+    /// resolves, and an inline module's import is treated as visible to the
+    /// whole file. That last one over-approximates, which errs toward a
+    /// false positive rather than a miss.
+    ///
+    /// **What it does not resolve, and cannot from one file:** a re-export
+    /// chain, where module A does `pub use chelis_deep::parser::parse_str;`
+    /// and module B in a *different* file calls `crate::a::parse_str`. The
+    /// `pub use` itself is reported at its own site, so the chain cannot be
+    /// introduced without one finding; a caller of an already-existing
+    /// re-export in another file is the residual blind spot. Closing it
+    /// needs cross-file name resolution, which is the visibility-restriction
+    /// work under chelis#1029 rather than a source census.
     pub fn findings_in(source: &str, in_owning_crate: bool) -> Vec<String> {
         let file = match syn::parse_file(source) {
             Ok(file) => file,
             Err(error) => return vec![format!("source does not parse as Rust: {error}")],
         };
+        let mut crate_aliases = CrateAliasCollector::default();
+        crate_aliases.visit_file(&file);
         let mut bindings = UseCollector {
             in_owning_crate,
+            crate_aliases: crate_aliases.aliases,
             ..UseCollector::default()
         };
         bindings.visit_file(&file);
         let mut checker = CallChecker {
-            in_owning_crate,
             bindings: &bindings,
             findings: Vec::new(),
         };
@@ -944,6 +1055,191 @@ fn the_guard_catches_a_glob_import_of_the_weak_ingress_module() {
     assert!(
         findings.iter().any(|finding| finding.contains("glob")),
         "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_an_owning_crate_alias() {
+    // Red-team mutation A, verbatim: `use chelis_deep as deep;` then
+    // `deep::parser::parse_str`. The prior guard resolved module aliases but
+    // not aliases of the crate itself, so this reopened the ingress green.
+    let source = r#"
+        #[allow(dead_code)]
+        mod redteam_crate_alias_weak_ingress {
+            use chelis_deep as deep;
+
+            pub(super) fn ingest(source: &str) {
+                let _ = deep::parser::parse_str(source);
+            }
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("deep::parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_grouped_self_module_alias() {
+    // Red-team mutation B, verbatim: `use chelis_deep::parser::{self as
+    // deep_parser};`. The grouped `self` names the module, which the prior
+    // resolver read as an item literally called `self`.
+    let source = r#"
+        #[allow(dead_code)]
+        mod redteam_grouped_module_alias_weak_ingress {
+            use chelis_deep::parser::{self as deep_parser};
+
+            pub(super) fn ingest(source: &str) {
+                let _ = deep_parser::parse_str(source);
+            }
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("deep_parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_bare_grouped_self_module_import() {
+    // One step past the review: `{self}` with no rename binds the module
+    // under its own name, so the call spells `parser::parse_str` with no
+    // `chelis_deep` on the line at all.
+    let source = r#"
+        use chelis_deep::parser::{self};
+
+        fn ingest(source: &str) {
+            let _ = parser::parse_str(source);
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_nested_group_module_rename() {
+    // `use chelis_deep::{parser as p};` — the rename lives inside a group
+    // rather than at the tail of a path.
+    let source = r#"
+        use chelis_deep::{DeepTag, parser as p};
+
+        fn ingest(source: &str) -> Option<DeepTag> {
+            let _ = p::parse_str_strict(source);
+            None
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("p::parse_str_strict")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_crate_alias_combined_with_a_function_rename() {
+    // Both indirections at once: alias the crate, then import the function
+    // through the alias under a third name.
+    let source = r#"
+        use chelis_deep as deep;
+        use deep::parser::parse_str as ingest_deep;
+
+        fn ingest(source: &str) {
+            let _ = ingest_deep(source);
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("ingest_deep")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_public_re_export_of_the_weak_ingress() {
+    // A `pub use` re-export is reported at its own site, which is what makes
+    // the cross-file chain impossible to introduce without one finding.
+    let source = r#"
+        pub use chelis_deep::parser::parse_str;
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("imports the weak Deep ingress")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_use_declared_below_its_first_call() {
+    // `use` items are order-independent in Rust, so the resolver collects
+    // every binding in the file before checking any path.
+    let source = r#"
+        fn ingest(source: &str) {
+            let _ = deep::parser::parse_str(source);
+        }
+
+        use chelis_deep as deep;
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("deep::parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_does_not_flag_an_unrelated_crate_named_parser_module() {
+    // The anchoring control. `chelis_surf::parser::parse_str` is the Surf
+    // parser: a different crate, no Deep top-level stamp to weaken. Flagging
+    // it would make the guard unusable, since production code calls it
+    // everywhere.
+    let source = r#"
+        use chelis_surf::parser::parse_str as parse_surf;
+
+        fn ingest(source: &str) {
+            let _ = parse_surf(source);
+            let _ = chelis_surf::parser::parse_str(source);
+        }
+    "#;
+    assert!(
+        weak_ingress::findings(source).is_empty(),
+        "{:?}",
+        weak_ingress::findings(source)
+    );
+}
+
+#[test]
+fn the_guard_does_not_flag_an_alias_of_an_unrelated_crate() {
+    // The crate-alias rule must anchor on `chelis_deep` specifically.
+    let source = r#"
+        use chelis_surf as surf;
+
+        fn ingest(source: &str) {
+            let _ = surf::parser::parse_str(source);
+        }
+    "#;
+    assert!(
+        weak_ingress::findings(source).is_empty(),
+        "{:?}",
+        weak_ingress::findings(source)
     );
 }
 

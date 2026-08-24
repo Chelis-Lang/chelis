@@ -789,7 +789,8 @@ top-level forms and [03-PROG-2] states the rejection contract.
 
 The authoritative oracle is [#908]'s
 `scripts/unrepresentable_domain_oracle.py`, run by `scripts/gate.py`'s
-`lint-and-unit` stage and its `--local` subset. It executes
+`integration` stage (hosted CI's `workspace-tests` job, on every
+non-docs-only pull request) and by its `--local` pre-push subset. It executes
 `crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` as one of its
 obligations; that suite is evidence, not a second oracle. The suite's
 parity table drives every module-text door over one shared accept/reject
