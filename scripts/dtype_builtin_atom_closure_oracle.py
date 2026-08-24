@@ -616,7 +616,10 @@ def _code_spans(text: str) -> tuple[str, ...]:
 
 
 def _leading_identity(code: str) -> str | None:
-    match = re.match(r"(?:[a-z0-9_/]+::)?([A-Za-z][A-Za-z0-9_]*)\s*(?:\(|\Z)", code.strip())
+    stripped = code.strip()
+    if "::" in stripped:
+        return None
+    match = re.match(r"([A-Za-z][A-Za-z0-9_]*)\s*(?:\(|\Z)", stripped)
     return match.group(1) if match else None
 
 

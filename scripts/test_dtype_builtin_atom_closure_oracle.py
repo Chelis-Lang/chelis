@@ -205,6 +205,17 @@ class ClosureValidationTests(unittest.TestCase):
             frozenset({"carrier", "mul"}),
         )
 
+    def test_namespaced_stdlib_identity_does_not_authorize_bare_builtin(self) -> None:
+        block = """\
+> **[05-OP-1]** `io/json::json_int(value) -> result` governs exactly the
+> `io/json::json_int` identity and its signature.
+>
+> | identity | exact signature |
+> |---|---|
+> | `io/json::parse_json` | `(string)->Json` |
+"""
+        self.assertEqual(oracle.governing_names(block), frozenset())
+
     def test_unnumbered_prose_is_not_an_atom(self) -> None:
         wrong = (
             oracle.SemanticRegistration(numeric_identity(), "section 2.1"),
