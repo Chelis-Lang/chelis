@@ -783,11 +783,22 @@ whole-input offset a re-wrapped parse error reported. And
 `validate_deep` used to skip its module-identity forgery checks silently
 whenever its own parse failed.
 
-`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` is the
-oracle. Its parity table drives every module-text door over one shared
-accept/reject corpus, so the two strengths cannot silently reappear, and
-a source tripwire fails the build if any file under the crate's `src/`
-calls a weaker Deep ingress again.
+The top-level rule this enforces is decided by the numbered spec:
+`spec/03-deep-syntax.md` §7.1 [03-PROG-1] enumerates the admissible
+top-level forms and [03-PROG-2] states the rejection contract.
+
+The authoritative oracle is [#908]'s
+`scripts/unrepresentable_domain_oracle.py`, run by `scripts/gate.py`'s
+`lint-and-unit` stage and its `--local` subset. It executes
+`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` as one of its
+obligations; that suite is evidence, not a second oracle. The suite's
+parity table drives every module-text door over one shared accept/reject
+corpus, so the two strengths cannot silently reappear, and a structural
+guard over the workspace's production sources fails the build if any of
+them reaches a weaker Deep ingress again. The guard resolves `use`
+imports, renames, module aliases, and glob imports rather than matching
+source lines, because a line-substring guard is blind to exactly the
+alias a regression would introduce.
 
 Still open at §C4.2: mutating authoring normalization remains active, and
 the legacy `List` variant and consumer bridge remain active ([#1029], in

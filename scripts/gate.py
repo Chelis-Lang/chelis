@@ -199,6 +199,18 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_pipeline_core_compile_fail.py",
 ]
+# The chelis#908 unrepresentable-domain oracle. #908's "Constraint on every
+# fix in this class" requires it to run in a continuous job: before this it
+# was invoked by no workflow and no gate stage, so the only thing exercising
+# it was its own unit tests, which patch the command runners and therefore
+# never ran the behavioral oracle against a compiled binary. Every obligation
+# it carries drives real compiled artifacts: the built `chelis` binary over
+# `.dp` fixtures, and compiled test binaries through `cargo nextest`.
+# Acceptance is exit 0 with a final `ORACLE: PASS` line.
+UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/unrepresentable_domain_oracle.py",
+]
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
@@ -213,6 +225,7 @@ STAGES: dict[str, list[list[str]]] = {
         PIPELINE_CORE_DEPENDENCY_GUARD,
         PIPELINE_CORE_DOCUMENTATION_GUARD,
         PIPELINE_CORE_COMPILE_FAIL,
+        UNREPRESENTABLE_DOMAIN_ORACLE,
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
@@ -237,6 +250,7 @@ LOCAL_STATIC_COMMANDS: list[list[str]] = [
     CHECKPOINT_COMPILE_FAIL,
     PIPELINE_CORE_DEPENDENCY_GUARD,
     PIPELINE_CORE_DOCUMENTATION_GUARD,
+    UNREPRESENTABLE_DOMAIN_ORACLE,
 ]
 
 LOCAL_ANNOTATION = "local + ci"

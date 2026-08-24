@@ -415,8 +415,13 @@ This file. All design forks resolved before implementation.
 
 ### Task 9: Wire the Oracle
 
-- Python `scripts/unrepresentable_domain_oracle.py` (behavioral)
-- Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests)
+- Python `scripts/unrepresentable_domain_oracle.py` (behavioral) - the
+  authoritative oracle, run by `scripts/gate.py`'s `lint-and-unit` stage
+  and its `--local` subset, and locked there by `scripts/test_gate.py`.
+  Acceptance is exit 0 with a final `ORACLE: PASS` line.
+- Python `scripts/test_unrepresentable_domain_oracle.py` (unit tests).
+  These patch the command runners, so they are evidence about the script's
+  decision logic and never a substitute for running the oracle.
 - trybuild (Task 3): API surface
 - deny-lint (Tasks 6-8): exhaustiveness
 
@@ -460,8 +465,23 @@ named non-compiler-API readers moved with it
 rule, `chelis-e2e`'s snippet checker, `chelis-lsp`'s Deep document
 analysis, and the `chelis-cli` style-gate fallback), so
 `parse_str`/`parse_str_strict` are test-only spellings in the workspace.
-The oracle is
-`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs`.
+
+The top-level rule this enforces is decided in the numbered spec, not
+here: `spec/03-deep-syntax.md` §7.1 [03-PROG-1] enumerates the admissible
+top-level forms, and [03-PROG-2] states the rejection contract. Chapter
+03's PEG previously read `Program <- Spacing Node+ EOF`, which imposed no
+top-level role restriction at all.
+
+**The oracle is `scripts/unrepresentable_domain_oracle.py`**, wired into
+`scripts/gate.py`'s `lint-and-unit` stage and its `--local` subset, so it
+runs on every pull request. Acceptance is exit 0 with a final
+`ORACLE: PASS` line. Its obligations cover the compiler-API ingress:
+obligation 3 drives [03-PROG-1] and [03-PROG-2] through the built `chelis`
+binary over `.dp` fixtures, and obligation 5 executes the compiled
+`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` parity suite.
+That Rust suite is evidence the oracle executes, not a second oracle;
+`scripts/test_gate.py` locks the wiring so a future CI edit cannot drop
+it silently.
 
 The Evidence Record line "Macros Surf-only: `.dp` path uses
 `parse_str_strict` which rejects unknown tags" states a true conclusion on

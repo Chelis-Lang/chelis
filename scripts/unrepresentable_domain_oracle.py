@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Unrepresentable-domain oracle for chelis#908.
 
-This oracle verifies the CLI-observable surface of the unrepresentable-domain
-contract. The headline criterion — bare Name at a RuntimeExpr slot produces a
-StampError — is enforced by the stamp pass integration tests in
-`crates/chelis-deep/tests/stamp_to_typed.rs` (12 tests), not by this script.
-The stamp path is not yet wired into `chelis check`'s Deep ingestion
-(`cmd_check_one_deep` uses `parse_str_strict`, not `parse_and_stamp`), so
-this oracle tests the subset visible through the CLI:
+The authoritative completion oracle for the unrepresentable-domain contract.
+Every obligation below runs compiled code: the CLI obligations drive a built
+`chelis` binary over real `.dp` fixtures, and the suite obligations execute
+compiled test binaries through `cargo nextest`. Nothing here is mocked; the
+unit tests in `test_unrepresentable_domain_oracle.py` patch the runners to
+exercise this script's own decision logic and are evidence about the script,
+never a substitute for running it.
+
+Obligations:
 
 1. Bare `:keyword` in expression position → parse error (exit 2, non-empty
    errors array).
@@ -16,18 +18,29 @@ this oracle tests the subset visible through the CLI:
    ensuring that rejecting bare names at RuntimeExpr slots does not
    accidentally break programs that legitimately use names at structural
    positions.
-3. The stamp pass and successor-carrier validation integration tests exist
-   and cover the headline criterion (verified by running `cargo nextest run
-   -p chelis-deep --test stamp_to_typed --test
-   phase3_successor_validation`). The successor suite adds the chelis#731
-   Phase 3 obligation that the gated `Node` carrier refuses to construct a
-   raw closed-vocabulary tag below itself, in metadata or in a child.
+3. `spec/03-deep-syntax.md` [03-PROG-1]: a top-level form is a `module`
+   wrapper or a declaration. Non-declaration top-level forms are rejected by
+   the ingress boundary, naming the offending head per [03-PROG-2], and the
+   admissible spellings still score 1.0.
+4. The stamp pass and successor-carrier validation suites cover the headline
+   criterion — bare Name at a RuntimeExpr slot produces a StampError — and
+   the chelis#731 Phase 3 obligation that the gated `Node` carrier refuses to
+   construct a raw closed-vocabulary tag below itself, in metadata or in a
+   child.
+5. chelis#1088: the compiler-API embedding surface consumes the same stamped
+   carrier. Its parity suite drives one accept/reject corpus through every
+   public Deep text door and structurally forbids reopening the weaker
+   ingress anywhere in the workspace's production sources.
 
 Usage:
 
     .venv/bin/python scripts/unrepresentable_domain_oracle.py
 
 Acceptance is exit 0 with the final line ``ORACLE: PASS``.
+
+This oracle is wired into `scripts/gate.py`'s `lint-and-unit` stage and its
+`--local` subset, so it runs on every pull request. `scripts/test_gate.py`
+locks that wiring.
 """
 
 from __future__ import annotations
@@ -69,7 +82,45 @@ SCORE_ONE_CONTROL_FIXTURES: list[tuple[str, str]] = [
     ),
 ]
 
-# ── Stamp pass integration tests (Rust-side oracle) ──────────────────
+# ── [03-PROG-1] top-level form fixtures ──────────────────────────────
+
+# `spec/03-deep-syntax.md` [03-PROG-1] enumerates the admissible top-level
+# forms. Every other top-level form is rejected, and [03-PROG-2] requires the
+# rejection to name the offending head.
+TOP_LEVEL_REJECTED_FIXTURES: list[tuple[str, str, str]] = [
+    # (name, source, the head the diagnostic must name)
+    (
+        "top-level fn expression",
+        "(fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))",
+        "fn",
+    ),
+    ("top-level var expression", "(var {} x)", "var"),
+    ("top-level application", "(app {} (var {} f) (var {} x))", "app"),
+    ("top-level type expression", "(t-prim {} f32)", "t-prim"),
+    ("top-level pattern", "(pat-var {} x)", "pat-var"),
+    # `variant` and `field` table under §2.2 but are structural children.
+    ("top-level variant", "(variant {} Some (field {} value (t-prim {} f32)))", "variant"),
+    ("top-level helper", "(params {} (x {type: (t-prim {} f32)}))", "params"),
+    ("top-level unknown tag", "(future-form {} value)", "future-form"),
+]
+
+# The admissible spellings: a `module` wrapper, bare declarations, and a mix.
+TOP_LEVEL_ACCEPTED_FIXTURES: list[tuple[str, str]] = [
+    ("module wrapper", "(module {} m (def {} f (lit {} 1)))"),
+    ("bare declaration", "(def {} f (lit {} 1))"),
+    (
+        "bare declaration pair",
+        "(defsig {} f (t-fn {eff: (effects {})} (t-prim {} int32)))\n"
+        "(def {} f (fn {} (params {}) (lit {type: (t-prim {} int32)} 1)))",
+    ),
+    (
+        "module wrapper beside a bare declaration",
+        "(module {} m (def {} inner (lit {} 1)))\n(def {} outer (lit {} 2))",
+    ),
+    ("type declaration", "(deftype {} Color () (variant {} Red))"),
+]
+
+# ── Compiled Rust obligations ────────────────────────────────────────
 
 STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "cargo",
@@ -81,6 +132,21 @@ STAMP_NEXTEST_COMMAND: tuple[str, ...] = (
     "stamp_to_typed",
     "--test",
     "phase3_successor_validation",
+)
+
+# chelis#1088. The compiler-API embedding surface is not reachable from the
+# `chelis` CLI's own `.dp` path, so its behavioral coverage runs as a
+# compiled test binary: the parity table over every public Deep text door,
+# and the structural guard that no production source in the workspace
+# reopens the weaker ingress.
+COMPILER_API_INGRESS_NEXTEST_COMMAND: tuple[str, ...] = (
+    "cargo",
+    "nextest",
+    "run",
+    "-p",
+    "chelis-compiler-api",
+    "--test",
+    "phase3_stamped_ingress",
 )
 
 
@@ -112,9 +178,58 @@ def chelis_check_command() -> tuple[str, ...]:
     )
 
 
+def target_directory() -> Path:
+    """The cargo target directory this run writes to."""
+    override = os.environ.get("CARGO_TARGET_DIR")
+    return Path(override) if override else REPO_ROOT / "target"
+
+
+_RESOLVED_CHELIS_BINARY: Path | None = None
+_BINARY_RESOLUTION_ATTEMPTED = False
+
+
+def resolve_chelis_binary() -> Path | None:
+    """Build `chelis` once and return its path, or None to fall back.
+
+    The CLI obligations run more than twenty fixtures. Going through
+    `cargo run` for each pays cargo's dependency resolution twenty times,
+    which is most of this oracle's wall clock and none of its coverage.
+    Building once and invoking the produced binary is the same compiled
+    behavioral path, and is what keeps the oracle affordable as a per-PR
+    gate stage. A failure here is not an oracle failure: the caller falls
+    back to `cargo run`, which reports the build problem in context.
+    """
+    global _RESOLVED_CHELIS_BINARY, _BINARY_RESOLUTION_ATTEMPTED
+    if _BINARY_RESOLUTION_ATTEMPTED:
+        return _RESOLVED_CHELIS_BINARY
+    _BINARY_RESOLUTION_ATTEMPTED = True
+    build = subprocess.run(
+        ("cargo", "build", "-p", "chelis-cli", "--bin", "chelis", "--quiet"),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    if build.returncode != 0:
+        return None
+    candidate = target_directory() / "debug" / "chelis"
+    if candidate.is_file():
+        _RESOLVED_CHELIS_BINARY = candidate
+    return _RESOLVED_CHELIS_BINARY
+
+
 def run_chelis_check(fixture_path: Path) -> subprocess.CompletedProcess[str]:
     """Run `chelis check` on a fixture file and return the completed process."""
-    cmd = chelis_check_command() + (str(fixture_path),)
+    binary = resolve_chelis_binary()
+    if binary is not None:
+        cmd: tuple[str, ...] = (
+            str(binary),
+            "check",
+            "--allow-style-violations",
+            str(fixture_path),
+        )
+    else:
+        cmd = chelis_check_command() + (str(fixture_path),)
     return subprocess.run(
         cmd,
         cwd=REPO_ROOT,
@@ -206,41 +321,122 @@ def check_score_one_controls() -> None:
             fixture.unlink(missing_ok=True)
 
 
-def check_stamp_pass_integration_tests() -> None:
-    """Obligation 3: stamp pass integration tests exist and pass.
+def check_top_level_form_rule() -> None:
+    """Obligation 3: `spec/03-deep-syntax.md` [03-PROG-1] and [03-PROG-2].
 
-    The headline criterion (Name at RuntimeExpr slot → StampError) is
-    enforced by the Rust integration tests in
-    `crates/chelis-deep/tests/stamp_to_typed.rs`. This obligation
-    verifies they still exist and pass.
+    A top-level form is a `module` wrapper or a declaration. Every other
+    top-level form is rejected at the ingress boundary, and the rejection
+    names the offending head.
     """
-    print("── Obligation 3: stamp pass integration tests green ──")
-    cmd = STAMP_NEXTEST_COMMAND
+    print("── Obligation 3: [03-PROG-1] top-level form rule ──")
+    for name, source, head in TOP_LEVEL_REJECTED_FIXTURES:
+        fixture = write_fixture(source)
+        try:
+            result = run_chelis_check(fixture)
+            if result.returncode == 0:
+                raise OracleFailure(
+                    f"[{name}] [03-PROG-1] requires a rejection, got exit 0.\n"
+                    f"Source: {source}\nStdout: {result.stdout}"
+                )
+            report = parse_check_json(result.stdout)
+            errors = report.get("errors", [])
+            if not errors:
+                raise OracleFailure(
+                    f"[{name}] exit was non-zero but errors array is empty.\n"
+                    f"Source: {source}\nReport: {report}"
+                )
+            error_text = json.dumps(errors)
+            # [03-PROG-2]: the rejection names the offending form's head.
+            if f"`{head}`" not in error_text:
+                raise OracleFailure(
+                    f"[{name}] [03-PROG-2] requires the diagnostic to name the "
+                    f"offending head `{head}`.\nErrors: {errors}"
+                )
+            print(f"  PASS: {name} (names `{head}`)")
+        finally:
+            fixture.unlink(missing_ok=True)
+
+    for name, source in TOP_LEVEL_ACCEPTED_FIXTURES:
+        fixture = write_fixture(source)
+        try:
+            result = run_chelis_check(fixture)
+            if result.returncode != 0:
+                raise OracleFailure(
+                    f"[{name}] [03-PROG-1] admits this top-level form; got exit "
+                    f"{result.returncode}.\nSource: {source}\n"
+                    f"Stderr: {result.stderr}\nStdout: {result.stdout}"
+                )
+            report = parse_check_json(result.stdout)
+            score = report.get("score")
+            if score != 1 and score != 1.0:
+                raise OracleFailure(
+                    f"[{name}] expected score 1.0, got {score}.\n"
+                    f"Source: {source}\nReport: {report}"
+                )
+            print(f"  PASS: {name} (score={score})")
+        finally:
+            fixture.unlink(missing_ok=True)
+
+
+def run_compiled_suite(label: str, cmd: tuple[str, ...], timeout: int = 300) -> None:
+    """Execute a compiled test binary through nextest and require green."""
     print(f"  + {' '.join(cmd)}")
     result = subprocess.run(
         cmd,
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=timeout,
     )
     if result.returncode != 0:
         raise OracleFailure(
-            f"Stamp pass integration tests failed (exit {result.returncode}).\n"
+            f"{label} failed (exit {result.returncode}).\n"
             f"Stderr: {result.stderr}\nStdout: {result.stdout}"
         )
-    # Verify the test count is at least 12 (the known count).
-    # nextest output contains "N tests run" or similar.
     combined = result.stdout + result.stderr
-    print(f"  PASS: stamp_to_typed tests green")
-    # Print a summary line from nextest if available.
+    print(f"  PASS: {label} green")
     for line in combined.splitlines():
-        if "pass" in line.lower() and ("test" in line.lower() or "run" in line.lower()):
+        if "Summary" in line and "tests run" in line:
             print(f"    {line.strip()}")
             break
 
 
+def check_stamp_pass_integration_tests() -> None:
+    """Obligation 4: the stamp pass and successor-carrier suites are green.
+
+    The headline criterion (Name at RuntimeExpr slot → StampError) is
+    enforced by the compiled integration tests in
+    `crates/chelis-deep/tests/stamp_to_typed.rs`.
+    """
+    print("── Obligation 4: stamp pass integration tests green ──")
+    run_compiled_suite("stamp_to_typed + phase3_successor_validation", STAMP_NEXTEST_COMMAND)
+
+
+def check_compiler_api_ingress() -> None:
+    """Obligation 5: the compiler-API embedding surface shares the carrier.
+
+    chelis#1088. `crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs`
+    drives one accept/reject corpus through every public Deep text door and
+    carries the structural guard forbidding a weaker ingress in any of the
+    workspace's production sources.
+    """
+    print("── Obligation 5: compiler-API stamped ingress parity ──")
+    run_compiled_suite(
+        "phase3_stamped_ingress",
+        COMPILER_API_INGRESS_NEXTEST_COMMAND,
+    )
+
+
 # ── Main ─────────────────────────────────────────────────────────────
+
+
+OBLIGATIONS = (
+    check_keyword_in_expr_rejected,
+    check_score_one_controls,
+    check_top_level_form_rule,
+    check_stamp_pass_integration_tests,
+    check_compiler_api_ingress,
+)
 
 
 def main() -> int:
@@ -249,18 +445,16 @@ def main() -> int:
     print("=" * 60)
     print()
     print(
-        "NOTE: The headline criterion (Name at RuntimeExpr → StampError)\n"
-        "is enforced by the stamp pass integration tests, not the CLI.\n"
-        "`chelis check` uses `parse_str_strict` (old path) for .dp files.\n"
-        "The stamp pass wiring into the CLI is tracked separately.\n"
+        "Every obligation runs compiled code: the CLI obligations drive the\n"
+        "built `chelis` binary over real .dp fixtures, and the suite\n"
+        "obligations execute compiled test binaries through cargo nextest.\n"
     )
 
     try:
-        check_keyword_in_expr_rejected()
-        print()
-        check_score_one_controls()
-        print()
-        check_stamp_pass_integration_tests()
+        for index, obligation in enumerate(OBLIGATIONS):
+            if index:
+                print()
+            obligation()
         print()
         print("=" * 60)
         print("ORACLE: PASS")

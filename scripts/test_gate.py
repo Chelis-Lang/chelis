@@ -599,6 +599,50 @@ class ListOutputTests(unittest.TestCase):
         ):
             self.assertIn(command, rendered)
 
+    def test_unrepresentable_domain_oracle_runs_in_the_per_pr_gate(self):
+        # chelis#908's "Constraint on every fix in this class": the oracle
+        # must run in a continuous job. It was referenced by no workflow and
+        # no gate stage, so the only thing exercising it was its own unit
+        # tests, which patch the command runners; the behavioral oracle never
+        # reached a compiled binary. Hosted CI runs `gate.py lint-and-unit`,
+        # so membership in that stage is what makes it continuous, and
+        # membership in the local subset is what makes it pre-push. Removing
+        # either turns the oracle dark silently, which is the exact failure
+        # mode #1089 inventories -- hence an explicit lock.
+        command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["lint-and-unit"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+
+    def test_unrepresentable_domain_oracle_script_exists_and_documents_acceptance(self):
+        # The wiring above is worthless if the script it names is gone or
+        # stops declaring its acceptance condition. #908 and the repository's
+        # one-oracle rule both key on the `ORACLE: PASS` line.
+        script = REPO_ROOT / "scripts" / "unrepresentable_domain_oracle.py"
+        self.assertTrue(script.is_file(), f"{script} must exist")
+        text = script.read_text()
+        self.assertIn(
+            "ORACLE: PASS",
+            text,
+            "the oracle must emit its documented acceptance line",
+        )
+        self.assertIn(
+            "phase3_stamped_ingress",
+            text,
+            "the oracle's obligations must cover the compiler-API ingress "
+            "(chelis#1088)",
+        )
+        self.assertIn(
+            "[03-PROG-1]",
+            text,
+            "the oracle must check the spec/03 top-level form rule",
+        )
+
     def test_cheap_pipeline_core_guards_are_in_the_local_subset(self):
         # The two cheap guards (cargo metadata + pure Python) run pre-push; the
         # out-of-workspace compile-fail build stays CI/full-gate only.

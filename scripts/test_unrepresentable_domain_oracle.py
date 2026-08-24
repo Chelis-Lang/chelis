@@ -241,6 +241,191 @@ class TestStampPassObligation(unittest.TestCase):
             oracle.check_stamp_pass_integration_tests()
 
 
+class TestTopLevelFormRule(unittest.TestCase):
+    """Test obligation 3 logic (spec/03 [03-PROG-1]) with mocked runners."""
+
+    def test_rejected_fixtures_carry_the_head_the_diagnostic_must_name(self) -> None:
+        self.assertTrue(oracle.TOP_LEVEL_REJECTED_FIXTURES)
+        for name, source, head in oracle.TOP_LEVEL_REJECTED_FIXTURES:
+            self.assertTrue(name)
+            # The named head must be the fixture's actual top-level head, or
+            # the obligation would assert against a diagnostic that could not
+            # be about this input.
+            self.assertTrue(
+                source.startswith(f"({head} ") or source.startswith(f"({head}{{"),
+                f"{name}: `{head}` is not the head of {source!r}",
+            )
+
+    def test_accepted_fixtures_are_modules_or_declarations(self) -> None:
+        admissible = (
+            "module",
+            "def",
+            "defsig",
+            "deftype",
+            "typealias",
+            "defdim",
+            "import",
+            "import-all",
+            "export",
+        )
+        self.assertTrue(oracle.TOP_LEVEL_ACCEPTED_FIXTURES)
+        for name, source in oracle.TOP_LEVEL_ACCEPTED_FIXTURES:
+            for line in source.splitlines():
+                head = line[1:].split()[0].split("{")[0]
+                self.assertIn(head, admissible, f"{name}: {line!r}")
+
+    def _rejection(self, message: str) -> subprocess.CompletedProcess[str]:
+        report = {
+            "score": 0,
+            "errors": [{"kind": "Other", "message": message, "severity": 0.5}],
+        }
+        return subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=2,
+            stdout=json.dumps(report),
+            stderr="",
+        )
+
+    def _accepted(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=0,
+            stdout='{"score": 1, "errors": []}',
+            stderr="",
+        )
+
+    def _heads(self) -> dict[str, str]:
+        return {source: head for _, source, head in oracle.TOP_LEVEL_REJECTED_FIXTURES}
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_a_rejection_naming_the_head_passes(self, mock_check: MagicMock) -> None:
+        heads = self._heads()
+
+        def respond(fixture_path: Path) -> subprocess.CompletedProcess[str]:
+            head = heads.get(Path(fixture_path).read_text())
+            if head is not None:
+                return self._rejection(
+                    f"stamp error: expected declaration, got `{head}`"
+                )
+            return self._accepted()
+
+        mock_check.side_effect = respond
+        oracle.check_top_level_form_rule()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_an_accepted_non_declaration_fails(self, mock_check: MagicMock) -> None:
+        """[03-PROG-1] rejects these; reporting exit 0 is an oracle failure."""
+        mock_check.return_value = self._accepted()
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_top_level_form_rule()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_a_rejection_that_does_not_name_the_head_fails(
+        self, mock_check: MagicMock
+    ) -> None:
+        """[03-PROG-2] requires the diagnostic to name the offending head."""
+        mock_check.return_value = self._rejection("stamp error: something went wrong")
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_top_level_form_rule()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_a_rejected_admissible_form_fails(self, mock_check: MagicMock) -> None:
+        """A `module` wrapper or declaration must not be rejected."""
+        heads = self._heads()
+
+        def respond(fixture_path: Path) -> subprocess.CompletedProcess[str]:
+            head = heads.get(Path(fixture_path).read_text())
+            if head is not None:
+                return self._rejection(
+                    f"stamp error: expected declaration, got `{head}`"
+                )
+            # Every admissible form is rejected too; the obligation must
+            # notice rather than reporting a pass.
+            return self._rejection("stamp error: expected declaration, got `def`")
+
+        mock_check.side_effect = respond
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_top_level_form_rule()
+
+
+class TestCompilerApiIngressObligation(unittest.TestCase):
+    """Test obligation 5 (chelis#1088) with mocked command execution."""
+
+    @patch("subprocess.run")
+    def test_green_suite_passes(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=list(oracle.COMPILER_API_INGRESS_NEXTEST_COMMAND),
+            returncode=0,
+            stdout="Summary [ 5.2s] 17 tests run: 17 passed, 0 skipped",
+            stderr="",
+        )
+        oracle.check_compiler_api_ingress()
+
+    @patch("subprocess.run")
+    def test_red_suite_fails(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=list(oracle.COMPILER_API_INGRESS_NEXTEST_COMMAND),
+            returncode=1,
+            stdout="",
+            stderr="test failed",
+        )
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_compiler_api_ingress()
+
+    def test_command_drives_the_compiled_parity_suite(self) -> None:
+        cmd = oracle.COMPILER_API_INGRESS_NEXTEST_COMMAND
+        self.assertEqual(cmd[0], "cargo")
+        self.assertIn("nextest", cmd)
+        self.assertIn("chelis-compiler-api", cmd)
+        self.assertIn("phase3_stamped_ingress", cmd)
+
+
+class TestObligationRoster(unittest.TestCase):
+    """The roster main() runs is the contract this oracle advertises."""
+
+    def test_every_obligation_is_registered(self) -> None:
+        self.assertEqual(
+            list(oracle.OBLIGATIONS),
+            [
+                oracle.check_keyword_in_expr_rejected,
+                oracle.check_score_one_controls,
+                oracle.check_top_level_form_rule,
+                oracle.check_stamp_pass_integration_tests,
+                oracle.check_compiler_api_ingress,
+            ],
+        )
+
+
+class TestBinaryResolution(unittest.TestCase):
+    """The build-once fast path must degrade to `cargo run`, never to a pass."""
+
+    def setUp(self) -> None:
+        oracle._BINARY_RESOLUTION_ATTEMPTED = False
+        oracle._RESOLVED_CHELIS_BINARY = None
+
+    def tearDown(self) -> None:
+        oracle._BINARY_RESOLUTION_ATTEMPTED = False
+        oracle._RESOLVED_CHELIS_BINARY = None
+
+    @patch("subprocess.run")
+    def test_a_failed_build_falls_back_rather_than_resolving(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["cargo", "build"], returncode=101, stdout="", stderr="build failed"
+        )
+        self.assertIsNone(oracle.resolve_chelis_binary())
+
+    @patch("subprocess.run")
+    def test_resolution_is_attempted_once(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["cargo", "build"], returncode=101, stdout="", stderr=""
+        )
+        oracle.resolve_chelis_binary()
+        oracle.resolve_chelis_binary()
+        self.assertEqual(mock_run.call_count, 1)
+
+
 class TestChelisCheckCommand(unittest.TestCase):
     """Test the command builder."""
 

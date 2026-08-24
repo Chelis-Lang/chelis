@@ -840,7 +840,11 @@ than quoting it, rewriting it, or emitting text with changed meaning.
 ## 7. Grammar (PEG)
 
 ```peg
-Program     ← Spacing Node+ EOF
+Program     ← Spacing TopLevelForm+ EOF
+TopLevelForm ← &('(' Spacing TopLevelTag) Node        # §7.1
+TopLevelTag ← ('module' / 'import-all' / 'import' / 'export'
+            / 'defsig' / 'deftype' / 'defdim' / 'def'
+            / 'typealias') ![a-z0-9-]                 # longest-first; tag must end here
 Node        ← '(' Spacing Tag Spacing Meta Spacing Children ')' Spacing
 Tag         ← [a-z] [a-z0-9-]*                    # lowercase, hyphens allowed (pat-var, t-fn, etc.)
 Meta        ← '{' Spacing (MetaPair (',' Spacing MetaPair)*)? '}'
@@ -871,6 +875,39 @@ Comment     ← ';' (![\n] .)*
 EOF         ← !.
 ```
 
+### 7.1 Top-Level Form
+
+A Deep program is a namespace, not an expression. Deep has no top-level
+evaluation position: a form at top level either introduces a name into the
+program's namespace or declares module structure, and there is no other
+position for it to occupy. A value produced at top level could not be named,
+given a signature, exported, selected as a root, lowered, or observed, so a
+program whose top level is an expression carries no content a consumer can
+act on.
+
+> **[03-PROG-1]** A Deep program SHALL consist of one or more top-level
+> forms. Each top-level form SHALL be a `module` node (§2.1) or a declaration
+> node whose tag is one of `def`, `defsig`, `deftype`, `typealias`, `defdim`,
+> `import`, `import-all`, or `export`. Every other top-level form SHALL be
+> rejected: an expression node, a pattern node, a type-expression or
+> dimension-expression node, a transform node, a helper node, a bare
+> identifier, a bare literal, an untagged list, and a node whose head is
+> outside the closed vocabulary (§2). `variant` and `field` are structural
+> children of `deftype` and `variant`; they bind nothing on their own and are
+> not top-level forms.
+
+The declarations a program contains are the children of its `module`
+wrappers together with its bare top-level declarations; a program MAY mix
+both spellings and MAY contain more than one `module` wrapper, subject to the
+one-wrapper-per-module-name rule in §2.1.
+
+> **[03-PROG-2]** A rejection under [03-PROG-1] SHALL name the offending
+> form's head and SHALL carry that form's source location. It SHALL be
+> reported at the ingress boundary that reads the program text, before name
+> resolution, type checking, evaluation, lowering, or resugaring observes the
+> program. An implementation SHALL NOT skip, ignore, or silently reinterpret
+> a top-level form that [03-PROG-1] rejects.
+
 ---
 
 ## 8. Validation Rules
@@ -878,6 +915,8 @@ EOF         ← !.
 ### 8.1 Structural Validation (Parser)
 - Every node is a 3-tuple: `(tag meta children...)`.
 - Tag is from the closed vocabulary (§2).
+- Every top-level form satisfies [03-PROG-1]; a violation is rejected per
+  [03-PROG-2].
 - Meta is a valid `{}` map (may be empty).
 - A colon-prefixed keyword token such as `:type` is metadata-key syntax, not
   an expression atom or node child. Outside metadata-key position, the parser
@@ -894,7 +933,7 @@ EOF         ← !.
   headers and binder context are not available to the syntax parser.
 
 ### 8.3 Unknown Tags
-Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score.
+Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score. This distinction applies below the top level; an unknown tag in top-level position is a [03-PROG-1] rejection in every mode, because no unknown head is one of the top-level forms that rule enumerates.
 
 ---
 
