@@ -1664,9 +1664,10 @@ The schema is owned by `spec/design/capability_table.md`. It keeps `Prim`,
 A from per-backend Table B; expands finite semantic parameters per `Prim` and
 scalar/tensor surface; routes container/boundary builtins to the exact sibling
 registry while retaining §C6's external-family semantic registries; gives
-runtime and binding callables total external target dispositions; derives an
-exported stdlib definition's executability transitively from its checked body;
-and composes host ABI types through a separate constructor table.
+runtime and binding callables total external target dispositions; gives exact
+effect dependencies a separate typed backend disposition; derives an exported
+stdlib definition's executability transitively from its checked body; and
+composes host ABI types through a separate constructor table.
 Phase 4 is split so table authoring, generated routing, and executable coverage
 cannot be conflated.
 
@@ -1683,18 +1684,22 @@ callable from bypassing review while the capability tables are built.
 
 1. The remaining callable decisions are timeless normative atoms: the exact
    `mean`, extrema, product, argument-reduction, modular-arithmetic, float
-   classification, named-lossy-cast, and canonical `to_string` contracts. The extrema contract
-   divides every non-NaN tie, including equal infinities, routes a NaN
-   cotangent to the first NaN selected by the forward rule, and applies the
-   same rule to windowed extrema.
+   classification, named-lossy-cast, canonical `to_string`, and boolean
+   `and`/`or`/`not` contracts. Logical operations are bool-only and do not
+   alias numeric primitives. The extrema contract divides every non-NaN tie,
+   including equal infinities, routes a NaN cotangent to the first NaN selected
+   by the forward rule, and applies the same rule to windowed extrema.
 2. `capability_table.md` freezes the exact typed Table-A/Table-B cells,
    backend set, companion constructor table, exact sibling-builtin key and
-   cells, external-family semantic and target routing, exported-stdlib
-   dependency derivation, ownership boundary, and macro-expanded machine form.
-   There are no open schema questions after this slice.
+   cells, external-family semantic and target routing, exact effect-disposition
+   registry, exported-stdlib dependency derivation, ownership boundary, and
+   macro-expanded machine form. There are no open schema questions after this
+   slice.
 3. Behavior-changing implementation work remains assigned to v0.19 and may
    not be disguised as table population. The v0.20 table mechanism records
-   honest `Unimplemented` cells until those implementations land.
+   honest `Unimplemented` cells until those implementations land. [#1284]
+   owns replacing the pre-table boolean numeric aliases used by logical
+   operations, comparison-derived negation, and `where`.
 
 **Frozen at exit:** the numbered-spec atoms and capability schema. Changing
 either follows §B1; table implementation may not reinterpret them.
@@ -1702,9 +1707,9 @@ either follows §B1; table implementation may not reinterpret them.
 **Authoritative 4B oracle:**
 `.venv/bin/python scripts/dtype_phase4b_oracle.py`; exit 0 and final line
 `DTYPE PHASE 4B ORACLE: PASS`. It validates the exact normative atom set,
-named-cast exclusion, typed numeric and sibling schema markers, phase naming,
-and generated rejection-registry agreement. Its success proves this freeze,
-not any Phase 4C implementation.
+named-cast exclusion, typed numeric, sibling, and effect schema markers, frozen
+contract digests, phase naming, and generated rejection-registry agreement.
+Its success proves this freeze, not any Phase 4C implementation.
 
 ### Phase 4C - populate the machine authorities
 
@@ -1723,11 +1728,16 @@ not any Phase 4C implementation.
    backend set; §C6's external-family semantic registry remains separate, and
    runtime/binding callables populate the exact
    `(ExternalCallableFamily, CanonicalCallableId, ExternalTargetContext)`
-   target-disposition registry. Table A and
-   sibling semantic cells use typed signature, result, atom, and diagnostic
-   identities; backend cells use typed kernel, issue, or rejected-by-design
-   authorities.
-4. Exact `[05-OP-N]` backfill and generated rejection-registry membership for
+   target-disposition registry. Exact effect dependencies populate the
+   `(CanonicalEffectRequirement, BackendId)` disposition registry over
+   `Random | Accum | Io | Test | Resource(ResourceId)`. Table A and sibling
+   semantic cells use typed signature, result, atom, and diagnostic identities;
+   backend and effect cells use typed implementation, issue, or
+   rejected-by-design authorities.
+4. Missing, duplicate, stale, or defaulted effect rows fail construction. An
+   explicit `CompleteEffectDependencies::Pure` is distinct from an absent or
+   unfinished checked-body traversal.
+5. Exact `[05-OP-N]` backfill and generated rejection-registry membership for
    every numeric callable entering these products.
 
 **Authoritative 4C oracle (supporting the overall Phase 4 oracle):**
@@ -1738,9 +1748,9 @@ not any Phase 4C implementation.
 
 **You deliver:** checker acceptance and reporting, early build gates, backend
 dispatch skeletons, [#912] root-realizability projections, checked host-cast
-planning, recursive host-ABI resolution, and exported-stdlib dependency
-closures generated from the owning tables and checked bodies. Delete each
-hand-mirrored list only after its generated
+planning, recursive host-ABI resolution, exact effect-disposition lookup, and
+exported-stdlib dependency closures generated from the owning registries and
+checked bodies. Delete each hand-mirrored list only after its generated
 consumer is live. A root capability may derive from numeric Table B, the host
 constructor table, or a sibling registry; the root manifest authors none of
 those decisions.
@@ -1753,14 +1763,15 @@ those decisions.
 
 **You deliver:** an executable product over every Table-A semantic cell,
 Table-B backend cell, finite parameter, surface, sibling semantic/backend
-cell, legal host-constructor composition, external target disposition, and
-derived exported-stdlib/backend result. Supported/implemented cells
+cell, legal host-constructor composition, external target disposition, effect
+disposition, and derived exported-stdlib/backend result. Supported/implemented cells
 execute with exact agreement or the one owning tolerance rule;
 rejected/unimplemented cells assert the typed diagnostic at every rendering
 stage. The suite includes structural mutations
 for a missing A row, missing B row, stale atom, missing dispatch arm, omitted
-constructor nesting, extrema finite-tie/NaN/infinity-tie routing, and a
-missing generated case.
+constructor nesting, missing or defaulted effect row, incomplete effect
+traversal, extrema finite-tie/NaN/infinity-tie routing, and a missing generated
+case.
 
 Finite-difference checks cover smooth reduction points and the two-way tie
 subgradient. General `k`-way extrema ties, including equal positive and
@@ -1847,7 +1858,7 @@ updates this section, `loud_unsupported.md` §I1, and
 | 2 | [#680], [#688], [#711], [#718] eval cells, [#722] eval half |
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
 | 4A-4B | §C6 capacity permanence; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions and schema freeze |
-| v0.19 behavior | [#170] product-tree/backend work; [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] `to_string` checker/eval domain; [#1059] compiled tensor/List cells |
+| v0.19 behavior | [#170] product-tree/backend work; [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] `to_string` checker/eval domain; [#1059] compiled tensor/List cells; [#1284] typed non-numeric logical and `where` lowering |
 | 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] migrates the last raw Pad constant carrier; [#937] supplies the missing-cell evidence for the generated matrix; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
@@ -1923,3 +1934,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1152]: https://github.com/Chelis-Lang/chelis/issues/1152
 [#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
 [#1282]: https://github.com/Chelis-Lang/chelis/issues/1282
+[#1284]: https://github.com/Chelis-Lang/chelis/issues/1284

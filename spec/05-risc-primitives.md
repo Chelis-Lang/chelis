@@ -840,15 +840,15 @@ not Tier 2 derived built-ins. `recip` is also a Tier 1 primitive
 exp(neg(log(b))))` lowering — which returned NaN for `b ≤ 0` — is
 no longer reachable from any Tier2 op.
 
-### 3.2 Comparison
+### 3.2 Comparison and Logical Operations
 
 | Name | Lowering to RISC |
 |---|---|
-| `eq(a, b)` | `neg(or(cmplt(a, b), cmplt(b, a)))` — neither less than the other |
+| `eq(a, b)` | `not(or(cmplt(a, b), cmplt(b, a)))` — neither less than the other |
 | `neq(a, b)` | `or(cmplt(a, b), cmplt(b, a))` |
 | `gt(a, b)` | `cmplt(b, a)` |
-| `gte(a, b)` | `neg(cmplt(a, b))` |
-| `lte(a, b)` | `neg(cmplt(b, a))` |
+| `gte(a, b)` | `not(cmplt(a, b))` |
+| `lte(a, b)` | `not(cmplt(b, a))` |
 
 These lowerings define result values over already-evaluated operands. They
 never reorder the evaluation of the operand expressions themselves:
@@ -856,7 +856,33 @@ never reorder the evaluation of the operand expressions themselves:
 (`spec/03-deep-syntax.md` §4.4), and only the value computation reads the
 operands in `cmplt(b, a)` order.
 
-Note: `or(a, b)` on bools is `max_elem(a, b)`. `and(a, b)` on bools is `mul(a, b)`. `not(a)` on bools is `neg(a)` (assuming bools are 0/1).
+> **[05-OP-26]** `and(left, right) -> result` admits exactly two `bool`
+> scalars or two `bool` tensors with identical dimensions. It returns `bool`
+> on the same surface and, for tensors, with those dimensions. Applications
+> evaluate `left` and then `right` before combining their values; `and` is not
+> short-circuiting. The result is true exactly when both operands are true and
+> is false otherwise, applied element-wise for tensors. A mixed surface,
+> mismatched tensor dimensions, or any non-`bool` operand is a type error. The
+> operation is pure, performs no arithmetic or dtype conversion, has no
+> accumulator, and is non-differentiable: `grad` rejects it.
+>
+> **[05-OP-27]** `or(left, right) -> result` has the signature, surface,
+> shape, evaluation-order, rejection, purity, accumulator, and differentiation
+> contract of [05-OP-26]. Its result is true exactly when either operand is
+> true and is false otherwise, applied element-wise for tensors.
+>
+> **[05-OP-28]** `not(value) -> result` admits exactly one `bool` scalar or
+> `bool` tensor and returns `bool` on the same surface and, for a tensor, with
+> the same dimensions. Its result is true exactly when `value` is false and is
+> false exactly when `value` is true, applied element-wise for tensors. Any
+> non-`bool` operand is a type error. The operation is pure, performs no
+> arithmetic or dtype conversion, has no accumulator, and is
+> non-differentiable: `grad` rejects it.
+
+Logical operations do not alias arithmetic primitives. An implementation may
+use an internal representation-specific lowering only when it preserves the
+three atoms above and never admits `bool` to a numeric capability or kernel.
+(Not fully implemented; see chelis#1284.)
 
 ### 3.3 Activation Functions
 
@@ -910,7 +936,7 @@ first-class unary primitive `RiscOp::Cos` — see §2.2 — alongside `tan`,
 | `argmax(x, axis)` | comparison chain via `cmplt` + `max_elem` |
 | `gather(x, idx, axis)` | one-hot encoding via `reshape`, `expand`, `mul`, `sum` |
 | `im2col(x, kh, kw, ...)` | `stride`, `pad`, `reshape`, `permute` |
-| `where(cond, a, b)` | `add(mul(cond, a), mul(neg(cond), b))` assuming bool 0/1 |
+| `where(cond, a, b)` | Element-wise selection of `a` where `cond` is true and `b` where it is false; the boolean condition is not converted to or combined through a numeric dtype |
 
 Implementation note: the compiler now also has first-class specialized sparse
 IR nodes `RiscOp::Gather { axis }`, `RiscOp::ScatterAdd { axis }`,
@@ -1594,7 +1620,7 @@ the predicate itself has a useful derivative.
 **Structural rejections.** On float operands, `floor`, `ceil`, and `round` are
 piecewise constant and `grad` rejects them with an
 `AdRejectionReason::PiecewiseConstant` error rather than silently returning a
-zero gradient. `cast_trunc`, `cast_saturate`, `cast_wrap`,
+zero gradient. `cast_trunc`, `cast_saturate`, `cast_wrap`, `and`, `or`, `not`,
 `argmax_reduce`, and `argmin_reduce` likewise reject `grad` under their atoms.
 The `wrap_*` operations and integer reduction/unary forms are forward-only
 because integer values do not carry cotangents. Integer `floor`, `ceil`, and

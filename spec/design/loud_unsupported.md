@@ -2086,14 +2086,20 @@ supported-row × backend product. Runtime exports and binding functions use
 their §C6 semantic registry plus the exact external target-disposition
 registry; they are not stdlib execution authority. An exported stdlib
 definition instead derives its per-backend result transitively from every
-statically resolved numeric, sibling, host-constructor, and effect disposition
-reachable from its checked body. Recursive host values additionally compose
-through the host-constructor table. The program reaches build/link/run when
+statically resolved numeric, sibling, and host-constructor disposition plus
+every exact effect row keyed by
+`(CanonicalEffectRequirement, BackendId)`. The effect requirement is exactly
+`Random | Accum | Io | Test | Resource(ResourceId)`; the four fixed variants
+and every resource literal discovered in the completed checked-body closure
+expand across all backends. Recursive host values additionally compose through
+the host-constructor table. The program reaches build/link/run when
 every derived dependency is implemented or asserts the first
 canonical-source-order typed rejection when one is not. The derivation fails
 if an export has no declared signature or checked body, contains an unresolved
 call, reaches a missing owning row, leaves a recursive dependency cycle
-unresolved, or produces an empty-by-default result.
+unresolved, or produces an absent/defaulted result. A completed empty effect
+closure is the explicit `CompleteEffectDependencies::Pure` case; absence is
+never purity.
 The oracle mutates the manifest with a synthetic export and proves that the
 missing compiled cell is red, then runs the standing corpus. Eval-only stdlib
 self-tests and one hand-picked `Std.Io` build are supporting evidence, not

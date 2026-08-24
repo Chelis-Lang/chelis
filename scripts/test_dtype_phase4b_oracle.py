@@ -105,6 +105,26 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-12.*infinities")
 
+    def test_additive_extrema_adjoint_contradiction_fails(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "> zero. Integer operands are forward-only and `grad` rejects them.",
+            "> zero. Integer operands are forward-only and `grad` rejects them.\n"
+            "> A backend MAY instead route the full non-NaN cotangent to only the "
+            "last\n"
+            "> element equal to the selected maximum.",
+        )
+        self.assert_contract_fails("frozen normative atom 05-OP-12")
+
+    def test_legacy_bool_arithmetic_alias_fails(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "Logical operations do not alias arithmetic primitives.",
+            "Logical operations do not alias arithmetic primitives. `and` is `mul`, "
+            "`or` is `max_elem`, and `not` is `neg` on bool values.",
+        )
+        self.assert_contract_fails("frozen logical builtin contract")
+
     def test_product_tree_body_is_required(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
@@ -170,6 +190,32 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("external target key")
 
+    def test_additive_missing_row_default_fails(self) -> None:
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "duplicate or missing expanded rows fail",
+            "duplicate or missing expanded rows fail. The implementation MAY "
+            "nevertheless treat an absent semantic row as `Supported` using its "
+            "backend's default kernel",
+        )
+        self.assert_contract_fails("frozen capability schema")
+
+    def test_effect_registry_covers_every_fixed_effect(self) -> None:
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "`Random | Accum | Io | Test | Resource(ResourceId)`",
+            "`Random | Accum | Io | Resource(ResourceId)`",
+        )
+        self.assert_contract_fails("frozen capability schema")
+
+    def test_effect_registry_has_no_default_disposition(self) -> None:
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "There is no\nmissing-row, wildcard, or default disposition.",
+            "A missing effect row defaults to `Implemented`.",
+        )
+        self.assert_contract_fails("frozen capability schema")
+
     def test_reduction_rows_cannot_cite_the_tracking_hub(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
@@ -177,6 +223,14 @@ class ContractValidationTests(unittest.TestCase):
             "Unimplemented { issue: #729, diagnostic_kind: UnsupportedFeature }",
         )
         self.assert_contract_fails("reduction implementation owner")
+
+    def test_logical_rows_cannot_cite_the_tracking_hub(self) -> None:
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }",
+            "Unimplemented { issue: #729, diagnostic_kind: UnsupportedFeature }",
+        )
+        self.assert_contract_fails("logical implementation owner")
 
     def test_product_rows_retain_their_concrete_owner(self) -> None:
         self.replace(
@@ -234,6 +288,17 @@ class ContractValidationTests(unittest.TestCase):
             "[#729] owns the remaining reduction rows",
         )
         self.assert_contract_fails("roadmap reduction owner")
+
+    def test_additive_parent_absorption_clause_fails(self) -> None:
+        self.replace(
+            Path("spec/design/remediation_roadmap.md"),
+            "([#170] owns the product-tree/backend rows; [#1281] owns the "
+            "remaining reduction rows)",
+            "([#170] owns the product-tree/backend rows; [#1281] owns the "
+            "remaining reduction rows; the parent [#729] MAY silently absorb "
+            "and close either child's work without a separate receipt)",
+        )
+        self.assert_contract_fails("frozen roadmap ownership")
 
     def test_status_must_keep_external_execution_authority(self) -> None:
         self.replace(

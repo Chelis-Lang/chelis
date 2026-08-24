@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -53,6 +54,99 @@ EXPECTED_PHASE4B_OPS = {
     23: "cast_saturate",
     24: "cast_wrap",
     25: "to_string",
+    26: "and",
+    27: "or",
+    28: "not",
+}
+
+FROZEN_ATOM_DIGESTS = {
+    "04-NUM-4": "b9f34c7d9113c094338a828eca087cacdca1c40321e930631eaf874b16ee3b3f",
+    "04-NUM-16": "55a463dbe522a0b653255742568038a375cee2cf3b9c113cc53d7b75953b7dfd",
+    "05-OP-11": "5723ecadeb87782d930839d557545eaa90d73b1204ba19e5e40f0c3242faef39",
+    "05-OP-12": "05c3af79686730379892ad267bfb4b35451213c138cc3f4bae7e123591b377e3",
+    "05-OP-13": "52a071e1e02febb3208f15d1b913de8370577fb7649f127d578c4619c7e8df31",
+    "05-OP-14": "7da6a49016d65e63223f270f0ef03c091f8ec893e2698c17a1fb5f3e0ca759c8",
+    "05-OP-15": "a9ad8cf1423e99bf092e6dd52ce273555cda77b4beb52ff3a78564db1800933e",
+    "05-OP-16": "ddced357a351860e42537449d526dfa3ba8cda0a2aa28073d3ea5b81eae2008f",
+    "05-OP-17": "1e4cc1b02acf4d527f3396a8acd49083b63bdc877270129b311bce6e3f7bb54d",
+    "05-OP-18": "6cf5eaa4e1ab068d667ea1d8cc26ba366694329669cba39443a4878a6d04714a",
+    "05-OP-19": "d84cd2202079d852ba918b99e2bae1c964650362dee200942a9addba954bd5e5",
+    "05-OP-20": "6facebb9f20f5072eb9e64b568161a9b968a526fd91107cbb87e0bdbe86d2d2f",
+    "05-OP-21": "ced775b654a61c4d36d2313191145b3543e55ef75825a5066e04b3c114437545",
+    "05-OP-22": "f7c7c00b0fbea5176eb3427b517f5fb9f7434e24caaacd86fc1408455658329a",
+    "05-OP-23": "bfc8198f2940f9d81c4dd3069568058974a39c1ddb37d0e51aadbfde226eb8bc",
+    "05-OP-24": "d9210188e6698e34ce8a82008db7eff1a34e674b5f92ddf63c77db5fdd5bf79f",
+    "05-OP-25": "8f400b1b3a5c1ba7a9f0f717fc6b41612949c708a21c053ef315883ab03652fb",
+    "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
+    "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
+    "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
+}
+
+# The markers are part of the freeze contract: each must occur exactly once,
+# and the end marker is excluded from the digest. Digests are not a self-bless
+# mechanism. An intentional change owes the owning spec/design update, every
+# consuming contract, and an adversarial mutation before this manifest moves.
+FROZEN_REGION_DIGESTS = {
+    "logical builtin contract": (
+        "spec/05-risc-primitives.md",
+        "### 3.2 Comparison and Logical Operations",
+        "### 3.3 Activation Functions",
+        "9036535a7ae1af2dfa364eb580a55b0bcb822c0c9a79bc48cc7f1eeaae7a9d93",
+    ),
+    "multi-axis reduction contract": (
+        "spec/04-type-system.md",
+        "Multiple **named** axes may be reduced in one call",
+        "**Unification (unitary).**",
+        "7e8cd63034ea341f5a338ed39c0c339e3c80894fca2cf864b6a3c35d8faaff9f",
+    ),
+    "window extrema contract": (
+        "spec/05-risc-primitives.md",
+        "### 2.3.1 Windowed Reduction",
+        "### 2.4 Movement",
+        "84a55eed44492dfb38e76d81c11a40028d383712ac1ce1d2782a78e021be83ae",
+    ),
+    "capability schema": (
+        "spec/design/capability_table.md",
+        "## The two-table design",
+        "## Seed dispositions the table must ship with",
+        "6f33014f59d784d876c9b5af0f9238de3576502a9d2a0da4f9ef8be54dae352c",
+    ),
+    "capability seed dispositions": (
+        "spec/design/capability_table.md",
+        "## Seed dispositions the table must ship with",
+        "## New numeric ops before the table lands (added 2026-07-30)",
+        "0988ef53973af79d96f91d42ffdf3b8dd96be97c90ffe0676ed15aa06e61c6b4",
+    ),
+    "Phase 4 handoff": (
+        "spec/design/dtype_semantics.md",
+        "## Phase 4 - the capability table becomes the permanent guard",
+        "## I1. Interlock with loud unsupported ([#730])",
+        "ceaeef17c214b61fb634bd7e5feb0cc54df413fd92f0bfe56e9b1102f3b26732",
+    ),
+    "compiled stdlib consumer": (
+        "spec/design/loud_unsupported.md",
+        "### LU5 - derived compiled-stdlib acceptance corpus ([#955])",
+        "### LU6 - exhaustive checked host-cast planning ([#1150])",
+        "ca1ba0f88b6efcac400d21614dfb38746d6315b1719b11f2c679bb9609940b15",
+    ),
+    "provenance governed surfaces": (
+        "spec/design/spec_provenance.md",
+        "| Capability-row, Deep-tag, tolerance-row, and diagnostic citations |",
+        "| OpenSpec proving inadequate as the trigger for provenance work |",
+        "56675ebf30876d376c9eeb1817472381d9cfb0254522f57a3894366762da782c",
+    ),
+    "roadmap ownership": (
+        "spec/design/remediation_roadmap.md",
+        "| **v0.19.0 - grounded dtype storage break",
+        "| **v0.20.0 - behavior-preserving permanent guards**",
+        "7c3ac7dd809b1b69a41631b3738fd3d850ed17c3e775e8e0bb7c4c502c0a6347",
+    ),
+    "status dtype row": (
+        "docs/investigations/remediation_status_2026_08_04.md",
+        "| **#729 dtype semantics** |",
+        "| **#730 loud unsupported** |",
+        "b7f313b76d409e74f0b4aa9f13a1c28bb8f86335973bd1ff446794e0aec0e242",
+    ),
 }
 
 
@@ -89,6 +183,83 @@ def atom_blocks(text: str) -> dict[str, str]:
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         blocks[match.group(1)] = text[match.start() : end]
     return blocks
+
+
+def strict_atom_block(text: str, atom: str) -> str:
+    starts = [match for match in ATOM_START.finditer(text) if match.group(1) == atom]
+    if len(starts) != 1:
+        raise OracleError(
+            f"frozen normative atom {atom} must occur exactly once, got {len(starts)}"
+        )
+    start = starts[0].start()
+    end = start
+    for line in text[start:].splitlines(keepends=True):
+        if end > start and ATOM_START.match(line):
+            break
+        if not line.startswith(">"):
+            break
+        end += len(line)
+    return text[start:end]
+
+
+def normalize_frozen_block(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in normalized.split("\n")]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def frozen_digest(text: str) -> str:
+    return hashlib.sha256(normalize_frozen_block(text).encode("utf-8")).hexdigest()
+
+
+def frozen_region(text: str, start: str, end: str, label: str) -> str:
+    start_count = text.count(start)
+    end_count = text.count(end)
+    if start_count != 1 or end_count != 1:
+        raise OracleError(
+            f"frozen {label} markers must occur exactly once "
+            f"(start={start_count}, end={end_count})"
+        )
+    start_index = text.index(start)
+    end_index = text.index(end)
+    if end_index <= start_index:
+        raise OracleError(f"frozen {label} end marker precedes its start")
+    return text[start_index:end_index]
+
+
+def validate_frozen_contract(
+    docs: dict[str, str], violations: list[str]
+) -> None:
+    for atom, expected in FROZEN_ATOM_DIGESTS.items():
+        relative = (
+            "spec/04-type-system.md" if atom.startswith("04-") else "spec/05-risc-primitives.md"
+        )
+        try:
+            actual = frozen_digest(strict_atom_block(docs[relative], atom))
+        except OracleError as error:
+            violations.append(str(error))
+            continue
+        if actual != expected:
+            violations.append(
+                f"frozen normative atom {atom} digest mismatch: "
+                f"expected {expected}, got {actual}"
+            )
+
+    for label, (relative, start, end, expected) in FROZEN_REGION_DIGESTS.items():
+        try:
+            block = frozen_region(docs[relative], start, end, label)
+        except OracleError as error:
+            violations.append(str(error))
+            continue
+        actual = frozen_digest(block)
+        if actual != expected:
+            violations.append(
+                f"frozen {label} digest mismatch: expected {expected}, got {actual}"
+            )
 
 
 def require_atom(
@@ -314,6 +485,29 @@ def validate_normative_contract(
             "non-differentiable (`grad` rejects it)",
             "no accumulator",
         ),
+        "05-OP-26": (
+            "exactly two `bool` scalars or two `bool` tensors",
+            "identical dimensions",
+            "evaluate `left` and then `right`",
+            "not short-circuiting",
+            "true exactly when both operands are true",
+            "performs no arithmetic or dtype conversion",
+            "has no accumulator",
+            "`grad` rejects it",
+        ),
+        "05-OP-27": (
+            "contract of [05-OP-26]",
+            "true exactly when either operand is true",
+            "applied element-wise for tensors",
+        ),
+        "05-OP-28": (
+            "exactly one `bool` scalar or `bool` tensor",
+            "true exactly when `value` is false",
+            "Any non-`bool` operand is a type error",
+            "performs no arithmetic or dtype conversion",
+            "has no accumulator",
+            "`grad` rejects it",
+        ),
     }
     for atom, requirements in atom_requirements.items():
         require_atom(blocks, atom, requirements, violations)
@@ -423,6 +617,30 @@ def validate_schema_and_consumers(
                 "typed external implemented cell",
             ),
             (
+                "(`CanonicalEffectRequirement`, `BackendId`)**",
+                "effect disposition key",
+            ),
+            (
+                "`Random | Accum | Io | Test | Resource(ResourceId)`",
+                "closed effect requirement domain",
+            ),
+            (
+                "Implemented { implementation_id: EffectImplementationId }",
+                "typed effect implemented cell",
+            ),
+            (
+                "There is no\nmissing-row, wildcard, or default disposition.",
+                "effect no-default rule",
+            ),
+            (
+                "sealed `CompleteEffectDependencies`",
+                "completed effect dependency carrier",
+            ),
+            (
+                "explicit `Pure` case",
+                "explicit effect purity result",
+            ),
+            (
                 "An exported stdlib definition has no independent external target cell",
                 "derived stdlib execution rule",
             ),
@@ -433,6 +651,10 @@ def validate_schema_and_consumers(
             (
                 "Unimplemented { issue: #170, diagnostic_kind: UnsupportedFeature }",
                 "product implementation owner",
+            ),
+            (
+                "Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }",
+                "logical implementation owner",
             ),
             ("invokes the 4B, 4C, and 4D oracles", "nested Phase 4B oracle"),
         ),
@@ -457,14 +679,23 @@ def validate_schema_and_consumers(
                 "dtype-plan external target key",
             ),
             (
-                "exported-stdlib dependency\nclosures",
+                "exported-stdlib dependency derivation",
                 "dtype-plan stdlib derivation",
+            ),
+            (
+                "(CanonicalEffectRequirement, BackendId)",
+                "dtype-plan effect key",
+            ),
+            (
+                "CompleteEffectDependencies::Pure",
+                "dtype-plan explicit effect purity",
             ),
             ("invokes the 4B, 4C, and 4D oracles", "dtype-plan final nesting"),
             ("[#170] product-tree/backend work", "dtype-plan product owner"),
             ("[#1281] mean/extrema/argument-reduction", "dtype-plan reduction owner"),
+            ("[#1284]\n   owns replacing", "dtype-plan logical owner"),
             (
-                "canonical `to_string` contracts",
+                "canonical `to_string`, and boolean",
                 "dtype-plan to_string semantics",
             ),
             (
@@ -494,6 +725,14 @@ def validate_schema_and_consumers(
                 "generated transitive\n  dependency closure over the checked body",
                 "loud stdlib derivation",
             ),
+            (
+                "(CanonicalEffectRequirement, BackendId)",
+                "loud effect key",
+            ),
+            (
+                "CompleteEffectDependencies::Pure",
+                "loud explicit effect purity",
+            ),
             ("also invokes the Phase 4B oracle", "loud final-oracle nesting"),
         ),
         violations,
@@ -511,9 +750,13 @@ def validate_schema_and_consumers(
                 "provenance stdlib derivation",
             ),
             (
-                "external target dispositions, and derived exported-stdlib "
-                "dependencies",
+                "external target dispositions, exact effect dispositions, and "
+                "derived exported-stdlib dependencies",
                 "provenance governed-surface summary",
+            ),
+            (
+                "exact effect dispositions",
+                "provenance effect authority",
             ),
         ),
         violations,
@@ -529,7 +772,12 @@ def validate_schema_and_consumers(
                 "roadmap to_string checker owner",
             ),
             ("[05-OP-25] ([#1059])", "roadmap to_string backend owner"),
-            ("external target authorities", "roadmap external target authority"),
+            (
+                "external-target/effect dispositions",
+                "roadmap external target authority",
+            ),
+            ("effect dispositions", "roadmap effect authority"),
+            ("non-numeric logical/`where` lowering ([#1284])", "roadmap logical owner"),
             (
                 "exported-stdlib dependency closure",
                 "roadmap stdlib derivation",
@@ -541,19 +789,24 @@ def validate_schema_and_consumers(
         status,
         (
             ("This change is Phase 4B", "status Phase 4B statement"),
-            ("[05-OP-11..25]", "status Phase 4B atom range"),
+            ("[05-OP-11..28]", "status Phase 4B atom range"),
             ("#170 owns the product-tree/backend rows", "status product owner"),
             ("#1281 owns the remaining reduction rows", "status reduction owner"),
+            ("logical/`where` lowering (#1284)", "status logical owner"),
             (
                 "`to_string` checker/eval domain (#1282)",
                 "status to_string checker owner",
             ),
             ("C-host cells (#1059)", "status to_string backend owner"),
-            ("Of the 126 issues parented", "status parented count"),
-            ("#729 | 14 / 52", "status #729 count"),
+            ("Of the 127 issues parented", "status parented count"),
+            ("#729 | 15 / 53", "status #729 count"),
             (
-                "and external target dispositions",
+                "external target dispositions, and exact effect-disposition rows",
                 "status Phase 4C external target delivery",
+            ),
+            (
+                "exact effect-disposition rows",
+                "status Phase 4C effect delivery",
             ),
             (
                 "exported-stdlib dependency closures",
@@ -578,6 +831,7 @@ def validate_contract(root: Path = REPO_ROOT) -> None:
     violations: list[str] = []
     validate_normative_contract(docs, violations)
     validate_schema_and_consumers(docs, violations)
+    validate_frozen_contract(docs, violations)
     if violations:
         raise OracleError("; ".join(violations))
 

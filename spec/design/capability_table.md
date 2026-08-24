@@ -22,8 +22,9 @@ capability policy and `chelis-vocab` for representation vocabulary.
 
 The schema separates target-independent operation semantics from
 per-backend implementation status. Tables A and B cover operations; the
-companion host-ABI constructor table applies the same closed-disposition rule
-to recursive host types without becoming a third operation authority.
+companion host-ABI constructor table and exported-stdlib effect-disposition
+registry apply the same closed-disposition rule to recursive host types and
+effect dependencies without becoming additional operation authorities.
 
 The same separation governs host types. `HostTypeTerm -> ConcreteHostType` is
 a logical-resolution boundary over checked metadata and does not consult a
@@ -104,8 +105,11 @@ The row fields are:
   cannot become either `Supported` or `Rejected` without first authoring its
   language rule.
 
-Effects are NOT rows (they are constructs, not ops - `EffectKind` + checker
-totality, [#730]/[#731]). Movement ops and reductions are ordinary rows;
+Effects are NOT Table-A or Table-B rows: they are constructs, not operations.
+The exported-stdlib effect-disposition registry below gives their execution
+dependencies a separate typed authority. `chelis-vocab::EffectKind` remains
+the closed syntax/handler vocabulary and is not that authority. Movement ops
+and reductions are ordinary rows;
 parameter constraints (axis validity, window literalness per [#725]'s
 resolution) live behind `SignatureRuleId`, not in extra axes. The finite
 product is only for closed semantic choices such as a target dtype; it is not
@@ -222,15 +226,54 @@ external callable exists and executes in its owning environment; it does not
 decide language legality or substitute for a backend cell of a builtin used
 inside that implementation.
 
+### Exported-stdlib effect-disposition registry
+
+Effects reached by an exported stdlib definition use a companion registry
+owned by `chelis-types`, not an implied field on Table B. Its key is exactly
+**(`CanonicalEffectRequirement`, `BackendId`)**. The requirement is a closed
+typed value matching the type layer's complete effect domain:
+`Random | Accum | Io | Test | Resource(ResourceId)`. `ResourceId` preserves
+the exact checked UTF-8 string literal; it is not an author-written row label,
+an inferred device class, or a normalization rule.
+
+The finite row universe is the four payload-free requirements crossed with
+the exact backend set `eval | c-host | c-dag | hip | metal`, plus every exact
+`ResourceId` discovered by the completed checked-body dependency closure of
+the exported-stdlib manifest crossed with that same backend set. Adding a
+variant to `chelis_types::Effect` makes the conversion to
+`CanonicalEffectRequirement` non-exhaustive at compile time. Adding or
+changing a reachable resource literal adds or removes exact rows; it cannot
+inherit another resource's disposition.
+
+Every row has exactly one typed cell:
+
+- `Implemented { implementation_id: EffectImplementationId }`;
+- `Unimplemented { issue: IssueRef, diagnostic_kind: DiagnosticKind }`; or
+- `RejectedByDesign { atom: SpecAtomRef, diagnostic_kind: DiagnosticKind }`.
+
+Missing, duplicate, or stale rows fail registry construction. There is no
+missing-row, wildcard, or default disposition. A permanent rejection requires
+an existing normative atom and an implementation gap requires an open concrete
+issue; the parent [#729] is not a substitute for either. In particular,
+resource-selection meaning remains owned by [#735], so a resource/backend case
+whose result depends on that unauthored decision remains
+`Unimplemented { issue: #735, diagnostic_kind: UnsupportedFeature }` until
+that issue authors the controlling semantics and implementation receipt.
+
+Dependency traversal returns a sealed `CompleteEffectDependencies` only after
+the checked-body fixed point has completed. Its explicit `Pure` case means the
+completed set is empty. An absent traversal result, an unresolved call, or an
+unfinished recursive fixed point cannot be converted to `Pure`.
+
 An exported stdlib definition has no independent external target cell: it is
 Chelis source compiled for the selected backend. Its executability is derived
 transitively from every statically resolved builtin Table-B cell, sibling
-backend cell, host-constructor cell, and effect disposition reachable from its
-checked body. The exported-stdlib manifest must expose a checked body and
-declared signature to this generated dependency closure. An unresolved call,
-missing owning row, empty-by-default dependency result, or recursive cycle
-without a completed fixed point is a construction failure. For each backend,
-the definition is executable exactly when every reachable dependency is
+backend cell, host-constructor cell, and exact effect-registry row reachable
+from its checked body. The exported-stdlib manifest must expose a checked body
+and declared signature to this generated dependency closure. An unresolved
+call, missing owning row, absent dependency result, or recursive cycle without
+a completed fixed point is a construction failure. For each backend, the
+definition is executable exactly when every reachable dependency is
 implemented; otherwise the first dependency in canonical source order returns
 its typed rejection authority. Its §C6 semantic registration still binds a
 numeric exported identity to the language atom; it never supplies execution
@@ -272,13 +315,13 @@ of the shapes that happened to appear in the report.
 |---|---|---|
 | checker acceptance | A + sibling semantic registry | generated predicate; hand lists deleted ([#712]'s class dies here) |
 | `chelis check` reporting | A + sibling semantic registry | check always reports semantic `Rejected` cells because they are target-independent type facts; backend-level rejections surface at build where the target is known |
-| build gates | B + sibling backend product + exported-stdlib dependency closure | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
+| build gates | B + sibling backend product + effect-disposition registry + exported-stdlib dependency closure | generated early-UX gates per [#730] Phase 3's gate contract (earlier/more specific, never the sole defense) |
 | backend dispatch | B + sibling backend product + external target dispositions | macro-generated skeletons; missing arm or external disposition = compile error |
 | [#912] builtin realizability and target sets | A + B + host/sibling-builtin registries | generated routing projection; a root capability comes from the domain that owns it, with no independently authored support list |
-| conformance suite | expanded A parameter product x B + host constructor table + sibling builtin registry + external target dispositions + exported-stdlib dependency closure | every (`Supported`, `Implemented`) source x semantic-parameter x surface x backend cell executed, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it; every legal constructor pair is composed in both nesting orders; every sibling-registry and external callable is exercised under its declared domain; every stdlib export is derived and exercised per backend |
+| conformance suite | expanded A parameter product x B + host constructor table + sibling builtin registry + external target dispositions + effect-disposition registry + exported-stdlib dependency closure | every (`Supported`, `Implemented`) source x semantic-parameter x surface x backend cell executed, exact agreement or [#732]'s tolerance table; every `Rejected`/`Unimplemented` cell asserts its diagnostic from every stage that renders it; every legal constructor pair is composed in both nesting orders; every sibling-registry, external callable, and effect requirement is exercised under its declared domain; every stdlib export is derived and exercised per backend |
 | checked host-cast plan | expanded `cast` A rows + c-host B cells | The pre-Table adapter is `CheckedCastPlan`: C host ABI projection maps every admitted scalar/tensor source and target onto that exhaustive plan, exact same-type pairs alone are identity, and every other pair selects its checked implementation or exact typed rejection. [#730] LU6 owns this typed boundary; Phase 4D replaces its interim product source with the Phase-4C rows |
 | host-type resolution | host constructor table + operation-specific Table-B typed-carrier projections | recursive composition; no inventory of concrete nested shapes and no default ABI |
-| [#733] citations | A + B + host/sibling-builtin registries + external semantic/target registries + exported-stdlib dependency closure | Table A and the sibling builtin registry bind every semantic cell to its controlling atom; their backend products add typed implementation or rejection authority without replacing that semantic binding. The host domain, external-family `SemanticRegistration` registries, external target dispositions, and derived stdlib dependencies carry their corresponding typed authorities. The pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
+| [#733] citations | A + B + host/sibling-builtin registries + external semantic/target registries + effect-disposition registry + exported-stdlib dependency closure | Table A and the sibling builtin registry bind every semantic cell to its controlling atom; their backend products add typed implementation or rejection authority without replacing that semantic binding. The host domain, external-family `SemanticRegistration` registries, external target dispositions, effect dispositions, and derived stdlib dependencies carry their corresponding typed authorities. The pinned Buoy policy and Chelis shell adapter check authority, freshness, and selected-surface completeness |
 
 ## Delivery split and oracles
 
@@ -286,31 +329,32 @@ Phase 4 deliberately separates authoring from generated consumption:
 
 - **4B - semantic and schema freeze.** Author the controlling numbered-spec
   atoms and freeze the numeric, sibling-builtin, host-constructor, and
-  external-family routing schemas before machine population. The authoritative
+  external-family routing schemas plus the exported-stdlib effect-disposition
+  registry before machine population. The authoritative
   oracle is `.venv/bin/python scripts/dtype_phase4b_oracle.py`, whose success
   line is `DTYPE PHASE 4B ORACLE: PASS`.
 - **4C - machine authority population.** Add the closed key/cell types and
   compact authoring macros in `chelis-types`; expand them into a complete machine
   table; give every `BuiltinDecl` an exhaustive domain declaration; populate
   Tables A/B, the host-constructor table, sibling container/boundary
-  registries, and external target dispositions; and backfill exact semantic
-  atoms. Compact macros are an
+  registries, external target dispositions, and exact effect-disposition
+  rows; and backfill exact semantic atoms. Compact macros are an
   authoring convenience only: duplicate or missing expanded rows fail. The
   authoritative 4C oracle is
   `.venv/bin/python scripts/dtype_phase4c_oracle.py`,
   whose success line is `DTYPE PHASE 4C ORACLE: PASS`.
 - **4D - generated consumers.** Derive checker acceptance/reporting, build
   gates, backend dispatch skeletons, root-realizability projections, checked
-  host casts, recursive host-ABI resolution, and exported-stdlib dependency
-  closure. Delete the hand-authored
+  host casts, recursive host-ABI resolution, effect-policy lookup, and
+  exported-stdlib dependency closure. Delete the hand-authored
   mirrors only when the corresponding generated consumer is live. The
   authoritative 4D oracle is
   `.venv/bin/python scripts/dtype_phase4d_oracle.py`,
   whose success line is `DTYPE PHASE 4D ORACLE: PASS`.
 - **4E - conformance.** Generate positive and negative execution cases over
   the complete supported/implemented and rejected/unimplemented products,
-  including host-constructor nesting, external callables, and exported stdlib
-  definitions. The authoritative Phase 4 oracle is
+  including host-constructor nesting, external callables, effect requirements,
+  and exported stdlib definitions. The authoritative Phase 4 oracle is
   `.venv/bin/python scripts/dtype_phase4_oracle.py`, whose success line is
   `DTYPE PHASE 4 ORACLE: PASS`; it invokes the 4B, 4C, and 4D oracles and the
   4E suite. Phase 4 is not complete until this final oracle passes and the
@@ -326,6 +370,7 @@ dispositions and the issue that owns any unimplemented backend cell.
 |---|---|
 | `mean` x Tensor x int widths ([#724]) | DECIDED (2026-07, on the issue) and LANDED on main 2026-08-04 (validated at 013b947d, all three lanes citing the issue in `crates/chelis-cli/tests/reduction_and_bitwise_matrix.rs`; [#724] closed. The decision is release-visible at v0.19 per the roadmap's anti-churn invariant 4): `Rejected` at check time on every application form - integer mean requires an explicit cast (`mean(cast(x, f32))`) or `floor_div(sum(x), n)`; `mean`'s sig is float-only (bool rejects with the integers). Scope: only fractional-producing reductions reject; `sum`/`max`/`min`/`prod` over integers stay valid. Phase 4C records the cell |
 | `add`/`sub`/`mul` x (any) x bool ([#726]) | DECIDED (2026-07, on the issue) and LANDED on main 2026-08-04 (validated at 013b947d, a check-time rejection in every surface form per `crates/chelis-cli/tests/issue_860_checker_chokepoint.rs`; [#726] closed. The decision is release-visible at v0.19 per the roadmap's anti-churn invariant 4): `Rejected` per [04-NUM-4] at check time on every application form. The interim authored roster also includes `neg` and `floor_div`, whose bool-typed results fall under [04-NUM-4]. It does NOT claim `sum`/`prod_reduce`: their pre-existing dispositions remain outside this #726 decision until first-class `count` and the reduction cells are authored together. Diagnostic points at `and`/`or`/`not`, the existing explicit-cast counting idiom (`sum(cast(x, int64), 0)`), and the future `count`. Phase 4C records only the authored cells |
+| `and`/`or`/`not` x both surfaces x bool, plus `where` boolean selection ([05-OP-26..28], [#1284]) | The logical semantic cells are `Supported` exactly under their bool-only truth tables; non-bool, mixed-surface, and shape-mismatch applications are `Rejected`. `where` selects by a bool condition without numeric conversion. The pre-table `Mul`/`MaxElem`/comparison and mask-arithmetic aliases are not `Implemented` receipts because they send bool data through numeric IR. Every affected backend cell remains `Unimplemented { issue: #1284, diagnostic_kind: UnsupportedFeature }` until the typed non-numeric IR oracle is green; #729 is only the parent |
 | scalar `relu`/`sigmoid`/`silu`/`gelu`/`tanh` ([#712], [#704]) | DECIDED (2026-07, on the issue) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation: `Supported` on float dtypes at BOTH surfaces (a scalar is a rank-0 tensor); non-float is a check-time domain `Rejected`, never a silent 0. Eval and C now execute every active float width through dtype-aware kernels/helpers, and the always-run scalar matrix requires byte-identical observation. Phase 4C records the rows, 4D replaces the hand registration, and 4E replaces the curated matrix |
 | scalar `tan`/`atan`/`recip` ([#704]) | DECIDED by existing `spec/05-risc-primitives.md` §2.2 and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation on float types only (f32, f64, f16, bf16); non-float is a check-time domain `Rejected`. In particular `recip(0)` is IEEE infinity, not [04-NUM-9] `DivZero`. Eval and C now agree at every admitted width, and the C host path has no silent-zero fallback. Like [#1009]'s callables these three predate the semantic-registration ratchet and have §2.2 table semantics rather than their own `[05-OP-N]` atoms; Phase 4 authors those atoms and replaces the interim hand registration/matrix |
 | scalar `floor`/`ceil`/`round` x int widths ([#715]'s rows) | DECIDED (2026-07, via [#712]'s comment) and IMPLEMENTED by the 2026-08-05 pre-table scalar remediation: `Supported` as an exact identity at int8/int16/int32/int64 in checker, eval, and C, with no float conversion. Phase 4C records the cells and 4D derives their consumers |
@@ -423,8 +468,8 @@ checker.
 The other family semantic registries record which existing normative decision
 controls each discovered callable; they do not create language semantics.
 Per-backend executability is Table B's, the sibling backend product's, the
-external target disposition's, or the exported-stdlib dependency closure's
-separate decision,
+external target disposition's, the effect-disposition registry's, or the
+exported-stdlib dependency closure's separate decision,
 reported at build through [#730]'s `Unsupported` channel where the
 target is known: a language-legal op a backend cannot run is a
 CAPABILITY rejection, never a checker type error (§Derivations owns
@@ -508,3 +553,4 @@ in the §C6 family registry. Neither path is a grandfathered exemption.
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717
 [#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
 [#1282]: https://github.com/Chelis-Lang/chelis/issues/1282
+[#1284]: https://github.com/Chelis-Lang/chelis/issues/1284

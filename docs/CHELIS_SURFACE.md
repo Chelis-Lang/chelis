@@ -201,7 +201,7 @@ all backends and differentiate via their decomposition. `spec/05` §3–4.
 |---|---|---|
 | `sub` | `add(a, neg(b))` | differentiable |
 | `eq`,`neq`,`gt`,`gte`,`lte`,`lt` | `cmplt` compositions (`spec/05` §3.2) | zero-grad (bool out) |
-| `and`,`or`,`not` | `mul` / `max_elem` / `neg` on bools | zero-grad (bool) |
+| `and`,`or`,`not` | Spec: bool-only truth tables ([05-OP-26..28]); the pre-v0.19 IR still uses numeric aliases, tracked by #1284 | `grad` rejects |
 | `relu` | `max_elem(x, 0)` | differentiable (subgradient) |
 | `sigmoid` | `recip(add(1, exp(neg(x))))` | differentiable |
 | `tanh`,`silu`,`gelu` | `tier2.rs` decompositions | differentiable |
@@ -244,7 +244,7 @@ capability.
 | `einsum` | `(equation: string, &lhs, &rhs) -> tensor` | 2-operand only today; no ellipsis; static-extent errors rejected at check |
 | `diagonal` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | diagonal extraction |
 | `trace` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | matrix trace |
-| `where` | `(&cond, &a, &b) -> tensor` | `DAG+Host`: also has the `add(mul(cond,a),mul(neg(cond),b))` DAG form (`spec/05` §3.5) |
+| `where` | `(&cond, &a, &b) -> tensor` | Spec: element-wise selection without converting the boolean condition to a numeric dtype; the pre-v0.19 numeric-mask DAG form is tracked by #1284 (`spec/05` §3.5) |
 | `clamp` | `(&tensor, lo, hi) -> tensor` | elementwise clip |
 | `concat` | `(tensors: List[tensor], axis: int32) -> tensor` | join tensors along axis; ordinary two-list concatenation has no axis slot |
 | `split` | `(&tensor, axis: int32, sizes: List[int]) -> list` | partition along axis |
