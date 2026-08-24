@@ -495,7 +495,7 @@ fn test_assert_close_tensor_accepts_each_active_float_dtype() {
                 ("tolerance", tolerance),
             ],
         )
-        .unwrap_or_else(|error| panic!("{dtype:?} own-width comparison failed: {error}"));
+        .unwrap_or_else(|error| panic!("{} own-width comparison failed: {error}", dtype.name()));
     }
 }
 
@@ -517,6 +517,40 @@ fn test_assert_close_tensor_rejects_infinite_tolerance() {
 }
 
 #[test]
+fn test_assert_close_tensor_runtime_shape_mismatch_uses_decimal_shape_rendering() {
+    let actual = tensor_value(Prim::F32, vec![2], vec![1.0, 2.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::F32, 0.0);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "shape")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("different tensor shapes must fail before comparison");
+    assert!(error.contains("shape mismatch, expected [1], got [2]"));
+}
+
+#[test]
+fn test_assert_close_tensor_runtime_non_float_tolerance_uses_canonical_renderer() {
+    let actual = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let expected = tensor_value(Prim::F32, vec![1], vec![1.0]);
+    let tolerance = scalar_of(Prim::Int32, 0.0);
+    let error = eval_deep_with_bindings(
+        r#"test_assert_close_tensor(actual, expected, tolerance, "dtype")"#,
+        &[
+            ("actual", actual),
+            ("expected", expected),
+            ("tolerance", tolerance),
+        ],
+    )
+    .expect_err("a non-float tolerance must fail defensively at runtime");
+    assert!(error.contains("expected float tolerance, got int32 0"));
+}
+
+#[test]
 fn test_assert_close_tensor_infinity_and_signed_zero_contract() {
     for dtype in [Prim::F16, Prim::Bf16, Prim::F32, Prim::F64] {
         let actual = tensor_value(dtype, vec![3], vec![f64::INFINITY, f64::NEG_INFINITY, -0.0]);
@@ -530,7 +564,7 @@ fn test_assert_close_tensor_infinity_and_signed_zero_contract() {
                 ("tolerance", tolerance),
             ],
         )
-        .unwrap_or_else(|error| panic!("{dtype:?} equal infinities/zeros failed: {error}"));
+        .unwrap_or_else(|error| panic!("{} equal infinities/zeros failed: {error}", dtype.name()));
 
         let actual = tensor_value(dtype, vec![2], vec![f64::INFINITY, 1.0]);
         let expected = tensor_value(dtype, vec![2], vec![f64::NEG_INFINITY, f64::INFINITY]);

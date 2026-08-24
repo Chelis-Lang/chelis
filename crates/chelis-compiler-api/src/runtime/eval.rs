@@ -70,6 +70,15 @@ fn first_f64_mismatch(
         })
 }
 
+fn render_shape(shape: &[usize]) -> String {
+    let dimensions = shape
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{dimensions}]")
+}
+
 impl<'a> EvalContext<'a> {
     pub(super) fn resolve_top_level(&mut self, name: &str) -> Result<RuntimeValue, String> {
         if let Some(value) = self.bindings.get(name) {
@@ -2165,9 +2174,10 @@ impl<'a> EvalContext<'a> {
                 let expected = expect_tensor_arg(args, 1)?;
                 let tolerance = match args.get(2) {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => *payload,
-                    other => {
+                    _ => {
                         return Err(format!(
-                            "assert_close_tensor: expected float tolerance, got {other:?}"
+                            "assert_close_tensor: expected float tolerance, got {}",
+                            describe_argument(args.get(2))
                         ));
                     }
                 };
@@ -2186,8 +2196,9 @@ impl<'a> EvalContext<'a> {
                 }
                 if actual.value.shape != expected.value.shape {
                     return Err(format!(
-                        "assert_close_tensor ({label}): shape mismatch, expected {:?}, got {:?}",
-                        expected.value.shape, actual.value.shape
+                        "assert_close_tensor ({label}): shape mismatch, expected {}, got {}",
+                        render_shape(&expected.value.shape),
+                        render_shape(&actual.value.shape)
                     ));
                 }
                 let tolerance_f64 = tolerance.as_f64_lossy();
