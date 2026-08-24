@@ -213,6 +213,7 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             | WireRiscOp::Ceil
             | WireRiscOp::Round
             | WireRiscOp::Sum { .. }
+            | WireRiscOp::Count { .. }
             | WireRiscOp::MaxReduce { .. }
             | WireRiscOp::MinReduce { .. }
             | WireRiscOp::ProdReduce { .. }
@@ -494,7 +495,10 @@ const _: () = {
     // integer constants above 2^53 are now representable on the wire and
     // still enter the real envelope through the same lossy image (the
     // exact-envelope swap is the chelis#688 Phase 2 work).
-    assert!(WIRE_DAG_SCHEMA_VERSION == 5);
+    // Moved to `6` for chelis#1287: first-class bool `count` adds the
+    // f64-free `WireRiscOp::Count { axes }` payload and exact-only schema
+    // decoding. It does not change prove's float-bound extraction contract.
+    assert!(WIRE_DAG_SCHEMA_VERSION == 6);
 };
 
 #[cfg(test)]

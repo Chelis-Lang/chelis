@@ -1784,8 +1784,8 @@ pub fn shape_class(name: &str) -> ShapeClass {
         // and the procedural arm (`check_expand_signature`) computes the
         // symbolic output row, rejecting positional axes at symbolic rank —
         // the same gate structure as the reductions.
-        "sum" | "count" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
-        | "argmin_reduce" | "expand" => ShapeClass::NameTracked,
+        "sum" | "count" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
+        | "argmax_reduce" | "argmin_reduce" | "expand" => ShapeClass::NameTracked,
         // Positional reshapes/permutes, matmul/conv, axis-indexed ops,
         // gather/scatter, and every non-tensor/host builtin.
         _ => ShapeClass::Rewriting,

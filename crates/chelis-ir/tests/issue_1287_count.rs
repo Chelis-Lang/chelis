@@ -9,7 +9,7 @@ use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::lower::try_lower_program;
 use chelis_ir::verify;
 use chelis_ir::vmap::vectorize_axis0;
-use chelis_types::check_ir_program;
+use chelis_types::check_typed_program;
 use chelis_types::types::Prim;
 
 fn ty(dims: &[usize], precision: Prim) -> TensorType {
@@ -62,7 +62,10 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
     let input = TensorValue::finalize_from_wide_int("test", Prim::Bool, vec![2, 0, 3], vec![])
         .expect("empty bool fixture");
     let values = eval_tensor(&dag, &HashMap::from([("x".into(), input)])).expect("count eval");
-    assert_eq!(values[&chelis_ir::dag::NodeId(1)].to_f64_lossy_vec(), vec![0.0; 6]);
+    assert_eq!(
+        values[&chelis_ir::dag::NodeId(1)].to_f64_lossy_vec(),
+        vec![0.0; 6]
+    );
 }
 
 #[test]
@@ -99,15 +102,11 @@ fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
 
 fn lower_surf(source: &str) -> Result<Dag, String> {
     let decls = chelis_surf::parser::parse_str(source).map_err(|e| format!("parse: {e:?}"))?;
-    let exprs = chelis_macros::expand_program(
-        &chelis_surf::desugar::desugar_program(&decls),
-        &chelis_macros::ExpansionOptions::default(),
-    )
-    .map_err(|e| format!("expand: {e:?}"))?
-    .into_exprs();
-    let checked = check_ir_program(&exprs).map_err(|r| format!("check: {:#?}", r.errors))?;
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let checked = check_typed_program(&exprs).map_err(|r| format!("check: {:#?}", r.errors))?;
     let checked = chelis_effects::check_program(&checked).map_err(|e| format!("effects: {e:?}"))?;
-    let checked = chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
+    let checked =
+        chelis_types::check_linearity(&checked).map_err(|e| format!("linearity: {e:?}"))?;
     try_lower_program(&checked).map_err(|diag| format!("lower: {diag:?}"))
 }
 
@@ -152,7 +151,10 @@ fn vmap_shifts_every_count_axis_and_preserves_the_batch_axis() {
         .find(|node| matches!(node.op, RiscOp::Count { .. }))
         .expect("Count survives vmap");
     assert_eq!(count.op, RiscOp::Count { axes: vec![3, 1] });
-    assert_eq!(count.output_type.dims, vec![DimInfo::Lit(5), DimInfo::Lit(3)]);
+    assert_eq!(
+        count.output_type.dims,
+        vec![DimInfo::Lit(5), DimInfo::Lit(3)]
+    );
     assert!(verify::verify(&vmapped).is_empty());
 }
 

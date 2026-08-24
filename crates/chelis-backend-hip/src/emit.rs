@@ -1790,15 +1790,17 @@ impl HipEmitter {
                 &node.output_type,
             ),
             RiscOp::CastTrunc { .. } => return Err(Self::cast_trunc_unsupported(node)),
-            RiscOp::Count { .. } => return Err(Unsupported::new(
-                UnsupportedKind::Op("count".to_string()),
-                format!("the HIP kernel set (node {})", node.id.0),
-                Stage::Codegen("hip"),
-                chelis_types::unimplemented_rejection!(
-                    729,
-                    "chelis#1291 owns the dedicated HIP/Metal count kernels"
-                ),
-            )),
+            RiscOp::Count { .. } => {
+                return Err(Unsupported::new(
+                    UnsupportedKind::Op("count".to_string()),
+                    format!("the HIP kernel set (node {})", node.id.0),
+                    Stage::Codegen("hip"),
+                    chelis_types::unimplemented_rejection!(
+                        729,
+                        "chelis#1291 owns the dedicated HIP/Metal count kernels"
+                    ),
+                ));
+            }
             RiscOp::Store { name } => {
                 self.emit_store(id, name.as_str(), &node.inputs, &node.output_type)
             }

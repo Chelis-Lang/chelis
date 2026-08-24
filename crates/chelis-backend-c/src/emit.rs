@@ -4430,9 +4430,7 @@ impl CEmitter {
             self.line(&format!(
                 "if (t{a}->shape[{axis}] != 0 && __count_n_{id} > INT64_MAX / t{a}->shape[{axis}]) {{ fprintf(stderr, \"count reduction extent overflow\\n\"); abort(); }}"
             ));
-            self.line(&format!(
-                "__count_n_{id} *= t{a}->shape[{axis}];"
-            ));
+            self.line(&format!("__count_n_{id} *= t{a}->shape[{axis}];"));
         }
         self.line("#pragma omp parallel for");
         self.line(&format!(

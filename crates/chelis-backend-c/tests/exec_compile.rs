@@ -586,7 +586,10 @@ int main() {{
     );
     let output = compile_and_run_kernel("count_empty", &generated.c_source, &harness)
         .expect("empty Count C kernel compiles and runs");
-    assert!(output.contains("PASS"), "wrong empty Count output: {output}");
+    assert!(
+        output.contains("PASS"),
+        "wrong empty Count output: {output}"
+    );
 }
 
 // ---- Issue #254: reduce_window_* C-backend numerical parity ----

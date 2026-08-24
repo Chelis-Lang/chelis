@@ -337,7 +337,9 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                             .dims
                             .iter()
                             .enumerate()
-                            .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim.clone()))
+                            .filter_map(|(axis, dim)| {
+                                (!axes.contains(&axis)).then_some(dim.clone())
+                            })
                             .collect();
                         if node.output_type.dims != expected {
                             errors.push(format!(

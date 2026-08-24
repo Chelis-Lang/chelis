@@ -6,8 +6,8 @@
 
 use chelis_surf::desugar::desugar_program;
 use chelis_surf::parser::parse_str as parse_surf;
-use chelis_types::errors::CheckError;
 use chelis_types::check_typed_program;
+use chelis_types::errors::CheckError;
 
 fn errors(source: &str) -> Vec<CheckError> {
     let decls = parse_surf(source).expect("Surf fixture parses");
@@ -24,7 +24,10 @@ fn assert_clean(source: &str) {
 
 fn assert_rejects(source: &str, needle: &str) {
     let found = errors(source);
-    assert!(!found.is_empty(), "expected type error, but program checked");
+    assert!(
+        !found.is_empty(),
+        "expected type error, but program checked"
+    );
     assert!(
         found.iter().any(|error| error.message.contains(needle)),
         "expected diagnostic containing {needle:?}, got {found:#?}"
@@ -43,9 +46,7 @@ def g(x: tensor[2, 3, 4, bool]) -> tensor[3, int64] = count(&x, 2, 0)
 
 #[test]
 fn bool_tensor_is_required_not_numeric_tensor_or_bool_scalar() {
-    assert_clean(
-        "def good(x: tensor[4, bool]) -> tensor[int64] = count(&x, 0)",
-    );
+    assert_clean("def good(x: tensor[4, bool]) -> tensor[int64] = count(&x, 0)");
     assert_rejects(
         "def bad(x: tensor[4, int64]) -> tensor[int64] = count(&x, 0)",
         "bool tensor",

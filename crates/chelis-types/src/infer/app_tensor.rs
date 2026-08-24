@@ -521,9 +521,7 @@ pub(super) fn check_reduction_signature(
         }
     };
 
-    if name == "count"
-        && !matches!(prec, TensorPrec::Concrete(Prim::Bool) | TensorPrec::Var(_))
-    {
+    if name == "count" && !matches!(prec, TensorPrec::Concrete(Prim::Bool) | TensorPrec::Var(_)) {
         return report(
             errors,
             CheckError::new(
@@ -562,7 +560,9 @@ pub(super) fn check_reduction_signature(
     let mut remove: Vec<usize> = Vec::new();
     if !has_spread
         && (axis_exprs.len() == 1 || name == "count")
-        && axis_exprs.iter().all(|axis| extract_int_for_dim(axis).is_some())
+        && axis_exprs
+            .iter()
+            .all(|axis| extract_int_for_dim(axis).is_some())
     {
         for axis_expr in axis_exprs {
             let raw = extract_int_for_dim(axis_expr).expect("guarded static axis");
@@ -604,10 +604,10 @@ pub(super) fn check_reduction_signature(
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name}: a positional integer axis is only valid as the single axis of a \
-                         concrete-rank operand; on a rank-spread operand or for multiple axes, \
-                         name each axis (e.g. `{name}(x, seq)` or `{name}(x, seq, head)`) so it \
-                         is located by name (spec/04-type-system.md \u{00a7}4.5.3)"
+                            "{name}: positional and named axes cannot be mixed, and positional axes \
+                         require a concrete-rank operand; name every selected axis on a \
+                         rank-spread operand (e.g. `{name}(x, seq, head)`) \
+                         (spec/04-type-system.md \u{00a7}4.5.3)"
                         ),
                         vec![],
                     ),

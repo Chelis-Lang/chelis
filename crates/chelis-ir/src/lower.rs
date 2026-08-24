@@ -2513,6 +2513,27 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 return true;
             }
             if let Some(name) = builtin_name(list) {
+                // [05-OP-29]: Count axes are checked compile-time selectors,
+                // not scalar runtime computations. In particular Surf spells
+                // `-1` as an integer `neg` application, which the generic
+                // scalar rule below would otherwise route to the host lane
+                // before the dedicated Count lowerer could normalize it.
+                // The type checker has already proved that every selector is
+                // either a static int32 axis or a named operand dimension, so
+                // only the tensor operand contributes runtime requirements.
+                if name == "count" {
+                    let app_children = children(list);
+                    let axes = app_children.get(2..).unwrap_or_default();
+                    if !axes.is_empty()
+                        && axes.iter().all(|axis| {
+                            extract_int_axis(axis).is_some() || callable_ref_name(axis).is_some()
+                        })
+                    {
+                        return app_children.get(1).is_some_and(|input| {
+                            expr_requires_host_runtime_with_ctx(input, exempt_to_tensor_literal)
+                        });
+                    }
+                }
                 if matches!(
                     name,
                     "print"
