@@ -765,12 +765,14 @@ accept/reject corpus driven through every module-text door, plus a
 that guard actually covers is worth stating precisely, because a census is
 not a proof: it resolves qualified paths, `use` imports under any local
 name, module aliases, crate aliases (including the grouped-`self`,
-`pub use`, and `extern crate` spellings), and glob imports, and it applies a
-deliberately conservative fail-closed policy to `macro_rules!` bodies, whose
-tokens no path resolution can see through. It does not resolve a cross-file
-re-export chain or a procedural macro from another crate; closing those
-needs the visibility chokepoint that carrier retirement (#1029) brings, not
-a source census. It decides the top-level form rule in the controlling
+`pub use`, and `extern crate` spellings), and glob imports, with every
+identifier unraw-normalized first so a raw spelling such as
+`chelis_deep::r#parser::r#parse_str` cannot slip a string comparison; and it
+applies a deliberately conservative fail-closed policy to `macro_rules!`
+bodies, whose tokens no path resolution can see through. It does not resolve
+a cross-file re-export chain or a procedural macro from another crate;
+closing those needs the visibility chokepoint that carrier retirement
+(#1029) brings, not a source census. It decides the top-level form rule in the controlling
 numbered spec ([03-PROG-1] through [03-PROG-3] in
 `spec/03-deep-syntax.md`), which chapter 03's PEG had left unrestricted. And
 it wires #908's own oracle continuously; see the "Guards existing but not

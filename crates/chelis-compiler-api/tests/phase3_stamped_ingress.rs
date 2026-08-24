@@ -759,6 +759,25 @@ mod weak_ingress {
     /// top-level stamp to weaken) out of the findings.
     pub const CRATE: &str = "chelis_deep";
 
+    /// An identifier's name with the raw-identifier prefix removed.
+    ///
+    /// `r#parse_str` and `parse_str` name the same function: `r#` is a
+    /// lexical escape for spelling a keyword as an identifier, and Rust
+    /// accepts it on non-keywords too. `Ident::to_string` renders the raw
+    /// form literally as `"r#parse_str"`, and `Ident`'s own `PartialEq<str>`
+    /// treats raw and non-raw as different, so BOTH the string comparisons
+    /// and the `==` comparisons in this guard would miss it. Every identifier
+    /// the census reads goes through here first; a comparison that skips it
+    /// is a hole, which is how `chelis_deep::r#parser::parse_str` compiled
+    /// past an earlier revision of this guard.
+    fn ident_text(ident: &syn::Ident) -> String {
+        let rendered = ident.to_string();
+        match rendered.strip_prefix("r#") {
+            Some(unraw) => unraw.to_string(),
+            None => rendered,
+        }
+    }
+
     fn is_weak_function(name: &str) -> bool {
         FUNCTIONS.contains(&name)
     }
@@ -802,16 +821,22 @@ mod weak_ingress {
                 // `use chelis_deep as deep;` binds the crate only at the
                 // root of the tree; `use a::chelis_deep as deep;` names some
                 // other item.
-                syn::UseTree::Rename(rename) if depth == 0 && rename.ident == CRATE => {
-                    self.aliases.insert(rename.rename.to_string());
+                syn::UseTree::Rename(rename)
+                    if depth == 0 && ident_text(&rename.ident) == CRATE =>
+                {
+                    self.aliases.insert(ident_text(&rename.rename));
                 }
                 // `use chelis_deep::{self as deep};` and `use chelis_deep::{self};`.
                 // The `self` sits one level below the crate prefix, so the
                 // depth-0 arm above never sees it.
-                syn::UseTree::Rename(rename) if prefix_is_crate && rename.ident == "self" => {
-                    self.aliases.insert(rename.rename.to_string());
+                syn::UseTree::Rename(rename)
+                    if prefix_is_crate && ident_text(&rename.ident) == "self" =>
+                {
+                    self.aliases.insert(ident_text(&rename.rename));
                 }
-                syn::UseTree::Name(name) if prefix_is_crate && name.ident == "self" => {
+                syn::UseTree::Name(name)
+                    if prefix_is_crate && ident_text(&name.ident) == "self" =>
+                {
                     self.aliases.insert(CRATE.to_string());
                 }
                 syn::UseTree::Group(group) => {
@@ -820,7 +845,7 @@ mod weak_ingress {
                     }
                 }
                 syn::UseTree::Path(path) => {
-                    let names_crate = depth == 0 && path.ident == CRATE;
+                    let names_crate = depth == 0 && ident_text(&path.ident) == CRATE;
                     self.walk_tree(&path.tree, depth + 1, names_crate);
                 }
                 _ => {}
@@ -838,12 +863,12 @@ mod weak_ingress {
         /// `extern crate chelis_deep as deep;` binds a crate alias without a
         /// `use` tree at all.
         fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
-            if item.ident != CRATE {
+            if ident_text(&item.ident) != CRATE {
                 return;
             }
             match &item.rename {
                 Some((_, rename)) => {
-                    self.aliases.insert(rename.to_string());
+                    self.aliases.insert(ident_text(rename));
                 }
                 None => {
                     self.aliases.insert(CRATE.to_string());
@@ -927,12 +952,12 @@ mod weak_ingress {
         fn walk_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
             match tree {
                 syn::UseTree::Path(path) => {
-                    prefix.push(path.ident.to_string());
+                    prefix.push(ident_text(&path.ident));
                     self.walk_tree(&path.tree, prefix);
                     prefix.pop();
                 }
                 syn::UseTree::Name(name) => {
-                    let ident = name.ident.to_string();
+                    let ident = ident_text(&name.ident);
                     // `use a::b::{self}` binds `b` under its own name.
                     let local = if ident == "self" {
                         prefix.last().cloned().unwrap_or_else(|| ident.clone())
@@ -944,8 +969,8 @@ mod weak_ingress {
                 syn::UseTree::Rename(rename) => {
                     self.record(
                         prefix,
-                        &rename.ident.to_string(),
-                        &rename.rename.to_string(),
+                        &ident_text(&rename.ident),
+                        &ident_text(&rename.rename),
                     );
                 }
                 syn::UseTree::Glob(_) => {
@@ -998,7 +1023,7 @@ mod weak_ingress {
             let segments: Vec<String> = path
                 .segments
                 .iter()
-                .map(|segment| segment.ident.to_string())
+                .map(|segment| ident_text(&segment.ident))
                 .collect();
             if let Some(tail) = segments.last() {
                 let rendered = segments.join("::");
@@ -1048,7 +1073,7 @@ mod weak_ingress {
             for token in tokens {
                 match token {
                     proc_macro2::TokenTree::Ident(ident) => {
-                        let name = ident.to_string();
+                        let name = ident_text(&ident);
                         if is_weak_function(&name) {
                             self.findings.push(format!(
                                 "macro `{macro_name}!` mentions the weak Deep ingress \
@@ -1071,7 +1096,7 @@ mod weak_ingress {
             let name = item
                 .ident
                 .as_ref()
-                .map(ToString::to_string)
+                .map(ident_text)
                 .unwrap_or_else(|| "<anonymous>".to_string());
             self.scan_tokens(&name, item.mac.tokens.clone());
             visit::visit_item_macro(self, item);
@@ -1093,7 +1118,10 @@ mod weak_ingress {
     /// `chelis_deep::parser::parse_str` names elsewhere.
     ///
     /// **What this resolves:** fully qualified paths; `use` imports of a
-    /// weak function under any local name; module aliases
+    /// weak function under any local name, raw-identifier spellings
+    /// (`r#parse_str`, `chelis_deep::r#parser::parse_str`) included, because
+    /// every identifier is unraw-normalized before comparison; module
+    /// aliases
     /// (`use chelis_deep::parser as p`), in the plain, grouped, and
     /// grouped-`self` spellings; crate aliases, whether written
     /// `use chelis_deep as deep`, `use chelis_deep::{self as deep}`,
@@ -1602,6 +1630,136 @@ fn the_guard_does_not_flag_an_extern_crate_for_another_crate() {
 
         fn ingest(source: &str) {
             let _ = surf::parser::parse_str(source);
+        }
+    "#;
+    assert!(
+        weak_ingress::findings(source).is_empty(),
+        "{:?}",
+        weak_ingress::findings(source)
+    );
+}
+
+#[test]
+fn the_guard_catches_a_raw_identifier_call() {
+    // Red-team mutation, verbatim. `r#parse_str` and `parse_str` name the
+    // same function, but `Ident::to_string` renders the raw form literally
+    // and `Ident`'s `PartialEq<str>` treats the two as different, so an
+    // un-normalized census misses every raw spelling.
+    let source = r#"
+        #[allow(dead_code)]
+        fn ingest(text: &str) {
+            let _ = chelis_deep::parser::r#parse_str(text);
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("chelis_deep::parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_raw_identifier_import_and_call() {
+    // Red-team mutation, verbatim. This one binds the local name `parse_str`,
+    // which is exactly the case the doc comment's "under any local name"
+    // sentence promises to catch.
+    let source = r#"
+        use chelis_deep::parser::r#parse_str;
+
+        #[allow(dead_code)]
+        fn ingest(text: &str) {
+            let _ = r#parse_str(text);
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings.iter().any(|finding| finding.contains("parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_raw_module_segment() {
+    // Red-team mutation, verbatim. The raw spelling on the MODULE segment,
+    // not the function, so normalizing only function idents would still miss
+    // it.
+    let source = r#"
+        #[allow(dead_code)]
+        fn ingest(text: &str) {
+            let _ = chelis_deep::r#parser::parse_str(text);
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("chelis_deep::parser::parse_str")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_catches_a_raw_crate_segment_and_alias() {
+    // One step past the review: the raw spelling on the CRATE segment, and a
+    // raw crate alias. Both feed `roots_at_owning_crate`, which compares
+    // against `chelis_deep`.
+    let qualified = r#"
+        #[allow(dead_code)]
+        fn ingest(text: &str) {
+            let _ = r#chelis_deep::parser::parse_str(text);
+        }
+    "#;
+    assert!(
+        !weak_ingress::findings(qualified).is_empty(),
+        "raw crate segment: {:?}",
+        weak_ingress::findings(qualified)
+    );
+
+    let aliased = r#"
+        use r#chelis_deep as r#deep;
+
+        #[allow(dead_code)]
+        fn ingest(text: &str) {
+            let _ = r#deep::parser::parse_str(text);
+        }
+    "#;
+    assert!(
+        !weak_ingress::findings(aliased).is_empty(),
+        "raw crate alias: {:?}",
+        weak_ingress::findings(aliased)
+    );
+}
+
+#[test]
+fn the_guard_catches_a_raw_identifier_inside_a_macro_body() {
+    // The macro policy scans tokens, so it needs the same normalization: a
+    // raw ident in a `macro_rules!` body has the same textual shape problem.
+    let source = r#"
+        macro_rules! parse_weakly {
+            ($source:expr) => {
+                chelis_deep::parser::r#parse_str($source)
+            };
+        }
+    "#;
+    let findings = weak_ingress::findings(source);
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.contains("macro `parse_weakly!`")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn the_guard_does_not_flag_a_raw_identifier_of_an_unrelated_crate() {
+    // Normalization must not widen the anchoring: unrawing `chelis_surf`
+    // still leaves a different crate.
+    let source = r#"
+        #[allow(dead_code)]
+        fn ingest(text: &str) {
+            let _ = chelis_surf::r#parser::r#parse_str(text);
         }
     "#;
     assert!(
