@@ -4,11 +4,12 @@ sig normal_like: &tensor[..r, p_float] -> p_float -> p_float -> tensor[..r, p_fl
 def normal_like(template, mean, std) = {
   u1 = uniform_like(template, 1e-7, 1.0)
   u2 = uniform_like(template, 0.0, 1.0)
-  values = map(fn (pair) -> {
-    cos_term = cos(mul(6.283185307179586, pair.1))
-    radius = sqrt(mul(-2.0, log(pair.0)))
-    add(mean, mul(std, mul(radius, cos_term)))
-  }, zip(to_list(u1), to_list(u2)))
+  u1_flat = reshape(copy(u1), [numel(u1)])
+  u2_flat = reshape(copy(u2), [numel(u2)])
+  radii = map(fn (x) -> sqrt(mul(-2.0, log(x))), to_list(u1_flat))
+  cos_terms = map(fn (x) -> cos(mul(6.283185307179586, x)), to_list(u2_flat))
+  z = mul(to_tensor(radii), to_tensor(cos_terms))
+  values = map(fn (x) -> add(mean, mul(std, x)), to_list(z))
   _ = drop(u1)
   _ = drop(u2)
   reshape(to_tensor(values), tensor_shape(template, cast(0, int32), cast(rank(template), int32), drop([cast(0, int64)], cast(1, int64))))

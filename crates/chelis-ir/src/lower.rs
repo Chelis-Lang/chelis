@@ -1175,9 +1175,33 @@ pub fn try_lower_subexpr_program(
     full_type_env: HashMap<String, Expr>,
     program_defs: HashMap<String, Expr>,
 ) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_random_state(
+        expr,
+        scoped_tensor_types,
+        full_type_env,
+        program_defs,
+        None,
+        0,
+    )
+}
+
+pub fn try_lower_subexpr_program_with_random_state(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    full_type_env: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     let context = prepare_subexpr_lowering_context(&full_type_env, Arc::new(program_defs));
-    try_lower_subexpr_program_with_context(expr, scoped_tensor_types, &context)
+    try_lower_subexpr_program_with_context_and_random_state(
+        expr,
+        scoped_tensor_types,
+        &context,
+        random_seed,
+        random_counter,
+    )
 }
 
 #[derive(Clone)]
@@ -1208,19 +1232,47 @@ pub(crate) fn try_lower_subexpr_program_with_context(
     context: &SubexprLoweringContext,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| lower_subexpr_program_inner(expr, scoped_tensor_types, context))
+    try_lower_subexpr_program_with_context_and_random_state(
+        expr,
+        scoped_tensor_types,
+        context,
+        None,
+        0,
+    )
+}
+
+fn try_lower_subexpr_program_with_context_and_random_state(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<Dag, LowerDiagnostic> {
+    catch_lowering(|| {
+        lower_subexpr_program_inner(
+            expr,
+            scoped_tensor_types,
+            context,
+            random_seed,
+            random_counter,
+        )
+    })
 }
 
 fn lower_subexpr_program_inner(
     expr: &Expr,
     scoped_tensor_types: HashMap<String, TensorType>,
     context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
 ) -> Dag {
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
         context.program_defs.clone(),
         LinearityInfo::default(),
     );
+    ctx.random_seed = random_seed;
+    ctx.random_counter = random_counter;
     // Pre-create a `Load` for every scoped tensor param in a DETERMINISTIC
     // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `HashMap`,
     // whose iteration order is randomized per process; using it directly made
@@ -3511,6 +3563,21 @@ fn to_list_source_expr(expr: &Expr) -> Option<&Expr> {
     Some(source)
 }
 
+fn zip_to_list_source_exprs(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let ("zip", [lhs, rhs]) = app_var_name_and_args(expr)? else {
+        return None;
+    };
+    Some((to_list_source_expr(lhs)?, to_list_source_expr(rhs)?))
+}
+
+fn tensor_shape_template_expr(expr: &Expr) -> Option<&Expr> {
+    let (name, args) = app_var_name_and_args(expr)?;
+    if name != "tensor_shape" && !name.ends_with("__tensor_shape") {
+        return None;
+    }
+    args.first()
+}
+
 fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
     match dim {
         DimInfo::Lit(n) => Some(*n),
@@ -4548,6 +4615,7 @@ struct LowerCtx {
     program_types: Arc<HashMap<String, TensorType>>,
     program_defs: Arc<HashMap<String, Expr>>,
     random_seed: Option<u64>,
+    random_counter: u64,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
     /// Recursion lowers by unrolling, so a self- or mutually-recursive call
@@ -4660,6 +4728,7 @@ impl LowerCtx {
             program_types: program_types.into(),
             program_defs: program_defs.into(),
             random_seed: None,
+            random_counter: 0,
             linearity,
             inlining_depths: HashMap::new(),
             inlining_active: 0,
@@ -5996,7 +6065,7 @@ impl LowerCtx {
         });
         match callable {
             CallableExpr::Plain(fn_expr) => {
-                Some(self.lower_plain_callable_app(&fn_expr, args, app_span, inlining_name))
+                Some(self.lower_plain_callable_app(&fn_expr, args, ty, app_span, inlining_name))
             }
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -6438,6 +6507,11 @@ impl LowerCtx {
         // reached while differentiating the body monomorphizes to concrete
         // ranks instead of tripping the rank-monomorphization boundary.
         subctx.rank_substitutions = grad_rank_subst;
+        // Random wrapper adjoints are pathwise: the differentiated graph must
+        // consume the same handled stream as the forward execution. A fresh
+        // lowering context otherwise silently falls back to seed zero.
+        subctx.random_seed = self.random_seed;
+        subctx.random_counter = self.random_counter;
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
@@ -6852,6 +6926,7 @@ impl LowerCtx {
         &mut self,
         fn_expr: &Expr,
         args: &[Expr],
+        expected_return_ty: &TensorType,
         _app_span: Span,
         inlining_name: Option<String>,
     ) -> LoweredValue {
@@ -7060,6 +7135,20 @@ impl LowerCtx {
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
         let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || self.lower_expr(body));
+        if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
+            let ret_ty = Self::type_from_type_expr_with_subst(
+                ret_ty_expr,
+                &self.prec_substitutions,
+                &self.rank_substitutions,
+            );
+            self.repair_output_type_if_default(&result, &ret_ty);
+        } else {
+            // A named definition may carry its result type only in a
+            // separate `sig`; the resolved application metadata still has
+            // the fully substituted type. Preserve that rank/precision when
+            // the inlined body ends in an untyped default node.
+            self.repair_output_type_if_default(&result, expected_return_ty);
+        }
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -7829,7 +7918,9 @@ impl LowerCtx {
                     as f64;
                 let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound")
                     as f32 as f64;
-                let seed = self.random_seed.unwrap_or(0);
+                let seed = self.random_seed.unwrap_or(0)
+                    ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                self.random_counter = self.random_counter.saturating_add(1);
                 // When no `type` metadata is attached to the `app` form
                 // (as is common when the host lane drives sub-expression
                 // lowering through `lower_subexpr_program` from a
@@ -7863,7 +7954,9 @@ impl LowerCtx {
                 // bounds): a wrapped/computed rate must resolve statically or
                 // fail loudly, never silently become 0.0 (no-op dropout).
                 let rate = self.resolve_static_f64_arg(&args[1], "dropout", "rate");
-                let seed = self.random_seed.unwrap_or(0);
+                let seed = self.random_seed.unwrap_or(0)
+                    ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                self.random_counter = self.random_counter.saturating_add(1);
                 let inferred_ty = self
                     .dag
                     .get(x)
@@ -8569,6 +8662,16 @@ impl LowerCtx {
                 let (new_shape, ty_dims, shape_srcs) = if args.len() >= 2 {
                     let checker_dims = ty.dims.clone();
                     self.extract_reshape_dim_list(&args[1], &checker_dims, &mut inputs)
+                        .or_else(|| {
+                            let template = tensor_shape_template_expr(&args[1])?;
+                            let source = self.lower_expr_node(template, "tensor_shape template");
+                            let source_ty = self.dag.get(source)?.output_type.clone();
+                            Some((
+                                source_ty.dims.iter().map(RtDim::from_dim_info).collect(),
+                                source_ty.dims,
+                                vec![source],
+                            ))
+                        })
                         .unwrap_or_else(fallback)
                 } else {
                     fallback()
@@ -9504,6 +9607,22 @@ impl LowerCtx {
         }
     }
 
+    fn static_numel_from_expr(&self, expr: &Expr) -> Option<usize> {
+        let ("numel", [operand]) = app_var_name_and_args(expr)? else {
+            return None;
+        };
+        let name = bare_var_name(operand)?;
+        let source = self.bindings.get(&name)?.as_single_node()?;
+        self.dag
+            .get(source)?
+            .output_type
+            .dims
+            .iter()
+            .try_fold(1usize, |product, dim| {
+                product.checked_mul(concrete_dim_len(dim)?)
+            })
+    }
+
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {
         bare_var_name(expr)
             .and_then(|name| self.list_bindings.get(&name).cloned())
@@ -9533,9 +9652,15 @@ impl LowerCtx {
         match (name, args) {
             ("map", [callback, list_expr]) => {
                 let list_resolved = self.resolved_list_expr(list_expr);
-                let source = to_list_source_expr(&list_resolved)?;
-                let source_node = self.lower_expr_node(source, "map source");
-                self.lower_host_list_map(callback, source_node)
+                if let Some((lhs, rhs)) = zip_to_list_source_exprs(&list_resolved) {
+                    let lhs_node = self.lower_expr_node(lhs, "map zip left source");
+                    let rhs_node = self.lower_expr_node(rhs, "map zip right source");
+                    self.lower_host_list_zip_map(callback, lhs_node, rhs_node)
+                } else {
+                    let source = to_list_source_expr(&list_resolved)?;
+                    let source_node = self.lower_expr_node(source, "map source");
+                    self.lower_host_list_map(callback, source_node)
+                }
             }
             ("filter", [predicate, list_expr]) => {
                 let list_resolved = self.resolved_list_expr(list_expr);
@@ -9554,7 +9679,7 @@ impl LowerCtx {
         let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
             return None;
         };
-        let (len, elem_ty, out_dim) = self.rank1_list_source_parts(source_node)?;
+        let (source_node, len, elem_ty, out_dim) = self.flattened_list_source_parts(source_node)?;
         let mut mapped = Vec::with_capacity(len);
         for index in 0..len {
             let item = self.rank1_item(source_node, index, &elem_ty);
@@ -9564,6 +9689,39 @@ impl LowerCtx {
             mapped.push(item_out);
         }
         self.stack_scalar_nodes(&mapped, out_dim)
+    }
+
+    fn lower_host_list_zip_map(
+        &mut self,
+        callback: &Expr,
+        lhs_node: NodeId,
+        rhs_node: NodeId,
+    ) -> Option<NodeId> {
+        let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
+            return None;
+        };
+        let (lhs_node, lhs_len, lhs_elem_ty, _) = self.flattened_list_source_parts(lhs_node)?;
+        let (rhs_node, rhs_len, rhs_elem_ty, _) = self.flattened_list_source_parts(rhs_node)?;
+        // Host `zip` truncates to the shorter input. Random wrappers supply
+        // two tensors with the same template shape, but preserving the host
+        // rule keeps this AD rewrite valid for every accepted expression.
+        let len = lhs_len.min(rhs_len);
+        let mut mapped = Vec::with_capacity(len);
+        for index in 0..len {
+            let lhs_item = self.rank1_item(lhs_node, index, &lhs_elem_ty);
+            let rhs_item = self.rank1_item(rhs_node, index, &rhs_elem_ty);
+            let item_out = self
+                .lower_plain_callable_with_values(
+                    &fn_expr,
+                    &[LoweredValue::Tuple(vec![
+                        LoweredValue::Node(lhs_item),
+                        LoweredValue::Node(rhs_item),
+                    ])],
+                )
+                .expect_node("map zip callback");
+            mapped.push(item_out);
+        }
+        self.stack_scalar_nodes(&mapped, DimInfo::Lit(len))
     }
 
     fn lower_host_list_filter(&mut self, predicate: &Expr, source_node: NodeId) -> Option<NodeId> {
@@ -9647,6 +9805,41 @@ impl LowerCtx {
             precision: source_ty.precision,
         };
         Some((len, elem_ty, dim))
+    }
+
+    fn flattened_list_source_parts(
+        &mut self,
+        source_node: NodeId,
+    ) -> Option<(NodeId, usize, TensorType, DimInfo)> {
+        let source_ty = self.dag.get(source_node)?.output_type.clone();
+        let len = source_ty.dims.iter().try_fold(1usize, |product, dim| {
+            product.checked_mul(concrete_dim_len(dim)?)
+        })?;
+        let out_dim = if source_ty.dims.len() == 1 {
+            source_ty.dims[0].clone()
+        } else {
+            DimInfo::Lit(len)
+        };
+        let elem_ty = TensorType {
+            dims: vec![],
+            precision: source_ty.precision,
+        };
+        let flattened = if source_ty.dims.len() == 1 {
+            source_node
+        } else {
+            self.dag.add_node(
+                RiscOp::Reshape {
+                    new_shape: vec![RtDim::Lit(len)],
+                },
+                vec![source_node],
+                TensorType {
+                    dims: vec![out_dim.clone()],
+                    precision: source_ty.precision,
+                },
+                self.current_span_id.clone(),
+            )
+        };
+        Some((flattened, len, elem_ty, out_dim))
     }
 
     fn rank1_item(&mut self, source_node: NodeId, index: usize, elem_ty: &TensorType) -> NodeId {
@@ -10681,9 +10874,12 @@ impl LowerCtx {
         match effect_kind {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
+                let saved_counter = self.random_counter;
                 self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
+                self.random_counter = 0;
                 let result = self.lower_expr(&elems[3]);
                 self.random_seed = saved_seed;
+                self.random_counter = saved_counter;
                 result
             }
             Ok(EffectKind::Resource) if elems.len() >= 4 => self.lower_expr(&elems[3]),
@@ -10892,6 +11088,15 @@ impl LowerCtx {
                 }
                 op_dims.push(RtDim::Lit(value as usize));
                 ty_dims.push(DimInfo::Lit(value as usize));
+            } else if let Some(value) = self.static_numel_from_expr(elem) {
+                // Rank-polymorphic stdlib wrappers flatten a concrete call
+                // site's tensor as `reshape(x, [numel(x)])` before crossing
+                // the rank-1 `to_list` boundary. Once the wrapper is inlined,
+                // the bound tensor node carries every concrete extent, so
+                // preserve that exact product in the DAG instead of falling
+                // back to an unresolved checker symbol.
+                op_dims.push(RtDim::Lit(value));
+                ty_dims.push(DimInfo::Lit(value));
             } else if let Some((dim_expr, src)) = self.dim_expr_from_shape_arg_with_source(elem)
                 && let Some(dim) = Self::dim_info_from_dim_expr(&dim_expr)
             {

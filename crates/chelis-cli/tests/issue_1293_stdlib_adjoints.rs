@@ -97,3 +97,67 @@ bad = grad(discrete_loss, wrt=xs)(values)
         .failure()
         .stdout(predicate::str::contains("not differentiable"));
 }
+
+#[test]
+fn stdlib_normal_like_has_seeded_pathwise_scalar_parameter_adjoints() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1293-normal-like-adjoints");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Init.Random (normal_like)
+
+def total_normal(template: tensor[2, 2, f32], mean: f32, std: f32) -> f32 ! { Random } =
+  normal_like(template, mean, std)
+  |> sum(cast(0, int32))
+  |> sum(cast(0, int32))
+  |> tensor_to_scalar
+
+template = to_tensor([
+  [cast(0.0, f32), cast(0.0, f32)],
+  [cast(0.0, f32), cast(0.0, f32)]
+])
+sample_sum = with seed(42i64) {
+  total_normal(copy(template), cast(0.0, f32), cast(1.0, f32))
+}
+normal_grads = with seed(42i64) {
+  grad(total_normal, wrt=(template, mean, std))(
+    template,
+    cast(0.0, f32),
+    cast(1.0, f32)
+  )
+}
+"#,
+    );
+
+    let assert = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8 stdout");
+
+    assert!(
+        stdout.contains("normal_grads.0 = tensor(shape=[2, 2], data=[0.0, 0.0, 0.0, 0.0])"),
+        "Random draws are non-differentiable with respect to the template values:\n{stdout}"
+    );
+    let scalar = |name: &str| {
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} = ")))
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("missing scalar `{name}` in:\n{stdout}"))
+    };
+    assert_eq!(scalar("normal_grads.1"), 4.0);
+    assert!(
+        (scalar("normal_grads.2") - scalar("sample_sum")).abs() < 1e-5,
+        "the std cotangent must reuse the fixed-seed standard-normal sample:\n{stdout}"
+    );
+}

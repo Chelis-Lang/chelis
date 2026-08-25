@@ -4,7 +4,6 @@
 //! computing gradients of the output with respect to specified input nodes.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt;
 
 use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
@@ -424,6 +423,10 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
     let mut adjoints: HashMap<NodeId, NodeId> = HashMap::new();
+    // Contributions wait here until reverse traversal reaches their input.
+    // Keeping the consumer ordinal and input slot makes the normative order
+    // explicit instead of inheriting reverse traversal order.
+    let mut pending: HashMap<NodeId, Vec<(usize, usize, NodeId)>> = HashMap::new();
     // Seed the gradient at `output` (∂output/∂output = 1). This is a
     // backward node corresponding to the forward `output`, so it
     // carries the grad marker.
@@ -436,15 +439,34 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         None,
     );
     stamp_grad_marker(&mut dag, dag_before_seed, &output_node);
-    adjoints.insert(output, seed);
 
     // Walk forward topological order in reverse.
     let topo = forward.topological_order();
+    let topo_positions: HashMap<NodeId, usize> = topo
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(position, node)| (node, position))
+        .collect();
     for &node_id in topo.iter().rev() {
-        let grad_out = match adjoints.get(&node_id) {
-            Some(&g) => g,
-            None => continue,
+        let grad_out = if node_id == output {
+            seed
+        } else {
+            let Some(mut contributions) = pending.remove(&node_id) else {
+                continue;
+            };
+            contributions.sort_by_key(|(consumer, slot, _)| (*consumer, *slot));
+            let node = forward.get(node_id).expect("topological node exists");
+            balanced_adjoint_sum(
+                &mut dag,
+                node,
+                contributions
+                    .into_iter()
+                    .map(|(_, _, contribution)| contribution)
+                    .collect(),
+            )
         };
+        adjoints.insert(node_id, grad_out);
 
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
@@ -461,24 +483,22 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         // forward span onto each.
         stamp_grad_marker(&mut dag, dag_size_before, &node);
 
+        let consumer_position = topo_positions[&node_id];
+        let mut used_slots = vec![false; node.inputs.len()];
         for (input_id, grad_node) in input_grads {
-            match adjoints.entry(input_id) {
-                Entry::Vacant(e) => {
-                    e.insert(grad_node);
-                }
-                Entry::Occupied(mut e) => {
-                    let existing = *e.get();
-                    let ty = dag.get(existing).unwrap().output_type.clone();
-                    // Sum-accumulator for multi-consumer forward nodes
-                    // — also a backward node, attributed to the
-                    // forward input being accumulated.
-                    let dag_before_sum = dag.len();
-                    let sum = dag.add_node(RiscOp::Add, vec![existing, grad_node], ty, None);
-                    let input_forward = forward.get(input_id).unwrap().clone();
-                    stamp_grad_marker(&mut dag, dag_before_sum, &input_forward);
-                    e.insert(sum);
-                }
-            }
+            let input_slot = node
+                .inputs
+                .iter()
+                .enumerate()
+                .find_map(|(slot, candidate)| {
+                    (!used_slots[slot] && *candidate == input_id).then_some(slot)
+                })
+                .expect("adjoint input belongs to its forward node");
+            used_slots[input_slot] = true;
+            pending
+                .entry(input_id)
+                .or_default()
+                .push((consumer_position, input_slot, grad_node));
         }
     }
 
@@ -513,6 +533,47 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         output_node,
         grad_nodes,
     })
+}
+
+/// Combine one forward value's incoming cotangent contributions in the exact
+/// spec/06 §2.4 order: an exact positive-zero base leaf followed by increasing
+/// forward consumer ordinal and input slot, reduced by adjacent pairs while an
+/// odd tail is carried unchanged. The caller supplies contributions in that
+/// sorted order.
+fn balanced_adjoint_sum(
+    dag: &mut Dag,
+    forward_node: &DagNode,
+    contributions: Vec<NodeId>,
+) -> NodeId {
+    debug_assert!(!contributions.is_empty());
+    let ty = forward_node.output_type.clone();
+    let before_zero = dag.len();
+    let zero = dag.add_node(
+        RiscOp::synth_const(ty.precision, 0.0),
+        vec![],
+        ty.clone(),
+        None,
+    );
+    stamp_grad_marker(dag, before_zero, forward_node);
+
+    let mut level = Vec::with_capacity(contributions.len() + 1);
+    level.push(zero);
+    level.extend(contributions);
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            if let [left, right] = pair {
+                let before_add = dag.len();
+                let sum = dag.add_node(RiscOp::Add, vec![*left, *right], ty.clone(), None);
+                stamp_grad_marker(dag, before_add, forward_node);
+                next.push(sum);
+            } else {
+                next.push(pair[0]);
+            }
+        }
+        level = next;
+    }
+    level[0]
 }
 
 fn is_scalar_float(ty: &TensorType) -> bool {
@@ -2377,6 +2438,36 @@ mod tests {
         let vals = eval_scalar(&grad_result.dag, &inputs);
         let dx = vals[&grad_result.grad_nodes[&x]];
         assert!((dx - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn grad_accumulation_uses_forward_consumer_order_and_a_balanced_tree() {
+        // The four uses of x have forward consumer order c1, c2, c3, c4.
+        // With the required positive-zero base leaf, adjacent-pair balancing
+        // computes ((+0 + c1) + (c2 + c3)) + c4 = 1 at f32. The historical
+        // reverse-consumer left fold computes (((c4 + c3) + c2) + c1) = 0.
+        let mut dag = Dag::new();
+        let ty = scalar_f32();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let coefficients = [1.0e20, -1.0e20, 1.0, 1.0];
+        let mut uses = Vec::new();
+        for coefficient in coefficients {
+            let constant = dag.add_node(
+                RiscOp::synth_const(Prim::F32, coefficient),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            uses.push(dag.add_node(RiscOp::Mul, vec![x, constant], ty.clone(), None));
+        }
+        let left = dag.add_node(RiscOp::Add, vec![uses[0], uses[1]], ty.clone(), None);
+        let right = dag.add_node(RiscOp::Add, vec![uses[2], uses[3]], ty.clone(), None);
+        let output = dag.add_node(RiscOp::Add, vec![left, right], ty, None);
+
+        let grad_result = grad_dag(&dag, output, &[x]).expect("gradient");
+        let values = eval_scalar(&grad_result.dag, &HashMap::from([("x".to_string(), 0.0)]));
+
+        assert_eq!(values[&grad_result.grad_nodes[&x]], 1.0);
     }
 
     #[test]

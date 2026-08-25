@@ -5,7 +5,8 @@ sig xavier_uniform: &tensor[..r, p_float] -> p_float -> p_float -> tensor[..r, p
 def xavier_uniform(template, fan_in, fan_out) = {
   bound = sqrt(div(6.0, add(fan_in, fan_out)))
   raw = uniform_like(template, 0.0, 1.0)
-  values = map(fn (x) -> mul(sub(mul(2.0, x), 1.0), bound), to_list(raw))
+  flat = reshape(copy(raw), [numel(raw)])
+  values = map(fn (x) -> mul(sub(mul(2.0, x), 1.0), bound), to_list(flat))
   _ = drop(raw)
   reshape(to_tensor(values), tensor_shape(template, cast(0, int32), cast(rank(template), int32), drop([cast(0, int64)], cast(1, int64))))
 }
@@ -17,7 +18,8 @@ def xavier_normal(template, fan_in, fan_out) = {
 sig trunc_normal: &tensor[..r, p_float] -> p_float -> p_float -> p_float -> p_float -> tensor[..r, p_float] ! { Random }
 def trunc_normal(template, mean, std, a, b) = {
   raw = normal_like(template, mean, std)
-  values = map(fn (x) -> if lt(x, a) then a else if gt(x, b) then b else x, to_list(raw))
+  flat = reshape(copy(raw), [numel(raw)])
+  values = map(fn (x) -> if lt(x, a) then a else if gt(x, b) then b else x, to_list(flat))
   _ = drop(raw)
   reshape(to_tensor(values), tensor_shape(template, cast(0, int32), cast(rank(template), int32), drop([cast(0, int64)], cast(1, int64))))
 }

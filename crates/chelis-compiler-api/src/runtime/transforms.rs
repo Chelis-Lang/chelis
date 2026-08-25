@@ -5,7 +5,7 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::lower::try_lower_subexpr_program;
+use chelis_ir::lower::try_lower_subexpr_program_with_random_state;
 use chelis_types::types::Prim;
 
 use super::named_axis::*;
@@ -340,8 +340,14 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        let lower_result =
-            try_lower_subexpr_program(&app_expr, scoped_types, self.type_env.clone(), program_defs);
+        let lower_result = try_lower_subexpr_program_with_random_state(
+            &app_expr,
+            scoped_types,
+            self.type_env.clone(),
+            program_defs,
+            self.random_seed,
+            self.random_counter,
+        );
         let dag = match lower_result {
             Ok(dag) => dag,
             Err(diagnostic) => {

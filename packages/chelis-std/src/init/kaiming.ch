@@ -5,7 +5,8 @@ sig kaiming_uniform: &tensor[..r, p_float] -> p_float -> tensor[..r, p_float] ! 
 def kaiming_uniform(template, fan_in) = {
   bound = sqrt(div(6.0, fan_in))
   raw = uniform_like(template, 0.0, 1.0)
-  values = map(fn (x) -> mul(sub(mul(2.0, x), 1.0), bound), to_list(raw))
+  flat = reshape(copy(raw), [numel(raw)])
+  values = map(fn (x) -> mul(sub(mul(2.0, x), 1.0), bound), to_list(flat))
   _ = drop(raw)
   reshape(to_tensor(values), tensor_shape(template, cast(0, int32), cast(rank(template), int32), drop([cast(0, int64)], cast(1, int64))))
 }
