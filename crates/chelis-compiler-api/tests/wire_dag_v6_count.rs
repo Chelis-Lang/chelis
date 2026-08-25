@@ -41,6 +41,35 @@ fn count_dag(axes: Vec<usize>) -> WireDag {
     }
 }
 
+fn assert_contract_rejects_encode_and_decode(dag: &WireDag, expected: &str) {
+    let encode_error = serde_json::to_string(dag).expect_err("encoder must reject invalid WireDag");
+    assert!(
+        encode_error.to_string().contains(expected),
+        "{encode_error}"
+    );
+
+    let raw_json = serde_json::json!({
+        "schema_version": dag.schema_version,
+        "nodes": &dag.nodes,
+        "roots": &dag.roots,
+    })
+    .to_string();
+    let decode_error = WireDag::from_validated_json(&raw_json)
+        .expect_err("validated decode must reject invalid WireDag");
+    assert!(matches!(decode_error, WireDagDecodeError::Contract(_)));
+    assert!(
+        decode_error.to_string().contains(expected),
+        "{decode_error}"
+    );
+
+    let direct_error = serde_json::from_str::<WireDag>(&raw_json)
+        .expect_err("direct decode must enforce the same WireDag contract");
+    assert!(
+        direct_error.to_string().contains(expected),
+        "{direct_error}"
+    );
+}
+
 #[test]
 fn wire_dag_v6_count_round_trips_canonical_axes() {
     assert_eq!(WIRE_DAG_SCHEMA_VERSION, 6);
@@ -195,6 +224,30 @@ fn wire_dag_v6_rejects_noncanonical_count_axes_on_encode_and_decode() {
             Err(WireDagDecodeError::Contract(_))
         ));
     }
+}
+
+#[test]
+fn wire_dag_v6_rejects_count_semantic_dtype_and_shape_corruption() {
+    let mut wrong_input_dtype = count_dag(vec![2, 0]);
+    wrong_input_dtype.nodes[0].output_type.precision = "f32".to_string();
+    assert_contract_rejects_encode_and_decode(
+        &wrong_input_dtype,
+        "Count node 1 input dtype must be bool, found f32",
+    );
+
+    let mut wrong_output_dtype = count_dag(vec![2, 0]);
+    wrong_output_dtype.nodes[1].output_type.precision = "int32".to_string();
+    assert_contract_rejects_encode_and_decode(
+        &wrong_output_dtype,
+        "Count node 1 output dtype must be int64, found int32",
+    );
+
+    let mut wrong_output_shape = count_dag(vec![2, 0]);
+    wrong_output_shape.nodes[1].output_type.dims = vec![WireDimInfo::Lit { size: 4 }];
+    assert_contract_rejects_encode_and_decode(
+        &wrong_output_shape,
+        "Count node 1 output dimensions must equal input dimensions with axes removed",
+    );
 }
 
 #[test]

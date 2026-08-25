@@ -54,8 +54,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "run",
                 "-p",
                 "chelis-ir",
-                "--test",
-                "issue_1287_count",
+                "-E",
+                "binary(issue_1287_count) | test(adjacent_pair_fold_preserves_canonical_tree)",
             ),
         ),
         OracleLeg(

@@ -502,6 +502,17 @@ fn exec_count_multi_axis_matches_exact_int64_result() {
     .expect("Count C generation");
     assert!(generated.c_source.contains("chelis_int_checked_add"));
     assert!(generated.c_source.contains("CHELIS_BOOL"));
+    for balanced_tree_fragment in [
+        "while (__level_n_1 > 1)",
+        "int64_t __left_1 = 2 * __j_1",
+        "int64_t __right_1 = __left_1 + 1",
+        "chelis_int_checked_add(__level_1[__left_1], __level_1[__right_1]",
+    ] {
+        assert!(
+            generated.c_source.contains(balanced_tree_fragment),
+            "Count C must emit the canonical adjacent-pair balanced tree; missing {balanced_tree_fragment:?}"
+        );
+    }
 
     let harness = format!(
         r#"{HARNESS_HEADER}

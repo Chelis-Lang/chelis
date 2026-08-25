@@ -2010,6 +2010,37 @@ impl WireDag {
                     node.id
                 )));
             }
+            if input.output_type.precision != Prim::Bool.name() {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} input dtype must be bool, found {}",
+                    node.id, input.output_type.precision
+                )));
+            }
+            if node.output_type.precision != Prim::Int64.name() {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} output dtype must be int64, found {}",
+                    node.id, node.output_type.precision
+                )));
+            }
+            let expected_output_dims = input
+                .output_type
+                .dims
+                .iter()
+                .enumerate()
+                .filter(|(axis, _)| !axes.contains(axis))
+                .map(|(_, dim)| dim)
+                .collect::<Vec<_>>();
+            if expected_output_dims.len() != node.output_type.dims.len()
+                || expected_output_dims
+                    .iter()
+                    .zip(&node.output_type.dims)
+                    .any(|(expected, actual)| !wire_dim_info_equal(expected, actual))
+            {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} output dimensions must equal input dimensions with axes removed",
+                    node.id
+                )));
+            }
         }
         Ok(())
     }
@@ -2050,6 +2081,23 @@ impl WireDag {
         dag.validate_wire_contract()
             .map_err(WireDagDecodeError::Contract)?;
         Ok(dag)
+    }
+}
+
+fn wire_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
+    match (left, right) {
+        (WireDimInfo::Lit { size: left }, WireDimInfo::Lit { size: right }) => left == right,
+        (
+            WireDimInfo::Named {
+                name: left_name,
+                size: left_size,
+            },
+            WireDimInfo::Named {
+                name: right_name,
+                size: right_size,
+            },
+        ) => left_name == right_name && left_size == right_size,
+        _ => false,
     }
 }
 

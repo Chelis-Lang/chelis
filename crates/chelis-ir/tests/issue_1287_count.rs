@@ -69,6 +69,26 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
 }
 
 #[test]
+fn evaluator_count_is_wired_to_the_canonical_adjacent_pair_fold() {
+    let source = include_str!("../src/eval.rs");
+    let count_body = source
+        .split_once("pub fn count_tensor")
+        .expect("Count evaluator exists")
+        .1
+        .split_once("fn reshape")
+        .expect("Count evaluator ends before reshape")
+        .0;
+    assert!(
+        count_body.contains("checked_adjacent_pair_fold(group"),
+        "Count must call the single helper whose unit test fixes the adjacent-pair tree"
+    );
+    assert!(
+        !count_body.contains("try_fold") && !count_body.contains(".fold("),
+        "Count must not substitute a sequential fold"
+    );
+}
+
+#[test]
 fn verifier_rejects_noncanonical_axes_wrong_dtype_and_wrong_shape() {
     for (axes, input_prim, output_dims, output_prim, needle) in [
         (vec![], Prim::Bool, vec![2, 3], Prim::Int64, "non-empty"),

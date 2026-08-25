@@ -1107,6 +1107,25 @@ fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<Te
 /// result groups by removing the selected coordinates. Each group is filled
 /// by scanning the input in its original row-major order, then folded through
 /// the canonical adjacent-pair balanced checked-int64 tree.
+fn checked_adjacent_pair_fold<T, E>(
+    mut level: Vec<T>,
+    mut combine: impl FnMut(T, T) -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    while level.len() > 1 {
+        let mut source = level.into_iter();
+        let mut next = Vec::with_capacity(source.len().div_ceil(2));
+        while let Some(left) = source.next() {
+            let value = match source.next() {
+                Some(right) => combine(left, right)?,
+                None => left,
+            };
+            next.push(value);
+        }
+        level = next;
+    }
+    Ok(level.pop())
+}
+
 pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
     if input.prim() != Prim::Bool {
         return Err(format!(
@@ -1148,22 +1167,15 @@ pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, 
     }
 
     let mut output = Vec::with_capacity(groups.len());
-    for mut level in groups {
-        while level.len() > 1 {
-            let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            for pair in level.chunks(2) {
-                let value = if pair.len() == 2 {
-                    pair[0]
-                        .checked_add(pair[1])
-                        .ok_or_else(|| "count/int64 overflow".to_string())?
-                } else {
-                    pair[0]
-                };
-                next.push(value);
-            }
-            level = next;
-        }
-        output.push(level.first().copied().unwrap_or(0));
+    for group in groups {
+        let value = match checked_adjacent_pair_fold(group, |left, right| {
+            left.checked_add(right)
+                .ok_or_else(|| "count/int64 overflow".to_string())
+        })? {
+            Some(value) => value,
+            None => 0,
+        };
+        output.push(value);
     }
     finalize_wide_int("count", Prim::Int64, out_shape, output)
 }
@@ -2561,6 +2573,20 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    #[test]
+    fn adjacent_pair_fold_preserves_canonical_tree() {
+        let leaves = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let tree = checked_adjacent_pair_fold(leaves, |left, right| {
+            Ok::<_, std::convert::Infallible>(format!("({left}+{right})"))
+        })
+        .expect("infallible trace fold")
+        .expect("non-empty trace");
+        assert_eq!(tree, "(((a+b)+(c+d))+e)");
     }
 
     #[test]

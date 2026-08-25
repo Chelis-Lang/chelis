@@ -521,7 +521,7 @@ pub(super) fn check_reduction_signature(
         }
     };
 
-    if name == "count" && !matches!(prec, TensorPrec::Concrete(Prim::Bool) | TensorPrec::Var(_)) {
+    if name == "count" && !matches!(prec, TensorPrec::Concrete(Prim::Bool)) {
         return report(
             errors,
             CheckError::new(

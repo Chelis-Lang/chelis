@@ -34,6 +34,7 @@ class CommandManifestTests(unittest.TestCase):
         for required in (
             "issue_1287_count_checker",
             "issue_1287_count",
+            "adjacent_pair_fold_preserves_canonical_tree",
             "wire_dag_v6_count",
             "capacity_census_wire",
             "exec_count_",
