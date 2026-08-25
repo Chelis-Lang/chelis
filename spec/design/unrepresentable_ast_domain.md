@@ -111,9 +111,9 @@ inspecting element zero.
 | RuntimeExpr | **StampError** | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (checker rung, scored) |
 | Type | Permitted | Vocabulary head → Node. Undecodable head → **StampError** (`UndecodableTypeHead`; see the 2026-08-24 amendment) |
 | EffectHandler | Permitted | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (form-expecting) |
-| Syntax | Permitted | → **BareList** without head decode |
-| Binder | Permitted | → **BareList** without head decode |
-| Selector | Permitted | → **BareList** without head decode |
+| Syntax | Permitted | Known tag head + metadata map → Node ([03-ROLE-3]). Any other list → **BareList** |
+| Binder | Permitted | Known tag head + metadata map → Node ([03-ROLE-3]). Any other list → **BareList** |
+| Selector | Permitted | Known tag head + metadata map → Node ([03-ROLE-3]). Any other list → **BareList** |
 | Bypass | Permitted | **Per-tag child expectation** (see below) |
 
 ### Strict/Lenient Reasoning Per Row
@@ -130,9 +130,15 @@ inspecting element zero.
   child in these slots gets **skipped** rather than scored — the walker
   doesn't enter it and the invariant is satisfied vacuously. That is
   #858, and hard rejection is the only disposition that prevents it.
-- **Syntax/Binder/Selector** — structural. Content is names or
-  structural data (params lists, import name lists). No head decode
-  attempted.
+- **Syntax/Binder/Selector** — structural, with vocabulary decode. A
+  list whose head is a known tag word AND whose element 1 is a metadata
+  map is a vocabulary node wherever it sits and decodes to Node;
+  [03-ROLE-3]'s conjunction is the disambiguator, at any depth. Every
+  other list stays BareList, because each half of the conjunction alone
+  is legitimate structural data: a tag-word head without a map is an
+  import name list (`(copy fill)`), and a map behind an ordinary name
+  head is an annotated parameter (`(x {type: ...})`). Neither half may
+  reinterpret the list on its own.
 
 ### Per-Tag Bypass Child Expectation
 
@@ -550,8 +556,10 @@ The same change set recorded four related decisions:
   [03-PROG-2] with the `(var {} ...)` remediation), and [03-ROLE-3] (the
   metadata-map-at-element-1 disambiguator for lists at structural
   positions — neither the head alone nor the map alone reinterprets a
-  structural list). This document's stamp tables elaborate those atoms;
-  where they disagree, the numbered spec wins.
+  structural list). The Per-Role Stamp Table above states the same rule;
+  its Syntax/Binder/Selector rows shipped still reading "BareList without
+  head decode" and were corrected to the decode conjunction in the PR
+  #1319 review round.
 - **The continuous oracle gained obligation 7** (`NAME_IN_EXPR_FIXTURES`):
   a bare identifier at def-body / fn-body / app-argument / bind-RHS
   positions rejects with the [03-ROLE-2] identification and remediation
