@@ -4154,22 +4154,44 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
     })
 }
 
-/// Apply the HIP capability gate to every tensor-helper DAG emitted with a
-/// host program. A HIP request must not bypass device capability policy merely
-/// because its public artifact is produced through the C-host fallback.
+fn guard_count_for_device(
+    dag: &Dag,
+    target: &'static str,
+) -> std::result::Result<(), CompilerError> {
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Count { .. }) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target {target}` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated {target} kernel; use `--target c`.",
+                    node.id.0
+                ),
+                target,
+                chelis_types::unimplemented_rejection!(
+                    1291,
+                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject Count in every tensor-helper DAG emitted with a HIP host program.
+/// Other helper operations retain their C-host fallback semantics; full HIP
+/// capability policy applies only to DAGs emitted as HIP device code.
 pub fn reject_unsupported_hip_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
-    for_each_host_helper_dag(program, reject_unsupported_hip_ops)
+    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "hip"))
 }
 
-/// Apply the Metal capability gate to every tensor-helper DAG emitted with a
-/// host program. A Metal request must not bypass device capability policy
-/// merely because its public artifact is produced through the C-host fallback.
+/// Reject Count in every tensor-helper DAG emitted with a Metal host program.
+/// Other helper operations retain their C-host fallback semantics; full Metal
+/// capability policy applies only to DAGs emitted as Metal device code.
 pub fn reject_unsupported_metal_ops_in_host_program(
     program: &chelis_ir::host::ConcreteHostProgram,
 ) -> std::result::Result<(), CompilerError> {
-    for_each_host_helper_dag(program, reject_unsupported_metal_ops)
+    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "metal"))
 }
 
 /// Metal-specific early capability policy. The IR verifier and backend
@@ -4177,20 +4199,8 @@ pub fn reject_unsupported_metal_ops_in_host_program(
 /// provides the typed public diagnostic without allowing CLI/compiler-api
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    guard_count_for_device(dag, "metal")?;
     for node in dag.nodes() {
-        if matches!(node.op, RiscOp::Count { .. }) {
-            return Err(unsupported_gate_error(
-                format!(
-                    "`chelis build --target metal` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated Metal kernel; use `--target c`.",
-                    node.id.0
-                ),
-                "metal",
-                chelis_types::unimplemented_rejection!(
-                    1291,
-                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
-                ),
-            ));
-        }
         let node_valued = match &node.op {
             RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
             RiscOp::Pad { padding, .. } => padding.iter().any(pair_has_node_bound),
@@ -4378,21 +4388,9 @@ mod metal_runtime_dim_reject_tests {
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    guard_count_for_device(dag, "hip")?;
     for node in dag.nodes() {
         match &node.op {
-            RiscOp::Count { .. } => {
-                return Err(unsupported_gate_error(
-                    format!(
-                        "`chelis build --target hip` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated HIP kernel; use `--target c`.",
-                        node.id.0
-                    ),
-                    "hip",
-                    chelis_types::unimplemented_rejection!(
-                        1291,
-                        "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
-                    ),
-                ));
-            }
             // `pad` / `shrink` are now implemented on the HIP backend
             // (typed per-output-element kernels, GPU==eval verified by the
             // `gpu_correctness` manual oracle). No reject arm: they fall

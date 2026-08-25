@@ -170,6 +170,22 @@ def f(x: tensor[2, 4, f32]) -> tensor[4, f32] = sum(&x, 0i64)
     );
 }
 
+#[test]
+fn count_int32_axis_accepted_int64_rejected() {
+    assert_clean(
+        r#"
+def f(x: tensor[2, 4, bool]) -> tensor[2, int64] = count(&x, 1)
+"#,
+        "count with a bare int32 axis",
+    );
+    assert_rejects_int64_axis(
+        r#"
+def g(x: tensor[2, 4, bool]) -> tensor[2, int64] = count(&x, 1i64)
+"#,
+        "count",
+    );
+}
+
 /// The indexing builtins reach the guard through the same shared
 /// `resolve_builtin_axis` helper as `cumsum`/`sort`, so their acceptance
 /// is pinned on its own rather than inferred from the helper's other
@@ -354,6 +370,7 @@ fn every_axis_builtin_has_one_axis_layout() {
         "argmax_reduce",
         "argmin_reduce",
         "concat",
+        "count",
         "cumsum",
         "diagonal",
         "expand",
