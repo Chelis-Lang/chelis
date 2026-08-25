@@ -243,6 +243,34 @@ fn issue_1316_linear_scc_matches_the_previous_order_on_every_three_vertex_graph(
 }
 
 #[test]
+fn issue_1316_iterative_scc_handles_a_hundred_thousand_vertex_chain() {
+    let vertices = 100_000;
+    let mut graph = vec![Vec::new(); vertices];
+    for (vertex, callees) in graph.iter_mut().enumerate().take(vertices - 1) {
+        callees.push(vertex + 1);
+    }
+    let components = linear_scc_component_vertices_for_test(&graph);
+    assert_eq!(components.len(), vertices);
+    assert_eq!(components.first(), Some(&vec![vertices - 1]));
+    assert_eq!(components.last(), Some(&vec![0]));
+}
+
+#[test]
+fn issue_1316_mid_scc_cancellation_returns_no_partial_plan() {
+    let program = generated_program(64, GraphShape::Chain);
+    let token = CancelToken::new();
+    let _cancel_guard = crate::cancel::install_cancel_token(token.clone());
+    let _plan_hook = cancel_function_plan_after_edges_for_test(17, token);
+    reset_function_plan_profile();
+
+    let plan = plan_for(&program);
+    let profile = take_function_plan_profile();
+    assert!(!plan.complete);
+    assert!(plan.components.is_empty());
+    assert_eq!(profile.scc_edge_inspections, 17);
+}
+
+#[test]
 fn issue_1316_planner_work_is_linear_on_generated_graph_axes() {
     for definitions in [16, 32, 64, 128, 256, 512] {
         for (shape, expected_edges) in [

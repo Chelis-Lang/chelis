@@ -721,6 +721,8 @@ pub(super) struct FunctionPlanProfile {
 #[cfg(test)]
 thread_local! {
     static FUNCTION_PLAN_PROFILE: RefCell<FunctionPlanProfile> = RefCell::default();
+    static FUNCTION_PLAN_CANCEL_AFTER_EDGES: RefCell<Option<(usize, CancelToken)>> =
+        const { RefCell::new(None) };
 }
 
 fn profile_plan_build() {
@@ -746,7 +748,20 @@ fn profile_scc_vertex_entry() {
 
 fn profile_scc_edge_inspection() {
     #[cfg(test)]
-    FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().scc_edge_inspections += 1);
+    {
+        FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().scc_edge_inspections += 1);
+        FUNCTION_PLAN_CANCEL_AFTER_EDGES.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            let Some((remaining, token)) = hook.as_mut() else {
+                return;
+            };
+            *remaining -= 1;
+            if *remaining == 0 {
+                token.cancel();
+                hook.take();
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -757,6 +772,28 @@ pub(super) fn reset_function_plan_profile() {
 #[cfg(test)]
 pub(super) fn take_function_plan_profile() -> FunctionPlanProfile {
     FUNCTION_PLAN_PROFILE.with(|profile| std::mem::take(&mut *profile.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(super) struct FunctionPlanCancellationHook;
+
+#[cfg(test)]
+impl Drop for FunctionPlanCancellationHook {
+    fn drop(&mut self) {
+        FUNCTION_PLAN_CANCEL_AFTER_EDGES.with(|hook| hook.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+pub(super) fn cancel_function_plan_after_edges_for_test(
+    inspections: usize,
+    token: CancelToken,
+) -> FunctionPlanCancellationHook {
+    assert!(inspections > 0);
+    FUNCTION_PLAN_CANCEL_AFTER_EDGES.with(|hook| {
+        assert!(hook.borrow_mut().replace((inspections, token)).is_none());
+    });
+    FunctionPlanCancellationHook
 }
 
 #[cfg(test)]
