@@ -814,3 +814,65 @@ fn non_constant_value_binding_does_not_break_genuine_constant_decode() {
         .expect_err("1.5 is outside the eps band and must be rejected");
     assert!(matches!(err, DecodeError::Invariant(_)), "got {err:?}");
 }
+
+// ── OpenSpec `add-eval-system-boundary`: invariant evaluation is deny-all ──
+
+/// A hand-authored Deep opaque type whose invariant predicate calls the
+/// `file_exists` covered builtin instead of a pure comparison. The decode
+/// chokepoint accepts hand-authored Deep (the same rationale as the CR2-6
+/// fixtures above), which is exactly what lets this probe an evaluator
+/// system call from inside a predicate without going through the Surf
+/// checker's own effect-purity gate.
+const GUARDED_DEEP_SYSTEM_CALL_INVARIANT: &str = r#"
+(module {}
+  eval.sysboundary.probe
+  (deftype {opaque: true,
+            invariant_amenability: "linear",
+            invariant: (fn {}
+                          (params {} p)
+                          (app {}
+                            (var {} file_exists)
+                            (lit {} "chelis-eval-system-boundary-probe.marker")))}
+    Guarded
+    ()
+    (variant {} Guarded (field {} value (t-prim {} f32)))))
+"#;
+
+fn guarded_payload(value: f32) -> ExecutionValue {
+    ExecutionValue::Adt {
+        ctor: "Guarded".to_string(),
+        fields: vec![ExecutionValue::Float32 { value }],
+    }
+}
+
+#[test]
+fn invariant_predicate_system_call_is_refused_before_any_adapter_access() {
+    // Construction test (OpenSpec `add-eval-system-boundary` task 1.4): the
+    // decoder's `EvalContext` for invariant predicate evaluation MUST carry
+    // a deny-all system boundary (`runtime/invariant.rs::revalidate_adt_value`),
+    // enforcing `spec/04-type-system.md` §2.5.1's ban on effects in
+    // invariant predicates. A predicate that calls `file_exists` must be
+    // refused -- never executed and never silently replaced with `true`,
+    // `false`, or any other substituted value -- regardless of whether the
+    // named path exists on disk.
+    //
+    // This is a REFUSAL, not a filesystem probe: the marker path is chosen
+    // to be extremely unlikely to exist, but the assertion does not depend
+    // on that. Even if the path existed, a permissive boundary would still
+    // be a bug here -- the invariant path must never reach the adapter at
+    // all.
+    let exprs = program_exprs_deep(GUARDED_DEEP_SYSTEM_CALL_INVARIANT);
+    let err = try_decode_adt_value(&exprs, &guarded_payload(0.5))
+        .expect_err("a predicate that calls file_exists must be refused, not executed");
+    let DecodeError::Invariant(message) = err else {
+        panic!("expected an invariant-class decode error, got {err:?}");
+    };
+    assert!(
+        message.contains("refused"),
+        "expected the refusal to name a refused capability, got: {message}"
+    );
+    assert!(
+        message.contains("Filesystem"),
+        "expected the refusal to name the Filesystem capability, got: {message}"
+    );
+}

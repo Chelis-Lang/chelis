@@ -199,6 +199,14 @@ PIPELINE_CORE_COMPILE_FAIL: list[str] = [
     MANAGED_PYTHON,
     "scripts/check_pipeline_core_compile_fail.py",
 ]
+# The `add-eval-system-boundary` focused oracle (OpenSpec change): guard
+# unit tests, the source guard itself, the boundary's fake-adapter/refusal/
+# construction/parity coverage, and the named CLI parity suites. See
+# `scripts/eval_system_oracle.py` for the exact leg manifest.
+EVAL_SYSTEM_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/eval_system_oracle.py",
+]
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
@@ -213,6 +221,7 @@ STAGES: dict[str, list[list[str]]] = {
         PIPELINE_CORE_DEPENDENCY_GUARD,
         PIPELINE_CORE_DOCUMENTATION_GUARD,
         PIPELINE_CORE_COMPILE_FAIL,
+        EVAL_SYSTEM_ORACLE,
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,

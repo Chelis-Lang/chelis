@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""Evaluator system boundary source guard (OpenSpec `add-eval-system-boundary`).
+
+`crates/chelis-compiler-api/src/runtime/` is the compiler API evaluator.
+Every filesystem, path-existence, and subprocess operation in that
+directory MUST route through the injected `EvalSystem` boundary
+(`runtime/system.rs`) instead of calling `std::fs`, `std::path::Path::exists`,
+or `std::process::Command` directly. The one exception is
+`runtime/system_adapter.rs`'s `DefaultEvalSystem`, the single adapter
+permitted to make those calls.
+
+This guard scans every other production `.rs` file under `runtime/` (test
+harnesses declared `#[cfg(test)]` in `runtime/mod.rs` are excluded -- they
+never ship, and a default-adapter parity test legitimately needs real
+filesystem access to build its fixtures) and fails on any direct-access
+form, including an aliased import.
+
+Usage:
+
+    <managed-python> scripts/eval_system_guard.py
+
+Acceptance is exit 0 with the final line ``eval system guard: PASS``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import bisect
+import re
+import sys
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_DIR = REPO_ROOT / "crates" / "chelis-compiler-api" / "src" / "runtime"
+
+# The one module permitted direct `std::fs` / `std::path::Path` /
+# `std::process::Command` access (design D6).
+ALLOWED_ADAPTER_FILE = "system_adapter.rs"
+
+
+class SourceGuardError(RuntimeError):
+    """A source file could not be read or classified (fail-closed)."""
+
+
+@dataclass(frozen=True)
+class Hit:
+    """One direct-access occurrence found by `classify_source`."""
+
+    line_number: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class Violation:
+    path: Path
+    hit: Hit
+    line_text: str
+
+    def render(self) -> str:
+        return f"{self.path}:{self.hit.line_number}: {self.hit.reason}\n    {self.line_text.strip()}"
+
+
+# ── Comment/string stripping ────────────────────────────────────────────
+
+
+def strip_comments_and_strings(source: str) -> str:
+    """Best-effort Rust comment/string/char-literal stripper.
+
+    A naive text scan would flag a bypass pattern that only appears in a
+    doc comment or a string literal (this module's own doc comment above
+    mentions every banned form by name). This walks the source once,
+    replacing comment and literal contents with spaces -- preserving line
+    structure so reported line numbers stay correct -- while leaving real
+    code untouched. It does not need to be a full Rust lexer: false
+    negatives inside a strangely-nested raw string are acceptable for a
+    guard whose false-positive-vs-false-negative tradeoff already favors
+    rejecting unclassifiable input (see `classify_source` fail-closed
+    note below); this function only needs to keep documentation and
+    ordinary string literals from causing false POSITIVES.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(source)
+    while i < n:
+        two = source[i : i + 2]
+        if two == "//":
+            while i < n and source[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if two == "/*":
+            out.append("  ")
+            i += 2
+            depth = 1
+            while i < n and depth > 0:
+                if source[i : i + 2] == "/*":
+                    out.append("  ")
+                    i += 2
+                    depth += 1
+                elif source[i : i + 2] == "*/":
+                    out.append("  ")
+                    i += 2
+                    depth -= 1
+                else:
+                    out.append("\n" if source[i] == "\n" else " ")
+                    i += 1
+            continue
+        if source[i] == '"':
+            out.append(" ")
+            i += 1
+            while i < n and source[i] != '"':
+                if source[i] == "\\" and i + 1 < n:
+                    out.append("  ")
+                    i += 2
+                    continue
+                out.append("\n" if source[i] == "\n" else " ")
+                i += 1
+            if i < n:
+                out.append(" ")
+                i += 1
+            continue
+        if source[i] == "'" and i + 1 < n:
+            # A char literal (`'\n'`, `'a'`, `'\u{7f}'`) closes with a
+            # second `'` within a short window; a lifetime (`'a`) does
+            # not. Only consume as a literal when a close quote appears
+            # nearby on the same line -- otherwise leave `'` untouched so
+            # a lifetime token is not corrupted.
+            close = source.find("'", i + 1, i + 12)
+            if close != -1 and "\n" not in source[i:close]:
+                out.append(" " * (close - i + 1))
+                i = close + 1
+                continue
+        out.append(source[i])
+        i += 1
+    return "".join(out)
+
+
+# ── Direct-access patterns ──────────────────────────────────────────────
+
+_PATH_EFFECT_METHOD = (
+    r"(?:canonicalize|exists|try_exists|is_dir|is_file|is_symlink|metadata|"
+    r"symlink_metadata|read_dir|read_link)"
+)
+_DIRECT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bstd\s*::\s*fs\s*::"), "direct `std::fs::` access"),
+    (
+        re.compile(r"\bstd\s*::\s*process\s*::"),
+        "direct `std::process` access",
+    ),
+    (
+        re.compile(
+            rf"\bstd\s*::\s*path\s*::\s*(?:Path|PathBuf)\s*::\s*{_PATH_EFFECT_METHOD}\b"
+        ),
+        "direct `std::path` filesystem call",
+    ),
+    (
+        re.compile(rf"\b(?:Path|PathBuf)\s*::\s*{_PATH_EFFECT_METHOD}\s*\("),
+        "qualified `Path` filesystem call",
+    ),
+    (
+        re.compile(rf"\.\s*{_PATH_EFFECT_METHOD}\s*\("),
+        "method-form path filesystem call",
+    ),
+)
+
+# `use` statements that bind a local name to a guarded item. A later
+# reference through that bound name (`fs::read`, `Command::new`, a
+# directly-imported function called bare, an aliased `Path::exists`)
+# would not contain the literal `std::...` text the patterns above match,
+# so it needs explicit alias tracking. These match across the WHOLE
+# stripped text (not per line, see `classify_source`): rustfmt never
+# splits a `use` statement's path across lines in practice, but nothing
+# stops a hand-written bypass from inserting a newline (or any other
+# `\s`) between path segments, and `\s` already matches `\n` in every
+# pattern below -- restricting the search to one line at a time would
+# silently defeat that on both the `use`-statement patterns and the
+# direct-access patterns, so every regex here runs over the full text.
+_USE_FS_MODULE = re.compile(r"\buse\s+std\s*::\s*fs\s*(?:as\s+(\w+))?\s*;")
+_USE_FS_ITEMS = re.compile(r"\buse\s+std\s*::\s*fs\s*::\s*\{([^}]*)\}\s*;")
+_USE_FS_SINGLE_ITEM = re.compile(
+    r"\buse\s+std\s*::\s*fs\s*::\s*(\w+)\s*(?:as\s+(\w+))?\s*;"
+)
+_USE_PROCESS_MODULE = re.compile(r"\buse\s+std\s*::\s*process\s*(?:as\s+(\w+))?\s*;")
+_USE_COMMAND = re.compile(
+    r"\buse\s+std\s*::\s*process\s*::\s*Command\s*(?:as\s+(\w+))?\s*;"
+)
+_USE_PATH = re.compile(r"\buse\s+std\s*::\s*path\s*::\s*Path\s*(?:as\s+(\w+))?\s*;")
+_USE_GUARDED_MODULE = re.compile(r"\buse\s+std\s*::\s*(fs|process)\b")
+_USE_BRACED_PATH = re.compile(r"\buse\s+std\s*::\s*path\s*::\s*\{[^}]*\bPath\b")
+_USE_STD_TREE_START = re.compile(r"\buse\s+std\s*::\s*\{")
+_STD_TREE_GUARDED_ROOTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?:^|,)\s*fs\b"), "nested `std` filesystem import"),
+    (re.compile(r"(?:^|,)\s*process\b"), "nested `std` process import"),
+    (
+        re.compile(r"(?:^|,)\s*path\s*::\s*(?:\{\s*)?Path\b"),
+        "nested `std` path import",
+    ),
+)
+
+
+def _iter_std_use_trees(stripped: str) -> list[tuple[int, str]]:
+    """Return balanced `use std::{...}` bodies with their source offsets."""
+    trees: list[tuple[int, str]] = []
+    for match in _USE_STD_TREE_START.finditer(stripped):
+        open_brace = match.end() - 1
+        depth = 0
+        for offset in range(open_brace, len(stripped)):
+            token = stripped[offset]
+            if token == "{":
+                depth += 1
+            elif token == "}":
+                depth -= 1
+                if depth == 0:
+                    body_start = open_brace + 1
+                    trees.append((body_start, stripped[body_start:offset]))
+                    break
+    return trees
+
+
+def _collect_bound_aliases(
+    stripped: str,
+) -> tuple[set[str], set[str], set[str], set[str], set[str]]:
+    """Return (fs_module_names, fs_function_names, process_module_names,
+    command_names, path_names)."""
+    fs_module_names: set[str] = set()
+    fs_function_names: set[str] = set()
+    process_module_names: set[str] = set()
+    command_names: set[str] = set()
+    path_names: set[str] = set()
+
+    for match in _USE_FS_MODULE.finditer(stripped):
+        fs_module_names.add(match.group(1) or "fs")
+    for match in _USE_FS_ITEMS.finditer(stripped):
+        for item in match.group(1).split(","):
+            item = item.strip()
+            if not item:
+                continue
+            parts = [part.strip() for part in item.split(" as ")]
+            fs_function_names.add(parts[-1])
+    for match in _USE_FS_SINGLE_ITEM.finditer(stripped):
+        fs_function_names.add(match.group(2) or match.group(1))
+    for match in _USE_PROCESS_MODULE.finditer(stripped):
+        process_module_names.add(match.group(1) or "process")
+    for match in _USE_COMMAND.finditer(stripped):
+        command_names.add(match.group(1) or "Command")
+    for match in _USE_PATH.finditer(stripped):
+        path_names.add(match.group(1) or "Path")
+
+    return (
+        fs_module_names,
+        fs_function_names,
+        process_module_names,
+        command_names,
+        path_names,
+    )
+
+
+def _line_starts(text: str) -> list[int]:
+    """Return the character offset each line starts at (1-indexed lines)."""
+    starts = [0]
+    for match in re.finditer("\n", text):
+        starts.append(match.end())
+    return starts
+
+
+def _line_number_for(line_starts: list[int], offset: int) -> int:
+    return bisect.bisect_right(line_starts, offset)
+
+
+def classify_source(text: str) -> list[Hit]:
+    """Return every direct-access occurrence in `text` as a `Hit`.
+
+    Pure function over raw Rust source (comments and string/char literals
+    are stripped internally), independent of the filesystem -- this is
+    what `scripts/test_eval_system_guard.py` exercises directly against
+    positive and negative fixtures.
+
+    Every pattern is matched against the FULL stripped text (never one
+    line at a time): matching line-by-line would let a bypass evade
+    detection just by inserting a newline between path segments (Rust
+    does not care where whitespace falls inside a `::`-separated path),
+    since `\\s` in every pattern below already matches `\\n`.
+    """
+    stripped = strip_comments_and_strings(text)
+    line_starts = _line_starts(stripped)
+    (
+        fs_module_names,
+        fs_function_names,
+        process_module_names,
+        command_names,
+        path_names,
+    ) = _collect_bound_aliases(stripped)
+
+    hits: list[Hit] = []
+
+    def add(offset: int, reason: str) -> None:
+        hits.append(Hit(_line_number_for(line_starts, offset), reason))
+
+    for pattern, reason in _DIRECT_PATTERNS:
+        for match in pattern.finditer(stripped):
+            add(match.start(), reason)
+    for match in _USE_GUARDED_MODULE.finditer(stripped):
+        add(match.start(), f"direct `std::{match.group(1)}` import")
+    for match in _USE_BRACED_PATH.finditer(stripped):
+        add(match.start(), "braced `std::path::Path` import")
+    for name in fs_module_names:
+        for match in re.finditer(rf"(?<!\w){re.escape(name)}\s*::", stripped):
+            add(match.start(), f"imported filesystem-module alias `{name}::` access")
+    for name in fs_function_names:
+        for match in re.finditer(rf"(?<![.\w:]){re.escape(name)}\s*\(", stripped):
+            add(
+                match.start(),
+                f"directly imported filesystem function `{name}(...)` call",
+            )
+    for name in process_module_names:
+        # A bare `use std::process;` (or aliased) import: any later use of
+        # `<name>::Command` (however it is spelled downstream, `::new(`
+        # included) constructs a process exactly the way the fully
+        # qualified `std::process::Command` pattern already catches.
+        for match in re.finditer(rf"(?<!\w){re.escape(name)}\s*::\s*Command\b", stripped):
+            add(
+                match.start(),
+                f"imported process-module alias `{name}::Command` construction",
+            )
+    for name in command_names:
+        for match in re.finditer(
+            rf"(?<!\w){re.escape(name)}\s*::\s*new\s*\(", stripped
+        ):
+            add(
+                match.start(),
+                f"imported process alias `{name}::new(...)` construction",
+            )
+    for name in path_names:
+        for match in re.finditer(
+            rf"(?<!\w){re.escape(name)}\s*::\s*{_PATH_EFFECT_METHOD}\s*\(", stripped
+        ):
+            add(match.start(), f"imported path alias `{name}` filesystem call")
+    for body_start, body in _iter_std_use_trees(stripped):
+        for pattern, reason in _STD_TREE_GUARDED_ROOTS:
+            for match in pattern.finditer(body):
+                add(body_start + match.start(), reason)
+    return hits
+
+
+# ── Module classification (production vs. `#[cfg(test)]`) ──────────────
+
+# `mod x;` optionally preceded by a visibility modifier (`pub`,
+# `pub(crate)`, `pub(super)`, ...).
+_MOD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;\s*$")
+_CFG_TEST_ATTR = re.compile(r"^\s*#\[cfg\(test\)\]\s*$")
+# Any other attribute line (`#[allow(dead_code)]`, `#[rustfmt::skip]`, ...).
+# Rust permits stacking attributes above one item; `#[cfg(test)]` should
+# still apply to the `mod` line even when another attribute sits between
+# them.
+_OTHER_ATTR = re.compile(r"^\s*#\[.*\]\s*$")
+# The one-line form: `#[cfg(test)] mod x;`.
+_CFG_TEST_MOD_INLINE = re.compile(
+    r"^\s*#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;\s*$"
+)
+
+
+def parse_test_only_modules(mod_rs_text: str) -> frozenset[str]:
+    """Return the `mod <name>;` names gated by `#[cfg(test)]`.
+
+    These files never ship in a release binary, so a default-adapter
+    parity test file legitimately touching real `std::fs` to build its
+    fixtures is not a production bypass. Handles the inline form
+    (`#[cfg(test)] mod x;`), the two-line form, a `pub`/`pub(crate)`
+    visibility modifier on the `mod` line, and an unrelated attribute
+    stacked between `#[cfg(test)]` and the `mod` line. A parse this
+    permissive can only widen which files are treated as test-only, never
+    narrow it below what `parse_test_only_modules` recognized before --
+    the failure direction stays fail-closed (an unrecognized form is
+    scanned as production, not silently excluded).
+    """
+    test_only: set[str] = set()
+    pending_cfg_test = False
+    for line in mod_rs_text.splitlines():
+        inline = _CFG_TEST_MOD_INLINE.match(line)
+        if inline:
+            test_only.add(inline.group(1))
+            pending_cfg_test = False
+            continue
+        if _CFG_TEST_ATTR.match(line):
+            pending_cfg_test = True
+            continue
+        match = _MOD_DECL.match(line)
+        if match:
+            if pending_cfg_test:
+                test_only.add(match.group(1))
+            pending_cfg_test = False
+            continue
+        if pending_cfg_test and _OTHER_ATTR.match(line):
+            # A second attribute stacked between `#[cfg(test)]` and the
+            # `mod` line does not cancel the pending gate.
+            continue
+        if line.strip():
+            pending_cfg_test = False
+    return frozenset(test_only)
+
+
+def iter_scanned_files(runtime_dir: Path) -> list[Path]:
+    if not runtime_dir.is_dir():
+        raise SourceGuardError(f"runtime directory not found: {runtime_dir}")
+    mod_rs = runtime_dir / "mod.rs"
+    try:
+        mod_rs_text = mod_rs.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SourceGuardError(f"cannot read {mod_rs}: {error}") from error
+    test_only_modules = parse_test_only_modules(mod_rs_text)
+
+    scanned = []
+    for path in sorted(runtime_dir.rglob("*.rs")):
+        relative = path.relative_to(runtime_dir)
+        if relative == Path(ALLOWED_ADAPTER_FILE):
+            continue
+        if relative.parent == Path(".") and relative.stem in test_only_modules:
+            continue
+        scanned.append(path)
+    return scanned
+
+
+def scan_directory(runtime_dir: Path) -> list[Violation]:
+    violations: list[Violation] = []
+    for path in iter_scanned_files(runtime_dir):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            # Fail closed: an unreadable or unclassifiable source file is a
+            # guard failure, not a silent skip.
+            raise SourceGuardError(f"cannot read {path}: {error}") from error
+        lines = text.splitlines()
+        for hit in classify_source(text):
+            line_text = lines[hit.line_number - 1] if 0 < hit.line_number <= len(lines) else ""
+            violations.append(Violation(path, hit, line_text))
+    return violations
+
+
+def main() -> int:
+    try:
+        violations = scan_directory(RUNTIME_DIR)
+    except SourceGuardError as error:
+        print(f"eval system guard: FAIL: {error}", file=sys.stderr)
+        return 1
+    if violations:
+        print(
+            "eval system guard: FAIL: direct system access outside "
+            f"`{ALLOWED_ADAPTER_FILE}`",
+            file=sys.stderr,
+        )
+        for violation in violations:
+            print(f"  {violation.render()}", file=sys.stderr)
+        return 1
+    print("eval system guard: PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

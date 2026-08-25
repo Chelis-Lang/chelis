@@ -755,6 +755,12 @@ pub(crate) fn revalidate_adt_value(
     // top_level_defs so a predicate referencing e.g. a tolerance `eps`
     // resolves it to its value instead of dying on "unknown runtime name".
     let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    // OpenSpec `add-eval-system-boundary`: invariant predicate evaluation
+    // MUST receive a deny-all system boundary, enforcing the effect
+    // prohibition in `spec/04-type-system.md` §2.5.1. This is a fresh
+    // per-revalidation boundary, not a parameter threaded through
+    // `decode_with_tables` or another decode API (design D5).
+    let mut system_boundary = super::system::EvalSystemBoundary::deny_all();
     let mut ctx = EvalContext {
         bindings: HashMap::new(),
         binding_types: HashMap::new(),
@@ -774,6 +780,7 @@ pub(crate) fn revalidate_adt_value(
         // Invariant predicates run inside an enclosing evaluation, so they
         // honour whatever token that evaluation installed (chelis#914).
         cancel: chelis_types::current_cancel_token(),
+        system: &mut system_boundary,
     };
     ctx.bindings.insert(pred.binder.clone(), value.clone());
 

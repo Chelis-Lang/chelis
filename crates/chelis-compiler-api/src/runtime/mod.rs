@@ -14,6 +14,10 @@ mod host_ops;
 mod invariant;
 mod json;
 mod named_axis;
+mod system;
+mod system_adapter;
+#[cfg(test)]
+mod system_tests;
 #[cfg(test)]
 mod tests;
 mod transforms;
@@ -444,6 +448,39 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
 ) -> Result<RuntimeOutcome, String> {
+    // Every public program-evaluation path routes through a FRESH
+    // permissive boundary (OpenSpec `add-eval-system-boundary` task 2.10):
+    // this is the sole place a plain (non-system-parameterized) program
+    // eval call constructs one. Tests that need a fake adapter or a
+    // refusing policy call `evaluate_host_program_with_library_and_types_and_system`
+    // directly instead of going through this wrapper.
+    let mut system_boundary = system::EvalSystemBoundary::permissive();
+    evaluate_host_program_with_library_and_types_and_system(
+        program,
+        library_exprs,
+        library_type_env,
+        library_lowered_names,
+        tensor_bindings,
+        selected_roots,
+        &mut system_boundary,
+    )
+}
+
+/// [`evaluate_host_program_with_library_and_types`], parameterized over the
+/// evaluator system boundary (OpenSpec `add-eval-system-boundary` design
+/// D5). This is the one crate-private program-evaluator entry a
+/// fake-adapter test calls directly: construct an
+/// `EvalSystemBoundary::with_adapter(policy, Box::new(fake))`, call this
+/// function, and assert on the fake's recorded operations.
+pub(crate) fn evaluate_host_program_with_library_and_types_and_system(
+    program: &CheckedProgram,
+    library_exprs: &[Expr],
+    library_type_env: &HashMap<String, Expr>,
+    library_lowered_names: Option<&HashMap<String, bool>>,
+    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
+    selected_roots: Option<&[String]>,
+    system_boundary: &mut system::EvalSystemBoundary,
+) -> Result<RuntimeOutcome, String> {
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
     // inherit that function's host-lane-vs-tensor-lane classification —
@@ -532,6 +569,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         random_seed: None,
         random_counter: 0,
         cancel: chelis_types::current_cancel_token(),
+        system: system_boundary,
     };
 
     for name in top_level_order {
@@ -925,6 +963,15 @@ struct EvalContext<'a> {
     /// TLS lookup. `None` — the default when no caller installed a token —
     /// makes the check a single `Option` discriminant test.
     cancel: Option<chelis_types::CancelToken>,
+    /// The injected evaluator system boundary (OpenSpec
+    /// `add-eval-system-boundary`). A mutable reference for one evaluation
+    /// lifetime only (design D5): program evaluation supplies a fresh
+    /// permissive boundary per `eval_compiled` call, invariant predicate
+    /// evaluation supplies a fresh deny-all boundary per revalidation, and
+    /// tests supply a fake adapter through the same field. Every
+    /// `EvalContext` constructor must populate this — there is no
+    /// `Option`/default path that would let a call site skip the boundary.
+    system: &'a mut system::EvalSystemBoundary,
 }
 
 fn tag(list: &List) -> Option<DeepTag> {

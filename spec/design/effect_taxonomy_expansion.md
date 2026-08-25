@@ -31,8 +31,12 @@ exactly five variants:
   handler.
 - `Accum` — internal design hook for backward-pass accumulation. Not yet
   user-facing as a checked effect; reserved.
-- `Io` — host-side print and debug. Narrow today; covers stdout/stderr-style
-  output only, not network or filesystem.
+- `Io` — the general host-effect catch-all. Covers host-side print and
+  debug, the eval-only filesystem builtins (`read_file`, `write_file`,
+  `read_lines`, `read_bytes`, `file_exists`, `list_dir`, `mmap_file`), and
+  the eval-only `process_run` subprocess builtin (`spec/04-type-system.md`
+  §7.1, `spec/05-risc-primitives.md` §2.6). It does not distinguish those
+  sources from one another, and it does not cover network access.
 - `Test` — the in-language test runner's effect. Functions defined as
   `! { Test }` may use test-only assertions.
 - `Resource(String)` — device resource boundaries (`gpu:0`, `cpu`). Validated
@@ -41,15 +45,19 @@ exactly five variants:
 
 The set is correct for what it tracks: each variant has a well-defined
 compile-time guarantee and at least one production code path that exercises
-it. The set is narrow because two categories that matter for trust stories
-beyond reproducibility and determinism are absent: network access and
-filesystem access. Subprocess execution is a third category that does not
-fire today because Chelis programs cannot spawn subprocesses (no FFI, no
-`exec` primitive, no string-to-code path); it can be added when FFI is
-designed in a later phase.
+it. The set is narrow in a different sense than an earlier draft of this
+document claimed: filesystem access and subprocess execution (`process_run`)
+are not absent — both already exist and both already carry `Io` (blanket,
+undifferentiated). What is genuinely absent is (a) a dedicated variant that
+lets a checker distinguish "this function touches the filesystem" from
+"this function only prints," and (b) any coverage of network access at all,
+which has no eval-only builtin and no `Io` inference path today.
 
-The expansion below covers `Network` and `Filesystem` only. Subprocess
-tracking is intentionally deferred to the FFI design conversation.
+The expansion below covers `Network` and `Filesystem` only. `process_run`
+already exists and already carries `Io`; giving subprocess execution its
+own dedicated variant is out of scope for this item and can follow the same
+pattern later if a real driver needs to distinguish it from the rest of
+`Io`.
 
 ---
 

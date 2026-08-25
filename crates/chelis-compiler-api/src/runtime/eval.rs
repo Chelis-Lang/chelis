@@ -1,6 +1,6 @@
 use chelis_deep::DeepTag;
 use std::collections::HashMap;
-use std::fs;
+use std::path::Path;
 
 use chelis_deep::ast::{Atom, Expr, List};
 use chelis_deep::{Span, decode_effect_kind};
@@ -1599,8 +1599,7 @@ impl<'a> EvalContext<'a> {
             }
             "read_file" => {
                 let path = expect_string_arg(args, 0)?;
-                let text = fs::read_to_string(&path)
-                    .map_err(|err| format!("read_file failed for `{path}`: {err}"))?;
+                let text = self.system.read_file(Path::new(&path))?;
                 Ok(RuntimeValue::String(text))
             }
             // Host-lane JSON I/O (chelis#890). Eval-only; the build backends
@@ -1895,6 +1894,11 @@ impl<'a> EvalContext<'a> {
             // `cmd` or `args` value cannot inject extra shell commands. The C
             // and HIP build backends deliberately reject this builtin (see
             // `reject_eval_only_builtins_host`) rather than emit a silent `0`.
+            //
+            // The actual spawn routes through the injected `EvalSystem`
+            // boundary (OpenSpec `add-eval-system-boundary`); this arm keeps
+            // only the pure argument marshalling plus the exit-code and
+            // output-decoding transformations (design D2/D4).
             "process_run" => {
                 let cmd = expect_string_arg(args, 0)?;
                 let raw_args = expect_list_arg(args, 1)?;
@@ -1909,13 +1913,10 @@ impl<'a> EvalContext<'a> {
                         }
                     }
                 }
-                let output = std::process::Command::new(&cmd)
-                    .args(&argv)
-                    .output()
-                    .map_err(|err| format!("process_run failed to spawn `{cmd}`: {err}"))?;
+                let output = self.system.run_process(&cmd, &argv)?;
                 // A process killed by a signal has no exit code; report -1 so
                 // callers can distinguish it from a clean exit 0.
-                let exit_code = output.status.code().map_or(-1_i64, i64::from);
+                let exit_code = output.exit_status.map_or(-1_i64, i64::from);
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 Ok(RuntimeValue::Tuple(vec![
@@ -1927,14 +1928,12 @@ impl<'a> EvalContext<'a> {
             "write_file" => {
                 let path = expect_string_arg(args, 0)?;
                 let contents = expect_string_arg(args, 1)?;
-                fs::write(&path, contents)
-                    .map_err(|err| format!("write_file failed for `{path}`: {err}"))?;
+                self.system.write_file(Path::new(&path), &contents)?;
                 Ok(RuntimeValue::Unit)
             }
             "read_lines" => {
                 let path = expect_string_arg(args, 0)?;
-                let text = fs::read_to_string(&path)
-                    .map_err(|err| format!("read_lines failed for `{path}`: {err}"))?;
+                let text = self.system.read_lines_source(Path::new(&path))?;
                 Ok(RuntimeValue::List(
                     text.lines()
                         .map(|line| RuntimeValue::String(line.to_string()))
@@ -1943,8 +1942,7 @@ impl<'a> EvalContext<'a> {
             }
             "read_bytes" => {
                 let path = expect_string_arg(args, 0)?;
-                let bytes = fs::read(&path)
-                    .map_err(|err| format!("read_bytes failed for `{path}`: {err}"))?;
+                let bytes = self.system.read_bytes(Path::new(&path))?;
                 Ok(RuntimeValue::List(
                     bytes
                         .into_iter()
@@ -1954,26 +1952,19 @@ impl<'a> EvalContext<'a> {
             }
             "file_exists" => {
                 let path = expect_string_arg(args, 0)?;
-                Ok(RuntimeValue::Bool(std::path::Path::new(&path).exists()))
+                let exists = self.system.file_exists(Path::new(&path))?;
+                Ok(RuntimeValue::Bool(exists))
             }
             "list_dir" => {
                 let path = expect_string_arg(args, 0)?;
-                let entries = fs::read_dir(&path)
-                    .map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                let mut out = Vec::new();
-                for entry in entries {
-                    let entry =
-                        entry.map_err(|err| format!("list_dir failed for `{path}`: {err}"))?;
-                    out.push(RuntimeValue::String(
-                        entry.file_name().to_string_lossy().into_owned(),
-                    ));
-                }
-                Ok(RuntimeValue::List(out))
+                let entries = self.system.list_dir(Path::new(&path))?;
+                Ok(RuntimeValue::List(
+                    entries.into_iter().map(RuntimeValue::String).collect(),
+                ))
             }
             "mmap_file" => {
                 let path = expect_string_arg(args, 0)?;
-                let bytes = fs::read(&path)
-                    .map_err(|err| format!("mmap_file failed for `{path}`: {err}"))?;
+                let bytes = self.system.load_mapped_file_bytes(Path::new(&path))?;
                 Ok(RuntimeValue::MappedFile(bytes))
             }
             "mmap_read" => {

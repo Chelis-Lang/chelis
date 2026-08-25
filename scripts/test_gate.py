@@ -727,6 +727,17 @@ class ListOutputTests(unittest.TestCase):
         ):
             self.assertIn(command, rendered)
 
+    def test_eval_system_boundary_oracle_is_in_the_lint_and_unit_stage(self):
+        # The `add-eval-system-boundary` focused oracle (guard unit tests,
+        # the source guard, the boundary's fake-adapter/refusal/
+        # construction/parity coverage, and the named CLI parity suites)
+        # must run in the per-PR gate, not only through a manual command.
+        rendered = [gate.render(command) for command in gate.STAGES["lint-and-unit"]]
+        self.assertIn(
+            "<managed-python> scripts/eval_system_oracle.py",
+            rendered,
+        )
+
     def test_cheap_pipeline_core_guards_are_in_the_local_subset(self):
         # The two cheap guards (cargo metadata + pure Python) run pre-push; the
         # out-of-workspace compile-fail build stays CI/full-gate only.

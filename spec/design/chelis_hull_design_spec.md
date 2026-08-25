@@ -815,7 +815,7 @@ def reference_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
 }
 
 -- Run the real compiler's structured check and parse the JSON result. `process_run` is
--- the new subprocess builtin (under Io) that the next-phase monorepo work adds (§8.1).
+-- the shipped subprocess builtin (under Io); see §8.1.
 def compiler_check(path: String) -> Option[(Type, EffectRow)] ! { IO } = {
   result = process_run("chelis", ["check", path, "--json"])
   parse_check_result(result)
@@ -1047,25 +1047,19 @@ reconciled as follows, and this is the pinned decision:
 - **`gen_conformance_suite` and `run_differential_suite` are Chelis drivers, not Python.**
   They are `.ch` programs with `def main() -> unit ! { IO }` that read Deep files, run the
   reference checker/evaluator, shell out to the compiler, and write the corpus. They are
-  pure Chelis because Hull gains a new `process_run` exec builtin (under `Io`) to invoke
+  pure Chelis because Hull uses the `process_run` exec builtin (under `Io`) to invoke
   the compiler.
 - **Golden assertions are native `tests/*.ch`** carrying the `Test` effect (named
   `test_*` / `example_*` per §10.1), not Python golden runners.
 - **Only `coverage_report.py` stays Python** — it is pure tabulation over the generated
   corpus and the `type_check` arm list (§7.1), with no language semantics in it.
 
-**Enabling dependencies (monorepo, next phase).** Making the drivers pure Chelis requires
-three additions that do **not** exist yet (verified: no `process_run`, `eval --json`, or
-`check --json` in `crates/chelis-cli/src/` as of v0.7.19):
-
-1. a `process_run` subprocess builtin under the `Io` effect, so a Chelis driver can invoke
-   `chelis check` / `chelis eval`;
-2. `chelis eval --json` (machine-readable values) for eval-agreement;
-3. structured `chelis check --json` (machine-readable type + effect row) for
-   check-agreement.
-
-These are added in the next phase in the monorepo; the `chelis-std`-only dependency story
-holds once they ship.
+**Enabling dependencies (shipped).** Making the drivers pure Chelis required three
+additions, all of which have since shipped: a `process_run` subprocess builtin under the
+`Io` effect (`crates/chelis-types/src/builtins.rs`, `crates/chelis-compiler-api/src/runtime/eval.rs`),
+`chelis eval --json` (machine-readable values, for eval-agreement), and structured
+`chelis check --json` (machine-readable type + effect row, for check-agreement). The
+`chelis-std`-only dependency story holds now that they are in place.
 
 ---
 
@@ -1106,11 +1100,11 @@ holds once they ship.
 | Option type + `?` operator | Shipped | Hull returns `Option` from every check |
 | String operations in Chelis | Foundation shipped (`String` primitive + `string_*` builtins, `to_int`/`to_float`; see `examples/scalar_string_foundation.ch`) | Hull parses source strings |
 | `chelis prove` infrastructure | Shipped (v0.7.1: `@property`, type-directed sampling) | Hull's generator is the language-level version |
-| `process_run` subprocess builtin (under `Io`) | **In-flight** (not present in `crates/chelis-cli/src/` as of v0.7.19) | Chelis drivers invoke `chelis check` / `chelis eval` (§8.1) |
-| `chelis eval --json` | **In-flight** (no `--json` on `eval` as of v0.7.19) | Machine-readable values for eval-agreement (§6) |
-| Structured `chelis check --json` | **In-flight** (no `--json` on `check` as of v0.7.19) | Machine-readable type + effect row for check-agreement (§6) |
+| `process_run` subprocess builtin (under `Io`) | Shipped (eval/test-only; `crates/chelis-types/src/builtins.rs`, `crates/chelis-compiler-api/src/runtime/eval.rs`) | Chelis drivers invoke `chelis check` / `chelis eval` (§8.1) |
+| `chelis eval --json` | Shipped | Machine-readable values for eval-agreement (§6) |
+| Structured `chelis check --json` | Shipped | Machine-readable type + effect row for check-agreement (§6) |
 
-**Timing:** Phase 4 or Phase 5. Not before the language-spec paper (OOPSLA-targeted) finalizes the linearity / Δ-capability rules and the ICLR pipeline establishes the AI training loop. The mechanical prerequisites for the v0.1.0 *supported fragment* are met (Deep parser, ADTs + pattern matching, `Option`/`?`, string foundation, `chelis prove`); the remaining work is the three in-flight monorepo enablement deps above (`process_run`, `eval --json`, structured `check --json`) and freezing the linearity / effect-handling rules that the out-of-fragment constructs need. Hull's value increases as the language stabilizes - building the full checker while those rules are still changing means constant maintenance, so v0.1.0 deliberately scopes to the already-stable fragment and prevents regression there.
+**Timing:** Phase 4 or Phase 5. Not before the language-spec paper (OOPSLA-targeted) finalizes the linearity / Δ-capability rules and the ICLR pipeline establishes the AI training loop. The mechanical prerequisites for the v0.1.0 *supported fragment* are met (Deep parser, ADTs + pattern matching, `Option`/`?`, string foundation, `chelis prove`, `process_run`, `eval --json`, structured `check --json`); the remaining work is freezing the linearity / effect-handling rules that the out-of-fragment constructs need. Hull's value increases as the language stabilizes - building the full checker while those rules are still changing means constant maintenance, so v0.1.0 deliberately scopes to the already-stable fragment and prevents regression there.
 
 ---
 
