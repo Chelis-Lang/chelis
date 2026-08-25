@@ -2351,9 +2351,9 @@ fn host_program_call_name_sites<T>(
 pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
     "process_run",
     "round_to",
-    // Host-lane CSV I/O (chelis#903): same eval-only scope as the JSON
-    // family above -- the compiled backends have no Json/Csv document
-    // runtime, so the build gates reject these loudly.
+    // Host-lane CSV I/O (chelis#903): the compiler-owned text-table
+    // carrier is evaluator-only. Compiled structured I/O lives in the
+    // source-defined Std.Io modules instead.
     "parse_csv",
     "to_csv",
     "csv_f64s",

@@ -255,6 +255,19 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             let (form_tag, tag, children) = self.type_form_expr(expr)?;
             if form_tag == Some(DeepTag::TPrim) {
                 let name = self.one_symbol(tag, children)?;
+                // Reserved primitive spellings cannot be captured by a
+                // declaration-local type variable with the same name. This
+                // matters for the deferred `f8e4m3` spelling: treating it as
+                // the signature's quantified result would bypass the owning
+                // §1.1.1 rejection and let the build lane accept the program.
+                // Ordinary authored binders such as `p` still take the
+                // symbolic path below.
+                if Prim::parse_name(name).is_some() {
+                    return Ok(ResolvedCastTarget::PrimitiveSpelling {
+                        name: name.to_string(),
+                        canonical: true,
+                    });
+                }
                 if let Some(var) = self.type_vars.get(name).copied() {
                     return Ok(ResolvedCastTarget::Type(ResolvedDeepType(Type::Var(var))));
                 }
