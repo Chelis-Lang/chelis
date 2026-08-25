@@ -337,9 +337,9 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `fn` | `(fn {} (params ...) body)` | Anonymous function |
+| `fn` | `(fn {} (params {} ...) body)` | Anonymous function |
 | `app` | `(app {} func arg...)` | Function application |
-| `let` | `(let {} (bind name₁ expr₁ ...) body)` | Sequential let binding |
+| `let` | `(let {} (bind {} name₁ expr₁ ...) body)` | Sequential let binding |
 | `match` | `(match {} scrutinee arm...)` | Pattern match |
 | `arm` | `(arm {} pattern guard body)` | Match arm; guard is `()` if absent |
 | `if` | `(if {} cond then else)` | Conditional |
@@ -559,7 +559,7 @@ Explicit closure construction:
 
 ```scheme
 ;; f(x, _, z) where _ is the partial hole
-(fn {} (params y) (app {} (var {} f) (var {} x) (var {} y) (var {} z)))
+(fn {} (params {} y) (app {} (var {} f) (var {} x) (var {} y) (var {} z)))
 ```
 
 ### 4.3 Operators
@@ -616,7 +616,7 @@ Each element after the first must be a function (or lambda). Pipes with multi-ar
 
 ```scheme
 (pipe {} (var {} x)
-  (fn {} (params v) (app {} (var {} f) (var {} v) (var {} a)))
+  (fn {} (params {} v) (app {} (var {} f) (var {} v) (var {} a)))
   (var {} g))
 ```
 
@@ -854,8 +854,9 @@ MetaPair    ← MetaKey ':' Spacing MetaValue
 MetaKey     ← [a-z]+
 MetaValue   ← Node / Literal / Identifier / TypeName
 Children    ← (Child Spacing)*
-Child       ← Node / BareName / Literal
-BareName    ← Identifier / TypeName                # bare names only in params, bind, field contexts
+Child       ← Node / BareList / Meta / BareName / Literal
+BareList    ← '(' Spacing (Child Spacing)* ')' Spacing
+BareName    ← Identifier / TypeName                # admissibility is per child role; see §7.2
 Identifier  ← [a-z_] [a-zA-Z0-9_]*
 TypeName    ← [A-Z] [a-zA-Z0-9]*
 Literal     ← FloatLit / IntLit / BoolLit / StringLit
@@ -937,12 +938,74 @@ rather than leaving an implementation to invent a placeholder.
 > [03-PROG-2]'s reporting rules.
 
 The class set is closed because it partitions what the grammar can produce in
-top-level position: `Child`'s three alternatives (`Node`, `BareName`,
-`Literal`) plus the metadata forms a producer may emit. A bare identifier is
-the `BareName` production, admissible inside `params`, `bind`, and `field`
-contexts (§7) and never at top level; the four literal classes are `Literal`'s
-alternatives, with `IntLit` and `FloatLit` distinguished because a producer's
-mistake is usually specific to one.
+top-level position: `Child`'s five alternatives (`Node`, `BareList`, `Meta`,
+`BareName`, `Literal`) plus the metadata-annotated form a producer may emit. A
+bare identifier is the `BareName` production, admissible at the structural
+child positions §7.2 assigns and never at top level; the empty-list and
+list-without-a-tag-symbol classes are the `BareList` production's headless
+shapes; a metadata map is the `Meta` production; the four literal classes are
+`Literal`'s alternatives, with `IntLit` and `FloatLit` distinguished because a
+producer's mistake is usually specific to one.
+
+### 7.2 Child Roles
+
+A tagged node's children are not interchangeable. Each per-tag form in §2
+gives its children fixed meanings — `(def {} name body)` puts a declaration
+name at index 0 and a runtime expression at index 1 — and those meanings
+partition every child position into a small set of roles: an **expression**
+position carries runtime computation; a **structural** position carries a
+name, preserved syntax, or a field/axis/index selector; a **type** position
+carries type or dimension syntax; an **effect-handler** position carries the
+handler payload whose contract chapter 06 owns; and a few positions delegate
+to a per-tag expectation (a `match` child must be an `arm`, a `let` child
+must be a `bind`, a `module` child must be a declaration). The role is a
+property of the vocabulary, decided by the tag and the child index alone, so
+a reader never inspects a child's content to learn what kind of thing its
+position holds.
+
+> **[03-ROLE-1]** For every tag in the closed vocabulary (§2) and every
+> child index its form admits, an implementation SHALL classify the position
+> into exactly one role, per that tag's form in §2. The classification SHALL
+> be total over the vocabulary and SHALL depend only on the tag and the
+> child position, never on the child's content. A bare identifier at a
+> structural, type, or effect-handler position is a name, even when its
+> spelling coincides with a vocabulary tag or another reserved word.
+
+The identifier rule has a sharp edge at expression positions. A name is not
+an expression: Deep spells a variable reference `(var {} x)`, so a bare
+identifier where an expression is required is always a producer error, and
+accepting one would oblige every downstream consumer to invent a meaning
+for it.
+
+> **[03-ROLE-2]** A bare identifier at an expression position SHALL be
+> rejected at the ingress boundary that reads the program text, before name
+> resolution, type checking, evaluation, lowering, or resugaring observes
+> the program. The rejection SHALL identify the offending identifier and
+> SHALL carry its source location, under [03-PROG-2]'s reporting
+> discipline, and SHOULD name the `(var {} ...)` spelling that expresses a
+> variable reference.
+
+Lists at structural positions serve two purposes that share one byte shape.
+A vocabulary node may legitimately stand there — `(params {} w b x)` at a
+`fn`'s binder position — but so may a plain structural list: an import name
+list `(copy fill)` whose elements happen to spell vocabulary tags, or an
+annotated parameter `(x {type: (t-prim {} f32)})` whose second element is a
+metadata map. Neither the head alone nor the metadata map alone
+distinguishes the two. The disambiguator is their conjunction: every
+vocabulary node carries a metadata map at element 1 (§1), and a structural
+list whose head is not a vocabulary tag cannot be a node no matter what
+follows it.
+
+> **[03-ROLE-3]** A parenthesized list at a structural position SHALL be
+> read as a vocabulary node exactly when its first element is a tag of the
+> closed vocabulary (§2) AND its second element is a metadata map (§1.1);
+> otherwise it SHALL be read as a structural list whose elements are names,
+> literals, and nested forms under this section's rules. An implementation
+> SHALL NOT reinterpret a structural list by inspecting its head alone: an
+> import name list such as `(copy fill)` (a vocabulary-tag spelling at the
+> head, no metadata map) and an annotated parameter such as
+> `(x {type: (t-prim {} f32)})` (a metadata map at element 1, an ordinary
+> name at the head) both remain structural lists.
 
 ---
 
@@ -956,7 +1019,11 @@ mistake is usually specific to one.
 - Meta is a valid `{}` map (may be empty).
 - A colon-prefixed keyword token such as `:type` is metadata-key syntax, not
   an expression atom or node child. Outside metadata-key position, the parser
-  MUST reject it before checker or evaluator processing.
+  MUST reject it before checker or evaluator processing — the same ingress
+  discipline [03-ROLE-2] (§7.2) applies to a bare identifier at an
+  expression position.
+- Child positions carry the roles §7.2 assigns; a list at a structural
+  position is read per [03-ROLE-3].
 
 ### 8.2 Arity Validation (Post-Parse)
 - `(if {} cond then else)` — exactly 3 children.
@@ -987,7 +1054,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (app {} (var {} const) (lit {type: (t-prim {} f32)} 1.0) (d-lit {} 2) (d-lit {} 3))))
 
   (def {} main
-    (fn {} (params)
+    (fn {} (params {})
       (app {} (var {} println) (realize {} (var {} twos))))))
 ```
 
@@ -1006,14 +1073,14 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (t-tensor {} (d-name {} samples) (t-prim {} f32))))
 
   (def {} predict
-    (fn {} (params w b x)
+    (fn {} (params {} w b x)
       (app {} (var {} add)
         (app {} (var {} matmul) (var {} x) (var {} w))
         (var {} b))))
 
   (def {} mse_loss
-    (fn {} (params y_pred y_true)
-      (let {} (bind
+    (fn {} (params {} y_pred y_true)
+      (let {} (bind {}
         diff (app {} (var {} sub) (var {} y_pred) (var {} y_true))
         sq   (app {} (var {} mul) (var {} diff) (var {} diff)))
         (app {} (var {} mean) (var {} sq))))))
@@ -1033,7 +1100,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
     (variant {} Sigmoid))
 
   (def {} activate
-    (fn {} (params act x)
+    (fn {} (params {} act x)
       (match {} (var {} act)
         (arm {} (pat-ctor {} ReLU) ()
           (app {} (var {} relu) (var {} x)))
@@ -1041,11 +1108,11 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
           (app {} (var {} sigmoid) (var {} x))))))
 
   (def {} forward
-    (fn {} (params w1 b1 w2 b2 act x)
+    (fn {} (params {} w1 b1 w2 b2 act x)
       (pipe {} (var {} x)
-        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
-        (fn {} (params v) (app {} (var {} activate) (var {} act) (var {} v)))
-        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
+        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
+        (fn {} (params {} v) (app {} (var {} activate) (var {} act) (var {} v)))
+        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
 ```
 
 ### 9.4 ADT with Record Variants
@@ -1061,7 +1128,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (field {} height (t-prim {} f32))))
 
   (def {} area
-    (fn {} (params s)
+    (fn {} (params {} s)
       (match {} (var {} s)
         (arm {} (pat-ctor {} Circle (pat-var {} r)) ()
           (app {} (var {} mul)

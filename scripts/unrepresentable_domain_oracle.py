@@ -38,6 +38,12 @@ Obligations:
    carrier. Its parity suite drives one accept/reject corpus through every
    public Deep text door and structurally forbids reopening the weaker
    ingress anywhere in the workspace's production sources.
+7. `spec/03-deep-syntax.md` [03-ROLE-2] (chelis#885): a bare identifier at
+   an expression position (def body, fn body, application argument, bind
+   RHS) is an ingress rejection that identifies the offending name AND
+   names the `(var {} ...)` remediation spelling. This is the continuous
+   form of the chelis#885 oracle; obligation 2's structural-name controls
+   are its over-application guard.
 
 Usage:
 
@@ -77,6 +83,25 @@ KEYWORD_IN_EXPR_FIXTURES: list[tuple[str, str]] = [
     ("bare keyword as app argument", "(def {} f (app {} (var {} g) :arg))"),
 ]
 
+# Programs that MUST fail at ingress: a bare identifier at an expression
+# position (`spec/03-deep-syntax.md` [03-ROLE-2], chelis#885). Every fixture
+# names the identifier `oops` so obligation 7 can assert the remediation
+# spelling `use `(var {} oops)`` exactly.
+NAME_IN_EXPR_FIXTURES: list[tuple[str, str]] = [
+    ("bare name as def body", "(def {} f oops)"),
+    ("bare name inside fn body", "(def {} f (fn {} (params {} x) oops))"),
+    ("bare name as app argument", "(def {} f (app {} (var {} g) oops))"),
+    (
+        "bare name as bind RHS",
+        "(def {} f (fn {} (params {} x) (let {} (bind {} y oops) (var {} y))))",
+    ),
+]
+
+# The [03-ROLE-2] identification and remediation the obligation-7 diagnostic
+# must carry (`StampErrorKind::NameAtExprSlot`'s Display).
+NAME_IN_EXPR_IDENTIFICATION = "bare name"
+NAME_IN_EXPR_REMEDIATION = "use `(var {} oops)`"
+
 # Valid programs with Names at structural positions that MUST score 1.0.
 # These exercise the over-application control: the domain restriction on
 # RuntimeExpr must not accidentally reject names where they belong
@@ -91,6 +116,25 @@ SCORE_ONE_CONTROL_FIXTURES: list[tuple[str, str]] = [
     (
         "nested fn",
         "(def {} outer (fn {} (params {} x) (fn {} (params {} y) (var {} x))))",
+    ),
+    # chelis#885 over-application control: every structural position the
+    # corpus guard `structural_symbol_positions_still_score_one` names —
+    # record head, kv key, access field, export names, deftype / defsig /
+    # def names — must keep scoring exactly 1.0 while obligation 7 rejects
+    # bare names at expression positions. The program is that corpus
+    # member's, verbatim.
+    (
+        "record head, kv key, access field, export, deftype names",
+        "(module {} stats.prob "
+        "(export {} probability prob_value) "
+        "(deftype {opaque: true} Probability () "
+        "(variant {} Probability (field {} value (t-prim {} f32)))) "
+        "(defsig {} probability (t-fn {} (t-prim {} f32) (t-adt {} Probability))) "
+        "(def {} probability (fn {} (params {} (x {type: (t-prim {} f32)})) "
+        "(record {} Probability (kv {} value (var {} x))))) "
+        "(defsig {} prob_value (t-fn {} (t-adt {} Probability) (t-prim {} f32))) "
+        "(def {} prob_value (fn {} (params {} (p {type: (t-adt {} Probability)})) "
+        "(access {} (var {} p) value))))",
     ),
 ]
 
@@ -397,6 +441,49 @@ def check_keyword_in_expr_rejected() -> None:
             fixture.unlink(missing_ok=True)
 
 
+def check_name_in_expr_rejected() -> None:
+    """Obligation 7: bare identifier in expression position → ingress error.
+
+    `spec/03-deep-syntax.md` [03-ROLE-2] (chelis#885): the rejection
+    identifies the offending name and names the `(var {} ...)` remediation
+    spelling (`StampErrorKind::NameAtExprSlot`'s Display). Obligation 2's
+    structural-name fixtures are the over-application control.
+    """
+    print("── Obligation 7: bare name at expression position → ingress error ──")
+    for name, source in NAME_IN_EXPR_FIXTURES:
+        fixture = write_fixture(source)
+        try:
+            result = run_chelis_check(fixture)
+            if result.returncode == 0:
+                raise OracleFailure(
+                    f"[{name}] [03-ROLE-2] requires an ingress rejection, got "
+                    f"exit 0.\nSource: {source}\nStdout: {result.stdout}"
+                )
+            report = parse_check_json(result.stdout)
+            errors = report.get("errors", [])
+            if not errors:
+                raise OracleFailure(
+                    f"[{name}] exit was non-zero but errors array is empty.\n"
+                    f"Source: {source}\nReport: {report}"
+                )
+            error_text = json.dumps(errors)
+            if NAME_IN_EXPR_IDENTIFICATION not in error_text:
+                raise OracleFailure(
+                    f"[{name}] [03-ROLE-2] requires the diagnostic to identify "
+                    f"the offending form as a {NAME_IN_EXPR_IDENTIFICATION}.\n"
+                    f"Errors: {errors}"
+                )
+            if NAME_IN_EXPR_REMEDIATION not in error_text:
+                raise OracleFailure(
+                    f"[{name}] [03-ROLE-2] requires the diagnostic to name the "
+                    f"remediation spelling ({NAME_IN_EXPR_REMEDIATION}).\n"
+                    f"Errors: {errors}"
+                )
+            print(f"  PASS: {name}")
+        finally:
+            fixture.unlink(missing_ok=True)
+
+
 def check_score_one_controls() -> None:
     """Obligation 2: valid programs with Names at structural slots score 1.0."""
     print("── Obligation 2: structural-name programs score 1.0 ──")
@@ -608,6 +695,7 @@ OBLIGATIONS = (
     check_validate_agrees_with_check,
     check_stamp_pass_integration_tests,
     check_compiler_api_ingress,
+    check_name_in_expr_rejected,
 )
 
 

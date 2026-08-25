@@ -45,6 +45,17 @@ const VALID_MODULE: &str = r#"(module {}
 /// A bare name at a RuntimeExpr slot: the canonical stamp rejection.
 const BARE_NAME_BODY_MODULE: &str = "(module {} phase3.ingress (def {} target unwrapped_name))";
 
+/// A bare name as an application argument ([03-ROLE-2] at a nested
+/// RuntimeExpr slot rather than a def body).
+const BARE_NAME_APP_ARG_MODULE: &str =
+    "(module {} phase3.ingress (def {} target (app {} (var {} g) unwrapped_name)))";
+
+/// A bare name as a bind RHS: `bind`'s odd children are RuntimeExpr slots,
+/// so the value position rejects while the adjacent binder-name position
+/// stays admissible.
+const BARE_NAME_BIND_RHS_MODULE: &str =
+    "(module {} phase3.ingress (def {} target (let {} (bind {} y unwrapped_name) (var {} y))))";
+
 /// A top-level `(fn ...)`. It is a vocabulary-headed node, so the weaker
 /// lenient ingress stamped it happily as a bare/syntax position; only the
 /// declaration-role stamp rejects it.
@@ -76,6 +87,16 @@ const REJECTED_MODULES: &[(&str, &str, &str)] = &[
     (
         "bare name at a RuntimeExpr slot",
         BARE_NAME_BODY_MODULE,
+        "bare name",
+    ),
+    (
+        "bare name as an application argument",
+        BARE_NAME_APP_ARG_MODULE,
+        "bare name",
+    ),
+    (
+        "bare name as a bind RHS",
+        BARE_NAME_BIND_RHS_MODULE,
         "bare name",
     ),
     (
