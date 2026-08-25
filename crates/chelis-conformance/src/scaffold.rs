@@ -240,7 +240,7 @@ fn resync_block(
 
 fn reef_toml(name: &str, module_prefix: &str, version: &str) -> String {
     format!(
-        "schema = \"2\"\n\n\
+        "schema = \"3\"\n\n\
          [package]\n\
          name = \"{name}\"\n\
          version = \"0.1.0\"\n\

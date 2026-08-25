@@ -1,6 +1,7 @@
 use super::{
     ArtifactPlatform, ArtifactSpec, ChelisSrcSpec, ConformSpec, DependencySpec, LockSource,
-    LockedDependency, ManifestPackage, PackageId, ReefLock, ReefManifest,
+    LockedDependency, ManifestPackage, PackageDescription, PackageId, PackageMetadata, PackageUrl,
+    PortablePackagePath, ReefLock, ReefManifest, SpdxLicense,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use toml_edit::DocumentMut;
 
-const MANIFEST_SCHEMA_CURRENT: u32 = 2;
+const MANIFEST_SCHEMA_CURRENT: u32 = 3;
 const LOCK_SCHEMA_CURRENT: u32 = 1;
 pub(crate) const PROJECT_WRITE_LOCK_FILE: &str = ".reef-write.lock";
 const PROJECT_WRITE_IGNORE_RULES: &[&str] =
@@ -46,6 +47,21 @@ const MANIFEST_PACKAGE_KEYS_V2: &[&str] = &[
     "module_prefix",
     "additional_sources",
     "resolver",
+];
+const MANIFEST_PACKAGE_KEYS_V3: &[&str] = &[
+    "name",
+    "version",
+    "compiler",
+    "module_prefix",
+    "additional_sources",
+    "resolver",
+    "description",
+    "license",
+    "license-file",
+    "repository",
+    "documentation",
+    "homepage",
+    "readme",
 ];
 const DEPENDENCY_KEYS: &[&str] = &["version", "path"];
 const CHELIS_SRC_KEYS: &[&str] = &["crates", "pin_commit"];
@@ -227,6 +243,12 @@ enum SchemaTwo {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+enum SchemaThree {
+    #[serde(rename = "3")]
+    Three,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
 enum ResolverTwo {
     #[serde(rename = "2")]
     Two,
@@ -299,6 +321,51 @@ struct ManifestPackageWireV2 {
 enum DependencySpecWireV2 {
     Requirement(String),
     Detailed(DependencySpecWireV1),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ManifestWireV3 {
+    schema: SchemaThree,
+    package: ManifestPackageWireV3,
+    #[serde(default)]
+    dependencies: BTreeMap<String, DependencySpecWireV2>,
+    #[serde(default, rename = "chelis-src")]
+    chelis_src: Option<ChelisSrcWireV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conform: Option<ConformWireV1>,
+    #[serde(default)]
+    artifacts: BTreeMap<String, ArtifactSpecWireV1>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ManifestPackageWireV3 {
+    name: String,
+    version: String,
+    compiler: String,
+    module_prefix: String,
+    #[serde(default)]
+    additional_sources: Vec<String>,
+    resolver: ResolverTwo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    license: Option<String>,
+    #[serde(
+        default,
+        rename = "license-file",
+        skip_serializing_if = "Option::is_none"
+    )]
+    license_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    documentation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    homepage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    readme: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -388,6 +455,7 @@ impl From<ManifestWireV1> for ReefManifest {
                 compiler: wire.package.compiler,
                 module_prefix: wire.package.module_prefix,
                 additional_sources: wire.package.additional_sources,
+                metadata: PackageMetadata::default(),
             },
             dependencies: wire
                 .dependencies
@@ -449,6 +517,7 @@ impl From<ManifestWireV2> for ReefManifest {
                 compiler: wire.package.compiler,
                 module_prefix: wire.package.module_prefix,
                 additional_sources: wire.package.additional_sources,
+                metadata: PackageMetadata::default(),
             },
             dependencies: wire
                 .dependencies
@@ -501,6 +570,77 @@ impl From<ManifestWireV2> for ReefManifest {
                 })
                 .collect(),
         }
+    }
+}
+
+fn parse_optional_metadata<T>(field: &str, value: Option<String>) -> Result<Option<T>, String>
+where
+    T: FromStr,
+    T::Err: fmt::Display,
+{
+    value
+        .map(|value| {
+            value
+                .parse::<T>()
+                .map_err(|error| format!("package.{field}: {error}"))
+        })
+        .transpose()
+}
+
+impl TryFrom<ManifestWireV3> for ReefManifest {
+    type Error = String;
+
+    fn try_from(wire: ManifestWireV3) -> Result<Self, Self::Error> {
+        let ManifestWireV3 {
+            schema: SchemaThree::Three,
+            package,
+            dependencies,
+            chelis_src,
+            conform,
+            artifacts,
+        } = wire;
+        let ManifestPackageWireV3 {
+            name,
+            version,
+            compiler,
+            module_prefix,
+            additional_sources,
+            resolver,
+            description,
+            license,
+            license_file,
+            repository,
+            documentation,
+            homepage,
+            readme,
+        } = package;
+        let metadata = PackageMetadata::new(
+            parse_optional_metadata::<PackageDescription>("description", description)?,
+            parse_optional_metadata::<SpdxLicense>("license", license)?,
+            parse_optional_metadata::<PortablePackagePath>("license-file", license_file)?,
+            parse_optional_metadata::<PackageUrl>("repository", repository)?,
+            parse_optional_metadata::<PackageUrl>("documentation", documentation)?,
+            parse_optional_metadata::<PackageUrl>("homepage", homepage)?,
+            parse_optional_metadata::<PortablePackagePath>("readme", readme)?,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut manifest = ReefManifest::from(ManifestWireV2 {
+            schema: SchemaTwo::Two,
+            package: ManifestPackageWireV2 {
+                name,
+                version,
+                compiler,
+                module_prefix,
+                additional_sources,
+                resolver,
+            },
+            dependencies,
+            chelis_src,
+            conform,
+            artifacts,
+        });
+        manifest.package.metadata = metadata;
+        Ok(manifest)
     }
 }
 
@@ -623,6 +763,61 @@ impl From<&ReefManifest> for ManifestWireV2 {
                     )
                 })
                 .collect(),
+        }
+    }
+}
+
+impl From<&ReefManifest> for ManifestWireV3 {
+    fn from(manifest: &ReefManifest) -> Self {
+        let ManifestWireV2 {
+            package,
+            dependencies,
+            chelis_src,
+            conform,
+            artifacts,
+            ..
+        } = ManifestWireV2::from(manifest);
+        Self {
+            schema: SchemaThree::Three,
+            package: ManifestPackageWireV3 {
+                name: package.name,
+                version: package.version,
+                compiler: package.compiler,
+                module_prefix: package.module_prefix,
+                additional_sources: package.additional_sources,
+                resolver: package.resolver,
+                description: manifest
+                    .package
+                    .metadata
+                    .description()
+                    .map(ToString::to_string),
+                license: manifest.package.metadata.license().map(ToString::to_string),
+                license_file: manifest
+                    .package
+                    .metadata
+                    .license_file()
+                    .map(ToString::to_string),
+                repository: manifest
+                    .package
+                    .metadata
+                    .repository()
+                    .map(ToString::to_string),
+                documentation: manifest
+                    .package
+                    .metadata
+                    .documentation()
+                    .map(ToString::to_string),
+                homepage: manifest
+                    .package
+                    .metadata
+                    .homepage()
+                    .map(ToString::to_string),
+                readme: manifest.package.metadata.readme().map(ToString::to_string),
+            },
+            dependencies,
+            chelis_src,
+            conform,
+            artifacts,
         }
     }
 }
@@ -763,6 +958,11 @@ const MANIFEST_MIGRATIONS: &[MigrationStep] = &[
         to: 2,
         apply: migrate_manifest_1_to_2,
     },
+    MigrationStep {
+        from: 2,
+        to: 3,
+        apply: migrate_manifest_2_to_3,
+    },
 ];
 
 const LOCK_MIGRATIONS: &[MigrationStep] = &[MigrationStep {
@@ -868,6 +1068,7 @@ fn strict_manifest_key_preflight(text: &str, schema: u32) -> Result<(), String> 
         let package_keys = match schema {
             1 => MANIFEST_PACKAGE_KEYS_V1,
             2 => MANIFEST_PACKAGE_KEYS_V2,
+            3 => MANIFEST_PACKAGE_KEYS_V3,
             _ => {
                 return Err(format!(
                     "no strict key set exists for manifest schema {schema}"
@@ -1021,6 +1222,30 @@ pub(crate) fn parse_manifest_text(
                     message: format!("failed strict field parsing: {error}"),
                 })
         }
+        3 => {
+            strict_manifest_key_preflight(text, 3).map_err(|message| {
+                DocumentUpgradeError::Schema {
+                    document: "manifest",
+                    path: path.to_path_buf(),
+                    schema: Some(3),
+                    message,
+                }
+            })?;
+            let wire = toml::from_str::<ManifestWireV3>(text).map_err(|error| {
+                DocumentUpgradeError::Schema {
+                    document: "manifest",
+                    path: path.to_path_buf(),
+                    schema: Some(3),
+                    message: format!("failed strict field parsing: {error}"),
+                }
+            })?;
+            ReefManifest::try_from(wire).map_err(|message| DocumentUpgradeError::Schema {
+                document: "manifest",
+                path: path.to_path_buf(),
+                schema: Some(3),
+                message: format!("failed typed metadata parsing: {message}"),
+            })
+        }
         schema => Err(DocumentUpgradeError::Schema {
             document: "manifest",
             path: path.to_path_buf(),
@@ -1076,9 +1301,9 @@ pub(crate) fn parse_lock_text(
     }
 }
 
-pub(crate) fn serialize_manifest_v2(manifest: &ReefManifest) -> Result<Vec<u8>, String> {
-    let text = toml::to_string_pretty(&ManifestWireV2::from(manifest))
-        .map_err(|error| format!("serialize manifest schema 2: {error}"))?;
+pub(crate) fn serialize_manifest_v3(manifest: &ReefManifest) -> Result<Vec<u8>, String> {
+    let text = toml::to_string_pretty(&ManifestWireV3::from(manifest))
+        .map_err(|error| format!("serialize manifest schema 3: {error}"))?;
     Ok(format!("{text}\n").into_bytes())
 }
 
@@ -1224,12 +1449,13 @@ fn rewrite_inline_dependency(
     Ok(())
 }
 
-fn migrate_manifest_schema_directive(text: String) -> String {
+fn migrate_manifest_schema_directive(text: String, from: u32, to: u32) -> String {
+    let previous = format!("manifest-v{from}.schema.json");
+    let current = format!("manifest-v{to}.schema.json");
     text.split_inclusive('\n')
         .map(|line| {
-            if line.trim_start().starts_with("#:schema") && line.contains("manifest-v1.schema.json")
-            {
-                line.replacen("manifest-v1.schema.json", "manifest-v2.schema.json", 1)
+            if line.trim_start().starts_with("#:schema") && line.contains(&previous) {
+                line.replacen(&previous, &current, 1)
             } else {
                 line.to_string()
             }
@@ -1313,7 +1539,7 @@ fn migrate_manifest_1_to_2(text: &str, path: &Path) -> Result<String, DocumentUp
         }
     }
 
-    let migrated = migrate_manifest_schema_directive(document.to_string());
+    let migrated = migrate_manifest_schema_directive(document.to_string(), 1, 2);
     let manifest = parse_manifest_text(&migrated, path, false)?;
     super::validate_manifest_schema_with(&manifest, ManifestSchemaVersion(2), true).map_err(
         |message| DocumentUpgradeError::Migration {
@@ -1321,6 +1547,45 @@ fn migrate_manifest_1_to_2(text: &str, path: &Path) -> Result<String, DocumentUp
             path: path.to_path_buf(),
             from: 1,
             to: 2,
+            operation: "validate migrated manifest",
+            message,
+        },
+    )?;
+    Ok(migrated)
+}
+
+fn migrate_manifest_2_to_3(text: &str, path: &Path) -> Result<String, DocumentUpgradeError> {
+    let mut document =
+        text.parse::<DocumentMut>()
+            .map_err(|error| DocumentUpgradeError::Migration {
+                document: "manifest",
+                path: path.to_path_buf(),
+                from: 2,
+                to: 3,
+                operation: "parse editable TOML",
+                message: error.to_string(),
+            })?;
+    let schema = document
+        .get_mut("schema")
+        .and_then(toml_edit::Item::as_value_mut)
+        .ok_or_else(|| DocumentUpgradeError::Migration {
+            document: "manifest",
+            path: path.to_path_buf(),
+            from: 2,
+            to: 3,
+            operation: "select schema field",
+            message: "manifest schema must be a string value".to_string(),
+        })?;
+    replace_string_value(schema, "3".to_string());
+
+    let migrated = migrate_manifest_schema_directive(document.to_string(), 2, 3);
+    let manifest = parse_manifest_text(&migrated, path, false)?;
+    super::validate_manifest_schema_with(&manifest, ManifestSchemaVersion(3), true).map_err(
+        |message| DocumentUpgradeError::Migration {
+            document: "manifest",
+            path: path.to_path_buf(),
+            from: 2,
+            to: 3,
             operation: "validate migrated manifest",
             message,
         },
@@ -1853,6 +2118,14 @@ pub fn manifest_schema_v2_json() -> String {
     )
 }
 
+pub fn manifest_schema_v3_json() -> String {
+    let schema = schema_for!(ManifestWireV3);
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&schema).expect("manifest schema serialization")
+    )
+}
+
 pub fn lock_schema_v1_json() -> String {
     let schema = schema_for!(LockWireV1);
     format!(
@@ -1921,6 +2194,17 @@ mod tests {
         assert_eq!(
             json_schema_property_keys(&manifest_v2["definitions"]["ManifestPackageWireV2"]),
             expected_keys(MANIFEST_PACKAGE_KEYS_V2)
+        );
+
+        let manifest_v3: serde_json::Value =
+            serde_json::from_str(&manifest_schema_v3_json()).expect("manifest schema 3 JSON");
+        assert_eq!(
+            json_schema_property_keys(&manifest_v3),
+            expected_keys(MANIFEST_ROOT_KEYS)
+        );
+        assert_eq!(
+            json_schema_property_keys(&manifest_v3["definitions"]["ManifestPackageWireV3"]),
+            expected_keys(MANIFEST_PACKAGE_KEYS_V3)
         );
 
         let lock: serde_json::Value =
@@ -2146,7 +2430,7 @@ mod tests {
         assert!(
             fs::read_to_string(manifest_path)
                 .unwrap()
-                .starts_with("schema = \"2\"")
+                .starts_with("schema = \"3\"")
         );
         assert!(
             fs::read_to_string(lock_path)

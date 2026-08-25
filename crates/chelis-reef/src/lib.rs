@@ -27,10 +27,22 @@ use walkdir::WalkDir;
 pub mod chelis_src;
 mod document_schema;
 /// Typed package identities and deterministic bounded local resolution.
+mod package_metadata;
 #[doc(hidden)]
 pub mod package_versioning;
 mod remote_discovery;
 
+pub use package_metadata::{
+    DeclaredFileSnapshot, METADATA_FILE_MAX_BYTES, METADATA_TOTAL_MAX_BYTES, PackageDescription,
+    PackageMetadata, PackageMetadataError, PackageUrl, PortablePackagePath, SpdxLicense,
+    snapshot_declared_metadata_file,
+};
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub use package_metadata::{
+    check_archive_spelling_collision_for_test, snapshot_declared_metadata_file_with_hook,
+    snapshot_declared_metadata_file_with_walk_hook,
+};
 pub use remote_discovery::{
     BudgetDimension, BudgetError, DiscoveryError, DiscoveryMode, OutdatedPackage, OutdatedReport,
     ResolutionBudget, SourceLocator, UpdateReport, VersionChange,
@@ -39,7 +51,8 @@ pub use remote_discovery::{
 
 pub use document_schema::{
     DocumentUpgradeError, LockSchemaVersion, ManifestSchemaVersion, UpgradeMode, UpgradeReport,
-    lock_schema_v1_json, manifest_schema_v1_json, manifest_schema_v2_json, upgrade_documents,
+    lock_schema_v1_json, manifest_schema_v1_json, manifest_schema_v2_json, manifest_schema_v3_json,
+    upgrade_documents,
 };
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
@@ -174,6 +187,10 @@ pub struct ManifestPackage {
     /// full set of validation rules.
     #[serde(default)]
     pub additional_sources: Vec<String>,
+    /// Descriptive schema-3 metadata. It does not participate in package
+    /// identity, dependency matching, or source selection.
+    #[serde(default)]
+    pub metadata: PackageMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1989,6 +2006,7 @@ pub fn init_package(
             compiler: CURRENT_COMPILER_VERSION.to_string(),
             module_prefix: module_prefix.to_string(),
             additional_sources: Vec::new(),
+            metadata: PackageMetadata::default(),
         },
         dependencies: BTreeMap::new(),
         chelis_src: None,
@@ -2251,7 +2269,8 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // inert and make the same binary emit different C depending on cache state).
 // v4 adds typed package identities and lock-preference validation. The bump
 // keeps pre-SemVer graph payloads outside the typed resolver boundary.
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 4;
+// v5 adds invariant package metadata to every prepared manifest payload.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
@@ -6042,18 +6061,22 @@ impl ParsedManifest {
     }
 }
 
-fn read_manifest(path: &Path) -> Result<ParsedManifest, String> {
-    let text =
-        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+fn parse_manifest_contents(path: &Path, text: &str) -> Result<ParsedManifest, String> {
     let schema =
-        document_schema::manifest_schema_version(&text, path).map_err(|error| error.to_string())?;
-    let manifest = document_schema::parse_manifest_text(&text, path, true)
+        document_schema::manifest_schema_version(text, path).map_err(|error| error.to_string())?;
+    let manifest = document_schema::parse_manifest_text(text, path, true)
         .map_err(|error| error.to_string())?;
     let typed = validate_manifest_schema_with(&manifest, schema, allow_dep_compiler_drift())?;
     Ok(ParsedManifest {
         raw: manifest,
         typed,
     })
+}
+
+fn read_manifest(path: &Path) -> Result<ParsedManifest, String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    parse_manifest_contents(path, &text)
 }
 
 /// Read a shell's `<root>/reef.toml` for the cross-version `reef src`
@@ -6079,7 +6102,7 @@ fn write_manifest_unlocked(
     path: &Path,
     manifest: &ReefManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = document_schema::serialize_manifest_v2(manifest)?;
+    let bytes = document_schema::serialize_manifest_v3(manifest)?;
     let text = std::str::from_utf8(&bytes)?;
     document_schema::parse_manifest_text(text, path, false)?;
     document_schema::atomic_replace(path, &bytes)?;
@@ -6600,6 +6623,12 @@ pub(crate) fn validate_manifest_schema_with(
     schema: ManifestSchemaVersion,
     allow_compiler_drift: bool,
 ) -> Result<package_versioning::TypedManifest, String> {
+    if schema.get() < 3 && manifest.package.metadata != PackageMetadata::default() {
+        return Err(format!(
+            "manifest schema {} does not support package metadata; upgrade to schema 3",
+            schema.get()
+        ));
+    }
     let dependencies = || {
         manifest.dependencies.iter().map(|(name, dependency)| {
             (
@@ -6616,7 +6645,7 @@ pub(crate) fn validate_manifest_schema_with(
             &manifest.package.compiler,
             dependencies(),
         ),
-        2 => package_versioning::TypedManifest::schema_two(
+        2 | 3 => package_versioning::TypedManifest::schema_two(
             &manifest.package.name,
             &manifest.package.version,
             &manifest.package.compiler,
@@ -8312,28 +8341,49 @@ fn module_name_for_input(root: &Path, file: &Path, package_name: &str) -> Result
     ))
 }
 
+enum ArchiveMember {
+    Source(PathBuf),
+    Snapshot(Vec<u8>),
+}
+
 fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
-    // Re-read the manifest to know which additional source roots to pack.
-    // (This function is called from `build_package` after the graph has
-    // already been resolved; reading once more here is cheap and keeps
-    // the archive packing self-contained.)
-    let manifest = read_manifest(&root.join("reef.toml"))?;
+    build_archive_with_snapshot_hook(root, out_path, || {})
+}
+
+fn build_archive_with_snapshot_hook<F>(
+    root: &Path,
+    out_path: &Path,
+    after_snapshots: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    // Capture the manifest bytes once. The parsed declarations and archived
+    // manifest must describe the same immutable byte snapshot.
+    let manifest_path = root.join("reef.toml");
+    let manifest_bytes = fs::read(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
+    let manifest_text = std::str::from_utf8(&manifest_bytes)
+        .map_err(|error| format!("{} is not UTF-8: {error}", manifest_path.display()))?;
+    let manifest = parse_manifest_contents(&manifest_path, manifest_text)?;
     let archive_mtime = canonical_archive_mtime()?;
-    let mut members = BTreeMap::<String, PathBuf>::new();
-    let metadata_files: &[&str] = if manifest.package.name == CHELIS_STD_PACKAGE_NAME {
-        // chelis-std is the bundled runtime and therefore has a
-        // self-referential lock entry. Including reef.lock in its own
-        // archive makes the archive hash depend on the previous bundle
-        // hash and prevents the committed lock from reaching a fixed
-        // point. Downstream shells still pack reef.lock normally.
-        &["reef.toml"]
-    } else {
-        &["reef.toml", "reef.lock"]
-    };
-    for rel in metadata_files {
-        let path = root.join(rel);
-        if path.exists() {
-            members.insert((*rel).to_string(), path);
+    let mut members = BTreeMap::<String, ArchiveMember>::new();
+    members.insert(
+        "reef.toml".to_string(),
+        ArchiveMember::Snapshot(manifest_bytes),
+    );
+    if manifest.package.name != CHELIS_STD_PACKAGE_NAME {
+        // chelis-std has a self-referential lock entry. Excluding its lock
+        // lets the committed bundle hash reach a fixed point.
+        let lock_path = root.join("reef.lock");
+        match fs::read(&lock_path) {
+            Ok(bytes) => {
+                members.insert("reef.lock".to_string(), ArchiveMember::Snapshot(bytes));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("failed to read {}: {error}", lock_path.display()));
+            }
         }
     }
     // Pack src/ plus every declared additional source root. Tar paths
@@ -8364,16 +8414,42 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
             }
             let rel = entry.path().strip_prefix(root).map_err(|e| e.to_string())?;
             let archive_path = portable_archive_path(rel)?;
-            members.insert(archive_path, entry.path().to_path_buf());
+            members.insert(
+                archive_path,
+                ArchiveMember::Source(entry.path().to_path_buf()),
+            );
         }
     }
+
+    let declared_paths = [
+        manifest.package.metadata.readme(),
+        manifest.package.metadata.license_file(),
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .collect::<BTreeSet<_>>();
+    for path in declared_paths {
+        let snapshot = snapshot_declared_metadata_file(root, &path)
+            .map_err(|error| format!("package metadata snapshot failed: {error}"))?;
+        let (path, bytes) = snapshot.into_parts();
+        for existing in members.keys() {
+            package_metadata::ensure_archive_spellings_do_not_collide(existing, path.as_str())
+                .map_err(|error| error.to_string())?;
+        }
+        members.insert(path.to_string(), ArchiveMember::Snapshot(bytes));
+    }
+    after_snapshots();
 
     let mut tar_bytes = Vec::new();
     {
         let mut builder = Builder::new(&mut tar_bytes);
-        for (archive_path, source_path) in members {
-            let contents = fs::read(&source_path)
-                .map_err(|e| format!("failed to read {}: {e}", source_path.display()))?;
+        for (archive_path, member) in members {
+            let contents = match member {
+                ArchiveMember::Source(source_path) => fs::read(&source_path)
+                    .map_err(|e| format!("failed to read {}: {e}", source_path.display()))?,
+                ArchiveMember::Snapshot(contents) => contents,
+            };
             let mut header = Header::new_gnu();
             header.set_size(contents.len() as u64);
             header.set_mode(0o644);
@@ -8389,6 +8465,22 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
     let compressed =
         zstd::stream::encode_all(Cursor::new(tar_bytes), 19).map_err(|e| e.to_string())?;
     document_schema::atomic_replace(out_path, &compressed)
+}
+
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub fn build_source_archive_with_snapshot_hook<F>(
+    root: &Path,
+    out_path: &Path,
+    after_snapshots: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    let root = canonical_root(root)?;
+    let _project_lock =
+        document_schema::acquire_project_write_lock(&root).map_err(|error| error.to_string())?;
+    build_archive_with_snapshot_hook(&root, out_path, after_snapshots)
 }
 
 const DEFAULT_ARCHIVE_MTIME: u64 = 0;
@@ -10529,6 +10621,7 @@ kind = "local_registry"
                 compiler: CURRENT_COMPILER_VERSION.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::from([(
                 "chelis-std".to_string(),
@@ -12986,7 +13079,24 @@ module_prefix = "RegistryLib"
     #[test]
     fn prepared_reef_graph_round_trips_through_bincode() {
         let (_dir, root) = shared_graph_fixture();
-        let original = prepare_reef_graph(&root).expect("prepare graph");
+        let mut original = prepare_reef_graph(&root).expect("prepare graph");
+        original
+            .graph
+            .packages
+            .get_mut("myapp")
+            .expect("root package")
+            .manifest
+            .package
+            .metadata = PackageMetadata::new(
+            Some("Prepared metadata".parse().expect("description")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("metadata");
         let bytes = original.encode().expect("encode graph");
         let restored = PreparedReefGraph::decode(&bytes).expect("decode graph");
 
@@ -13003,6 +13113,11 @@ module_prefix = "RegistryLib"
         assert_eq!(original.dep_shells.len(), restored.dep_shells.len());
         assert_eq!(original.eval_module_prefix, restored.eval_module_prefix);
         assert_eq!(
+            original.graph.packages["myapp"].manifest.package.metadata,
+            restored.graph.packages["myapp"].manifest.package.metadata,
+            "typed metadata survives the prepared-graph cache boundary"
+        );
+        assert_eq!(
             original.internal_maps.len(),
             restored.internal_maps.len(),
             "internal maps survive round-trip"
@@ -13010,26 +13125,26 @@ module_prefix = "RegistryLib"
     }
 
     #[test]
-    fn prepared_graph_cache_rejects_pre_semver_version_three_envelopes() {
+    fn prepared_graph_cache_rejects_metadata_free_version_four_envelopes() {
         let directory = tempdir().expect("tempdir");
         let cache_path = directory.path().join("prepared.graph");
         let payload = Vec::new();
         let envelope = PreparedGraphCacheEnvelope {
-            version: 3,
+            version: 4,
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
             source_hash: [0; 32],
             payload_sha256: Sha256::digest(&payload).into(),
             payload,
         };
         let mut bytes = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
-        bytes.extend(bincode::serialize(&envelope).expect("serialize v2 envelope"));
-        fs::write(&cache_path, bytes).expect("write v2 envelope");
+        bytes.extend(bincode::serialize(&envelope).expect("serialize v4 envelope"));
+        fs::write(&cache_path, bytes).expect("write v4 envelope");
 
         let error = load_prepared_graph_cache(&cache_path, directory.path())
-            .expect_err("v3 cache must fail closed");
+            .expect_err("v4 cache must fail closed");
 
         assert!(
-            error.contains("format version 3 unsupported (expected 4)"),
+            error.contains("format version 4 unsupported (expected 5)"),
             "{error}"
         );
     }
@@ -13347,6 +13462,7 @@ additional_sources = ["properties"]
                     compiler: CURRENT_COMPILER_VERSION.to_string(),
                     module_prefix: "Demo".to_string(),
                     additional_sources: entries.iter().map(|s| s.to_string()).collect(),
+                    metadata: PackageMetadata::default(),
                 },
                 dependencies: BTreeMap::new(),
                 chelis_src: None,
@@ -13368,6 +13484,7 @@ additional_sources = ["properties"]
                 compiler: CURRENT_COMPILER_VERSION.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: vec!["properties".to_string(), "references".to_string()],
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
@@ -13397,6 +13514,7 @@ additional_sources = ["properties"]
                 compiler: mismatched.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
@@ -13427,6 +13545,7 @@ additional_sources = ["properties"]
                 compiler: compiler.to_string(),
                 module_prefix: "Demo".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
@@ -13541,6 +13660,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 compiler: CURRENT_COMPILER_VERSION.to_string(),
                 module_prefix: "Plain".to_string(),
                 additional_sources: Vec::new(),
+                metadata: PackageMetadata::default(),
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
@@ -13569,6 +13689,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
             compiler: CURRENT_COMPILER_VERSION.to_string(),
             module_prefix: "Shelly".to_string(),
             additional_sources: Vec::new(),
+            metadata: PackageMetadata::default(),
         };
         let cases: Vec<(ChelisSrcSpec, &str)> = vec![
             (

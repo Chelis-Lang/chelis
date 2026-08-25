@@ -86,7 +86,7 @@ with chelis#571) for the source-crate side.
 
 ### 3.1 Document versions and recoverable replacement
 
-The manifest and lockfile formats have independent schema versions. New manifests use schema 2. New locks use schema 1.
+The manifest and lockfile formats have independent schema versions. New manifests use schema 3. New locks use schema 1.
 
 A missing schema identifies legacy schema 0. A schema-specific wire parser owns each current document shape.
 
@@ -119,6 +119,10 @@ If no local graph completes, Reef uses bounded provider discovery. An explicit u
 A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
 
 Manifest schema 1 retains exact dependency versions. Manifest schema 2 activates resolver-2 ranges and bounded GitHub discovery.
+
+Manifest schema 3 owns optional descriptive metadata and declared package files. These values do not change resolver or source-provider behavior.
+
+Declared README and license files enter source archives through bounded, no-follow snapshots. They do not enter lock, index, or shell formats.
 
 Reef treats the local registry as an append-only cache of verified package pairs. It does not roll back a complete entry after a late failure.
 
@@ -442,3 +446,5 @@ Inherited from `reef_distribution.md` §Out of scope: a public registry server (
 Additionally: garbage-collection / uninstall of the three stores — all of
 `~/.chelis/{toolchains,reef,src}` currently grow unbounded — is deferred to a
 later hygiene workstream.
+
+Workspaces, features, development dependencies, publication controls, and general archive patterns remain deferred.

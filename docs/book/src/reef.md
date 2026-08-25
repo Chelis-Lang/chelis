@@ -29,7 +29,7 @@ consulted for the runtime.
 Every Reef package has a `reef.toml`:
 
 ```toml
-schema = "2"
+schema = "3"
 
 [package]
 name = "demo"
@@ -37,6 +37,10 @@ version = "<version>"
 compiler = "=<version>"
 module_prefix = "Demo"
 resolver = "2"
+description = "Example Chelis package"
+license = "MIT"
+repository = "https://github.com/example/demo"
+readme = "README.md"
 
 [dependencies]
 nautilus = "^0.7"
@@ -55,6 +59,36 @@ runtime version that compiler ships. You can also list `chelis-std`
 explicitly in `[dependencies]` (the installer soft-verifies that the
 declared version matches the bundled version, mismatches surface a
 typed error), but it is never required.
+
+### Package metadata
+
+Manifest schema 3 accepts optional package metadata. Schema 2 rejects these fields as unknown keys.
+
+The available fields are:
+
+- `description`
+- `license`
+- `license-file`
+- `repository`
+- `documentation`
+- `homepage`
+- `readme`
+
+A description contains 1 through 512 UTF-8 bytes after trim. It cannot contain line breaks, control characters, or Unicode format characters.
+
+The `license` field contains an SPDX expression of at most 1024 UTF-8 bytes. The `license-file` field records a custom license.
+
+A manifest cannot declare both license fields.
+
+Raw and normalized package URLs contain at most 2048 UTF-8 bytes. They use HTTPS, contain a host, and contain no credentials.
+
+Package URLs do not select package sources.
+
+A declared file path uses Unicode NFC and `/` separators. It rejects unsafe components, format characters, platform-sensitive names, and Reef document names.
+
+Each declared file contains at most 4 MiB. Reef opens each path without symbolic-link traversal on Linux and macOS.
+
+Reef reads each file twice from one handle. A content mismatch stops archive replacement.
 
 ### Package identities and resolution
 
@@ -142,11 +176,11 @@ If lock replacement fails, the prior lock remains authoritative. Complete unused
 
 ## Document Schemas and Upgrades
 
-Each `reef.toml` and `reef.lock` declares an independent top-level schema. New manifests use schema 2. New locks use schema 1.
+Each `reef.toml` and `reef.lock` declares an independent top-level schema. New manifests use schema 3. New locks use schema 1.
 
 Reef reads a document without a schema as legacy schema 0. It reports one warning that names the upgrade command.
 
-Schema 1 and schema 2 reject unknown keys in fixed tables. Reef selects the schema before complete document parsing.
+Schema 1, schema 2, and schema 3 reject unknown keys in fixed tables. Reef selects the schema before complete document parsing.
 
 Use one mode for each upgrade command:
 
@@ -158,12 +192,14 @@ chelis reef upgrade --check
 chelis reef upgrade --inplace
 
 # Select a package and explicit supported targets.
-chelis reef upgrade --inplace --path <dir> --manifest-to 2 --lock-to 1
+chelis reef upgrade --inplace --path <dir> --manifest-to 3 --lock-to 1
 ```
 
 The schema-1 to schema-2 step adds resolver 2. It rewrites each exact dependency from `X.Y.Z` to `=X.Y.Z`.
 
-The migration preserves path-only dependencies, accepted comments, and key order. It also updates a known Taplo manifest directive.
+The schema-2 to schema-3 step enables typed package metadata. It does not invent metadata values.
+
+Each migration preserves path-only dependencies, accepted comments, and key order. It also updates a known Taplo manifest directive.
 
 The command examines both documents before a write. It replaces `reef.toml` first and `reef.lock` second.
 
@@ -228,6 +264,10 @@ Unchanged package inputs produce byte-identical archive and CHB files across
 repeated `chelis reef build` runs. Reef sorts archive members by their UTF-8
 package-relative paths and normalizes regular-file headers to mode `0644`,
 uid/gid `0`, and mtime `0`.
+
+The source archive includes each declared README and license file. Reef does not discover undeclared metadata files.
+
+Two declarations for one path produce one member. A declared metadata snapshot supplies bytes when a source root selects the same path.
 
 Set `SOURCE_DATE_EPOCH` to a non-negative integer number of seconds when a
 release requires a different canonical timestamp:

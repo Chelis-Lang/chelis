@@ -957,7 +957,7 @@ fn external_format_locations_remain_exact_strings() {
 
     let manifest: toml::Value =
         toml::from_str(&std::fs::read_to_string(root.join("reef.toml")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"].as_str(), Some("2"));
+    assert_eq!(manifest["schema"].as_str(), Some("3"));
     assert_eq!(manifest["package"]["name"].as_str(), Some("format-demo"));
     assert_eq!(manifest["package"]["version"].as_str(), Some("0.1.0"));
     assert_eq!(manifest["package"]["resolver"].as_str(), Some("2"));

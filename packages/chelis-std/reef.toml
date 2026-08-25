@@ -1,7 +1,10 @@
-schema = "2"
+schema = "3"
 [package]
 name = "chelis-std"
 version = "0.4.0"
 compiler = "=0.18.4"
 module_prefix = "Std"
 resolver = "2"
+description = "Standard library for the Chelis language"
+license = "MIT"
+repository = "https://github.com/Chelis-Lang/chelis"

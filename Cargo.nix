@@ -1733,6 +1733,11 @@ rec {
             features = [ "user-hooks" ];
           }
           {
+            name = "chelis-reef";
+            packageId = "chelis-reef";
+            features = [ "test-hooks" ];
+          }
+          {
             name = "chelis-shell";
             packageId = "chelis-shell";
           }
@@ -2620,6 +2625,10 @@ rec {
             packageId = "sha2";
           }
           {
+            name = "spdx";
+            packageId = "spdx";
+          }
+          {
             name = "tar";
             packageId = "tar";
           }
@@ -2634,6 +2643,18 @@ rec {
           {
             name = "toml_edit";
             packageId = "toml_edit";
+          }
+          {
+            name = "unicode-general-category";
+            packageId = "unicode-general-category";
+          }
+          {
+            name = "unicode-normalization";
+            packageId = "unicode-normalization";
+          }
+          {
+            name = "url";
+            packageId = "url";
           }
           {
             name = "walkdir";
@@ -2655,7 +2676,9 @@ rec {
             packageId = "wiremock";
           }
         ];
-
+        features = {
+        };
+        resolvedDefaultFeatures = [ "test-hooks" ];
       };
       "chelis-runtime" = rec {
         crateName = "chelis-runtime";
@@ -9988,6 +10011,24 @@ rec {
         };
         resolvedDefaultFeatures = [ "all" ];
       };
+      "spdx" = rec {
+        crateName = "spdx";
+        version = "0.10.9";
+        edition = "2024";
+        sha256 = "18qgak6ng0g60q30xy48l52i9dn5pm3fqldplxib7bmg1f47xqf3";
+        authors = [
+          "Embark <opensource@embark-studios.com>"
+          "Jake Shadle <jake.shadle@embark-studios.com>"
+        ];
+        dependencies = [
+          {
+            name = "smallvec";
+            packageId = "smallvec";
+          }
+        ];
+        features = {
+        };
+      };
       "stable_deref_trait" = rec {
         crateName = "stable_deref_trait";
         version = "1.2.1";
@@ -10623,6 +10664,48 @@ rec {
           "zerovec" = [ "dep:zerovec" ];
         };
         resolvedDefaultFeatures = [ "zerovec" ];
+      };
+      "tinyvec" = rec {
+        crateName = "tinyvec";
+        version = "1.12.0";
+        edition = "2018";
+        sha256 = "0zxaid976y60f4722vjhfnwcbydmzpwva7p03aqzl15gl3dblkmv";
+        authors = [
+          "Lokathor <zefria@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "tinyvec_macros";
+            packageId = "tinyvec_macros";
+            optional = true;
+          }
+        ];
+        features = {
+          "alloc" = [ "tinyvec_macros" ];
+          "arbitrary" = [ "dep:arbitrary" ];
+          "bin-proto" = [ "dep:bin-proto" ];
+          "borsh" = [ "dep:borsh" ];
+          "defmt" = [ "dep:defmt" ];
+          "generic-array" = [ "dep:generic-array" ];
+          "latest_stable_rust" = [ "rustc_1_61" ];
+          "real_blackbox" = [ "criterion/real_blackbox" ];
+          "rustc_1_61" = [ "rustc_1_57" ];
+          "schemars" = [ "dep:schemars" "alloc" ];
+          "serde" = [ "dep:serde_core" ];
+          "std" = [ "alloc" ];
+          "tinyvec_macros" = [ "dep:tinyvec_macros" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" "default" "tinyvec_macros" ];
+      };
+      "tinyvec_macros" = rec {
+        crateName = "tinyvec_macros";
+        version = "0.1.1";
+        edition = "2018";
+        sha256 = "081gag86208sc3y6sdkshgw3vysm5d34p431dzw0bshz66ncng0z";
+        authors = [
+          "Soveu <marx.tomasz@gmail.com>"
+        ];
+
       };
       "tokio" = rec {
         crateName = "tokio";
@@ -11562,6 +11645,17 @@ rec {
         sha256 = "154smf048k84prsdgh09nkm2n0w0336v84jd4zikyn6v6jrqbspa";
 
       };
+      "unicode-general-category" = rec {
+        crateName = "unicode-general-category";
+        version = "1.1.0";
+        edition = "2018";
+        sha256 = "0zv7q4fdnlawjxd75bpxfll33sf3db09xd13sv85pblkq7fkp68b";
+        libName = "unicode_general_category";
+        authors = [
+          "YesLogic Pty. Ltd. <info@yeslogic.com>"
+        ];
+
+      };
       "unicode-ident" = rec {
         crateName = "unicode-ident";
         version = "1.0.24";
@@ -11583,6 +11677,28 @@ rec {
           "Axel Forsman <axelsfor@gmail.com>"
         ];
 
+      };
+      "unicode-normalization" = rec {
+        crateName = "unicode-normalization";
+        version = "0.1.25";
+        edition = "2018";
+        sha256 = "1s76dcrxw7vs32yhpi0p074apdc3s7lak7809f3qvclwij3zdm2z";
+        libName = "unicode_normalization";
+        authors = [
+          "kwantam <kwantam@gmail.com>"
+          "Manish Goregaokar <manishsmail@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "tinyvec";
+            packageId = "tinyvec";
+            features = [ "alloc" ];
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+        };
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "unicode-segmentation" = rec {
         crateName = "unicode-segmentation";

@@ -1,4 +1,4 @@
-schema = "2"
+schema = "3"
 [package]
 name = "nautilus"
 version = "0.7.36"

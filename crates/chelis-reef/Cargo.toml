@@ -6,6 +6,9 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+test-hooks = []
+
 [dependencies]
 chelis-deep.workspace = true
 chelis-macros.workspace = true
@@ -17,6 +20,10 @@ chelis-shell.workspace = true
 chelis-std-bundle.workspace = true
 serde.workspace = true
 semver.workspace = true
+spdx.workspace = true
+unicode-general-category.workspace = true
+unicode-normalization.workspace = true
+url.workspace = true
 bincode = "1"
 schemars = "0.8"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }

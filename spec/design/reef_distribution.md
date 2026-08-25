@@ -84,7 +84,23 @@ A refresh stages and verifies each selected pair. Then it gets the project lock 
 
 Reef publishes complete package directories, replaces `index.json`, and replaces the project lock last. A late failure can leave complete unused cache entries.
 
-Manifest schema 3 remains allocated to package metadata. A later change owns that schema and its migration.
+### Package metadata and declared files
+
+Manifest schema 3 owns optional descriptive package metadata. It accepts descriptions, SPDX licenses, HTTPS URLs, READMEs, and custom license files.
+
+Descriptive metadata does not enter package identity, dependency matching, source selection, `reef.lock`, `index.json`, or `.chb`.
+
+Declared files use a bounded Unicode NFC path grammar with `/` separators. The grammar rejects unsafe components and platform-sensitive names.
+
+On supported Unix platforms, Reef opens each component relative to the package-root handle. Each open rejects symbolic links.
+
+Each declared file contains at most 4 MiB. Reef reads one open handle twice and rejects different byte sequences.
+
+The source archive contains stable captured bytes for declared files. A bytewise member map preserves canonical order and deduplicates identical declared paths.
+
+A metadata snapshot supplies member bytes when a source root selects the same path. Two distinct hard-link paths remain distinct archive members.
+
+Reef completes all snapshots before final archive replacement. A snapshot failure preserves the prior archive.
 
 ### Shipped surface
 
@@ -138,6 +154,8 @@ mtime equal to `SOURCE_DATE_EPOCH`; when the variable is absent, Reef uses the
 fixed Unix epoch (`0`). A present value must be a non-negative integer number
 of seconds or the build fails. Filesystem mtimes, ownership, permissions, and
 directory enumeration order never enter the artifact.
+
+Declared README and license snapshots join the same canonical member map. Reef does not discover undeclared metadata files.
 
 The CHB continues to embed the SHA-256 of the resulting canonical source
 archive. Changing `SOURCE_DATE_EPOCH` can therefore intentionally change both
