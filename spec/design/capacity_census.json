@@ -52,7 +52,7 @@
         "expected_success": "capacity_census_matches_public_surface passes",
         "mutations": [
           "planted_prelude_adt_with_f64_variant_is_detected",
-          "registered_prelude_json_adt_is_enumerated_with_both_flags"
+          "final_surface_has_no_duplicate_prelude_json_or_legacy_builtin_aliases"
         ]
       },
       {
@@ -117,6 +117,12 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: _Bool chelis_value_as_bool ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
       "flags": []
     },
@@ -148,8 +154,9 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * left , const chelis_dict * right ) ;",
-      "flags": []
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -234,6 +241,12 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_list_from_tensor ( const chelis_tensor * tensor ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
       "flags": [
         "numeric-op"
@@ -283,15 +296,11 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_list * chelis_tensor_elements ( const chelis_tensor * tensor ) ;",
-      "flags": []
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int32_t axis , const chelis_list * sizes ) ;",
+      "id": "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int64_t axis , const chelis_list * sizes ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -306,40 +315,33 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_scalar chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
-      "flags": [
-        "numeric-op"
-      ]
+      "id": "chelis_runtime.h: chelis_option_f64 chelis_dict_get_f64 ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_scalar chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
-      "flags": [
-        "numeric-op"
-      ]
+      "id": "chelis_runtime.h: chelis_option_f64 chelis_parse_f64 ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option_i64 chelis_dict_get_i64 ( const chelis_dict * dict , chelis_value key ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_option_i64 chelis_parse_int64 ( chelis_string value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_scalar chelis_tensor_to_scalar ( const chelis_tensor * tensor ) ;",
-      "flags": []
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_scalar chelis_value_as_scalar ( chelis_value value ) ;",
-      "flags": []
     },
     {
       "kind": "header-export",
@@ -358,13 +360,40 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_bool ( _Bool value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
       "flags": []
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_string chelis_string_from_scalar ( chelis_scalar value ) ;",
-      "flags": []
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_f32 ( float value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_f64 ( double value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_int64 ( int64_t value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -387,117 +416,153 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
+      "flags": [
+        "raw-dtype-int"
+      ],
+      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int64_t * shape , int dtype , float * data ) ;",
+      "flags": [
+        "float-carrier",
+        "raw-dtype-int",
+        "numeric-op"
+      ],
+      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * t ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_value pad_value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_value pad_value ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , void * data , int64_t byte_capacity ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f32 ( float value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f64 ( double value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_i64 ( int64_t value ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * tensor ) ;",
-      "flags": []
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lo , const chelis_tensor * hi ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_scalar pad_value ) ;",
-      "flags": []
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_scalar pad_value ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int64_t axis ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor ( chelis_scalar value ) ;",
-      "flags": []
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lower , const chelis_tensor * upper ) ;",
-      "flags": []
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * left , const chelis_tensor * right ) ;",
-      "flags": []
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int32_t axis ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int64_t axis ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list ( const chelis_list * list ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
+      "flags": [
+        "raw-dtype-int"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int64_t axis ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * left , const chelis_tensor * right , chelis_dtype accumulator ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int64_t axis , chelis_string mode ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_values ( const chelis_list * list , chelis_dtype dtype ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int32_t axis ) ;",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_replace ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * condition , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
-      "flags": []
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * cond , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -507,10 +572,11 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int64_t axis ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -558,8 +624,31 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_bool ( _Bool value ) ;",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_dict ( chelis_dict * value ) ;",
       "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_f64 ( double value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_int64 ( int64_t value ) ;",
+      "flags": [
+        "numeric-op"
+      ],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
@@ -567,11 +656,6 @@
       "id": "chelis_runtime.h: chelis_value chelis_value_from_list ( chelis_list * value ) ;",
       "flags": [],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_scalar ( chelis_scalar value ) ;",
-      "flags": []
     },
     {
       "kind": "header-export",
@@ -598,10 +682,39 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: int32_t chelis_tensor_rank ( const chelis_tensor * tensor ) ;",
+      "id": "chelis_runtime.h: double chelis_tensor_to_f64 ( const chelis_tensor * t ) ;",
       "flags": [
+        "float-carrier",
         "numeric-op"
-      ]
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: double chelis_value_as_f64 ( chelis_value value ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
+      "flags": [
+        "raw-dtype-int"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int chelis_format_shortest ( double value , int dtype , char * buf , size_t cap ) ;",
+      "flags": [
+        "float-carrier",
+        "raw-dtype-int",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
     },
     {
       "kind": "header-export",
@@ -618,13 +731,6 @@
         "numeric-op"
       ],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_dtype_size ( chelis_dtype dtype ) ;",
-      "flags": [
-        "numeric-op"
-      ]
     },
     {
       "kind": "header-export",
@@ -652,14 +758,23 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * t ) ;",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_rank ( const chelis_tensor * t ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int32_t axis ) ;",
       "flags": [
         "numeric-op"
       ]
@@ -667,6 +782,14 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_value_as_int64 ( chelis_value value ) ;",
       "flags": [
         "numeric-op"
       ],
@@ -686,6 +809,15 @@
     },
     {
       "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_bf16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
       "flags": [],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
@@ -698,8 +830,96 @@
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor * tensor , chelis_scalar value ) ;",
-      "flags": []
+      "id": "chelis_runtime.h: void chelis_f16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_f32_buffer_to_bf16 ( const float * src , uint16_t * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_f32_buffer_to_f16 ( const float * src , uint16_t * dst , int64_t n ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_bf16 ( chelis_tensor * t , uint16_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_bool_bits ( chelis_tensor * t , uint32_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f16 ( chelis_tensor * t , uint16_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f32 ( chelis_tensor * t , float val ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f32_bits ( chelis_tensor * t , uint32_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f64 ( chelis_tensor * t , double val ) ;",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_f64_bits ( chelis_tensor * t , uint64_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: void chelis_fill_i64 ( chelis_tensor * t , int64_t val ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-export",
@@ -786,15 +1006,32 @@
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 }",
-      "flags": []
+      "id": "chelis_runtime.h: typedef enum { CHELIS_VALUE_INT64 , CHELIS_VALUE_FLOAT64 , CHELIS_VALUE_BOOL , CHELIS_VALUE_STRING , CHELIS_VALUE_TENSOR , CHELIS_VALUE_LIST , CHELIS_VALUE_TUPLE , CHELIS_VALUE_DICT , CHELIS_VALUE_ADT } chelis_value_tag",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { chelis_dtype dtype ; uint8_t reserved [ 7 ] ; uint64_t bits ; } chelis_scalar",
+      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; chelis_value value ; } chelis_option_value",
+      "flags": [],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; double value ; } chelis_option_f64",
+      "flags": [
+        "float-carrier",
+        "numeric-op"
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; int64_t value ; } chelis_option_i64",
       "flags": [
         "numeric-op"
-      ]
+      ],
+      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
     },
     {
       "kind": "header-struct",
@@ -804,55 +1041,27 @@
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
+      "id": "chelis_runtime.h: typedef struct { chelis_value_tag tag ; union { int64_t i64 ; double f64 ; _Bool boolean ; chelis_string string ; chelis_tensor * tensor ; chelis_list * list ; chelis_tuple * tuple ; chelis_dict * dict ; chelis_adt * adt ; } as ; } chelis_value",
       "flags": [
+        "float-carrier",
         "numeric-op"
-      ]
+      ],
+      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_scalar value ; } chelis_option_scalar",
+      "id": "chelis_runtime.h: typedef struct { float * data ; int64_t shape [ 8 ] ; int64_t strides [ 8 ] ; int ndim ; int dtype ; int64_t size ; int owns_data ; } chelis_tensor",
       "flags": [
+        "float-carrier",
+        "raw-dtype-int",
         "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_value value ; } chelis_option_value",
-      "flags": [
-        "numeric-op"
-      ]
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t size ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t owns_data ; uint8_t reserved [ 2 ] ; } chelis_tensor",
-      "flags": [
-        "numeric-op"
-      ]
+      ],
+      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
     },
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
       "flags": []
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef union { chelis_scalar scalar ; void * handle ; } chelis_value_payload",
-      "flags": []
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
-      "flags": []
-    },
-    {
-      "kind": "prelude-adt-numeric",
-      "id": "prelude::Json: JNull | JBool(bool) | JInt(int64) | JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition([05-OP-2] source-faithful prelude Json numeric split; exact descriptor ratified 2026-08-04)"
     },
     {
       "kind": "std-adt-numeric",
@@ -897,11 +1106,9 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "contracts::normal_cdf: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "contracts::normal_cdf: (t-fn {} (t-var {} p_float) (t-var {} p_float))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -929,11 +1136,29 @@
     },
     {
       "kind": "std-def-numeric",
+      "id": "decimal::decimal: (t-fn {} (t-prim {} string) (t-adt {} Decimal))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_add: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
       "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
       "flags": [
         "numeric-op"
       ],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -945,11 +1170,59 @@
     },
     {
       "kind": "std-def-numeric",
+      "id": "decimal::decimal_gt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_gte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_lt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_lte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_mul: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
       "id": "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
       "flags": [
         "float-carrier"
       ],
       "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::decimal_to_string: (t-fn {} (t-adt {} Decimal) (t-prim {} string))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -977,51 +1250,51 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} f32))) (t-prim {} f32) (t-prim {} f32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_array: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} List (t-adt {} Json))))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_bool: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} bool)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -1033,140 +1306,193 @@
     },
     {
       "kind": "std-def-numeric",
+      "id": "io/json::json_get: (t-fn {} (t-adt {} Json) (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
       "id": "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "io::mmap_size: (t-fn {} (t-prim {} string) (t-prim {} int64))",
+      "id": "io/json::json_is_null: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_object: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} Dict (t-prim {} string) (t-adt {} Json))))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_string: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::parse_json: (t-fn {} (t-prim {} string) (t-adt {} Json))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::to_json: (t-fn {} (t-adt {} Json) (t-prim {} string))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_parse_json: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_to_json: (t-fn {} (t-adt {} Json) (t-adt {} Option (t-prim {} string)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::try_write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-adt {} Option (t-unit {})))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-unit {}))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "io::read_head_bytes: (t-fn {} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+      "id": "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "process::run: (t-fn {} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "id": "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "process::run_chelis: (t-fn {} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+      "id": "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "scalar::abs: (t-fn {} (t-prim {} f32) (t-prim {} f32))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "scalar::abs: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "scalar::max: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "scalar::max: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "scalar::min: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "scalar::min: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "sort::sort_1d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} n) (t-prim {} int64))))",
+      "id": "sort::sort: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "sort::sort_2d: (t-fn {} (t-ref {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-var {} m) (d-var {} n) (t-var {} p)) (t-tensor {} (d-var {} m) (d-var {} n) (t-prim {} int64))))",
+      "id": "tensor/construct::arange: (t-fn {} (t-var {} p_int) (t-var {} p_int) (t-tensor {} (d-var {} n) (t-var {} p_int)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/construct::linspace: (t-fn {} (t-var {} p_float) (t-var {} p_float) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p_float)))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::arange: (t-fn {} (t-prim {} int32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} int32)))",
+      "id": "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "tensor/construct::linspace: (t-fn {} (t-prim {} f32) (t-prim {} f32) (t-prim {} int32) (t-tensor {} (d-var {} n) (t-prim {} f32)))",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-lit {} 1) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-var {} d) (t-prim {} f32))) (t-var {} _))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-var {} a) (d-var {} b) (t-prim {} f32))) (t-var {} _))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+      "id": "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_close: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+      "id": "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
       "flags": [
-        "float-carrier"
+        "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "test::assert_close: (t-fn {eff: (effects {} test)} (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -1178,35 +1504,23 @@
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_eq: (t-fn {eff: (effects {} test)} (t-prim {} f32) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
-      "flags": [
-        "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "id": "test::assert_eq: (t-fn {eff: (effects {} test)} (t-var {} Q) (t-var {} Q) (t-prim {} string) (t-unit {}))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_eq_int: (t-fn {eff: (effects {} test)} (t-prim {} int64) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "test::assert_eq_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} string) (t-unit {}))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_eq_tensor_int64: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-ref {} (t-tensor {} (d-var {} n) (t-prim {} int64))) (t-prim {} string) (t-unit {}))",
+      "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "std-def-numeric",
-      "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} int64) (t-prim {} string) (t-unit {}))",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -1223,6 +1537,48 @@
         "numeric-op"
       ],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::day_of_week: (t-fn {} (t-adt {} Date) (t-adt {} DayOfWeek))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::day_of_week_name: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -1255,6 +1611,12 @@
         "numeric-op"
       ],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "time::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     },
     {
       "kind": "std-def-numeric",
@@ -1295,6 +1657,18 @@
         "numeric-op"
       ],
       "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Tokenizer))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "tokenizer::try_load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Tokenizer)))",
+      "flags": [],
+      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
     }
   ]
 }
