@@ -296,10 +296,8 @@ fn issue_520_d1_static_tag_runtime_field_gradient_flows() {
 }
 
 /// Static selection of a constant taken arm must behave exactly like the
-/// no-match constant-function control: today both fail with the same
-/// pre-existing "produced no roots" diagnostic (grad of a constant has no
-/// adjoint; zero-filling constant gradients is tracked separately from
-/// chelis#520). The match must introduce no divergence from the control.
+/// no-match constant-function control: both produce the exact shaped zero
+/// cotangent. The match must introduce no divergence from the control.
 #[test]
 fn issue_520_d1_constant_taken_arm_matches_constant_fn_control() {
     let match_source = format!(
@@ -317,21 +315,15 @@ fn issue_520_d1_constant_taken_arm_matches_constant_fn_control() {
          out = grad(fwd_const)(to_tensor([{}]))\n",
         fmt_f32_list(&[1.0, 2.0]),
     );
-    let (_stdout, match_stderr, match_ok) = eval_program(&match_source);
-    let (_stdout, control_stderr, control_ok) = eval_program(&control_source);
+    let (match_stdout, match_stderr, match_ok) = eval_program(&match_source);
+    let (control_stdout, control_stderr, control_ok) = eval_program(&control_source);
+    assert!(match_ok, "constant-arm grad failed: {match_stderr}");
     assert!(
-        !match_ok,
-        "constant-arm grad currently has no adjoint roots"
+        control_ok,
+        "constant-fn grad control failed: {control_stderr}"
     );
-    assert!(!control_ok, "constant-fn grad control must agree");
-    assert!(
-        match_stderr.contains("produced no roots"),
-        "constant-arm diagnostic: {match_stderr}"
-    );
-    assert!(
-        control_stderr.contains("produced no roots"),
-        "control diagnostic: {control_stderr}"
-    );
+    assert_eq!(parse_tensor_data(&match_stdout), vec![0.0, 0.0]);
+    assert_eq!(parse_tensor_data(&control_stdout), vec![0.0, 0.0]);
 }
 
 // --- D1 compiled lane ----------------------------------------------------------

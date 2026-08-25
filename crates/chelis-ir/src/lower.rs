@@ -4208,10 +4208,10 @@ impl LoweredValue {
     /// Whether `add_named_roots` would contribute zero roots for this
     /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
     ///
-    /// The empty aggregate is reachable: the single-target arm of the
-    /// `grad` result packing drops an absent adjoint instead of
-    /// materializing a zero, so a `grad` over a body that resolves to
-    /// [`CallableExpr::Parameter`] leaves `packed` empty. This is
+    /// The empty aggregate is reachable: a `grad` body that actually calls
+    /// an unresolved [`CallableExpr::Parameter`] has no sound standalone
+    /// value until call-site specialization supplies the callable, so its
+    /// lowering returns an empty placeholder. This is
     /// deliberately not "added no NEW root": `Dag::add_root` also
     /// deduplicates, so two defs sharing one node would answer yes to
     /// that question while genuinely owning a root.
@@ -4289,6 +4289,22 @@ impl LoweredValue {
             },
         }
     }
+}
+
+/// Whether every callable reached while lowering the current body had a
+/// concrete implementation available.
+///
+/// A missing adjoint is an exact zero only when the forward body was lowered
+/// completely. An unresolved function-valued parameter makes the whole
+/// provisional gradient unknown: even a present local adjoint could omit the
+/// callable's contribution, so the standalone transform must remain rootless
+/// until ordinary call-site specialization replaces the parameter with a
+/// concrete callable (chelis#1095/#1102).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum CallableDependencyState {
+    #[default]
+    Complete,
+    UnresolvedParameter,
 }
 
 fn extract_param_type(expr: &Expr, index: usize) -> Option<&Expr> {
@@ -4466,6 +4482,10 @@ struct LowerCtx {
     /// alongside `bindings` and `local_callables`. See
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: HashSet<String>,
+    /// Completeness evidence for callable applications actually encountered
+    /// by this lowering context. Grad subcontexts start `Complete` and poison
+    /// this state when they reach a function-valued parameter without a body.
+    callable_dependency_state: CallableDependencyState,
     /// chelis#1095: top-level def names whose lowered value held no tensor
     /// node, so they contributed no DAG root. `chelis-pipeline-core`
     /// subtracts these from the declared root names before aligning them
@@ -4554,6 +4574,7 @@ impl LowerCtx {
             inlining_depths: HashMap::new(),
             inlining_active: 0,
             fn_typed_params: HashSet::new(),
+            callable_dependency_state: CallableDependencyState::Complete,
             rootless_defs: BTreeSet::new(),
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
@@ -4755,6 +4776,12 @@ impl LowerCtx {
                 .iter()
                 .filter(|(name, _)| !shadowed.contains(*name))
                 .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        subctx.fn_typed_params.extend(
+            self.fn_typed_params
+                .iter()
+                .filter(|name| !shadowed.contains(*name))
+                .cloned(),
         );
         captures
     }
@@ -5672,6 +5699,20 @@ impl LowerCtx {
         };
 
         if let Some(Expr::Atom(Atom::Name(name), _)) = elems.get(2) {
+            // A captured function-valued parameter is represented by a
+            // defensive Load in standalone lowering, but that Load is not a
+            // callable implementation. Record the unresolved dependency
+            // before returning the cached binding so an enclosing `grad`
+            // cannot interpret the placeholder's missing contribution as an
+            // exact zero. Concrete call-site inlining removes the name from
+            // `fn_typed_params` and installs it in `local_callables`, so real
+            // specializations do not poison this state (chelis#1095/#1102).
+            if self.fn_typed_params.contains(name)
+                && !self.local_callables.contains_key(name)
+                && !self.program_defs.contains_key(name)
+            {
+                self.callable_dependency_state = CallableDependencyState::UnresolvedParameter;
+            }
             if let Some(id) = self.bindings.get(name) {
                 let cached = id.clone();
                 // N→1 lowering collapse per
@@ -5772,6 +5813,7 @@ impl LowerCtx {
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
+            && !self.fn_typed_params.contains(func_name)
         {
             // chelis#520: a positional ADT constructor application
             // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
@@ -5871,7 +5913,10 @@ impl LowerCtx {
             // concrete callable into `local_callables` before lowering
             // the inlined body, so the resolver sees a `Plain` not a
             // `Parameter`).
-            CallableExpr::Parameter { .. } => None,
+            CallableExpr::Parameter { .. } => {
+                self.callable_dependency_state = CallableDependencyState::UnresolvedParameter;
+                None
+            }
         }
     }
 
@@ -6372,9 +6417,16 @@ impl LowerCtx {
                 }
             }
         }
-        let output = subctx
-            .lower_expr(body)
-            .expect_node("grad requires a scalar floating output");
+        let lowered_output = subctx.lower_expr(body);
+        if subctx.callable_dependency_state == CallableDependencyState::UnresolvedParameter {
+            // The standalone higher-order definition cannot know the
+            // callable's contribution to any selected gradient. Preserve
+            // chelis#1095's rootless placeholder; when a concrete callable
+            // is supplied, ordinary call-site inlining re-lowers this body
+            // in a fresh Complete subcontext and computes the real value.
+            return LoweredValue::Tuple(Vec::new());
+        }
+        let output = lowered_output.expect_node("grad requires a scalar floating output");
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
         // non-differentiable op in the gradient body (argmax/argmin,
@@ -6408,11 +6460,10 @@ impl LowerCtx {
             &remap_actual_types,
         );
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
-        // Per-wrt gradient node (post-splice). A `None` entry means the
-        // wrt input has no adjoint because it does not influence the
-        // output; the tensor lane preserves the pre-#520 behavior of
-        // dropping it from the result, and the ADT lane packs an explicit
-        // zero tensor so the gradient struct keeps its field structure.
+        // Per-wrt gradient node (post-splice). An unresolved callable body
+        // returned above, so a `None` entry here is proven to mean that the
+        // wrt input does not influence the completely lowered output. Its
+        // cotangent is therefore an exact shape-preserving zero.
         let grad_per_wrt: Vec<Option<NodeId>> = wrt
             .iter()
             .map(|wrt_node| {
@@ -6432,11 +6483,6 @@ impl LowerCtx {
         let mut grad_iter = grad_per_wrt.iter().copied();
         let mut wrt_actual_iter = wrt_actuals.iter().copied();
         let mut packed: Vec<LoweredValue> = Vec::with_capacity(result_plans.len());
-        // A multi-target result is displayed as a tuple keyed by fixed,
-        // type-derived slot names (`out.0..out.N`, chelis#614): slot position
-        // is significant. A single-target result is a bare value with no
-        // sibling slots to shift.
-        let multi_target = result_plans.len() > 1;
         for plan in &result_plans {
             match plan {
                 GradResultPlan::Tensor => {
@@ -6444,25 +6490,19 @@ impl LowerCtx {
                     let actual = wrt_actual_iter.next();
                     match grad_node {
                         Some(node) => packed.push(LoweredValue::Node(node)),
-                        // The differentiated tensor argument does not
-                        // influence the output: its gradient is exactly zero.
-                        // In a multi-target result, dropping the slot would
-                        // shift every later gradient into the wrong tuple
-                        // position and mislabel it, so materialize the shaped
-                        // zero, the same way the ADT field zero-fill below
-                        // does (chelis#520 D2 / chelis#614).
-                        None if multi_target => {
+                        // The completely lowered output does not depend on
+                        // this argument, so its gradient is exactly zero.
+                        // Materialize it for single- and multi-target results;
+                        // dropping a single target loses the root (chelis#1102),
+                        // while dropping a multi-target slot mislabels every
+                        // later value (chelis#520 D2 / chelis#614).
+                        None => {
                             let field_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
                             let zero = self.zero_tensor_node(&field_ty);
                             packed.push(LoweredValue::Node(zero));
                         }
-                        // Single-target result: preserve the pre-#520
-                        // bare-tensor drop and its reuse-hint path (the
-                        // `[LoweredValue::Node(single)]` arm below). A lone
-                        // target has no sibling slot to mislabel.
-                        None => {}
                     }
                 }
                 GradResultPlan::Adt {
@@ -6522,8 +6562,8 @@ impl LowerCtx {
 
     /// A zero-valued tensor of the given type: `Const 0.0`, cast to the
     /// target precision, expanded axis-by-axis to the target dims
-    /// (mirrors the `lower_if_mask` expansion pattern). Used by the ADT
-    /// gradient packing (chelis#520 D2) for fields with no adjoint.
+    /// (mirrors the `lower_if_mask` expansion pattern). Used by gradient
+    /// packing for every proven-zero tensor slot (chelis#520 D2/#1102).
     fn zero_tensor_node(&mut self, ty: &TensorType) -> NodeId {
         let mut node = self.dag.add_node(
             RiscOp::synth_const(Self::default_type().precision, 0.0),
@@ -11230,8 +11270,16 @@ impl LowerCtx {
                     // which substitutes the concrete callable into
                     // `local_callables` so the resolver returns
                     // `Plain`/`Vmap`/`Grad`/`VmapGrad`, not `Parameter`).
+                    // Record that the provisional body is incomplete before
+                    // leaving the value unchanged, so an enclosing `grad`
+                    // cannot mistake the missing callable contribution for
+                    // an exact zero (chelis#1102).
                     // See `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
-                    CallableExpr::Parameter { .. } => current,
+                    CallableExpr::Parameter { .. } => {
+                        self.callable_dependency_state =
+                            CallableDependencyState::UnresolvedParameter;
+                        current
+                    }
                 };
                 continue;
             }
