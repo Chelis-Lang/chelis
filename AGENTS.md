@@ -559,6 +559,31 @@ nextest`, which the lint-and-unit job deliberately does not install.
 `scripts/test_gate.py` locks both memberships and the pairing between the
 oracle's stage and a nextest-installing job.
 
+The oracle builds its own `chelis` before its first `.dp` fixture. Inside a
+gate run that binary already exists, so `gate.py` hands the built path over
+in `CHELIS_ORACLE_BINARY` and the oracle skips the build (chelis#1322). The
+gate sets it only for a command list whose earlier commands provably build
+that bin target (`cargo build --workspace --all-targets` and `cargo run -p
+chelis-cli --bin chelis`); `gate.py integration` on its own, which is how
+hosted CI reaches the oracle, sets nothing and keeps the original
+build-it-yourself behavior. The variable is an explicit override and is
+therefore authoritative: a path that is not an executable file is a loud
+failure, never a silent fall back to a build, and an explicit setting from
+the caller is never replaced. That is the same discipline the gate applies
+to an explicit `PYO3_PYTHON`, timing included: the gate validates an
+explicit handoff in `gate_environment`, so a bad one aborts before the
+first command rather than after the whole pre-push subset has run.
+
+Present-but-empty is a failure on both sides, not an off switch. Reading
+`export CHELIS_ORACLE_BINARY=` as "unset" would disable the handoff with no
+notice anywhere, so unset it entirely instead. The spelling itself lives in
+exactly one place: the oracle declares it and `gate.py` imports it, because
+two independent literals would let a rename keep every test green while the
+handoff was dead.
+
+`scripts/test_gate.py` locks the build-before-oracle ordering the handoff
+rests on, so a reorder cannot quietly turn the oracle cold again.
+
 Local pre-push gate (chelis#360):
 
 ```sh

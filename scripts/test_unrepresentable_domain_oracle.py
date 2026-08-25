@@ -8,12 +8,14 @@ invoke `chelis check` are covered by running the oracle itself.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -598,8 +600,16 @@ class TestBinaryResolution(unittest.TestCase):
     def setUp(self) -> None:
         oracle._BINARY_RESOLUTION_ATTEMPTED = False
         oracle._RESOLVED_CHELIS_BINARY = None
+        # These cases are about the build path, so the handoff must be out
+        # of the way. A stray CHELIS_ORACLE_BINARY in the ambient shell
+        # would otherwise short-circuit resolution and make the assertions
+        # below vacuously wrong (chelis#1322).
+        self._env = patch.dict(os.environ, {}, clear=False)
+        self._env.start()
+        os.environ.pop(oracle.ORACLE_BINARY_ENV, None)
 
     def tearDown(self) -> None:
+        self._env.stop()
         oracle._BINARY_RESOLUTION_ATTEMPTED = False
         oracle._RESOLVED_CHELIS_BINARY = None
 
@@ -620,6 +630,181 @@ class TestBinaryResolution(unittest.TestCase):
         oracle.resolve_chelis_binary()
         oracle.resolve_chelis_binary()
         self.assertEqual(mock_run.call_count, 1)
+
+
+class TestHandedOverBinary(unittest.TestCase):
+    """chelis#1322: an explicit handoff is authoritative and fails closed.
+
+    `scripts/gate.py` sets `CHELIS_ORACLE_BINARY` to the `chelis` an earlier
+    command in the same gate run already built. Three behaviors matter and
+    are locked here: set-and-valid skips the build, set-and-invalid is a
+    loud failure, and unset leaves the historical build path untouched.
+    """
+
+    def setUp(self) -> None:
+        oracle._BINARY_RESOLUTION_ATTEMPTED = False
+        oracle._RESOLVED_CHELIS_BINARY = None
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+        oracle._BINARY_RESOLUTION_ATTEMPTED = False
+        oracle._RESOLVED_CHELIS_BINARY = None
+
+    def _executable(self, name: str = "chelis") -> Path:
+        path = self.root / name
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755)
+        return path
+
+    def test_unset_reads_as_no_handoff(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(oracle.ORACLE_BINARY_ENV, None)
+            self.assertIsNone(oracle.handed_over_binary())
+
+    def test_empty_and_whitespace_fail_loudly_rather_than_disabling(
+        self,
+    ) -> None:
+        # Present-but-empty is a caller who meant to hand something over,
+        # not an off switch. Reading it as "unset" would let an ambient
+        # `export CHELIS_ORACLE_BINARY=` silently disable the handoff, and
+        # `scripts/gate.py` would not object either because its own guard
+        # keys on presence. Both sides reject it instead.
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                with patch.dict(
+                    os.environ, {oracle.ORACLE_BINARY_ENV: value}, clear=False
+                ):
+                    with self.assertRaisesRegex(
+                        oracle.OracleBinaryError, "empty"
+                    ):
+                        oracle.handed_over_binary()
+
+    def test_a_directory_is_named_as_a_directory(self) -> None:
+        # `is_file()` alone reported an existing directory as "no file
+        # exists at ...", which sends the reader looking for a missing
+        # path rather than at the path they gave.
+        with patch.dict(
+            os.environ, {oracle.ORACLE_BINARY_ENV: str(self.root)}, clear=False
+        ):
+            with self.assertRaisesRegex(
+                oracle.OracleBinaryError, "is a directory"
+            ):
+                oracle.handed_over_binary()
+
+    def test_a_valid_absolute_path_is_returned(self) -> None:
+        binary = self._executable()
+        with patch.dict(
+            os.environ, {oracle.ORACLE_BINARY_ENV: str(binary)}, clear=False
+        ):
+            self.assertEqual(oracle.handed_over_binary(), binary)
+
+    def test_a_relative_path_resolves_against_the_repo_root(self) -> None:
+        # Not against the caller's cwd: gate.py runs children from the repo
+        # root, and a resolution that depended on cwd would break the moment
+        # anyone invoked the oracle from a subdirectory.
+        binary = self._executable("relative-chelis")
+        with patch.object(oracle, "REPO_ROOT", self.root):
+            with patch.dict(
+                os.environ,
+                {oracle.ORACLE_BINARY_ENV: "relative-chelis"},
+                clear=False,
+            ):
+                self.assertEqual(oracle.handed_over_binary(), binary)
+
+    def test_a_missing_path_fails_loudly(self) -> None:
+        missing = self.root / "not-built" / "chelis"
+        with patch.dict(
+            os.environ, {oracle.ORACLE_BINARY_ENV: str(missing)}, clear=False
+        ):
+            with self.assertRaises(oracle.OracleBinaryError) as caught:
+                oracle.handed_over_binary()
+        message = str(caught.exception)
+        self.assertIn(oracle.ORACLE_BINARY_ENV, message)
+        self.assertIn(str(missing), message)
+        self.assertIn("will not be replaced", message)
+
+    def test_a_non_executable_path_fails_loudly(self) -> None:
+        inert = self.root / "chelis.txt"
+        inert.write_text("not a binary\n")
+        inert.chmod(0o644)
+        with patch.dict(
+            os.environ, {oracle.ORACLE_BINARY_ENV: str(inert)}, clear=False
+        ):
+            with self.assertRaisesRegex(
+                oracle.OracleBinaryError, "not executable"
+            ):
+                oracle.handed_over_binary()
+
+    @patch("subprocess.run")
+    def test_a_valid_handoff_skips_the_cargo_build(
+        self, mock_run: MagicMock
+    ) -> None:
+        binary = self._executable()
+        with patch.dict(
+            os.environ, {oracle.ORACLE_BINARY_ENV: str(binary)}, clear=False
+        ):
+            self.assertEqual(oracle.resolve_chelis_binary(), binary)
+        self.assertEqual(
+            mock_run.call_count,
+            0,
+            "a handed-over binary must not re-enter cargo",
+        )
+
+    @patch("subprocess.run")
+    def test_an_invalid_handoff_never_falls_back_to_a_build(
+        self, mock_run: MagicMock
+    ) -> None:
+        # The whole point of failing closed: a silent fall back would run
+        # the build this handoff exists to avoid and still report PASS.
+        missing = self.root / "not-built" / "chelis"
+        with patch.dict(
+            os.environ, {oracle.ORACLE_BINARY_ENV: str(missing)}, clear=False
+        ):
+            with self.assertRaises(oracle.OracleBinaryError):
+                oracle.resolve_chelis_binary()
+            self.assertEqual(mock_run.call_count, 0)
+            # And it stays failed: the resolution state was left untouched,
+            # so a later call raises again rather than reaching cargo.
+            with self.assertRaises(oracle.OracleBinaryError):
+                oracle.resolve_chelis_binary()
+            self.assertEqual(mock_run.call_count, 0)
+
+    @patch("subprocess.run")
+    def test_no_handoff_still_runs_the_cargo_build(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["cargo", "build"], returncode=101, stdout="", stderr=""
+        )
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(oracle.ORACLE_BINARY_ENV, None)
+            self.assertIsNone(oracle.resolve_chelis_binary())
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ("cargo", "build", "-p", "chelis-cli", "--bin", "chelis", "--quiet"),
+        )
+
+    def test_an_invalid_handoff_is_reported_before_any_obligation_runs(
+        self,
+    ) -> None:
+        # A harness fault is not an obligation result. `main` must abandon
+        # the run without printing a per-obligation verdict, and without
+        # the acceptance line.
+        missing = self.root / "not-built" / "chelis"
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(
+            os.environ, {oracle.ORACLE_BINARY_ENV: str(missing)}, clear=False
+        ):
+            with redirect_stdout(out), redirect_stderr(err):
+                status = oracle.main()
+        self.assertEqual(status, 2)
+        self.assertIn("ORACLE: FAIL", err.getvalue())
+        self.assertIn(oracle.ORACLE_BINARY_ENV, err.getvalue())
+        self.assertNotIn("ORACLE: PASS", out.getvalue())
+        self.assertNotIn("Obligation 1", out.getvalue())
 
 
 class TestChelisCheckCommand(unittest.TestCase):
