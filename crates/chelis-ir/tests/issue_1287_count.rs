@@ -217,11 +217,15 @@ fn grad_rejects_a_live_count_with_a_structured_reason() {
         Ok(_) => panic!("count has no adjoint"),
         Err(err) => err,
     };
+    assert!(
+        err.to_string().contains("integer-reduction output"),
+        "Count's rendered rejection must describe a reduction, not an index: {err}"
+    );
     assert_eq!(
         err,
         AdError::NotSupported {
             op: "count",
-            reason: AdRejectionReason::IntegerIndexOutput,
+            reason: AdRejectionReason::IntegerReductionOutput,
         }
     );
 }

@@ -169,6 +169,11 @@ fn hidden_value_row() {}
             "parity_tensor_structural_ops",
             "{}",
         )
+        sources[oracle.PARITY_SOURCE] = oracle.replace_test_body(
+            sources[oracle.PARITY_SOURCE],
+            "parity_count_bool_axes",
+            "{}",
+        )
         sources[oracle.REJECTED_SOURCE] = oracle.replace_test_body(
             sources[oracle.REJECTED_SOURCE],
             "rejected_cells_fail_the_build_with_their_pinned_diagnostics",
@@ -178,6 +183,7 @@ fn hidden_value_row() {}
         violations = oracle.definition_digest_violations(sources)
 
         self.assertTrue(any("parity_tensor_structural_ops" in item for item in violations))
+        self.assertTrue(any("parity_count_bool_axes" in item for item in violations))
         self.assertTrue(
             any(
                 "rejected_cells_fail_the_build_with_their_pinned_diagnostics" in item

@@ -58,6 +58,7 @@ ALLOWED_IGNORES = {
 REQUIRED_TESTS = {
     PARITY_SOURCE: {
         "parity_dict_foundation",
+        "parity_count_bool_axes",
         "parity_constraint_directed_risk_guards_library_only",
         "parity_iter_foundation",
         "parity_list_foundation",
@@ -133,10 +134,11 @@ REQUIRED_EVAL_RECEIPTS = {
 # A digest changes only when the owning design's corpus is intentionally revised
 # and the replacement behavior has independent review evidence. Editing this map
 # merely to accept a changed test is not a repair.
-# chelis#1158 adds parity_recursive_generic to the frozen corpus. The 22-case
-# recursive_generic_monomorphization suite supplies independent evidence.
-# Fresh-context hardening red-team round 3 also accepted the implementation.
-# The corpus guard changes only to list recursive_generic.ch.
+# chelis#1158 added parity_recursive_generic to the frozen corpus. The 22-case
+# recursive_generic_monomorphization suite supplies its independent evidence.
+# chelis#1287 adds parity_count_bool_axes and count_bool_axes.ch together; the
+# executable parity row itself plus the dedicated Count oracle are the
+# independent evidence for extending this guard.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_comparator_accepts_byte_identical_tensor_lines": "9224411d844dc758300d5880b424edd89deea5eb9dfa9d12a34ba7257a58e38f",
@@ -145,7 +147,8 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_rejects_value_divergence": "06b51ffeb117c26b55c7901d64d3525a22855bec70f20246d263d9b5fc041f89",
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
-        "parity_corpus_is_complete": "1fb228c8e6a4ca0042702cefb875a8a504c0f42a1484330e9ca5fe5c6d0bb9a5",
+        "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
+        "parity_corpus_is_complete": "b6f6656ee9c69f86386ed4f71f0ed7bd195a864295cfda8e1204628937005f2a",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
         # chelis#912 applies [05-OBS-7] uniformly: hello_tensor's pure
         # nullary `main` and opaque_invariants_simplex's top-level `eps`
