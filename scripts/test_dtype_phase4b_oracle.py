@@ -2448,6 +2448,14 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("count axes stay in the signature rule")
 
+    def test_count_child_oracle_receipt_is_required(self) -> None:
+        self.replace(
+            Path("spec/design/dtype_semantics.md"),
+            "DTYPE COUNT ORACLE: PASS",
+            "DTYPE COUNT ORACLE: SKIPPED",
+        )
+        self.assert_contract_fails("Count child oracle success line")
+
     def test_runtime_axis_and_host_rows_keep_concrete_owners(self) -> None:
         path = self.root / "spec/design/capability_table.md"
         mutations = (
