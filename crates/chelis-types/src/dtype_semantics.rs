@@ -2494,12 +2494,11 @@ fn checked_adjacent_pair_fold<T, E>(
 }
 
 fn checked_count_add(left: i64, right: i64) -> Result<i64, NumericKernelError> {
-    left.checked_add(right).ok_or_else(|| {
-        NumericKernelError::Trap(NumericTrap::Overflow {
+    left.checked_add(right)
+        .ok_or(NumericKernelError::Trap(NumericTrap::Overflow {
             op: "count",
             prim: Prim::Int64,
-        })
-    })
+        }))
 }
 
 /// Count true elements in explicitly ordered groups through the closed typed
