@@ -8,9 +8,11 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Reef documents now have independent versioned schemas.** New manifests and lockfiles write schema 1. Legacy files remain readable with an upgrade warning. `chelis reef upgrade --check|--inplace` provides preflighted ordered migration. Project writers use `.reef-write.lock` and atomic single-file replacement. Versioned JSON Schema files provide advisory editor validation. Prepared graph cache version 3 rejects pre-schema cache envelopes.
+- **Reef documents now have independent versioned schemas.** New manifests write schema 2. New lockfiles write schema 1. Legacy files remain readable with an upgrade warning. `chelis reef upgrade --check|--inplace` provides ordered migration. Project writers use `.reef-write.lock` and atomic single-file replacement. Versioned JSON Schema files provide editor validation. Prepared graph cache version 3 rejects pre-schema cache envelopes.
 
-- **Reef now parses canonical package identities and prefers valid exact locks.** Package versions use Semantic Versioning without build metadata. Schema 1 retains exact dependency semantics. The bounded local resolver defines deterministic Cargo-style resolver-2 behavior, but schema 2 and remote discovery remain inactive. Prepared graph cache version 4 rejects pre-SemVer envelopes. Noncanonical names, partial versions, non-SemVer release tags, and malformed locks now fail closed.
+- **Reef now parses canonical package identities and prefers valid exact locks.** Package versions use Semantic Versioning without build metadata. Schema 1 retains exact dependency semantics. Schema 2 activates deterministic Cargo-style resolver-2 behavior. Prepared graph cache version 4 rejects pre-SemVer envelopes. Noncanonical names, partial versions, non-SemVer release tags, and malformed locks now fail closed.
+
+- **Reef now performs bounded GitHub release discovery.** Normal commands use valid locks without release listing. `chelis reef update [<package>]` performs full or targeted refresh. `chelis reef outdated [<package>] [--json]` reports available versions without final writes. Candidate scans, requests, downloads, and resolver states have finite limits. Reef publishes complete verified cache entries before it replaces `reef.lock`.
 
 - **The Darwin release toolchain builds from Nix (openspec
   `ship-darwin-release-from-nix`).** `nix/release-chelis.nix` now covers

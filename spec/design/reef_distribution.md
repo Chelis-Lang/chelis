@@ -3,8 +3,9 @@
 **Status:** Current Phase A distribution contract, with historical implementation-plan
 notes preserved for context. Phase A is complete in `spec/12-roadmap.md`: the shipped
 surface includes `chelis reef install --from-github`, `--bootstrap`, default-on
-auto-fetch during `chelis reef build`, lockfile `remote_origin`, and
-`chelis reef install --from-lockfile`. The public registry server remains deferred.
+auto-fetch during `chelis reef build`, lockfile `remote_origin`, bounded resolver-2 discovery,
+`chelis reef update`, `chelis reef outdated`, and `chelis reef install --from-lockfile`.
+The public registry server remains deferred.
 
 Companion to `chelis_trust_stack.md` and `effect_taxonomy_expansion.md` (which adds
 install-time effect manifests on top of the install path described here).
@@ -59,28 +60,38 @@ Reef parses each package name, package version, compiler pin, lock identity, ind
 
 Canonical package names use lowercase ASCII letters, digits, and internal hyphens. Complete package versions use Semantic Versioning without build metadata.
 
-Manifest schema 1 retains complete exact dependency versions. The resolver-2 model uses Cargo-style requirements, but schema 2 remains inactive.
+Manifest schema 1 retains complete exact dependency versions. Manifest schema 2 requires resolver 2 and uses Cargo-style requirements.
 
-Local candidates can come from an exact lock, the local registry, the bundled runtime, or a path. No local candidate source enumerates a remote repository.
+Candidates can come from an exact lock, the local registry, GitHub Releases, the bundled runtime, or a path.
 
-Schema-1 local resolution uses the bounded resolver core with one exact candidate per declaration. It performs no compatible-version selection.
+Resolver 2 uses bytewise package order, lock preference, descending version precedence, bounded depth-first search, and failed-state memoization.
 
-The inactive resolver-2 model uses bytewise package order, lock preference, descending version precedence, bounded depth-first search, and failed-requirement memoization.
-
-Both modes limit candidates and resolved packages to 256. They limit dependencies to 256, depth to 128, and explored states to 100000.
+All modes limit candidates and resolved packages to 256. They limit dependencies to 256, depth to 128, and explored states to 100000.
 
 One active path source overrides registry candidates for its package name. Reef rejects two active paths or conflicting verified non-path sources.
 
-A valid lock is the preferred exact graph. Reef reuses it without search or rewrite after identity, requirement, source, path, origin, and hash verification.
+A valid lock is the preferred exact graph. Reef reuses it without release listing after complete identity and integrity checks.
 
 A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error.
 
-`add-bounded-reef-remote-discovery` owns the schema-2 DTO, migration, editor schema, remote providers, and resolver-2 activation.
+Remote discovery uses one private provider interface. `GitHubReleaseProvider` is the only implementation.
+
+The production budget limits pages, requests, tags, manifests, request time, and downloaded bytes. Local resolver limits remain authoritative for graph search.
+
+Candidate archives stay in command-owned temporary storage. Reef scans one root `reef.toml` without complete archive extraction.
+
+A refresh stages and verifies each selected pair. Then it gets the project lock before the registry lock.
+
+Reef publishes complete package directories, replaces `index.json`, and replaces the project lock last. A late failure can leave complete unused cache entries.
+
+Manifest schema 3 remains allocated to package metadata. A later change owns that schema and its migration.
 
 ### Shipped surface
 
 - `chelis reef init` scaffolds a new package with the newest supported manifest schema.
 - `chelis reef upgrade` checks or applies ordered manifest and lock schema migrations.
+- `chelis reef update [<package>]` performs a full or targeted remote refresh.
+- `chelis reef outdated [<package>] [--json]` reports remote state without final writes.
 - `chelis reef build` resolves dependencies from the local registry, and auto-fetches
   missing dependencies from recorded or canonical GitHub release origins unless
   `--no-auto-fetch` is passed. It type-checks, lowers, and emits
@@ -467,9 +478,8 @@ lockfile command is a thin wrapper over Item 6's helper.
 
 ### Item 10 — Public registry server (deferred)
 
-Post-launch endgame. A dedicated registry service replaces GitHub
-Releases as the artifact backend. It activates remote version search,
-multiple publishers, and discoverability around the typed local resolver. Substantial product
+Post-launch endgame. A dedicated registry service can replace GitHub
+Releases as the artifact backend. It adds multiple publishers and registry discovery around the typed resolver. Substantial product
 work; do not start without a specific driver pulling for it. Recorded
 here for forward-compatibility so the design of Items 6-9 stays
 compatible with a future migration (the lockfile's `remote_origin`

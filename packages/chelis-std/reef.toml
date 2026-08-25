@@ -1,6 +1,7 @@
-schema = "1"
+schema = "2"
 [package]
 name = "chelis-std"
 version = "0.4.0"
 compiler = "=0.18.4"
 module_prefix = "Std"
+resolver = "2"

@@ -1,0 +1,204 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ManifestWireV2",
+  "type": "object",
+  "required": [
+    "package",
+    "schema"
+  ],
+  "properties": {
+    "artifacts": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/ArtifactSpecWireV1"
+      }
+    },
+    "chelis-src": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ChelisSrcWireV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "conform": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConformWireV1"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "dependencies": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/DependencySpecWireV2"
+      }
+    },
+    "package": {
+      "$ref": "#/definitions/ManifestPackageWireV2"
+    },
+    "schema": {
+      "$ref": "#/definitions/SchemaTwo"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ArtifactPlatformWireV1": {
+      "type": "object",
+      "required": [
+        "asset",
+        "sha256"
+      ],
+      "properties": {
+        "asset": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArtifactSpecWireV1": {
+      "type": "object",
+      "required": [
+        "platforms",
+        "repo",
+        "tag"
+      ],
+      "properties": {
+        "platforms": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/ArtifactPlatformWireV1"
+          }
+        },
+        "repo": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ChelisSrcWireV1": {
+      "type": "object",
+      "properties": {
+        "crates": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pin_commit": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConformWireV1": {
+      "type": "object",
+      "properties": {
+        "local_skills": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "DependencySpecWireV1": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DependencySpecWireV2": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/definitions/DependencySpecWireV1"
+        }
+      ]
+    },
+    "ManifestPackageWireV2": {
+      "type": "object",
+      "required": [
+        "compiler",
+        "module_prefix",
+        "name",
+        "resolver",
+        "version"
+      ],
+      "properties": {
+        "additional_sources": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compiler": {
+          "type": "string"
+        },
+        "module_prefix": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "resolver": {
+          "$ref": "#/definitions/ResolverTwo"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ResolverTwo": {
+      "type": "string",
+      "enum": [
+        "2"
+      ]
+    },
+    "SchemaTwo": {
+      "type": "string",
+      "enum": [
+        "2"
+      ]
+    }
+  }
+}

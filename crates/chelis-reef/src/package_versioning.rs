@@ -615,6 +615,37 @@ impl TypedManifest {
         compiler: &str,
         dependencies: impl IntoIterator<Item = (String, Option<String>, Option<String>)>,
     ) -> Result<Self, VersioningError> {
+        Self::parse(
+            ResolverVersion::One,
+            package_name,
+            package_version,
+            compiler,
+            dependencies,
+        )
+    }
+
+    pub fn schema_two(
+        package_name: &str,
+        package_version: &str,
+        compiler: &str,
+        dependencies: impl IntoIterator<Item = (String, Option<String>, Option<String>)>,
+    ) -> Result<Self, VersioningError> {
+        Self::parse(
+            ResolverVersion::Two,
+            package_name,
+            package_version,
+            compiler,
+            dependencies,
+        )
+    }
+
+    fn parse(
+        resolver: ResolverVersion,
+        package_name: &str,
+        package_version: &str,
+        compiler: &str,
+        dependencies: impl IntoIterator<Item = (String, Option<String>, Option<String>)>,
+    ) -> Result<Self, VersioningError> {
         let dependencies = dependencies.into_iter().collect::<Vec<_>>();
         if dependencies.len() as u64 > MAX_DEPENDENCIES_PER_MANIFEST {
             return Err(limit_error(
@@ -628,7 +659,7 @@ impl TypedManifest {
         for (raw_name, version, path) in dependencies {
             let dependency_name = PackageName::from_str(&raw_name)?;
             let dependency =
-                TypedDependency::inline(ResolverVersion::One, version.as_deref(), path.as_deref())?;
+                TypedDependency::inline(resolver, version.as_deref(), path.as_deref())?;
             parsed_dependencies.insert(dependency_name, dependency);
         }
         Ok(Self {
@@ -638,7 +669,7 @@ impl TypedManifest {
             ),
             compiler: ExactCompilerVersion::from_str(compiler)?,
             dependencies: parsed_dependencies,
-            resolver: ResolverVersion::One,
+            resolver,
         })
     }
 }
@@ -649,6 +680,9 @@ pub enum CandidateSource {
         source_identity: String,
     },
     LocalRegistry {
+        source_identity: String,
+    },
+    Remote {
         source_identity: String,
     },
     BundledRuntime {
@@ -662,9 +696,9 @@ pub enum CandidateSource {
 impl CandidateSource {
     fn source_identity(&self) -> String {
         match self {
-            Self::Locked { source_identity } | Self::LocalRegistry { source_identity } => {
-                source_identity.clone()
-            }
+            Self::Locked { source_identity }
+            | Self::LocalRegistry { source_identity }
+            | Self::Remote { source_identity } => source_identity.clone(),
             Self::BundledRuntime { compiler_version } => {
                 format!("bundled://{compiler_version}")
             }
@@ -761,6 +795,17 @@ pub fn resolve_local(
     candidates: &BTreeMap<PackageName, Vec<LocalCandidate>>,
     limits: ResolverLimits,
 ) -> Result<LocalResolution, VersioningError> {
+    let mut explored_states = 0;
+    resolve_local_with_state_counter(root_requirements, candidates, limits, &mut explored_states)
+}
+
+pub fn resolve_local_with_state_counter(
+    root_requirements: &[RequestedPackage],
+    candidates: &BTreeMap<PackageName, Vec<LocalCandidate>>,
+    limits: ResolverLimits,
+    explored_states: &mut u64,
+) -> Result<LocalResolution, VersioningError> {
+    let starting_states = *explored_states;
     let mut requirements = BTreeMap::<PackageName, Vec<RequestedPackage>>::new();
     for item in root_requirements {
         if item.depth > limits.depth {
@@ -779,7 +824,6 @@ pub fn resolve_local(
     sort_requirements(&mut requirements);
     let mut selected = BTreeMap::new();
     let mut failed_states = BTreeSet::new();
-    let mut explored_states = 0_u64;
     let mut memo_hits = 0_u64;
     search(
         candidates,
@@ -787,12 +831,12 @@ pub fn resolve_local(
         &mut requirements,
         &mut selected,
         &mut failed_states,
-        &mut explored_states,
+        explored_states,
         &mut memo_hits,
     )?;
     Ok(LocalResolution {
         selected,
-        explored_states,
+        explored_states: (*explored_states).saturating_sub(starting_states),
         memoized_failures: failed_states.len() as u64,
         memo_hits,
     })
@@ -948,6 +992,22 @@ fn search(
         Err(last_error
             .unwrap_or_else(|| incompatible_error(&package, &active, providers.get(&package))))
     } else {
+        *explored_states = explored_states.checked_add(1).ok_or_else(|| {
+            limit_error(
+                "explored resolver states",
+                Some(package.clone()),
+                limits.states,
+                u64::MAX,
+            )
+        })?;
+        if *explored_states > limits.states {
+            return Err(limit_error(
+                "explored resolver states",
+                Some(package.clone()),
+                limits.states,
+                *explored_states,
+            ));
+        }
         failed_states.insert(state_key);
         Err(incompatible_error(
             &package,

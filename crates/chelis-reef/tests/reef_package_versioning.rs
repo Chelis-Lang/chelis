@@ -494,6 +494,29 @@ fn local_limits_fail_before_excess_work() {
             ..
         })
     ));
+
+    let memo_insert = BTreeMap::from([
+        (
+            name("dep"),
+            vec![candidate("dep", "1.0.0", &[("missing", "^1")])],
+        ),
+        (name("missing"), Vec::new()),
+    ]);
+    assert!(matches!(
+        resolve_local(
+            &[requested("root", "dep", "^1")],
+            &memo_insert,
+            ResolverLimits {
+                states: 1,
+                ..ResolverLimits::default()
+            }
+        ),
+        Err(VersioningError::LimitExceeded {
+            dimension: "explored resolver states",
+            limit: 1,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -618,7 +641,7 @@ fn lock_assessment_distinguishes_reuse_staleness_and_corruption() {
 }
 
 #[test]
-fn schema_two_remains_inactive() {
+fn schema_one_rejects_resolver_two_outside_the_package_table() {
     let directory = tempdir().unwrap();
     std::fs::write(
         directory.path().join("reef.toml"),
@@ -934,10 +957,10 @@ fn external_format_locations_remain_exact_strings() {
 
     let manifest: toml::Value =
         toml::from_str(&std::fs::read_to_string(root.join("reef.toml")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"].as_str(), Some("1"));
+    assert_eq!(manifest["schema"].as_str(), Some("2"));
     assert_eq!(manifest["package"]["name"].as_str(), Some("format-demo"));
     assert_eq!(manifest["package"]["version"].as_str(), Some("0.1.0"));
-    assert!(manifest.get("resolver").is_none());
+    assert_eq!(manifest["package"]["resolver"].as_str(), Some("2"));
 
     let lock_path = root.join("reef.lock");
     let lock_bytes = std::fs::read(&lock_path).unwrap();

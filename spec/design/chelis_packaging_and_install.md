@@ -86,7 +86,7 @@ with chelis#571) for the source-crate side.
 
 ### 3.1 Document versions and recoverable replacement
 
-The manifest and lockfile formats have independent schema versions. Both first write `schema = "1"`.
+The manifest and lockfile formats have independent schema versions. New manifests use schema 2. New locks use schema 1.
 
 A missing schema identifies legacy schema 0. A schema-specific wire parser owns each current document shape.
 
@@ -112,11 +112,19 @@ Reef verifies the root identity, direct requirements, source kinds, canonical pa
 
 A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
 
-A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local resolution and publishes a replacement only after success.
+A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local-first resolution.
+
+If no local graph completes, Reef uses bounded provider discovery. An explicit update uses refresh mode even when a local graph completes.
 
 A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
 
-Manifest schema 1 retains exact dependency versions. Resolver-2 ranges remain inactive until `add-bounded-reef-remote-discovery` lands schema 2.
+Manifest schema 1 retains exact dependency versions. Manifest schema 2 activates resolver-2 ranges and bounded GitHub discovery.
+
+Reef treats the local registry as an append-only cache of verified package pairs. It does not roll back a complete entry after a late failure.
+
+A final update gets the project lock before the registry lock. It keeps both locks through package, index, and lock replacement.
+
+Reef replaces `reef.lock` last. Thus, a new lock never names an incomplete registry entry.
 
 ## 4. Store consolidation
 
@@ -429,8 +437,7 @@ build" walkthrough:
 
 ## 11. Out of scope
 
-Inherited from `reef_distribution.md` §Out of scope: resolver-2 activation,
-remote version discovery, a public registry server (Item 10), cryptographic artifact signing
+Inherited from `reef_distribution.md` §Out of scope: a public registry server (Item 10), multiple providers, cryptographic artifact signing
 (trust-stack Item 5), and bit-reproducible cross-machine artifact comparison.
 Additionally: garbage-collection / uninstall of the three stores — all of
 `~/.chelis/{toolchains,reef,src}` currently grow unbounded — is deferred to a

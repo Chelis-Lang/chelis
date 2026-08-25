@@ -29,10 +29,17 @@ mod document_schema;
 /// Typed package identities and deterministic bounded local resolution.
 #[doc(hidden)]
 pub mod package_versioning;
+mod remote_discovery;
+
+pub use remote_discovery::{
+    BudgetDimension, BudgetError, DiscoveryError, DiscoveryMode, OutdatedPackage, OutdatedReport,
+    ResolutionBudget, SourceLocator, UpdateReport, VersionChange,
+    inspect_candidate_manifest_archive, outdated_project, update_project,
+};
 
 pub use document_schema::{
     DocumentUpgradeError, LockSchemaVersion, ManifestSchemaVersion, UpgradeMode, UpgradeReport,
-    lock_schema_v1_json, manifest_schema_v1_json, upgrade_documents,
+    lock_schema_v1_json, manifest_schema_v1_json, manifest_schema_v2_json, upgrade_documents,
 };
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
@@ -2822,6 +2829,13 @@ fn load_package_graph_with_lock_preference(
             }
         }
     }
+    let manifest = read_manifest(&root.join("reef.toml"))?;
+    if manifest.typed.resolver == package_versioning::ResolverVersion::Two {
+        remote_discovery::resolve_project(root, options.auto_fetch, options.project_lock_held)
+            .map_err(|error| error.to_string())?;
+        let lock = read_lockfile(&lock_path)?;
+        return reconstruct_graph_from_lockfile(root, &lock, options).map(|graph| (graph, true));
+    }
     let root_clone = root.to_path_buf();
     run_with_timeout(
         move || resolve_package_graph(&root_clone, options),
@@ -3551,42 +3565,105 @@ pub fn install_validated_artifact_pair(
     };
     canonicalize_local_registry_index(&mut index)?;
 
-    let target_dir = registry_root
-        .join("packages")
-        .join(requested_name.as_str())
-        .join(requested_version.to_string());
-    fs::create_dir_all(&target_dir).map_err(|e| {
+    let package_parent = registry_root.join("packages").join(requested_name.as_str());
+    fs::create_dir_all(&package_parent).map_err(|e| {
         format!(
-            "failed to create registry package dir {}: {e}",
-            target_dir.display()
+            "failed to create registry package parent {}: {e}",
+            package_parent.display()
         )
     })?;
+    let target_dir = package_parent.join(requested_version.to_string());
     let archive_dst = target_dir.join(format!("{name}-{version}.tar.zst"));
     let shell_dst = target_dir.join(format!("{name}-{version}.chb"));
-    fs::copy(archive_path, &archive_dst).map_err(|e| {
-        format!(
-            "failed to copy archive {} -> {}: {e}",
-            archive_path.display(),
-            archive_dst.display()
-        )
-    })?;
-    fs::copy(shell_path, &shell_dst).map_err(|e| {
-        format!(
-            "failed to copy shell {} -> {}: {e}",
-            shell_path.display(),
-            shell_dst.display()
-        )
-    })?;
+    if target_dir.exists() {
+        let existing = verify_artifact_pair(&archive_dst, &shell_dst).map_err(|error| {
+            format!("existing package `{name}` `{version}` is incomplete or invalid: {error}")
+        })?;
+        if existing.archive_sha256 != archive_sha256
+            || existing.shell_sha256 != shell_sha256
+            || existing.package.name != name
+            || existing.package.version != version
+        {
+            return Err(format!(
+                "source conflict for existing package `{name}` `{version}`: bytes differ"
+            ));
+        }
+    } else {
+        let temporary = tempfile::Builder::new()
+            .prefix(".reef-package-")
+            .tempdir_in(&package_parent)
+            .map_err(|error| {
+                format!(
+                    "failed to create package sibling in {}: {error}",
+                    package_parent.display()
+                )
+            })?;
+        let staged_archive = temporary.path().join(format!("{name}-{version}.tar.zst"));
+        let staged_shell = temporary.path().join(format!("{name}-{version}.chb"));
+        fs::copy(archive_path, &staged_archive).map_err(|e| {
+            format!(
+                "failed to stage archive {} -> {}: {e}",
+                archive_path.display(),
+                staged_archive.display()
+            )
+        })?;
+        fs::copy(shell_path, &staged_shell).map_err(|e| {
+            format!(
+                "failed to stage shell {} -> {}: {e}",
+                shell_path.display(),
+                staged_shell.display()
+            )
+        })?;
+        let temporary_path = temporary.keep();
+        if let Err(error) = fs::rename(&temporary_path, &target_dir) {
+            if target_dir.exists() {
+                let concurrent = verify_artifact_pair(&archive_dst, &shell_dst).map_err(|verify| {
+                    let _ = fs::remove_dir_all(&temporary_path);
+                    format!(
+                        "concurrent package publication for `{name}` `{version}` is invalid: {verify}"
+                    )
+                })?;
+                let identical = concurrent.archive_sha256 == archive_sha256
+                    && concurrent.shell_sha256 == shell_sha256
+                    && concurrent.package.name == name
+                    && concurrent.package.version == version;
+                let _ = fs::remove_dir_all(&temporary_path);
+                if !identical {
+                    return Err(format!(
+                        "source conflict for concurrently published package `{name}` `{version}`"
+                    ));
+                }
+            } else {
+                let _ = fs::remove_dir_all(&temporary_path);
+                return Err(format!(
+                    "failed to publish package sibling {} -> {}: {error}",
+                    temporary_path.display(),
+                    target_dir.display()
+                ));
+            }
+        }
+        document_schema::sync_parent(&package_parent)?;
+    }
 
     let versions = index.packages.entry(name.to_string()).or_default();
-    versions.retain(|entry| entry.version != version);
-    versions.push(RegistryVersion {
-        version: version.to_string(),
-        compiler: verified.compiler,
-        archive_sha256: archive_sha256.clone(),
-        shell_sha256: shell_sha256.clone(),
-        remote_origin: remote_origin.map(str::to_string),
-    });
+    if let Some(existing) = versions.iter().find(|entry| entry.version == version) {
+        if existing.compiler != verified.compiler
+            || existing.archive_sha256 != archive_sha256
+            || existing.shell_sha256 != shell_sha256
+        {
+            return Err(format!(
+                "source conflict for registry index package `{name}` `{version}`"
+            ));
+        }
+    } else {
+        versions.push(RegistryVersion {
+            version: version.to_string(),
+            compiler: verified.compiler,
+            archive_sha256: archive_sha256.clone(),
+            shell_sha256: shell_sha256.clone(),
+            remote_origin: remote_origin.map(str::to_string),
+        });
+    }
     canonicalize_local_registry_index(&mut index)?;
 
     let serialized = serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?;
@@ -5968,9 +6045,11 @@ impl ParsedManifest {
 fn read_manifest(path: &Path) -> Result<ParsedManifest, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let schema =
+        document_schema::manifest_schema_version(&text, path).map_err(|error| error.to_string())?;
     let manifest = document_schema::parse_manifest_text(&text, path, true)
         .map_err(|error| error.to_string())?;
-    let typed = validate_manifest(&manifest)?;
+    let typed = validate_manifest_schema_with(&manifest, schema, allow_dep_compiler_drift())?;
     Ok(ParsedManifest {
         raw: manifest,
         typed,
@@ -5988,21 +6067,11 @@ pub fn read_manifest_for_src(root: &Path) -> Result<ReefManifest, String> {
     let path = root.join("reef.toml");
     let text =
         fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let schema = document_schema::manifest_schema_version(&text, &path)
+        .map_err(|error| error.to_string())?;
     let manifest = document_schema::parse_manifest_text(&text, &path, true)
         .map_err(|error| error.to_string())?;
-    package_versioning::TypedManifest::schema_one(
-        &manifest.package.name,
-        &manifest.package.version,
-        &manifest.package.compiler,
-        manifest.dependencies.iter().map(|(name, dependency)| {
-            (
-                name.clone(),
-                dependency.version.clone(),
-                dependency.path.clone(),
-            )
-        }),
-    )
-    .map_err(|error| error.to_string())?;
+    validate_manifest_schema_with(&manifest, schema, true)?;
     Ok(manifest)
 }
 
@@ -6010,7 +6079,7 @@ fn write_manifest_unlocked(
     path: &Path,
     manifest: &ReefManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = document_schema::serialize_manifest_v1(manifest)?;
+    let bytes = document_schema::serialize_manifest_v2(manifest)?;
     let text = std::str::from_utf8(&bytes)?;
     document_schema::parse_manifest_text(text, path, false)?;
     document_schema::atomic_replace(path, &bytes)?;
@@ -6510,6 +6579,7 @@ fn compiler_pin_outcome(
     }
 }
 
+#[cfg(test)]
 fn validate_manifest(manifest: &ReefManifest) -> Result<package_versioning::TypedManifest, String> {
     validate_manifest_with(manifest, allow_dep_compiler_drift())
 }
@@ -6518,18 +6588,46 @@ fn validate_manifest_with(
     manifest: &ReefManifest,
     allow_compiler_drift: bool,
 ) -> Result<package_versioning::TypedManifest, String> {
-    let typed = package_versioning::TypedManifest::schema_one(
-        &manifest.package.name,
-        &manifest.package.version,
-        &manifest.package.compiler,
+    validate_manifest_schema_with(
+        manifest,
+        ManifestSchemaVersion::from_str("1").expect("schema 1 is valid"),
+        allow_compiler_drift,
+    )
+}
+
+pub(crate) fn validate_manifest_schema_with(
+    manifest: &ReefManifest,
+    schema: ManifestSchemaVersion,
+    allow_compiler_drift: bool,
+) -> Result<package_versioning::TypedManifest, String> {
+    let dependencies = || {
         manifest.dependencies.iter().map(|(name, dependency)| {
             (
                 name.clone(),
                 dependency.version.clone(),
                 dependency.path.clone(),
             )
-        }),
-    )
+        })
+    };
+    let typed = match schema.get() {
+        0 | 1 => package_versioning::TypedManifest::schema_one(
+            &manifest.package.name,
+            &manifest.package.version,
+            &manifest.package.compiler,
+            dependencies(),
+        ),
+        2 => package_versioning::TypedManifest::schema_two(
+            &manifest.package.name,
+            &manifest.package.version,
+            &manifest.package.compiler,
+            dependencies(),
+        ),
+        value => {
+            return Err(format!(
+                "no manifest validator is registered for schema {value}"
+            ));
+        }
+    }
     .map_err(|error| error.to_string())?;
     if manifest.package.module_prefix.trim().is_empty() {
         return Err("package.module_prefix must not be empty".to_string());
@@ -7630,6 +7728,7 @@ fn github_fetch_error_category(e: &GitHubFetchError) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LoadOptions {
     auto_fetch: bool,
+    project_lock_held: bool,
 }
 
 impl LoadOptions {
@@ -7638,7 +7737,10 @@ impl LoadOptions {
     /// against an empty registry will auto-fetch the same way
     /// `chelis reef build` does.
     fn default_for_load() -> Self {
-        Self { auto_fetch: true }
+        Self {
+            auto_fetch: true,
+            project_lock_held: false,
+        }
     }
 }
 
@@ -7646,6 +7748,7 @@ impl From<&BuildOptions> for LoadOptions {
     fn from(opts: &BuildOptions) -> Self {
         Self {
             auto_fetch: opts.auto_fetch,
+            project_lock_held: true,
         }
     }
 }
@@ -11211,7 +11314,10 @@ kind = "local_registry"
                 reconstruct_graph_from_lockfile(
                     &root_clone,
                     &lock,
-                    LoadOptions { auto_fetch: false },
+                    LoadOptions {
+                        auto_fetch: false,
+                        project_lock_held: false,
+                    },
                 )
             },
             Duration::from_millis(200),

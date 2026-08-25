@@ -1,9 +1,10 @@
-schema = "1"
+schema = "2"
 [package]
 name = "nautilus-quantile-contract"
 version = "0.1.0"
 compiler = "=0.18.4"
 module_prefix = "QuantileContract"
+resolver = "2"
 
 [dependencies]
 nautilus = { path = "fixtures/nautilus" }

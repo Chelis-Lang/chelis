@@ -26,19 +26,20 @@ consulted for the runtime.
 
 ## Package Manifest
 
-Every reef package has a `reef.toml`:
+Every Reef package has a `reef.toml`:
 
 ```toml
-schema = "1"
+schema = "2"
 
 [package]
 name = "demo"
 version = "<version>"
 compiler = "=<version>"
 module_prefix = "Demo"
+resolver = "2"
 
 [dependencies]
-nautilus = { version = "<version>" }
+nautilus = "^0.7"
 ```
 
 Package source normally lives under `src/`. Module declarations should line up with the
@@ -55,42 +56,97 @@ explicitly in `[dependencies]` (the installer soft-verifies that the
 declared version matches the bundled version, mismatches surface a
 typed error), but it is never required.
 
-### Package identities and local resolution
+### Package identities and resolution
 
 Package names use lowercase ASCII letters, digits, and internal hyphens. Names start with a lowercase letter and contain at most 64 bytes.
 
-Package versions use complete Semantic Versions. Prerelease versions are valid, but package build metadata is not valid.
+Package versions use complete Semantic Versions. Prerelease versions are valid. Package build metadata is not valid.
 
 Manifest schema 1 keeps exact dependency semantics. A schema-1 dependency version such as `0.7.2` selects only `0.7.2`.
 
-A path dependency can include an exact version. Reef verifies the loaded package name and version before graph construction.
+Manifest schema 2 requires `package.resolver = "2"`. Resolver 2 uses Cargo-style requirements and accepts string or inline dependency forms.
 
-Reef contains a bounded resolver-2 model with Cargo-style requirements. Manifest schema 2 remains unsupported, so generated and migrated manifests stay on resolver 1.
+Use `=0.7.2` for an exact resolver-2 requirement. A path dependency can include the same exact requirement.
 
-Schema-1 local resolution validates the same bounded resolver with one exact candidate per declaration. It does not perform compatible-version selection.
+Resolver 2 sorts package names by byte value. It sorts unlocked candidates by descending Semantic Version precedence.
 
-The resolver-2 model sorts package names bytewise. It prefers compatible lock candidates, then sorts other candidates by descending Semantic Version precedence.
+A compatible lock candidate sorts before other candidates during normal resolution. An explicit refresh removes that preference for the selected package.
 
-Both modes select one version for each package name. The shared limits cover candidates, packages, dependencies, depth, and explored states.
+Reef selects one version for each package name. Shared limits cover candidates, packages, dependencies, depth, and resolver states.
 
-Normal commands prefer a valid exact `reef.lock`. Reef verifies root identity, requirements, source kinds, canonical paths, origins, and content hashes before reuse.
+### Discovery modes
 
-A valid lock prevents an implicit compatible upgrade and remains byte-identical. A changed requirement or source declaration starts bounded local resolution.
+Every resolver operation uses one mode:
 
-A locked hash failure or unavailable origin remains a hard error. Reef does not replace damaged locked bytes with another version.
+- `Locked` reuses a valid exact lock and does not list releases.
+- `Resolve` uses a complete local graph before it uses a remote provider.
+- `Refresh` lists remote candidates when a complete local graph exists.
+- `Inspect` uses refresh discovery without final registry, index, or lock writes.
 
-A malformed lock also fails closed. Inspect or remove the damaged lock, then run `chelis reef build` to create a verified replacement.
+GitHub Releases is the only remote provider. Reef does not use descriptive package URLs for source selection.
 
-Remote version enumeration and resolver-2 activation belong to `add-bounded-reef-remote-discovery`.
+When network access is disabled, Reef does not create a provider client. Local candidates and exact locked origins remain available.
+
+A locked hash failure or unavailable origin is a hard error. Reef does not replace damaged locked bytes with another version.
+
+### Remote limits
+
+Reef applies these production limits:
+
+| Resource | Limit |
+|---|---:|
+| Release pages for each package | 10 |
+| HTTP requests for each command | 2048 |
+| Accepted release tags for each package | 256 |
+| Candidate manifests for each package | 64 |
+| Compressed candidate archive | 64 MiB |
+| Scanned candidate bytes | 256 MiB |
+| Parsed `reef.toml` | 1 MiB |
+| Total candidate download bytes | 1 GiB |
+| Time for each HTTP request | 60 seconds |
+
+A limit error names the resource, limit, observed value, package, and provider operation.
+
+Reef scans candidate archives without archive extraction. It accepts one regular root `reef.toml` and rejects unsafe archive entries.
+
+### Update and outdated commands
+
+Run a full refresh:
+
+```sh
+chelis reef update
+```
+
+Run a targeted refresh:
+
+```sh
+chelis reef update <package>
+```
+
+Inspect compatible and incompatible versions without final writes:
+
+```sh
+chelis reef outdated [<package>]
+chelis reef outdated [<package>] --json
+```
+
+Add `--offline` to either command for local candidates only.
+
+A targeted refresh keeps unrelated locked packages fixed. It changes a transitive package only when the selected target requires that change.
+
+Reef verifies all selected remote pairs in temporary storage. Then Reef gets the project lock before the registry lock.
+
+Reef publishes complete package directories and updates `index.json`. Reef replaces the project `reef.lock` last.
+
+If lock replacement fails, the prior lock remains authoritative. Complete unused cache entries can remain for a later garbage-collection command.
 
 ## Document Schemas and Upgrades
 
-Each new `reef.toml` and `reef.lock` declares an independent top-level schema.
-The initial schema for both documents is `schema = "1"`.
+Each `reef.toml` and `reef.lock` declares an independent top-level schema. New manifests use schema 2. New locks use schema 1.
 
-Reef reads documents without a schema as legacy schema 0. It reports one warning that names the upgrade command.
+Reef reads a document without a schema as legacy schema 0. It reports one warning that names the upgrade command.
 
-Schema 1 rejects unknown keys in fixed tables. Reef selects the schema before it parses the complete document.
+Schema 1 and schema 2 reject unknown keys in fixed tables. Reef selects the schema before complete document parsing.
 
 Use one mode for each upgrade command:
 
@@ -102,18 +158,20 @@ chelis reef upgrade --check
 chelis reef upgrade --inplace
 
 # Select a package and explicit supported targets.
-chelis reef upgrade --inplace --path <dir> --manifest-to 1 --lock-to 1
+chelis reef upgrade --inplace --path <dir> --manifest-to 2 --lock-to 1
 ```
 
-The command preflights both documents before a write. It preserves accepted manifest comments and key order.
+The schema-1 to schema-2 step adds resolver 2. It rewrites each exact dependency from `X.Y.Z` to `=X.Y.Z`.
 
-Reef replaces `reef.toml` first and `reef.lock` second. A process stop between replacements leaves two readable supported schemas.
+The migration preserves path-only dependencies, accepted comments, and key order. It also updates a known Taplo manifest directive.
 
-Run the command again to complete the remaining lock step. Repeated upgrades do not change current documents.
+The command examines both documents before a write. It replaces `reef.toml` first and `reef.lock` second.
 
-Project file writers serialize through `.reef-write.lock`. Reef adds the lock and command-owned sibling patterns to the nearest package ignore file.
+If a process stops between replacements, run the command again. Both intermediate documents use readable schemas.
 
-Versioned editor schemas are in `docs/schemas/reef/`. They check syntax and table shape only.
+Project file writers serialize through `.reef-write.lock`. Reef adds its lock and sibling patterns to the package ignore file.
+
+Versioned editor schemas are in `docs/schemas/reef/`. These schemas check syntax and table shape only.
 
 Editor validation does not check paths, network sources, compiler compatibility, or artifact bytes. Reef remains the validation authority.
 
@@ -186,12 +244,11 @@ identities.
 
 ## Auto-fetch During Build
 
-`chelis reef build` is auto-fetch-by-default: if a dependency is
-missing from the local registry, the build attempts to fetch it from
-the canonical hosting org (or from the `remote_origin` recorded in
-the lockfile, when present) before falling back to the
-"missing-from-registry" error. Pass `--no-auto-fetch` to disable this
-fallback.
+`chelis reef build` uses exact locked origins when a valid lock needs missing bytes.
+
+Without a valid resolver-2 lock, the command uses local candidates first. It starts bounded remote discovery only when no local graph completes.
+
+Schema-1 exact dependencies keep their direct exact-tag fetch path. Pass `--no-auto-fetch` to disable network access during the build.
 
 The result of all four items above is that a fresh dev environment's
 onboarding is just:

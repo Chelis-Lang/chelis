@@ -10,6 +10,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chelis_reef::manifest_schema_v1_json(),
     )?;
     fs::write(
+        output.join("manifest-v2.schema.json"),
+        chelis_reef::manifest_schema_v2_json(),
+    )?;
+    fs::write(
         output.join("lock-v1.schema.json"),
         chelis_reef::lock_schema_v1_json(),
     )?;
