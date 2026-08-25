@@ -3089,16 +3089,29 @@ int main(void) {{
     }
 }
 
-fn direct_extrema_bit_case(
-    tag: &str,
+#[derive(Clone, Copy)]
+struct DirectExtremaBitCase<'a> {
+    tag: &'a str,
     prim: Prim,
-    c_dtype: &str,
-    bits_type: &str,
-    lhs_bits: &[u64],
-    rhs_bits: &[u64],
+    c_dtype: &'a str,
+    bits_type: &'a str,
+    lhs_bits: &'a [u64],
+    rhs_bits: &'a [u64],
+}
+
+fn direct_extrema_bit_case(
+    case: DirectExtremaBitCase<'_>,
     expected_max: &[u64],
     expected_min: &[u64],
 ) {
+    let DirectExtremaBitCase {
+        tag,
+        prim,
+        c_dtype,
+        bits_type,
+        lhs_bits,
+        rhs_bits,
+    } = case;
     let n = lhs_bits.len();
     assert_eq!(rhs_bits.len(), n);
     let format_bits = |bits: &[u64]| {
@@ -3175,22 +3188,24 @@ int main(void) {{
 #[test]
 fn direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width() {
     direct_extrema_bit_case(
-        "f64",
-        Prim::F64,
-        "CHELIS_DTYPE_F64",
-        "uint64_t",
-        &[
-            0x7ff8_1111_2222_3333,
-            0x3ff0_0000_0000_0000,
-            0,
-            0x8000_0000_0000_0000,
-        ],
-        &[
-            0x4000_0000_0000_0000,
-            0xfff8_4444_5555_6666,
-            0x8000_0000_0000_0000,
-            0,
-        ],
+        DirectExtremaBitCase {
+            tag: "f64",
+            prim: Prim::F64,
+            c_dtype: "CHELIS_DTYPE_F64",
+            bits_type: "uint64_t",
+            lhs_bits: &[
+                0x7ff8_1111_2222_3333,
+                0x3ff0_0000_0000_0000,
+                0,
+                0x8000_0000_0000_0000,
+            ],
+            rhs_bits: &[
+                0x4000_0000_0000_0000,
+                0xfff8_4444_5555_6666,
+                0x8000_0000_0000_0000,
+                0,
+            ],
+        },
         &[
             0x7ff8_1111_2222_3333,
             0xfff8_4444_5555_6666,
@@ -3205,47 +3220,56 @@ fn direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width
         ],
     );
     direct_extrema_bit_case(
-        "f32",
-        Prim::F32,
-        "CHELIS_DTYPE_F32",
-        "uint32_t",
-        &[0x7fc1_2345, 0x3f80_0000, 0, 0x8000_0000],
-        &[0x4000_0000, 0xffc5_4321, 0x8000_0000, 0],
+        DirectExtremaBitCase {
+            tag: "f32",
+            prim: Prim::F32,
+            c_dtype: "CHELIS_DTYPE_F32",
+            bits_type: "uint32_t",
+            lhs_bits: &[0x7fc1_2345, 0x3f80_0000, 0, 0x8000_0000],
+            rhs_bits: &[0x4000_0000, 0xffc5_4321, 0x8000_0000, 0],
+        },
         &[0x7fc1_2345, 0xffc5_4321, 0, 0x8000_0000],
         &[0x7fc1_2345, 0xffc5_4321, 0, 0x8000_0000],
     );
     direct_extrema_bit_case(
-        "f16",
-        Prim::F16,
-        "CHELIS_DTYPE_F16",
-        "uint16_t",
-        &[0x7e11, 0x3c00, 0, 0x8000],
-        &[0x4000, 0xfe22, 0x8000, 0],
+        DirectExtremaBitCase {
+            tag: "f16",
+            prim: Prim::F16,
+            c_dtype: "CHELIS_DTYPE_F16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7e11, 0x3c00, 0, 0x8000],
+            rhs_bits: &[0x4000, 0xfe22, 0x8000, 0],
+        },
         &[0x7e11, 0xfe22, 0, 0x8000],
         &[0x7e11, 0xfe22, 0, 0x8000],
     );
     direct_extrema_bit_case(
-        "bf16",
-        Prim::Bf16,
-        "CHELIS_DTYPE_BF16",
-        "uint16_t",
-        &[0x7fc1, 0x3f80, 0, 0x8000],
-        &[0x4000, 0xffc2, 0x8000, 0],
+        DirectExtremaBitCase {
+            tag: "bf16",
+            prim: Prim::Bf16,
+            c_dtype: "CHELIS_DTYPE_BF16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7fc1, 0x3f80, 0, 0x8000],
+            rhs_bits: &[0x4000, 0xffc2, 0x8000, 0],
+        },
         &[0x7fc1, 0xffc2, 0, 0x8000],
         &[0x7fc1, 0xffc2, 0, 0x8000],
     );
 }
 
 fn direct_extrema_adjoint_bit_case(
-    tag: &str,
-    prim: Prim,
-    c_dtype: &str,
-    bits_type: &str,
-    lhs_bits: &[u64],
-    rhs_bits: &[u64],
+    case: DirectExtremaBitCase<'_>,
     gradient_bits: &[u64],
     expected: [&[u64]; 4],
 ) {
+    let DirectExtremaBitCase {
+        tag,
+        prim,
+        c_dtype,
+        bits_type,
+        lhs_bits,
+        rhs_bits,
+    } = case;
     let n = lhs_bits.len();
     assert_eq!(rhs_bits.len(), n);
     assert_eq!(gradient_bits.len(), n);
@@ -3344,13 +3368,7 @@ int main(void) {{
 
 #[test]
 fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection() {
-    let run = |tag: &str,
-               prim: Prim,
-               c_dtype: &str,
-               bits_type: &str,
-               lhs: &[u64],
-               rhs: &[u64],
-               gradient: &[u64]| {
+    let run = |case: DirectExtremaBitCase<'_>, gradient: &[u64]| {
         let zero = 0;
         let max_left = [
             gradient[0],
@@ -3371,38 +3389,35 @@ fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection()
         ];
         let min_right = [zero, gradient[1], zero, zero, gradient[4], zero];
         direct_extrema_adjoint_bit_case(
-            tag,
-            prim,
-            c_dtype,
-            bits_type,
-            lhs,
-            rhs,
+            case,
             gradient,
             [&max_left, &max_right, &min_left, &min_right],
         );
     };
 
     run(
-        "f64",
-        Prim::F64,
-        "CHELIS_DTYPE_F64",
-        "uint64_t",
-        &[
-            0x7ff8_1111_2222_3333,
-            0x3ff0_0000_0000_0000,
-            0,
-            0x8000_0000_0000_0000,
-            0x4000_0000_0000_0000,
-            0x3ff0_0000_0000_0000,
-        ],
-        &[
-            0x4000_0000_0000_0000,
-            0xfff8_4444_5555_6666,
-            0x8000_0000_0000_0000,
-            0,
-            0x3ff0_0000_0000_0000,
-            0x4000_0000_0000_0000,
-        ],
+        DirectExtremaBitCase {
+            tag: "f64",
+            prim: Prim::F64,
+            c_dtype: "CHELIS_DTYPE_F64",
+            bits_type: "uint64_t",
+            lhs_bits: &[
+                0x7ff8_1111_2222_3333,
+                0x3ff0_0000_0000_0000,
+                0,
+                0x8000_0000_0000_0000,
+                0x4000_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+            ],
+            rhs_bits: &[
+                0x4000_0000_0000_0000,
+                0xfff8_4444_5555_6666,
+                0x8000_0000_0000_0000,
+                0,
+                0x3ff0_0000_0000_0000,
+                0x4000_0000_0000_0000,
+            ],
+        },
         &[
             0x7ff8_abcd_1234_5678,
             0xbff0_0000_0000_0000,
@@ -3413,26 +3428,28 @@ fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection()
         ],
     );
     run(
-        "f32",
-        Prim::F32,
-        "CHELIS_DTYPE_F32",
-        "uint32_t",
-        &[
-            0x7fc1_2345,
-            0x3f80_0000,
-            0,
-            0x8000_0000,
-            0x4000_0000,
-            0x3f80_0000,
-        ],
-        &[
-            0x4000_0000,
-            0xffc5_4321,
-            0x8000_0000,
-            0,
-            0x3f80_0000,
-            0x4000_0000,
-        ],
+        DirectExtremaBitCase {
+            tag: "f32",
+            prim: Prim::F32,
+            c_dtype: "CHELIS_DTYPE_F32",
+            bits_type: "uint32_t",
+            lhs_bits: &[
+                0x7fc1_2345,
+                0x3f80_0000,
+                0,
+                0x8000_0000,
+                0x4000_0000,
+                0x3f80_0000,
+            ],
+            rhs_bits: &[
+                0x4000_0000,
+                0xffc5_4321,
+                0x8000_0000,
+                0,
+                0x3f80_0000,
+                0x4000_0000,
+            ],
+        },
         &[
             0x7fc6_789a,
             0xbf80_0000,
@@ -3443,21 +3460,25 @@ fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection()
         ],
     );
     run(
-        "f16",
-        Prim::F16,
-        "CHELIS_DTYPE_F16",
-        "uint16_t",
-        &[0x7e11, 0x3c00, 0, 0x8000, 0x4000, 0x3c00],
-        &[0x4000, 0xfe22, 0x8000, 0, 0x3c00, 0x4000],
+        DirectExtremaBitCase {
+            tag: "f16",
+            prim: Prim::F16,
+            c_dtype: "CHELIS_DTYPE_F16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7e11, 0x3c00, 0, 0x8000, 0x4000, 0x3c00],
+            rhs_bits: &[0x4000, 0xfe22, 0x8000, 0, 0x3c00, 0x4000],
+        },
         &[0x7e33, 0xbc00, 0x3c00, 0x8000, 0x4200, 0xc400],
     );
     run(
-        "bf16",
-        Prim::Bf16,
-        "CHELIS_DTYPE_BF16",
-        "uint16_t",
-        &[0x7fc1, 0x3f80, 0, 0x8000, 0x4000, 0x3f80],
-        &[0x4000, 0xffc2, 0x8000, 0, 0x3f80, 0x4000],
+        DirectExtremaBitCase {
+            tag: "bf16",
+            prim: Prim::Bf16,
+            c_dtype: "CHELIS_DTYPE_BF16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7fc1, 0x3f80, 0, 0x8000, 0x4000, 0x3f80],
+            rhs_bits: &[0x4000, 0xffc2, 0x8000, 0, 0x3f80, 0x4000],
+        },
         &[0x7fc3, 0xbf80, 0x3f80, 0x8000, 0x4040, 0xc080],
     );
 }
