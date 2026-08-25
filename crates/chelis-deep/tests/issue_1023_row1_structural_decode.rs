@@ -38,9 +38,7 @@ fn node_child(expr: &Expr, expected: DeepTag, index: usize) -> &Expr {
 fn tag_head_with_meta_decodes_at_binder_syntax_selector() {
     // Binder position: `fn` child 0. `(params {} w b x)` carries the
     // [03-ROLE-3] conjunction, so it decodes to Node(Params), not BareList.
-    let exprs = stamp(
-        "(def {} f (fn {} (params {} w b x) (var {} w)))",
-    );
+    let exprs = stamp("(def {} f (fn {} (params {} w b x) (var {} w)))");
     let body = node_child(&exprs[0], DeepTag::Def, 1);
     let params = node_child(body, DeepTag::Fn, 0);
     let Expr::Node(params_node, _) = params else {
@@ -52,9 +50,7 @@ fn tag_head_with_meta_decodes_at_binder_syntax_selector() {
     // Nested depth inside the structural region: an annotated parameter's
     // `type:` metadata value is itself stamped, so the `(t-prim {} f32)`
     // inside it decodes to a Node too.
-    let exprs = stamp(
-        "(def {} g (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
-    );
+    let exprs = stamp("(def {} g (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))");
     let body = node_child(&exprs[0], DeepTag::Def, 1);
     let params = node_child(body, DeepTag::Fn, 0);
     let Expr::Node(params_node, _) = params else {
@@ -110,9 +106,7 @@ fn unknown_head_with_meta_stays_bare_list_with_name_head() {
     // `(x {type: ...})` carries a metadata map at element 1, but `x` is not
     // a vocabulary tag, so [03-ROLE-3] keeps it a structural BareList whose
     // head is an ordinary `Atom::Name` — the annotated-parameter shape.
-    let exprs = stamp(
-        "(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))",
-    );
+    let exprs = stamp("(def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x)))");
     let body = node_child(&exprs[0], DeepTag::Def, 1);
     let params = node_child(body, DeepTag::Fn, 0);
     let Expr::Node(params_node, _) = params else {

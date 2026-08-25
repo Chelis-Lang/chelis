@@ -933,8 +933,8 @@ fn skipped_variant_ctor_rejects_at_structural_decode() {
                 "the unknown-constructor guard is the backstop: {msg}"
             );
         }
-        other => panic!(
-            "an unresolvable constructor is a structural decode failure, got {other:?}"
-        ),
+        other => {
+            panic!("an unresolvable constructor is a structural decode failure, got {other:?}")
+        }
     }
 }

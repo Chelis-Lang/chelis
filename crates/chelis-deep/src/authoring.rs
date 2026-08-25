@@ -1813,6 +1813,9 @@ mod tests {
             read_visits.iter().any(|visit| visit.contains("\"c\"")),
             "traversal reaches the nested BareList interior: {read_visits:?}"
         );
-        assert_eq!(mutable, fixture, "a no-op visitor leaves the tree unchanged");
+        assert_eq!(
+            mutable, fixture,
+            "a no-op visitor leaves the tree unchanged"
+        );
     }
 }

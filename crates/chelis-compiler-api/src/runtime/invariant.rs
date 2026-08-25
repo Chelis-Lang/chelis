@@ -873,11 +873,17 @@ mod tests {
             Expr::Atom(_, _) => false,
             Expr::Map(map, _) => {
                 map.entries.iter().any(|(key, _)| key == "span")
-                    || map.entries.iter().any(|(_, value)| mentions_span_key(value))
+                    || map
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
             }
             Expr::MetaExpr(meta, _) => {
                 meta.entries.iter().any(|(key, _)| key == "span")
-                    || meta.entries.iter().any(|(_, value)| mentions_span_key(value))
+                    || meta
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
                     || mentions_span_key(&meta.expr)
             }
             Expr::List(list, _) => list.elements.iter().any(mentions_span_key),

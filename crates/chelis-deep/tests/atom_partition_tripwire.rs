@@ -35,9 +35,7 @@ enum AtomPartition {
 /// compile error here until it is classified.
 fn atom_partition(atom: &Atom) -> AtomPartition {
     match atom {
-        Atom::Int(_) | Atom::Float(_) | Atom::Str(_) | Atom::Bool(_) => {
-            AtomPartition::ValueLiteral
-        }
+        Atom::Int(_) | Atom::Float(_) | Atom::Str(_) | Atom::Bool(_) => AtomPartition::ValueLiteral,
         Atom::Name(_) => AtomPartition::StructuralName,
         Atom::Tag(_) => AtomPartition::DecodedTag,
     }
@@ -95,5 +93,8 @@ fn structural_variants_are_exactly_name_and_tag() {
         .count();
     let literals = atoms.len() - structural;
     assert_eq!(structural, 2, "structural atom variants: Name and Tag");
-    assert_eq!(literals, 4, "value-literal atom variants: Int/Float/Str/Bool");
+    assert_eq!(
+        literals, 4,
+        "value-literal atom variants: Int/Float/Str/Bool"
+    );
 }
