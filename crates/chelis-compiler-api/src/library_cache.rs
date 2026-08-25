@@ -86,12 +86,15 @@ use crate::stdlib_cache::{StdLibContext, cache_disabled, typecheck_cache_dir};
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
 /// Mixed into the content-addressed key.
 ///
+/// V3 accounts for the serialized type-checker generalization-level state in
+/// `TypeEnv`; a V2 dependency-library payload is a clean miss.
+///
 /// V2: the sub-context now stores a proof-bound `CheckedLibrary`, and decode
 /// reruns effect/linearity checks to rebind the proof (mirroring the stdlib
 /// and compiled-context caches). The wire `CheckedProgram` also grew the
 /// library-proof-identity fields. A V1 `chelis-lib-*.tc` written by a
 /// pre-extraction binary at the same compiler version is a clean miss.
-const LIBRARY_CACHE_FORMAT_VERSION: u32 = 2;
+const LIBRARY_CACHE_FORMAT_VERSION: u32 = 3;
 
 /// The typechecked composed `chelis-std ++ dependency-packages`
 /// sub-context.
@@ -221,9 +224,17 @@ pub fn library_cache_key(
     dependency_decls: &[chelis_surf::ast::Decl],
     stdlib_key: [u8; 32],
 ) -> [u8; 32] {
+    library_cache_key_at_version(dependency_decls, stdlib_key, LIBRARY_CACHE_FORMAT_VERSION)
+}
+
+fn library_cache_key_at_version(
+    dependency_decls: &[chelis_surf::ast::Decl],
+    stdlib_key: [u8; 32],
+    format_version: u32,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"chelis_library_typecheck_v");
-    hasher.update(LIBRARY_CACHE_FORMAT_VERSION.to_le_bytes());
+    hasher.update(format_version.to_le_bytes());
     let compiler_version = crate::build_fingerprint();
     hasher.update(b"compiler_version");
     hasher.update((compiler_version.len() as u64).to_le_bytes());
@@ -550,8 +561,36 @@ mod tests {
     use crate::stdlib_cache::build_stdlib_context;
 
     #[test]
-    fn cache_format_version_tracks_deferred_reshape_relations() {
-        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 2);
+    fn cache_format_version_tracks_typecheck_generalization_levels() {
+        assert_eq!(LIBRARY_CACHE_FORMAT_VERSION, 3);
+    }
+
+    #[test]
+    fn preceding_payload_version_is_a_clean_cache_miss() {
+        let stdlib_context = build_stdlib_context(&[]).expect("empty stdlib context");
+        let decls = sample_decls("preceding_version");
+        let stdlib_key = key(5);
+        let current_key = library_cache_key(&decls, stdlib_key);
+        let preceding_key = library_cache_key_at_version(&decls, stdlib_key, 2);
+        assert_ne!(current_key, preceding_key);
+
+        let context = build_library_context(&stdlib_context, &decls)
+            .expect("sample context must build")
+            .expect("sample dependency must compose");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let preceding_path = library_cache_path(dir.path(), preceding_key);
+        cache_envelope::save(&preceding_path, preceding_key, &context)
+            .expect("preceding-version fixture must save");
+
+        let current_path = library_cache_path(dir.path(), current_key);
+        let loaded: Option<LibraryContext> = cache_envelope::load(&current_path, current_key)
+            .expect("a preceding-version fixture must be a clean miss");
+        assert!(loaded.is_none());
+        assert!(
+            preceding_path.exists(),
+            "negative-control fixture must exist"
+        );
+        assert_ne!(current_path, preceding_path);
     }
 
     /// chelis#1156 (PR #1161 review, F5): eviction must reclaim a

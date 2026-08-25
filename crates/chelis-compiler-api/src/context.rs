@@ -771,7 +771,12 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
-/// V9: two independent V8 formats are unified here. The pipeline-core
+/// V10: `TypeEnv` now serializes transactional generalization levels,
+/// transition watermarks, lowering overrides, and persisted-context resume
+/// floors. Bincode is positional, so every V9 payload has the old checker
+/// state shape and must be rejected before decode.
+///
+/// V9 unified two independent V8 formats. The pipeline-core
 /// extraction sealed the lowered-library proof identity into the cached
 /// context (branch V8). On main (main V8), chelis#878 (`RiscOp::Pad::fill`
 /// sealed dtype-tagged scalar), chelis#942 (deferred positional-expand
@@ -783,13 +788,13 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V9\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V10\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 9;
+const CACHE_FORMAT_VERSION: u32 = 10;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1304,9 +1309,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_deferred_reshape_relations() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V9\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 9);
+    fn cache_format_version_tracks_typecheck_generalization_levels() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V10\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 10);
     }
 
     /// chelis#1156: the cache identity must distinguish two BUILDS, not

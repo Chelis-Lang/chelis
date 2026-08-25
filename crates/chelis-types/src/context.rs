@@ -190,6 +190,15 @@ impl TypeEnv {
         &self.inner
     }
 
+    /// Clone this persisted checker snapshot for a new checking unit.
+    /// Variables imported from the snapshot are normalized to level zero
+    /// before any IDs for the new unit can be minted.
+    pub(crate) fn resume_for_new_check(&self) -> TypeEnvInner {
+        let mut inner = self.inner().clone();
+        inner.subst.resume_for_new_check(&inner.var_gen);
+        inner
+    }
+
     /// Number of library defs in scope. Diagnostic helper.
     pub fn library_def_count(&self) -> usize {
         self.inner.library_def_names.len()
@@ -209,5 +218,76 @@ impl TypeEnv {
         self.library_proof_id.is_some()
             && self.library_proof_id == program.library_proof_id()
             && self.inner.ir_types.eq(program.type_env())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Dim, Scheme, TensorPrec, Type};
+    use crate::unify::unify;
+
+    #[test]
+    fn serialized_level_state_resumes_old_ids_at_zero_and_compacts_history() {
+        let empty = TypeEnv::empty();
+        let mut inner = empty.inner().clone();
+        let older = inner.var_gen.fresh_tvar();
+        inner
+            .env
+            .bind("outer".to_string(), Scheme::mono(Type::Var(older)));
+
+        let level = inner.subst.enter_level(&inner.var_gen);
+        let lowered_tvar = inner.var_gen.fresh_tvar();
+        let lowered_dvar = inner.var_gen.fresh_dvar();
+        let lowered_rvar = inner.var_gen.fresh_rvar();
+        let child_tvar = inner.var_gen.fresh_tvar();
+        let composite = Type::Tuple(vec![
+            Type::Var(lowered_tvar),
+            Type::Tensor(
+                vec![Dim::Var(lowered_dvar), Dim::Rank(lowered_rvar)],
+                TensorPrec::Var(lowered_tvar),
+            ),
+        ]);
+        unify(&Type::Var(older), &composite, &mut inner.subst).expect("escape binding");
+        inner.subst.leave_level(level, &inner.var_gen);
+        inner
+            .env
+            .bind("child".to_string(), Scheme::mono(Type::Var(child_tvar)));
+
+        let context = TypeEnv::from_inner(inner);
+        let encoded = bincode::serialize(&context).expect("TypeEnv serializes level state");
+        let decoded: TypeEnv =
+            bincode::deserialize(&encoded).expect("TypeEnv deserializes level state");
+        assert_eq!(decoded.inner().subst.level_of_tvar(lowered_tvar), 0);
+        assert_eq!(decoded.inner().subst.level_of_dvar(lowered_dvar), 0);
+        assert_eq!(decoded.inner().subst.level_of_rvar(lowered_rvar), 0);
+        assert_eq!(decoded.inner().subst.level_of_tvar(child_tvar), 1);
+        assert_eq!(decoded.inner().subst.level_metadata_counts(), (2, 1, 1, 1));
+
+        let mut resumed = decoded.resume_for_new_check();
+        assert_eq!(resumed.subst.level_of_tvar(child_tvar), 0);
+        assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
+        let imported = resumed
+            .env
+            .generalize(&Type::Var(child_tvar), &resumed.subst);
+        assert!(imported.tvars.is_empty());
+
+        for cycle in 0..4 {
+            let level = resumed.subst.enter_level(&resumed.var_gen);
+            let fresh = resumed.var_gen.fresh_tvar();
+            resumed.subst.leave_level(level, &resumed.var_gen);
+            resumed
+                .env
+                .bind(format!("cycle_{cycle}"), Scheme::mono(Type::Var(fresh)));
+
+            let context = TypeEnv::from_inner(resumed);
+            let encoded = bincode::serialize(&context).expect("cycle serializes");
+            let decoded: TypeEnv = bincode::deserialize(&encoded).expect("cycle deserializes");
+            resumed = decoded.resume_for_new_check();
+            assert_eq!(resumed.subst.level_of_tvar(fresh), 0);
+            assert_eq!(resumed.subst.level_metadata_counts(), (1, 0, 0, 0));
+            let imported = resumed.env.generalize(&Type::Var(fresh), &resumed.subst);
+            assert!(imported.tvars.is_empty());
+        }
     }
 }

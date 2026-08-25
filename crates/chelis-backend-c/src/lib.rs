@@ -233,10 +233,23 @@ mod tests {
 
     fn runtime_library_path() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidates = [
-            manifest_dir.join("../../target/debug/deps"),
-            manifest_dir.join("../../target/release/deps"),
-        ];
+        let workspace_root = manifest_dir.join("../..");
+        let configured_target = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    workspace_root.join(path)
+                }
+            });
+        let mut candidates = Vec::new();
+        if let Some(target) = configured_target {
+            candidates.push(target.join("debug/deps"));
+            candidates.push(target.join("release/deps"));
+        }
+        candidates.push(workspace_root.join("target/debug/deps"));
+        candidates.push(workspace_root.join("target/release/deps"));
         // `cargo test` leaves many libchelis_runtime-<hash>.a artifacts from
         // historical builds in target/{debug,release}/deps. Using `find` on
         // that directory is nondeterministic and easily lands on a stale
@@ -269,8 +282,8 @@ mod tests {
         {
             return path;
         }
-        for dir in candidates {
-            if let Some(path) = newest_runtime_archive(&dir) {
+        for dir in &candidates {
+            if let Some(path) = newest_runtime_archive(dir) {
                 return path;
             }
         }

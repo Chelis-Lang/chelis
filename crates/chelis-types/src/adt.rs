@@ -543,6 +543,18 @@ fn list_children(list: &deep::List) -> &[deep::Expr] {
 pub(crate) fn substitute_alias_type(ty: &Type, subst: &HashMap<TypeVar, Type>) -> Type {
     match ty {
         Type::Var(tv) => subst.get(tv).cloned().unwrap_or(Type::Var(*tv)),
+        Type::Ref(inner) => Type::Ref(Box::new(substitute_alias_type(inner, subst))),
+        Type::Tensor(dims, precision) => {
+            let precision = match precision {
+                TensorPrec::Var(var) => match subst.get(var) {
+                    Some(Type::Prim(prim)) => TensorPrec::Concrete(*prim),
+                    Some(Type::Var(var)) => TensorPrec::Var(*var),
+                    _ => TensorPrec::Var(*var),
+                },
+                TensorPrec::Concrete(prim) => TensorPrec::Concrete(*prim),
+            };
+            Type::Tensor(dims.clone(), precision)
+        }
         Type::Fn(args, ret) => Type::Fn(
             args.iter()
                 .map(|arg| substitute_alias_type(arg, subst))

@@ -7,6 +7,44 @@ use serde::{Deserialize, Serialize};
 use crate::types::*;
 use crate::unify::Subst;
 
+#[cfg(feature = "generalize-sweep-oracle")]
+thread_local! {
+    static GENERALIZE_SWEEP_ORACLE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    static GENERALIZE_SWEEP_ENV_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(feature = "generalize-sweep-oracle")]
+fn note_generalize_sweep_env_visit() {
+    GENERALIZE_SWEEP_ENV_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+/// Run `f` through the production level path without invoking the reference
+/// sweep. Used by the structural elimination test in the authoritative
+/// parity-oracle build.
+#[cfg(all(test, feature = "generalize-sweep-oracle"))]
+pub(crate) fn without_generalize_sweep_oracle<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| enabled.set(self.0));
+        }
+    }
+
+    let previous = GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| enabled.replace(false));
+    let _restore = Restore(previous);
+    f()
+}
+
+#[cfg(all(test, feature = "generalize-sweep-oracle"))]
+pub(crate) fn reset_generalize_sweep_env_visits() {
+    GENERALIZE_SWEEP_ENV_VISITS.with(|visits| visits.set(0));
+}
+
+#[cfg(all(test, feature = "generalize-sweep-oracle"))]
+pub(crate) fn generalize_sweep_env_visits() -> usize {
+    GENERALIZE_SWEEP_ENV_VISITS.with(std::cell::Cell::get)
+}
+
 /// Provenance of a let-bound `int`-valued name, tracked so a runtime
 /// `expand` size can be checked for materializability (chelis#397/#469).
 ///
@@ -210,9 +248,12 @@ impl Env {
     }
 
     /// Collect all free type variables across all bindings in the environment.
+    #[cfg(any(test, feature = "generalize-sweep-oracle"))]
     pub fn free_tvars(&self, subst: &Subst) -> HashSet<TypeVar> {
         let mut result = HashSet::new();
         for scheme in self.bindings.values() {
+            #[cfg(feature = "generalize-sweep-oracle")]
+            note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
             let body_vars = free_tvars(&ty);
             for v in body_vars {
@@ -225,9 +266,12 @@ impl Env {
     }
 
     /// Collect all free dimension variables across all bindings in the environment.
+    #[cfg(any(test, feature = "generalize-sweep-oracle"))]
     pub fn free_dvars(&self, subst: &Subst) -> HashSet<DimVar> {
         let mut result = HashSet::new();
         for scheme in self.bindings.values() {
+            #[cfg(feature = "generalize-sweep-oracle")]
+            note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
             let body_dvars = free_dvars(&ty);
             for v in body_dvars {
@@ -240,9 +284,12 @@ impl Env {
     }
 
     /// Free rank variables in the environment (Tier-2 rank polymorphism).
+    #[cfg(any(test, feature = "generalize-sweep-oracle"))]
     pub fn free_rvars(&self, subst: &Subst) -> HashSet<RankVar> {
         let mut result = HashSet::new();
         for scheme in self.bindings.values() {
+            #[cfg(feature = "generalize-sweep-oracle")]
+            note_generalize_sweep_env_visit();
             let ty = subst.apply_scheme(scheme);
             for v in free_rvars(&ty) {
                 if !scheme.rvars.contains(&v) {
@@ -255,18 +302,43 @@ impl Env {
 
     /// Generalize a type over variables not free in the environment.
     pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
+        let level_scheme = self.generalize_by_levels(ty, subst);
+        #[cfg(feature = "generalize-sweep-oracle")]
+        GENERALIZE_SWEEP_ORACLE_ENABLED.with(|enabled| {
+            if enabled.get() {
+                let sweep_scheme = self.generalize_by_sweep(ty, subst);
+                assert_eq!(
+                    level_scheme.tvars, sweep_scheme.tvars,
+                    "level-based type quantifiers diverged from the reference environment sweep"
+                );
+                assert_eq!(
+                    level_scheme.dvars, sweep_scheme.dvars,
+                    "level-based dimension quantifiers diverged from the reference environment sweep"
+                );
+                assert_eq!(
+                    level_scheme.rvars, sweep_scheme.rvars,
+                    "level-based rank quantifiers diverged from the reference environment sweep"
+                );
+                assert_eq!(
+                    level_scheme.body, sweep_scheme.body,
+                    "level-based scheme body diverged from the reference environment sweep"
+                );
+            }
+        });
+        level_scheme
+    }
+
+    fn generalize_by_levels(&self, ty: &Type, subst: &Subst) -> Scheme {
         let ty = subst.apply(ty);
-        let env_tvars = self.free_tvars(subst);
-        let env_dvars = self.free_dvars(subst);
-        let env_rvars = self.free_rvars(subst);
         let ty_tvars = free_tvars(&ty);
         let ty_dvars = free_dvars(&ty);
         let ty_rvars = free_rvars(&ty);
+        let level = subst.current_level();
         Scheme {
             tvars: ty_tvars
                 .into_iter()
                 .filter(|v| {
-                    !env_tvars.contains(v)
+                    subst.level_of_tvar(*v) > level
                         && !subst.has_deferred_shape_constraint(*v)
                         // spec/04 §3.1.1: a variable minted for an in-group
                         // recursive instantiation stays monomorphic while its
@@ -277,9 +349,38 @@ impl Env {
                 .collect(),
             dvars: ty_dvars
                 .into_iter()
-                .filter(|v| !env_dvars.contains(v))
+                .filter(|v| subst.level_of_dvar(*v) > level)
                 .collect(),
             rvars: ty_rvars
+                .into_iter()
+                .filter(|v| subst.level_of_rvar(*v) > level)
+                .collect(),
+            body: ty,
+        }
+    }
+
+    /// Exact pre-#1207 environment-sweep implementation. It is compiled only
+    /// into tests and the temporary parity-oracle feature.
+    #[cfg(feature = "generalize-sweep-oracle")]
+    fn generalize_by_sweep(&self, ty: &Type, subst: &Subst) -> Scheme {
+        let ty = subst.apply(ty);
+        let env_tvars = self.free_tvars(subst);
+        let env_dvars = self.free_dvars(subst);
+        let env_rvars = self.free_rvars(subst);
+        Scheme {
+            tvars: free_tvars(&ty)
+                .into_iter()
+                .filter(|v| {
+                    !env_tvars.contains(v)
+                        && !subst.has_deferred_shape_constraint(*v)
+                        && !crate::infer::recursion::tvar_pinned(*v)
+                })
+                .collect(),
+            dvars: free_dvars(&ty)
+                .into_iter()
+                .filter(|v| !env_dvars.contains(v))
+                .collect(),
+            rvars: free_rvars(&ty)
                 .into_iter()
                 .filter(|v| !env_rvars.contains(v))
                 .collect(),

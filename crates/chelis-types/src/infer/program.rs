@@ -6,6 +6,160 @@
 use super::*;
 use crate::context::LibraryProofId;
 
+/// Transactional owner for one recursive SCC's inference level and temporary
+/// top-level bindings. It snapshots every member binding before provisional
+/// prebinding so cancellation can restore the environment exactly.
+struct RecursiveLevelScope {
+    level: crate::unify::LevelToken,
+    members: Vec<(String, Option<Scheme>)>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecursiveAbortObservation {
+    current_level: u32,
+    group_state_counts: (usize, usize),
+    member_count: usize,
+    prior_binding_count: usize,
+    all_prior_bindings_restored: bool,
+    all_temporary_bindings_removed: bool,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PRIMARY_RECURSIVE_CANCEL_COUNTDOWN: Cell<Option<usize>> = const { Cell::new(None) };
+    static RECURSIVE_ABORT_OBSERVATION: RefCell<Option<RecursiveAbortObservation>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct PrimaryRecursiveCancelGuard;
+
+#[cfg(test)]
+impl Drop for PrimaryRecursiveCancelGuard {
+    fn drop(&mut self) {
+        PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| countdown.set(None));
+    }
+}
+
+#[cfg(test)]
+fn cancel_primary_recursive_after_members(count: usize) -> PrimaryRecursiveCancelGuard {
+    assert!(
+        count > 0,
+        "the test hook must allow at least one SCC member"
+    );
+    PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
+        assert!(
+            countdown.replace(Some(count)).is_none(),
+            "the primary recursive cancellation hook is already armed"
+        );
+    });
+    RECURSIVE_ABORT_OBSERVATION.with(|observation| *observation.borrow_mut() = None);
+    PrimaryRecursiveCancelGuard
+}
+
+#[cfg(test)]
+fn primary_recursive_member_finished_for_test() {
+    PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
+        let Some(remaining) = countdown.get() else {
+            return;
+        };
+        if remaining == 1 {
+            countdown.set(None);
+            crate::cancel::current_cancel_token()
+                .expect("the cancellation test hook requires an installed token")
+                .cancel();
+        } else {
+            countdown.set(Some(remaining - 1));
+        }
+    });
+}
+
+#[cfg(test)]
+fn take_recursive_abort_observation() -> Option<RecursiveAbortObservation> {
+    RECURSIVE_ABORT_OBSERVATION.with(|observation| observation.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
+    left.tvars == right.tvars
+        && left.dvars == right.dvars
+        && left.rvars == right.rvars
+        && left.body == right.body
+}
+
+impl RecursiveLevelScope {
+    fn enter(
+        indices: &[usize],
+        items: &[(Option<String>, &deep::Expr)],
+        env: &Env,
+        var_gen: &VarGen,
+        subst: &mut Subst,
+    ) -> Self {
+        let mut seen = HashSet::new();
+        let members = indices
+            .iter()
+            .filter_map(|index| top_level_decl_name(items[*index].1))
+            .filter(|name| seen.insert((*name).to_string()))
+            .map(|name| (name.to_string(), env.lookup(name).cloned()))
+            .collect();
+        Self {
+            level: subst.enter_level(var_gen),
+            members,
+        }
+    }
+
+    fn remove_temporary_bindings(&self, env: &mut Env) {
+        for (name, _) in &self.members {
+            env.remove_binding(name);
+        }
+    }
+
+    /// Normal completion deliberately does not restore prior defsig/metadata
+    /// bindings: completed generalized member schemes replace them below.
+    fn complete(self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+        self.remove_temporary_bindings(env);
+        subst.leave_level(self.level, var_gen);
+    }
+
+    fn abort(self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+        #[cfg(test)]
+        let prior_members = self.members.clone();
+        super::recursion::abort_group();
+        self.remove_temporary_bindings(env);
+        for (name, prior) in self.members {
+            if let Some(scheme) = prior {
+                env.bind(name, scheme);
+            }
+        }
+        subst.leave_level(self.level, var_gen);
+        #[cfg(test)]
+        RECURSIVE_ABORT_OBSERVATION.with(|observation| {
+            let prior_binding_count = prior_members
+                .iter()
+                .filter(|(_, prior)| prior.is_some())
+                .count();
+            let all_prior_bindings_restored = prior_members.iter().all(|(name, prior)| {
+                prior.as_ref().is_none_or(|prior| {
+                    env.lookup(name)
+                        .is_some_and(|restored| schemes_match(restored, prior))
+                })
+            });
+            let all_temporary_bindings_removed = prior_members
+                .iter()
+                .filter(|(_, prior)| prior.is_none())
+                .all(|(name, _)| env.lookup(name).is_none());
+            *observation.borrow_mut() = Some(RecursiveAbortObservation {
+                current_level: subst.current_level(),
+                group_state_counts: super::recursion::group_state_counts(),
+                member_count: prior_members.len(),
+                prior_binding_count,
+                all_prior_bindings_restored,
+                all_temporary_bindings_removed,
+            });
+        });
+    }
+}
+
 /// Front-end cancellation gate for a check unit (chelis#930).
 ///
 /// Placed between the passes of every public check entry. When the thread's
@@ -99,8 +253,21 @@ pub(super) fn infer_program_with_product_in_session(
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let metadata_prebound_names = HashSet::new();
     let inference_groups = primary_inference_groups(exprs, &items);
+    // Match the persisted-state driver: cache the TLS token once and poll at
+    // declaration granularity. In particular, an incomplete recursive SCC
+    // must consume its structured scope through `abort` before this schedule
+    // returns; finishing or generalizing a partially inferred group would
+    // leak its pins, temporary bindings, and child level.
+    let cancel = crate::cancel::current_cancel_token();
+    let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
-    for group in inference_groups {
+    'schedule: for group in inference_groups {
+        if cancelled() {
+            break;
+        }
+        let mut recursive_scope = group
+            .recursive
+            .then(|| RecursiveLevelScope::enter(&group.indices, &items, &env, &vg, &mut subst));
         let provisional_types = if group.recursive {
             prebind_recursive_function_schemes(
                 &group.indices,
@@ -131,6 +298,12 @@ pub(super) fn infer_program_with_product_in_session(
         }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
+            if cancelled() {
+                if let Some(scope) = recursive_scope.take() {
+                    scope.abort(&mut env, &vg, &mut subst);
+                }
+                break 'schedule;
+            }
             let (module, expr) = &items[declaration_index];
             product.begin_root(expr);
             let decl_name = top_level_decl_name(expr);
@@ -162,15 +335,26 @@ pub(super) fn infer_program_with_product_in_session(
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
+            #[cfg(test)]
+            if group.recursive {
+                primary_recursive_member_finished_for_test();
+            }
+        }
+        if cancelled() {
+            if let Some(scope) = recursive_scope.take() {
+                scope.abort(&mut env, &vg, &mut subst);
+            }
+            break 'schedule;
         }
         if group.recursive {
             // Uniform-recursive-instantiation validation must run before the
             // deferred generalization: it clears the instantiation-variable
             // pins, which would otherwise block quantification here.
             super::recursion::finish_group(&subst, errors);
-            for (name, _) in &deferred_bindings {
-                env.remove_binding(name);
-            }
+            recursive_scope
+                .take()
+                .expect("recursive group owns an inference-level scope")
+                .complete(&mut env, &vg, &mut subst);
             let schemes = deferred_bindings
                 .into_iter()
                 .map(|(name, ty)| {
@@ -184,6 +368,11 @@ pub(super) fn infer_program_with_product_in_session(
         }
     }
     crate::opacity::set_current_item(None, None);
+
+    if cancelled() {
+        errors.push(crate::cancel::cancellation_check_error());
+        return product;
+    }
 
     // [04-TENSOR-EXPAND]: later roots get the first opportunity to select a
     // positional expand's legal output shape. At the whole-program freeze
@@ -552,7 +741,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
     // `check_ir_with_signature_context`.
     let stack_scope = StackExhaustionScope::enter();
     // Seed from the base context's snapshot rather than the empty state.
-    let mut state = base.inner().clone();
+    let mut state = base.resume_for_new_check();
 
     // `library_exprs` declared types (IR), layered on top of the base's.
     let new_ir = build_ir_type_env(library_exprs);
@@ -746,7 +935,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
             *t = std::time::Instant::now();
         }
     };
-    let mut state = context.inner().clone();
+    let mut state = context.resume_for_new_check();
 
     // New-code declared types (IR) layered on top of library's.
     let new_ir = build_ir_type_env(new_exprs);
@@ -1024,14 +1213,17 @@ pub(super) fn infer_ir_program_with_state(
 
     let mut prebound_type_failures = HashMap::new();
     for (name, ty_expr) in &collected_ir_types.type_env {
-        match resolve_deep_type(
+        let metadata_level = state.subst.enter_level(&state.var_gen);
+        let resolved = resolve_deep_type(
             ty_expr,
             &mut state.var_gen,
             &state.adt_reg,
             TypeUseSite::CompilerMetadata,
             BinderMode::TrustedCompilerMetadata,
             errors,
-        ) {
+        );
+        state.subst.leave_level(metadata_level, &state.var_gen);
+        match resolved {
             Ok(ty) => {
                 if defsig_names.contains(name.as_str()) {
                     // Preserve the defsig-derived binding (chelis#1124); do not
@@ -1077,6 +1269,15 @@ pub(super) fn infer_ir_program_with_state(
     let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
     'schedule: for group in inference_groups {
+        let mut recursive_scope = group.recursive.then(|| {
+            RecursiveLevelScope::enter(
+                &group.indices,
+                &items,
+                &state.env,
+                &state.var_gen,
+                &mut state.subst,
+            )
+        });
         let provisional_types = if group.recursive {
             prebind_recursive_function_schemes(
                 &group.indices,
@@ -1108,6 +1309,9 @@ pub(super) fn infer_ir_program_with_state(
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
             if cancelled() {
+                if let Some(scope) = recursive_scope.take() {
+                    scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
+                }
                 break 'schedule;
             }
             let (module, expr) = &items[declaration_index];
@@ -1154,14 +1358,21 @@ pub(super) fn infer_ir_program_with_state(
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&state.subst, &state.adt_reg, errors);
         }
+        if cancelled() {
+            if let Some(scope) = recursive_scope.take() {
+                scope.abort(&mut state.env, &state.var_gen, &mut state.subst);
+            }
+            break 'schedule;
+        }
         if group.recursive {
             // Uniform-recursive-instantiation validation must run before the
             // deferred generalization: it clears the instantiation-variable
             // pins, which would otherwise block quantification here.
             super::recursion::finish_group(&state.subst, errors);
-            for (name, _) in &deferred_bindings {
-                state.env.remove_binding(name);
-            }
+            recursive_scope
+                .take()
+                .expect("recursive group owns an inference-level scope")
+                .complete(&mut state.env, &state.var_gen, &mut state.subst);
             let schemes = deferred_bindings
                 .into_iter()
                 .map(|(name, ty)| {
@@ -1593,4 +1804,145 @@ fn normalize_node_to_list(expr: &deep::Expr) -> deep::Expr {
         "one normalization root produces exactly one expression"
     );
     values.pop().expect("normalization produced its root")
+}
+
+#[cfg(test)]
+mod recursive_level_scope_tests {
+    use super::*;
+
+    fn mutual_defs() -> Vec<deep::Expr> {
+        chelis_deep::parser::parse_str(
+            "(def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
+             (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+        )
+        .expect("mutual fixture parses")
+    }
+
+    #[test]
+    fn recursive_scope_mints_provisionals_inside_then_removes_every_member() {
+        let exprs = mutual_defs();
+        let items = top_level_decl_items_with_modules(&exprs);
+        let indices = vec![0, 1];
+        let mut env = Env::new();
+        env.bind("left".to_string(), Scheme::mono(Type::Prim(Prim::Int32)));
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+
+        let scope = RecursiveLevelScope::enter(&indices, &items, &env, &var_gen, &mut subst);
+        let provisional = prebind_recursive_function_schemes(
+            &indices,
+            &items,
+            &HashMap::new(),
+            &HashSet::new(),
+            &mut env,
+            &mut var_gen,
+        );
+        for ty in provisional.values() {
+            for var in crate::env::free_tvars(ty) {
+                assert_eq!(subst.level_of_tvar(var), 1);
+            }
+        }
+        scope.complete(&mut env, &var_gen, &mut subst);
+
+        assert_eq!(subst.current_level(), 0);
+        assert!(env.lookup("left").is_none());
+        assert!(env.lookup("right").is_none());
+        assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
+    }
+
+    #[test]
+    fn recursive_scope_abort_restores_prior_bindings_levels_and_pins() {
+        let exprs = mutual_defs();
+        let items = top_level_decl_items_with_modules(&exprs);
+        let indices = vec![0, 1];
+        let mut env = Env::new();
+        let prior = Scheme::mono(Type::Prim(Prim::Bool));
+        env.bind("left".to_string(), prior.clone());
+        let mut var_gen = VarGen::default();
+        let mut subst = Subst::new();
+        let scope = RecursiveLevelScope::enter(&indices, &items, &env, &var_gen, &mut subst);
+        prebind_recursive_function_schemes(
+            &indices,
+            &items,
+            &HashMap::new(),
+            &HashSet::new(),
+            &mut env,
+            &mut var_gen,
+        );
+        super::super::recursion::begin_group(
+            ["left", "right"].into_iter().map(|name| (name, false)),
+            &env,
+        );
+        let pinned = var_gen.fresh_tvar();
+        let _caller = super::super::recursion::begin_caller("left", None, &[]);
+        super::super::recursion::record_occurrence(
+            "right",
+            &[(pinned, Type::Var(pinned))],
+            None,
+            None,
+        );
+        assert_eq!(super::super::recursion::group_state_counts(), (2, 1));
+
+        scope.abort(&mut env, &var_gen, &mut subst);
+        assert_eq!(subst.current_level(), 0);
+        assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
+        assert!(!super::super::recursion::tvar_pinned(pinned));
+        let restored = env.lookup("left").expect("shadowed prior binding restored");
+        assert_eq!(restored.tvars, prior.tvars);
+        assert_eq!(restored.dvars, prior.dvars);
+        assert_eq!(restored.rvars, prior.rvars);
+        assert_eq!(restored.body, prior.body);
+        assert!(env.lookup("right").is_none());
+
+        let follow_up = infer_program(
+            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
+                .expect("follow-up parses"),
+        );
+        assert!(follow_up.errors.is_empty());
+    }
+
+    #[test]
+    fn primary_driver_mid_scc_cancellation_aborts_before_return() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(defsig {} left (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+             (defsig {} right (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+             (def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
+             (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+        )
+        .expect("authored mutual-recursion fixture parses");
+
+        let observation = {
+            let token = crate::cancel::CancelToken::new();
+            let _cancel_guard = crate::cancel::install_cancel_token(token);
+            let _hook_guard = cancel_primary_recursive_after_members(1);
+            let result = infer_program(&exprs);
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| crate::cancel::is_cancellation(&error.message)),
+                "mid-SCC cancellation must be a hard checker error: {:?}",
+                result.errors
+            );
+            take_recursive_abort_observation()
+                .expect("the primary driver must abort the incomplete recursive scope")
+        };
+
+        assert_eq!(observation.current_level, 0);
+        assert_eq!(observation.group_state_counts, (0, 0));
+        assert_eq!(observation.member_count, 2);
+        assert_eq!(observation.prior_binding_count, 2);
+        assert!(observation.all_prior_bindings_restored);
+        assert!(observation.all_temporary_bindings_removed);
+
+        let follow_up = infer_program(
+            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
+                .expect("follow-up parses"),
+        );
+        assert!(
+            follow_up.errors.is_empty(),
+            "a cancelled recursive check must not contaminate its successor: {:?}",
+            follow_up.errors
+        );
+    }
 }
