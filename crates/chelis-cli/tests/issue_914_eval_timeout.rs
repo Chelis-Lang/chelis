@@ -90,7 +90,9 @@ fn reef_package() -> (TempDir, PathBuf) {
     std::fs::write(
         root.join("reef.toml"),
         format!(
-            r#"[package]
+            r#"schema = "1"
+
+[package]
 name = "demo"
 version = "0.1.0"
 compiler = "={}"

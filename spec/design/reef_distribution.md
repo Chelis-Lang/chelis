@@ -29,9 +29,34 @@ not designed in this round.
 
 ## Background
 
+### Reef document schema ownership
+
+`reef.toml` and `reef.lock` each carry an independent top-level `schema` string. Schema 1 is the first written version.
+
+A missing schema identifies legacy schema 0. Ordinary reads keep the legacy parser and report the general upgrade command.
+
+Reef parses the schema header before a complete document. Each current fixed table rejects unknown keys through its version-specific wire type.
+
+`chelis reef upgrade --check|--inplace` owns all document migration. Target options select supported manifest and lock schemas independently.
+
+The command preflights both selected migrations before replacement. It preserves accepted manifest comments and key order.
+
+Each replacement uses a unique sibling, flushes the bytes, renames the sibling over the target, and syncs the parent where supported.
+
+One persistent `.reef-write.lock` serializes project manifest, lock, and package archive replacement. Registry mutation keeps its separate registry lock.
+
+The manifest is replaced before the lock. Every reader accepts a current manifest with a supported older lock.
+
+A repeated upgrade completes an interrupted lock step without rewriting the current manifest. The two-file operation does not claim joint atomicity.
+
+Versioned editor schemas under `docs/schemas/reef/` describe syntax only. Executable Reef parsing remains the document validation boundary.
+
+The schema allocation sequence is manifest 1, resolver-2 manifest 2, and package-metadata manifest 3. The lock remains schema 1 until its fields change.
+
 ### Shipped surface
 
-- `chelis reef init` scaffolds a new package.
+- `chelis reef init` scaffolds a new package with the newest supported manifest schema.
+- `chelis reef upgrade` checks or applies ordered manifest and lock schema migrations.
 - `chelis reef build` resolves dependencies from the local registry, and auto-fetches
   missing dependencies from recorded or canonical GitHub release origins unless
   `--no-auto-fetch` is passed. It type-checks, lowers, and emits

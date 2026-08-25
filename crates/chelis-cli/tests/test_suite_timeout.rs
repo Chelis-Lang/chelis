@@ -24,7 +24,9 @@ fn make_reef_package(name: &str) -> (tempfile::TempDir, PathBuf) {
     write_file(
         &pkg.join("reef.toml"),
         &format!(
-            r#"[package]
+            r#"schema = "1"
+
+[package]
 name = "{name}"
 version = "0.1.0"
 compiler = "={version}"

@@ -357,7 +357,7 @@ fn write_qualified_collision_package(root: &std::path::Path) -> PathBuf {
     );
     write_file(
         &root.join("reef.lock"),
-        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"0.4.0\"\ncompiler = \"=0.18.4\"\narchive_sha256 = \"c12eb890eb09451e8e8e3ae647d7072ec29c6c0c3737d1264526e7b05b722049\"\nshell_sha256 = \"5bd235c779ca0e49b026d383634c31331c124d0f02a4f8563a64aabca23d6d2a\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"0.18.4\"\n",
+        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"0.4.0\"\ncompiler = \"=0.18.4\"\narchive_sha256 = \"366dcb928fc24b72ce5d7b46087d8e08dad791687bb7b6f2914be471e464e513\"\nshell_sha256 = \"e3d6de8bea774c1191738584fdad362c08a5d8ceb90da8e35e1bb7a5220f68e6\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"0.18.4\"\n",
     );
     write_file(
         &root.join("src/a.ch"),

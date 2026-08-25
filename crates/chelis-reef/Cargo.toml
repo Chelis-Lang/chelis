@@ -17,6 +17,7 @@ chelis-shell.workspace = true
 chelis-std-bundle.workspace = true
 serde.workspace = true
 bincode = "1"
+schemars = "0.8"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }
 # Item 8: process-level advisory lock (`flock(2)`) on
 # `$CHELIS_REEF_HOME/.reef-lock` around the auto-fetch + install + index
@@ -30,6 +31,7 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 toml = "0.8"
+toml_edit = "0.22"
 walkdir = "2"
 zstd = "0.13"
 # Item 11 (chelis#468): gunzip support for binary-artifact assets

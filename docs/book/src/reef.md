@@ -29,6 +29,8 @@ consulted for the runtime.
 Every reef package has a `reef.toml`:
 
 ```toml
+schema = "1"
+
 [package]
 name = "demo"
 version = "<version>"
@@ -43,6 +45,8 @@ Package source normally lives under `src/`. Module declarations should line up w
 manifest `module_prefix`; for example, `src/nn/linear.ch` in the manifest above would
 declare a module under `Demo.Nn.Linear`.
 
+A conformant shell can declare owned domain skills through `[conform] local_skills`. Reef validates and preserves this table.
+
 The `compiler =` pin is exact (no version ranges in this round) and
 implicitly declares the chelis-std runtime version: a project that
 pins an exact compiler version automatically gets chelis-std at the
@@ -50,6 +54,40 @@ runtime version that compiler ships. You can also list `chelis-std`
 explicitly in `[dependencies]` (the installer soft-verifies that the
 declared version matches the bundled version, mismatches surface a
 typed error), but it is never required.
+
+## Document Schemas and Upgrades
+
+Each new `reef.toml` and `reef.lock` declares an independent top-level schema.
+The initial schema for both documents is `schema = "1"`.
+
+Reef reads documents without a schema as legacy schema 0. It reports one warning that names the upgrade command.
+
+Schema 1 rejects unknown keys in fixed tables. Reef selects the schema before it parses the complete document.
+
+Use one mode for each upgrade command:
+
+```sh
+# Report each required step without a write.
+chelis reef upgrade --check
+
+# Apply each required step in the package rooted at the current directory.
+chelis reef upgrade --inplace
+
+# Select a package and explicit supported targets.
+chelis reef upgrade --inplace --path <dir> --manifest-to 1 --lock-to 1
+```
+
+The command preflights both documents before a write. It preserves accepted manifest comments and key order.
+
+Reef replaces `reef.toml` first and `reef.lock` second. A process stop between replacements leaves two readable supported schemas.
+
+Run the command again to complete the remaining lock step. Repeated upgrades do not change current documents.
+
+Project file writers serialize through `.reef-write.lock`. Reef adds the lock and command-owned sibling patterns to the nearest package ignore file.
+
+Versioned editor schemas are in `docs/schemas/reef/`. They check syntax and table shape only.
+
+Editor validation does not check paths, network sources, compiler compatibility, or artifact bytes. Reef remains the validation authority.
 
 ## Install Paths
 
@@ -197,6 +235,8 @@ default), then for each discovered shell reports every dependency class:
 
 ## Lockfile
 
+Each new `reef.lock` starts with `schema = "1"`. Its schema evolves independently from the manifest schema.
+
 `reef.lock` records every resolved dependency as a tuple of
 `(name, version, source-kind, compiler-pin, archive_sha256,
 shell_sha256)`. The `source-kind` discriminator (`LockSource`) has
@@ -284,10 +324,11 @@ chelis reef build
 
 ## Concurrent Builds
 
-`chelis reef build` is safe to run concurrently across independent
-working trees. The local registry is protected by file locks
-(`flock`); two builds racing for the same package serialize cleanly
-without corrupting the registry.
+`chelis reef build` is safe to run concurrently across independent working trees.
+
+Each package root uses `.reef-write.lock` for manifest, lock, and package archive replacement. The local registry uses its separate `.reef-lock`.
+
+Two writers for one package serialize without deleting another writer's sibling. A failed single-file replacement restores the prior readable target.
 
 ## See Also
 

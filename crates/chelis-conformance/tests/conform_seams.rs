@@ -32,6 +32,14 @@ fn append(path: &Path, extra: &str) {
     std::fs::write(path, t).unwrap();
 }
 
+#[test]
+fn new_scaffold_uses_the_current_reef_manifest_schema() {
+    let (_tmp, root) = green_shell();
+    let manifest = std::fs::read_to_string(root.join("reef.toml")).unwrap();
+
+    assert!(manifest.starts_with("schema = \"1\"\n\n[package]\n"));
+}
+
 // ---------------------------------------------------------------- #651 allowlist
 
 #[test]

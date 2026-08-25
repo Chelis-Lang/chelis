@@ -1,3 +1,4 @@
+schema = "1"
 [package]
 name = "release-pipe-stage"
 version = "0.1.0"
@@ -6,8 +7,8 @@ version = "0.1.0"
 name = "chelis-std"
 version = "0.4.0"
 compiler = "=0.18.4"
-archive_sha256 = "c12eb890eb09451e8e8e3ae647d7072ec29c6c0c3737d1264526e7b05b722049"
-shell_sha256 = "5bd235c779ca0e49b026d383634c31331c124d0f02a4f8563a64aabca23d6d2a"
+archive_sha256 = "366dcb928fc24b72ce5d7b46087d8e08dad791687bb7b6f2914be471e464e513"
+shell_sha256 = "e3d6de8bea774c1191738584fdad362c08a5d8ceb90da8e35e1bb7a5220f68e6"
 
 [dependencies.source]
 kind = "bundled"

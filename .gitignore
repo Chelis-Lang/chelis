@@ -10,6 +10,10 @@ target/
 # Node dependency trees are generated artifacts. OpenSpec tooling is supplied
 # by CI and must not install packages into the repository checkout.
 node_modules/
+# Reef project writers keep command-owned lock and recovery siblings at package roots.
+.reef-write.lock
+.*.reef-tmp-*
+.*.reef-backup-*
 # Devenv generates local state from the tracked input files.
 /.devenv/
 /.devenv.flake.nix

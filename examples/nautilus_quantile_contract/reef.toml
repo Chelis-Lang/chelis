@@ -1,3 +1,4 @@
+schema = "1"
 [package]
 name = "nautilus-quantile-contract"
 version = "0.1.0"

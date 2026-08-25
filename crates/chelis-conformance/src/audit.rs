@@ -997,8 +997,8 @@ fn check_vendored_skills(ctx: &Ctx) -> Check {
 /// Parse the `local_skills` allowlist from a `[conform]` table in `reef.toml`
 /// (chelis#651). Hand-parsed — the crate has no `toml` dependency — accepting a
 /// single- or multi-line array of double- or single-quoted names, tolerating
-/// inline `#` comments. `chelis-reef` ignores the `[conform]` table (no
-/// `deny_unknown_fields`), so this is its only reader.
+/// inline `#` comments. `chelis-reef` validates the table shape but does not
+/// consume its values, so this remains the semantic reader.
 pub(crate) fn parse_local_skills(reef_toml: &str) -> Vec<String> {
     // Skill names and TOML table headers never contain `#`, and the values are
     // quoted names, so a bare `#` starts a comment. Cutting each physical line

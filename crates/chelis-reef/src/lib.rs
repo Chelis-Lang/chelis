@@ -24,6 +24,12 @@ use walkdir::WalkDir;
 /// machinery driving `~/.local/share/chelis-src/`; wired into the CLI by
 /// `chelis reef src`.
 pub mod chelis_src;
+mod document_schema;
+
+pub use document_schema::{
+    DocumentUpgradeError, LockSchemaVersion, ManifestSchemaVersion, UpgradeMode, UpgradeReport,
+    lock_schema_v1_json, manifest_schema_v1_json, upgrade_documents,
+};
 
 const CURRENT_COMPILER_VERSION: &str = concat!("=", env!("CARGO_PKG_VERSION"));
 
@@ -75,6 +81,11 @@ pub struct ReefManifest {
     /// manifest without `[chelis-src]` round-trips byte-identically.
     #[serde(default, rename = "chelis-src")]
     pub chelis_src: Option<ChelisSrcSpec>,
+    /// Shell-owned configuration for `chelis reef conform`. Reef validates
+    /// and preserves this table, while `chelis-conformance` owns its semantics.
+    /// Keep the field unconditional in the prepared-graph bincode payload.
+    #[serde(default)]
+    pub conform: Option<ConformSpec>,
     /// Item 11 (chelis#468): first-class binary release artifacts.
     /// Logical artifact name -> per-platform, SHA-pinned release-asset
     /// spec. These are neither reef source packages nor Cargo crates, so
@@ -198,6 +209,12 @@ pub struct ChelisSrcSpec {
     /// `None` here.
     #[serde(default)]
     pub pin_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformSpec {
+    #[serde(default)]
+    pub local_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1600,19 +1617,20 @@ impl PreparedReefGraph {
             let manifest_bytes = fs::read(&manifest_path)
                 .map_err(|e| format!("read manifest `{}`: {e}", manifest_path.display()))?;
             if validate_graph_against_snapshot {
-                let snapshot_manifest: ReefManifest =
-                    toml::from_str(std::str::from_utf8(&manifest_bytes).map_err(|error| {
-                        format!(
-                            "manifest `{}` is not UTF-8: {error}",
-                            manifest_path.display()
-                        )
-                    })?)
-                    .map_err(|error| {
-                        format!(
-                            "parse manifest snapshot `{}`: {error}",
-                            manifest_path.display()
-                        )
-                    })?;
+                let snapshot_text = std::str::from_utf8(&manifest_bytes).map_err(|error| {
+                    format!(
+                        "manifest `{}` is not UTF-8: {error}",
+                        manifest_path.display()
+                    )
+                })?;
+                let snapshot_manifest =
+                    document_schema::parse_manifest_text(snapshot_text, &manifest_path, false)
+                        .map_err(|error| {
+                            format!(
+                                "parse manifest snapshot `{}`: {error}",
+                                manifest_path.display()
+                            )
+                        })?;
                 if snapshot_manifest != package.manifest {
                     return Err(format!(
                         "manifest `{}` changed while its graph was prepared",
@@ -1950,6 +1968,8 @@ pub fn init_package(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     fs::create_dir_all(root.join("src"))?;
+    let _project_lock = document_schema::acquire_project_write_lock(&root)?;
+    document_schema::ensure_project_lock_ignore(&root).map_err(std::io::Error::other)?;
     let manifest = ReefManifest {
         package: ManifestPackage {
             name: name.to_string(),
@@ -1960,9 +1980,10 @@ pub fn init_package(
         },
         dependencies: BTreeMap::new(),
         chelis_src: None,
+        conform: None,
         artifacts: BTreeMap::new(),
     };
-    write_manifest(&root.join("reef.toml"), &manifest)?;
+    write_manifest_unlocked(&root.join("reef.toml"), &manifest)?;
     let main_module = format!("{module_prefix}.Main");
     // Canonical Surf form: no blank line between `module` and the first
     // decl, no trailing newline. The scaffold must satisfy
@@ -2213,7 +2234,9 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // for multi-dependency graphs, changing the serialized decl order. Bumped so a
 // warm project does not load a stale old-order graph (which would make #1182
 // inert and make the same binary emit different C depending on cache state).
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 2;
+// v3 adds schema-aware manifest parsing and changes every current manifest's
+// exact source bytes. The bump keeps pre-schema envelopes outside this boundary.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
@@ -2594,9 +2617,12 @@ pub fn build_package_with_options(
     options: &BuildOptions,
 ) -> Result<PackageBuildArtifacts, String> {
     let root = canonical_root(root)?;
+    let _project_lock =
+        document_schema::acquire_project_write_lock(&root).map_err(|error| error.to_string())?;
     let graph = resolve_package_graph(&root, options.into())?;
     let lock = build_lockfile(&graph);
-    write_lockfile(&root.join("reef.lock"), &lock)?;
+    document_schema::ensure_project_lock_ignore(&root)?;
+    write_lockfile_unlocked(&root.join("reef.lock"), &lock)?;
 
     let root_pkg = graph
         .packages
@@ -4524,9 +4550,11 @@ pub fn install_from_lockfile(
         path: lockfile_path.clone(),
         message: format!("failed to read: {e}"),
     })?;
-    let lock: ReefLock = toml::from_str(&text).map_err(|e| LockfileInstallError::Malformed {
-        path: lockfile_path.clone(),
-        message: e.to_string(),
+    let lock = document_schema::parse_lock_text(&text, &lockfile_path, true).map_err(|error| {
+        LockfileInstallError::Malformed {
+            path: lockfile_path.clone(),
+            message: error.to_string(),
+        }
     })?;
 
     fs::create_dir_all(registry_root).map_err(|e| LockfileInstallError::Malformed {
@@ -5576,8 +5604,8 @@ pub fn artifact_install_path(name: &str) -> Result<PathBuf, String> {
 fn read_manifest(path: &Path) -> Result<ReefManifest, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let manifest = toml::from_str::<ReefManifest>(&text)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    let manifest = document_schema::parse_manifest_text(&text, path, true)
+        .map_err(|error| error.to_string())?;
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -5593,26 +5621,41 @@ pub fn read_manifest_for_src(root: &Path) -> Result<ReefManifest, String> {
     let path = root.join("reef.toml");
     let text =
         fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    toml::from_str::<ReefManifest>(&text)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+    document_schema::parse_manifest_text(&text, &path, true).map_err(|error| error.to_string())
 }
 
-fn write_manifest(path: &Path, manifest: &ReefManifest) -> Result<(), Box<dyn std::error::Error>> {
-    let text = toml::to_string_pretty(manifest)?;
-    fs::write(path, format!("{text}\n"))?;
+fn write_manifest_unlocked(
+    path: &Path,
+    manifest: &ReefManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = document_schema::serialize_manifest_v1(manifest)?;
+    let text = std::str::from_utf8(&bytes)?;
+    document_schema::parse_manifest_text(text, path, false)?;
+    document_schema::atomic_replace(path, &bytes)?;
     Ok(())
 }
 
 fn write_lockfile(path: &Path, lock: &ReefLock) -> Result<(), String> {
-    let text = toml::to_string_pretty(lock).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{text}\n")).map_err(|e| e.to_string())
+    let root = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    let _project_lock =
+        document_schema::acquire_project_write_lock(root).map_err(|error| error.to_string())?;
+    document_schema::ensure_project_lock_ignore(root)?;
+    write_lockfile_unlocked(path, lock)
+}
+
+fn write_lockfile_unlocked(path: &Path, lock: &ReefLock) -> Result<(), String> {
+    let bytes = document_schema::serialize_lock_v1(lock)?;
+    let text = std::str::from_utf8(&bytes).map_err(|error| error.to_string())?;
+    document_schema::parse_lock_text(text, path, false).map_err(|error| error.to_string())?;
+    document_schema::atomic_replace(path, &bytes)
 }
 
 fn read_lockfile(path: &Path) -> Result<ReefLock, String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    toml::from_str::<ReefLock>(&text)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))
+    document_schema::parse_lock_text(&text, path, true).map_err(|error| error.to_string())
 }
 
 /// Run `f` on a background thread.  Return `Err(timeout_msg)` if it does not
@@ -7341,7 +7384,7 @@ fn build_archive(root: &Path, out_path: &Path) -> Result<(), String> {
     }
     let compressed =
         zstd::stream::encode_all(Cursor::new(tar_bytes), 19).map_err(|e| e.to_string())?;
-    fs::write(out_path, compressed).map_err(|e| e.to_string())
+    document_schema::atomic_replace(out_path, &compressed)
 }
 
 const DEFAULT_ARCHIVE_MTIME: u64 = 0;
@@ -9491,6 +9534,7 @@ kind = "local_registry"
                 },
             )]),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&manifest).expect("serialize");
@@ -11950,6 +11994,31 @@ module_prefix = "RegistryLib"
     }
 
     #[test]
+    fn prepared_graph_cache_rejects_pre_schema_version_two_envelopes() {
+        let directory = tempdir().expect("tempdir");
+        let cache_path = directory.path().join("prepared.graph");
+        let payload = Vec::new();
+        let envelope = PreparedGraphCacheEnvelope {
+            version: 2,
+            compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            source_hash: [0; 32],
+            payload_sha256: Sha256::digest(&payload).into(),
+            payload,
+        };
+        let mut bytes = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
+        bytes.extend(bincode::serialize(&envelope).expect("serialize v2 envelope"));
+        fs::write(&cache_path, bytes).expect("write v2 envelope");
+
+        let error = load_prepared_graph_cache(&cache_path, directory.path())
+            .expect_err("v2 cache must fail closed");
+
+        assert!(
+            error.contains("format version 2 unsupported (expected 3)"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn prepared_graph_cache_rejects_corruption_and_changed_dependency_source() {
         let _guard = lock_reef_home_env();
         let (dir, root) = shared_graph_fixture();
@@ -12265,6 +12334,7 @@ additional_sources = ["properties"]
                 },
                 dependencies: BTreeMap::new(),
                 chelis_src: None,
+                conform: None,
                 artifacts: BTreeMap::new(),
             };
             let err =
@@ -12285,6 +12355,7 @@ additional_sources = ["properties"]
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         validate_manifest(&manifest).expect("valid additional_sources must pass");
@@ -12313,6 +12384,7 @@ additional_sources = ["properties"]
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         let err =
@@ -12342,6 +12414,7 @@ additional_sources = ["properties"]
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         }
     }
@@ -12455,6 +12528,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
             },
             dependencies: BTreeMap::new(),
             chelis_src: None,
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         let text = toml::to_string_pretty(&manifest).expect("serialize");
@@ -12523,6 +12597,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 package: base_pkg(),
                 dependencies: BTreeMap::new(),
                 chelis_src: Some(src.clone()),
+                conform: None,
                 artifacts: BTreeMap::new(),
             };
             let err = validate_manifest(&manifest).expect_err(&format!("{src:?} must be rejected"));
@@ -12538,6 +12613,7 @@ pin_commit = "b741149b23db7c05849ebd8f5cccc5ce95ca626b"
                 crates: vec!["chelis-ir".to_string(), "chelis-types".to_string()],
                 pin_commit: Some("b741149b23db7c05849ebd8f5cccc5ce95ca626b".to_string()),
             }),
+            conform: None,
             artifacts: BTreeMap::new(),
         };
         validate_manifest(&ok).expect("well-formed [chelis-src] must pass");

@@ -2598,6 +2598,10 @@ rec {
             features = [ "fs" ];
           }
           {
+            name = "schemars";
+            packageId = "schemars";
+          }
+          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" "rc" ];
@@ -2621,6 +2625,10 @@ rec {
           {
             name = "toml";
             packageId = "toml";
+          }
+          {
+            name = "toml_edit";
+            packageId = "toml_edit";
           }
           {
             name = "walkdir";
@@ -10934,7 +10942,7 @@ rec {
           "serde" = [ "dep:serde" "toml_datetime/serde" "dep:serde_spanned" ];
           "unstable-debug" = [ "winnow?/debug" ];
         };
-        resolvedDefaultFeatures = [ "display" "parse" "serde" ];
+        resolvedDefaultFeatures = [ "default" "display" "parse" "serde" ];
       };
       "toml_write" = rec {
         crateName = "toml_write";

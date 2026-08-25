@@ -1,3 +1,4 @@
+schema = "1"
 [package]
 name = "release-pipe-stage"
 version = "0.1.0"

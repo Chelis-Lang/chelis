@@ -8,6 +8,8 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Reef documents now have independent versioned schemas.** New manifests and lockfiles write schema 1. Legacy files remain readable with an upgrade warning. `chelis reef upgrade --check|--inplace` provides preflighted ordered migration. Project writers use `.reef-write.lock` and atomic single-file replacement. Versioned JSON Schema files provide advisory editor validation. Prepared graph cache version 3 rejects pre-schema cache envelopes.
+
 - **The Darwin release toolchain builds from Nix (openspec
   `ship-darwin-release-from-nix`).** `nix/release-chelis.nix` now covers
   both supported systems: the `aarch64-darwin` leg statically links
