@@ -79,12 +79,14 @@ fn evaluator_count_is_wired_to_the_canonical_adjacent_pair_fold() {
         .expect("Count evaluator ends before reshape")
         .0;
     assert!(
-        count_body.contains("checked_adjacent_pair_fold(group"),
-        "Count must call the single helper whose unit test fixes the adjacent-pair tree"
+        count_body.contains("checked_adjacent_pair_fold(group, checked_count_add)"),
+        "Count must call the checked add helper inside the canonical adjacent-pair tree"
     );
     assert!(
-        !count_body.contains("try_fold") && !count_body.contains(".fold("),
-        "Count must not substitute a sequential fold"
+        !count_body.contains("try_fold")
+            && !count_body.contains(".fold(")
+            && !count_body.contains("wrapping_add"),
+        "Count must not substitute a sequential fold or wrapping addition"
     );
 }
 

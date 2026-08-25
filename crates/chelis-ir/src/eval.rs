@@ -1126,6 +1126,11 @@ fn checked_adjacent_pair_fold<T, E>(
     Ok(level.pop())
 }
 
+fn checked_count_add(left: i64, right: i64) -> Result<i64, String> {
+    left.checked_add(right)
+        .ok_or_else(|| "count/int64 overflow".to_string())
+}
+
 pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
     if input.prim() != Prim::Bool {
         return Err(format!(
@@ -1168,10 +1173,15 @@ pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, 
 
     let mut output = Vec::with_capacity(groups.len());
     for group in groups {
-        let value = match checked_adjacent_pair_fold(group, |left, right| {
-            left.checked_add(right)
-                .ok_or_else(|| "count/int64 overflow".to_string())
-        })? {
+        // The empty selected-extent result is the specified Count identity,
+        // not a permissive fallback. Keep that semantic branch visible rather
+        // than spelling it as a generic defaulting combinator.
+        #[allow(
+            clippy::manual_unwrap_or,
+            clippy::manual_unwrap_or_default,
+            reason = "Count's explicit empty-group identity must remain auditable"
+        )]
+        let value = match checked_adjacent_pair_fold(group, checked_count_add)? {
             Some(value) => value,
             None => 0,
         };
@@ -2587,6 +2597,15 @@ mod tests {
         .expect("infallible trace fold")
         .expect("non-empty trace");
         assert_eq!(tree, "(((a+b)+(c+d))+e)");
+    }
+
+    #[test]
+    fn count_add_traps_int64_overflow() {
+        assert_eq!(checked_count_add(3, 4), Ok(7));
+        assert_eq!(
+            checked_count_add(i64::MAX, 1),
+            Err("count/int64 overflow".to_string())
+        );
     }
 
     #[test]
