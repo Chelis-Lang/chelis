@@ -13,7 +13,7 @@
 //!
 //! Migrated sites (line numbers in `crates/chelis-backend-c/src/host_emit.rs`):
 //!   * L1587 elementwise binary operator (`add`, `sub`, `mul`, `div`).
-//!   * L1623 elementwise binary func (`fmaxf`, `fminf`, ...).
+//!   * L1623 elementwise binary func (direct extrema selectors).
 //!   * L1649 elementwise unary operator (`neg`, `not`).
 //!   * L1675 elementwise unary func (`expf`, `logf`, `sinf`, ...).
 //!   * L1749/L1753/L1757 scalar-to-tensor coercion arms for int64,
@@ -516,10 +516,10 @@ fn binary_elementwise_f32_arm_keeps_float_pointers() {
 fn binary_func_elementwise_emits_typed_pointer_access() {
     let program = make_binary_program("max_elem", Prim::F32);
     let src = emit_host_program(&program, "binfunc_f32").unwrap();
-    // `max_elem` -> `fmaxf` requires an f32-typed access pattern.  The
-    // migrated emission must cast `->data` to a typed pointer before
-    // indexing rather than reading through the public `float *data`
-    // field declaration unconditionally.
+    // Direct extrema selection requires an f32-typed access pattern. The
+    // migrated emission must cast `->data` to a typed pointer before indexing
+    // rather than reading through the public `float *data` field declaration
+    // unconditionally.
     assert!(
         src.contains("(float*)") || src.contains("(const float*)"),
         "binary func elementwise must cast `->data` to a typed pointer; got:\n{src}"
@@ -529,20 +529,39 @@ fn binary_func_elementwise_emits_typed_pointer_access() {
             && !l.contains("(float*)")
             && !l.contains("(double*)")
             && !l.contains("(int64_t*)")),
-        "binary func elementwise must not emit bare `->data[i] = fmaxf(...)`; got:\n{src}"
+        "binary func elementwise must not emit a bare `->data[i]` assignment; got:\n{src}"
     );
 }
 
 #[test]
-fn binary_func_f32_max_keeps_fmaxf() {
-    let program = make_binary_program("max_elem", Prim::F32);
-    let src = emit_host_program(&program, "binfunc_f32_max").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_F32");
+fn binary_func_f32_extrema_use_exact_first_operand_selectors() {
+    for (op, comparison, forbidden) in [
+        ("max_elem", ">=", ["fmaxf(", "fmax("]),
+        ("min_elem", "<=", ["fminf(", "fmin("]),
+    ] {
+        let program = make_binary_program(op, Prim::F32);
+        let src = emit_host_program(&program, "binfunc_f32_extrema").unwrap();
+        let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_F32");
 
-    assert!(
-        arm.contains("fmaxf(__lhs_data[idx_lhs], __rhs_data[idx_rhs])"),
-        "the f32 max arm must keep fmaxf; arm:\n{arm}"
-    );
+        assert!(arm.contains("isnan(__lhs_data[idx_lhs])"), "{arm}");
+        assert!(arm.contains("!isnan(__rhs_data[idx_rhs])"), "{arm}");
+        assert!(
+            arm.contains(&format!(
+                "__lhs_data[idx_lhs] {comparison} __rhs_data[idx_rhs]"
+            )),
+            "{arm}"
+        );
+        assert!(
+            arm.contains("? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]"),
+            "{arm}"
+        );
+        for function in forbidden {
+            assert!(
+                !arm.contains(function),
+                "direct extrema must select an operand, not call {function}:\n{arm}"
+            );
+        }
+    }
 }
 
 #[test]
