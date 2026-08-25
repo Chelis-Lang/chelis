@@ -4,7 +4,7 @@
 //! a GPU or HIP runtime. They run in default CI.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtDim, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::env;
@@ -328,8 +328,10 @@ fn s2_neg_const_only_dag_only_fill_kernel() {
 fn s3_all_elementwise_ops_emit_kernels() {
     let ops_and_names: Vec<(RiscOp, &str)> = vec![
         (RiscOp::Add, "add"),
+        (RiscOp::Sub, "sub"),
         (RiscOp::Mul, "mul"),
         (RiscOp::MaxElem, "max_elem"),
+        (RiscOp::MinElem, "min_elem"),
         (RiscOp::CmpLt, "cmplt"),
     ];
     for (op, name) in &ops_and_names {
@@ -354,6 +356,45 @@ fn s3_all_elementwise_ops_emit_kernels() {
             "Binary op '{name}' must emit a kernel launch"
         );
     }
+}
+
+#[test]
+fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
+    let sub = dag.add_node(RiscOp::Sub, vec![a, b], vec_f32(4), None);
+    let max = dag.add_node(RiscOp::MaxElem, vec![a, b], vec_f32(4), None);
+    let min = dag.add_node(RiscOp::MinElem, vec![a, b], vec_f32(4), None);
+    let adjoint = dag.add_node(
+        RiscOp::ExtremaAdjoint {
+            kind: ExtremaKind::Max,
+            operand: ExtremaOperand::Left,
+        },
+        vec![a, b, g],
+        vec_f32(4),
+        None,
+    );
+    for root in [sub, max, min, adjoint] {
+        dag.add_root(root);
+    }
+
+    let source = codegen_hip(&dag, "direct_arithmetic_structure")
+        .unwrap()
+        .c_source;
+    for kernel in [
+        "kernel_sub_f32",
+        "kernel_max_elem",
+        "kernel_min_elem",
+        "kernel_max_adjoint_left_f32",
+    ] {
+        assert!(source.contains(kernel), "missing {kernel}: {source}");
+    }
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av >= bv);"));
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av <= bv);"));
+    assert!(!source.contains("fmaxf(av, bv)"), "{source}");
+    assert!(!source.contains("fminf(av, bv)"), "{source}");
 }
 
 // chelis#178: floor_div / trunc_div emit correctly-shaped HIP kernels.

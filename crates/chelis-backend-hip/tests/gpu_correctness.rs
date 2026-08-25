@@ -14,7 +14,7 @@
 //! Manual gate per AGENTS.md: not part of default CI.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtDim, TensorType};
 use chelis_ir::eval::{TensorValue, eval_tensor_roots_with_strict};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
@@ -503,6 +503,148 @@ fn compile_and_run_single_output(dag: &Dag, func_name: &str, inputs: &[TestInput
         .unwrap_or("")
         .split_whitespace()
         .map(|token| token.parse::<f32>().expect("parse output float"))
+        .collect()
+}
+
+/// Compile a direct-arithmetic DAG with f32/f64 inputs initialized from raw
+/// bits and return every root's output bits. This is the manual HIP proof for
+/// stored-operand extrema and adjoints, where decimal/tolerance comparison
+/// would erase NaN payload and signed-zero evidence.
+fn compile_and_run_float_output_bits(
+    dag: &Dag,
+    func_name: &str,
+    prim: Prim,
+    inputs: &[(&str, &[u64])],
+) -> Vec<Vec<u64>> {
+    require_hipcc();
+    assert!(matches!(prim, Prim::F32 | Prim::F64));
+    let result = codegen_hip(dag, func_name).unwrap();
+    let n = inputs.first().expect("bit harness needs inputs").1.len();
+    assert!(inputs.iter().all(|(_, bits)| bits.len() == n));
+
+    let mut setup = vec![format!("    int shape[1] = {{ {n} }};")];
+    setup.push(format!(
+        "    chelis_tensor *inputs[{}] = {{0}};",
+        result.input_labels.len()
+    ));
+    for (slot, label) in result.input_labels.iter().enumerate() {
+        let bits = inputs
+            .iter()
+            .find_map(|(name, bits)| (*name == label).then_some(*bits))
+            .unwrap_or_else(|| panic!("missing bit input {label}"));
+        let dtype = if prim == Prim::F32 {
+            "CHELIS_F32"
+        } else {
+            "CHELIS_F64"
+        };
+        setup.push(format!(
+            "    inputs[{slot}] = chelis_alloc(1, shape, {dtype});"
+        ));
+        for (index, value) in bits.iter().enumerate() {
+            setup.push(if prim == Prim::F32 {
+                format!(
+                    "    inputs[{slot}]->data[{index}] = chelis_f32_from_bits(0x{value:08x}u);"
+                )
+            } else {
+                format!(
+                    "    ((double *)inputs[{slot}]->data)[{index}] = chelis_f64_from_bits(0x{value:016x}uLL);"
+                )
+            });
+        }
+    }
+    setup.push(format!(
+        "    chelis_tensor *outputs[{}] = {{0}};",
+        result.output_labels.len()
+    ));
+    setup.push(format!(
+        "    {func_name}(inputs, {}, outputs, {});",
+        result.input_labels.len(),
+        result.output_labels.len()
+    ));
+    setup.push(format!(
+        "    for (int out = 0; out < {}; out++) {{",
+        result.output_labels.len()
+    ));
+    setup.push("        for (int i = 0; i < outputs[out]->size; i++) {".to_string());
+    setup.push("            if (i > 0) printf(\" \" );".to_string());
+    setup.push(if prim == Prim::F32 {
+        "            uint32_t bits; memcpy(&bits, &outputs[out]->data[i], sizeof(bits)); printf(\"0x%08x\", bits);"
+            .to_string()
+    } else {
+        "            uint64_t bits; memcpy(&bits, &((double *)outputs[out]->data)[i], sizeof(bits)); printf(\"0x%016llx\", (unsigned long long)bits);"
+            .to_string()
+    });
+    setup.push("        }".to_string());
+    setup.push("        printf(\"\\n\");".to_string());
+    setup.push("        chelis_free(outputs[out]);".to_string());
+    setup.push("    }".to_string());
+    setup.push(format!(
+        "    for (int i = 0; i < {}; i++) chelis_free(inputs[i]);",
+        result.input_labels.len()
+    ));
+
+    let main_cpp = format!(
+        r#"#include "chelis_runtime.h"
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+extern "C" void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+int main(void) {{
+{body}
+    return 0;
+}}
+"#,
+        body = setup.join("\n")
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let hip_rt = hip_runtime_src_dir();
+    write_temp_file(
+        tmp.path(),
+        "chelis_hip_runtime.h",
+        &fs::read_to_string(hip_rt.join("chelis_hip_runtime.h")).expect("hip runtime header"),
+    );
+    copy_runtime_artifacts(tmp.path());
+    write_temp_file(tmp.path(), "model.cpp", &result.c_source);
+    write_temp_file(tmp.path(), "main.cpp", &main_cpp);
+    let bin_path = tmp.path().join("gpu_direct_arithmetic_bits");
+    let mut compile_cmd = Command::new("hipcc");
+    compile_cmd.arg("-O2");
+    compile_cmd.args(&result.compile_flags);
+    compile_cmd.arg(tmp.path().join("main.cpp"));
+    compile_cmd.arg(tmp.path().join("model.cpp"));
+    compile_cmd.arg(format!("-L{}", tmp.path().display()));
+    compile_cmd.arg("-lchelis_runtime");
+    compile_cmd.arg("-lpthread");
+    compile_cmd.arg("-ldl");
+    compile_cmd.args(&result.link_flags);
+    compile_cmd.arg("-o");
+    compile_cmd.arg(&bin_path);
+    let compile = compile_cmd.output().expect("run hipcc");
+    assert!(
+        compile.status.success(),
+        "hipcc failed:\nstderr: {}\nsource:\n{}\nharness:\n{}",
+        String::from_utf8_lossy(&compile.stderr),
+        result.c_source,
+        main_cpp
+    );
+
+    let run = Command::new(&bin_path)
+        .output()
+        .expect("run GPU bit binary");
+    assert_gpu_binary_success(&run, &result.link_flags);
+    String::from_utf8(run.stdout)
+        .expect("utf8 stdout")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .map(|token| {
+                    u64::from_str_radix(token.trim_start_matches("0x"), 16)
+                        .expect("parse output bits")
+                })
+                .collect()
+        })
         .collect()
 }
 
@@ -1044,6 +1186,158 @@ fn g3_max_elem_gpu_matches_cpu() {
     );
 }
 
+fn direct_extrema_gpu_bit_case(prim: Prim, lhs: &[u64; 6], rhs: &[u64; 6], gradient: &[u64; 6]) {
+    let ty = TensorType {
+        dims: vec![DimInfo::Lit(6)],
+        precision: prim,
+    };
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+    for op in [RiscOp::MaxElem, RiscOp::MinElem] {
+        let root = dag.add_node(op, vec![a, b], ty.clone(), None);
+        dag.add_root(root);
+    }
+    for (kind, operand) in [
+        (ExtremaKind::Max, ExtremaOperand::Left),
+        (ExtremaKind::Max, ExtremaOperand::Right),
+        (ExtremaKind::Min, ExtremaOperand::Left),
+        (ExtremaKind::Min, ExtremaOperand::Right),
+    ] {
+        let root = dag.add_node(
+            RiscOp::ExtremaAdjoint { kind, operand },
+            vec![a, b, g],
+            ty.clone(),
+            None,
+        );
+        dag.add_root(root);
+    }
+
+    let zero = 0;
+    let expected = vec![
+        vec![lhs[0], rhs[1], lhs[2], lhs[3], lhs[4], rhs[5]],
+        vec![lhs[0], rhs[1], lhs[2], lhs[3], rhs[4], lhs[5]],
+        vec![
+            gradient[0],
+            zero,
+            gradient[2],
+            gradient[3],
+            gradient[4],
+            zero,
+        ],
+        vec![zero, gradient[1], zero, zero, zero, gradient[5]],
+        vec![
+            gradient[0],
+            zero,
+            gradient[2],
+            gradient[3],
+            zero,
+            gradient[5],
+        ],
+        vec![zero, gradient[1], zero, zero, gradient[4], zero],
+    ];
+    let actual = compile_and_run_float_output_bits(
+        &dag,
+        &format!("direct_extrema_{}_bits", prim.name()),
+        prim,
+        &[("a", lhs), ("b", rhs), ("g", gradient)],
+    );
+    assert_eq!(actual, expected);
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn direct_extrema_and_adjoints_preserve_exact_f32_and_f64_bits_on_gpu() {
+    direct_extrema_gpu_bit_case(
+        Prim::F32,
+        &[
+            0x7fc1_2345,
+            0x3f80_0000,
+            0,
+            0x8000_0000,
+            0x4000_0000,
+            0x3f80_0000,
+        ],
+        &[
+            0x4000_0000,
+            0xffc5_4321,
+            0x8000_0000,
+            0,
+            0x3f80_0000,
+            0x4000_0000,
+        ],
+        &[
+            0x7fc6_789a,
+            0xbf80_0000,
+            0x3f80_0000,
+            0x8000_0000,
+            0x4040_0000,
+            0xc080_0000,
+        ],
+    );
+    direct_extrema_gpu_bit_case(
+        Prim::F64,
+        &[
+            0x7ff8_1111_2222_3333,
+            0x3ff0_0000_0000_0000,
+            0,
+            0x8000_0000_0000_0000,
+            0x4000_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+        ],
+        &[
+            0x4000_0000_0000_0000,
+            0xfff8_4444_5555_6666,
+            0x8000_0000_0000_0000,
+            0,
+            0x3ff0_0000_0000_0000,
+            0x4000_0000_0000_0000,
+        ],
+        &[
+            0x7ff8_abcd_1234_5678,
+            0xbff0_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+            0x8000_0000_0000_0000,
+            0x4008_0000_0000_0000,
+            0xc010_0000_0000_0000,
+        ],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn direct_sub_gpu_matches_own_width_evaluator() {
+    let mut f32_dag = Dag::new();
+    let x = f32_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let y = f32_dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
+    let out = f32_dag.add_node(RiscOp::Sub, vec![x, y], vec_f32(4), None);
+    f32_dag.add_root(out);
+    assert_gpu_matches_eval(
+        &f32_dag,
+        "direct_sub_f32",
+        &[
+            TestInput::new("x", &[4], &[1.0, -0.0, f32::MAX, -17.25]),
+            TestInput::new("y", &[4], &[2.0, 0.0, f32::MAX, 4.5]),
+        ],
+    );
+
+    let mut f64_dag = Dag::new();
+    let x = f64_dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f64(4), None);
+    let y = f64_dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f64(4), None);
+    let out = f64_dag.add_node(RiscOp::Sub, vec![x, y], vec_f64(4), None);
+    f64_dag.add_root(out);
+    assert_gpu_matches_eval_f64(
+        &f64_dag,
+        "direct_sub_f64",
+        &[
+            TestInputF64::f64("x", &[4], &[1.0, -0.0, f64::MAX, -17.25]),
+            TestInputF64::f64("y", &[4], &[2.0, 0.0, f64::MAX, 4.5]),
+        ],
+        0.0,
+    );
+}
+
 #[test]
 #[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
 fn g3_cmplt_gpu_matches_cpu() {
@@ -1553,6 +1847,28 @@ fn gf2_fused_three_way_chain_gpu_matches_cpu() {
             TestInput::new("x", &[4], &[1.0, -2.0, 3.0, -4.0]),
             TestInput::new("y", &[4], &[-0.5, 0.5, 2.0, 1.0]),
             TestInput::new("z", &[4], &[2.0, 3.0, -1.5, 4.0]),
+        ],
+    );
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn fused_direct_sub_and_min_gpu_match_unfused_evaluator() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], vec_f32(4), None);
+    let y = dag.add_node(RiscOp::Load { name: "y".into() }, vec![], vec_f32(4), None);
+    let z = dag.add_node(RiscOp::Load { name: "z".into() }, vec![], vec_f32(4), None);
+    let difference = dag.add_node(RiscOp::Sub, vec![x, y], vec_f32(4), None);
+    let out = dag.add_node(RiscOp::MinElem, vec![difference, z], vec_f32(4), None);
+    dag.add_root(out);
+
+    assert_fused_gpu_matches_unfused_eval(
+        &dag,
+        "fused_direct_sub_min",
+        &[
+            TestInput::new("x", &[4], &[1.0, -2.0, 3.0, -4.0]),
+            TestInput::new("y", &[4], &[-0.5, 0.5, 2.0, 1.0]),
+            TestInput::new("z", &[4], &[0.0, -3.0, 0.5, -4.0]),
         ],
     );
 }
@@ -2965,6 +3281,40 @@ fn ws_a4_i16_mul_gpu_matches_two_complement_wrap() {
         "%lld",
     );
     assert_eq!(actual, vec![10000, 16960]);
+}
+
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn direct_i32_extrema_gpu_select_exact_signed_operands() {
+    for (name, op, expected) in [
+        (
+            "direct_i32_max",
+            RiscOp::MaxElem,
+            vec![i32::MAX as i64, -1, 0, i32::MAX as i64],
+        ),
+        (
+            "direct_i32_min",
+            RiscOp::MinElem,
+            vec![i32::MIN as i64, -1, 0, i32::MIN as i64],
+        ),
+    ] {
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_i32(4), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_i32(4), None);
+        let out = dag.add_node(op, vec![a, b], vec_i32(4), None);
+        dag.add_root(out);
+        let actual = compile_and_run_single_output_typed_i64(
+            &dag,
+            name,
+            &[
+                TestInput::int32("a", &[4], &[i32::MAX, -1, 0, i32::MIN]),
+                TestInput::int32("b", &[4], &[i32::MIN, -1, 0, i32::MAX]),
+            ],
+            "int32_t",
+            "%lld",
+        );
+        assert_eq!(actual, expected, "{name}");
+    }
 }
 
 /// WS-A4: i8 reduce_sum on GPU promotes accumulator to i32 per spec
