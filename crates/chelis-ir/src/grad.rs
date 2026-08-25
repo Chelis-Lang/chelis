@@ -554,6 +554,7 @@ fn balanced_adjoint_sum(
         ty.clone(),
         None,
     );
+    dag.add_shape_dep(zero, forward_node.id);
     stamp_grad_marker(dag, before_zero, forward_node);
 
     let mut level = Vec::with_capacity(contributions.len() + 1);
@@ -2468,6 +2469,50 @@ mod tests {
         let values = eval_scalar(&grad_result.dag, &HashMap::from([("x".to_string(), 0.0)]));
 
         assert_eq!(values[&grad_result.grad_nodes[&x]], 1.0);
+    }
+
+    #[test]
+    fn balanced_adjoint_zero_tracks_runtime_wildcard_shape() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let concrete_ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let source = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            concrete_ty.clone(),
+            None,
+        );
+        let symbolic_ty = TensorType {
+            dims: vec![DimInfo::Named("*".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let contribution_1 = dag.add_node(RiscOp::Copy, vec![source], concrete_ty.clone(), None);
+        let contribution_2 = dag.add_node(RiscOp::Copy, vec![source], concrete_ty, None);
+        let mut symbolic_forward = dag.get(source).expect("source exists").clone();
+        symbolic_forward.output_type = symbolic_ty;
+        let accumulated = balanced_adjoint_sum(
+            &mut dag,
+            &symbolic_forward,
+            vec![contribution_1, contribution_2],
+        );
+        dag.add_root(accumulated);
+
+        let values = eval_tensor(
+            &dag,
+            &HashMap::from([(
+                "x".to_string(),
+                TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
+            )]),
+        )
+        .expect("runtime-wildcard accumulation evaluates");
+        let gradient = &values[&accumulated];
+
+        assert_eq!(gradient.shape, vec![3]);
+        assert_eq!(gradient.to_f64_lossy_vec(), vec![2.0, 4.0, 6.0]);
     }
 
     #[test]

@@ -197,12 +197,10 @@ exported, so documents can be built directly):
 
 These IO modules carry the `IO` effect and run in **both lanes**: under
 `chelis eval`/`chelis test` and inside compiled `chelis build` programs alike.
-They are distinct from the eval-only prelude JSON/CSV builtins
-(`parse_json`/`to_json`/`parse_csv`/`to_csv` over the prelude `Json` ADT,
-chelis#890/chelis#903), which `chelis build` rejects whole-program — so for a
-compiled program this module surface is the structured-I/O path. The shared
-names are different callables on different types; reef package name-rewriting
-keeps them apart in both lanes.
+`Std.Io.Json` is the sole public JSON value surface. `Std.Io.Csv` is distinct
+from the eval-only prelude CSV builtins (`parse_csv`/`to_csv`, chelis#903),
+which `chelis build` rejects whole-program; reef package name-rewriting keeps
+the shared CSV names apart in both lanes.
 
 ### Tokenization
 
@@ -217,9 +215,8 @@ keeps them apart in both lanes.
 `Std.Test` provides assertion helpers for `def test_*()` functions discovered by
 `chelis test`. They carry the `Test` effect:
 
-- `assert_true`, `assert_false`, `assert_eq`, `assert_eq_int`, `assert_eq_bool`,
-  `assert_eq_string`, `assert_close`.
-- `assert_close_tensor`, `assert_eq_tensor_int64`, `assert_shape` for tensors.
+- `assert_true`, `assert_false`, generic `assert_eq`, and `assert_close`.
+- `assert_close_tensor`, generic `assert_eq_tensor`, and `assert_shape` for tensors.
 - `fail(msg)`.
 
 ## Process execution

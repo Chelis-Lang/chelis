@@ -340,9 +340,9 @@ fn test_assert_shape_accepts_all_arithmetic_dtypes() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("assert_shape.ch");
         let src = format!(
-            r#"sig assert_shape: &tensor[n, p] -> int64 -> string -> unit ! {{ Test }}
-def assert_shape(t, expected_size, label) = test_assert(true, label)
-def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, cast(3, int64), "label")
+            r#"sig assert_shape: &tensor[..r, p] -> List[int64] -> string -> unit ! {{ Test }}
+def assert_shape(t, expected_shape, label) = ()
+def call(t: &tensor[3, {dtype}]) -> unit ! {{ Test }} = assert_shape(t, [cast(3, int64)], "label")
 "#
         );
         write_file(&path, &src);

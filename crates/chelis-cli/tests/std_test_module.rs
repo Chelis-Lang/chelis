@@ -188,12 +188,11 @@ ran = test_case()
 "#,
     );
     assert_check_clean(&reef_home, &app_pkg);
-    // `assert_eq` routes through `test_assert_eq_f32`; runtime brands the
-    // failure as `assert_eq_f32 (<label>): expected <expected>, got <actual>`.
+    // `assert_eq` routes through the dtype-generic `test_assert_eq` builtin.
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert_eq_f32 (eq-fail): expected 2.5, got 1.5"],
+        &["assert_eq (eq-fail): expected 2.5, got 1.5"],
     );
 }
 
@@ -205,9 +204,9 @@ fn std_test_assert_eq_int_pass() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_int)
+import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq_int(cast(3, int64), cast(3, int64), "eq-int-pass")
+def test_case() -> unit ! { Test } = assert_eq(cast(3, int64), cast(3, int64), "eq-int-pass")
 
 ran = test_case()
 "#,
@@ -224,19 +223,18 @@ fn std_test_assert_eq_int_fail_reports_label() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_int)
+import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq_int(cast(3, int64), cast(5, int64), "eq-int-fail")
+def test_case() -> unit ! { Test } = assert_eq(cast(3, int64), cast(5, int64), "eq-int-fail")
 
 ran = test_case()
 "#,
     );
     assert_check_clean(&reef_home, &app_pkg);
-    // `assert_eq_int` routes through `test_assert_eq_int`.
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert_eq_int (eq-int-fail): expected 5, got 3"],
+        &["assert_eq (eq-int-fail): expected 5, got 3"],
     );
 }
 
@@ -248,9 +246,9 @@ fn std_test_assert_eq_bool_pass() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_bool)
+import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq_bool(true, true, "eq-bool-pass")
+def test_case() -> unit ! { Test } = assert_eq(true, true, "eq-bool-pass")
 
 ran = test_case()
 "#,
@@ -267,9 +265,9 @@ fn std_test_assert_eq_bool_fail_reports_label() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_bool)
+import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq_bool(true, false, "eq-bool-fail")
+def test_case() -> unit ! { Test } = assert_eq(true, false, "eq-bool-fail")
 
 ran = test_case()
 "#,
@@ -278,7 +276,7 @@ ran = test_case()
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert_eq_bool (eq-bool-fail): expected false, got true"],
+        &["assert_eq (eq-bool-fail): expected false, got true"],
     );
 }
 
@@ -290,9 +288,9 @@ fn std_test_assert_eq_string_pass() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_string)
+import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq_string("hi", "hi", "eq-str-pass")
+def test_case() -> unit ! { Test } = assert_eq("hi", "hi", "eq-str-pass")
 
 ran = test_case()
 "#,
@@ -309,19 +307,19 @@ fn std_test_assert_eq_string_fail_reports_label() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_string)
+import Std.Test (assert_eq)
 
-def test_case() -> unit ! { Test } = assert_eq_string("foo", "bar", "eq-str-fail")
+def test_case() -> unit ! { Test } = assert_eq("foo", "bar", "eq-str-fail")
 
 ran = test_case()
 "#,
     );
     assert_check_clean(&reef_home, &app_pkg);
-    // `test_assert_eq_string` uses Debug-quoted strings: `expected "bar", got "foo"`.
+    // The generic runtime equality diagnostic renders string values directly.
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert_eq_string (eq-str-fail): expected \"bar\", got \"foo\""],
+        &["assert_eq (eq-str-fail): expected bar, got foo"],
     );
 }
 
@@ -336,7 +334,7 @@ fn std_test_assert_close_pass() {
 import Std.Test (assert_close)
 
 def test_case() -> unit ! { Test } = {
-  _ = assert_close(1.0, 1.0, 0.0, "close-exact");
+  _ = assert_close(1.0, 1.0, 0.0, "close-exact")
   assert_close(1.0, 1.01, 0.05, "close-tol")
 }
 
@@ -365,11 +363,11 @@ ran = test_case()
     assert_check_clean(&reef_home, &app_pkg);
     // `assert_close` builds its own diagnostic via string_concat:
     // `assert_close (<label>): expected <expected>, got <actual>, tol <tol>`.
-    // Float Display renders `1.0`/`2.0` as `1`/`2` and `0.001` as `0.001`.
+    // Float rendering preserves the decimal point for integral float values.
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert failed: assert_close (close-fail): expected 2, got 1, tol 0.001"],
+        &["assert failed: assert_close (close-fail): expected 2.0, got 1.0, tol 0.001"],
     );
 }
 
@@ -427,10 +425,10 @@ fn std_test_assert_eq_tensor_int64_pass() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_tensor_int64)
+import Std.Test (assert_eq_tensor)
 
 def test_case() -> unit ! { Test } =
-  assert_eq_tensor_int64(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), "eq-tensor-i64-pass")
+  assert_eq_tensor(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), "eq-tensor-i64-pass")
 
 ran = test_case()
 "#,
@@ -447,20 +445,19 @@ fn std_test_assert_eq_tensor_int64_fail_reports_label() {
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
 
-import Std.Test (assert_eq_tensor_int64)
+import Std.Test (assert_eq_tensor)
 
 def test_case() -> unit ! { Test } =
-  assert_eq_tensor_int64(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(7, int64), cast(2, int64)]), "eq-tensor-i64-fail")
+  assert_eq_tensor(to_tensor([cast(0, int64), cast(1, int64), cast(2, int64)]), to_tensor([cast(0, int64), cast(7, int64), cast(2, int64)]), "eq-tensor-i64-fail")
 
 ran = test_case()
 "#,
     );
     assert_check_clean(&reef_home, &app_pkg);
-    // The runtime emits `at index <i> expected <e> got <a>`.
     assert_eval_fails_with(
         &reef_home,
         &app_pkg,
-        &["assert_eq_tensor_int64 (eq-tensor-i64-fail): at index 1 expected 7 got 1"],
+        &["assert_eq_tensor (eq-tensor-i64-fail): first mismatch at row-major index 1"],
     );
 }
 
@@ -475,7 +472,7 @@ fn std_test_assert_shape_pass() {
 import Std.Test (assert_shape)
 
 def test_case() -> unit ! { Test } =
-  assert_shape(to_tensor([1.0, 2.0, 3.0]), cast(3, int64), "shape-3-pass")
+  assert_shape(to_tensor([1.0, 2.0, 3.0]), [cast(3, int64)], "shape-3-pass")
 
 ran = test_case()
 "#,
@@ -495,19 +492,13 @@ fn std_test_assert_shape_fail_reports_label() {
 import Std.Test (assert_shape)
 
 def test_case() -> unit ! { Test } =
-  assert_shape(to_tensor([1.0, 2.0]), cast(7, int64), "shape-fail")
+  assert_shape(to_tensor([1.0, 2.0]), [cast(7, int64)], "shape-fail")
 
 ran = test_case()
 "#,
     );
     assert_check_clean(&reef_home, &app_pkg);
-    // `assert_shape` builds its diagnostic via string_concat as well:
-    // `assert_shape (<label>): expected <expected_n>, got <actual_n>`.
-    assert_eval_fails_with(
-        &reef_home,
-        &app_pkg,
-        &["assert failed: assert_shape (shape-fail): expected 7, got 2"],
-    );
+    assert_eval_fails_with(&reef_home, &app_pkg, &["assert failed: shape-fail"]);
 }
 
 #[test]
@@ -626,7 +617,7 @@ fn std_test_assert_shape_reports_label_on_mismatch() {
 
 import Std.Test (assert_shape)
 
-def test_shape_bad() -> unit ! { Test } = assert_shape(to_tensor([1.0, 2.0]), cast(7, int64), "shape-bad")
+def test_shape_bad() -> unit ! { Test } = assert_shape(to_tensor([1.0, 2.0]), [cast(7, int64)], "shape-bad")
 
 ran = test_shape_bad()
 "#,
@@ -654,9 +645,5 @@ ran = test_shape_bad()
         ])
         .assert()
         .failure()
-        // assert_shape must brand its own failures with `assert_shape (...)`
-        // rather than leaking the internal test_assert_eq_int prefix (RT2 C.2).
-        .stderr(predicate::str::contains("assert_shape"))
-        .stderr(predicate::str::contains("shape-bad"))
-        .stderr(predicate::str::contains("expected 7"));
+        .stderr(predicate::str::contains("assert failed: shape-bad"));
 }

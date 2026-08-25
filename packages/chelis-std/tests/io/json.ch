@@ -122,7 +122,7 @@ def test_to_json_canonical_bigint_is_verbatim_and_round_trips_as_bigint() -> uni
 }
 def test_try_to_json_rejects_noncanonical_or_in_range_bigint_storage() -> unit ! { Test } = {
   invalid = ["", "-", "0", "-0", "01", "-01", "+9223372036854775808", "9223372036854775807", "-9223372036854775808", "1.0"]
-  fold(fn (acc: unit, text: string) -> unit = match try_to_json(JsonBigInt(text)) with {
+  fold(fn (acc: unit, text: string) -> match try_to_json(JsonBigInt(text)) with {
     | Some(_) => fail(string_concat("try_to_json must reject invalid JsonBigInt storage: ", text))
     | None => assert_true(true, string_concat("invalid JsonBigInt rejected: ", text))
   }, (), invalid)

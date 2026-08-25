@@ -2,7 +2,7 @@ module Std.Test
 export (assert_true, assert_false, assert_eq, assert_close, assert_close_tensor, assert_eq_tensor, assert_shape, fail)
 def assert_true(cond: bool, label: string) -> unit ! { Test } = test_assert(cond, label)
 def assert_false(cond: bool, label: string) -> unit ! { Test } = test_assert(not(cond), label)
-def assert_eq[Q](actual: Q, expected: Q, label: string) -> unit ! { Test } = test_assert_eq(actual, expected, label)
+def assert_eq[q](actual: q, expected: q, label: string) -> unit ! { Test } = test_assert_eq(actual, expected, label)
 def assert_close[p_float](actual: p_float, expected: p_float, tol: p_float, label: string) -> unit ! { Test } = {
   zero = sub(tol, tol)
   tol_nan = neq(tol, tol)
