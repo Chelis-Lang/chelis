@@ -130,8 +130,10 @@ an unshipped repair release.
   and all seventeen `issue_912_root_boundary` cells pass. That
   unblocks #1029's carrier deletion and #730's Phase 3 integration leg. The
   parent tracker remains open for the separately owned #1102 zero-gradient
-  value defect and #1148 `trace` result-type decision; neither is implemented
-  by the root-manifest integration.
+  value defect. The #1148 `trace` result-type question is settled by spec/04
+  section 4.3 and [05-OP-33]: matrix trace already returns the required
+  rank-zero tensor, and #1148 closes as a test-honesty repair rather than an
+  implementation change.
 - **#909** (typed host function values / C-host callable ABI; children #866,
   #867, #879): no longer paperless - `spec/design/host_function_values.md`
   is written and re-authored against current `main` (PR #1173), and the
@@ -785,8 +787,9 @@ cells that previously blocked #730's sixth Phase 3 leg. The additive `spec/05`
 change follows
 `dtype_semantics.md` §B1: it changes no frozen [05-OP] atom or capability
 schema, and the complete Phase 4B oracle passes. This delivery unblocks #1029;
-it does not absorb #1102 or #1148, which remain separate semantic work under
-the parent tracker.
+it does not absorb #1102. It also did not implement #1148: the numbered specs
+settled that question in favor of the existing rank-zero tensor behavior, so
+#1148 later closed through corrected fixtures and explicit contract tests.
 
 ### 5. Twelve defects are owned but not scheduled
 

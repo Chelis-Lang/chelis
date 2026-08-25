@@ -271,8 +271,8 @@ fn fix7b_suggestions_for_unbound() {
 #[test]
 fn ir_literal_dimension_mismatch_surfaces_error() {
     let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
     )
     .expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
@@ -286,13 +286,21 @@ fn ir_literal_dimension_mismatch_surfaces_error() {
         "expected ir inference to preserve literal dimension mismatches, got {:?}",
         result.errors
     );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "dimension mismatch fixture must not be masked by a trace return TypeMismatch: {:?}",
+        result.errors
+    );
 }
 
 #[test]
 fn ir_rejects_polymorphic_dims_pinned_by_body() {
     let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
          def main() -> f32 = cast(0.0, f32)\n",
     )
     .expect("surf parse");
@@ -305,6 +313,14 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
             .iter()
             .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
         "expected ir inference to reject polymorphic dims forced to literals by the body, got {:?}",
+        result.errors
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "polymorphic dimension fixture must not be masked by a trace return TypeMismatch: {:?}",
         result.errors
     );
 }

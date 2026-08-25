@@ -1760,8 +1760,8 @@ fn check_rejects_literal_dimension_mismatch() {
     let path = dir.path().join("literal_dim_mismatch.ch");
     write_file(
         &path,
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
     );
 
     let json = run_json_check(&path);
@@ -1772,6 +1772,14 @@ fn check_rejects_literal_dimension_mismatch() {
             .iter()
             .any(|error| error["kind"] == "DimensionMismatch"),
         "expected DimensionMismatch in check output, got {json}"
+    );
+    assert!(
+        !json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| error["kind"] == "TypeMismatch"),
+        "dimension mismatch fixture must not be masked by a trace return TypeMismatch: {json}"
     );
     assert_eq!(
         json["unresolved_names"]
@@ -1789,8 +1797,8 @@ fn check_rejects_polymorphic_dims_pinned_by_body() {
     let path = dir.path().join("polymorphic_dim_pinned.ch");
     write_file(
         &path,
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
          def main() -> f32 = cast(0.0, f32)\n",
     );
 
@@ -1802,6 +1810,14 @@ fn check_rejects_polymorphic_dims_pinned_by_body() {
             .iter()
             .any(|error| error["kind"] == "DimensionMismatch"),
         "expected DimensionMismatch when polymorphic dims are pinned by the body, got {json}"
+    );
+    assert!(
+        !json["errors"]
+            .as_array()
+            .expect("errors array")
+            .iter()
+            .any(|error| error["kind"] == "TypeMismatch"),
+        "polymorphic dimension fixture must not be masked by a trace return TypeMismatch: {json}"
     );
     assert_eq!(
         json["unresolved_names"]
