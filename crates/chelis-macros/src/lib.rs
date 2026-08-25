@@ -128,7 +128,19 @@ impl Expander {
         scope: &Scope,
     ) -> Result<Expr, ExpansionError> {
         match expr {
-            Expr::Atom(_, _) | Expr::Map(_, _) => Ok(expr.clone()),
+            Expr::Atom(_, _) => Ok(expr.clone()),
+            // Metadata values are full Deep expressions (spec/03 section 1.1
+            // macro boundary rule), so macro syntax inside a metadata map,
+            // including a map nested inside another metadata value, must
+            // compile away like any other position (PR #1319 review).
+            Expr::Map(meta, span) => Ok(Expr::Map(
+                MetaMap {
+                    entries: try_map_meta_entries(&meta.entries, |value| {
+                        self.expand_expr(value, macros, scope)
+                    })?,
+                },
+                *span,
+            )),
             // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
             Expr::Node(node, span) => {
                 let bridged = Expr::List(node.to_list(*span), *span);
@@ -148,7 +160,9 @@ impl Expander {
             }
             Expr::MetaExpr(meta, span) => Ok(Expr::MetaExpr(
                 MetaExpr {
-                    entries: meta.entries.clone(),
+                    entries: try_map_meta_entries(&meta.entries, |value| {
+                        self.expand_expr(value, macros, scope)
+                    })?,
                     expr: Box::new(self.expand_expr(&meta.expr, macros, scope)?),
                 },
                 *span,
@@ -407,7 +421,16 @@ fn fresh_placeholder(
 
 fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review).
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    replace_placeholder_vars(value, replacements)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
@@ -427,7 +450,9 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
         }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    replace_placeholder_vars(value, replacements)
+                }),
                 expr: Box::new(replace_placeholder_vars(&meta.expr, replacements)),
             },
             *span,
@@ -458,7 +483,17 @@ fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
         Expr::Atom(Atom::Name(name), _) => {
             out.insert(name.clone());
         }
-        Expr::Atom(_, _) | Expr::Map(_, _) => {}
+        Expr::Atom(_, _) => {}
+        // Names inside metadata values are used symbols too (PR #1319
+        // review); the source provenance record stays unread like every
+        // other compiler pass (spec/03 section 1.1).
+        Expr::Map(meta, _) => {
+            for (key, value) in &meta.entries {
+                if key != PROVENANCE_KEY {
+                    collect_symbols(value, out);
+                }
+            }
+        }
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
@@ -473,14 +508,23 @@ fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::UnknownForm(data) => {
-            for (_, value) in &data.meta.entries {
-                collect_symbols(value, out);
+            for (key, value) in &data.meta.entries {
+                if key != PROVENANCE_KEY {
+                    collect_symbols(value, out);
+                }
             }
             for child in &data.children {
                 collect_symbols(child, out);
             }
         }
-        Expr::MetaExpr(meta, _) => collect_symbols(&meta.expr, out),
+        Expr::MetaExpr(meta, _) => {
+            for (key, value) in &meta.entries {
+                if key != PROVENANCE_KEY {
+                    collect_symbols(value, out);
+                }
+            }
+            collect_symbols(&meta.expr, out);
+        }
         Expr::List(list, _) => {
             for element in &list.elements {
                 collect_symbols(element, out);
@@ -572,7 +616,16 @@ fn substitute_expr(
     shadowed: &HashSet<String>,
 ) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review).
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    substitute_expr(value, params, shadowed)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
@@ -592,7 +645,9 @@ fn substitute_expr(
         }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    substitute_expr(value, params, shadowed)
+                }),
                 expr: Box::new(substitute_expr(&meta.expr, params, shadowed)),
             },
             *span,
@@ -726,7 +781,16 @@ fn substitute_match(
 
 fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String>) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review).
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    hygienize_expr(value, counter, env)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
@@ -746,7 +810,9 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
         }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    hygienize_expr(value, counter, env)
+                }),
                 expr: Box::new(hygienize_expr(&meta.expr, counter, env)),
             },
             *span,
@@ -1032,7 +1098,18 @@ fn hygienize_pattern(
 
 fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
     match expr {
-        Expr::Atom(_, _) | Expr::Map(_, _) => expr.clone(),
+        Expr::Atom(_, _) => expr.clone(),
+        // Metadata values are walked like children (PR #1319 review), so a
+        // vocabulary node inside a metadata value carries provenance the
+        // same way one in a child position does.
+        Expr::Map(meta, span) => Expr::Map(
+            MetaMap {
+                entries: map_meta_entries(&meta.entries, |value| {
+                    annotate_source_expr(value, invocation)
+                }),
+            },
+            *span,
+        ),
         // Bridge: reconstruct List so existing tag-dispatch logic runs unchanged (#908)
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
@@ -1055,7 +1132,9 @@ fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
         }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
-                entries: meta.entries.clone(),
+                entries: map_meta_entries(&meta.entries, |value| {
+                    annotate_source_expr(value, invocation)
+                }),
                 expr: Box::new(annotate_source_expr(&meta.expr, invocation)),
             },
             *span,
@@ -1115,6 +1194,51 @@ fn get_tag(list: &List) -> Option<DeepTag> {
     list.tag()
 }
 
+/// The provenance metadata key (spec/03 section 1.1): its value records the
+/// original macro invocation verbatim, and the spec says every compiler pass
+/// except error reporting ignores it. The metadata walks below therefore
+/// leave it untouched; walking it would re-expand, rename, or substitute
+/// inside the historical record and destroy the "original invocation
+/// arguments" guarantee.
+const PROVENANCE_KEY: &str = "source";
+
+/// Rebuild metadata entries, applying `f` to every value except the
+/// `source` provenance record. Metadata values are full Deep expressions,
+/// so every macro walk treats them like children (PR #1319 review); a map
+/// nested inside a metadata value reaches the caller's own `Expr::Map` arm
+/// and recurses to any depth.
+fn map_meta_entries(
+    entries: &[(String, Expr)],
+    mut f: impl FnMut(&Expr) -> Expr,
+) -> Vec<(String, Expr)> {
+    entries
+        .iter()
+        .map(|(key, value)| {
+            if key == PROVENANCE_KEY {
+                (key.clone(), value.clone())
+            } else {
+                (key.clone(), f(value))
+            }
+        })
+        .collect()
+}
+
+/// Fallible twin of [`map_meta_entries`] for the expansion walk.
+fn try_map_meta_entries(
+    entries: &[(String, Expr)],
+    mut f: impl FnMut(&Expr) -> Result<Expr, ExpansionError>,
+) -> Result<Vec<(String, Expr)>, ExpansionError> {
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        if key == PROVENANCE_KEY {
+            out.push((key.clone(), value.clone()));
+        } else {
+            out.push((key.clone(), f(value)?));
+        }
+    }
+    Ok(out)
+}
+
 /// Rebuild an `UnknownForm`, applying `f` to every metadata value and every
 /// child (chelis#1087). Macro-relevant material — an invocation, a captured
 /// symbol, a binder — can sit in either position, so both recurse.
@@ -1122,12 +1246,7 @@ fn map_unknown_form(data: &UnknownFormData, mut f: impl FnMut(&Expr) -> Expr) ->
     Expr::UnknownForm(Box::new(UnknownFormData {
         head: data.head.clone(),
         meta: MetaMap {
-            entries: data
-                .meta
-                .entries
-                .iter()
-                .map(|(key, value)| (key.clone(), f(value)))
-                .collect(),
+            entries: map_meta_entries(&data.meta.entries, &mut f),
         },
         children: data.children.iter().map(&mut f).collect(),
         span: data.span,
@@ -1139,10 +1258,7 @@ fn try_map_unknown_form(
     data: &UnknownFormData,
     mut f: impl FnMut(&Expr) -> Result<Expr, ExpansionError>,
 ) -> Result<Expr, ExpansionError> {
-    let mut entries = Vec::with_capacity(data.meta.entries.len());
-    for (key, value) in &data.meta.entries {
-        entries.push((key.clone(), f(value)?));
-    }
+    let entries = try_map_meta_entries(&data.meta.entries, &mut f)?;
     let mut children = Vec::with_capacity(data.children.len());
     for child in &data.children {
         children.push(f(child)?);

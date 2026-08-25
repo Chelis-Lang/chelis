@@ -199,3 +199,162 @@ fn substitute_reaches_params_inside_bare_list() {
     );
     assert!(text.contains("7"), "the argument arrives: {text}");
 }
+
+// ── Metadata-value recursion (PR #1319 review) ───────────────────────
+//
+// Metadata values are full Deep expressions (spec/03 section 1.1), so the
+// macro walks treat them like children. The `source` provenance record is
+// the one exception: it stores the original invocation verbatim and every
+// compiler pass except error reporting ignores it.
+
+#[test]
+fn macro_invocation_inside_nested_meta_map_expands() {
+    // The review probe, verbatim: a map nested inside an UnknownForm
+    // metadata value hid the invocation from the one-level metadata walk.
+    let text = expand_deep(&format!(
+        "{BUMP_MACRO}\n(def {{}} f (mystery {{outer: {{inner: (app {{}} (var {{}} bump) \
+         (lit {{}} 2.0))}}}} (lit {{}} 0.0)))"
+    ));
+    assert!(
+        !text.contains(" bump)"),
+        "an invocation below a nested metadata map must expand: {text}"
+    );
+    assert!(text.contains(" add)"), "expansion output present: {text}");
+}
+
+#[test]
+fn macro_invocation_inside_vocabulary_node_metadata_expands() {
+    // Same class at a structural position: a vocabulary node's metadata map
+    // is element 1 of the walked List, so an invocation in one of its
+    // values must expand too.
+    let text = expand_deep(&format!(
+        "{BUMP_MACRO}\n(def {{note: (app {{}} (var {{}} bump) (lit {{}} 1.0))}} f (lit {{}} 0.0))"
+    ));
+    assert!(
+        !text.contains(" bump)"),
+        "an invocation in a vocabulary node's metadata value must expand: {text}"
+    );
+    assert!(text.contains(" add)"), "expansion output present: {text}");
+}
+
+#[test]
+fn substitute_reaches_params_inside_nested_meta_map() {
+    // A macro parameter referenced from a map nested inside a metadata
+    // value must receive its argument.
+    let text = expand_deep(
+        "(defmacro {} inject_meta (params {} v) \
+           (carrier {outer: {inner: (var {} v)}} (lit {} 0.0)))\n\
+         (def {} f (app {} (var {} inject_meta) (lit {} 7.0)))",
+    );
+    assert!(
+        !text.contains(" v)"),
+        "the parameter reference below a nested metadata map must substitute: {text}"
+    );
+    assert!(text.contains("7"), "the argument arrives: {text}");
+}
+
+#[test]
+fn hygienize_renames_reach_references_inside_nested_meta_map() {
+    // The macro body binds `tmp`; a reference from a map nested inside an
+    // UnknownForm metadata value must follow the hygiene rename.
+    let body = tag_list(
+        DeepTag::Let,
+        vec![
+            tag_list(DeepTag::Bind, vec![atom_name("tmp"), var_ref("v")]),
+            Expr::UnknownForm(Box::new(UnknownFormData {
+                head: "mystery".to_string(),
+                meta: MetaMap {
+                    entries: vec![(
+                        "outer".to_string(),
+                        Expr::Map(
+                            MetaMap {
+                                entries: vec![("inner".to_string(), var_ref("tmp"))],
+                            },
+                            sp(),
+                        ),
+                    )],
+                },
+                children: vec![var_ref("tmp")],
+                span: sp(),
+            })),
+        ],
+    );
+    let defmacro = Expr::List(
+        List {
+            elements: vec![
+                atom_name("defmacro"),
+                empty_map(),
+                atom_name("wrapm"),
+                tag_list(DeepTag::Params, vec![atom_name("v")]),
+                body,
+            ],
+        },
+        sp(),
+    );
+    let call = tag_list(
+        DeepTag::Def,
+        vec![
+            atom_name("f"),
+            tag_list(
+                DeepTag::App,
+                vec![
+                    var_ref("wrapm"),
+                    tag_list(DeepTag::Lit, vec![Expr::Atom(Atom::Int(3), sp())]),
+                ],
+            ),
+        ],
+    );
+    let expanded = expand_program(
+        &[defmacro, call],
+        &ExpansionOptions {
+            max_iterations: 100,
+            load_std_prelude: false,
+        },
+    )
+    .expect("expansion must succeed");
+    let text = chelis_deep::printer::print_canonical(expanded.exprs());
+    assert!(
+        !text.contains(" tmp)"),
+        "the reference below a nested metadata map must follow the rename: {text}"
+    );
+    assert!(
+        text.contains("tmp_macro_"),
+        "the hygienic rename is visible: {text}"
+    );
+}
+
+#[test]
+fn metadata_without_macro_syntax_round_trips_byte_identically() {
+    // Control: the metadata walk must not rewrite metadata containing no
+    // macro syntax.
+    let deep =
+        chelis_deep::parser::parse_str("(def {note: {inner: (var {} plain)}} f (lit {} 0.0))")
+            .expect("control fixture must stamp");
+    let before = chelis_deep::printer::print_canonical(&deep);
+    let expanded = expand_program(
+        &deep,
+        &ExpansionOptions {
+            max_iterations: 100,
+            load_std_prelude: false,
+        },
+    )
+    .expect("expansion must succeed");
+    let after = chelis_deep::printer::print_canonical(expanded.exprs());
+    assert_eq!(
+        before, after,
+        "metadata with no macro syntax must round-trip byte-identically"
+    );
+}
+
+#[test]
+fn provenance_source_metadata_is_not_reexpanded() {
+    // Negative: macro-shaped text under the `source` provenance key is a
+    // verbatim historical record and must survive expansion unchanged.
+    let text = expand_deep(&format!(
+        "{BUMP_MACRO}\n(def {{source: (app {{}} (var {{}} bump) (lit {{}} 1.0))}} f (lit {{}} 0.0))"
+    ));
+    assert!(
+        text.contains(" bump)"),
+        "the source record must keep its original spelling: {text}"
+    );
+}
