@@ -61,6 +61,22 @@ import tempfile
 import time
 from pathlib import Path
 
+# The chelis#908 oracle owns its handoff variable's spelling, and this file
+# must not carry a second copy of it (chelis#1322). Two independent literals
+# would let a rename on either side keep the whole suite green while the
+# handoff was dead: the oracle would see no variable, rebuild its own binary,
+# and still print `ORACLE: PASS`. That silent degradation is the exact
+# failure the handoff's fail-closed design exists to prevent, so the spelling
+# is imported rather than repeated. `scripts/` goes on the path first because
+# `scripts/test_gate.py` loads this file by path with the repo root, not
+# `scripts/`, on `sys.path`. The oracle module is stdlib-only and imports
+# cleanly on the macOS system Python 3.9, so this runs before the uv re-exec
+# below without disturbing the bootstrap guidance.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from unrepresentable_domain_oracle import ORACLE_BINARY_ENV  # noqa: E402
+
 # NB: `tomllib` is intentionally NOT imported at module top. It is stdlib
 # only from Python 3.11. The gate bootstrap now re-executes an unmanaged
 # launcher through uv before `main`, but tests and module consumers can import
@@ -76,6 +92,7 @@ DIAGNOSTIC_ENVIRONMENT = (
     "DEVENV_STATE",
     "CARGO_TARGET_DIR",
     "CARGO_HUSKY_DONT_INSTALL_HOOKS",
+    ORACLE_BINARY_ENV,
     "CARGO_HOME",
     "RUSTUP_HOME",
     "RUSTUP_TOOLCHAIN",
@@ -221,6 +238,26 @@ UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     MANAGED_PYTHON,
     "scripts/unrepresentable_domain_oracle.py",
 ]
+
+# chelis#1322. The oracle's `resolve_chelis_binary()` runs its own
+# `cargo build -p chelis-cli --bin chelis` before its first `.dp` fixture.
+# Inside a gate run that binary already exists: every command list this
+# script runs the oracle in builds it earlier. Naming the built path in
+# ORACLE_BINARY_ENV lets the oracle skip re-entering cargo for an artifact
+# it was handed.
+#
+# The gate commands that leave a usable `chelis` at <target>/debug/chelis.
+# Both are unconditional builds of that exact bin target, so their presence
+# earlier in a list is a static guarantee rather than an assumption about
+# cargo's behavior. `cargo nextest run --workspace` is deliberately NOT
+# here: it happens to build the bin today because chelis-cli has
+# integration tests, but that is an implicit consequence of cargo's test
+# harness rules, not something this list states, and the handoff fails
+# closed rather than falling back.
+CHELIS_BINARY_PRODUCERS: tuple[tuple[str, ...], ...] = (
+    tuple(BUILD_WORKSPACE),
+    tuple(CHELIS_LINT_CHECK),
+)
 
 STAGES: dict[str, list[list[str]]] = {
     "lint-and-unit": [
@@ -428,11 +465,63 @@ def gate_environment(
         )
     environment["CARGO_TARGET_DIR"] = str(target)
 
+    # An explicit handoff is diagnosed here, before the first command runs,
+    # not when the oracle finally reaches it (chelis#1322). The oracle
+    # rejects a bad value on its own, but that is command 10 of 10 in
+    # `--local`: a typo would cost the whole workspace clippy, fmt, the
+    # lint pass, three rustdoc stages and two Python guards before saying
+    # so. PYO3_PYTHON above is diagnosed at command 0 of 10, and the docs
+    # claim the two get the same discipline, so they now do. Only a value
+    # the CALLER set is checked; the path `run_commands` computes for
+    # itself names a binary an earlier command has yet to build.
+    if ORACLE_BINARY_ENV in environment:
+        error = _oracle_binary_validation_error(
+            environment[ORACLE_BINARY_ENV], root
+        )
+        if error is not None:
+            raise ValueError(
+                f"{ORACLE_BINARY_ENV} is set, but {error}. The explicit "
+                "setting will not be replaced. Point it at a `chelis` "
+                "binary, or unset it entirely so the gate hands over the "
+                "one its own commands build."
+            )
+
     # cargo-husky's build script can write into the clone's shared .git
     # directory. The checked-in hook remains directly runnable; gate builds
     # must not mutate shared Git state behind sibling worktrees.
     environment["CARGO_HUSKY_DONT_INSTALL_HOOKS"] = "1"
     return environment
+
+
+def _oracle_binary_validation_error(
+    configured: str, repo_root: Path
+) -> str | None:
+    """Return why an explicit handoff value is unusable, or None.
+
+    Mirrors `handed_over_binary` in
+    `scripts/unrepresentable_domain_oracle.py`, including its rule that an
+    empty value is a failure rather than an off switch. Both sides must
+    agree on what "set" means: if the gate read an empty value as absent
+    while the oracle read it as a handoff (or the reverse), an ambient
+    `export CHELIS_ORACLE_BINARY=` would disable the handoff with no
+    notice anywhere.
+    """
+    stripped = configured.strip()
+    if not stripped:
+        return (
+            "its value is empty. An empty handoff is not an off switch: it "
+            "would silently disable the handoff instead of naming a binary"
+        )
+    candidate = Path(stripped)
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
+    if candidate.is_dir():
+        return f"{candidate} is a directory, not a `chelis` binary"
+    if not candidate.is_file():
+        return f"no file exists at {candidate}"
+    if not os.access(candidate, os.X_OK):
+        return f"{candidate} is not executable"
+    return None
 
 
 def _python_validation_error(candidate: Path) -> str | None:
@@ -464,6 +553,35 @@ def _python_validation_error(candidate: Path) -> str | None:
 def materialize_command(command: list[str], python: Path) -> list[str]:
     """Replace the canonical managed-Python marker for execution."""
     return [str(python) if part == MANAGED_PYTHON else part for part in command]
+
+
+def oracle_binary_handoff(
+    commands: list[list[str]], target_dir: str
+) -> str | None:
+    """The `chelis` this command list builds before it runs the oracle.
+
+    Returns the path to hand over in `ORACLE_BINARY_ENV`, or None when this
+    list does not run the chelis#908 oracle, or runs it without building
+    `chelis` first. `target_dir` is the already-normalized
+    `CARGO_TARGET_DIR` from `gate_environment`, so the handoff points into
+    the same worktree-local target the child commands write to.
+
+    Deciding this statically from the list, rather than probing the
+    filesystem for a binary, is what keeps the handoff honest: the oracle
+    treats the variable as authoritative and fails loudly on a bad path, so
+    the gate may only set it where the list itself guarantees the build.
+    That is also why `gate.py integration` on its own hands over nothing;
+    hosted CI's `Workspace Tests (Linux)` job keeps the oracle's original
+    build-it-yourself behavior.
+    """
+    try:
+        oracle_index = commands.index(UNREPRESENTABLE_DOMAIN_ORACLE)
+    except ValueError:
+        return None
+    for command in commands[:oracle_index]:
+        if tuple(command) in CHELIS_BINARY_PRODUCERS:
+            return str(Path(target_dir) / "debug" / "chelis")
+    return None
 
 
 def full_command_list() -> list[list[str]]:
@@ -716,6 +834,9 @@ def _rerun_command(
     for name in (
         "CARGO_TARGET_DIR",
         "CARGO_HUSKY_DONT_INSTALL_HOOKS",
+        # Without this the printed rerun of a failed oracle stage would
+        # build its own binary and so would not reproduce the failure.
+        ORACLE_BINARY_ENV,
         "RUSTUP_TOOLCHAIN",
     ):
         value = environment.get(name)
@@ -778,6 +899,25 @@ def _print_failure_diagnostics(
         f"gate: rerun: {_rerun_command(command, environment, repo_root)}",
         file=error_stream,
     )
+    # The rerun line pins the handoff on purpose: reproduce-the-failure is
+    # what a failure diagnostic is for, and dropping the pin would rerun a
+    # different binary than the one that failed. But the same line gets
+    # pasted again after a fix, and then the pin is a trap: it re-runs the
+    # binary from the failing run, so a Rust fix appears not to work, and
+    # in the direction where the OLD binary passes it reports a false
+    # `ORACLE: PASS`. Naming both uses costs one line (chelis#1322).
+    if (
+        ORACLE_BINARY_ENV in environment
+        and UNREPRESENTABLE_DOMAIN_ORACLE[-1] in command
+    ):
+        print(
+            f"gate: the rerun above pins {ORACLE_BINARY_ENV} to the "
+            "`chelis` this run already built, which reproduces the "
+            "failure exactly. After changing Rust source, drop that "
+            "assignment so the oracle rebuilds; otherwise you are "
+            "retesting the old binary.",
+            file=error_stream,
+        )
 
     omitted = max(0, line_count - len(tail))
     print(
@@ -816,8 +956,20 @@ def run_commands(
             repo_root=repo_root,
         )
     except ValueError as exc:
-        print(f"gate: Python setup failed: {exc}", file=error)
+        # Not "Python setup" any more: `gate_environment` also rejects a
+        # cross-worktree CARGO_TARGET_DIR and an unusable explicit handoff.
+        print(f"gate: environment setup failed: {exc}", file=error)
         return 2
+
+    # chelis#1322: hand the oracle the `chelis` this list builds before it.
+    # An explicit caller setting is authoritative and is never replaced,
+    # the same way `gate_environment` treats an explicit PYO3_PYTHON.
+    if ORACLE_BINARY_ENV not in environment:
+        handoff = oracle_binary_handoff(
+            commands, environment["CARGO_TARGET_DIR"]
+        )
+        if handoff is not None:
+            environment[ORACLE_BINARY_ENV] = handoff
 
     persistent_root = (
         repo_root / "target/gate-failures"

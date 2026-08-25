@@ -59,6 +59,11 @@ which the `lint-and-unit` job deliberately does not install, so the oracle
 would fail there with `no such command: nextest`. `scripts/test_gate.py`
 locks both memberships and the pairing between the oracle's stage and a job
 that installs cargo-nextest.
+
+Binary handoff (chelis#1322): when a gate command list already builds
+`chelis` before it reaches this oracle, `scripts/gate.py` names the built
+path in ``CHELIS_ORACLE_BINARY`` and this script skips its own
+``cargo build``. See `resolve_chelis_binary`.
 """
 
 from __future__ import annotations
@@ -262,6 +267,22 @@ class OracleFailure(RuntimeError):
     """A failed oracle obligation."""
 
 
+class OracleBinaryError(RuntimeError):
+    """An explicitly handed-over `chelis` binary that cannot be used.
+
+    Distinct from `OracleFailure`: nothing about the unrepresentable-domain
+    contract has been observed yet. The harness was pointed at a binary that
+    is not there, so the run is abandoned before any obligation reports.
+    """
+
+
+# `scripts/gate.py` names the `chelis` it already built in this variable when
+# the command list it is running provably builds that binary before reaching
+# this oracle. Unset means "build your own", which is what a standalone run
+# and hosted CI's `gate.py integration` job both do.
+ORACLE_BINARY_ENV = "CHELIS_ORACLE_BINARY"
+
+
 def chelis_check_command() -> tuple[str, ...]:
     """Return the cargo command for `chelis check`.
 
@@ -293,21 +314,92 @@ _RESOLVED_CHELIS_BINARY: Path | None = None
 _BINARY_RESOLUTION_ATTEMPTED = False
 
 
+_REMEDIATION = (
+    "The explicit setting will not be replaced by a build. Point it at a "
+    "`chelis` binary, or unset it entirely so the oracle builds its own."
+)
+
+
+def handed_over_binary() -> Path | None:
+    """The `chelis` a caller handed over, validated, or None if none was.
+
+    Absent means no handoff, and the caller stays on the build-it-yourself
+    path this oracle has always taken. PRESENT is an explicit override and
+    is therefore authoritative: if it does not name an executable file,
+    that is an `OracleBinaryError`, never a quiet fall back to
+    `cargo build`. Falling back would reintroduce the exact cost the
+    handoff removes while still reporting `ORACLE: PASS`, so the caller
+    would never learn the handoff had stopped working. This mirrors how
+    `scripts/gate.py` treats an explicit `PYO3_PYTHON`, and is deliberately
+    not the silent candidate chain `scripts/nautilus_local_gate.py` uses
+    for `CHELIS_BIN`.
+
+    Present-but-empty is therefore a failure too, not a soft off switch.
+    `export CHELIS_ORACLE_BINARY=` reads as a caller who meant to hand
+    something over; treating it as "unset" would let an ambient empty value
+    disable the handoff with no notice on either side. `scripts/gate.py`
+    applies the same rule when it decides whether a value is the caller's.
+    """
+    if ORACLE_BINARY_ENV not in os.environ:
+        return None
+    configured = os.environ[ORACLE_BINARY_ENV].strip()
+    if not configured:
+        raise OracleBinaryError(
+            f"{ORACLE_BINARY_ENV} is set to an empty value. An empty "
+            "handoff is not an off switch: it would silently disable the "
+            f"handoff instead of naming a binary. {_REMEDIATION}"
+        )
+    candidate = Path(configured)
+    if not candidate.is_absolute():
+        candidate = REPO_ROOT / candidate
+    if candidate.is_dir():
+        raise OracleBinaryError(
+            f"{ORACLE_BINARY_ENV} is set to {configured!r}, but "
+            f"{candidate} is a directory, not a `chelis` binary. "
+            f"{_REMEDIATION}"
+        )
+    if not candidate.is_file():
+        raise OracleBinaryError(
+            f"{ORACLE_BINARY_ENV} is set to {configured!r}, but no file "
+            f"exists at {candidate}. {_REMEDIATION}"
+        )
+    if not os.access(candidate, os.X_OK):
+        raise OracleBinaryError(
+            f"{ORACLE_BINARY_ENV} is set to {configured!r}, but {candidate} "
+            f"is not executable. {_REMEDIATION}"
+        )
+    return candidate
+
+
 def resolve_chelis_binary() -> Path | None:
-    """Build `chelis` once and return its path, or None to fall back.
+    """Return the `chelis` to drive the CLI obligations with, or None.
 
     The CLI obligations run more than twenty fixtures. Going through
     `cargo run` for each pays cargo's dependency resolution twenty times,
     which is most of this oracle's wall clock and none of its coverage.
     Building once and invoking the produced binary is the same compiled
     behavioral path, and is what keeps the oracle affordable as a per-PR
-    gate stage. A failure here is not an oracle failure: the caller falls
-    back to `cargo run`, which reports the build problem in context.
+    gate stage.
+
+    When a caller has already built that binary it can say so in
+    ``CHELIS_ORACLE_BINARY`` (chelis#1322), and this function skips the
+    build entirely. `scripts/gate.py` does that for any command list whose
+    earlier commands provably build `chelis`; a bad path raises rather than
+    falling back, so the resolution state is left untouched and a second
+    call raises again instead of quietly reaching cargo.
+
+    Otherwise the build runs as before. A failure there is not an oracle
+    failure: the caller falls back to `cargo run`, which reports the build
+    problem in context.
     """
     global _RESOLVED_CHELIS_BINARY, _BINARY_RESOLUTION_ATTEMPTED
     if _BINARY_RESOLUTION_ATTEMPTED:
         return _RESOLVED_CHELIS_BINARY
+    handed_over = handed_over_binary()
     _BINARY_RESOLUTION_ATTEMPTED = True
+    if handed_over is not None:
+        _RESOLVED_CHELIS_BINARY = handed_over
+        return _RESOLVED_CHELIS_BINARY
     build = subprocess.run(
         ("cargo", "build", "-p", "chelis-cli", "--bin", "chelis", "--quiet"),
         cwd=REPO_ROOT,
@@ -709,6 +801,23 @@ def main() -> int:
         "built `chelis` binary over real .dp fixtures, and the suite\n"
         "obligations execute compiled test binaries through cargo nextest.\n"
     )
+
+    # Resolve the CLI binary up front. A bad handoff is a harness fault, not
+    # an obligation result, so it must not be reported as one; failing here
+    # also means no obligation runs against a binary nobody chose.
+    try:
+        binary = resolve_chelis_binary()
+    except OracleBinaryError as e:
+        print(f"\nORACLE: FAIL\n{e}", file=sys.stderr)
+        return 2
+    if binary is None:
+        print("chelis binary: falling back to `cargo run` per fixture\n")
+    elif ORACLE_BINARY_ENV in os.environ:
+        # Resolution succeeded and the variable was present, so it named
+        # this binary: a present-but-unusable value would have raised.
+        print(f"chelis binary: {binary} (handed over by the caller)\n")
+    else:
+        print(f"chelis binary: {binary} (built by this run)\n")
 
     try:
         for index, obligation in enumerate(OBLIGATIONS):
