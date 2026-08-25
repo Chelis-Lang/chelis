@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use chelis_types::unsupported::Unsupported;
 use chelis_types::{
-    ScalarValue, scalar_from_f64,
+    ScalarValue,
     types::{Lane, Prim, Target},
 };
 use chelis_vocab::DiagnosticKind;
