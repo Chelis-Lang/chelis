@@ -54,9 +54,7 @@ invalid_in_range = try_to_json(JsonBigInt("9223372036854775807"))
         ))
         .stdout(predicate::str::contains("positive_as_int = None"))
         .stdout(predicate::str::contains("positive_as_float = None"))
-        .stdout(predicate::str::contains(
-            "serialized = 9223372036854775808",
-        ))
+        .stdout(predicate::str::contains("serialized = 9223372036854775808"))
         .stdout(predicate::str::contains(
             "round_trip = Some(9223372036854775808)",
         ))

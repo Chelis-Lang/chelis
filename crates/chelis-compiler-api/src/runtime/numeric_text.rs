@@ -51,10 +51,13 @@ pub(super) fn round_to_f64_impl(x: f64, places: i64) -> Result<f64, String> {
     if !x.is_finite() {
         return Ok(x);
     }
-    let formatted = format!("{x:.prec$}", prec = places as usize);
-    formatted
-        .parse::<f64>()
-        .map_err(|err| format!("round_to: internal error re-parsing `{formatted}`: {err}"))
+    match chelis_types::observation::round_element_to_decimal_places(
+        chelis_types::ElementRef::F64(x),
+        places as usize,
+    ) {
+        chelis_types::ElementRef::F64(value) => Ok(value),
+        _ => unreachable!("the sealed f64 formatter preserves its variant"),
+    }
 }
 
 pub(super) fn round_to_f32_impl(x: f32, places: i64) -> Result<f32, String> {
@@ -62,10 +65,13 @@ pub(super) fn round_to_f32_impl(x: f32, places: i64) -> Result<f32, String> {
     if !x.is_finite() {
         return Ok(x);
     }
-    let formatted = format!("{x:.prec$}", prec = places as usize);
-    formatted
-        .parse::<f32>()
-        .map_err(|err| format!("round_to: internal error re-parsing `{formatted}`: {err}"))
+    match chelis_types::observation::round_element_to_decimal_places(
+        chelis_types::ElementRef::F32(x),
+        places as usize,
+    ) {
+        chelis_types::ElementRef::F32(value) => Ok(value),
+        _ => unreachable!("the sealed f32 formatter preserves its variant"),
+    }
 }
 
 fn round_to_places(places: i64) -> Result<(), String> {

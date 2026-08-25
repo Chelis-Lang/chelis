@@ -226,29 +226,6 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
     }
 }
 
-#[cfg(test)]
-mod grad_argument_type_tests {
-    use super::*;
-
-    #[test]
-    fn list_cotangent_recurses_and_preserves_the_container_shape() {
-        let registry = AdtRegistry::default();
-        let floats = Type::Adt("List".to_string(), vec![Type::Prim(Prim::F32)]);
-        let nested = Type::Adt("List".to_string(), vec![floats.clone()]);
-
-        assert_eq!(grad_argument_type(&floats, &registry), Some(floats));
-        assert_eq!(grad_argument_type(&nested, &registry), Some(nested));
-    }
-
-    #[test]
-    fn recursively_all_discrete_list_is_not_a_gradient_target() {
-        let registry = AdtRegistry::default();
-        let ints = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
-
-        assert_eq!(grad_argument_type(&ints, &registry), None);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn infer_vmap(
     list: &deep::List,
@@ -423,4 +400,27 @@ pub(super) fn infer_def(
     note_list_literal_binding(env, &name, &kids[1]);
     env.bind(name, scheme);
     body_ty
+}
+
+#[cfg(test)]
+mod grad_argument_type_tests {
+    use super::*;
+
+    #[test]
+    fn list_cotangent_recurses_and_preserves_the_container_shape() {
+        let registry = AdtRegistry::default();
+        let floats = Type::Adt("List".to_string(), vec![Type::Prim(Prim::F32)]);
+        let nested = Type::Adt("List".to_string(), vec![floats.clone()]);
+
+        assert_eq!(grad_argument_type(&floats, &registry), Some(floats));
+        assert_eq!(grad_argument_type(&nested, &registry), Some(nested));
+    }
+
+    #[test]
+    fn recursively_all_discrete_list_is_not_a_gradient_target() {
+        let registry = AdtRegistry::default();
+        let ints = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+
+        assert_eq!(grad_argument_type(&ints, &registry), None);
+    }
 }

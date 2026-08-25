@@ -1073,12 +1073,12 @@
     },
     {
       "kind": "std-adt-numeric",
-      "id": "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+      "id": "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
       "flags": [
         "float-carrier",
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "maintainer-override(source-faithful JsonBigInt successor directed for PR #1302, chelis#1314)"
     },
     {
       "kind": "std-adt-numeric",
@@ -1289,6 +1289,12 @@
       "id": "io/json::json_array: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} List (t-adt {} Json))))",
       "flags": [],
       "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+    },
+    {
+      "kind": "std-def-numeric",
+      "id": "io/json::json_bigint: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+      "flags": [],
+      "citation": "chelis#1314 exact [05-OP-35] json_bigint surface"
     },
     {
       "kind": "std-def-numeric",

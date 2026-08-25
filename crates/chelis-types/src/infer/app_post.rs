@@ -431,7 +431,7 @@ pub(super) fn finish_unified_app(
                         DeferredShapeRule::Expand {
                             axis_is_dim_name,
                             size_class,
-                            env: env.clone(),
+                            env: Box::new(env.clone()),
                         },
                         kids[1..].to_vec(),
                         arg_tys.clone(),
