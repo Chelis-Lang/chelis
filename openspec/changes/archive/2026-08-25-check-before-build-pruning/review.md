@@ -76,14 +76,28 @@ devenv shell -- python3 scripts/gate.py --local
 
 Manual CI run `32873124904` tested implementation commit `60ed69671339994f6d88bb7f29151ac145b01f7d`.
 
-The required `Integration Tests (Linux)` check passed. Its dependent Linux workspace tests also passed.
-
-The first overall run found one unrelated policy-test false positive. A workflow comment contained lowercase `devenv shell`, which the literal command scanner rejected.
+That run found one unrelated policy-test false positive. A workflow comment contained lowercase `devenv shell`, which the literal command scanner rejected.
 
 The comment now uses the product name `Devenv`. The complete 955-test Python script suite passed after this correction.
 
-Run URL:
+Final CI run `32878555677` tested follow-up commit `53971e7714b75a784ad63e65a5acd48949839f0f`.
+
+These final jobs passed:
+
+- `Lint and Unit Tests (Linux)`
+- `Workspace Tests (Linux)`
+- required `Integration Tests (Linux)`
+
+The optional macOS smoke job was canceled. It was not a required Linux check.
+
+Issue comment:
 
 ```text
-https://github.com/Chelis-Lang/chelis/actions/runs/32873124904
+https://github.com/Chelis-Lang/chelis/issues/1184#issuecomment-5414833842
+```
+
+Final run:
+
+```text
+https://github.com/Chelis-Lang/chelis/actions/runs/32878555677
 ```
