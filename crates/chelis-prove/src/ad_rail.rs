@@ -144,7 +144,7 @@ pub enum AdRailError {
     },
 
     /// Building the per-target box/range goal failed at the WI-3 producer
-    /// boundary: a non-v1 gradient `WireDag`, a non-finite float in the
+    /// boundary: a non-current gradient `WireDag`, a non-finite float in the
     /// gradient DAG, or an ill-formed (inverted/NaN) output range. The gradient
     /// DAG flows through the same fail-closed boundary checks as a forward DAG.
     #[error("box/range goal construction failed: {0}")]
@@ -161,7 +161,7 @@ pub struct GradGoal {
     pub target: String,
     /// The box/range goal (with a populated [`crate::discharge::IrHandle`]
     /// addressing the gradient DAG by content hash + this target's root index)
-    /// and the serialized gradient `WireDag` v1 bytes.
+    /// and the serialized exact-version gradient `WireDag` v6 bytes.
     pub extracted: ExtractedGoal,
 }
 

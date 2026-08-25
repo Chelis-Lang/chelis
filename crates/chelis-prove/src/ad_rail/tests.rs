@@ -173,7 +173,7 @@ fn structurally_distinct_adjoints_get_distinct_roots_sharing_one_gradient_dag_ha
         "the gradient artifact bytes are identical across the fan-out"
     );
 
-    // The serialized gradient artifact round-trips as a v1 WireDag, and each
+    // The serialized gradient artifact round-trips as an exact-version v6 WireDag, and each
     // goal's root index addresses a real root of it.
     let parsed: WireDag = serde_json::from_slice(&goals[0].extracted.wire_dag_bytes)
         .expect("the gradient bytes parse back as a WireDag");
@@ -610,7 +610,7 @@ fn inverted_output_range_on_a_gradient_target_is_rejected_as_ill_formed() {
 }
 
 #[test]
-fn non_v1_gradient_dag_is_rejected_at_the_producer_boundary() {
+fn non_current_gradient_dag_is_rejected_at_the_producer_boundary() {
     // A future-version gradient DAG must be rejected, not silently hashed.
     let mut grad = single_op_grad_result(WireRiscOp::Const {
         value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 1.0)
