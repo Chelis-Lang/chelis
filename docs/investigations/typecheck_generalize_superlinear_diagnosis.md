@@ -189,7 +189,7 @@ and per-lane scaling carry the diagnosis.
 The implementation replaces the three production sweeps with transactional solver
 levels for type, dimension, rank, and precision-slot variables. Its retained sweep
 implementation is compiled only by the `generalize-sweep-oracle` test feature. The
-authoritative command at the evidence commit was:
+authoritative command on the repaired implementation tree was:
 
 ```sh
 cargo nextest run --workspace \
@@ -198,9 +198,20 @@ cargo nextest run --workspace \
   --no-fail-fast
 ```
 
-It passed all 8,408 discovered tests with 222 skipped. Every observed production
+It passed all 8,410 discovered tests with 222 skipped. Every observed production
 generalization matched the retained sweep result exactly, and the independent-binding
 structural test observed zero production environment-binding visits.
+
+A fresh exact-head adversarial review found two cleanup gaps after the initial
+implementation. First, resolving several deferred expand constraints could lower a
+younger dimension variable before a later constraint rejected, leaving that level
+change behind. Deferred resolution now runs as one cloned-solver transaction and
+commits only when every constraint accepts; the negative regression also proves that
+the rejected relation remains deferred. Second, the primary inference driver did not
+poll cancellation between members of a recursive SCC. It now aborts the structured
+recursive scope before returning a hard cancellation error, with an executable test
+covering restoration of the parent level, recursion pins, authored prior bindings, and
+temporary bindings. The 8,410-test result above includes both regressions.
 
 The optimized exact-head checker was then run on generated, formatted fixtures. Each
 timing was accepted only after asserting `score == 1` and an empty error list. The

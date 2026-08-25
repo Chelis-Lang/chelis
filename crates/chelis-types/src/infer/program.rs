@@ -14,6 +14,79 @@ struct RecursiveLevelScope {
     members: Vec<(String, Option<Scheme>)>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecursiveAbortObservation {
+    current_level: u32,
+    group_state_counts: (usize, usize),
+    member_count: usize,
+    prior_binding_count: usize,
+    all_prior_bindings_restored: bool,
+    all_temporary_bindings_removed: bool,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static PRIMARY_RECURSIVE_CANCEL_COUNTDOWN: Cell<Option<usize>> = const { Cell::new(None) };
+    static RECURSIVE_ABORT_OBSERVATION: RefCell<Option<RecursiveAbortObservation>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct PrimaryRecursiveCancelGuard;
+
+#[cfg(test)]
+impl Drop for PrimaryRecursiveCancelGuard {
+    fn drop(&mut self) {
+        PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| countdown.set(None));
+    }
+}
+
+#[cfg(test)]
+fn cancel_primary_recursive_after_members(count: usize) -> PrimaryRecursiveCancelGuard {
+    assert!(
+        count > 0,
+        "the test hook must allow at least one SCC member"
+    );
+    PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
+        assert!(
+            countdown.replace(Some(count)).is_none(),
+            "the primary recursive cancellation hook is already armed"
+        );
+    });
+    RECURSIVE_ABORT_OBSERVATION.with(|observation| *observation.borrow_mut() = None);
+    PrimaryRecursiveCancelGuard
+}
+
+#[cfg(test)]
+fn primary_recursive_member_finished_for_test() {
+    PRIMARY_RECURSIVE_CANCEL_COUNTDOWN.with(|countdown| {
+        let Some(remaining) = countdown.get() else {
+            return;
+        };
+        if remaining == 1 {
+            countdown.set(None);
+            crate::cancel::current_cancel_token()
+                .expect("the cancellation test hook requires an installed token")
+                .cancel();
+        } else {
+            countdown.set(Some(remaining - 1));
+        }
+    });
+}
+
+#[cfg(test)]
+fn take_recursive_abort_observation() -> Option<RecursiveAbortObservation> {
+    RECURSIVE_ABORT_OBSERVATION.with(|observation| observation.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn schemes_match(left: &Scheme, right: &Scheme) -> bool {
+    left.tvars == right.tvars
+        && left.dvars == right.dvars
+        && left.rvars == right.rvars
+        && left.body == right.body
+}
+
 impl RecursiveLevelScope {
     fn enter(
         indices: &[usize],
@@ -49,6 +122,8 @@ impl RecursiveLevelScope {
     }
 
     fn abort(self, env: &mut Env, var_gen: &VarGen, subst: &mut Subst) {
+        #[cfg(test)]
+        let prior_members = self.members.clone();
         super::recursion::abort_group();
         self.remove_temporary_bindings(env);
         for (name, prior) in self.members {
@@ -57,6 +132,31 @@ impl RecursiveLevelScope {
             }
         }
         subst.leave_level(self.level, var_gen);
+        #[cfg(test)]
+        RECURSIVE_ABORT_OBSERVATION.with(|observation| {
+            let prior_binding_count = prior_members
+                .iter()
+                .filter(|(_, prior)| prior.is_some())
+                .count();
+            let all_prior_bindings_restored = prior_members.iter().all(|(name, prior)| {
+                prior.as_ref().is_none_or(|prior| {
+                    env.lookup(name)
+                        .is_some_and(|restored| schemes_match(restored, prior))
+                })
+            });
+            let all_temporary_bindings_removed = prior_members
+                .iter()
+                .filter(|(_, prior)| prior.is_none())
+                .all(|(name, _)| env.lookup(name).is_none());
+            *observation.borrow_mut() = Some(RecursiveAbortObservation {
+                current_level: subst.current_level(),
+                group_state_counts: super::recursion::group_state_counts(),
+                member_count: prior_members.len(),
+                prior_binding_count,
+                all_prior_bindings_restored,
+                all_temporary_bindings_removed,
+            });
+        });
     }
 }
 
@@ -153,8 +253,18 @@ pub(super) fn infer_program_with_product_in_session(
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let metadata_prebound_names = HashSet::new();
     let inference_groups = primary_inference_groups(exprs, &items);
+    // Match the persisted-state driver: cache the TLS token once and poll at
+    // declaration granularity. In particular, an incomplete recursive SCC
+    // must consume its structured scope through `abort` before this schedule
+    // returns; finishing or generalizing a partially inferred group would
+    // leak its pins, temporary bindings, and child level.
+    let cancel = crate::cancel::current_cancel_token();
+    let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
     super::recursion::reset();
-    for group in inference_groups {
+    'schedule: for group in inference_groups {
+        if cancelled() {
+            break;
+        }
         let mut recursive_scope = group
             .recursive
             .then(|| RecursiveLevelScope::enter(&group.indices, &items, &env, &vg, &mut subst));
@@ -188,6 +298,12 @@ pub(super) fn infer_program_with_product_in_session(
         }
         let mut deferred_bindings = Vec::new();
         for declaration_index in group.indices {
+            if cancelled() {
+                if let Some(scope) = recursive_scope.take() {
+                    scope.abort(&mut env, &vg, &mut subst);
+                }
+                break 'schedule;
+            }
             let (module, expr) = &items[declaration_index];
             product.begin_root(expr);
             let decl_name = top_level_decl_name(expr);
@@ -219,6 +335,16 @@ pub(super) fn infer_program_with_product_in_session(
             // D-CHECK: drain the per-def deferred-access ledger (see
             // `validate_deferred_opaque_uses`).
             validate_deferred_opaque_uses(&subst, &adt_reg, errors);
+            #[cfg(test)]
+            if group.recursive {
+                primary_recursive_member_finished_for_test();
+            }
+        }
+        if cancelled() {
+            if let Some(scope) = recursive_scope.take() {
+                scope.abort(&mut env, &vg, &mut subst);
+            }
+            break 'schedule;
         }
         if group.recursive {
             // Uniform-recursive-instantiation validation must run before the
@@ -242,6 +368,11 @@ pub(super) fn infer_program_with_product_in_session(
         }
     }
     crate::opacity::set_current_item(None, None);
+
+    if cancelled() {
+        errors.push(crate::cancel::cancellation_check_error());
+        return product;
+    }
 
     // [04-TENSOR-EXPAND]: later roots get the first opportunity to select a
     // positional expand's legal output shape. At the whole-program freeze
@@ -1768,5 +1899,50 @@ mod recursive_level_scope_tests {
                 .expect("follow-up parses"),
         );
         assert!(follow_up.errors.is_empty());
+    }
+
+    #[test]
+    fn primary_driver_mid_scc_cancellation_aborts_before_return() {
+        let exprs = chelis_deep::parser::parse_str(
+            "(defsig {} left (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+             (defsig {} right (t-fn {} (t-prim {} int32) (t-prim {} int32)))
+             (def {} left (fn {} (params {} x) (app {} (var {} right) (var {} x))))
+             (def {} right (fn {} (params {} x) (app {} (var {} left) (var {} x))))",
+        )
+        .expect("authored mutual-recursion fixture parses");
+
+        let observation = {
+            let token = crate::cancel::CancelToken::new();
+            let _cancel_guard = crate::cancel::install_cancel_token(token);
+            let _hook_guard = cancel_primary_recursive_after_members(1);
+            let result = infer_program(&exprs);
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| crate::cancel::is_cancellation(&error.message)),
+                "mid-SCC cancellation must be a hard checker error: {:?}",
+                result.errors
+            );
+            take_recursive_abort_observation()
+                .expect("the primary driver must abort the incomplete recursive scope")
+        };
+
+        assert_eq!(observation.current_level, 0);
+        assert_eq!(observation.group_state_counts, (0, 0));
+        assert_eq!(observation.member_count, 2);
+        assert_eq!(observation.prior_binding_count, 2);
+        assert!(observation.all_prior_bindings_restored);
+        assert!(observation.all_temporary_bindings_removed);
+
+        let follow_up = infer_program(
+            &chelis_deep::parser::parse_str("(def {} clean (fn {} (params {} x) (var {} x)))")
+                .expect("follow-up parses"),
+        );
+        assert!(
+            follow_up.errors.is_empty(),
+            "a cancelled recursive check must not contaminate its successor: {:?}",
+            follow_up.errors
+        );
     }
 }

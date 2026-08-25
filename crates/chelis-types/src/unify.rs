@@ -1803,27 +1803,39 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
         .deferred_expand_constraints
         .lock()
         .expect("subst.deferred_expand_constraints poisoned")
-        .remove(&v);
+        .get(&v)
+        .cloned();
     if let Some(constraints) = constraints {
         if let Type::Var(target) = ty {
-            subst
+            let mut deferred = subst
+                .deferred_expand_constraints
+                .lock()
+                .expect("subst.deferred_expand_constraints poisoned");
+            deferred.remove(&v);
+            deferred.entry(*target).or_default().extend(constraints);
+        } else {
+            // Resolving more than one deferred candidate is one transaction:
+            // an early candidate may lower reachable variables before a later
+            // candidate rejects. Run the complete set on a clone and publish
+            // it only after every candidate accepts, preserving all bindings,
+            // constraints, and level metadata on failure.
+            let mut trial = subst.clone();
+            trial
                 .deferred_expand_constraints
                 .lock()
                 .expect("subst.deferred_expand_constraints poisoned")
-                .entry(*target)
-                .or_default()
-                .extend(constraints);
-        } else {
+                .remove(&v);
             for constraint in constraints {
                 let canonical = constraint.canonical_for_output(ty)?;
-                unify(&canonical, ty, subst)?;
+                unify(&canonical, ty, &mut trial)?;
             }
+            *subst = trial;
         }
     }
     // An older variable that becomes bound to a younger composite makes all
-    // reachable variables part of the older scope. Deferred shape trials
-    // above run on cloned substitutions; wait until they accept so a rejected
-    // candidate cannot leak a level override into the committed solver.
+    // reachable variables part of the older scope. Deferred shape resolution
+    // above commits its cloned transaction only after every candidate accepts,
+    // so lowering here cannot expose a rejected candidate's level overrides.
     let target_level = subst.level_of_tvar(v);
     subst.lower_type_to(ty, target_level);
     subst.insert_type(v, ty.clone());
@@ -3166,6 +3178,63 @@ mod tests {
         assert!(
             s.has_deferred_shape_constraint(output_var),
             "a rejected consumer must not erase the deferred relation"
+        );
+        s.leave_level(inner, &g);
+    }
+
+    #[test]
+    fn rejected_deferred_expand_bind_restores_level_state() {
+        let mut g = var_gen();
+        let output = g.fresh_tvar();
+        let older_dim = g.fresh_dvar();
+        let mut s = Subst::new();
+
+        for prim in [Prim::F32, Prim::F64] {
+            s.record_deferred_expand_constraint(
+                output,
+                DeferredExpandConstraint {
+                    input_dims: vec![Dim::Var(older_dim)],
+                    input_prec: tprec(prim),
+                    axis: 1,
+                    size: Dim::Lit(3),
+                },
+            );
+        }
+
+        let inner = s.enter_level(&g);
+        let younger_dim = g.fresh_dvar();
+        let younger_precision = g.fresh_tvar();
+        let before_level_state = (
+            s.current_level,
+            s.level_transitions.clone(),
+            s.lowered_tvar_levels.clone(),
+            s.lowered_dvar_levels.clone(),
+            s.lowered_rvar_levels.clone(),
+            s.resume_floors,
+        );
+        let candidate = Type::Tensor(
+            vec![Dim::Var(younger_dim), Dim::Lit(3)],
+            TensorPrec::Var(younger_precision),
+        );
+
+        unify(&Type::Var(output), &candidate, &mut s)
+            .expect_err("conflicting deferred precisions must reject");
+
+        assert_eq!(
+            (
+                s.current_level,
+                s.level_transitions.clone(),
+                s.lowered_tvar_levels.clone(),
+                s.lowered_dvar_levels.clone(),
+                s.lowered_rvar_levels.clone(),
+                s.resume_floors,
+            ),
+            before_level_state,
+            "a rejected deferred expand bind must not leak solver-level lowering"
+        );
+        assert!(
+            s.has_deferred_expand_constraint(output),
+            "a rejected binding must preserve the deferred expand relation"
         );
         s.leave_level(inner, &g);
     }
