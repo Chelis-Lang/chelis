@@ -3326,6 +3326,26 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
             {
                 prims.insert(name.clone());
             }
+            // [05-OP-35]'s closed precision domains and recursive equality
+            // domain are numeric capacity even when no concrete primitive is
+            // written in the signature. A tensor precision variable is also
+            // capacity over the active tensor element set. These markers are
+            // deliberately not in `FLOAT_PRIMS`: they use the tagged carrier,
+            // so they are numeric operations without introducing a bare-float
+            // seam.
+            if list.tag() == Some(DeepTag::TVar)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+                && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "Q")
+            {
+                prims.insert(name.clone());
+            }
+            if list.tag() == Some(DeepTag::TTensor)
+                && let Some(Expr::List(precision, _)) = list.elements.last()
+                && precision.tag() == Some(DeepTag::TVar)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = precision.elements.get(2)
+            {
+                prims.insert(format!("tensor-precision:{name}"));
+            }
             for e in &list.elements {
                 collect_numeric_tprims(e, prims);
             }
@@ -3341,6 +3361,117 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
             collect_numeric_tprims(&bridged, prims);
         }
         Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+    }
+}
+
+fn collect_referenced_adts(expr: &Expr, names: &mut BTreeSet<String>) {
+    match expr {
+        Expr::List(list, _) => {
+            if list.tag() == Some(DeepTag::TAdt)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+            {
+                names.insert(name.clone());
+            }
+            for element in &list.elements {
+                collect_referenced_adts(element, names);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_referenced_adts(value, names);
+            }
+        }
+        Expr::MetaExpr(meta, _) => collect_referenced_adts(&meta.expr, names),
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_referenced_adts(&bridged, names);
+        }
+        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+    }
+}
+
+#[derive(Default)]
+struct AdtNumericDependencies {
+    direct_prims: BTreeSet<String>,
+    referenced_adts: BTreeSet<String>,
+}
+
+fn collect_adt_numeric_dependencies(
+    expr: &Expr,
+    definitions: &mut BTreeMap<String, AdtNumericDependencies>,
+) {
+    match expr {
+        Expr::List(list, _) => {
+            if list.tag() == Some(DeepTag::Deftype) {
+                let mut dependency = AdtNumericDependencies::default();
+                for element in list.elements.iter().skip(3) {
+                    collect_numeric_tprims(element, &mut dependency.direct_prims);
+                    collect_referenced_adts(element, &mut dependency.referenced_adts);
+                }
+                definitions.insert(deftype_name(list), dependency);
+            }
+            for element in &list.elements {
+                collect_adt_numeric_dependencies(element, definitions);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_adt_numeric_dependencies(value, definitions);
+            }
+        }
+        Expr::MetaExpr(meta, _) => collect_adt_numeric_dependencies(&meta.expr, definitions),
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_adt_numeric_dependencies(&bridged, definitions);
+        }
+        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+    }
+}
+
+fn nominal_adt_numeric_prims(exprs: &[Vec<Expr>]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut definitions = BTreeMap::new();
+    for program in exprs {
+        for expr in program {
+            collect_adt_numeric_dependencies(expr, &mut definitions);
+        }
+    }
+
+    let mut closure: BTreeMap<String, BTreeSet<String>> = definitions
+        .iter()
+        .map(|(name, dependency)| (name.clone(), dependency.direct_prims.clone()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (name, dependency) in &definitions {
+            let inherited = dependency
+                .referenced_adts
+                .iter()
+                .filter_map(|referenced| closure.get(referenced))
+                .flat_map(|prims| prims.iter().cloned())
+                .collect::<Vec<_>>();
+            let target = closure.entry(name.clone()).or_default();
+            let previous_len = target.len();
+            target.extend(inherited);
+            changed |= target.len() != previous_len;
+        }
+        if !changed {
+            return closure;
+        }
+    }
+}
+
+fn collect_numeric_tprims_with_adts(
+    expr: &Expr,
+    adt_prims: &BTreeMap<String, BTreeSet<String>>,
+    prims: &mut BTreeSet<String>,
+) {
+    collect_numeric_tprims(expr, prims);
+    let mut referenced = BTreeSet::new();
+    collect_referenced_adts(expr, &mut referenced);
+    for name in referenced {
+        if let Some(reachable) = adt_prims.get(&name) {
+            prims.extend(reachable.iter().cloned());
+        }
     }
 }
 
@@ -3361,7 +3492,12 @@ fn symbol(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>) {
+fn scan_exported_numeric_defs(
+    list: &List,
+    file_label: &str,
+    adt_prims: &BTreeMap<String, BTreeSet<String>>,
+    rows: &mut Vec<Row>,
+) {
     if list.tag() != Some(DeepTag::Module) {
         return;
     }
@@ -3425,7 +3561,7 @@ fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>
             continue;
         };
         let mut prims = BTreeSet::new();
-        collect_numeric_tprims(signature, &mut prims);
+        collect_numeric_tprims_with_adts(signature, adt_prims, &mut prims);
         if prims.is_empty() {
             continue;
         }
@@ -3441,16 +3577,26 @@ fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>
     }
 }
 
-fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
-    fn walk(expr: &Expr, file_label: &str, rows: &mut Vec<Row>) {
+fn scan_deftypes_with_adts(
+    exprs: &[Expr],
+    file_label: &str,
+    adt_prims: &BTreeMap<String, BTreeSet<String>>,
+    rows: &mut Vec<Row>,
+) {
+    fn walk(
+        expr: &Expr,
+        file_label: &str,
+        adt_prims: &BTreeMap<String, BTreeSet<String>>,
+        rows: &mut Vec<Row>,
+    ) {
         match expr {
             Expr::List(list, _) => {
-                scan_exported_numeric_defs(list, file_label, rows);
+                if list.tag() == Some(DeepTag::Module) {
+                    scan_exported_numeric_defs(list, file_label, adt_prims, rows);
+                }
                 if list.tag() == Some(DeepTag::Deftype) {
-                    let mut prims = BTreeSet::new();
-                    for e in list.elements.iter().skip(2) {
-                        collect_numeric_tprims(e, &mut prims);
-                    }
+                    let name = deftype_name(list);
+                    let prims = adt_prims.get(&name).cloned().unwrap_or_default();
                     if !prims.is_empty() {
                         let shape = list
                             .elements
@@ -3459,35 +3605,40 @@ fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
                             .map(chelis_deep::printer::print_expr_flat)
                             .collect::<Vec<_>>()
                             .join(" ");
-                        let id = format!("{file_label}::{}: {shape}", deftype_name(list),);
                         rows.push(Row {
                             kind: "std-adt-numeric".to_string(),
-                            id,
+                            id: format!("{file_label}::{name}: {shape}"),
                             flags: numeric_carrier_flags(&prims),
                             citation: String::new(),
                         });
                     }
                 }
                 for e in &list.elements {
-                    walk(e, file_label, rows);
+                    walk(e, file_label, adt_prims, rows);
                 }
             }
             Expr::Map(map, _) => {
                 for (_, v) in &map.entries {
-                    walk(v, file_label, rows);
+                    walk(v, file_label, adt_prims, rows);
                 }
             }
-            Expr::MetaExpr(me, _) => walk(&me.expr, file_label, rows),
+            Expr::MetaExpr(me, _) => walk(&me.expr, file_label, adt_prims, rows),
             Expr::Node(node, span) => {
                 let bridged = Expr::List(node.to_list(*span), *span);
-                walk(&bridged, file_label, rows);
+                walk(&bridged, file_label, adt_prims, rows);
             }
             Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
         }
     }
     for e in exprs {
-        walk(e, file_label, rows);
+        walk(e, file_label, adt_prims, rows);
     }
+}
+
+fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
+    let programs = vec![exprs.to_vec()];
+    let adt_prims = nominal_adt_numeric_prims(&programs);
+    scan_deftypes_with_adts(exprs, file_label, &adt_prims, rows);
 }
 
 fn stdlib_rows(root: &Path) -> Vec<Row> {
@@ -3495,7 +3646,7 @@ fn stdlib_rows(root: &Path) -> Vec<Row> {
     let mut files = Vec::new();
     walk_ch_files(&src_dir, &mut files);
     files.sort();
-    let mut rows = Vec::new();
+    let mut programs = Vec::new();
     for path in files {
         let src =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -3512,7 +3663,16 @@ fn stdlib_rows(root: &Path) -> Vec<Row> {
             .with_extension("")
             .to_string_lossy()
             .replace('\\', "/");
-        scan_deftypes(&exprs, &label, &mut rows);
+        programs.push((label, exprs));
+    }
+    let exprs = programs
+        .iter()
+        .map(|(_, exprs)| exprs.clone())
+        .collect::<Vec<_>>();
+    let adt_prims = nominal_adt_numeric_prims(&exprs);
+    let mut rows = Vec::new();
+    for (label, exprs) in programs {
+        scan_deftypes_with_adts(&exprs, &label, &adt_prims, &mut rows);
     }
     rows
 }

@@ -2350,21 +2350,6 @@ fn host_program_call_name_sites<T>(
 /// gates cannot drift (chelis#891 review finding 13).
 pub const EVAL_ONLY_HOST_BUILTINS: &[&str] = &[
     "process_run",
-    // Host-lane JSON I/O (chelis#890).
-    "parse_json",
-    "to_json",
-    "json_f64",
-    "json_int",
-    "json_str",
-    "json_list",
-    "json_f64s",
-    "json_ints",
-    "jnum",
-    "jint",
-    "jstr",
-    "jlist",
-    "jdict",
-    "json_set",
     "round_to",
     // Host-lane CSV I/O (chelis#903): same eval-only scope as the JSON
     // family above -- the compiled backends have no Json/Csv document
@@ -11946,23 +11931,15 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
             HostTypeTerm::String,
             HostTypeTerm::String,
         ])),
-        // Host-lane JSON I/O (chelis#890) and CSV I/O (chelis#903), over the
-        // prelude `Json` ADT. Eval/test-only like `process_run`: the terms
-        // here exist so host lowering can complete and hand the program to
-        // `find_eval_only_host_builtin`, which rejects every compiled-target
-        // use loudly before codegen.
-        "parse_json" | "parse_csv" | "jnum" | "jint" | "jstr" | "jlist" | "jdict" | "json_set" => {
-            Some(HostTypeTerm::Adt("Json".to_string(), Vec::new()))
-        }
-        "to_json" | "to_csv" | "json_str" | "csv_str" => Some(HostTypeTerm::String),
-        "json_f64" | "csv_f64" => Some(HostTypeTerm::Float64),
-        "json_int" | "csv_int" | "csv_nrows" => Some(HostTypeTerm::Int64),
-        "json_list" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Adt(
-            "Json".to_string(),
-            Vec::new(),
+        "parse_csv" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Dict(
+            Box::new(HostTypeTerm::String),
+            Box::new(HostTypeTerm::String),
         )))),
-        "json_f64s" | "csv_f64s" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Float64))),
-        "json_ints" | "csv_ints" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
+        "to_csv" | "csv_str" => Some(HostTypeTerm::String),
+        "csv_f64" => Some(HostTypeTerm::Float64),
+        "csv_int" | "csv_nrows" => Some(HostTypeTerm::Int64),
+        "csv_f64s" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Float64))),
+        "csv_ints" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::Int64))),
         "csv_strs" | "csv_cols" => Some(HostTypeTerm::List(Box::new(HostTypeTerm::String))),
         // `round_to` preserves its operand's float dtype ([05-OP-1]: f64 or
         // f32, decided by the checker); an unresolved operand stays an

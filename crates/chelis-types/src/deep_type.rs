@@ -255,6 +255,9 @@ impl<'resolver, 'session, 'binders> DeepTypeResolver<'resolver, 'session, 'binde
             let (form_tag, tag, children) = self.type_form_expr(expr)?;
             if form_tag == Some(DeepTag::TPrim) {
                 let name = self.one_symbol(tag, children)?;
+                if let Some(var) = self.type_vars.get(name).copied() {
+                    return Ok(ResolvedCastTarget::Type(ResolvedDeepType(Type::Var(var))));
+                }
                 return Ok(ResolvedCastTarget::PrimitiveSpelling {
                     name: name.to_string(),
                     canonical: true,

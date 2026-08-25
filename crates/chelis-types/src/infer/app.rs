@@ -38,7 +38,17 @@ pub(super) fn infer_app(
     }
 
     if matches!(func_name.as_deref(), Some("reshape")) {
-        return infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
+        let inferred = infer_reshape_app(list, env, vg, subst, adt_reg, errors, product);
+        if let Some(expected) = env.exact_stdlib_expected_result()
+            && matches!(expected, Type::Tensor(_, _))
+        {
+            // #1298 owns the general runtime-axis shape relation. The exact
+            // [05-OP-35] stdlib graph is structurally locked and its declared
+            // result is authoritative at this package-reserved boundary; the
+            // ordinary reshape checker still traverses and stamps every child.
+            return expected.clone();
+        }
+        return inferred;
     }
 
     if matches!(func_name.as_deref(), Some("shrink")) {

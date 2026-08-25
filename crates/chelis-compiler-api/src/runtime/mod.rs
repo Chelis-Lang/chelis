@@ -16,8 +16,8 @@ mod csv;
 mod eval;
 mod host_ops;
 mod invariant;
-mod json;
 mod named_axis;
+mod numeric_text;
 #[cfg(test)]
 mod tests;
 mod transforms;

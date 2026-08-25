@@ -9,12 +9,12 @@ type Json =
   | JsonString(string)
   | JsonArray(List[Json])
   | JsonObject(Dict[string, Json])
-def load_json(path: string) -> Json =
+def load_json(path: string) -> Json ! { IO } =
   match try_load_json(path) with {
     | Some(value) => value
     | None => fail(string_concat("load_json failed for ", path))
   }
-def try_load_json(path: string) -> Option[Json] = if not(file_exists(path)) then None else try_parse_json(read_file(path))
+def try_load_json(path: string) -> Option[Json] ! { IO } = if not(file_exists(path)) then None else try_parse_json(read_file(path))
 def parse_json(text: string) -> Json =
   match try_parse_json(text) with {
     | Some(value) => value
@@ -119,12 +119,12 @@ def render_json(value: Json) -> string =
     | JsonArray(items) => string_concat("[", string_concat(join(map(fn (item: Json) -> render_json(item), items), ","), "]"))
     | JsonObject(entries) => string_concat("{", string_concat(join(map(fn (kv: (string, Json)) -> string_concat(quote_string(kv.0), string_concat(":", render_json(kv.1))), dict_entries(entries)), ","), "}"))
   }
-def write_json(path: string, value: Json) -> unit =
+def write_json(path: string, value: Json) -> unit ! { IO } =
   match try_to_json(value) with {
     | Some(text) => write_file(path, text)
     | None => fail(string_concat("write_json failed for ", string_concat(path, ": non-finite numbers cannot be represented in JSON")))
   }
-def try_write_json(path: string, value: Json) -> Option[unit] =
+def try_write_json(path: string, value: Json) -> Option[unit] ! { IO } =
   match try_to_json(value) with {
     | Some(text) => Some(write_file(path, text))
     | None => None
