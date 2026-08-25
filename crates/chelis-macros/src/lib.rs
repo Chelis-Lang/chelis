@@ -2,7 +2,7 @@ use chelis_deep::DeepTag;
 use std::collections::{HashMap, HashSet};
 
 use chelis_deep::Span;
-use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap};
+use chelis_deep::ast::{Atom, Expr, List, MetaExpr, MetaMap, UnknownFormData};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -134,7 +134,18 @@ impl Expander {
                 let bridged = Expr::List(node.to_list(*span), *span);
                 self.expand_expr(&bridged, macros, scope)
             }
-            Expr::BareList(_, _) | Expr::UnknownForm(_) => Ok(expr.clone()),
+            // chelis#1087: a macro invocation nested inside either
+            // transitional variant must still expand, so both recurse.
+            Expr::BareList(elements, span) => Ok(Expr::BareList(
+                elements
+                    .iter()
+                    .map(|child| self.expand_expr(child, macros, scope))
+                    .collect::<Result<Vec<_>, _>>()?,
+                *span,
+            )),
+            Expr::UnknownForm(data) => {
+                try_map_unknown_form(data, |child| self.expand_expr(child, macros, scope))
+            }
             Expr::MetaExpr(meta, span) => Ok(Expr::MetaExpr(
                 MetaExpr {
                     entries: meta.entries.clone(),
@@ -402,7 +413,18 @@ fn replace_placeholder_vars(expr: &Expr, replacements: &HashMap<String, Expr>) -
             let bridged = Expr::List(node.to_list(*span), *span);
             replace_placeholder_vars(&bridged, replacements)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: placeholders inside either transitional variant must
+        // still receive their argument, so both recurse.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| replace_placeholder_vars(child, replacements))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| replace_placeholder_vars(child, replacements))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),
@@ -442,7 +464,22 @@ fn collect_symbols(expr: &Expr, out: &mut HashSet<String>) {
             let bridged = Expr::List(node.to_list(*span), *span);
             collect_symbols(&bridged, out);
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
+        // chelis#1087: names inside either transitional variant are used
+        // symbols. Skipping them made those names invisible to the
+        // fresh-placeholder collision check and to hygiene/capture analysis.
+        Expr::BareList(elements, _) => {
+            for element in elements {
+                collect_symbols(element, out);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for (_, value) in &data.meta.entries {
+                collect_symbols(value, out);
+            }
+            for child in &data.children {
+                collect_symbols(child, out);
+            }
+        }
         Expr::MetaExpr(meta, _) => collect_symbols(&meta.expr, out),
         Expr::List(list, _) => {
             for element in &list.elements {
@@ -541,7 +578,18 @@ fn substitute_expr(
             let bridged = Expr::List(node.to_list(*span), *span);
             substitute_expr(&bridged, params, shadowed)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: macro parameters referenced inside either
+        // transitional variant must still substitute, so both recurse.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| substitute_expr(child, params, shadowed))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| substitute_expr(child, params, shadowed))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),
@@ -684,7 +732,18 @@ fn hygienize_expr(expr: &Expr, counter: &mut usize, env: &HashMap<String, String
             let bridged = Expr::List(node.to_list(*span), *span);
             hygienize_expr(&bridged, counter, env)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: binder renames must reach references inside either
+        // transitional variant, so both recurse.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| hygienize_expr(child, counter, env))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| hygienize_expr(child, counter, env))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),
@@ -979,7 +1038,21 @@ fn annotate_source_expr(expr: &Expr, invocation: &Expr) -> Expr {
             let bridged = Expr::List(node.to_list(*span), *span);
             annotate_source_expr(&bridged, invocation)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087: expansion output nested inside either transitional
+        // variant still carries `source` metadata, so both recurse. The
+        // variant's own metadata map records no `source` entry here — only
+        // recursion, matching the recursion-only disposition of the sibling
+        // walks above.
+        Expr::BareList(elements, span) => Expr::BareList(
+            elements
+                .iter()
+                .map(|child| annotate_source_expr(child, invocation))
+                .collect(),
+            *span,
+        ),
+        Expr::UnknownForm(data) => {
+            map_unknown_form(data, |child| annotate_source_expr(child, invocation))
+        }
         Expr::MetaExpr(meta, span) => Expr::MetaExpr(
             MetaExpr {
                 entries: meta.entries.clone(),
@@ -1040,6 +1113,46 @@ fn standard_prelude_macros() -> Result<HashMap<String, MacroDef>, ExpansionError
 
 fn get_tag(list: &List) -> Option<DeepTag> {
     list.tag()
+}
+
+/// Rebuild an `UnknownForm`, applying `f` to every metadata value and every
+/// child (chelis#1087). Macro-relevant material — an invocation, a captured
+/// symbol, a binder — can sit in either position, so both recurse.
+fn map_unknown_form(data: &UnknownFormData, mut f: impl FnMut(&Expr) -> Expr) -> Expr {
+    Expr::UnknownForm(Box::new(UnknownFormData {
+        head: data.head.clone(),
+        meta: MetaMap {
+            entries: data
+                .meta
+                .entries
+                .iter()
+                .map(|(key, value)| (key.clone(), f(value)))
+                .collect(),
+        },
+        children: data.children.iter().map(&mut f).collect(),
+        span: data.span,
+    }))
+}
+
+/// Fallible twin of [`map_unknown_form`] for the expansion walk.
+fn try_map_unknown_form(
+    data: &UnknownFormData,
+    mut f: impl FnMut(&Expr) -> Result<Expr, ExpansionError>,
+) -> Result<Expr, ExpansionError> {
+    let mut entries = Vec::with_capacity(data.meta.entries.len());
+    for (key, value) in &data.meta.entries {
+        entries.push((key.clone(), f(value)?));
+    }
+    let mut children = Vec::with_capacity(data.children.len());
+    for child in &data.children {
+        children.push(f(child)?);
+    }
+    Ok(Expr::UnknownForm(Box::new(UnknownFormData {
+        head: data.head.clone(),
+        meta: MetaMap { entries },
+        children,
+        span: data.span,
+    })))
 }
 
 /// Compiler-internal pre-expansion tags (`defmacro` / `macro-invoke`)
