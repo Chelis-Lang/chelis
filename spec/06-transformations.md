@@ -72,7 +72,11 @@ gradient value directly; multiple listed parameters return a flat tuple.
 
 ### 2.3 Algorithm: Reverse-Mode AD
 
-**Input:** A forward DAG `G` with nodes `[n_1, n_2, ..., n_k]` in topological order, where `n_k` is the output node.
+**Input:** A forward DAG `G` with its canonical node sequence
+`[n_1, n_2, ..., n_k]`, where every input precedes its consumer and `n_k` is
+the output node. A node's canonical forward ordinal is its position in this
+sequence. The ordinal belongs to the input DAG; a transform never derives it
+from an arbitrary topological-sort tie.
 
 **Output:** A backward DAG `G'` that computes both the forward output and gradients.
 
@@ -131,8 +135,11 @@ omitted.
 ### 2.4 Gradient Accumulation (Multi-Use Nodes)
 
 When a value `x` is consumed by multiple downstream edges, order those edges
-by increasing forward consumer topological index and then input-slot index.
-At every float scalar or tensor leaf, combine their contributions with the
+lexicographically by canonical forward node ordinal, then by input-slot index.
+Repeated use by one consumer therefore remains distinct and is ordered by the
+slot in that consumer's exact input list. This consumer-edge order is
+independent of the work-list or topological-sort tie order used to construct
+the backward graph. At every float scalar or tensor leaf, combine their contributions with the
 canonical adjacent-pair balanced addition tree at that leaf's declared dtype,
 beginning with an exact positive-zero base leaf. Tuple, List, and ADT
 cotangents combine corresponding fields/elements recursively; List lengths and
@@ -727,12 +734,23 @@ This section provides a precise formal definition of the `grad` transformation, 
 ### 7.1 Definitions
 
 A **RISC DAG** is a tuple `(N, E, inputs, outputs)` where:
-- `N` is a set of nodes, each labeled with an operation and a type.
+- `N = [n_1, ..., n_k]` is the canonical ordered node sequence. Each node is
+  labeled with an operation and a type, and its canonical forward node ordinal
+  is its unique position in `N`.
 - `E` is a set of directed edges `(src, dst, port)`, where `port` identifies which input of `dst` the edge connects to.
 - `inputs` is an ordered list of Load nodes (function parameters).
 - `outputs` is an ordered list of nodes whose values constitute the function's return value.
 
-The **topological order** of a DAG is any total ordering of `N` such that for every edge `(src, dst, _)`, `src` precedes `dst`.
+The canonical sequence is topological: for every edge `(src, dst, _)`,
+`src` has a lower canonical ordinal than `dst`. An implementation may use a
+different valid topological work-list internally, but canonical consumer-edge
+order always uses `(ordinal(dst), port)` and therefore cannot change with that
+choice.
+
+A **contribution key** is either the distinguished `SeedKey` or a consumer-edge
+key `(canonical_forward_ordinal(dst), port)`. `SeedKey` orders before every
+consumer-edge key. Before accumulation, contributions are sorted by this key;
+the seed is the sole contribution to the scalar output.
 
 ### 7.2 Adjoint DAG Construction
 
@@ -741,30 +759,31 @@ Given a forward DAG `G = (N, E, inputs, outputs)`:
 ```
 function build_adjoint(G, wrt):
     -- Step 1: Topological sort
-    topo = topological_sort(N)
+    topo = stable_topological_order(N, tie_break=canonical_forward_ordinal)
     reverse_topo = reverse(topo)
 
     -- Step 2: Initialize shape-preserving contribution lists
-    contributions = new Map<Node, List<Node>>
+    contributions = new Map<Node, List<(ContributionKey, Node)>>
     for each node n in N:
         contributions[n] = []
 
     -- Step 3: Seed the scalar float output
     assert len(outputs) == 1    -- for scalar output
-    contributions[outputs[0]].append(exact_one(type_of(outputs[0])))
+    contributions[outputs[0]].append((SeedKey, exact_one(type_of(outputs[0]))))
 
     -- Step 4: Backward traversal
     for each node n in reverse_topo:
         upstream = balanced_sum(
             exact_zero(cotangent_type(type_of(n))),
-            contributions[n],
-            consumer_edge_order(n))
+            values_sorted_by_key(contributions[n]))
 
         let rule = adjoint_rule(op_of(n))
         let input_contributions = rule(inputs_of(n), upstream)
 
-        for (input_node, contribution) in zip(inputs_of(n), input_contributions):
-            contributions[input_node].append(contribution)
+        for (input_slot, input_node, contribution) in enumerate_inputs(
+                inputs_of(n), input_contributions):
+            edge_key = (canonical_forward_ordinal(n), input_slot)
+            contributions[input_node].append((edge_key, contribution))
 
     -- Step 5: Collect the selected recursive gradient payload
     grads = [finalize_contributions(p, contributions[p]) for p in wrt]

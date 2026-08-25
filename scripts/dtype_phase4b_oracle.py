@@ -50,34 +50,34 @@ FROZEN_FILE_DIGESTS = {
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "6135bb430a9b4c59e23616cc8fc4423afa448b02b2dad172e24a394f8c549d05"
+        "4d7149ed1e6dfd4d8dad4163adc5b3b14bbbf12289e7f78bf2c5ef33bf0c8329"
     ),
     "spec/06-transformations.md": (
-        "68628d2039fa364b6eafb7fa73cc868e5520b0fb6f00950f5639b3f160638dbf"
+        "57f0797f5d79fe6cf752c277ff74c290c595d179be166a8b294ba6f52f5ce374"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "8fb4953e69c8df80e444f825d7fd224b365303e7ba2c16af5d586c2caa439912"
+        "2ed5a35ef6878593213272875e6f6a93ffd432d63350417ecb0aa22b88055eab"
     ),
     "spec/design/dtype_semantics.md": (
-        "c76c5a73b4976687f24b06422bd8a5e9b5fd7d8524945652ec5a632408868a36"
+        "f0fbdd18d9bd5b20fb1e656d2ac5c5685d91a3a0ae61814ec9ea582dc40ab73e"
     ),
     "spec/design/loud_unsupported.md": (
-        "146cca6092dac7fd60c83bc4e519f653a07bfeee0a6fab385669e27f731f313e"
+        "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
     ),
     "spec/design/spec_provenance.md": (
         "a2a84ab3a4d2925fc7a79f482e296eb979aadc24a0ebf21872c1fb257f7ea3fe"
     ),
     "openspec/specs/risc-primitives/spec.md": (
-        "65e22be4079ad0d19fef546a1fb392c5890fd1ccefc7c73d3b31e7ed025b8823"
+        "c1590d1f4d06564af18e38b790c1d0b8701c5384944aa58d96de1b3381a7ec27"
     ),
     "openspec/specs/serialization/spec.md": (
         "ef0139de7e1da5ec986ec5ec4bfb12710a5cee8e77e9c91840d478404907b5ed"
     ),
     "openspec/specs/transformations/spec.md": (
-        "c7b76d7749c930bf8beadf0663fd542c1d675ab6e503455bc32f2f00f25f1e57"
+        "d35aa126ab9075bc893169e9124047ee76fd64302c5bc2ca892dc61e3fd92172"
     ),
     "openspec/specs/type-system/spec.md": (
         "135fd5d18b3bbbffa851720973984e3b61ed18ee0b83fa8884eb7e728b38c811"
@@ -346,13 +346,13 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-29": "3993f9bbfd12ac2e0123859ec2c4664ee9aac341090d31f217cd74e23ab23f50",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "be9dd899970a14b9c1765671915e6c722215a2cee6384faab0992966a4561753",
-    "05-OP-32": "cec19e9042970ad05ded01aa3e9b5df670020f6fa192c1b8b0d000eb5c37d6db",
+    "05-OP-32": "4c6438ef1fa47bc6085d717e68c410030695bee86c59cbcf608f7948ca516e50",
     "05-OP-33": "61d98d7e69bb94d5199a6a3358211cd9e9de6258109da5aa45b8cec7dd3e9bba",
     "05-OP-34": "ec98b43a4afe89384afd625ff6e71bb2bd0f4c4a9c7c8884f15d6857ec289102",
-    "05-OP-35": "2283f535f9b5690fd8e7f05320dc94243b1c9ef99ee466b9bd6f83b5de0bacaf",
+    "05-OP-35": "3ba13ad976c619550237c56e25251304b07a47907272a14457a20d7acf35040a",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
     "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
-    "05-OP-38": "7393c5cac5f772eefa75cf079adea1be3b0f408c2bac57bbc305ff52e8534084",
+    "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
     "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
 }
 
@@ -413,7 +413,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## The two-table design",
         "## Seed dispositions the table must ship with",
-        "c53763a406f164f8ae333a6648932b9961a0fae1d344dbe1b901dc497c96ee33",
+        "fe07f1865a552ca283befa55b69b31e0345f6db486448d9f813f66fa5c2e0db9",
     ),
     "capability seed dispositions": (
         "spec/design/capability_table.md",
@@ -425,13 +425,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "cc2d50fbd9c77e3539721d92d1202e239f2f049aa978e217d4deb0dd9abd6280",
+        "7ce271ebf8c18d5298fe4ca8ab126de034c2347a2affbe31d9eb5aec2cde3bdb",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
         "### LU5 - derived compiled-stdlib acceptance corpus ([#955])",
         "### LU6 - exhaustive checked host-cast planning ([#1150])",
-        "ca1ba0f88b6efcac400d21614dfb38746d6315b1719b11f2c679bb9609940b15",
+        "30ba46096ab69975228a288c42633ace364da7c5fe92307fd696d8100df3a17e",
     ),
     "provenance governed surfaces": (
         "spec/design/spec_provenance.md",
@@ -449,7 +449,7 @@ FROZEN_REGION_DIGESTS = {
         "docs/investigations/remediation_status_2026_08_04.md",
         "| **#729 dtype semantics** |",
         "| **#730 loud unsupported** |",
-        "9847b1e21efd800346d4a769c7da70f40a1303b02583b72c8aafbc6d54fb339b",
+        "c1b138171925733b57ab4d6c50f701d064bea492dd6b7b61793f09ffd37386e6",
     ),
 }
 
@@ -846,6 +846,22 @@ def validate_normative_contract(
                 "upstream = balanced_sum(\n"
                 "            exact_zero(cotangent_type(type_of(n))),",
                 "formal balanced cotangent accumulation",
+            ),
+            (
+                "canonical forward node ordinal, then by input-slot index",
+                "canonical consumer-edge order",
+            ),
+            (
+                "independent of the work-list or topological-sort tie order",
+                "topological-sort independence",
+            ),
+            (
+                "stable_topological_order(N, tie_break=canonical_forward_ordinal)",
+                "stable formal traversal",
+            ),
+            (
+                "values_sorted_by_key(contributions[n])",
+                "key-sorted formal accumulation",
             ),
             (
                 "return pack_wrt_gradients(grads)",
@@ -1302,9 +1318,17 @@ def validate_normative_contract(
             "later duplicate replaces the value",
             "Recursive dictionary observation is canonical rather than "
             "insertion-ordered",
+            "Recursive observation uses one byte grammar `R(value)` over every "
+            "validated `chelis_value` variant",
+            "A tuple renders as `()` when it has no fields, `(R(v),)` when it has one",
+            "A dictionary renders entries in the canonical key order above as",
+            "`R(key): R(value)` pairs separated by `, `",
+            "An ADT renders its exact stored constructor-name bytes followed by `(`",
+            "a zero-field constructor therefore renders as `Ctor()`",
+            "unit and an empty tuple both render `()`",
             "Each of `chelis_print_list`, `chelis_print_tuple`, "
-            "`chelis_print_dict`, and `chelis_print_adt` writes exactly "
-            "[05-OP-25]'s complete recursive rendering",
+            "`chelis_print_dict`, and `chelis_print_adt` writes exactly `R` of its "
+            "argument",
             "followed by one byte `\\n` to standard output",
             "adds no label, prefix, extra space, truncation beyond the nested "
             "tensor rule, or additional newline",
@@ -1588,7 +1612,7 @@ def validate_normative_contract(
             "domain",
             "Repeated variables denote the same type, dtype, rank, and dimensions",
             "`tensor_scan` has [05-HOST-1]'s exact-width recurrence and adjoint",
-            "`process_run` has §2.6's argv, exit-code, capture, `Io`, and outside-AD "
+            "`process_run` has §2.6's argv, exit-code, capture, `IO`, and outside-AD "
             "contract",
             "assertion family has [05-HOST-3] and [05-OP-35]'s equality, own-width "
             "closeness, left-to-right evaluation, zero-cotangent, and `Test` behavior",
@@ -1644,13 +1668,21 @@ def validate_normative_contract(
             "host-runtime operations in every language execution mode",
             "Pure parsing, projection, serialization, and rounding retain their "
             "stated purity",
-            "file and process operations retain their declared `Io` effect and "
+            "file and process operations retain their declared `IO` effect and "
             "observable order",
             "compiled host execution SHALL produce the same typed result or language "
             "trap as evaluation",
-            "device-only kernel may not perform `Io`",
+            "device-only kernel may not perform `IO`",
             "effect-boundary fact SHALL NOT be represented as a language-wide "
             "rejection, inert stub, default value, or evaluator-only signature",
+        ),
+        "05-SPARSE-1": (
+            "`ScatterElements` SHALL take an index tensor of any active signed-integer dtype",
+            "interpreted at its exact stored width",
+            "no index dtype is widened, narrowed, or otherwise converted",
+            "public C gather and scatter callables in [05-OP-33] have this same "
+            "complete index-dtype domain",
+            "no int32/int64-only exception",
         ),
         "05-HOST-3": (
             "`test_assert` admits bool",
@@ -1835,7 +1867,7 @@ def validate_schema_and_consumers(
                 "effect disposition key",
             ),
             (
-                "`Random | Accum | Io | Test | Resource(ResourceId)`",
+                "`Random | Accum | IO | Test | Resource(ResourceId)`",
                 "closed effect requirement domain",
             ),
             (
@@ -1954,6 +1986,24 @@ def validate_schema_and_consumers(
                 "`and`/`or`/`not`; NaN-aware "
                 "comparison/equality; exact scalar/container/C\n   tensor carriers",
                 "dtype-plan to_string semantics",
+            ),
+            (
+                "byte-exact recursive runtime List/tuple/Dict/ADT\n   observation",
+                "dtype-plan recursive runtime rendering",
+            ),
+            (
+                "every active signed-integer sparse-index width across IR and\n"
+                "   public C",
+                "dtype-plan sparse index domain",
+            ),
+            (
+                "canonical gradient consumer-edge order by forward node ordinal\n"
+                "   and input slot",
+                "dtype-plan gradient edge order",
+            ),
+            (
+                "legal compiled host\n   effects with the exact language spelling `IO`",
+                "dtype-plan IO spelling",
             ),
             (
                 "This is the executable requirement for zero capacity exceptions.",
@@ -2186,6 +2236,20 @@ def validate_schema_and_consumers(
             ("This change is Phase 4B", "status Phase 4B statement"),
             ("[05-OP-1..39]", "status Phase 4B atom range"),
             ("canonical balanced sum/product/count tree", "status balanced tree"),
+            (
+                "canonical gradient consumer-edge order by forward node ordinal "
+                "and input slot",
+                "status gradient edge order",
+            ),
+            (
+                "byte-exact runtime List/tuple/Dict/ADT observation",
+                "status recursive runtime rendering",
+            ),
+            (
+                "all-active-signed sparse indices across IR and public C",
+                "status sparse index domain",
+            ),
+            ("exact `IO` effect spelling", "status IO spelling"),
             ("#893/#1289 seal tensor access", "status carrier prerequisite"),
             (
                 "#1288 replaces every frozen capacity disposition",

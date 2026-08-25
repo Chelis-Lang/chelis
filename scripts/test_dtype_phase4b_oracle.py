@@ -715,10 +715,10 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "writes exactly [05-OP-25]'s complete recursive rendering\n"
-                "> of its argument followed by one byte `\\n` to standard output",
+                "writes exactly `R` of its argument followed by one byte\n"
+                "> `\\n` to standard output",
                 "writes an implementation-defined debug rendering",
-                "OP-32.*complete recursive rendering",
+                "OP-32.*writes exactly",
             ),
             (
                 "It adds no\n"
@@ -2655,8 +2655,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_effect_registry_covers_every_fixed_effect(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "`Random | Accum | Io | Test | Resource(ResourceId)`",
-            "`Random | Accum | Io | Resource(ResourceId)`",
+            "`Random | Accum | IO | Test | Resource(ResourceId)`",
+            "`Random | Accum | IO | Resource(ResourceId)`",
         )
         self.assert_contract_fails("frozen capability schema")
 
@@ -2906,6 +2906,89 @@ class ContractValidationTests(unittest.TestCase):
             "the parent tracker implicitly owns stdlib alignment",
         )
         self.assert_contract_fails("status stdlib alignment owner")
+
+    def test_recursive_runtime_printing_has_byte_exact_structural_grammar(self) -> None:
+        path = Path("spec/05-risc-primitives.md")
+        mutations = (
+            (
+                "A tuple\n> renders as `()` when it has no fields, `(R(v),)` when it has one",
+                "A tuple uses an implementation-defined display",
+                "OP-32.*A tuple renders",
+            ),
+            (
+                "A dictionary renders entries in the canonical key order above as",
+                "A dictionary renders in insertion order as",
+                "OP-32.*A dictionary renders",
+            ),
+            (
+                "An ADT renders its exact stored constructor-name bytes followed by `(`",
+                "An ADT renders an implementation-defined debug name",
+                "OP-32.*An ADT renders",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = (self.root / path).read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                (self.root / path).write_text(
+                    original.replace(old, new, 1), encoding="utf-8"
+                )
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    (self.root / path).write_text(original, encoding="utf-8")
+
+    def test_gradient_contribution_order_uses_canonical_forward_ordinals(self) -> None:
+        path = Path("spec/06-transformations.md")
+        mutations = (
+            (
+                "canonical forward node ordinal, then by input-slot index",
+                "the order returned by the current topological sort",
+                "canonical consumer-edge order",
+            ),
+            (
+                "independent of the work-list or topological-sort tie order",
+                "may vary with the topological-sort tie order",
+                "topological-sort independence",
+            ),
+            (
+                "stable_topological_order(N, tie_break=canonical_forward_ordinal)",
+                "topological_sort(N)",
+                "stable formal traversal",
+            ),
+            (
+                "values_sorted_by_key(contributions[n])",
+                "values(contributions[n])",
+                "key-sorted formal accumulation",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                original = (self.root / path).read_text(encoding="utf-8")
+                self.assertIn(old, original)
+                (self.root / path).write_text(
+                    original.replace(old, new, 1), encoding="utf-8"
+                )
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    (self.root / path).write_text(original, encoding="utf-8")
+
+    def test_sparse_indices_use_every_active_signed_integer_width(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "`ScatterElements` SHALL take an index tensor of any active signed-integer dtype",
+            "`ScatterElements` SHALL take only int32 or int64 indices",
+        )
+        self.assert_contract_fails("05-SPARSE-1.*active signed-integer")
+
+    def test_effect_requirement_domain_uses_language_IO_spelling(self) -> None:
+        self.replace(
+            Path("spec/design/capability_table.md"),
+            "`Random | Accum | IO | Test | Resource(ResourceId)`",
+            "`Random | Accum | Io | Test | Resource(ResourceId)`",
+        )
+        self.assert_contract_fails("closed effect requirement domain")
 
 
 class RunnerTests(unittest.TestCase):

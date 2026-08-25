@@ -243,7 +243,7 @@ Effects reached by an exported stdlib definition use a companion registry
 owned by `chelis-types`, not an implied field on Table B. Its key is exactly
 **(`CanonicalEffectRequirement`, `BackendId`)**. The requirement is a closed
 typed value matching the type layer's complete effect domain:
-`Random | Accum | Io | Test | Resource(ResourceId)`. `ResourceId` preserves
+`Random | Accum | IO | Test | Resource(ResourceId)`. `ResourceId` preserves
 the exact checked UTF-8 string literal; it is not an author-written row label,
 an inferred device class, or a normalization rule.
 

@@ -222,7 +222,10 @@ mixing.
 `Scatter` (last-write-wins) and `ScatterAdd` (commutative accumulation) SHALL be distinct
 primitives. `Scatter` SHALL resolve duplicate indices by updates-tensor row-major flat order on
 every backend (single-threaded on C, `<<<1,1>>>` on HIP) and SHALL structurally reject reverse-mode
-AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
+AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint. `Gather`,
+`ScatterAdd`, `Scatter`, and `ScatterElements`, including [05-OP-33]'s public C gather and scatter
+callables, SHALL admit an index tensor at every active signed-integer dtype, interpreted at its
+exact stored width without conversion.
 
 #### Scenario: ScatterAdd is differentiable
 
@@ -233,6 +236,11 @@ AD via `AdError::NotSupported`; `ScatterAdd` SHALL have the `Gather` adjoint.
 
 - **WHEN** `grad` is applied through `Scatter`
 - **THEN** it is rejected with `AdError::NotSupported` because the forward result depends on iteration order at duplicate indices
+
+#### Scenario: Narrow signed indices remain exact
+
+- **WHEN** gather or scatter consumes an int8 or int16 index tensor
+- **THEN** it interprets each stored index exactly rather than rejecting or widening the tensor
 
 ### Requirement: Host-executed builtins
 

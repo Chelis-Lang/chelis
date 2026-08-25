@@ -2101,7 +2101,7 @@ definition instead derives its per-backend result transitively from every
 statically resolved numeric, sibling, and host-constructor disposition plus
 every exact effect row keyed by
 `(CanonicalEffectRequirement, BackendId)`. The effect requirement is exactly
-`Random | Accum | Io | Test | Resource(ResourceId)`; the four fixed variants
+`Random | Accum | IO | Test | Resource(ResourceId)`; the four fixed variants
 and every resource literal discovered in the completed checked-body closure
 expand across all backends. Recursive host values additionally compose through
 the host-constructor table. The program reaches build/link/run when

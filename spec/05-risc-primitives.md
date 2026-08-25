@@ -843,7 +843,7 @@ operation or a compile-time-only alias.
 |---|---|---|---|
 | `dropout` | `(&tensor[D, p_float], p_float) -> tensor[D, p_float]` | Apply [05-OP-37]'s inverted-dropout transform using the active `with seed(...)` handler and a same-dtype rate | Introduces `Random`. Its pathwise adjoint reuses the exact forward mask. |
 | `uniform_like` | `(&tensor[D, p_float], p_float, p_float) -> tensor[D, p_float]` | Create a tensor matching the input shape and float dtype, filled by the deterministic affine sampler defined by [05-OP-8] under the active `with seed(...)` handler | Introduces `Random`. The template values are not observed; its adjoint is the zero cotangent. |
-| `process_run` | `(String, List[String]) -> (Int64, String, String)` | Run an external program with the given argv and capture `(exit_code, stdout, stderr)`. Arguments are passed straight to the OS as argv (no shell, no interpolation), so a value in the args list cannot inject extra shell commands. A process killed by a signal reports exit code `-1`. | Introduces `Io`; it is outside AD. |
+| `process_run` | `(String, List[String]) -> (Int64, String, String)` | Run an external program with the given argv and capture `(exit_code, stdout, stderr)`. Arguments are passed straight to the OS as argv (no shell, no interpolation), so a value in the args list cannot inject extra shell commands. A process killed by a signal reports exit code `-1`. | Introduces `IO`; it is outside AD. |
 
 > **[05-OP-8]** `uniform_like(template, low, high) -> result` admits every
 > active float template dtype `p` in spec/04 §1.1, requires `low` and `high`
@@ -1095,16 +1095,20 @@ index operand.
 #### Replace-scatter vs scatter-add
 
 > **[05-SPARSE-1]** `Gather`, `ScatterAdd`, `Scatter`, and
-> `ScatterElements` SHALL take int32 or int64 indices. For the three scatter
-> forms, target, updates, and output SHALL have identical precision. A
-> different index dtype or a precision mismatch is a type error, never an
-> implicit cast.
+> `ScatterElements` SHALL take an index tensor of any active signed-integer dtype.
+> The index is interpreted at its exact stored width; no index dtype is widened,
+> narrowed, or otherwise converted. For the three scatter forms, target,
+> updates, and output SHALL have identical precision. A non-integer index dtype
+> or a precision mismatch is a type error, never an implicit cast. The public C
+> gather and scatter callables in [05-OP-33] have this same complete index-dtype
+> domain; they have no int32/int64-only exception.
 
 `Scatter` and `ScatterAdd` are intentionally distinct primitives. Both
 take inputs `(target, indices, updates)` with the same shape contract
 (updates shape equals `target.dims[..axis] ++ indices.dims ++
 target.dims[axis+1..]`) and the same precision constraints
-(int32/int64 indices; target/updates/output precision identical).
+(any one active signed-integer index dtype; target/updates/output precision
+identical).
 They differ only in how duplicate target indices are resolved and in
 their AD policies:
 
@@ -1177,8 +1181,8 @@ indices.shape == updates.shape          (NOT data.shape)
 output.shape == data.shape
 ```
 
-Precision constraints match the hyperplane scatters: `indices` is
-`int32` or `int64`; `data`, `updates`, and `output` share one
+Precision constraints match the hyperplane scatters: `indices` has any one
+active signed-integer dtype; `data`, `updates`, and `output` share one
 precision. `axis` is in `0..rank(data)`; on every axis other than
 `axis`, `indices.shape[d] <= data.shape[d]`.
 
@@ -1298,7 +1302,7 @@ traps `Test` with its supplied label and the operation name.
 > float dtype, and `p` is one active tensor element dtype. Repeated variables
 > denote the same type, dtype, rank, and dimensions. `tensor_scan` has
 > [05-HOST-1]'s exact-width recurrence and adjoint; `process_run` has §2.6's
-> argv, exit-code, capture, `Io`, and outside-AD contract; and the assertion
+> argv, exit-code, capture, `IO`, and outside-AD contract; and the assertion
 > family has [05-HOST-3] and [05-OP-35]'s equality, own-width closeness,
 > left-to-right evaluation, zero-cotangent, and `Test` behavior. None has a
 > numeric accumulator other than `tensor_scan`'s explicitly typed recurrence
@@ -1391,9 +1395,9 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > **[05-HOST-2]** JSON and CSV operations, `round_to`, and `process_run` are
 > legal host-runtime operations in every language execution mode. Pure parsing,
 > projection, serialization, and rounding retain their stated purity; file and
-> process operations retain their declared `Io` effect and observable order.
+> process operations retain their declared `IO` effect and observable order.
 > A compiled host execution SHALL produce the same typed result or language
-> trap as evaluation. A device-only kernel may not perform `Io`, but that
+> trap as evaluation. A device-only kernel may not perform `IO`, but that
 > effect-boundary fact SHALL NOT be represented as a language-wide rejection,
 > inert stub, default value, or evaluator-only signature.
 
@@ -1695,14 +1699,28 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > mathematical value within their one static key dtype, and string keys order
 > lexicographically by Unicode scalar value. A dictionary has one static key
 > type, so no cross-kind or cross-width ordering is defined.
+> Recursive observation uses one byte grammar `R(value)` over every validated
+> `chelis_value` variant. Unit renders as `()`. Scalars, strings, tensors, and
+> Lists use [05-OP-25]'s exact scalar, raw-string, tensor, bracket, separator,
+> traversal, and tensor-truncation rules, except that `R` applies recursively
+> to each List element and therefore admits every variant defined here. A tuple
+> renders as `()` when it has no fields, `(R(v),)` when it has one, and as `(`
+> followed by its fields in index order separated by `, ` and then `)` when it
+> has two or more. A dictionary renders entries in the canonical key order above as
+> `{` followed by `R(key): R(value)` pairs separated by `, ` and then `}`;
+> `{}` is empty. An ADT renders its exact stored constructor-name bytes followed by `(`,
+> its fields in index order rendered by `R` and separated by `, `, and then
+> `)`; a zero-field constructor therefore renders as `Ctor()`. No structure
+> inserts quoting or escaping. The grammar is deliberately non-injective:
+> unit and an empty tuple both render `()`, and string bytes are unquoted.
 > `read_bytes` and `mmap_read` return int64 elements in `0..=255`; mapped
 > reads also require `offset + length` to lie within the mapped file.
 > Each of `chelis_print_list`, `chelis_print_tuple`, `chelis_print_dict`, and
-> `chelis_print_adt` writes exactly [05-OP-25]'s complete recursive rendering
-> of its argument followed by one byte `\n` to standard output. It adds no
+> `chelis_print_adt` writes exactly `R` of its argument followed by one byte
+> `\n` to standard output. It adds no
 > label, prefix, extra space, truncation beyond the nested tensor rule, or
 > additional newline. A short or failed write traps `IO`; bytes the operating
-> system accepted before that failure remain an ordinary prior `Io` effect.
+> system accepted before that failure remain an ordinary prior `IO` effect.
 > Successful return means every required byte was written. Recursive printing
 > applies [05-OBS-1..5] at each stored scalar's own dtype and never widens a
 > value for observation. These boundary operations are outside AD and have no
@@ -2324,7 +2342,7 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > must configure the intended toolchain explicitly. An absent, relative, or
 > non-executable capability traps `IO` with
 > `run_chelis: no valid Chelis executable configured`. Both
-> inherit the current working directory and environment. They are `Io`
+> inherit the current working directory and environment. They are `IO`
 > operations under [05-HOST-2] in every language execution mode. IO and process
 > operations are outside AD. Pure constructors, tokenizers, time values, and
 > decimal values have no cotangent unless their governing atom explicitly

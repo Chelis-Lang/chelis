@@ -71,13 +71,20 @@ rest as constants. The gradient result SHALL contain entries only for the listed
 `grad` SHALL construct the backward DAG by initializing each value's recursive shape-preserving
 cotangent to zero, seeding the scalar float output to exact one, traversing values in reverse
 topological order under each op's exact adjoint/zero/rejection contract, and accumulating each
-float leaf by the canonical adjacent-pair balanced tree over consumer-edge order. The combined
+float leaf by the canonical adjacent-pair balanced tree over consumer-edge order. Consumer edges
+SHALL be ordered lexicographically by the consumer's canonical forward node ordinal and then its
+input-slot index, independently of a topological-sort implementation's tie order. The combined
 forward+backward DAG SHALL remain acyclic.
 
 #### Scenario: Multi-use node sums contributions
 
 - **WHEN** a node is consumed by multiple downstream nodes
 - **THEN** its adjoint is the sum of all consumer contributions
+
+#### Scenario: Independent topological schedules preserve gradient bits
+
+- **WHEN** two valid backward work lists choose different ties among unrelated forward nodes
+- **THEN** both build the same canonical consumer-edge tree and produce identical gradient bits
 
 #### Scenario: Backward DAG is acyclic
 

@@ -1643,8 +1643,12 @@ callable from bypassing review while the capability tables are built.
    argument reductions, and canonical multi-axis sum/count; modular
    arithmetic; float classification; scalar/tensor/recursive-List `to_string`; boolean
    `and`/`or`/`not`; NaN-aware comparison/equality; exact scalar/container/C
-   tensor carriers; the 83-definition stdlib manifest; legal compiled host
-   effects; and target-independent runtime reduction windows. Logical
+   tensor carriers; byte-exact recursive runtime List/tuple/Dict/ADT
+   observation; every active signed-integer sparse-index width across IR and
+   public C; canonical gradient consumer-edge order by forward node ordinal
+   and input slot; the 83-definition stdlib manifest; legal compiled host
+   effects with the exact language spelling `IO`; and target-independent
+   runtime reduction windows. Logical
    operations are bool-only and do not alias numeric primitives; arithmetic
    reductions reject bool and `count` is the dedicated bool-tensor reduction.
    The exact scalar, container, tensor-runtime, exported numeric ADT, and
@@ -1752,7 +1756,7 @@ conformant. This is the executable requirement for zero capacity exceptions.
    `(ExternalCallableFamily, CanonicalCallableId, ExternalTargetContext)`
    target-disposition registry. Exact effect dependencies populate the
    `(CanonicalEffectRequirement, BackendId)` disposition registry over
-   `Random | Accum | Io | Test | Resource(ResourceId)`. Table A and sibling
+   `Random | Accum | IO | Test | Resource(ResourceId)`. Table A and sibling
    semantic cells use typed signature, result, atom, and diagnostic identities;
    backend and effect cells use typed implementation, issue, or
    rejected-by-design authorities.
