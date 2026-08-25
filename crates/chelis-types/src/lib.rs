@@ -1,4 +1,11 @@
 //! Type checker for the Chelis language.
+//!
+//! Closed effect identity is owned by [`chelis_vocab::EffectKind`]; this crate
+//! does not provide a compatibility re-export.
+//!
+//! ```compile_fail
+//! use chelis_types::EffectKind;
+//! ```
 
 pub mod adt;
 pub mod agreement;
@@ -50,7 +57,6 @@ pub use cancel::{
     CancelToken, CancelTokenGuard, EVAL_CANCELLED_MSG, cancellation_check_error,
     cancellation_requested, current_cancel_token, install_cancel_token, is_cancellation,
 };
-pub use chelis_vocab::EffectKind;
 pub use context::{LibraryProofId, TypeEnv};
 pub use dtype_semantics::{
     ArgReduceOp, CheckedCastKind, CheckedCastPlan, CheckedCastPlanError, CompareOp, FloatBinOp,

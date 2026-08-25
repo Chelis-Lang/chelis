@@ -168,39 +168,44 @@ The numeric remediation's covered-family surface ratchet and typed entry
 edges (`spec/design/dtype_semantics.md` §C6) bind every change that touches
 numeric data, whether or not you have read that document:
 
-- **No new numeric channel outside the tagged carrier.** A public ADT variant, wire
+- **No numeric channel outside the tagged carrier.** A public ADT variant, wire
   field, exported C signature, exported C data declaration, or binding parameter that
   carries numeric values as
   bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
-  finding. On every covered family the capacity census freezes both the canonical
-  surface identity and its enforcement-relevant derived classification: an UNFLAGGED
-  addition cites an OPEN issue; a FLAGGED capacity seam has NO citation path at all -
-  redesign onto the tagged carrier, remove it, or obtain a maintainer override in
-  review. Opening a fresh issue to cite is not authorization; new capacity debt does
-  not land. This applies to the stdlib ADT family on the same terms as the C ones: a
-  variant or field carrying a bare float primitive is a seam, while an INTEGER
-  primitive is classified `numeric-op` rather than being a seam. On a new,
-  post-ratchet row, that classification owes the semantic registration below;
-  the frozen initial descriptors retain their capacity dispositions without
-  retroactive registrations. This is why source-faithful ingestion variants
-  (`JsonInt(int64)`) are the wanted shape and a float funnel is not. The
-  grandfathered seam citation and the initial non-seam permanent disposition are
-  frozen to exact `(kind, canonical id, flags)` complete-descriptor lists, so neither
-  can be copied onto a new row to skip its own disposition. A rename, signature
-  change, or reclassification is a removal of the old descriptor plus an addition of
-  the successor descriptor; the successor follows the ordinary addition rules and
-  never inherits a frozen disposition by resemblance. In particular, a flagged
-  successor requires the named maintainer-override path until chelis#1160's separately
-  reviewed, tamper-evident relocation mechanism lands. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
+  finding. Zero-exception classification is the landing rule: every discovered row
+  must end in exactly one final authority class - structurally nonnumeric, a
+  structurally recognized exact tagged carrier/transport, or an exact numeric
+  operation registration. The checked-in census still carries the old 39
+  grandfather rows, three successor overrides, and 155 permanent-disposition rows
+  as deletion debt owned by chelis#1288. Those lists confer no authorization for a
+  new, renamed, reclassified, or otherwise changed row, and a change touching one
+  must move it to a final authority class rather than copy its disposition. A bare
+  numeric carrier has no citation or maintainer-override path:
+  redesign it onto the tagged carrier or remove it. Opening a fresh issue does not
+  authorize capacity debt. No grandfather, permanent-disposition,
+  successor-override, or integer-plumbing path is part of the final contract. A language-level stdlib ADT
+  field such as `t-prim f64` remains type-tagged by its declared Chelis type; the ADT
+  constructor is therefore a `numeric-op` requiring exact semantic registration,
+  not a C-style untagged carrier seam. Integer fields follow the same rule. Every
+  such constructor, irrespective of age, owes the semantic registration below.
+  Source-faithful ingestion still preserves distinct variants such as
+  `JsonInt(int64)` and `JsonFloat(f64)`; one float funnel is not an equivalent
+  tagged source model. The
+  complete inventory is exact and bijective with its authority map; regeneration
+  cannot bless an unclassified row. A rename, signature change, or reclassification
+  removes the old identity and adds a successor that independently satisfies the
+  final rule. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
   coverage become mandatory only through their named executable entry gates in §C6,
   and Phase 1 may not start before both are green. Coverage state comes from the
   test's typed `coverage_manifest()` (artifact, enumerator, command, expected
   success, and mutations), never an editable field in the baseline JSON.
-- **A new numeric op requires an exact semantic registration in the same change
-  set.** The owning family registry binds the callable's exact canonical identity to
+- **Every new or changed numeric op requires an exact semantic registration in the
+  same change set.** The owning family
+  registry binds the callable's exact canonical identity to
   one verbatim, existing `[05-OP-N]` authority in
-  `spec/05-risc-primitives.md`. A new callable authors that atom and its mapping
-  together. A chapter substring, `[05-OBS-1]`, an absent atom, or a Rust doc comment
+  `spec/05-risc-primitives.md`. A callable without an existing governing atom authors
+  that atom and its mapping together. A chapter substring, `[05-OBS-1]`, an absent
+  atom, or a Rust doc comment
   is not authority; existence means a normative definition line beginning
   `> **[05-OP-N]**`, not a cross-reference elsewhere. The atom states the signature,
   per-dtype semantics at [04-NUM-8]'s declared widths, adjoint or
@@ -209,7 +214,9 @@ numeric data, whether or not you have read that document:
   text actually governs the callable. Review does not confer semantic authority: if
   no existing atom governs it, amend the numbered spec first and register that new
   atom. Before allocating its number, re-check the highest existing `[05-OP-N]` on
-  current `main`. Authoring the atom also requires running
+  current `main`. The chelis#1288/#1293 prerequisites apply the same requirement to
+  every surviving legacy row; age and an old census disposition are not authority.
+  Authoring the atom also requires running
   `.venv/bin/python scripts/generate_rejection_registries.py --write` and committing
   the resulting `crates/chelis-types/src/rejection_registry_generated.rs`; that
   generated membership artifact is required in addition to, and is not a substitute
@@ -237,16 +244,17 @@ numeric data, whether or not you have read that document:
   non-character built-in arithmetic value type - including bare `int`, `short`,
   `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
   types - makes a callable `numeric-op`. Names and parameter-name heuristics never
-  turn a future callable into plumbing. The only exception is the closed set of
-  exactly three reviewed canonical declarations in
-  `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS`; each must also remain in an exact reviewed
-  seam-disposition set. Two remain in the shrink-only pre-ratchet set; PR #1149's
-  `chelis_alloc` successor remains in its closed one-off maintainer-override set.
-  Neither set is a route for a future declaration. Conditional macro definitions
+  turn a callable into plumbing. The executable census still contains three exact
+  integer-plumbing exceptions as chelis#1288 deletion debt; they cannot be copied,
+  widened, renamed, or used to authorize any changed declaration. The final rule
+  registers extents, allocation sizes, indices, and dtype selectors as numeric
+  operations; raw dtype selectors are forbidden.
+  Conditional macro definitions
   likewise taint their whole connected local-include component, by either include
   spelling: a public declaration consuming a tainted token is rejected even when the
-  definition lives in another header. These two rules are locked by PR #956 commit
-  `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; widening either exception requires
+  definition lives in another header. These conservative classification and
+  context rules are locked by PR #956 commit
+  `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; weakening either rule requires
   changing this contract and the negative controls together.
 - **An arithmetic spelling the census does not recognize is a BUILD FAILURE, not an
   unflagged row.** The closed list is the non-numeric one
