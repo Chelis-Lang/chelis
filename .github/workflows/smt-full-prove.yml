@@ -122,7 +122,7 @@ jobs:
       - name: Run clarabel-gated chelis-prove tests
         # OPENBLAS_MAIN_FREE=1 skips the OpenBLAS exit-time memory free that
         # segfaults on the runner after every test passes. The env is inline
-        # so it reaches the test binary inside the devenv shell. One thread
+        # so it reaches the test binary inside the Devenv shell. One thread
         # avoids the worker-pool teardown too; Clarabel problems are small.
         run: devenv-retry --profile smt shell --no-tui -- env OPENBLAS_MAIN_FREE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 cargo test -p chelis-prove --features clarabel
 
