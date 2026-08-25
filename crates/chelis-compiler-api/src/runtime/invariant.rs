@@ -945,7 +945,8 @@ mod tests {
         strip_span_meta(&mut expr);
         assert!(
             !mentions_span_key(&expr),
-            "span metadata inside transitional variants must be stripped: {expr:?}"
+            "span metadata inside transitional variants must be stripped \
+             (a span key survived under a BareList or UnknownForm child)"
         );
     }
 }
