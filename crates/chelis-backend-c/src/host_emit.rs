@@ -3997,6 +3997,22 @@ impl<'a> HostEmitter<'a> {
                 |index: usize| scalar_arithmetic_arg_expr(&arg_vars[index].0, &arg_vars[index].1);
             let binary = |operator, lhs, rhs| EmittedExpr::binary(operator, lhs, rhs);
             let unary = |operator, operand| EmittedExpr::unary(operator, operand);
+            let direct_extrema = |comparison| {
+                let lhs = numeric_arg(0);
+                let rhs = numeric_arg(1);
+                let lhs_nan = EmittedExpr::call("isnan", [lhs.clone()]);
+                let rhs_not_nan = EmittedExpr::unary(
+                    UnaryOperator::LogicalNot,
+                    EmittedExpr::call("isnan", [rhs.clone()]),
+                );
+                let ordered = binary(comparison, lhs, rhs);
+                let select_left = binary(
+                    BinaryOperator::LogicalOr,
+                    lhs_nan,
+                    binary(BinaryOperator::LogicalAnd, rhs_not_nan, ordered),
+                );
+                EmittedExpr::conditional(select_left, arg(0), arg(1))
+            };
             let expression_builtin = CExpressionBuiltin::decode(name)?;
             let expr = match expression_builtin {
                 CExpressionBuiltin::Add if is_integer_abi(ty) => integer_checked_binary_expr(
@@ -4616,29 +4632,17 @@ impl<'a> HostEmitter<'a> {
                     ty,
                 ),
                 CExpressionBuiltin::MinElem if is_integer_abi(ty) => EmittedExpr::conditional(
-                    binary(BinaryOperator::Less, arg(0), arg(1)),
+                    binary(BinaryOperator::LessEqual, arg(0), arg(1)),
                     arg(0),
                     arg(1),
                 ),
                 CExpressionBuiltin::MaxElem if is_integer_abi(ty) => EmittedExpr::conditional(
-                    binary(BinaryOperator::Greater, arg(0), arg(1)),
+                    binary(BinaryOperator::GreaterEqual, arg(0), arg(1)),
                     arg(0),
                     arg(1),
                 ),
-                CExpressionBuiltin::MinElem => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmin", "fminf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
-                ),
-                CExpressionBuiltin::MaxElem => finalize_scalar_expr(
-                    EmittedExpr::call(
-                        float_math_function(ty, "fmax", "fmaxf"),
-                        [numeric_arg(0), numeric_arg(1)],
-                    ),
-                    ty,
-                ),
+                CExpressionBuiltin::MinElem => direct_extrema(BinaryOperator::LessEqual),
+                CExpressionBuiltin::MaxElem => direct_extrema(BinaryOperator::GreaterEqual),
             };
             Ok(expr)
         };
@@ -4678,9 +4682,10 @@ impl<'a> HostEmitter<'a> {
     //     for every supported dtype arm.  All arms are semantically
     //     well-defined for the supported operators.
     //
-    //   * `assign_tensor_binary_func_elementwise` emits f32 libm calls
-    //     for F32. Its I32 arm emits an exact integer comparison for max
-    //     and min. F64, I64, and Bool abort.
+    //   * `assign_tensor_binary_func_elementwise` emits direct operand
+    //     selection for every represented dtype. Float arms preserve the
+    //     first NaN and every lhs equality bit-pattern; integer and Bool arms
+    //     select the lhs on equality.
     //
     //   * `assign_tensor_unary_func_elementwise` takes an f32-only helper
     //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32.
@@ -4782,17 +4787,12 @@ impl<'a> HostEmitter<'a> {
         ));
         self.lines
             .push(format!("{}switch ({target}->dtype) {{", self.indent));
-        for arm in DtypeArm::f32_payload_func_arms() {
+        for arm in DtypeArm::all_operator_arms() {
             self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, *arm);
         }
-        self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, DtypeArm::I32);
-        self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I64, DtypeArm::Bool],
-            &format!("binary func elementwise ({})", func.f32_name()),
-        );
         self.emit_default_runtime_fail_arm_for(
             target,
-            &format!("binary func elementwise ({})", func.f32_name()),
+            &format!("binary func elementwise ({})", func.label()),
         );
         self.lines.push(format!("{}}}", self.indent));
     }
@@ -4912,17 +4912,14 @@ impl<'a> HostEmitter<'a> {
             "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->rank);"
         ));
         let expression = match arm {
-            DtypeArm::F32 => format!(
-                "{}(__lhs_data[idx_lhs], __rhs_data[idx_rhs])",
-                func.f32_name()
+            DtypeArm::F32 | DtypeArm::F64 => format!(
+                "isnan(__lhs_data[idx_lhs]) || (!isnan(__rhs_data[idx_rhs]) && __lhs_data[idx_lhs] {} __rhs_data[idx_rhs]) ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
+                func.comparison()
             ),
-            DtypeArm::I32 => format!(
+            DtypeArm::Bool | DtypeArm::I32 | DtypeArm::I64 => format!(
                 "__lhs_data[idx_lhs] {} __rhs_data[idx_rhs] ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
-                func.i32_comparison()
+                func.comparison()
             ),
-            DtypeArm::F64 | DtypeArm::I64 | DtypeArm::Bool => {
-                unreachable!("binary func arm must reject non-f32-function dtypes before emission")
-            }
         };
         self.lines
             .push(format!("{ind}            __target_data[i] = {expression};"));
@@ -8123,14 +8120,14 @@ enum BinaryElementwiseFunc {
 }
 
 impl BinaryElementwiseFunc {
-    fn f32_name(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
-            Self::Max => "fmaxf",
-            Self::Min => "fminf",
+            Self::Max => "max_elem",
+            Self::Min => "min_elem",
         }
     }
 
-    fn i32_comparison(self) -> &'static str {
+    fn comparison(self) -> &'static str {
         match self {
             Self::Max => ">=",
             Self::Min => "<=",

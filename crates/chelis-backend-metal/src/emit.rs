@@ -578,6 +578,29 @@ impl Emitter {
             // Binary elementwise (M2 first cut: add, mul).
             RiscOp::Add | RiscOp::Mul => self.emit_binary(dag, node),
 
+            // chelis#1306: these identities are rejected by the shared typed
+            // Metal capability gate. Keep explicit backend arms so no new
+            // operation can fall through the generic unsupported wildcard.
+            RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem | RiscOp::ExtremaAdjoint { .. } => {
+                Err(format!(
+                    "Metal direct arithmetic node {id} reached emission after the #1306 typed capability rejection"
+                ))
+            }
+            RiscOp::FusedElem { ops }
+                if ops.iter().any(|step| {
+                    matches!(
+                        step.op,
+                        chelis_ir::dag::FusedStepOp::Sub
+                            | chelis_ir::dag::FusedStepOp::MaxElem
+                            | chelis_ir::dag::FusedStepOp::MinElem
+                    )
+                }) =>
+            {
+                Err(format!(
+                    "Metal fused direct arithmetic node {id} reached emission after the #1306 typed capability rejection"
+                ))
+            }
+
             // Full-axis rank-1 reductions to scalar. WS-M1 widens the
             // accumulator admission per spec/04-type-system.md §5.7.1
             // (f16/bf16 → f32; i8/i16 → i32; i32/i64 → same; f32 → f32).

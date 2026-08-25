@@ -150,12 +150,15 @@ fn classify_nodes(dag: &Dag, reduction_inlined: &HashSet<NodeId>) -> Vec<NodeMem
                 // before codegen; classification completeness only).
                 | RiscOp::Shape { .. }
                 | RiscOp::Add
+                | RiscOp::Sub
                 | RiscOp::Mul
                 | RiscOp::Div
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
                 | RiscOp::CmpLt
                 | RiscOp::MaxElem
+                | RiscOp::MinElem
+                | RiscOp::ExtremaAdjoint { .. }
                 | RiscOp::Neg
                 | RiscOp::Recip
                 | RiscOp::Exp

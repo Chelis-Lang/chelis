@@ -199,12 +199,15 @@ fn check_finite_floats(wire_dag: &WireDag) -> Result<(), GraphExtractError> {
             // wildcard) so a new variant breaks the build until someone
             // decides whether it carries an f64. ---
             WireRiscOp::Add
+            | WireRiscOp::Sub
             | WireRiscOp::Mul
             | WireRiscOp::Div
             | WireRiscOp::FloorDiv
             | WireRiscOp::TruncDiv
             | WireRiscOp::CmpLt
             | WireRiscOp::MaxElem
+            | WireRiscOp::MinElem
+            | WireRiscOp::ExtremaAdjoint { .. }
             | WireRiscOp::Neg
             | WireRiscOp::Recip
             | WireRiscOp::Exp

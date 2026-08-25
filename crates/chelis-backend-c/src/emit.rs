@@ -1,8 +1,9 @@
 //! RISC DAG to C source code emission.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStep, FusedStepOp, NodeId, ReduceWindowKind,
-    RiscOp, RtDim, SymbolicDimSource, TensorType, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStep,
+    FusedStepOp, NodeId, ReduceWindowKind, RiscOp, RtDim, SymbolicDimSource, TensorType,
+    symbolic_bindings,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
@@ -469,16 +470,18 @@ impl CEmitter {
         let id = node.id.0;
         // chelis#664: same-shape elementwise family — guard operand
         // agreement before the op emitters index operands through the
-        // output's shape. (`Sub`, `min`, and `where` have no RISC op of
-        // their own; they lower through this family.)
+        // output's shape.
         if matches!(
             node.op,
             RiscOp::Add
+                | RiscOp::Sub
                 | RiscOp::Mul
                 | RiscOp::Div
                 | RiscOp::TruncDiv
                 | RiscOp::FloorDiv
                 | RiscOp::MaxElem
+                | RiscOp::MinElem
+                | RiscOp::ExtremaAdjoint { .. }
                 | RiscOp::CmpLt
         ) {
             self.emit_elementwise_operand_guard(node, dag);
@@ -489,6 +492,7 @@ impl CEmitter {
             RiscOp::Shape { axis } => self.emit_shape(id, *axis, &node.inputs, &node.output_type),
             RiscOp::Load { .. } => unreachable!("handled in emit_dag"),
             RiscOp::Add => self.emit_binary(id, "+", &node.inputs, &node.output_type),
+            RiscOp::Sub => self.emit_binary(id, "-", &node.inputs, &node.output_type),
             RiscOp::Mul => self.emit_binary(id, "*", &node.inputs, &node.output_type),
             RiscOp::Div => self.emit_binary(id, "/", &node.inputs, &node.output_type),
             // chelis#178: `trunc_div` is the C integer `/` quotient (round
@@ -502,6 +506,12 @@ impl CEmitter {
             RiscOp::FloorDiv => self.emit_floor_div(id, &node.inputs, &node.output_type),
             RiscOp::MaxElem => {
                 self.emit_binary_func(id, "fmaxf", &node.inputs, &node.output_type);
+            }
+            RiscOp::MinElem => {
+                self.emit_binary_func(id, "fminf", &node.inputs, &node.output_type);
+            }
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                self.emit_extrema_adjoint(id, *kind, *operand, &node.inputs, &node.output_type)
             }
             RiscOp::CmpLt => self.emit_cmplt(id, &node.inputs, &node.output_type, dag),
             RiscOp::Neg => self.emit_unary(id, "-", &node.inputs, &node.output_type),
@@ -1962,7 +1972,7 @@ impl CEmitter {
         // `chelis_int_div_guard`, which aborts with the same clean diagnostic
         // the evaluator emits. Float `/` is IEEE-754 (`1.0/0.0 == inf`) and
         // is never guarded; `+`/`*`/`fmaxf` never divide.
-        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "*" | "/");
+        let checked_int = ty.precision.is_integer() && matches!(op, "+" | "-" | "*" | "/");
         let elem_expr = |lhs: String, rhs: String| -> String {
             if !checked_int {
                 return format!("{lhs} {op} {rhs}");
@@ -1970,6 +1980,7 @@ impl CEmitter {
             let bits = Self::integer_width(ty.precision);
             let op_name = match op {
                 "+" => "add",
+                "-" => "sub",
                 "*" => "mul",
                 "/" => "trunc_div",
                 _ => unreachable!(),
@@ -1982,6 +1993,9 @@ impl CEmitter {
             match op {
                 "+" => format!(
                     "({et})chelis_int_checked_add((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
+                ),
+                "-" => format!(
+                    "({et})chelis_int_checked_sub((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
                 ),
                 "*" => format!(
                     "({et})chelis_int_checked_mul((int64_t)({lhs}), (int64_t)({rhs}), {bits}, {overflow:?})"
@@ -2279,7 +2293,21 @@ impl CEmitter {
         self.line("}");
     }
 
-    // ---- Binary func (fmaxf etc.) ----
+    /// Exact direct-extrema selection expression for f32/f64 and integer
+    /// storage. The conditional returns one operand expression unchanged, so
+    /// NaN payloads, NaN signs, and signed zero bits are never re-encoded.
+    fn extrema_select_expr(ty: &TensorType, func: &str, lhs: String, rhs: String) -> String {
+        let comparison = if func.contains("max") { ">=" } else { "<=" };
+        if ty.precision.is_integer() {
+            format!("(({lhs}) {comparison} ({rhs}) ? ({lhs}) : ({rhs}))")
+        } else {
+            format!(
+                "(isnan({lhs}) || (!isnan({rhs}) && ({lhs}) {comparison} ({rhs})) ? ({lhs}) : ({rhs}))"
+            )
+        }
+    }
+
+    // ---- Direct extrema selection ----
     fn emit_binary_func(&mut self, id: usize, func: &str, inputs: &[NodeId], ty: &TensorType) {
         if Self::is_reduced_float(ty) {
             self.emit_binary_func_reduced_f(id, func, inputs, ty);
@@ -2288,19 +2316,6 @@ impl CEmitter {
         let a = inputs[0].0;
         let b = inputs[1].0;
         let et = Self::elem_type(ty);
-        let f = if Self::is_f64(ty) {
-            Self::double_math_fn(func)
-        } else {
-            func
-        };
-        let elem_expr = |lhs: String, rhs: String| -> String {
-            if ty.precision.is_integer() {
-                let comparison = if func.contains("max") { ">" } else { "<" };
-                format!("(({lhs}) {comparison} ({rhs}) ? ({lhs}) : ({rhs}))")
-            } else {
-                format!("{f}({lhs}, {rhs})")
-            }
-        };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
@@ -2319,7 +2334,12 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!(
             "__out_{id}[i] = {};",
-            elem_expr(format!("__in_a_{id}[i]"), format!("__in_b_{id}[i]"))
+            Self::extrema_select_expr(
+                ty,
+                func,
+                format!("__in_a_{id}[i]"),
+                format!("__in_b_{id}[i]")
+            )
         ));
         self.indent -= 1;
         self.line("}");
@@ -2343,7 +2363,9 @@ impl CEmitter {
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {};",
-            elem_expr(
+            Self::extrema_select_expr(
+                ty,
+                func,
                 format!("(({et}*)t{a}->data)[idx_a]"),
                 format!("(({et}*)t{b}->data)[idx_b]")
             )
@@ -2866,11 +2888,8 @@ impl CEmitter {
         self.line("}");
     }
 
-    /// WS-1: bf16 / f16 binary func (e.g., `fmaxf`). Convert both
-    /// operands to f32, apply the (single-precision) math function,
-    /// convert back. Math libs that batch on f32 buffers cannot be
-    /// used here without a wider conversion pass; the scalar loop is
-    /// the canonical path for reduced-float arithmetic.
+    /// Direct bf16/f16 extrema. Values are decoded only for NaN/comparison;
+    /// the selected original `uint16_t` is copied unchanged.
     fn emit_binary_func_reduced_f(
         &mut self,
         id: usize,
@@ -2881,7 +2900,7 @@ impl CEmitter {
         let a = inputs[0].0;
         let b = inputs[1].0;
         let load = Self::reduced_to_f32_fn(ty.precision);
-        let store = Self::f32_to_reduced_fn(ty.precision);
+        let comparison = if func.contains("max") { ">=" } else { "<=" };
         self.emit_slot_wrapper(id, ty);
         self.line(&format!(
             "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size) {{"
@@ -2902,7 +2921,9 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
         self.line(&format!("float __bv = {load}(__in_b_{id}[i]);"));
-        self.line(&format!("__out_{id}[i] = {store}({func}(__av, __bv));"));
+        self.line(&format!(
+            "__out_{id}[i] = (isnan(__av) || (!isnan(__bv) && __av {comparison} __bv)) ? __in_a_{id}[i] : __in_b_{id}[i];"
+        ));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -2930,7 +2951,150 @@ impl CEmitter {
             "float __bv = {load}(((uint16_t*)t{b}->data)[idx_b]);"
         ));
         self.line(&format!(
-            "((uint16_t*)t{id}->data)[i] = {store}({func}(__av, __bv));"
+            "((uint16_t*)t{id}->data)[i] = (isnan(__av) || (!isnan(__bv) && __av {comparison} __bv)) ? ((uint16_t*)t{a}->data)[idx_a] : ((uint16_t*)t{b}->data)[idx_b];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    /// Emit the AD-only selected-extrema cotangent. The selection predicate
+    /// is identical to the forward direct extrema rule, and the complete
+    /// cotangent is copied without arithmetic when its operand was selected.
+    fn emit_extrema_adjoint(
+        &mut self,
+        id: usize,
+        kind: ExtremaKind,
+        operand: ExtremaOperand,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let g = inputs[2].0;
+        let comparison = match kind {
+            ExtremaKind::Max => ">=",
+            ExtremaKind::Min => "<=",
+        };
+        let take_selected = |left: String| match operand {
+            ExtremaOperand::Left => left,
+            ExtremaOperand::Right => format!("!({left})"),
+        };
+        self.emit_slot_wrapper(id, ty);
+
+        if Self::is_reduced_float(ty) {
+            let load = Self::reduced_to_f32_fn(ty.precision);
+            self.line(&format!(
+                "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && chelis_is_contiguous(t{g}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size && t{g}->size == t{id}->size) {{"
+            ));
+            self.indent += 1;
+            self.line(&format!(
+                "uint16_t* restrict __out_{id} = (uint16_t*)t{id}->data;"
+            ));
+            self.line(&format!(
+                "const uint16_t* restrict __in_a_{id} = (const uint16_t*)t{a}->data;"
+            ));
+            self.line(&format!(
+                "const uint16_t* restrict __in_b_{id} = (const uint16_t*)t{b}->data;"
+            ));
+            self.line(&format!(
+                "const uint16_t* restrict __in_g_{id} = (const uint16_t*)t{g}->data;"
+            ));
+            self.line("#pragma omp parallel for simd");
+            self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            self.line(&format!("float __av = {load}(__in_a_{id}[i]);"));
+            self.line(&format!("float __bv = {load}(__in_b_{id}[i]);"));
+            let left = format!("isnan(__av) || (!isnan(__bv) && __av {comparison} __bv)");
+            self.line(&format!(
+                "__out_{id}[i] = {} ? __in_g_{id}[i] : UINT16_C(0);",
+                take_selected(left)
+            ));
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("} else {");
+            self.indent += 1;
+            self.line("#pragma omp parallel for");
+            self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
+            self.indent += 1;
+            self.line(&format!(
+                "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+            ));
+            self.line(&format!(
+                "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+            ));
+            for (name, source) in [("a", a), ("b", b), ("g", g)] {
+                self.line(&format!("int64_t idx_{name} = chelis_indices_to_flat(indices, t{source}->strides, t{source}->rank);"));
+            }
+            self.line(&format!(
+                "float __av = {load}(((uint16_t*)t{a}->data)[idx_a]);"
+            ));
+            self.line(&format!(
+                "float __bv = {load}(((uint16_t*)t{b}->data)[idx_b]);"
+            ));
+            let left = format!("isnan(__av) || (!isnan(__bv) && __av {comparison} __bv)");
+            self.line(&format!(
+                "((uint16_t*)t{id}->data)[i] = {} ? ((uint16_t*)t{g}->data)[idx_g] : UINT16_C(0);",
+                take_selected(left)
+            ));
+            self.indent -= 1;
+            self.line("}");
+            self.indent -= 1;
+            self.line("}");
+            return;
+        }
+
+        let et = Self::elem_type(ty);
+        let zero = if Self::is_f64(ty) { "0.0" } else { "0.0f" };
+        self.line(&format!(
+            "if (chelis_is_contiguous(t{a}) && chelis_is_contiguous(t{b}) && chelis_is_contiguous(t{g}) && t{a}->size == t{id}->size && t{b}->size == t{id}->size && t{g}->size == t{id}->size) {{"
+        ));
+        self.indent += 1;
+        self.line(&format!("{et}* restrict __out_{id} = ({et}*)t{id}->data;"));
+        self.line(&format!(
+            "const {et}* restrict __in_a_{id} = (const {et}*)t{a}->data;"
+        ));
+        self.line(&format!(
+            "const {et}* restrict __in_b_{id} = (const {et}*)t{b}->data;"
+        ));
+        self.line(&format!(
+            "const {et}* restrict __in_g_{id} = (const {et}*)t{g}->data;"
+        ));
+        self.line("#pragma omp parallel for simd");
+        self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        let left = format!(
+            "isnan(__in_a_{id}[i]) || (!isnan(__in_b_{id}[i]) && __in_a_{id}[i] {comparison} __in_b_{id}[i])"
+        );
+        self.line(&format!(
+            "__out_{id}[i] = {} ? __in_g_{id}[i] : {zero};",
+            take_selected(left)
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.indent -= 1;
+        self.line("} else {");
+        self.indent += 1;
+        self.line("#pragma omp parallel for");
+        self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        for (name, source) in [("a", a), ("b", b), ("g", g)] {
+            self.line(&format!("int64_t idx_{name} = chelis_indices_to_flat(indices, t{source}->strides, t{source}->rank);"));
+        }
+        let left = format!(
+            "isnan((({et}*)t{a}->data)[idx_a]) || (!isnan((({et}*)t{b}->data)[idx_b]) && (({et}*)t{a}->data)[idx_a] {comparison} (({et}*)t{b}->data)[idx_b])"
+        );
+        self.line(&format!(
+            "(({et}*)t{id}->data)[i] = {} ? (({et}*)t{g}->data)[idx_g] : {zero};",
+            take_selected(left)
         ));
         self.indent -= 1;
         self.line("}");
@@ -3161,6 +3325,11 @@ impl CEmitter {
                 let b = resolve(&inputs[1]);
                 format!("{a} + {b}")
             }
+            FusedStepOp::Sub => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("{a} - {b}")
+            }
             FusedStepOp::Mul => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
@@ -3192,8 +3361,12 @@ impl CEmitter {
             FusedStepOp::MaxElem => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                let f = mf("fmaxf");
-                format!("{f}({a}, {b})")
+                format!("(isnan({a}) || (!isnan({b}) && ({a}) >= ({b})) ? ({a}) : ({b}))")
+            }
+            FusedStepOp::MinElem => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("(isnan({a}) || (!isnan({b}) && ({a}) <= ({b})) ? ({a}) : ({b}))")
             }
             FusedStepOp::CmpLt => {
                 let a = resolve(&inputs[0]);
@@ -3278,6 +3451,11 @@ impl CEmitter {
                 let b = resolve(&inputs[1]);
                 format!("_mm256_add_ps({a}, {b})")
             }
+            FusedStepOp::Sub => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!("_mm256_sub_ps({a}, {b})")
+            }
             FusedStepOp::Mul => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
@@ -3305,7 +3483,16 @@ impl CEmitter {
             FusedStepOp::MaxElem => {
                 let a = resolve(&inputs[0]);
                 let b = resolve(&inputs[1]);
-                format!("_mm256_max_ps({a}, {b})")
+                format!(
+                    "_mm256_blendv_ps({b}, {a}, _mm256_or_ps(_mm256_cmp_ps({a}, {a}, _CMP_UNORD_Q), _mm256_and_ps(_mm256_cmp_ps({b}, {b}, _CMP_ORD_Q), _mm256_cmp_ps({a}, {b}, _CMP_GE_OQ))))"
+                )
+            }
+            FusedStepOp::MinElem => {
+                let a = resolve(&inputs[0]);
+                let b = resolve(&inputs[1]);
+                format!(
+                    "_mm256_blendv_ps({b}, {a}, _mm256_or_ps(_mm256_cmp_ps({a}, {a}, _CMP_UNORD_Q), _mm256_and_ps(_mm256_cmp_ps({b}, {b}, _CMP_ORD_Q), _mm256_cmp_ps({a}, {b}, _CMP_LE_OQ))))"
+                )
             }
             FusedStepOp::CmpLt => {
                 let a = resolve(&inputs[0]);
@@ -5820,6 +6007,11 @@ impl CEmitter {
                     let b = resolve(&step.input_indices[1]);
                     format!("{a} + {b}")
                 }
+                FusedStepOp::Sub => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("{a} - {b}")
+                }
                 FusedStepOp::Mul => {
                     let a = resolve(&step.input_indices[0]);
                     let b = resolve(&step.input_indices[1]);
@@ -5846,7 +6038,12 @@ impl CEmitter {
                 FusedStepOp::MaxElem => {
                     let a = resolve(&step.input_indices[0]);
                     let b = resolve(&step.input_indices[1]);
-                    format!("fmaxf({a}, {b})")
+                    format!("(isnan({a}) || (!isnan({b}) && ({a}) >= ({b})) ? ({a}) : ({b}))")
+                }
+                FusedStepOp::MinElem => {
+                    let a = resolve(&step.input_indices[0]);
+                    let b = resolve(&step.input_indices[1]);
+                    format!("(isnan({a}) || (!isnan({b}) && ({a}) <= ({b})) ? ({a}) : ({b}))")
                 }
                 FusedStepOp::CmpLt => {
                     let a = resolve(&step.input_indices[0]);

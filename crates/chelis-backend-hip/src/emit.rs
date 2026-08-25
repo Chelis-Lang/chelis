@@ -4,7 +4,8 @@
 //! and walks the DAG in topological order launching kernels on GPU.
 
 use chelis_ir::dag::{
-    Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+    symbolic_bindings,
 };
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
@@ -956,6 +957,7 @@ impl HipEmitter {
                 "kernel_add{}",
                 Self::dtype_kernel_suffix(operand_prec())
             )),
+            RiscOp::Sub => Some(format!("kernel_sub_{}", kind_for_node(node)?.suffix())),
             RiscOp::Mul => Some(format!(
                 "kernel_mul{}",
                 Self::dtype_kernel_suffix(operand_prec())
@@ -976,7 +978,28 @@ impl HipEmitter {
                 Self::dtype_kernel_suffix(operand_prec())
             )),
             // WS-A2: float-only kernel templates remain `_<f32|f64>`-suffixed.
-            RiscOp::MaxElem => Some(format!("kernel_max_elem_{}", kind_for_node(node)?.suffix())),
+            RiscOp::MaxElem => Some(format!(
+                "kernel_max_elem{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::MinElem => Some(format!(
+                "kernel_min_elem{}",
+                Self::dtype_kernel_suffix(operand_prec())
+            )),
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                let extrema = match kind {
+                    ExtremaKind::Max => "max",
+                    ExtremaKind::Min => "min",
+                };
+                let selected = match operand {
+                    ExtremaOperand::Left => "left",
+                    ExtremaOperand::Right => "right",
+                };
+                Some(format!(
+                    "kernel_{extrema}_adjoint_{selected}_{}",
+                    kind_for_node(node)?.suffix()
+                ))
+            }
             RiscOp::CmpLt => {
                 // CmpLt has bool output but operand-precision storage;
                 // dispatch on the operand precision so the kernel name
@@ -1222,6 +1245,11 @@ impl HipEmitter {
                     kernels::binary_elementwise_typed(name, "+", Self::dtype_c_type(prec))
                 }
             }
+            RiscOp::Sub => kernels::binary_elementwise(
+                name,
+                "-",
+                Self::elem_kind(&dag.get(node.inputs[0]).unwrap().output_type)?,
+            ),
             RiscOp::Mul => {
                 let prec = operand_prec();
                 if matches!(prec, Prim::F32 | Prim::F64) {
@@ -1276,7 +1304,21 @@ impl HipEmitter {
                 );
                 kernels::binary_elementwise_typed(name, "/", Self::dtype_c_type(prec))
             }
-            RiscOp::MaxElem => kernels::binary_func(name, "fmaxf", elem_for_unary()?),
+            RiscOp::MaxElem | RiscOp::MinElem => {
+                let precision = operand_prec();
+                let is_max = matches!(op, RiscOp::MaxElem);
+                if precision.is_integer() {
+                    kernels::binary_extrema_integer(name, is_max, Self::dtype_c_type(precision))
+                } else {
+                    kernels::binary_extrema(name, is_max, elem_for_unary()?)
+                }
+            }
+            RiscOp::ExtremaAdjoint { kind, operand } => kernels::extrema_adjoint(
+                name,
+                matches!(kind, ExtremaKind::Max),
+                matches!(operand, ExtremaOperand::Left),
+                elem_for_unary()?,
+            ),
             RiscOp::CmpLt => {
                 let operand_ty = &dag.get(node.inputs[0]).unwrap().output_type;
                 Self::require_result_width_matches_operand(node, operand_ty)?;
@@ -1533,6 +1575,12 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
+            RiscOp::Sub => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
             RiscOp::Mul => self.emit_binary_launch(
                 id,
                 &resolved_kernel_name()?,
@@ -1553,7 +1601,13 @@ impl HipEmitter {
                 &node.inputs,
                 &node.output_type,
             ),
-            RiscOp::MaxElem => self.emit_binary_launch(
+            RiscOp::MaxElem | RiscOp::MinElem => self.emit_binary_launch(
+                id,
+                &resolved_kernel_name()?,
+                &node.inputs,
+                &node.output_type,
+            ),
+            RiscOp::ExtremaAdjoint { .. } => self.emit_ternary_launch(
                 id,
                 &resolved_kernel_name()?,
                 &node.inputs,
@@ -2138,6 +2192,54 @@ impl HipEmitter {
              &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
             a_stride_refs = self.stride_arg_refs(id, "a"),
             b_stride_refs = self.stride_arg_refs(id, "b"),
+            out_shape_refs = self.shape_arg_refs(id, "out"),
+        ));
+        self.emit_kernel_launch_expr(
+            &format!("mod_{kernel_name}"),
+            kernel_name,
+            &format!("(t{id}_size + 255) / 256"),
+            "256",
+            "args",
+        );
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    // ------------------------------------------------------------------
+    // Ternary elementwise kernel launch
+    // ------------------------------------------------------------------
+
+    fn emit_ternary_launch(
+        &mut self,
+        id: usize,
+        kernel_name: &str,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
+        let a = inputs[0].0;
+        let b = inputs[1].0;
+        let g = inputs[2].0;
+        self.emit_slot_wrapper(id, ty);
+        self.line("{");
+        self.indent += 1;
+        self.line(&format!("int t{id}_size = d_t{id}->size;"));
+        for (name, source) in [("a", a), ("b", b), ("g", g)] {
+            self.emit_stride_vars(id, name, source);
+            self.line(&format!("int t{id}_{name}_ndim = d_t{source}->ndim;"));
+            self.line(&format!(
+                "int t{id}_{name}_size = d_t{source}->storage_size;"
+            ));
+        }
+        self.emit_shape_vars(id, "out", id);
+        self.line(&format!("int t{id}_out_ndim = d_t{id}->ndim;"));
+        self.line(&format!(
+            "void *args[] = {{ &d_t{a}->data, {a_stride_refs}, &t{id}_a_ndim, &t{id}_a_size, \
+             &d_t{b}->data, {b_stride_refs}, &t{id}_b_ndim, &t{id}_b_size, \
+             &d_t{g}->data, {g_stride_refs}, &t{id}_g_ndim, &t{id}_g_size, \
+             &d_t{id}->data, {out_shape_refs}, &t{id}_out_ndim, &t{id}_size }};",
+            a_stride_refs = self.stride_arg_refs(id, "a"),
+            b_stride_refs = self.stride_arg_refs(id, "b"),
+            g_stride_refs = self.stride_arg_refs(id, "g"),
             out_shape_refs = self.shape_arg_refs(id, "out"),
         ));
         self.emit_kernel_launch_expr(
@@ -3517,11 +3619,14 @@ impl HipEmitter {
             | RiscOp::Const { .. }
             | RiscOp::ConstTensor { .. }
             | RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::MaxElem
+            | RiscOp::MinElem
+            | RiscOp::ExtremaAdjoint { .. }
             | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
