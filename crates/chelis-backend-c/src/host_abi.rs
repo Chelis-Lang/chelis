@@ -235,6 +235,7 @@ fn project_binding(
     Ok(HostAbiBinding {
         name: binding.name,
         display_name: binding.display_name,
+        display_roots: binding.display_roots,
         ty: HostAbiType::try_from_concrete(&binding.ty)?,
         value: project_expr(binding.value, allowed_callbacks)?,
     })

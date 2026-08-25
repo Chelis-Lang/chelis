@@ -1,17 +1,18 @@
 //! W6 acceptance oracle for the worked opaque-invariants examples.
 //!
-//! Two executable files (Example Corpus Policy), both library-only:
+//! Two executable files (Example Corpus Policy):
 //!
 //! - `examples/opaque_invariants.ch` (executable): the `Probability`
 //!   unit-interval type. Every part runs clean -- `fmt --check`, `check`
-//!   (score 1), `eval`/`build` (library-only), and `prove` (three SMT-tier
+//!   (score 1), `eval`/`build` (no owed roots), and `prove` (three SMT-tier
 //!   producer obligations plus an injected property).
 //! - `examples/opaque_invariants_simplex.ch` (executable): the `Simplex`
 //!   tolerance-band type with a `sum`-over-a-tensor-field invariant. The
 //!   invariant predicate is declaration metadata consumed only by `chelis
 //!   prove`; it is never lowered to runtime IR, so the runtime IR audit skips
-//!   it and the file now `eval`/`build`s cleanly (library-only, like
-//!   `Probability`). Its producer obligation discharges at Tier C (fuzz) and a
+//!   it and the file now `eval`/`build`s cleanly. Its top-level `eps` value is
+//!   an automatic owed root under [05-OBS-7]. Its producer obligation
+//!   discharges at Tier C (fuzz) and a
 //!   `Simplex` binder is served by constructor-based generation without
 //!   starving (the D-STARVE acceptance probe). Promoted from
 //!   `examples/illustrative/` once that audit stopped rejecting the
@@ -95,14 +96,14 @@ fn both_examples_check_clean_with_score_one() {
     assert_check_clean(&simplex_example());
 }
 
-/// `eval --file` succeeds on both examples. Both are library-only (only
-/// `@opaque`/`@invariant` declarations plus exported producers and a
-/// `@property`), so each emits the def-only warning and produces no value.
+/// `eval --file` succeeds on both examples. `Probability` has no owed roots,
+/// so it emits the def-only warning and produces no value. `Simplex` has the
+/// top-level `eps` binding, which [05-OBS-7] requires it to realize.
 /// This is the regression guard for the runtime IR audit fix: before it, the
 /// `Simplex` tensor-field invariant tripped `assert_ir_typed`
 /// ("shape-sensitive IR app nodes must carry explicit type metadata before
 /// lowering") because the audit walked the declaration metadata.
-fn assert_eval_library_only(path: &PathBuf) {
+fn assert_eval_without_roots(path: &PathBuf) {
     Command::cargo_bin("chelis")
         .expect("binary")
         .arg("eval")
@@ -117,15 +118,23 @@ fn assert_eval_library_only(path: &PathBuf) {
 }
 
 #[test]
-fn both_examples_eval_clean_library_only() {
-    assert_eval_library_only(&probability_example());
-    assert_eval_library_only(&simplex_example());
+fn both_examples_eval_clean_with_manifested_roots() {
+    assert_eval_without_roots(&probability_example());
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .arg("eval")
+        .arg("--file")
+        .arg(simplex_example())
+        .assert()
+        .success()
+        .stdout("eps = 0.0001\n")
+        .stderr(predicate::str::is_empty());
 }
 
-/// `build` (default C target) succeeds on both examples, emitting the C
-/// translation unit. The `Simplex` tensor-field invariant predicate is
-/// declaration metadata for `chelis prove`; it is never lowered to runtime
-/// IR, so the build path emits clean C just like `Probability`.
+/// `build` (default C target) succeeds on both examples. `Probability` emits
+/// an object without an observation entry point, while `Simplex` emits an
+/// executable entry point for `eps`. Its tensor-field invariant predicate is
+/// declaration metadata for `chelis prove`; it is never lowered to runtime IR.
 fn assert_build_clean(path: &PathBuf) {
     let out_dir = tempdir().expect("tempdir");
     Command::cargo_bin("chelis")

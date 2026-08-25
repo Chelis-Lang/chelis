@@ -152,6 +152,22 @@ When `chelis eval --file` runs from inside a Reef package root, ad hoc
 snippet files can import package modules even if the snippet file
 itself lives outside `src/` and does not declare a top-level `module`.
 
+### Targeted evaluation and root manifests
+
+`chelis eval --target eval|c|hip|metal` computes the root manifest against the
+selected backend's capabilities. The default is `eval`. This is useful when a
+program must be compared with a generated artifact: for example, an f64 root
+can use the Tensor lane under `eval` while the same root routes through the
+Host lane under `c`. An unknown target is an error; it never falls back to a
+different capability set.
+
+Every successful `chelis eval --json` response includes a `manifest` object:
+the selected `target`, ordered `entries` (`name`, `lane`, and
+`required_inputs`), and `requires_main`. The `roots` array has exactly the
+selected manifest names in the same order. Tuple roots and statically fixed
+ADT roots use dotted component names. If a lane cannot produce an owed root,
+evaluation exits nonzero instead of returning a partial JSON document.
+
 ### Bounding a slow evaluation
 
 Interactively, Ctrl-C stops a running `chelis eval` immediately. For

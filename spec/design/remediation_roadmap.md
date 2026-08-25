@@ -42,7 +42,7 @@ issue that took it:
 | [#730] makes callable rejections loud and explicitly non-goals making them WORK ("that is [#729]'s or an op-owner's work"), so a C-host function-value ABI has no owner anywhere in the five | [#909] ([#866], [#867], [#879]). [#868] sits in [#883]'s subtree with the rest of the span work; section C2 remains [#730]'s contract, and the parent link records where the fix lands |
 | [#729] seals numeric construction behind private Rust constructors. It has no reach into the C runtime, where `chelis_tensor.data` is a `pub` untyped `*mut u8`; Phases 0-4 never touch it | [#893] ([#899], [#889]). [#892]'s bool storage still rides [#729]'s v0.19 cut |
 | [#730] section C2 declares the diagnostic span normative and [#731] owns checker diagnostics, but neither has a phase that threads one: `Unsupported::with_span` has zero call sites and `CheckError::with_span_id` has none outside its own builder test | [#883] ([#868], [#886], [#916], [#1172]). [#730] section C2 keeps the span *contract*; the sub-issue links say where the *fix* lands |
-| [05-OBS-1..5] were each conditioned on a stored numeric value reaching an exit, so root existence, naming, order, and the `build` artifact obligation were outside [#732]. [05-OBS-6] now authors the always-labelled manifest-order envelope and the unavailable-root [05-UNS-1] requirement; complete manifested observation/build consumption is still not delivered by the formatter plan | [#912] ([#820], [#862]), with the post-[#1003] integration/acceptance residue tracked at [#1023]. [#775]'s shape half was authored as [05-OBS-4] under [#732] |
+| [05-OBS-1..5] were each conditioned on a stored numeric value reaching an exit, so root existence, naming, order, and the `build` artifact obligation were outside [#732]. [05-OBS-6] authored the always-labelled envelope; [05-OBS-7..11] and the integrated #1079/#1082/#1083 delivery now define and consume the target-carrying manifested root boundary for eval, C, and HIP. This remains independent of the formatter plan | [#912] ([#820], [#862]), with the post-[#1003] integration/acceptance surface tracked at [#1023]. [#775]'s shape half was authored as [05-OBS-4] under [#732] |
 | no numeric plan touches `chelis reef conform`'s audit surface, which the four bump waves below keep regenerating gaps in | [#788] ([#814], [#825], [#845]) |
 
 None carries a wave assignment; they are not sequenced against the waves.
@@ -199,8 +199,12 @@ scopes pure-DAG effect rejection to the entry actually emitted. It closes the
 former host-helper `dropout` emitter panic, cites the compiled-kernel owner
 [#1192], removes the no-op CLI reject hook, and corrects stale closed-#616
 Metal/HIP diagnostic prose to [05-MOV-1]. The single Phase 3 runner is
-`scripts/loud_unsupported_phase3_oracle.py`; it remains red only at the
-independently owned [#912] root-realizability leg, so Phase 3 is not complete.
+`scripts/loud_unsupported_phase3_oracle.py`; the integrated [#912]
+root-realizability delivery removes its final ignored-cell blocker. The full
+six-leg runner passes at this revision, including its exact
+`issue_912_root_boundary --run-ignored all` acceptance leg, so Phase 3 is
+executable-oracle green. The completion claim remains pending the delivering
+change's fresh exact-head red-team pass.
 [#730] Phase 4 (ratchet totality, added
 2026-07-30: product-source-manifest ratchets with non-Cargo language
 adapters, typed/live exclusion references, the non-product
@@ -540,9 +544,9 @@ patch.
    `1.2247449159622192` becomes `1.2247449`). No later [#729] phase may change
    those digits or shapes. [05-OBS-6] later authored a separate envelope around those frozen
    payloads; its `name = ` prefix shipped once in both lanes at v0.18.1. The
-   remaining manifested root set/order, unavailable-root, and artifact cut
-   rides v0.19 once. Neither later step may reopen [#732]'s formatter decisions
-   or restyle the shipped prefix.
+   manifested root set/order, unavailable-root, and C/HIP artifact cut is
+   implemented for v0.19 as one coordinated change. Neither this nor a later
+   step may reopen [#732]'s formatter decisions or restyle the shipped prefix.
 3. **Frozen seed form.** [#731] P1's `i64` suffix is the final syntax; [#735]
    authors only meaning. Safe to ship to shells at 0.17.
 4. **Decisions before tables.** Every behavior-changing capability decision

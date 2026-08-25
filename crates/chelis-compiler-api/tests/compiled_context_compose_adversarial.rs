@@ -147,8 +147,11 @@ fn g2_adt_exhaustive_match_in_new_code_against_library_option() {
     let main = "module App.Main\n\ndef placeholder() -> int32 = cast(0, int32)\n";
     let (_dir, root) = build_pkg(library, main);
 
+    // Put the non-matching `None` arm first: linked terminal-name matching
+    // must recognize the mangled `Some`, but must not collapse distinct
+    // constructors merely because both crossed the reef boundary.
     let snippet = "module App.Eval\nimport Mylib.Math (lib_some)\n\n\
-                   def unwrapped() -> int32 = match lib_some with {\n  | Some(x) => x\n  | None => 0\n}\n";
+                   def unwrapped() -> int32 = match lib_some with {\n  | None => 0\n  | Some(x) => x\n}\n";
 
     let ctx = compile_reef_context(Path::new("/tmp/x"), &root).expect("ctx");
     let result = eval_in_context(&ctx, snippet).expect("eval ok");

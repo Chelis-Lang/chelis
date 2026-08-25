@@ -44,6 +44,53 @@ fn checked_surf(source: &str) -> CheckedProgram {
     chelis_types::check_ir_program(&exprs).expect("ir check")
 }
 
+fn manifest_entry_with_path(
+    name: &str,
+    def_name: &str,
+    path: Vec<chelis_types::manifest::RootPathStep>,
+) -> chelis_types::manifest::RootEntry {
+    chelis_types::manifest::RootEntry {
+        name: name.to_string(),
+        path,
+        def_name: def_name.to_string(),
+        ty: Expr::Atom(
+            chelis_deep::ast::Atom::Name("unknown".to_string()),
+            chelis_deep::Span::new(0, 0),
+        ),
+        lane: chelis_types::types::Lane::Host,
+        required_inputs: std::collections::BTreeSet::new(),
+        reasons: Vec::new(),
+    }
+}
+
+#[test]
+fn manifest_root_lookup_follows_recursive_list_adt_path() {
+    use chelis_types::manifest::RootPathStep::Adt;
+
+    let entry = manifest_entry_with_path("items.1.0", "items", vec![Adt(1), Adt(0)]);
+    let bindings = HashMap::from([(
+        "items".to_string(),
+        RuntimeValue::List(vec![RuntimeValue::int_lit(1), RuntimeValue::int_lit(2)]),
+    )]);
+
+    let value = lookup_runtime_value_for_manifest_root(&entry, &bindings, &HashMap::new())
+        .expect("Cons tail/head path must select the second list item");
+    assert_eq!(render_value(&value), "2");
+}
+
+#[test]
+fn manifest_root_lookup_rejects_a_path_step_for_the_wrong_runtime_shape() {
+    use chelis_types::manifest::RootPathStep::Tuple;
+
+    let entry = manifest_entry_with_path("value.0", "value", vec![Tuple(0)]);
+    let bindings = HashMap::from([("value".to_string(), RuntimeValue::Bool(true))]);
+
+    assert!(
+        lookup_runtime_value_for_manifest_root(&entry, &bindings, &HashMap::new()).is_none(),
+        "an unavailable owed component must not fall back to the base value"
+    );
+}
+
 #[test]
 fn with_seed_uniform_like_evaluates_body() {
     let checked = checked_surf(

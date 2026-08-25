@@ -3300,8 +3300,10 @@ def free(x: tensor[1, f32]) -> tensor[1, f32] = mul(copy(x), x)
             Err(CompileAndLoadError::Compiler(e)) => format!("{e:?}"),
         };
         assert!(
-            message.contains("no callable interface"),
-            "expected a loud host-only error, got: {message}"
+            message.contains("top-level (non-def) value bindings")
+                && message.contains("compiled-execution lane")
+                && message.contains("eval"),
+            "expected the actionable top-level-binding rejection, got: {message}"
         );
     }
 

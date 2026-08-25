@@ -880,16 +880,18 @@ fn main() {
             timeout,
         }) => {
             // Parse target for realizability inference (issue #912).
-            let parsed_target = parse_eval_target(target.as_deref());
-            cmd_eval(
-                file.as_deref(),
-                expr.as_deref(),
-                json,
-                allow_style_violations,
-                parsed_target,
-                target.is_some(), // whether user explicitly passed --target
-                timeout,
-            )
+            match parse_eval_target(target.as_deref()) {
+                Ok(parsed_target) => cmd_eval(
+                    file.as_deref(),
+                    expr.as_deref(),
+                    json,
+                    allow_style_violations,
+                    parsed_target,
+                    target.is_some(), // whether user explicitly passed --target
+                    timeout,
+                ),
+                Err(error) => Err(error.into()),
+            }
         }
         Some(Command::Check {
             file,
@@ -1461,22 +1463,85 @@ fn rollback_committed_migrations(
 
 /// Parse the `--target` flag for `chelis eval` into a `Target` enum value.
 /// Default (None) → `Target::Eval`. Recognized values: "eval", "c", "hip", "metal".
-/// Issue #912 Task 3: argument plumbing only — wired to manifest pipeline at Task 7.
-fn parse_eval_target(target: Option<&str>) -> chelis_types::types::Target {
+/// The value is rejected rather than substituted: target choice controls the
+/// manifest's lane assignment and therefore cannot fall back silently.
+fn parse_eval_target(target: Option<&str>) -> Result<chelis_types::types::Target, String> {
     use chelis_types::types::Target;
     match target {
-        None | Some("eval") => Target::Eval,
-        Some("c") => Target::C,
-        Some("hip") => Target::Hip,
-        Some("metal") => Target::Metal,
-        Some(other) => {
-            eprintln!(
-                "warning: unknown eval target `{other}`, using `eval`. \
-                 Valid targets: eval, c, hip, metal."
-            );
-            Target::Eval
-        }
+        None | Some("eval") => Ok(Target::Eval),
+        Some("c") => Ok(Target::C),
+        Some("hip") => Ok(Target::Hip),
+        Some("metal") => Ok(Target::Metal),
+        Some(other) => Err(format!(
+            "unknown eval target `{other}`; valid targets: eval, c, hip, metal"
+        )),
     }
+}
+
+fn build_root_manifest(
+    checked: &chelis_types::CheckedProgram,
+    target: BuildTarget,
+) -> chelis_types::manifest::RootManifest {
+    let target = match target {
+        BuildTarget::C => chelis_types::types::Target::C,
+        BuildTarget::Hip => chelis_types::types::Target::Hip,
+        BuildTarget::Metal => chelis_types::types::Target::Metal,
+    };
+    let realizability = chelis_effects::realizability::infer_realizability(
+        checked,
+        chelis_compiler_api::target_capability::tensor_capable_prims(target),
+    );
+    chelis_effects::realizability::compute_root_manifest(checked, &realizability)
+}
+
+fn require_build_manifest_inputs(
+    manifest: &chelis_types::manifest::RootManifest,
+    target: BuildTarget,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
+    if let Some(entry) = manifest
+        .entries
+        .iter()
+        .find(|entry| !entry.required_inputs.is_empty())
+    {
+        return Err(build_unavailable_root_error(
+            entry,
+            target,
+            format!(
+                "`chelis build` has no runtime binding for required input(s) {}",
+                entry
+                    .required_inputs
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn build_unavailable_root_error(
+    entry: &chelis_types::manifest::RootEntry,
+    target: BuildTarget,
+    reason: impl Into<String>,
+) -> chelis_types::unsupported::Unsupported {
+    chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(format!(
+            "[05-UNS-1] unavailable root `{}`",
+            entry.name
+        )),
+        format!(
+            "{:?} lane while building target `{}`: {}",
+            entry.lane,
+            target.as_str(),
+            reason.into()
+        ),
+        chelis_types::unsupported::Stage::Codegen(target.as_str()),
+        chelis_types::unimplemented_rejection!(
+            912,
+            "this is a root-realization defect; file a bug with the program and target"
+        ),
+    )
 }
 
 /// chelis#914: `--timeout` wrapper around [`cmd_eval_inner`].
@@ -1570,7 +1635,7 @@ fn cmd_eval_inner(
     json: bool,
     allow_style_violations: bool,
     target: chelis_types::types::Target,
-    explicit_target: bool,
+    _explicit_target: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The style gate runs only on the `--file` form (a real on-disk
     // source). The `--expr` form is a synthetic one-line snippet
@@ -1617,9 +1682,19 @@ fn cmd_eval_inner(
                 chelis_deep::parse_and_stamp_file(&deep_source)
                     .map_err(|err| boxed_string_error(err.to_string()))?;
                 return if json {
-                    run_eval_json_emit(try_eval_result(SourceKind::Deep, &deep_source, None))
+                    run_eval_json_emit(try_eval_result_for_target(
+                        SourceKind::Deep,
+                        &deep_source,
+                        None,
+                        target,
+                    ))
                 } else {
-                    run_eval_emit(try_eval(SourceKind::Deep, &deep_source, None))
+                    run_eval_emit(try_eval_for_target(
+                        SourceKind::Deep,
+                        &deep_source,
+                        None,
+                        target,
+                    ))
                 };
             }
             // RFC v5 (RT-1 F2 bypass): a `--file` resolving into a reef
@@ -1635,7 +1710,7 @@ fn cmd_eval_inner(
                 .then(chelis_types::install_linked_program_guard);
             if let Some(package_root) = &eval_package_root {
                 let source = fs::read_to_string(path)?;
-                match run_eval_in_context(package_root, &source, json) {
+                match run_eval_in_context(package_root, &source, json, target) {
                     Ok(()) => return Ok(()),
                     Err(EvalInContextError::Compile(msg)) => return Err(msg.into()),
                 }
@@ -1647,39 +1722,27 @@ fn cmd_eval_inner(
             let deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
             let checked = checked_program_with_effects(&deep_exprs).map_err(boxed_string_error)?;
             let source = chelis_surf::format::format_program(&decls);
-            let mut selected_roots = root_names_from_decls(&entry_decls, checked.type_env());
-            // Issue #947: if no value roots were found but the program has
-            // zero-arg fn defs (arrow-form `def n() -> T = body`), include
-            // them so the host_root_values path can surface them.
-            if selected_roots.is_empty() {
-                for decl in &entry_decls {
-                    if let Some(name) = decl_name(decl)
-                        && checked
-                            .type_env()
-                            .get(name)
-                            .is_some_and(type_expr_is_zero_arg_fn)
-                    {
-                        selected_roots.push(name.to_string());
-                    }
-                }
-            }
+            // [05-OBS-7..11]: selection consumes the same target-aware
+            // manifest as evaluation and build. The former source-derived
+            // list excluded pure nullary defs whenever the file also had a
+            // value root, so eval and C disagreed about owed output. Filter
+            // by entry-file declaration identity, but take names/topology
+            // exclusively from the manifest.
+            let selected_roots = manifest_root_names_from_decls(&entry_decls, &checked, target);
             if json {
-                // Issue #912: include manifest lane assignments only when --target is explicit.
-                if explicit_target {
-                    let manifest_json = compute_manifest_json(&checked, target);
-                    run_eval_json_emit_with_manifest(
-                        try_eval_result(SourceKind::Surf, &source, Some(&selected_roots)),
-                        manifest_json,
-                    )
-                } else {
-                    run_eval_json_emit(try_eval_result(
-                        SourceKind::Surf,
-                        &source,
-                        Some(&selected_roots),
-                    ))
-                }
+                run_eval_json_emit(try_eval_result_for_target(
+                    SourceKind::Surf,
+                    &source,
+                    Some(&selected_roots),
+                    target,
+                ))
             } else {
-                run_eval_emit(try_eval(SourceKind::Surf, &source, Some(&selected_roots)))
+                run_eval_emit(try_eval_for_target(
+                    SourceKind::Surf,
+                    &source,
+                    Some(&selected_roots),
+                    target,
+                ))
             }
         }
         (None, Some(e)) => {
@@ -1687,9 +1750,14 @@ fn cmd_eval_inner(
             // resolution — keep the legacy path.
             let source = format!("__eval_result = {e}");
             if json {
-                run_eval_json_emit(try_eval_result(SourceKind::Surf, &source, None))
+                run_eval_json_emit(try_eval_result_for_target(
+                    SourceKind::Surf,
+                    &source,
+                    None,
+                    target,
+                ))
             } else {
-                run_eval_emit(try_eval(SourceKind::Surf, &source, None))
+                run_eval_emit(try_eval_for_target(SourceKind::Surf, &source, None, target))
             }
         }
         (None, None) => Err("provide --file or an expression".into()),
@@ -1742,6 +1810,7 @@ fn run_eval_in_context(
     package_root: &Path,
     source: &str,
     json: bool,
+    target: chelis_types::types::Target,
 ) -> Result<(), EvalInContextError> {
     let reef_home = env::var_os("CHELIS_REEF_HOME")
         .map(PathBuf::from)
@@ -1766,8 +1835,9 @@ fn run_eval_in_context(
                 return Err(EvalInContextError::Compile(msg));
             }
         };
-    let result = chelis_compiler_api::eval_in_context(&context, source)
-        .map_err(|err| EvalInContextError::Compile(join_eval_error(err)))?;
+    let result =
+        chelis_compiler_api::compiler::eval_in_context_for_target(&context, source, target)
+            .map_err(|err| EvalInContextError::Compile(join_eval_error(err)))?;
     if json {
         // JSON mode: stdout carries the raw `EvalResult` serde JSON
         // only. Empty-roots inputs serialize to `{"roots":[]}` (valid
@@ -1818,49 +1888,6 @@ fn run_eval_json_emit(
         }
         Err(e) => Err(e.into()),
     }
-}
-
-/// Issue #912: emit JSON with manifest lane assignments included.
-fn run_eval_json_emit_with_manifest(
-    outcome: Result<chelis_compiler_api::schema::EvalResult, String>,
-    manifest_json: serde_json::Value,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match outcome {
-        Ok(result) => {
-            let mut json = serde_json::to_value(&result)?;
-            if let serde_json::Value::Object(ref mut map) = json {
-                map.insert("manifest".to_string(), manifest_json);
-            }
-            println!("{}", serde_json::to_string(&json)?);
-            Ok(())
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Issue #912: compute manifest and serialize to JSON.
-fn compute_manifest_json(
-    checked: &chelis_types::CheckedProgram,
-    target: chelis_types::types::Target,
-) -> serde_json::Value {
-    let target_prims = chelis_compiler_api::target_capability::tensor_capable_prims(target);
-    let realizability = chelis_effects::realizability::infer_realizability(checked, target_prims);
-    let manifest = chelis_effects::realizability::compute_root_manifest(checked, &realizability);
-    let entries: Vec<serde_json::Value> = manifest
-        .entries
-        .iter()
-        .map(|entry| {
-            serde_json::json!({
-                "name": entry.name,
-                "lane": format!("{:?}", entry.lane),
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "target": format!("{:?}", target),
-        "entries": entries,
-        "requires_main": manifest.requires_main(),
-    })
 }
 
 // G7 CLI sub-bug: when `chelis eval --file <foo.ch>` is handed a Surf
@@ -3111,6 +3138,9 @@ fn cmd_build(
             .map_err(|e| format!("Check errors: {e}"))?,
     };
     let checked = checked_compilation.program();
+    let root_manifest = build_root_manifest(checked, target);
+    let requires_main = root_manifest.requires_main();
+    require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
     shared_compiler_gate(
@@ -3118,52 +3148,17 @@ fn cmd_build(
             checked, target,
         ),
     )?;
-    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(checked)
-        .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
+    let mut compiled_program =
+        chelis_ir::host::try_lower_compiled_program_with_manifest(checked, &root_manifest)
+            .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag =
         lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names =
         lowered_root_names_from_decls(&entry_decls, &deep_exprs, checked.type_env());
-    let entry_display_root_names = root_names_from_decls(&entry_decls, checked.type_env())
-        .into_iter()
-        .map(|name| {
-            name.rsplit_once("__")
-                .map(|(_, tail)| tail.to_string())
-                .unwrap_or(name)
-        })
-        .collect::<Vec<_>>();
     if let Some(host_program) = compiled_program.host.as_mut() {
-        host_program.globals = host_program
-            .globals
-            .iter()
-            .map(|binding| {
-                let mut binding = binding.clone();
-                binding.display_name = match binding.ty {
-                    chelis_ir::ConcreteHostType::Function(_, _) => None,
-                    _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
-                        || {
-                            // Tuple-typed top-level bindings get their root
-                            // name expanded into `name.0` / `name.1` entries
-                            // by `extend_root_names_from_value` (matching
-                            // eval-side behavior). Surface a synthetic
-                            // tuple-prefix display name so the C emitter
-                            // can render the per-field "name.i = ..." lines.
-                            if matches!(&binding.ty, chelis_ir::ConcreteHostType::Tuple(_)) {
-                                host_display_tuple_root_prefix(
-                                    &binding.name,
-                                    &entry_display_root_names,
-                                )
-                            } else {
-                                None
-                            }
-                        },
-                    ),
-                };
-                binding
-            })
-            .collect();
+        apply_manifest_display_roots(host_program, &root_manifest, target)?;
     }
     let selected = tensor_root_names
         .iter()
@@ -3188,7 +3183,8 @@ fn cmd_build(
     match target {
         BuildTarget::C => {
             if let Some(host_program) = compiled_program.host.as_ref()
-                && (chelis_ir::host::host_program_requires_host_backend(host_program)
+                && (requires_main
+                    || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
@@ -3235,7 +3231,7 @@ fn cmd_build(
                     ),
                 )?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
+                cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -3246,7 +3242,14 @@ fn cmd_build(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
+                cmd_build_c(
+                    &fused,
+                    func_name,
+                    file,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                )
             }
         }
         BuildTarget::Hip => {
@@ -3274,13 +3277,18 @@ fn cmd_build(
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
-            if dag.roots().is_empty()
-                && preferred_entry_dag.is_none()
-                && host_requires_host_backend
+            let has_host_roots = root_manifest
+                .entries
+                .iter()
+                .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+            if (has_host_roots
+                || (dag.roots().is_empty()
+                    && preferred_entry_dag.is_none()
+                    && host_requires_host_backend))
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_hip_host(result, func_name, output)
+                cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -3304,7 +3312,14 @@ fn cmd_build(
                     &specialized,
                 ))?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
+                cmd_build_hip(
+                    &fused,
+                    func_name,
+                    file,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                )
             }
         }
         BuildTarget::Metal => {
@@ -3340,7 +3355,7 @@ fn cmd_build(
                 // like the HIP path. The metal path doesn't have a separate
                 // host wrapper today; reuse cmd_build_hip_host for parity.
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_hip_host(result, func_name, output)
+                cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -3437,6 +3452,9 @@ fn cmd_build_deep(
     let checked_compilation = checked_compilation_with_effects(&final_deep_exprs)
         .map_err(|e| format!("Check errors: {e}"))?;
     let checked = checked_compilation.program();
+    let root_manifest = build_root_manifest(checked, target);
+    let requires_main = root_manifest.requires_main();
+    require_build_manifest_inputs(&root_manifest, target)?;
     chelis_effects::validate_build_target(checked, target.as_str())
         .map_err(|errors| format_effect_errors(&errors))?;
     shared_compiler_gate(
@@ -3444,45 +3462,16 @@ fn cmd_build_deep(
             checked, target,
         ),
     )?;
-    let mut compiled_program = chelis_ir::host::try_lower_compiled_program(checked)
-        .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
+    let mut compiled_program =
+        chelis_ir::host::try_lower_compiled_program_with_manifest(checked, &root_manifest)
+            .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?;
     emit_summary_rejections(compiled_program.host.as_ref());
     let mut dag =
         lower_checked_for_cli(checked_compilation.clone(), compiled_program.host.as_ref())?;
     let tensor_root_names = checked_compilation.root_metadata().tensor_names().clone();
     let entry_root_names = lowered_root_names_from_exprs(&entry_deep_exprs, checked.type_env());
-    let entry_display_root_names = root_names_from_exprs(&entry_deep_exprs, checked.type_env())
-        .into_iter()
-        .map(|name| {
-            name.rsplit_once("__")
-                .map(|(_, tail)| tail.to_string())
-                .unwrap_or(name)
-        })
-        .collect::<Vec<_>>();
     if let Some(host_program) = compiled_program.host.as_mut() {
-        host_program.globals = host_program
-            .globals
-            .iter()
-            .map(|binding| {
-                let mut binding = binding.clone();
-                binding.display_name = match binding.ty {
-                    chelis_ir::ConcreteHostType::Function(_, _) => None,
-                    _ => host_display_root_name(&binding.name, &entry_display_root_names).or_else(
-                        || {
-                            if matches!(&binding.ty, chelis_ir::ConcreteHostType::Tuple(_)) {
-                                host_display_tuple_root_prefix(
-                                    &binding.name,
-                                    &entry_display_root_names,
-                                )
-                            } else {
-                                None
-                            }
-                        },
-                    ),
-                };
-                binding
-            })
-            .collect();
+        apply_manifest_display_roots(host_program, &root_manifest, target)?;
     }
     let selected = tensor_root_names
         .iter()
@@ -3507,7 +3496,8 @@ fn cmd_build_deep(
     match target {
         BuildTarget::C => {
             if let Some(host_program) = compiled_program.host.as_ref()
-                && (chelis_ir::host::host_program_requires_host_backend(host_program)
+                && (requires_main
+                    || chelis_ir::host::host_program_requires_host_backend(host_program)
                     || dag.roots().is_empty()
                     || !host_program.functions.is_empty())
             {
@@ -3540,7 +3530,7 @@ fn cmd_build_deep(
                     ),
                 )?;
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
+                cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
             } else {
                 shared_compiler_gate(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops(
@@ -3551,7 +3541,14 @@ fn cmd_build_deep(
                 apply_shared_window_gates(&dag, BuildTarget::C)?;
                 let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_c(&fused, func_name, file, output, &symbolic_dims)
+                cmd_build_c(
+                    &fused,
+                    func_name,
+                    file,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                )
             }
         }
         BuildTarget::Hip => {
@@ -3574,13 +3571,18 @@ fn cmd_build_deep(
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| chelis_ir::host::lower_named_tensor_entry_dag(checked, name));
-            if dag.roots().is_empty()
-                && preferred_entry_dag.is_none()
-                && host_requires_host_backend
+            let has_host_roots = root_manifest
+                .entries
+                .iter()
+                .any(|entry| entry.lane == chelis_types::types::Lane::Host);
+            if (has_host_roots
+                || (dag.roots().is_empty()
+                    && preferred_entry_dag.is_none()
+                    && host_requires_host_backend))
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_hip_host(result, func_name, output)
+                cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut hip_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -3604,7 +3606,14 @@ fn cmd_build_deep(
                     &specialized,
                 ))?;
                 let fused = chelis_ir::fuse::fuse(&specialized);
-                cmd_build_hip(&fused, func_name, file, output, &symbolic_dims)
+                cmd_build_hip(
+                    &fused,
+                    func_name,
+                    file,
+                    output,
+                    &symbolic_dims,
+                    &root_manifest,
+                )
             }
         }
         BuildTarget::Metal => {
@@ -3633,7 +3642,7 @@ fn cmd_build_deep(
                 && let Some(host_program) = compiled_program.host.as_ref()
             {
                 let result = chelis_backend_c::codegen_host_program(host_program, func_name)?;
-                cmd_build_hip_host(result, func_name, output)
+                cmd_build_hip_host(result, func_name, output, requires_main)
             } else {
                 let mut metal_dag = if let Some(entry_dag) = preferred_entry_dag {
                     entry_dag
@@ -8974,8 +8983,9 @@ fn cmd_build_c(
     _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
+    root_manifest: &chelis_types::manifest::RootManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = chelis_backend_c::codegen_with_options(
+    let mut result = chelis_backend_c::codegen_with_options(
         dag,
         func_name,
         chelis_backend_c::CodegenOptions {
@@ -8984,7 +8994,15 @@ fn cmd_build_c(
         },
     )?;
     let symbolic_dims = fallback_symbolic_dims(dag, &result.symbolic_dims, symbolic_dims_hint);
-    cmd_build_c_result(result, func_name, output, &symbolic_dims, None)
+    let root_names =
+        tensor_manifest_root_names(&result.output_labels, root_manifest, BuildTarget::C, "C")?;
+    let requires_main = root_manifest.requires_main();
+    if requires_main {
+        result
+            .c_source
+            .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
+    }
+    cmd_build_c_result(result, func_name, output, &symbolic_dims, requires_main)
 }
 
 fn cmd_build_c_result(
@@ -8992,7 +9010,7 @@ fn cmd_build_c_result(
     func_name: &str,
     output: Option<&std::path::Path>,
     symbolic_dims: &[String],
-    requires_main: Option<bool>,
+    requires_main: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -9024,9 +9042,7 @@ fn cmd_build_c_result(
         println!("Symbolic dims: {}", symbolic_dims.join(", "));
     }
     let toolchain = chelis_backend_c::toolchain::runtime_toolchain(result.requirements);
-    // Issue #912: use manifest's requires_main when available; fall back to string search.
-    let has_main = requires_main.unwrap_or_else(|| result.c_source.contains("int main("));
-    if has_main {
+    if requires_main {
         println!(
             "Compile: {} -O2 {} {} -L{} -lchelis_runtime {} -o {}",
             toolchain.compiler,
@@ -9051,6 +9067,7 @@ fn cmd_build_hip_host(
     result: chelis_backend_c::CodegenResult,
     func_name: &str,
     output: Option<&std::path::Path>,
+    requires_main: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -9102,7 +9119,7 @@ fn cmd_build_hip_host(
         .map(String::as_str)
         .collect::<Vec<_>>();
     link_flags.retain(|flag| *flag != "-fopenmp");
-    if result.c_source.contains("int main(") {
+    if requires_main {
         println!(
             "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl {} -o {}",
             compile_flags.join(" "),
@@ -9121,14 +9138,154 @@ fn cmd_build_hip_host(
     Ok(())
 }
 
+fn tensor_manifest_observation_driver(func_name: &str, root_names: &[String]) -> String {
+    let mut source = String::from(
+        r#"
+
+static void chelis_manifest_print_tensor_elem(const chelis_tensor *tensor, int64_t index) {
+    char buffer[CHELIS_FORMAT_SHORTEST_BUF];
+    switch (tensor->dtype) {
+        case CHELIS_F64:
+            chelis_format_shortest(((const double *)tensor->data)[index], CHELIS_F64, buffer, sizeof buffer);
+            fputs(buffer, stdout);
+            break;
+        case CHELIS_F32:
+            chelis_format_shortest((double)((const float *)tensor->data)[index], CHELIS_F32, buffer, sizeof buffer);
+            fputs(buffer, stdout);
+            break;
+        case CHELIS_F16:
+            chelis_format_shortest((double)chelis_f16_to_f32(((const uint16_t *)tensor->data)[index]), CHELIS_F16, buffer, sizeof buffer);
+            fputs(buffer, stdout);
+            break;
+        case CHELIS_BF16:
+            chelis_format_shortest((double)chelis_bf16_to_f32(((const uint16_t *)tensor->data)[index]), CHELIS_BF16, buffer, sizeof buffer);
+            fputs(buffer, stdout);
+            break;
+        case CHELIS_I64:
+            printf("%lld", (long long)((const int64_t *)tensor->data)[index]);
+            break;
+        case CHELIS_I32:
+            printf("%d", (int)((const int32_t *)tensor->data)[index]);
+            break;
+        case CHELIS_I16:
+            printf("%d", (int)((const int16_t *)tensor->data)[index]);
+            break;
+        case CHELIS_I8:
+            printf("%d", (int)((const int8_t *)tensor->data)[index]);
+            break;
+        case CHELIS_BOOL:
+            fputs(((const float *)tensor->data)[index] != 0.0f ? "true" : "false", stdout);
+            break;
+        default:
+            fprintf(stderr, "unsupported: manifest observation of runtime dtype id %d [05-UNS-1]\n", tensor->dtype);
+            exit(1);
+    }
+}
+
+static void chelis_manifest_print_tensor(const chelis_tensor *tensor) {
+    if (tensor == NULL) {
+        fputs("unsupported: [05-UNS-1] Tensor root returned no tensor\n", stderr);
+        exit(1);
+    }
+    if (tensor->ndim == 0) {
+        chelis_manifest_print_tensor_elem(tensor, 0);
+        return;
+    }
+    fputs("tensor(shape=[", stdout);
+    for (int64_t dim = 0; dim < tensor->ndim; ++dim) {
+        if (dim > 0) fputs(", ", stdout);
+        printf("%lld", (long long)tensor->shape[dim]);
+    }
+    fputs("], data=[", stdout);
+    int64_t limit = tensor->size < 32 ? tensor->size : 32;
+    for (int64_t index = 0; index < limit; ++index) {
+        if (index > 0) fputs(", ", stdout);
+        chelis_manifest_print_tensor_elem(tensor, index);
+    }
+    if (tensor->size > limit) fputs(", ...", stdout);
+    fputs("])", stdout);
+}
+"#,
+    );
+    source.push_str(&format!(
+        "\nint main(void) {{\n    chelis_tensor *outputs[{}] = {{0}};\n    {func_name}(NULL, 0, outputs, {});\n",
+        root_names.len(),
+        root_names.len()
+    ));
+    for (index, name) in root_names.iter().enumerate() {
+        let label = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        source.push_str(&format!(
+            "    printf(\"{label} = \");\n    chelis_manifest_print_tensor(outputs[{index}]);\n    printf(\"\\n\");\n    chelis_free(outputs[{index}]);\n"
+        ));
+    }
+    source.push_str("    return 0;\n}\n");
+    source
+}
+
+fn tensor_manifest_root_names(
+    output_labels: &[String],
+    root_manifest: &chelis_types::manifest::RootManifest,
+    target: BuildTarget,
+    lowering_name: &str,
+) -> Result<Vec<String>, chelis_types::unsupported::Unsupported> {
+    if !root_manifest.requires_main() {
+        return Ok(Vec::new());
+    }
+    let root_names = root_manifest
+        .entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<Vec<_>>();
+    let labels_match = output_labels.len() == root_names.len()
+        && output_labels
+            .iter()
+            .zip(&root_names)
+            .enumerate()
+            .all(|(index, (lowered, owed))| lowered == owed || lowered == &format!("root{index}"));
+    if labels_match {
+        return Ok(root_names);
+    }
+
+    let owed_index = root_names
+        .iter()
+        .enumerate()
+        .find(|(index, name)| {
+            output_labels
+                .get(*index)
+                .is_none_or(|lowered| lowered != *name && lowered != &format!("root{index}"))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    Err(build_unavailable_root_error(
+        &root_manifest.entries[owed_index],
+        target,
+        format!(
+            "{lowering_name} lowering produced outputs {output_labels:?} instead of the manifest {root_names:?}"
+        ),
+    ))
+}
+
 fn cmd_build_hip(
     dag: &chelis_ir::dag::Dag,
     func_name: &str,
     _file: &std::path::Path,
     output: Option<&std::path::Path>,
     symbolic_dims_hint: &[String],
+    root_manifest: &chelis_types::manifest::RootManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = chelis_backend_hip::codegen_hip(dag, func_name)?;
+    let mut result = chelis_backend_hip::codegen_hip(dag, func_name)?;
+    let requires_main = root_manifest.requires_main();
+    if requires_main {
+        let root_names = tensor_manifest_root_names(
+            &result.output_labels,
+            root_manifest,
+            BuildTarget::Hip,
+            "HIP",
+        )?;
+        result
+            .c_source
+            .push_str(&tensor_manifest_observation_driver(func_name, &root_names));
+    }
 
     let out_dir = output
         .map(|p| p.to_path_buf())
@@ -9185,13 +9342,21 @@ fn cmd_build_hip(
         .collect();
     flags.sort();
     flags.dedup();
-    println!(
-        "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
-        flags.join(" "),
-        c_path.display(),
-        runtime_dir.display(),
-        c_path.with_extension("").display()
-    );
+    if requires_main {
+        println!(
+            "Compile: hipcc {} {} -L{} -lchelis_runtime -lpthread -ldl -o {}",
+            flags.join(" "),
+            c_path.display(),
+            runtime_dir.display(),
+            c_path.with_extension("").display()
+        );
+    } else {
+        println!(
+            "Compile object: hipcc {} -c {}",
+            flags.join(" "),
+            c_path.display()
+        );
+    }
     Ok(())
 }
 
@@ -9375,15 +9540,29 @@ fn try_eval_result(
     source: &str,
     selected_roots: Option<&[String]>,
 ) -> Result<chelis_compiler_api::schema::EvalResult, String> {
+    try_eval_result_for_target(
+        source_kind,
+        source,
+        selected_roots,
+        chelis_types::types::Target::Eval,
+    )
+}
+
+fn try_eval_result_for_target(
+    source_kind: SourceKind,
+    source: &str,
+    selected_roots: Option<&[String]>,
+    target: chelis_types::types::Target,
+) -> Result<chelis_compiler_api::schema::EvalResult, String> {
     let request = EvalRequest {
         source_kind,
         source: source.to_string(),
         bindings: BTreeMap::new(),
     };
     if let Some(roots) = selected_roots {
-        chelis_compiler_api::compiler::eval_selected(request, roots)
+        chelis_compiler_api::compiler::eval_selected_for_target(request, roots, target)
     } else {
-        chelis_compiler_api::compiler::eval(request)
+        chelis_compiler_api::compiler::eval_for_target(request, target)
     }
     .map_err(join_eval_error)
 }
@@ -9441,6 +9620,16 @@ fn try_eval(
     selected_roots: Option<&[String]>,
 ) -> Result<String, String> {
     let result = try_eval_result(source_kind, source, selected_roots)?;
+    Ok(format_eval_result(&result))
+}
+
+fn try_eval_for_target(
+    source_kind: SourceKind,
+    source: &str,
+    selected_roots: Option<&[String]>,
+    target: chelis_types::types::Target,
+) -> Result<String, String> {
+    let result = try_eval_result_for_target(source_kind, source, selected_roots, target)?;
     Ok(format_eval_result(&result))
 }
 
@@ -9653,9 +9842,44 @@ fn lowered_root_names_from_decls(
     lowered_root_names_from_selected_exprs(&deep_exprs, program_exprs, type_env)
 }
 
-fn root_names_from_decls(decls: &[Decl], type_env: &HashMap<String, DeepExpr>) -> Vec<String> {
-    let deep_exprs = chelis_surf::desugar::desugar_program(decls);
-    root_names_from_exprs(&deep_exprs, type_env)
+fn manifest_root_names_from_decls(
+    decls: &[Decl],
+    checked: &chelis_types::CheckedProgram,
+    target: chelis_types::types::Target,
+) -> Vec<String> {
+    fn collect_decl_names(expr: &DeepExpr, names: &mut HashSet<String>) {
+        match expr {
+            DeepExpr::List(list, _) if list.tag() == Some(DeepTag::Module) => {
+                for child in list.elements.iter().skip(3) {
+                    collect_decl_names(child, names);
+                }
+            }
+            DeepExpr::Node(node, span) => {
+                let bridged = DeepExpr::List(node.to_list(*span), *span);
+                collect_decl_names(&bridged, names);
+            }
+            _ => {
+                if let Some(name) = deep_top_level_expr_name(expr) {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+
+    let mut selected_defs = HashSet::new();
+    for expr in chelis_surf::desugar::desugar_program(decls) {
+        collect_decl_names(&expr, &mut selected_defs);
+    }
+    let realizability = chelis_effects::realizability::infer_realizability(
+        checked,
+        chelis_compiler_api::target_capability::tensor_capable_prims(target),
+    );
+    chelis_effects::realizability::compute_root_manifest(checked, &realizability)
+        .entries
+        .into_iter()
+        .filter(|entry| selected_defs.contains(entry.def_name.as_str()))
+        .map(|entry| entry.name)
+        .collect()
 }
 
 fn lowered_root_names_from_exprs(
@@ -9673,14 +9897,6 @@ fn lowered_root_names_from_selected_exprs(
     let mut out = Vec::new();
     for expr in selected_exprs {
         collect_lowered_root_names_from_expr(expr, program_exprs, type_env, &mut out);
-    }
-    out
-}
-
-fn root_names_from_exprs(exprs: &[DeepExpr], type_env: &HashMap<String, DeepExpr>) -> Vec<String> {
-    let mut out = Vec::new();
-    for expr in exprs {
-        collect_root_names_from_expr(expr, type_env, &mut out);
     }
     out
 }
@@ -9718,41 +9934,6 @@ fn collect_lowered_root_names_from_expr(
         DeepExpr::Node(node, span) => {
             let bridged = DeepExpr::List(node.to_list(*span), *span);
             collect_lowered_root_names_from_expr(&bridged, program_exprs, type_env, out);
-        }
-        _ => {}
-    }
-}
-
-fn collect_root_names_from_expr(
-    expr: &DeepExpr,
-    type_env: &HashMap<String, DeepExpr>,
-    out: &mut Vec<String>,
-) {
-    match expr {
-        DeepExpr::List(list, _) => match list.tag() {
-            Some(DeepTag::Module) => {
-                for child in list.elements.iter().skip(3) {
-                    collect_root_names_from_expr(child, type_env, out);
-                }
-            }
-            _ => {
-                let Some(name) = deep_top_level_expr_name(expr) else {
-                    return;
-                };
-                if type_env.get(name).is_some_and(type_expr_is_function) {
-                    return;
-                }
-                extend_root_names_from_value(
-                    name,
-                    type_env.get(name),
-                    top_level_def_body(expr),
-                    out,
-                );
-            }
-        },
-        DeepExpr::Node(node, span) => {
-            let bridged = DeepExpr::List(node.to_list(*span), *span);
-            collect_root_names_from_expr(&bridged, type_env, out);
         }
         _ => {}
     }
@@ -9927,36 +10108,169 @@ fn deep_referenced_vars(expr: &DeepExpr) -> Vec<&str> {
     chelis_compiler_api::prune::deep_referenced_vars(expr)
 }
 
-fn host_display_root_name(full_name: &str, entry_root_names: &[String]) -> Option<String> {
-    entry_root_names.iter().find_map(|entry| {
-        (full_name == entry
-            || full_name
-                .rsplit_once("__")
-                .is_some_and(|(_, tail)| tail == entry)
-            || full_name
-                .rsplit_once('.')
-                .is_some_and(|(_, tail)| tail == entry))
-        .then(|| entry.clone())
-    })
+fn apply_manifest_display_roots(
+    program: &mut chelis_ir::host::ConcreteHostProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+    target: BuildTarget,
+) -> Result<(), chelis_types::unsupported::Unsupported> {
+    use chelis_ir::host::{HostBinding, HostExpr, HostExprKind};
+    use chelis_types::types::Lane;
+
+    let mut represented_defs = std::collections::BTreeSet::new();
+    for binding in &mut program.globals {
+        binding.display_name = None;
+        binding.display_roots = manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.def_name == binding.name)
+            .map(|entry| {
+                represented_defs.insert(entry.def_name.clone());
+                manifest_host_display_root(entry)
+            })
+            .collect();
+    }
+
+    // A pure nullary definition is an observation root even though host
+    // lowering quite correctly represents it as a function and leaves
+    // `program.globals` empty. Materialize the manifest-selected call as a
+    // compiler-owned binding so the host emitter's ordinary, typed `main`
+    // path evaluates it and renders every dotted leaf. This consumes the
+    // manifest before emission; the backend never scans generated C to guess
+    // whether an entry point is owed.
+    let mut seen_host_defs = HashSet::new();
+    let host_defs = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.lane == Lane::Host
+                && !represented_defs.contains(&entry.def_name)
+                && seen_host_defs.insert(entry.def_name.as_str())
+        })
+        .map(|entry| entry.def_name.as_str())
+        .collect::<Vec<_>>();
+
+    let mut observation_defs = HashMap::<String, String>::new();
+    for (observation_index, def_name) in host_defs.into_iter().enumerate() {
+        let entries = manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.lane == Lane::Host && entry.def_name == def_name)
+            .collect::<Vec<_>>();
+        let first = entries
+            .first()
+            .copied()
+            .expect("host def came from one manifest entry");
+        let Some(function) = program
+            .functions
+            .iter()
+            .find(|function| function.name == def_name)
+        else {
+            return Err(build_unavailable_root_error(
+                first,
+                target,
+                format!(
+                    "the Host lowering produced neither a value binding nor a callable `{def_name}`"
+                ),
+            ));
+        };
+        if !function.params.is_empty() {
+            return Err(build_unavailable_root_error(
+                first,
+                target,
+                format!(
+                    "callable `{def_name}` still requires generated Host parameter(s) {}",
+                    function
+                        .params
+                        .iter()
+                        .map(|param| format!("`{}`", param.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+
+        let function_name = function.name.clone();
+        let ty = function.ret_ty.clone();
+        let display_roots = entries
+            .into_iter()
+            .map(manifest_host_display_root)
+            .collect();
+        let mut binding_name = format!("__chelis_manifest_observation_{observation_index}");
+        while program
+            .globals
+            .iter()
+            .any(|binding| binding.name == binding_name)
+            || program
+                .functions
+                .iter()
+                .any(|function| function.name == binding_name)
+        {
+            binding_name.push('_');
+        }
+        observation_defs.insert(binding_name.clone(), def_name.to_string());
+        let binding = HostBinding {
+            name: binding_name,
+            display_name: None,
+            display_roots,
+            ty: ty.clone(),
+            value: HostExpr::new(HostExprKind::Call {
+                function: function_name,
+                args: Vec::new(),
+                arg_tys: Vec::new(),
+                ty,
+            }),
+        };
+
+        // Preserve the lowerer's existing dependency order exactly. Some
+        // compiler-owned globals are inputs to a later manifested Host root
+        // without themselves appearing in this Host manifest; globally
+        // sorting by manifest position moves those inputs after their use.
+        // A synthetic pure-nullary observation is effect-free, so inserting
+        // it immediately before the next represented manifest root preserves
+        // both [05-OBS-11] observation order and every existing dependency.
+        let manifest_index = manifest
+            .entries
+            .iter()
+            .position(|entry| entry.def_name == def_name)
+            .expect("host def came from the manifest");
+        let insertion_index = program
+            .globals
+            .iter()
+            .position(|existing| {
+                let existing_def = observation_defs
+                    .get(existing.name.as_str())
+                    .map(String::as_str)
+                    .unwrap_or(existing.name.as_str());
+                manifest
+                    .entries
+                    .iter()
+                    .position(|entry| entry.def_name == existing_def)
+                    .is_some_and(|index| index > manifest_index)
+            })
+            .unwrap_or(program.globals.len());
+        program.globals.insert(insertion_index, binding);
+    }
+
+    Ok(())
 }
 
-/// For a tuple-typed binding, the eval root-name expander produces
-/// `<name>.0`, `<name>.1`, … entries (one per tuple field). The C emit
-/// path stores a single global per binding, so we surface a tuple-prefix
-/// display name (e.g. `"buckets"`) when at least one expanded entry
-/// references this binding's terminal name. The C emitter detects the
-/// `Tuple(_)` host type on the global and renders one labeled line per
-/// field, mirroring eval's output shape.
-fn host_display_tuple_root_prefix(full_name: &str, entry_root_names: &[String]) -> Option<String> {
-    let terminal = full_name
+fn manifest_host_display_root(
+    entry: &chelis_types::manifest::RootEntry,
+) -> chelis_ir::host::HostDisplayRoot {
+    let short_def = entry
+        .def_name
         .rsplit_once("__")
         .map(|(_, tail)| tail)
-        .unwrap_or(full_name);
-    let prefix_dot = format!("{terminal}.");
-    entry_root_names
-        .iter()
-        .any(|entry| entry.starts_with(&prefix_dot))
-        .then(|| terminal.to_string())
+        .or_else(|| entry.def_name.rsplit_once('.').map(|(_, tail)| tail))
+        .unwrap_or(entry.def_name.as_str());
+    let suffix = entry
+        .name
+        .strip_prefix(entry.def_name.as_str())
+        .unwrap_or_default();
+    chelis_ir::host::HostDisplayRoot {
+        name: format!("{short_def}{suffix}"),
+        path: entry.path.clone(),
+    }
 }
 
 fn top_level_def_body(expr: &DeepExpr) -> Option<&DeepExpr> {
@@ -10042,29 +10356,6 @@ fn display_root_name(name: &str) -> String {
 
 fn type_expr_is_function(expr: &DeepExpr) -> bool {
     matches!(expr, DeepExpr::List(list, _) if (list.tag() == Some(DeepTag::TFn)))
-}
-
-/// Issue #947: extract the name from a Surf Decl (for the zero-arg fn fallback).
-fn decl_name(decl: &Decl) -> Option<&str> {
-    match decl {
-        Decl::FunDef { name, .. } | Decl::LetDef { name, .. } => Some(name),
-        _ => None,
-    }
-}
-
-/// Issue #947: is this a zero-argument function type `(t-fn {} ret-type)`?
-/// A t-fn with no argument types (only the return type as the last element)
-/// is a nullary thunk.
-fn type_expr_is_zero_arg_fn(expr: &DeepExpr) -> bool {
-    let DeepExpr::List(list, _) = expr else {
-        return false;
-    };
-    if list.tag() != Some(DeepTag::TFn) {
-        return false;
-    }
-    // t-fn structure: (t-fn {meta} arg-types... ret-type)
-    // Elements: [tag, meta, ...args, ret]. Zero-arg = only tag+meta+ret = 3 elements.
-    list.elements.len() == 3
 }
 
 fn collect_symbolic_dims_from_deep(exprs: &[chelis_deep::ast::Expr]) -> Vec<String> {

@@ -4499,7 +4499,7 @@ fn known_finite_for_loops_preserve_iteration_count_and_values() {
 }
 
 #[test]
-fn compiler_path_retains_the_realizability_manifest_observation() {
+fn compiler_path_consumes_the_target_carrying_manifest() {
     let source = include_str!("compiler.rs");
     let start = source
         .find("fn compile_source_scoped(")
@@ -4513,11 +4513,50 @@ fn compiler_path_retains_the_realizability_manifest_observation() {
     for required in [
         "realizability::infer_realizability",
         "realizability::compute_root_manifest",
-        "[#912 migration-diff]",
+        "ManifestedProgram::new(checked, manifest, target)",
     ] {
         assert!(
             function.contains(required),
-            "compile_source_scoped lost the #912 observation marker {required}"
+            "compile_source_scoped lost the #912 production boundary {required}"
+        );
+    }
+    for forbidden in ["let _manifest", "[#912 migration-diff]"] {
+        assert!(
+            !function.contains(forbidden),
+            "compile_source_scoped restored the discarded observe-only manifest path: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn root_manifest_walkers_consume_stamped_nodes_without_list_reconstruction() {
+    let source = include_str!("../../chelis-effects/src/realizability.rs");
+    assert!(
+        !source.contains(".to_list("),
+        "#1082 regression: realizability rebuilt a legacy List from a stamped Node"
+    );
+    assert!(
+        source.contains("Expr::Node(node,"),
+        "#1082 regression: realizability has no direct stamped-Node traversal"
+    );
+}
+
+#[test]
+fn c_and_hip_artifact_kind_is_manifest_driven_not_source_scanned() {
+    let source = include_str!("../../chelis-cli/src/main.rs");
+    assert!(
+        !source.contains(".contains(\"int main("),
+        "#912 regression: build artifact kind is inferred from emitted source text"
+    );
+    for required in [
+        "fn cmd_build_c_result(",
+        "fn cmd_build_hip_host(",
+        "fn cmd_build_hip(",
+        "requires_main: bool",
+    ] {
+        assert!(
+            source.contains(required),
+            "#912 regression: C/HIP build plumbing lost {required}"
         );
     }
 }

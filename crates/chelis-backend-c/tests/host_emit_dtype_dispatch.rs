@@ -524,6 +524,7 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
         globals: vec![HostBinding {
             name: "result".to_string(),
             display_name: Some("result".to_string()),
+            display_roots: Vec::new(),
             ty: HostType::Tensor(tt.clone()),
             value: call,
         }],

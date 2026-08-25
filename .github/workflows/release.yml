@@ -366,8 +366,8 @@ jobs:
           set -euo pipefail
           file target/release/chelis | grep -E 'arm64|aarch64'
 
-      - name: Smoke test generated C with Accelerate
-        run: python3 .github/scripts/smoke_macos_accelerate.py ./target/release/chelis
+      - name: Smoke test manifested C callable ABI
+        run: python3 .github/scripts/smoke_macos_manifested_callable.py ./target/release/chelis
 
       - name: Determine version
         id: version

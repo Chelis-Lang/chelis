@@ -2828,3 +2828,49 @@ never emits e-notation):
 bool-tagged tensor slot stores a value outside the tag's value set, the
 element renders the stored value without truncating it into a well-formed
 lie. Rendering never repairs, rounds, or rejects stored values.
+
+### 8.2 The Root Manifest
+
+> **[05-OBS-7]** For a selected target, every top-level value binding and
+> every effect-free zero-parameter definition with a value result SHALL
+> contribute an owed root. Applying an effectful declaration merely to observe
+> it would change its execution count and SHALL NOT occur. Parameterized
+> definitions are callable entries, not observation
+> roots until evaluation explicitly selects one and supplies all of its runtime
+> inputs; that concrete call result becomes an owed root. A zero-parameter
+> generic definition whose result retains an unresolved type, dimension, or
+> rank parameter likewise remains a callable entry until a concrete call
+> instantiates its result. The manifest SHALL list owed roots in source
+> declaration order.
+
+> **[05-OBS-8]** A tuple-valued root SHALL expand recursively into dotted
+> positional names in depth-first order (`result.0`, `result.1.0`, ...). A
+> fixed-product user ADT-valued root SHALL expand only when its constructor is
+> statically fixed:
+> record fields use their declared field names, and positional fields use a
+> declared field name when present or their zero-based position otherwise. If
+> the constructor is not statically fixed, the ADT remains one bare root.
+> Variable-sized and opaque container ADTs such as `List`, `Dict`, `Option`,
+> and `MappedFile` are not fixed products and remain bare roots.
+
+> **[05-OBS-9]** The root manifest SHALL carry the selected target and SHALL
+> assign each entry its Tensor or Host lane and exactly the free runtime tensor
+> inputs in that root's reachable closure. Selecting one root SHALL NOT make a
+> sibling root's input live. Dotted descendants inherit their originating
+> root's lane and input closure.
+
+> **[05-OBS-10]** Lane assignment SHALL be target-aware. A root whose declared
+> dtype is outside the selected target's Tensor capability SHALL route through
+> the Host lane without changing dtype; it SHALL NOT be narrowed, dropped, or
+> admitted to the Tensor lane because another target supports that dtype.
+
+> **[05-OBS-11]** A non-empty root manifest SHALL require an executable
+> observation entry point; an empty manifest SHALL produce an object without
+> one. Every successful eval result and build artifact SHALL realize every
+> selected manifest entry in manifest order. If an assigned lane cannot
+> produce an owed root, the whole operation SHALL fail through [05-UNS-1]
+> before returning a partial result or artifact, naming the root, lane, and
+> failure reason.
+
+(Metal observation-entry generation is not fully implemented; see
+[chelis#912](https://github.com/Chelis-Lang/chelis/issues/912).)

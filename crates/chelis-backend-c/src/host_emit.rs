@@ -176,6 +176,7 @@ use crate::host_abi::{
     HostAbiType, HostAbiType as HostType, project_program,
 };
 use chelis_ir::dag::{DimExpr, DimInfo, RiscOp, TensorType};
+use chelis_types::manifest::RootPathStep;
 use chelis_types::types::Prim;
 use chelis_types::unsupported::{Stage, Unsupported, UnsupportedKind};
 use chelis_types::{CheckedCastKind, CheckedCastPlan, NumericTrap};
@@ -443,13 +444,12 @@ pub(crate) fn emit_host_abi_program(
     body.push(String::new());
     append_tensor_math_helpers(&mut body);
     body.push(String::new());
-    // When the program is a self-contained binary (has globals → `main` is emitted in the
-    // same translation unit), user-defined host functions can be marked `static inline` so
-    // the compiler can inline scalar helpers across calls under `-O2` / `-fPIC` without
-    // requiring the downstream shell to supply `-flto -Wl,-Bsymbolic`. Object-mode builds
-    // (no main) keep external linkage so the exported symbols remain callable from the
-    // linker.
-    let internal_linkage = !program.globals.is_empty();
+    // Authored functions are published in the generated header with external
+    // linkage. [05-OBS-11] can make the same translation unit executable by
+    // adding `main`, but that observation driver must not contradict the
+    // published ABI by turning those definitions `static`. Compiler-owned
+    // monomorphized specializations remain translation-unit local below.
+    let internal_linkage = false;
     let emitted_names = emitted_function_names(program, program_name);
     reject_duplicate_emitted_function_names(&emitted_names)?;
     let function_specializations = function_specializations(program);
@@ -1801,7 +1801,16 @@ fn emit_main(
         }
     }
     for binding in &program.globals {
-        if let Some(display_name) = binding.display_name.as_deref() {
+        if !binding.display_roots.is_empty() {
+            for root in &binding.display_roots {
+                emitter.emit_manifest_root(
+                    &root.name,
+                    &c_ident(&binding.name),
+                    &binding.ty,
+                    &root.path,
+                )?;
+            }
+        } else if let Some(display_name) = binding.display_name.as_deref() {
             // #379: the display label stays raw (it is a printed string);
             // the C value identifier routes through `c_ident` so it matches
             // the (possibly mangled) declaration above.
@@ -6300,6 +6309,105 @@ impl<'a> HostEmitter<'a> {
         }
         self.lines.push(format!("{}printf(\"\\n\");", self.indent));
         Ok(())
+    }
+
+    fn emit_manifest_root(
+        &mut self,
+        name: &str,
+        value: &str,
+        ty: &HostType,
+        path: &[RootPathStep],
+    ) -> Result<(), Unsupported> {
+        if path.is_empty() {
+            return self.emit_labeled_root(name, value, ty);
+        }
+
+        let mut current = value.to_string();
+        let mut boxed_values = Vec::with_capacity(path.len());
+        for (depth, step) in path.iter().enumerate() {
+            let boxed = self.next_temp("manifest_root_field");
+            let container = if depth == 0 {
+                current.clone()
+            } else {
+                match step {
+                    RootPathStep::Tuple(_) => format!("chelis_value_as_tuple({current})"),
+                    RootPathStep::Adt(_) => format!("chelis_value_as_adt({current})"),
+                }
+            };
+            let access = match step {
+                RootPathStep::Tuple(index) => {
+                    if depth == 0 && !matches!(ty, HostType::Tuple(_)) {
+                        return Err(invalid_abi_shape(
+                            format!("manifest tuple path starts at `{ty:?}`"),
+                            "manifested root observation",
+                        ));
+                    }
+                    format!("chelis_tuple_get({container}, {index})")
+                }
+                RootPathStep::Adt(index) => {
+                    if depth == 0 && !matches!(ty, HostType::Adt(_, _)) {
+                        return Err(invalid_abi_shape(
+                            format!("manifest ADT path starts at `{ty:?}`"),
+                            "manifested root observation",
+                        ));
+                    }
+                    format!("chelis_adt_get_field({container}, {index})")
+                }
+            };
+            self.lines
+                .push(format!("{}chelis_value {boxed} = {access};", self.indent));
+            current = boxed.clone();
+            boxed_values.push(boxed);
+        }
+
+        self.emit_labeled_boxed_root(name, &current);
+        for boxed in boxed_values.into_iter().rev() {
+            self.lines
+                .push(format!("{}chelis_value_release({boxed});", self.indent));
+        }
+        Ok(())
+    }
+
+    fn emit_labeled_boxed_root(&mut self, name: &str, value: &str) {
+        let safe_name = chelis_ir::span_sanitize::sanitize_for_format_string(name);
+        self.lines.push(format!(
+            "{}printf(\"%s = \", \"{safe_name}\");",
+            self.indent
+        ));
+        self.lines
+            .push(format!("{}switch ({value}.tag) {{", self.indent));
+        self.lines.push(format!(
+            "{}case CHELIS_VALUE_INT64: printf(\"%lld\", (long long){value}.as.i64); break;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}case CHELIS_VALUE_FLOAT64: {{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
+             chelis_format_shortest({value}.as.f64, CHELIS_F64, fmt_buf, sizeof fmt_buf); \
+             printf(\"%s\", fmt_buf); break; }}",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}case CHELIS_VALUE_BOOL: printf(\"%s\", {value}.as.boolean ? \"true\" : \"false\"); break;",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}case CHELIS_VALUE_STRING: printf(\"%s\", chelis_string_data({value}.as.string)); break;",
+            self.indent
+        ));
+        for (tag, printer, field) in [
+            ("TENSOR", "chelis_print_tensor_stdout", "tensor"),
+            ("LIST", "chelis_print_list", "list"),
+            ("TUPLE", "chelis_print_tuple", "tuple"),
+            ("DICT", "chelis_print_dict", "dict"),
+            ("ADT", "chelis_print_adt", "adt"),
+        ] {
+            self.lines.push(format!(
+                "{}case CHELIS_VALUE_{tag}: {printer}({value}.as.{field}); break;",
+                self.indent
+            ));
+        }
+        self.lines.push(format!("{}}}", self.indent));
+        self.lines.push(format!("{}printf(\"\\n\");", self.indent));
     }
 
     fn next_temp(&mut self, prefix: &str) -> String {

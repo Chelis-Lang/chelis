@@ -7,10 +7,11 @@
 // is zero-arg-specific.
 //
 // Output shape (chelis#732 Phase 1, [05-OBS-4]): `chelis eval --file`
-// renders a scalar root BARE - the old `tensor(shape=[], data=[N.N])`
+// renders scalar roots BARE - the old `tensor(shape=[], data=[N.N])`
 // wrapper was the interpreter's rank-0 realization leaking into the
 // observation channel and is no longer an exit form. bool prints
-// true/false, integers print as integers ([05-OBS-2]).
+// true/false, integers print as integers ([05-OBS-2]). [05-OBS-7] makes the
+// pure nullary declaration and the value binding roots in source order.
 
 use assert_cmd::Command;
 use std::fs;
@@ -39,7 +40,9 @@ fn host_eval_scalar_f32_zero_arg_returns_body_literal() {
     let fixture = dir.path().join("scalar_f32_zero_arg.ch");
     write_file(&fixture, "def go() -> f32 = 7.5\nresult = go()\n");
 
-    eval_file(&fixture).success().stdout("result = 7.5\n");
+    eval_file(&fixture)
+        .success()
+        .stdout("go = 7.5\nresult = 7.5\n");
 }
 
 #[test]
@@ -53,7 +56,9 @@ fn host_eval_scalar_f64_zero_arg_returns_body_literal() {
         "def go() -> f64 = cast(7.5, f64)\nresult = go()\n",
     );
 
-    eval_file(&fixture).success().stdout("result = 7.5\n");
+    eval_file(&fixture)
+        .success()
+        .stdout("go = 7.5\nresult = 7.5\n");
 }
 
 #[test]
@@ -63,7 +68,7 @@ fn host_eval_scalar_i64_zero_arg_returns_body_literal() {
     let fixture = dir.path().join("scalar_i64_zero_arg.ch");
     write_file(&fixture, "def go() -> i64 = 7\nresult = go()\n");
 
-    eval_file(&fixture).success().stdout("result = 7\n");
+    eval_file(&fixture).success().stdout("go = 7\nresult = 7\n");
 }
 
 #[test]
@@ -73,7 +78,9 @@ fn host_eval_scalar_bool_zero_arg_returns_body_literal() {
     let fixture = dir.path().join("scalar_bool_zero_arg.ch");
     write_file(&fixture, "def go() -> bool = true\nresult = go()\n");
 
-    eval_file(&fixture).success().stdout("result = true\n");
+    eval_file(&fixture)
+        .success()
+        .stdout("go = true\nresult = true\n");
 }
 
 #[test]
