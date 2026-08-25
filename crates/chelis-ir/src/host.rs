@@ -4165,7 +4165,68 @@ fn substitute_var(expr: &Expr, name: &str, replacement: &Expr) -> Expr {
             let bridged = Expr::List(node.to_list(*span), *span);
             substitute_var(&bridged, name, replacement)
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => expr.clone(),
+        // chelis#1087 documented pass-through: the pipe rewrite substitutes
+        // a name the surf desugarer minted fresh per stage (`__chelis_pipe`,
+        // the contract in this function's doc comment), so that name cannot
+        // occur inside a transitional variant's subtree. The assertion keeps
+        // the freshness contract checked rather than assumed; a firing here
+        // means a caller substituted a non-fresh name.
+        Expr::BareList(_, _) | Expr::UnknownForm(_) => {
+            debug_assert!(
+                !expr_mentions_name(expr, name),
+                "substitute_var pass-through violated its freshness contract: \
+                 `{name}` occurs inside a transitional Expr variant (chelis#1087)"
+            );
+            expr.clone()
+        }
+    }
+}
+
+/// Whether `name` occurs as an `Atom::Name` anywhere in `expr`. Supports the
+/// `substitute_var` pass-through assertion above (chelis#1087): under the
+/// freshness contract the substituted pipe-parameter name occurs nowhere in
+/// a skipped subtree, so any occurrence at all is a contract violation.
+fn expr_mentions_name(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Atom(Atom::Name(n), _) => n == name,
+        Expr::Atom(_, _) => false,
+        Expr::Map(map, _) => map
+            .entries
+            .iter()
+            .any(|(_, value)| expr_mentions_name(value, name)),
+        Expr::MetaExpr(meta, _) => {
+            meta.entries
+                .iter()
+                .any(|(_, value)| expr_mentions_name(value, name))
+                || expr_mentions_name(&meta.expr, name)
+        }
+        Expr::List(list, _) => list
+            .elements
+            .iter()
+            .any(|element| expr_mentions_name(element, name)),
+        Expr::Node(node, _) => {
+            node.meta()
+                .entries
+                .iter()
+                .any(|(_, value)| expr_mentions_name(value, name))
+                || node
+                    .children_slice()
+                    .iter()
+                    .any(|child| expr_mentions_name(child, name))
+        }
+        Expr::BareList(elements, _) => elements
+            .iter()
+            .any(|element| expr_mentions_name(element, name)),
+        Expr::UnknownForm(data) => {
+            data.meta
+                .entries
+                .iter()
+                .any(|(_, value)| expr_mentions_name(value, name))
+                || data
+                    .children
+                    .iter()
+                    .any(|child| expr_mentions_name(child, name))
+        }
     }
 }
 
@@ -12094,6 +12155,40 @@ mod tests {
     use super::*;
     use crate::{DimInfo, RiscOp};
     use chelis_types::types::Prim;
+
+    // ── chelis#1087: substitute_var transitional-variant pass-through ──
+
+    /// The documented pass-through leaves a transitional variant unchanged
+    /// when the freshness contract holds (the substituted name occurs
+    /// nowhere inside it).
+    #[test]
+    fn substitute_var_transitional_passthrough_is_unchanged() {
+        let sp = chelis_deep::Span::new(0, 0);
+        let bare = Expr::BareList(
+            vec![Expr::Atom(Atom::Name("other_name".to_string()), sp)],
+            sp,
+        );
+        let replacement = Expr::Atom(Atom::Int(1), sp);
+        let out = substitute_var(&bare, "__chelis_pipe_0", &replacement);
+        assert_eq!(out, bare, "pass-through must be byte-identical");
+    }
+
+    /// Negative: the pass-through's debug assertion fires when the
+    /// substituted name DOES occur inside a transitional variant — the
+    /// freshness contract (`__chelis_pipe` minted fresh per stage) is
+    /// checked, not assumed.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "freshness contract")]
+    fn substitute_var_documented_passthrough_negative() {
+        let sp = chelis_deep::Span::new(0, 0);
+        let bare = Expr::BareList(
+            vec![Expr::Atom(Atom::Name("__chelis_pipe_0".to_string()), sp)],
+            sp,
+        );
+        let replacement = Expr::Atom(Atom::Int(1), sp);
+        let _ = substitute_var(&bare, "__chelis_pipe_0", &replacement);
+    }
 
     // ── harden-bounded-monomorphization D1/D2/D4 unit locks ──
 

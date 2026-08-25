@@ -3189,7 +3189,20 @@ fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
                 out.insert(name.to_string());
             }
         }
-        Expr::UnknownForm(_) => {}
+        Expr::UnknownForm(_) => {
+            // Unreachable by role construction (chelis#1087): a param slot
+            // is a Binder position, where the stamp pass produces atoms,
+            // Nodes, or BareLists and never an UnknownForm
+            // (`chelis_deep::role`'s Binder disposition, spec/03
+            // [03-ROLE-3]); the `.ch` path delivers `Expr::List`. Release
+            // builds keep the skip; debug builds fail loudly so a new
+            // producer cannot silently drop parameter names.
+            debug_assert!(
+                false,
+                "collect_param_bound_names reached an UnknownForm at a param \
+                 slot; unreachable by role construction (chelis#1087)"
+            );
+        }
     }
 }
 
@@ -11951,6 +11964,26 @@ impl LowerCtx {
 mod tests {
     use super::*;
     use crate::verify;
+
+    /// chelis#1087: the param-slot UnknownForm arm is unreachable by role
+    /// construction (a Binder slot stamps to atoms, Nodes, or BareLists,
+    /// never an UnknownForm), so it is a debug-unreachable rather than a
+    /// silent skip. The guard must actually fire; an assertion nothing
+    /// triggers is the "belief without a test" shape the boundary-guard
+    /// test below also pins.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "unreachable by role construction")]
+    fn collect_param_bound_names_unknown_form_guard_fires() {
+        let mut out = std::collections::HashSet::new();
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: "mystery".to_string(),
+            meta: chelis_deep::ast::MetaMap::default(),
+            children: vec![],
+            span: chelis_deep::Span::new(0, 0),
+        }));
+        collect_param_bound_names(&unknown, &mut out);
+    }
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");

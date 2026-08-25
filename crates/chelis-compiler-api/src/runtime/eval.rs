@@ -79,9 +79,16 @@ impl<'a> EvalContext<'a> {
                 let bridged = node.to_list(*span);
                 self.eval_list(&bridged)
             }
-            Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-                Err("transitional Expr variant is not evaluable".to_string())
+            // chelis#1087: loud rejection, identifying the form the way the
+            // resugar boundary describes it rather than by an internal
+            // variant name.
+            Expr::BareList(_, _) => {
+                Err("a structural bare list is not a runtime expression".to_string())
             }
+            Expr::UnknownForm(data) => Err(format!(
+                "unknown form `{}` is not a runtime expression",
+                data.head
+            )),
         }
     }
 
