@@ -5229,4 +5229,266 @@ mod tests {
             "numeric trap: overflow in cast at int32"
         );
     }
+
+    #[test]
+    fn direct_subtraction_uses_the_exact_stored_width_at_every_signed_dtype() {
+        macro_rules! assert_width {
+            ($prim:expr, $variant:ident, $min:expr, $max:expr) => {{
+                let representable = int_binop(
+                    IntBinOp::Sub,
+                    ScalarValue {
+                        bits: Bits::$variant(-1),
+                    },
+                    ScalarValue {
+                        bits: Bits::$variant($min),
+                    },
+                )
+                .expect("-1 - MIN is representable as MAX at the same width");
+                assert_eq!(
+                    representable,
+                    ScalarValue {
+                        bits: Bits::$variant($max),
+                    },
+                    "{} representable boundary",
+                    $prim.name()
+                );
+
+                let overflow = int_binop(
+                    IntBinOp::Sub,
+                    ScalarValue {
+                        bits: Bits::$variant($min),
+                    },
+                    ScalarValue {
+                        bits: Bits::$variant(1),
+                    },
+                )
+                .expect_err("MIN - 1 must trap as direct subtraction overflow");
+                assert_eq!(
+                    overflow,
+                    NumericKernelError::Trap(NumericTrap::Overflow {
+                        op: "sub",
+                        prim: $prim,
+                    }),
+                    "{} true overflow",
+                    $prim.name()
+                );
+            }};
+        }
+
+        assert_width!(Prim::Int8, I8, i8::MIN, i8::MAX);
+        assert_width!(Prim::Int16, I16, i16::MIN, i16::MAX);
+        assert_width!(Prim::Int32, I32, i32::MIN, i32::MAX);
+        assert_width!(Prim::Int64, I64, i64::MIN, i64::MAX);
+    }
+
+    #[test]
+    fn scalar_extrema_preserve_first_nan_and_lhs_signed_zero_bits_at_every_float_width() {
+        macro_rules! assert_width {
+            ($variant:ident, $float:ty, $left_nan:expr, $right_nan:expr) => {{
+                let left_nan = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_bits($left_nan)),
+                };
+                let right_nan = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_bits($right_nan)),
+                };
+                let one = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_f32(1.0)),
+                };
+                assert_eq!(
+                    float_binop(FloatBinOp::Max, left_nan, one).unwrap(),
+                    left_nan
+                );
+                assert_eq!(
+                    float_binop(FloatBinOp::Min, left_nan, one).unwrap(),
+                    left_nan
+                );
+                assert_eq!(
+                    float_binop(FloatBinOp::Max, one, right_nan).unwrap(),
+                    right_nan
+                );
+                assert_eq!(
+                    float_binop(FloatBinOp::Min, one, right_nan).unwrap(),
+                    right_nan
+                );
+                assert_eq!(
+                    float_binop(FloatBinOp::Max, left_nan, right_nan).unwrap(),
+                    left_nan
+                );
+                assert_eq!(
+                    float_binop(FloatBinOp::Min, left_nan, right_nan).unwrap(),
+                    left_nan
+                );
+
+                let negative_zero = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_f32(-0.0)),
+                };
+                let positive_zero = ScalarValue {
+                    bits: Bits::$variant(<$float>::from_f32(0.0)),
+                };
+                assert_eq!(
+                    float_binop(FloatBinOp::Max, negative_zero, positive_zero).unwrap(),
+                    negative_zero
+                );
+                assert_eq!(
+                    float_binop(FloatBinOp::Min, positive_zero, negative_zero).unwrap(),
+                    positive_zero
+                );
+            }};
+        }
+
+        assert_width!(F16, half::f16, 0xfe01, 0x7e55);
+        assert_width!(Bf16, half::bf16, 0xffc1, 0x7fe5);
+
+        let left_nan = ScalarValue {
+            bits: Bits::F32(f32::from_bits(0xffc1_2345)),
+        };
+        let right_nan = ScalarValue {
+            bits: Bits::F32(f32::from_bits(0x7fc5_4321)),
+        };
+        let one = ScalarValue {
+            bits: Bits::F32(1.0),
+        };
+        assert_eq!(
+            float_binop(FloatBinOp::Max, left_nan, one).unwrap(),
+            left_nan
+        );
+        assert_eq!(
+            float_binop(FloatBinOp::Min, one, right_nan).unwrap(),
+            right_nan
+        );
+        assert_eq!(
+            float_binop(FloatBinOp::Max, left_nan, right_nan).unwrap(),
+            left_nan
+        );
+        assert_eq!(
+            float_binop(
+                FloatBinOp::Max,
+                ScalarValue {
+                    bits: Bits::F32(-0.0),
+                },
+                ScalarValue {
+                    bits: Bits::F32(0.0),
+                },
+            )
+            .unwrap(),
+            ScalarValue {
+                bits: Bits::F32(-0.0),
+            }
+        );
+
+        let left_nan = ScalarValue {
+            bits: Bits::F64(f64::from_bits(0xfff8_1234_5678_9abc)),
+        };
+        let right_nan = ScalarValue {
+            bits: Bits::F64(f64::from_bits(0x7ff8_abcd_1234_5678)),
+        };
+        let one = ScalarValue {
+            bits: Bits::F64(1.0),
+        };
+        assert_eq!(
+            float_binop(FloatBinOp::Max, left_nan, one).unwrap(),
+            left_nan
+        );
+        assert_eq!(
+            float_binop(FloatBinOp::Min, one, right_nan).unwrap(),
+            right_nan
+        );
+        assert_eq!(
+            float_binop(FloatBinOp::Min, left_nan, right_nan).unwrap(),
+            left_nan
+        );
+        assert_eq!(
+            float_binop(
+                FloatBinOp::Min,
+                ScalarValue {
+                    bits: Bits::F64(0.0),
+                },
+                ScalarValue {
+                    bits: Bits::F64(-0.0),
+                },
+            )
+            .unwrap(),
+            ScalarValue {
+                bits: Bits::F64(0.0),
+            }
+        );
+    }
+
+    #[test]
+    fn tensor_extrema_select_stored_operands_without_reencoding_payloads() {
+        macro_rules! assert_width {
+            ($variant:ident, $float:ty, $left_nan:expr, $right_nan:expr) => {{
+                let left = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        <$float>::from_bits($left_nan),
+                        <$float>::from_f32(-0.0),
+                        <$float>::from_f32(4.0),
+                    ]),
+                };
+                let right = TensorStorage {
+                    buf: Buf::$variant(vec![
+                        <$float>::from_bits($right_nan),
+                        <$float>::from_f32(0.0),
+                        <$float>::from_f32(2.0),
+                    ]),
+                };
+                let max = float_tensor_binop(FloatBinOp::Max, &left, &right).unwrap();
+                let min = float_tensor_binop(FloatBinOp::Min, &left, &right).unwrap();
+                match (max.buf, min.buf) {
+                    (Buf::$variant(max), Buf::$variant(min)) => {
+                        assert_eq!(max[0].to_bits(), $left_nan);
+                        assert_eq!(min[0].to_bits(), $left_nan);
+                        assert_eq!(max[1].to_bits(), <$float>::from_f32(-0.0).to_bits());
+                        assert_eq!(min[1].to_bits(), <$float>::from_f32(-0.0).to_bits());
+                        assert_eq!(max[2], <$float>::from_f32(4.0));
+                        assert_eq!(min[2], <$float>::from_f32(2.0));
+                    }
+                    _ => unreachable!("same-dtype kernels preserve their storage variant"),
+                }
+            }};
+        }
+
+        assert_width!(F16, half::f16, 0xfe01, 0x7e55);
+        assert_width!(Bf16, half::bf16, 0xffc1, 0x7fe5);
+
+        let left = TensorStorage {
+            buf: Buf::F32(vec![f32::from_bits(0xffc1_2345), -0.0, 4.0]),
+        };
+        let right = TensorStorage {
+            buf: Buf::F32(vec![f32::from_bits(0x7fc5_4321), 0.0, 2.0]),
+        };
+        let max = float_tensor_binop(FloatBinOp::Max, &left, &right).unwrap();
+        let min = float_tensor_binop(FloatBinOp::Min, &left, &right).unwrap();
+        match (max.buf, min.buf) {
+            (Buf::F32(max), Buf::F32(min)) => {
+                assert_eq!(max[0].to_bits(), 0xffc1_2345);
+                assert_eq!(min[0].to_bits(), 0xffc1_2345);
+                assert_eq!(max[1].to_bits(), (-0.0_f32).to_bits());
+                assert_eq!(min[1].to_bits(), (-0.0_f32).to_bits());
+                assert_eq!(max[2], 4.0);
+                assert_eq!(min[2], 2.0);
+            }
+            _ => unreachable!("f32 kernels preserve f32 storage"),
+        }
+
+        let left = TensorStorage {
+            buf: Buf::F64(vec![f64::from_bits(0xfff8_1234_5678_9abc), -0.0, 4.0]),
+        };
+        let right = TensorStorage {
+            buf: Buf::F64(vec![f64::from_bits(0x7ff8_abcd_1234_5678), 0.0, 2.0]),
+        };
+        let max = float_tensor_binop(FloatBinOp::Max, &left, &right).unwrap();
+        let min = float_tensor_binop(FloatBinOp::Min, &left, &right).unwrap();
+        match (max.buf, min.buf) {
+            (Buf::F64(max), Buf::F64(min)) => {
+                assert_eq!(max[0].to_bits(), 0xfff8_1234_5678_9abc);
+                assert_eq!(min[0].to_bits(), 0xfff8_1234_5678_9abc);
+                assert_eq!(max[1].to_bits(), (-0.0_f64).to_bits());
+                assert_eq!(min[1].to_bits(), (-0.0_f64).to_bits());
+                assert_eq!(max[2], 4.0);
+                assert_eq!(min[2], 2.0);
+            }
+            _ => unreachable!("f64 kernels preserve f64 storage"),
+        }
+    }
 }
