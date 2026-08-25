@@ -38,6 +38,39 @@ class TestFixtureInventory(unittest.TestCase):
     def test_score_one_fixtures_non_empty(self) -> None:
         self.assertGreater(len(oracle.SCORE_ONE_CONTROL_FIXTURES), 0)
 
+    def test_name_fixtures_non_empty(self) -> None:
+        self.assertGreater(len(oracle.NAME_IN_EXPR_FIXTURES), 0)
+
+    def test_name_fixtures_cover_the_four_expression_positions(self) -> None:
+        """Obligation 7 covers def body, fn body, app argument, bind RHS."""
+        names = [name for name, _ in oracle.NAME_IN_EXPR_FIXTURES]
+        for position in ("def body", "fn body", "app argument", "bind RHS"):
+            self.assertTrue(
+                any(position in name for name in names),
+                f"no NAME_IN_EXPR fixture covers the {position} position",
+            )
+
+    def test_name_fixtures_spell_the_remediation_name(self) -> None:
+        """Every fixture uses `oops` so the remediation assertion is exact."""
+        for name, source in oracle.NAME_IN_EXPR_FIXTURES:
+            self.assertIn(
+                "oops",
+                source,
+                f"fixture '{name}' must use the `oops` identifier the "
+                "remediation constant asserts",
+            )
+        self.assertIn("oops", oracle.NAME_IN_EXPR_REMEDIATION)
+
+    def test_score_one_fixtures_cover_structural_symbol_positions(self) -> None:
+        """The chelis#885 over-application control positions are present."""
+        combined = " ".join(source for _, source in oracle.SCORE_ONE_CONTROL_FIXTURES)
+        for spelling in ("(record {}", "(kv {}", "(access {}", "(export {}", "(deftype {"):
+            self.assertIn(
+                spelling,
+                combined,
+                f"no score-one control covers the {spelling} structural position",
+            )
+
     def test_score_one_fixtures_have_names_and_sources(self) -> None:
         for name, source in oracle.SCORE_ONE_CONTROL_FIXTURES:
             self.assertIsInstance(name, str)
@@ -162,6 +195,95 @@ class TestKeywordRejection(unittest.TestCase):
         )
         with self.assertRaises(oracle.OracleFailure):
             oracle.check_keyword_in_expr_rejected()
+
+
+class TestNameInExprRejection(unittest.TestCase):
+    """Test obligation 7 logic with mocked subprocess."""
+
+    def _mock_check_error(self, source: str) -> subprocess.CompletedProcess[str]:
+        """Simulate chelis check returning the [03-ROLE-2] stamp rejection."""
+        report = {
+            "score": 0,
+            "components": {"parse": 0, "structure": 0, "names": 0, "types": 0},
+            "typed_nodes": 0,
+            "untyped_nodes": 0,
+            "total_nodes": 0,
+            "unresolved_names": [],
+            "errors": [
+                {
+                    "kind": "Other",
+                    "message": "stamp error: bare name `oops` at expression slot; use `(var {} oops)`",
+                    "severity": 0.5,
+                }
+            ],
+        }
+        return subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=2,
+            stdout=json.dumps(report),
+            stderr="",
+        )
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_name_rejected_passes(self, mock_check: MagicMock) -> None:
+        mock_check.side_effect = self._mock_check_error
+        # Should not raise.
+        oracle.check_name_in_expr_rejected()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_name_accepted_fails(self, mock_check: MagicMock) -> None:
+        """If chelis check returns exit 0 for a bare-name fixture, oracle fails."""
+        mock_check.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=0,
+            stdout='{"score": 1, "errors": []}',
+            stderr="",
+        )
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_name_in_expr_rejected()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_error_without_bare_name_identification_fails(
+        self, mock_check: MagicMock
+    ) -> None:
+        """The diagnostic must identify the form as a bare name."""
+        report = {
+            "score": 0,
+            "errors": [{"kind": "Other", "message": "some other error", "severity": 0.5}],
+        }
+        mock_check.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=2,
+            stdout=json.dumps(report),
+            stderr="",
+        )
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_name_in_expr_rejected()
+
+    @patch("unrepresentable_domain_oracle.run_chelis_check")
+    def test_error_without_remediation_spelling_fails(
+        self, mock_check: MagicMock
+    ) -> None:
+        """[03-ROLE-2]'s SHOULD is this oracle's MUST: the `(var {} ...)`
+        remediation spelling has to appear, or the diagnostic regressed."""
+        report = {
+            "score": 0,
+            "errors": [
+                {
+                    "kind": "Other",
+                    "message": "stamp error: bare name `oops` at expression slot",
+                    "severity": 0.5,
+                }
+            ],
+        }
+        mock_check.return_value = subprocess.CompletedProcess(
+            args=["chelis", "check", "x.dp"],
+            returncode=2,
+            stdout=json.dumps(report),
+            stderr="",
+        )
+        with self.assertRaises(oracle.OracleFailure):
+            oracle.check_name_in_expr_rejected()
 
 
 class TestScoreOneControl(unittest.TestCase):
@@ -465,6 +587,7 @@ class TestObligationRoster(unittest.TestCase):
                 oracle.check_validate_agrees_with_check,
                 oracle.check_stamp_pass_integration_tests,
                 oracle.check_compiler_api_ingress,
+                oracle.check_name_in_expr_rejected,
             ],
         )
 
