@@ -42,8 +42,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "run",
                 "-p",
                 "chelis-types",
-                "--test",
-                "issue_1287_count_checker",
+                "-E",
+                "binary(issue_1287_count_checker) | test(count_tensor_groups_) | test(adjacent_pair_fold_preserves_canonical_tree) | test(count_add_traps_int64_overflow)",
             ),
         ),
         OracleLeg(
@@ -54,8 +54,8 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "run",
                 "-p",
                 "chelis-ir",
-                "-E",
-                "binary(issue_1287_count) | test(adjacent_pair_fold_preserves_canonical_tree) | test(count_add_traps_int64_overflow)",
+                "--test",
+                "issue_1287_count",
             ),
         ),
         OracleLeg(

@@ -24,9 +24,10 @@ use crate::dag::{
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, FloatBinOp, FloatUnOp, IndexedTrapCandidate, IntBinOp,
     IntUnOp, RawTensor, ReduceWindowGradOp, TensorReduceOp, TensorStorage,
-    arg_reduce_tensor_groups, compare_tensors, finalize_tensor, float_tensor_binop,
-    float_tensor_unop, int_tensor_binop, int_tensor_unop, integer_is_exactly_representable,
-    reduce_tensor_groups, reduce_window_grad_tensor_groups, tensor_from_scalars, uniform_sample,
+    arg_reduce_tensor_groups, compare_tensors, count_tensor_groups, finalize_tensor,
+    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
+    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
+    tensor_from_scalars, uniform_sample,
 };
 use chelis_types::types::Prim;
 
@@ -1105,39 +1106,9 @@ fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<Te
 
 /// [05-OP-29] multi-axis bool count. Source elements are partitioned into
 /// result groups by removing the selected coordinates. Each group is filled
-/// by scanning the input in its original row-major order, then folded through
-/// the canonical adjacent-pair balanced checked-int64 tree.
-fn checked_adjacent_pair_fold<T, E>(
-    mut level: Vec<T>,
-    mut combine: impl FnMut(T, T) -> Result<T, E>,
-) -> Result<Option<T>, E> {
-    while level.len() > 1 {
-        let mut source = level.into_iter();
-        let mut next = Vec::with_capacity(source.len().div_ceil(2));
-        while let Some(left) = source.next() {
-            let value = match source.next() {
-                Some(right) => combine(left, right)?,
-                None => left,
-            };
-            next.push(value);
-        }
-        level = next;
-    }
-    Ok(level.pop())
-}
-
-fn checked_count_add(left: i64, right: i64) -> Result<i64, String> {
-    left.checked_add(right)
-        .ok_or_else(|| "count/int64 overflow".to_string())
-}
-
+/// by scanning the input in its original row-major order. Arithmetic and the
+/// canonical adjacent-pair checked-int64 tree live only in the typed kernel.
 pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
-    if input.prim() != Prim::Bool {
-        return Err(format!(
-            "count expects bool storage, got {}",
-            input.prim().name()
-        ));
-    }
     if axes.is_empty()
         || axes.iter().any(|&axis| axis >= input.shape.len())
         || axes.windows(2).any(|pair| pair[0] <= pair[1])
@@ -1154,7 +1125,7 @@ pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, 
         .enumerate()
         .filter_map(|(axis, &extent)| (!selected.contains(&axis)).then_some(extent))
         .collect();
-    let mut groups = vec![Vec::<i64>::new(); numel(&out_shape)];
+    let mut groups = vec![Vec::<usize>::new(); numel(&out_shape)];
     for flat in 0..input.len() {
         let input_coord = linear_to_index(flat, &input.shape);
         let output_coord: Vec<usize> = input_coord
@@ -1163,31 +1134,11 @@ pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, 
             .filter_map(|(axis, &coord)| (!selected.contains(&axis)).then_some(coord))
             .collect();
         let group = index_to_linear(&output_coord, &out_shape);
-        let bit = input
-            .storage()
-            .scalar_at(flat)
-            .as_bool_exact()
-            .ok_or_else(|| format!("count input element {flat} is not an exact bool"))?;
-        groups[group].push(i64::from(bit));
+        groups[group].push(flat);
     }
-
-    let mut output = Vec::with_capacity(groups.len());
-    for group in groups {
-        // The empty selected-extent result is the specified Count identity,
-        // not a permissive fallback. Keep that semantic branch visible rather
-        // than spelling it as a generic defaulting combinator.
-        #[allow(
-            clippy::manual_unwrap_or,
-            clippy::manual_unwrap_or_default,
-            reason = "Count's explicit empty-group identity must remain auditable"
-        )]
-        let value = match checked_adjacent_pair_fold(group, checked_count_add)? {
-            Some(value) => value,
-            None => 0,
-        };
-        output.push(value);
-    }
-    finalize_wide_int("count", Prim::Int64, out_shape, output)
+    let storage =
+        count_tensor_groups(input.storage(), &groups).map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
 }
 
 fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
@@ -2583,29 +2534,6 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
-    }
-
-    #[test]
-    fn adjacent_pair_fold_preserves_canonical_tree() {
-        let leaves = ["a", "b", "c", "d", "e"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        let tree = checked_adjacent_pair_fold(leaves, |left, right| {
-            Ok::<_, std::convert::Infallible>(format!("({left}+{right})"))
-        })
-        .expect("infallible trace fold")
-        .expect("non-empty trace");
-        assert_eq!(tree, "(((a+b)+(c+d))+e)");
-    }
-
-    #[test]
-    fn count_add_traps_int64_overflow() {
-        assert_eq!(checked_count_add(3, 4), Ok(7));
-        assert_eq!(
-            checked_count_add(i64::MAX, 1),
-            Err("count/int64 overflow".to_string())
-        );
     }
 
     #[test]

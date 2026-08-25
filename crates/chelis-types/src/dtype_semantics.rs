@@ -2471,6 +2471,82 @@ fn reduction_result_scalar(
     }
 }
 
+/// Fold one level at a time by combining adjacent pairs and carrying an odd
+/// final element unchanged. This is the canonical balanced reduction tree for
+/// [05-OP-29]; leaf order is exactly the caller-provided group order.
+fn checked_adjacent_pair_fold<T, E>(
+    mut level: Vec<T>,
+    mut combine: impl FnMut(T, T) -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    while level.len() > 1 {
+        let mut source = level.into_iter();
+        let mut next = Vec::with_capacity(source.len().div_ceil(2));
+        while let Some(left) = source.next() {
+            let value = match source.next() {
+                Some(right) => combine(left, right)?,
+                None => left,
+            };
+            next.push(value);
+        }
+        level = next;
+    }
+    Ok(level.pop())
+}
+
+fn checked_count_add(left: i64, right: i64) -> Result<i64, NumericKernelError> {
+    left.checked_add(right).ok_or_else(|| {
+        NumericKernelError::Trap(NumericTrap::Overflow {
+            op: "count",
+            prim: Prim::Int64,
+        })
+    })
+}
+
+/// Count true elements in explicitly ordered groups through the closed typed
+/// kernel boundary. The input must use exact Bool storage and the result is
+/// exact int64. Empty groups produce the specified zero identity.
+pub fn count_tensor_groups(
+    input: &TensorStorage,
+    groups: &[Vec<usize>],
+) -> Result<TensorStorage, NumericKernelError> {
+    if input.prim() != Prim::Bool {
+        return Err(NumericKernelError::InvalidReductionSignature {
+            op: "count",
+            input: input.prim(),
+            accumulator: Prim::Int64,
+            result: Prim::Int64,
+        });
+    }
+
+    let mut values = Vec::with_capacity(groups.len());
+    for group in groups {
+        let leaves = group
+            .iter()
+            .map(|&index| {
+                i64::from(
+                    input
+                        .scalar_at(index)
+                        .as_bool_exact()
+                        .expect("sealed Bool storage contains exact bool elements"),
+                )
+            })
+            .collect();
+        // This is the [05-OP-29] empty selected-extent identity, not a
+        // permissive fallback. Keep the branch explicit and auditable.
+        #[allow(
+            clippy::manual_unwrap_or,
+            clippy::manual_unwrap_or_default,
+            reason = "Count's explicit empty-group identity must remain auditable"
+        )]
+        let value = match checked_adjacent_pair_fold(leaves, checked_count_add)? {
+            Some(value) => value,
+            None => 0,
+        };
+        values.push(value);
+    }
+    finalize_tensor("count", Prim::Int64, RawTensor::Int(values)).map_err(Into::into)
+}
+
 /// Reduce explicitly ordered groups of input indices through one closed,
 /// dtype-keyed kernel. Callers own shape/index planning; arithmetic order,
 /// accumulator width, trap identity, and final storage are enforced here.
@@ -4558,6 +4634,56 @@ mod tests {
 
     fn one_group(len: usize) -> Vec<Vec<usize>> {
         vec![(0..len).collect()]
+    }
+
+    #[test]
+    fn count_tensor_groups_uses_bool_input_int64_output_and_empty_identity() {
+        let input =
+            finalize_tensor("test", Prim::Bool, RawTensor::Int(vec![1, 0, 1, 1, 0])).unwrap();
+        let groups = vec![vec![0, 2, 3], vec![1, 4], vec![]];
+        let output = count_tensor_groups(&input, &groups).expect("typed Count kernel");
+        assert_eq!(output.prim(), Prim::Int64);
+        assert_eq!(output.to_i64_exact_vec(), Some(vec![3, 0, 0]));
+    }
+
+    #[test]
+    fn count_tensor_groups_rejects_non_bool_storage_before_arithmetic() {
+        let input = finalize_tensor("test", Prim::Int64, RawTensor::Int(vec![0, 1])).unwrap();
+        assert_eq!(
+            count_tensor_groups(&input, &one_group(2)),
+            Err(NumericKernelError::InvalidReductionSignature {
+                op: "count",
+                input: Prim::Int64,
+                accumulator: Prim::Int64,
+                result: Prim::Int64,
+            })
+        );
+    }
+
+    #[test]
+    fn adjacent_pair_fold_preserves_canonical_tree() {
+        let leaves = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let tree = checked_adjacent_pair_fold(leaves, |left, right| {
+            Ok::<_, std::convert::Infallible>(format!("({left}+{right})"))
+        })
+        .expect("infallible trace fold")
+        .expect("non-empty trace");
+        assert_eq!(tree, "(((a+b)+(c+d))+e)");
+    }
+
+    #[test]
+    fn count_add_traps_int64_overflow() {
+        assert_eq!(checked_count_add(3, 4), Ok(7));
+        assert_eq!(
+            checked_count_add(i64::MAX, 1),
+            Err(NumericKernelError::Trap(NumericTrap::Overflow {
+                op: "count",
+                prim: Prim::Int64,
+            }))
+        );
     }
 
     #[test]

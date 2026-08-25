@@ -69,7 +69,7 @@ fn evaluator_returns_zero_for_a_selected_zero_extent() {
 }
 
 #[test]
-fn evaluator_count_is_wired_to_the_canonical_adjacent_pair_fold() {
+fn evaluator_count_only_plans_groups_and_calls_the_typed_kernel() {
     let source = include_str!("../src/eval.rs");
     let count_body = source
         .split_once("pub fn count_tensor")
@@ -79,14 +79,15 @@ fn evaluator_count_is_wired_to_the_canonical_adjacent_pair_fold() {
         .expect("Count evaluator ends before reshape")
         .0;
     assert!(
-        count_body.contains("checked_adjacent_pair_fold(group, checked_count_add)"),
-        "Count must call the checked add helper inside the canonical adjacent-pair tree"
+        count_body.contains("count_tensor_groups(input.storage(), &groups)"),
+        "Count must call the closed typed kernel after planning ordered groups"
     );
     assert!(
         !count_body.contains("try_fold")
             && !count_body.contains(".fold(")
-            && !count_body.contains("wrapping_add"),
-        "Count must not substitute a sequential fold or wrapping addition"
+            && !count_body.contains("wrapping_add")
+            && !count_body.contains("checked_add"),
+        "IR Count must not own arithmetic; the typed kernel owns the canonical tree"
     );
 }
 
