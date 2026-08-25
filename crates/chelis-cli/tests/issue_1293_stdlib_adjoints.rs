@@ -12,6 +12,28 @@ mod common;
 
 use common::{make_app, write_file};
 
+fn assert_random_wrapper_rejects(source_name: &str, body: &str, message: &str) {
+    let (_dir, reef_home, app_pkg) = make_app(source_name);
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        &format!("module Demo.Main\n\n{body}\n"),
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(message));
+}
+
 #[test]
 fn stdlib_list_selection_adjoints_preserve_runtime_positions() {
     let (_dir, reef_home, app_pkg) = make_app("issue-1293-list-adjoints");
@@ -159,5 +181,77 @@ normal_grads = with seed(42i64) {
     assert!(
         (scalar("normal_grads.2") - scalar("sample_sum")).abs() < 1e-5,
         "the std cotangent must reuse the fixed-seed standard-normal sample:\n{stdout}"
+    );
+}
+
+#[test]
+fn stdlib_random_wrappers_validate_parameters_before_sampling() {
+    assert_random_wrapper_rejects(
+        "issue-1293-normal-domain",
+        r#"import Std.Init.Random (normal_like)
+
+template = to_tensor([cast(0.0, f32)])
+bad = with seed(42i64) {
+  normal_like(template, cast(0.0, f32), cast(-1.0, f32))
+}"#,
+        "numeric trap: domain in cast at bool",
+    );
+    assert_random_wrapper_rejects(
+        "issue-1293-normal-finite-domain",
+        r#"import Std.Init.Random (normal_like)
+
+template = to_tensor([cast(0.0, f32)])
+nan = sqrt(cast(-1.0, f32))
+bad = with seed(42i64) {
+  normal_like(template, nan, cast(1.0, f32))
+}"#,
+        "numeric trap: domain in cast at bool",
+    );
+    assert_random_wrapper_rejects(
+        "issue-1293-kaiming-domain",
+        r#"import Std.Init.Kaiming (kaiming_uniform)
+
+template = to_tensor([cast(0.0, f32)])
+bad = with seed(42i64) {
+  kaiming_uniform(template, cast(0.0, f32))
+}"#,
+        "numeric trap: domain in cast at bool",
+    );
+    assert_random_wrapper_rejects(
+        "issue-1293-xavier-domain",
+        r#"import Std.Init.XavierExt (xavier_normal)
+
+template = to_tensor([cast(0.0, f32)])
+bad = with seed(42i64) {
+  xavier_normal(template, cast(1.0, f32), cast(-1.0, f32))
+}"#,
+        "numeric trap: domain in cast at bool",
+    );
+    assert_random_wrapper_rejects(
+        "issue-1293-xavier-overflow-domain",
+        r#"import Std.Init.XavierExt (xavier_uniform)
+
+template = to_tensor([cast(0.0, f32)])
+large = cast(3.4e38, f32)
+bad = with seed(42i64) {
+  xavier_uniform(template, large, large)
+}"#,
+        "numeric trap: domain in cast at bool",
+    );
+    assert_random_wrapper_rejects(
+        "issue-1293-trunc-domain",
+        r#"import Std.Init.XavierExt (trunc_normal)
+
+template = to_tensor([cast(0.0, f32)])
+bad = with seed(42i64) {
+  trunc_normal(
+    template,
+    cast(0.0, f32),
+    cast(1.0, f32),
+    cast(2.0, f32),
+    cast(1.0, f32)
+  )
+}"#,
+        "numeric trap: domain in cast at bool",
     );
 }
