@@ -27,6 +27,7 @@ class CommandManifestTests(unittest.TestCase):
                 "exact typed scalar and tensor kernels",
                 "direct IR lowering, evaluation, and AD",
                 "direct constant folding",
+                "exact WireDag v6 decoder contract",
                 "wire and target disposition contracts",
                 "compiled C exact-value and trap behavior",
                 "HIP structural contracts",
@@ -54,6 +55,16 @@ class CommandManifestTests(unittest.TestCase):
         )
         self.assertIn("exec_compile", leg.argv)
         self.assertEqual(leg.argv[-1], "direct_")
+
+    def test_wire_decoder_leg_runs_the_review_regression_binary(self) -> None:
+        leg = next(
+            leg
+            for leg in oracle.oracle_legs(sys.executable)
+            if leg.name == "exact WireDag v6 decoder contract"
+        )
+        self.assertIn("--test", leg.argv)
+        self.assertIn("wire_dag_v6_direct_arithmetic", leg.argv)
+        self.assertNotIn("-E", leg.argv)
 
     def test_hip_leg_is_structural_only(self) -> None:
         leg = next(

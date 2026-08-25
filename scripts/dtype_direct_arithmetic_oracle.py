@@ -174,6 +174,18 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
             ),
         ),
         OracleLeg(
+            "exact WireDag v6 decoder contract",
+            (
+                "cargo",
+                "nextest",
+                "run",
+                "-p",
+                "chelis-compiler-api",
+                "--test",
+                "wire_dag_v6_direct_arithmetic",
+            ),
+        ),
+        OracleLeg(
             "wire and target disposition contracts",
             (
                 "cargo",

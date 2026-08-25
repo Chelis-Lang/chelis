@@ -124,7 +124,10 @@ fn missing_older_and_future_versions_fail_before_node_decode() {
 
     assert_version_rejected_before_node_decode(&unknown_op(None), "missing");
     for version in 1..=5 {
-        assert_version_rejected_before_node_decode(&unknown_op(Some(version)), &version.to_string());
+        assert_version_rejected_before_node_decode(
+            &unknown_op(Some(version)),
+            &version.to_string(),
+        );
     }
     assert_version_rejected_before_node_decode(&unknown_op(Some(7)), "7");
 }
