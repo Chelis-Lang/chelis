@@ -370,6 +370,98 @@ fn bare_atom_expression_position_scores_below_one() {
     assert_below_one(&cases);
 }
 
+/// chelis#885: the seven bare-atom corpus members now hold the TOP rung.
+///
+/// `bare_atom_expression_position_scores_below_one` above is the check-rung
+/// guard (score < 1.0). The #885 domain split moved the defect class up the
+/// `docs/agent_quality_architecture.md` ladder: a bare atom in expression
+/// position is an INGRESS rejection (`spec/03-deep-syntax.md` [03-ROLE-2]
+/// for a bare identifier; the §8.1 metadata-key rule for a bare `:keyword`),
+/// identified per [03-PROG-2] discipline. Every member must exit 2 with the
+/// identification its class fixes: `keyword` for the four keyword members,
+/// `bare name` for the three symbol members. The score-rung test above stays
+/// as regression evidence; this one is the rung the class now holds.
+#[test]
+fn bare_atom_expression_position_rejects_at_parse() {
+    let wrap_body = |body: &str| {
+        format!(
+            "(module {{}} m.main (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+        )
+    };
+    let wrap_unit_sig = |body: &str| {
+        format!(
+            "(module {{}} m.main \
+             (defsig {{}} f (t-fn {{}} (t-prim {{}} int32) (t-unit {{}}))) \
+             (def {{}} f (fn {{}} (params {{}} (x {{type: (t-prim {{}} int32)}})) {body})))\n"
+        )
+    };
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "dp_bare_keyword_body_no_defsig",
+            wrap_body(":oops"),
+            "keyword",
+        ),
+        (
+            "dp_bare_symbol_body_no_defsig",
+            wrap_body("oops"),
+            "bare name",
+        ),
+        (
+            "dp_bare_keyword_body_unit_defsig",
+            wrap_unit_sig(":oops"),
+            "keyword",
+        ),
+        (
+            "dp_bare_symbol_body_unit_defsig",
+            wrap_unit_sig("oops"),
+            "bare name",
+        ),
+        (
+            "dp_bare_keyword_toplevel_def",
+            "(module {} m.main (def {} out :oops))\n".to_string(),
+            "keyword",
+        ),
+        (
+            "dp_bare_symbol_toplevel_def",
+            "(module {} m.main (def {} out oops))\n".to_string(),
+            "bare name",
+        ),
+        (
+            "dp_bare_keyword_unused_let_binding",
+            wrap_body("(let {} (bind {} unused :oops) (var {} x))"),
+            "keyword",
+        ),
+    ];
+    for (name, program, identification) in &cases {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("p.dp");
+        write_file(&path, program);
+        let out = Command::cargo_bin("chelis")
+            .expect("binary")
+            .env("CHELIS_STYLE_GATE_DISABLE", "1")
+            .args(["check", path.to_str().unwrap()])
+            .output()
+            .expect("chelis check should run");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "[{name}] a bare atom in expression position is an ingress rejection (exit 2)"
+        );
+        let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("[{name}] check must emit JSON: {e}"));
+        let errors = parsed["errors"].to_string();
+        assert!(
+            !errors.is_empty() && errors != "[]",
+            "[{name}] the rejection must carry a diagnostic"
+        );
+        assert!(
+            errors.contains(identification),
+            "[{name}] the diagnostic must identify the rejected form as \
+             {identification}: {errors}"
+        );
+    }
+}
+
 /// Negative parity for [`bare_atom_expression_position_scores_below_one`]:
 /// the chelis#873 rejection must not over-apply.
 ///
