@@ -634,6 +634,94 @@ fn schema_two_requires_resolver_two_and_accepts_cargo_requirements() {
     }
 }
 
+#[test]
+fn explicit_bundled_runtime_resolves_without_registry_or_network_access() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("explicit-bundled-runtime");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("reef.toml"),
+        format!(
+            "schema = \"2\"\n\n[package]\nname = \"explicit-bundled-runtime\"\nversion = \"0.1.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Remote\"\nresolver = \"2\"\n\n[dependencies]\nchelis-std = \"={}\"\n",
+            chelis_reef::compiler_bundled_chelis_std_version()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/main.ch"),
+        "module Remote.Main\n\ndef main() -> int32 = 1\n",
+    )
+    .unwrap();
+
+    let registry = directory.path().join("empty-registry");
+    let output = directory.path().join("source-build");
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "src/main.ch", "-o", output.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(output.join("main.c").exists());
+    let source_lock = fs::read_to_string(root.join("reef.lock")).unwrap();
+    assert!(source_lock.contains("kind = \"bundled\""), "{source_lock}");
+    let warm_output = directory.path().join("warm-source-build");
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args(["build", "src/main.ch", "-o", warm_output.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(warm_output.join("main.c").exists());
+    fs::remove_file(root.join("reef.lock")).unwrap();
+
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9")
+        .args(["reef", "build"])
+        .assert()
+        .success();
+
+    let lock = fs::read_to_string(root.join("reef.lock")).unwrap();
+    assert!(lock.contains("name = \"chelis-std\""), "{lock}");
+    assert!(lock.contains("kind = \"bundled\""), "{lock}");
+    chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9")
+        .args(["reef", "update", "chelis-std"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(root.join("reef.lock")).unwrap(), lock);
+
+    let manifest = fs::read_to_string(root.join("reef.toml")).unwrap();
+    fs::write(
+        root.join("reef.toml"),
+        manifest.replace(
+            &format!(
+                "chelis-std = \"={}\"",
+                chelis_reef::compiler_bundled_chelis_std_version()
+            ),
+            "chelis-std = \"=999.0.0\"",
+        ),
+    )
+    .unwrap();
+    fs::remove_file(root.join("reef.lock")).unwrap();
+    let output = chelis(&root)
+        .env("CHELIS_REEF_HOME", &registry)
+        .env("CHELIS_REEF_GITHUB_BASE_API", "http://127.0.0.1:9")
+        .args(["reef", "build"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("chelis-std"), "{stderr}");
+    assert!(
+        !stderr.contains("remote discovery is unavailable"),
+        "{stderr}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_candidate_path_dependencies_cannot_escape_temporary_storage() {
     let directory = tempdir().unwrap();

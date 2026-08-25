@@ -793,15 +793,19 @@ fn chelis_std_importing_build_monolithic_vs_cache_warm_c_identical() {
 
     // Settle reef.lock (the first build resolves + writes it, which fixes the
     // chelis-std set folded into the key) so the compared builds are stable.
-    let _ = build_probe(&entry, &cache_home, &[]);
+    let (settled_ok, settled_error, _) = build_probe(&entry, &cache_home, &[]);
+    assert!(
+        settled_ok,
+        "initial lock settlement failed: {settled_error}"
+    );
 
-    let (mono_ok, _mono_err, mono_c) =
+    let (mono_ok, mono_err, mono_c) =
         build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
-    let (warm_ok, _warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
+    let (warm_ok, warm_err, warm_c) = build_probe(&entry, &cache_home, &[]);
 
     assert!(
         mono_ok && warm_ok,
-        "a chelis-std-importing package must build in both cache regimes"
+        "a chelis-std-importing package must build in both cache regimes: monolithic={mono_err:?} warm={warm_err:?}"
     );
     // Confirm the stdlib layer engaged (i.e. real chelis-std was linked and the
     // eval-only drop path ran over it, not the no-chelis-std shortcut).

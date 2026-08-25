@@ -1920,6 +1920,9 @@ impl Default for BuildOptions {
 struct LoadedPackage {
     id: PackageId,
     manifest: ReefManifest,
+    /// The resolver parsed from the document schema boundary.
+    /// The prepared-graph cache preserves it with the raw manifest payload.
+    resolver: package_versioning::ResolverVersion,
     modules: BTreeMap<String, ModuleSource>,
     source: LoadedSourceKind,
     /// Package root backing `modules`, including the extracted-cache root for
@@ -2270,7 +2273,8 @@ const PREPARED_GRAPH_CACHE_MAGIC: &[u8] = b"CHELIS_REEF_GRAPH_V1\n";
 // v4 adds typed package identities and lock-preference validation. The bump
 // keeps pre-SemVer graph payloads outside the typed resolver boundary.
 // v5 adds invariant package metadata to every prepared manifest payload.
-const PREPARED_GRAPH_CACHE_VERSION: u32 = 5;
+// v6 preserves each package's parsed resolver across prepared graph caches.
+const PREPARED_GRAPH_CACHE_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct PreparedGraphCacheEnvelope {
@@ -6298,7 +6302,8 @@ fn reconstruct_graph_from_lockfile(
         root_name.clone(),
         LoadedPackage {
             id: lock.package.clone(),
-            manifest: root_manifest.into_raw(),
+            manifest: root_manifest.raw.clone(),
+            resolver: root_manifest.typed.resolver,
             modules: root_modules,
             source: LoadedSourceKind::Root,
             source_root: root.to_path_buf(),
@@ -6383,7 +6388,8 @@ fn reconstruct_graph_from_lockfile(
                             name: dep.name.clone(),
                             version: dep.version.clone(),
                         },
-                        manifest: dep_manifest.into_raw(),
+                        manifest: dep_manifest.raw.clone(),
+                        resolver: dep_manifest.typed.resolver,
                         modules: dep_modules,
                         source: LoadedSourceKind::LocalRegistry,
                         source_root: installed.root,
@@ -6414,7 +6420,8 @@ fn reconstruct_graph_from_lockfile(
                             name: dep.name.clone(),
                             version: dep.version.clone(),
                         },
-                        manifest: dep_manifest.into_raw(),
+                        manifest: dep_manifest.raw.clone(),
+                        resolver: dep_manifest.typed.resolver,
                         modules: dep_modules,
                         source: LoadedSourceKind::Path {
                             relative: path.clone(),
@@ -6507,7 +6514,8 @@ fn reconstruct_graph_from_lockfile(
                             name: dep.name.clone(),
                             version: dep.version.clone(),
                         },
-                        manifest: dep_manifest.into_raw(),
+                        manifest: dep_manifest.raw.clone(),
+                        resolver: dep_manifest.typed.resolver,
                         modules: dep_modules,
                         source: LoadedSourceKind::LocalRegistry,
                         source_root: installed.root,
@@ -6884,24 +6892,44 @@ fn prune_unreachable_packages(graph: &mut PackageGraph) {
         .retain(|package_name, _| reachable.contains(package_name));
 }
 
-fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(), String> {
-    let root = graph
-        .packages
-        .get(&graph.root_package)
-        .ok_or_else(|| "root package missing from resolved graph".to_string())?;
-    let root_typed = package_versioning::TypedManifest::schema_one(
-        &root.manifest.package.name,
-        &root.manifest.package.version,
-        &root.manifest.package.compiler,
-        root.manifest.dependencies.iter().map(|(name, dependency)| {
+fn typed_manifest_for_loaded(
+    package: &LoadedPackage,
+) -> Result<package_versioning::TypedManifest, String> {
+    let dependencies = package
+        .manifest
+        .dependencies
+        .iter()
+        .map(|(name, dependency)| {
             (
                 name.clone(),
                 dependency.version.clone(),
                 dependency.path.clone(),
             )
-        }),
-    )
-    .map_err(|error| error.to_string())?;
+        })
+        .collect::<Vec<_>>();
+    let parsed = match package.resolver {
+        package_versioning::ResolverVersion::One => package_versioning::TypedManifest::schema_one(
+            &package.manifest.package.name,
+            &package.manifest.package.version,
+            &package.manifest.package.compiler,
+            dependencies,
+        ),
+        package_versioning::ResolverVersion::Two => package_versioning::TypedManifest::schema_two(
+            &package.manifest.package.name,
+            &package.manifest.package.version,
+            &package.manifest.package.compiler,
+            dependencies,
+        ),
+    };
+    parsed.map_err(|error| error.to_string())
+}
+
+fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(), String> {
+    let root = graph
+        .packages
+        .get(&graph.root_package)
+        .ok_or_else(|| "root package missing from resolved graph".to_string())?;
+    let root_typed = typed_manifest_for_loaded(root)?;
     let mut requested = root_typed
         .dependencies
         .iter()
@@ -6935,23 +6963,7 @@ fn validate_resolved_graph_with_local_resolver(graph: &PackageGraph) -> Result<(
         if raw_name == &graph.root_package {
             continue;
         }
-        let typed = package_versioning::TypedManifest::schema_one(
-            &package.manifest.package.name,
-            &package.manifest.package.version,
-            &package.manifest.package.compiler,
-            package
-                .manifest
-                .dependencies
-                .iter()
-                .map(|(name, dependency)| {
-                    (
-                        name.clone(),
-                        dependency.version.clone(),
-                        dependency.path.clone(),
-                    )
-                }),
-        )
-        .map_err(|error| error.to_string())?;
+        let typed = typed_manifest_for_loaded(package)?;
         let source = if raw_name == CHELIS_STD_PACKAGE_NAME {
             package_versioning::CandidateSource::BundledRuntime {
                 compiler_version: typed.compiler.clone(),
@@ -7203,6 +7215,7 @@ fn resolve_package_recursive(
     let package = LoadedPackage {
         id,
         manifest: manifest.raw.clone(),
+        resolver: manifest.typed.resolver,
         modules,
         source: source.clone(),
         source_root: root.clone(),
@@ -7278,8 +7291,17 @@ fn resolve_package_recursive(
                         ));
                     }
                 }
-                let installed =
-                    load_registry_package_or_autofetch(dep_name.as_str(), &version, options, None)?;
+                let resolved_version = if dep_name.as_str() == CHELIS_STD_PACKAGE_NAME {
+                    compiler_bundled_chelis_std_version().to_string()
+                } else {
+                    version.clone()
+                };
+                let installed = load_registry_package_or_autofetch(
+                    dep_name.as_str(),
+                    &resolved_version,
+                    options,
+                    None,
+                )?;
                 let dep_origin = installed.remote_origin.clone();
                 resolve_package_recursive(
                     dep_name.as_str(),
@@ -12846,7 +12868,8 @@ module_prefix = "RegistryLib"
                     name: "registry-lib".to_string(),
                     version: "1.0.0".to_string(),
                 },
-                manifest: manifest.into_raw(),
+                manifest: manifest.raw.clone(),
+                resolver: manifest.typed.resolver,
                 modules,
                 source: LoadedSourceKind::LocalRegistry,
                 source_root: registry_root,
@@ -13118,6 +13141,10 @@ module_prefix = "RegistryLib"
             "typed metadata survives the prepared-graph cache boundary"
         );
         assert_eq!(
+            original.graph.packages["myapp"].resolver, restored.graph.packages["myapp"].resolver,
+            "the parsed resolver survives the prepared-graph cache boundary"
+        );
+        assert_eq!(
             original.internal_maps.len(),
             restored.internal_maps.len(),
             "internal maps survive round-trip"
@@ -13125,26 +13152,26 @@ module_prefix = "RegistryLib"
     }
 
     #[test]
-    fn prepared_graph_cache_rejects_metadata_free_version_four_envelopes() {
+    fn prepared_graph_cache_rejects_resolver_free_version_five_envelopes() {
         let directory = tempdir().expect("tempdir");
         let cache_path = directory.path().join("prepared.graph");
         let payload = Vec::new();
         let envelope = PreparedGraphCacheEnvelope {
-            version: 4,
+            version: 5,
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
             source_hash: [0; 32],
             payload_sha256: Sha256::digest(&payload).into(),
             payload,
         };
         let mut bytes = PREPARED_GRAPH_CACHE_MAGIC.to_vec();
-        bytes.extend(bincode::serialize(&envelope).expect("serialize v4 envelope"));
-        fs::write(&cache_path, bytes).expect("write v4 envelope");
+        bytes.extend(bincode::serialize(&envelope).expect("serialize v5 envelope"));
+        fs::write(&cache_path, bytes).expect("write v5 envelope");
 
         let error = load_prepared_graph_cache(&cache_path, directory.path())
-            .expect_err("v4 cache must fail closed");
+            .expect_err("v5 cache must fail closed");
 
         assert!(
-            error.contains("format version 4 unsupported (expected 5)"),
+            error.contains("format version 5 unsupported (expected 6)"),
             "{error}"
         );
     }

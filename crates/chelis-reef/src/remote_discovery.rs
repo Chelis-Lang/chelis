@@ -665,20 +665,28 @@ enum CandidateMaterial {
         typed: TypedManifest,
         dependencies: Vec<RequestedPackage>,
     },
+    BundledRuntime {
+        typed: TypedManifest,
+        dependencies: Vec<RequestedPackage>,
+    },
     Remote(RemoteMaterial),
 }
 
 impl CandidateMaterial {
     fn typed(&self) -> &TypedManifest {
         match self {
-            Self::Path { typed, .. } | Self::Local { typed, .. } => typed,
+            Self::Path { typed, .. }
+            | Self::Local { typed, .. }
+            | Self::BundledRuntime { typed, .. } => typed,
             Self::Remote(material) => &material.typed,
         }
     }
 
     fn dependencies(&self) -> &[RequestedPackage] {
         match self {
-            Self::Path { dependencies, .. } | Self::Local { dependencies, .. } => dependencies,
+            Self::Path { dependencies, .. }
+            | Self::Local { dependencies, .. }
+            | Self::BundledRuntime { dependencies, .. } => dependencies,
             Self::Remote(material) => &material.dependencies,
         }
     }
@@ -690,6 +698,7 @@ impl CandidateMaterial {
                 .remote_origin
                 .clone()
                 .unwrap_or_else(|| format!("local://{}", entry.archive_sha256)),
+            Self::BundledRuntime { typed, .. } => format!("bundled://{}", typed.compiler),
             Self::Remote(material) => {
                 format!("{}@{}", material.locator, material.tag)
             }
@@ -702,6 +711,11 @@ impl CandidateMaterial {
             Self::Local { entry, .. } => {
                 format!("{}#{}", entry.archive_sha256, entry.shell_sha256)
             }
+            Self::BundledRuntime { .. } => format!(
+                "{}#{}",
+                chelis_std_bundle::archive_sha256(),
+                chelis_std_bundle::shell_sha256()
+            ),
             Self::Remote(material) => material.archive_sha256.clone(),
         }
     }
@@ -1438,6 +1452,51 @@ impl DiscoverySession {
         {
             self.loaded_local.insert(package.clone());
             if package.as_str() == crate::CHELIS_STD_PACKAGE_NAME {
+                let installed = crate::load_bundled_chelis_std().map_err(|error| {
+                    let message = match error {
+                        crate::LoadRegistryError::Other(message) => message,
+                        crate::LoadRegistryError::MissingFromIndex => {
+                            "bundled runtime is absent from its embedded index".to_string()
+                        }
+                        crate::LoadRegistryError::MissingPackageDir => {
+                            "bundled runtime package directory is absent".to_string()
+                        }
+                    };
+                    DiscoveryError::CandidateManifest {
+                        package: package.to_string(),
+                        message: format!("load compiler-bundled runtime: {message}"),
+                    }
+                })?;
+                let parsed =
+                    crate::read_manifest(&installed.root.join("reef.toml")).map_err(|message| {
+                        DiscoveryError::CandidateManifest {
+                            package: package.to_string(),
+                            message,
+                        }
+                    })?;
+                if parsed.typed.package.name != package
+                    || parsed.typed.package.version.to_string()
+                        != compiler_bundled_chelis_std_version()
+                {
+                    return Err(DiscoveryError::CandidateManifest {
+                        package: package.to_string(),
+                        message: format!(
+                            "bundled runtime manifest names `{}` but the compiler advertises `{}@{}`",
+                            parsed.typed.package,
+                            crate::CHELIS_STD_PACKAGE_NAME,
+                            compiler_bundled_chelis_std_version()
+                        ),
+                    });
+                }
+                let dependencies =
+                    self.requests_for_manifest(&package, &installed.root, &parsed.typed)?;
+                self.insert_material(
+                    package,
+                    CandidateMaterial::BundledRuntime {
+                        typed: parsed.typed,
+                        dependencies,
+                    },
+                )?;
                 continue;
             }
             let registry = registry_root().map_err(|message| DiscoveryError::Io {
@@ -1716,6 +1775,11 @@ impl DiscoverySession {
                                 CandidateMaterial::Local { .. } => {
                                     CandidateSource::LocalRegistry { source_identity }
                                 }
+                                CandidateMaterial::BundledRuntime { typed, .. } => {
+                                    CandidateSource::BundledRuntime {
+                                        compiler_version: typed.compiler.clone(),
+                                    }
+                                }
                                 CandidateMaterial::Remote(_) => {
                                     CandidateSource::Remote { source_identity }
                                 }
@@ -1774,8 +1838,8 @@ impl DiscoverySession {
                 }
             }
             DiscoveryMode::Refresh | DiscoveryMode::Inspect => {
-                if self.network_enabled {
-                    let target = self.target.clone().expect("target exists");
+                let target = self.target.clone().expect("target exists");
+                if self.network_enabled && target.as_str() != crate::CHELIS_STD_PACKAGE_NAME {
                     self.query_remote(&target)?;
                     while let Some(dependency) = self
                         .refresh_dependencies
@@ -1808,7 +1872,10 @@ impl DiscoverySession {
                 Err(package_versioning::VersioningError::IncompatibleRequirements {
                     package,
                     ..
-                }) if self.network_enabled && !self.queried_remote.contains(&package) => {
+                }) if self.network_enabled
+                    && package.as_str() != crate::CHELIS_STD_PACKAGE_NAME
+                    && !self.queried_remote.contains(&package) =>
+                {
                     self.query_remote(&package)?;
                 }
                 Err(error) => {
@@ -1953,6 +2020,14 @@ fn lock_for_resolution(
                 compiler: entry.compiler.clone(),
                 archive_sha256: entry.archive_sha256.clone(),
                 shell_sha256: entry.shell_sha256.clone(),
+            },
+            CandidateMaterial::BundledRuntime { typed, .. } => LockedDependency {
+                name: candidate.id.name.to_string(),
+                version: candidate.id.version.to_string(),
+                source: LockSource::bundled_for_current_compiler(),
+                compiler: typed.compiler.to_string(),
+                archive_sha256: chelis_std_bundle::archive_sha256(),
+                shell_sha256: chelis_std_bundle::shell_sha256(),
             },
             CandidateMaterial::Remote(_) => {
                 let item = staged
