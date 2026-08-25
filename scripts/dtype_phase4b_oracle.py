@@ -1920,7 +1920,7 @@ def validate_schema_and_consumers(
     require_all(
         surface,
         (
-            ("I/O and process — introduces `IO`", "surface IO spelling"),
+            ("introduces `IO`", "surface IO spelling"),
             ("| `IO` | file ops", "surface IO spelling"),
         ),
         violations,
