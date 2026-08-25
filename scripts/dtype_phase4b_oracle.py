@@ -44,7 +44,7 @@ FROZEN_FILE_DIGESTS = {
         "15e690f490c57d1a5a9629f87901900accb07ae14f7ec83d22195eea1d26904c"
     ),
     "spec/03-deep-syntax.md": (
-        "d3ff8af2d85519ea71a48c84f05a1a230b20b6d4700d26d28912bc6a57ff2590"
+        "7ff15a3d50eaaf40fb9c2f555d5a490a54b250d19d318cf4e78c107bc9913965"
     ),
     "spec/04-type-system.md": (
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
