@@ -283,7 +283,12 @@ unreachable call SHALL neither emit a stub nor cause whole-module rejection.
 `matmul`, `softmax`, `cross_entropy`, `layer_norm`, `conv2d`, `embedding`, and
 `multi_head_attention` SHALL lower to defined Tier-1 compositions; `matmul` SHALL carry an
 accumulator parameter with the documented defaults and SHALL NOT admit integer operand
-precisions. The compiler MAY recognize these patterns and emit optimized library calls.
+precisions. `matmul`'s inner sum SHALL follow the canonical balanced tree, so its result
+bits are target-independent; a library kernel or fusion is permissible only where it
+reproduces those exact bits and traps, and a vendor-kernel accumulation order is available
+only through a future named explicit opt-in, never a backend default. `relu` SHALL carry
+[05-OP-43]'s dedicated adjoint (gradient exactly zero at zero, both signed zeros, and NaN)
+while its forward value remains the exact `max_elem` lowering.
 
 #### Scenario: softmax lowers to a stable composition
 
@@ -297,20 +302,25 @@ precisions. The compiler MAY recognize these patterns and emit optimized library
 
 ### Requirement: AD completeness and reference oracle
 
-Every RISC primitive SHALL have a defined adjoint so `grad` can differentiate any composition;
-`cmplt`, `const`, and `load` SHALL have zero gradient. The naive C reference implementations
-SHALL be the correctness oracle, and GPU backends SHALL produce numerically identical results
-within floating-point tolerance (1e-6 for f32, 1e-12 for f64).
+Every numeric callable SHALL state exactly one of an adjoint, a zero cotangent, or a
+structural `grad` rejection; `cmplt`, `const`, and `load` contribute zero. [05-OP-42]
+`stop_gradient` SHALL be the differentiation barrier whose argument subgraph is outside
+adjoint construction and structural rejection analysis. The pseudocode reference
+implementations are illustrative, not a semantic oracle; cross-lane agreement is exact by
+default, with only [05-OBS-3]'s per-operation tolerance table excepted, and blanket
+per-dtype bounds are not a conforming oracle.
 
 #### Scenario: Composition is differentiable
 
 - **WHEN** `grad` is applied to a composition of primitives with defined adjoints
 - **THEN** it produces a gradient through the whole composition
 
-#### Scenario: GPU matches the reference within tolerance
+#### Scenario: Cross-lane agreement is exact outside the tolerance table
 
-- **WHEN** a GPU backend evaluates a primitive against the C reference
-- **THEN** the results agree within 1e-6 (f32) / 1e-12 (f64)
+- **WHEN** two lanes evaluate an operation absent from [05-OBS-3]'s table at the same
+  arithmetic width
+- **THEN** their stored result bits agree exactly; a blanket 1e-6/1e-12 bound is not a
+  conforming comparison
 
 ### Requirement: Unsupported-case response contract
 

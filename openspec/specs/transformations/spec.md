@@ -98,7 +98,11 @@ or structural `grad` rejection contract. Comparisons and `shape` contribute
 zero without blocking the graph. Piecewise-constant rounding and
 float-to-integer/bool casts structurally reject with
 `AdRejectionReason::PiecewiseConstant`; they never silently return zero.
-Float-to-float casts use `cast(g, source_dtype)`. An explicit `wrt` target
+Float-to-float casts use `cast(g, source_dtype)`. [05-OP-42]
+`stop_gradient` SHALL be the differentiation barrier: its argument's
+subgraph is outside adjoint construction and structural rejection analysis,
+and the argument receives the shape-preserving exact zero cotangent. An
+explicit `wrt` target
 must contain a differentiable float leaf; mixed List/tuple/ADT targets are
 legal and preserve discrete fields as `unit`.
 
@@ -113,6 +117,13 @@ legal and preserve discrete fields as `unit`.
 
 - **WHEN** `grad` is applied to a function whose `wrt` parameter is `bool`
 - **THEN** it is a `non_differentiable` type error naming the parameter
+
+#### Scenario: A structural rejection inside the barrier does not reject
+
+- **WHEN** `grad` is applied to `add(x, stop_gradient(sub(round(x), x)))`
+- **THEN** construction succeeds and the cotangent of `x` is exactly the
+  identity path's, while bare `round` under `grad` still rejects with
+  `AdRejectionReason::PiecewiseConstant`
 
 ### Requirement: Symbolic-dim adjoint construction
 

@@ -233,6 +233,11 @@ their exact tie/NaN subgradient rules, not a generic zero-at-ties convention.
 Piecewise-constant numeric conversions and roundings whose atoms specify
 `AdRejectionReason::PiecewiseConstant` reject the transformed graph even
 though their forward execution is legal; they never silently return zero.
+The one boundary that structural analysis does not cross is [05-OP-42]'s
+`stop_gradient` barrier: its argument's subgraph is outside adjoint
+construction and rejection analysis, its forward value passes through
+unchanged, and its argument receives the shape-preserving exact zero
+cotangent.
 
 An explicit `wrt` target must contain at least one differentiable float leaf.
 A bool, signed-integer, string, function, resource, or recursively all-unit
@@ -834,7 +839,10 @@ When traversal encounters an operation whose atom requires structural
 rejection, construction stops with that atom's exact `AdRejectionReason`.
 This includes piecewise-constant float-to-integer conversion and rounding; it
 does not silently insert `Const(0)`. Float-to-float precision casts use their
-declared cast adjoint.
+declared cast adjoint. A [05-OP-42] `stop_gradient` node is a barrier:
+traversal contributes the shape-preserving exact zero for its argument and
+does not enter the argument's subgraph, so a structurally rejected operation
+inside it does not stop construction.
 
 ### 7.6 Verification
 

@@ -325,7 +325,10 @@ the layer list by enumerating every public channel that carries numeric values
 value ADTs, exported stdlib definitions, and published runtime-header exports
 - and the storage decision covers all of them in one change set. The final JSON
 surface has one public value identity: `io/json::Json` with tagged
-`JsonInt(int64)` and `JsonFloat(f64)` variants under [05-OP-2]/[05-OP-34].
+`JsonInt(int64)`, `JsonBigInt(string)`, and `JsonFloat(f64)` variants under
+[05-OP-2]/[05-OP-34]; the big-integer variant carries an out-of-int64-range
+integer-form token's exact decimal spelling, so parse totality never buys a
+float image ([#1314] owns the implementation).
 [#1293] removes the duplicate prelude `Json`/`JInt`/`JNum` surface and moves CSV
 to its untyped text-table contract before Phase 4C. §C6 owns the standing guard
 that keeps this census from silently growing stale.
@@ -1972,3 +1975,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1297]: https://github.com/Chelis-Lang/chelis/issues/1297
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
+[#1314]: https://github.com/Chelis-Lang/chelis/issues/1314

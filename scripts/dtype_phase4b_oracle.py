@@ -45,25 +45,25 @@ FROZEN_FILE_DIGESTS = {
         "15e690f490c57d1a5a9629f87901900accb07ae14f7ec83d22195eea1d26904c"
     ),
     "spec/03-deep-syntax.md": (
-        "7ff15a3d50eaaf40fb9c2f555d5a490a54b250d19d318cf4e78c107bc9913965"
+        "f2b80cfc64ef79f163eed1b2bd765ddea939b03ffa77b088861eb2a91a28da31"
     ),
     "spec/04-type-system.md": (
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "6645d94ea8c1375997c7cd388f9b4165d5f1ccd0159c8b8cf8c4b894888f12a5"
+        "931e0aab5a3600c70cebc8cbda6173fc1e3a1c6a06daf10a8f899e5ff9c61c0a"
     ),
     "spec/06-transformations.md": (
-        "36d84cd0c3c73af85300c6563773890413a602b6f0e63f624cb4ab0801883d38"
+        "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "6bcf6a335132a0f347f3a0b8b715a578c910c0442e682e352bf9699fdebde008"
+        "ce3338f9e733eb9c38407455f1086c534b4cb85247af5bb5ae6a2b53db6c763b"
     ),
     "spec/design/dtype_semantics.md": (
-        "53d79d87613499cce6e0427ad3dac21e02d2abfbb01f9ce453e9844d0b28f27f"
+        "8c5866494ba6c2d02ff0ebde12254f89bdb6c4ce13d5d4e5eb33069fa135fb47"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -72,13 +72,13 @@ FROZEN_FILE_DIGESTS = {
         "a2a84ab3a4d2925fc7a79f482e296eb979aadc24a0ebf21872c1fb257f7ea3fe"
     ),
     "openspec/specs/risc-primitives/spec.md": (
-        "c4dd1448d0a1e865de4c6cba1e58a597a4d29d806668fb93e5ca34c82f88044d"
+        "875f1094b4fba6842f90fc96c17aa37c6c2be7a5a40957b0140a10992be601a6"
     ),
     "openspec/specs/serialization/spec.md": (
         "ef0139de7e1da5ec986ec5ec4bfb12710a5cee8e77e9c91840d478404907b5ed"
     ),
     "openspec/specs/transformations/spec.md": (
-        "85249429f5d2fdd3e1390567565143e180af1aafb143a7dad454b517cfbba342"
+        "a927fa0540c9bbb03a24fb752838409980af83d918f8f6bc8498b32ea7ab0e6f"
     ),
     "openspec/specs/type-system/spec.md": (
         "135fd5d18b3bbbffa851720973984e3b61ed18ee0b83fa8884eb7e728b38c811"
@@ -130,6 +130,8 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     39: "`window_reduction(arguments...) -> result`",
     40: "`max_elem(left, right) -> result` and",
     41: "`sub(left, right) -> result`",
+    42: "`stop_gradient(value) -> result`",
+    43: "`relu(x) -> result`",
 }
 
 # These are independent, executable copies of the exact normative manifests.
@@ -211,7 +213,7 @@ EXPECTED_OP_MANIFESTS = {
     ),
     "05-OP-34": tuple(
         """\
-> | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+> | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
 > | `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
 > | `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
 > | `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
@@ -247,61 +249,62 @@ EXPECTED_OP_MANIFESTS = {
 > | 26 | `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
 > | 27 | `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
 > | 28 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
-> | 29 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
-> | 30 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
-> | 31 | `io/json::json_get` | `(Json,string)->Option[Json]` |
-> | 32 | `io/json::json_int` | `(Option[Json])->Option[int64]` |
-> | 33 | `io/json::json_is_null` | `(Option[Json])->bool` |
-> | 34 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
-> | 35 | `io/json::json_string` | `(Option[Json])->Option[string]` |
-> | 36 | `io/json::load_json` | `(string)->Json!{IO}` |
-> | 37 | `io/json::parse_json` | `(string)->Json` |
-> | 38 | `io/json::to_json` | `(Json)->string` |
-> | 39 | `io/json::try_load_json` | `(string)->Option[Json]!{IO}` |
-> | 40 | `io/json::try_parse_json` | `(string)->Option[Json]` |
-> | 41 | `io/json::try_to_json` | `(Json)->Option[string]` |
-> | 42 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
-> | 43 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
-> | 44 | `io::mmap_size` | `(string)->int64!{IO}` |
-> | 45 | `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
-> | 46 | `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
-> | 47 | `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
-> | 48 | `scalar::abs` | `(p_numeric)->p_numeric` |
-> | 49 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
-> | 50 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
-> | 51 | `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
-> | 52 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
-> | 53 | `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
-> | 54 | `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
-> | 55 | `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
-> | 56 | `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
-> | 57 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
-> | 58 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
-> | 59 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
-> | 60 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
-> | 61 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-> | 62 | `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
-> | 63 | `time::add_days` | `(Date,int64)->Date` |
-> | 64 | `time::date` | `(int64,int64,int64)->Date` |
-> | 65 | `time::date_gt` | `(Date,Date)->bool` |
-> | 66 | `time::date_gte` | `(Date,Date)->bool` |
-> | 67 | `time::date_lt` | `(Date,Date)->bool` |
-> | 68 | `time::date_lte` | `(Date,Date)->bool` |
-> | 69 | `time::date_to_string` | `(Date)->string` |
-> | 70 | `time::day_of_week` | `(Date)->DayOfWeek` |
-> | 71 | `time::day_of_week_name` | `(Date)->string` |
-> | 72 | `time::day_of_year` | `(Date)->int64` |
-> | 73 | `time::days_between` | `(Date,Date)->int64` |
-> | 74 | `time::duration` | `(int64,int64,int64,int64)->Duration` |
-> | 75 | `time::is_leap_year` | `(int64)->bool` |
-> | 76 | `time::parse_date` | `(string)->Option[Date]` |
-> | 77 | `time::sub_days` | `(Date,int64)->Date` |
-> | 78 | `time::try_date` | `(int64,int64,int64)->Option[Date]` |
-> | 79 | `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
-> | 80 | `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
-> | 81 | `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
-> | 82 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
-> | 83 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
+> | 29 | `io/json::json_bigint` | `(Option[Json])->Option[string]` |
+> | 30 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
+> | 31 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
+> | 32 | `io/json::json_get` | `(Json,string)->Option[Json]` |
+> | 33 | `io/json::json_int` | `(Option[Json])->Option[int64]` |
+> | 34 | `io/json::json_is_null` | `(Option[Json])->bool` |
+> | 35 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
+> | 36 | `io/json::json_string` | `(Option[Json])->Option[string]` |
+> | 37 | `io/json::load_json` | `(string)->Json!{IO}` |
+> | 38 | `io/json::parse_json` | `(string)->Json` |
+> | 39 | `io/json::to_json` | `(Json)->string` |
+> | 40 | `io/json::try_load_json` | `(string)->Option[Json]!{IO}` |
+> | 41 | `io/json::try_parse_json` | `(string)->Option[Json]` |
+> | 42 | `io/json::try_to_json` | `(Json)->Option[string]` |
+> | 43 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
+> | 44 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
+> | 45 | `io::mmap_size` | `(string)->int64!{IO}` |
+> | 46 | `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
+> | 47 | `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
+> | 48 | `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
+> | 49 | `scalar::abs` | `(p_numeric)->p_numeric` |
+> | 50 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
+> | 51 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
+> | 52 | `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
+> | 53 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
+> | 54 | `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
+> | 55 | `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
+> | 56 | `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
+> | 57 | `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
+> | 58 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
+> | 59 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
+> | 60 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
+> | 61 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
+> | 62 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
+> | 63 | `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
+> | 64 | `time::add_days` | `(Date,int64)->Date` |
+> | 65 | `time::date` | `(int64,int64,int64)->Date` |
+> | 66 | `time::date_gt` | `(Date,Date)->bool` |
+> | 67 | `time::date_gte` | `(Date,Date)->bool` |
+> | 68 | `time::date_lt` | `(Date,Date)->bool` |
+> | 69 | `time::date_lte` | `(Date,Date)->bool` |
+> | 70 | `time::date_to_string` | `(Date)->string` |
+> | 71 | `time::day_of_week` | `(Date)->DayOfWeek` |
+> | 72 | `time::day_of_week_name` | `(Date)->string` |
+> | 73 | `time::day_of_year` | `(Date)->int64` |
+> | 74 | `time::days_between` | `(Date,Date)->int64` |
+> | 75 | `time::duration` | `(int64,int64,int64,int64)->Duration` |
+> | 76 | `time::is_leap_year` | `(int64)->bool` |
+> | 77 | `time::parse_date` | `(string)->Option[Date]` |
+> | 78 | `time::sub_days` | `(Date,int64)->Date` |
+> | 79 | `time::try_date` | `(int64,int64,int64)->Option[Date]` |
+> | 80 | `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
+> | 81 | `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
+> | 82 | `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
+> | 83 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
+> | 84 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
     ),
     "05-OP-38": tuple(
         """\
@@ -319,10 +322,10 @@ FROZEN_ATOM_DIGESTS = {
     "04-NUM-14": "621e87291569ed74f24adf9a9a1a2092b67a6824ef985ceb2645f6502c63f786",
     "04-NUM-16": "939c10f9449bb91c3117ec6d66f8afde5bedb733dec88be1623c7110740b8053",
     "05-OP-1": "c2fb6c19db7ada4f86af7436f4f531ee0adb1395c7080ea94b25fe2e0f0b8d6c",
-    "05-OP-2": "eec48a56a7d47470f2ace881942927e9c0d47a5948c41f1ec8249b4c6a0d5eb6",
-    "05-OP-3": "29e167f8d5fcdefa3141cda1edd6a3c32a4556f8ba29b398c4917e1c160b6ac0",
-    "05-OP-4": "4f1e257aa0f5f7a9b80aac4b5d74a59cc5c93593074d14baea600dea86be0c85",
-    "05-OP-5": "d348d7f49fa3fa347d268d8e45a42f417f534ae16360a0b921bef74f9c42e1ce",
+    "05-OP-2": "86fe2002cebd6192d15078ed0e8144936e38ba14f925802d2d526b7bf880ecd3",
+    "05-OP-3": "b5a3ee9ca9a4f3161e20e729467d044878080ac8fb302af14b512bea66a58d3b",
+    "05-OP-4": "f45693d5e3ef37033aef4c9a3f03de1806ea034d8247390c3ff6113d1c2ffa13",
+    "05-OP-5": "00b9b1ecfdb42d0def6cc38296a518d9a25039cb2af3bdac53f1648225377d9a",
     "05-OP-6": "95d842566c76f85e0e89844029d7387921f57f6997e68107be92fe9b9cc1061c",
     "05-OP-7": "d3c5120918a8de774833d776204d62c01b3eccd01ffc22e43ff5422d4e28e54b",
     "05-OP-8": "ea385826c01b7cb1d24e75e1dbb4889149f0a08441d798eafcee75fc7d9f7b4f",
@@ -346,19 +349,21 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
     "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
-    "05-OP-29": "383b90bb09a7cdd0dc0a18343bbcd1bf8469e18228fb5ce88532621b154f07c1",
+    "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "be9dd899970a14b9c1765671915e6c722215a2cee6384faab0992966a4561753",
     "05-OP-32": "4c6438ef1fa47bc6085d717e68c410030695bee86c59cbcf608f7948ca516e50",
     "05-OP-33": "61d98d7e69bb94d5199a6a3358211cd9e9de6258109da5aa45b8cec7dd3e9bba",
-    "05-OP-34": "ec98b43a4afe89384afd625ff6e71bb2bd0f4c4a9c7c8884f15d6857ec289102",
-    "05-OP-35": "3ba13ad976c619550237c56e25251304b07a47907272a14457a20d7acf35040a",
+    "05-OP-34": "ad41103584e7c7b6bb2db415fd8e70a781ff8875fe3d31eb5c3f69e64113f319",
+    "05-OP-35": "bc99867ded92a1dfa99bf15d06156ae2d0dc24a54d61778cc8b3b2d4ac76042a",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
     "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
     "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
     "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
-    "05-OP-40": "4bde2e959c3cf5c4d22d0d5db2564e195c877b3c2bd291faaca523532aa77ce4",
+    "05-OP-40": "4d3da3d13beca3c53b18515dbd15178b214fa3baa015ab975257ef778899dc18",
     "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
+    "05-OP-42": "d469e00652b7b9239f37532817b3c0f563bf22a66743c66dab66ce879be43ff4",
+    "05-OP-43": "51dd3a7b7df5ecc20c7796a49f7a0122daf0f3a4b6538993964fea7a9f284ee7",
 }
 
 # The markers are part of the freeze contract: each must occur exactly once,
@@ -382,7 +387,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "3bfff46b97216e66f2a7acf0f0e4d148093947ef7f5e6d21a43025e9201e07ad",
+        "53fc4eb2ab078b587f18e70fd187671ed4f907277cefa9534e953872324a968f",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -412,7 +417,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.8 Named Lossy Cast Forms",
         "## 4. Standard Lowerings",
-        "520b865b52cbcadea0eb1c074094b7e4c585c20d6cdc85dda7bcab9299cf53ac",
+        "4c2e336e26005cfea1a4cd649236231db3f5a4add35305f385434bbd3c68f089",
     ),
     "capability schema": (
         "spec/design/capability_table.md",
@@ -424,7 +429,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "034da3246b3321dce194f5906884e5fa997aa8a15dbecf5970fda8a0b1678827",
+        "ebf86739fab54d066c78a2af6a0d71ee510ee747e5484667db7a4cdd8bc4be14",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
@@ -448,7 +453,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "a33d0214a08ab35dc45e1c4eb76cbe3220c8cc5846be7f765b0d14b3830bff39",
+        "0a907eb4bb342d38e8643a7008ecf6ec5e6111eab66430ac2088af945ed63c9f",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
@@ -529,10 +534,10 @@ def validate_op_manifests(
     )
     numbers = [int(number) for number, _identity, _signature in stdlib_rows]
     identities = [identity for _number, identity, _signature in stdlib_rows]
-    if numbers != list(range(1, 84)) or len(set(identities)) != 83:
+    if numbers != list(range(1, 85)) or len(set(identities)) != 84:
         violations.append(
-            "[05-OP-35] stdlib numeric manifest must have exactly eighty-three "
-            "unique identities numbered 1 through 83"
+            "[05-OP-35] stdlib numeric manifest must have exactly eighty-four "
+            "unique identities numbered 1 through 84"
         )
 
 
@@ -989,8 +994,9 @@ def validate_normative_contract(
             "ingest as `JsonFloat` carrying the correctly-rounded f64 of the token",
             "any other number token",
             "ingest as `JsonInt` carrying its exact int64 value",
-            "An integer-form token outside int64 range is a loud `Overflow` error",
-            "punctuation never selects a lossy float fallback for an integer",
+            "An integer-form token outside int64 range SHALL ingest as",
+            "`JsonBigInt` carrying the token's exact decimal spelling",
+            "never\n> selects a lossy float image for an integer-form token",
             "CSV cells are TEXT at parse time",
             "integer accessors accept only its integer subset",
             "An empty or non-conforming cell is a loud error",
@@ -1417,7 +1423,7 @@ def validate_normative_contract(
             "constructors have no accumulator",
         ),
         "05-OP-35": (
-            "exactly the eighty-three final exported stdlib numeric definitions",
+            "exactly the eighty-four final exported stdlib numeric definitions",
             "`process::run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`init/random::normal_like` | "
@@ -1675,6 +1681,30 @@ def validate_normative_contract(
             "Signed-integer forms are forward-only",
             "no accumulator",
         ),
+        "05-OP-42": (
+            "admits exactly one value of",
+            "returns that value unchanged: the same type,",
+            "the operation itself is pure and adds none",
+            "the transform SHALL NOT traverse the argument's",
+            "subgraph for adjoint construction or for structural "
+            "differentiability",
+            "reject a graph that reaches it only through this barrier",
+            "shape-preserving exact zero for its",
+            "`vmap` maps the identity pointwise",
+            "never a mode, annotation, or effect",
+            "no\n> accumulator",
+        ),
+        "05-OP-43": (
+            "admits every active float dtype on a",
+            "Its forward value is exactly the §3.3 lowering",
+            "`max_elem(x, const(0.0))` under [05-OP-40]",
+            "Its adjoint is its own, not [05-OP-40]'s:",
+            "the input cotangent is `g` exactly where `cmplt(0, x)` is true "
+            "and exact",
+            "including at `x = 0`, at both signed zeros, and at",
+            "remains intact through AD and every other",
+            "The operation has no accumulator",
+        ),
         "05-RNG-1": (
             "Every conforming evaluation of a `with seed(N)` program produces "
             "byte-identical random results",
@@ -1841,7 +1871,8 @@ def validate_normative_contract(
                 "max_elem signed-zero tie selection",
             ),
             (
-                "`relu` via\n`max_elem(x, 0)` has gradient one at `x = 0`",
+                "`relu` carries [05-OP-43]'s own adjoint instead: its "
+                "gradient is exactly zero\nat `x = 0`",
                 "relu zero-boundary adjoint",
             ),
             (

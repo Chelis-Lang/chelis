@@ -523,7 +523,7 @@ points. The desugarer emits their typed identities. An identity remains intact
 through every semantic transform its governing atom names, including AD, and
 only then may the IR passes decompose it to RISC primitives.
 
-`sub`, `div`, `neg`, `lt`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`
+`sub`, `div`, `neg`, `lt`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`, `stop_gradient`
 
 ### 3.3 Standard Library (imported)
 

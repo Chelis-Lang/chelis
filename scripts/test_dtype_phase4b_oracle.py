@@ -172,7 +172,7 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-3.*csv_int",
             ),
             (
-                "It never truncates or rounds a float\n> into an integer",
+                "It never\n> truncates or rounds a float\n> into an integer",
                 "It truncates float variants into int64",
                 "OP-3.*never truncates",
             ),
@@ -306,11 +306,13 @@ class ContractValidationTests(unittest.TestCase):
     def test_integer_form_json_overflow_never_falls_back_to_jnum(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "An integer-form token outside int64 range is a loud `Overflow`\n"
-            "> error; punctuation never selects a lossy float fallback for an integer.",
+            "An integer-form token outside int64 range SHALL ingest as\n"
+            "> `JsonBigInt` carrying the token's exact decimal spelling; ingestion"
+            " never\n"
+            "> selects a lossy float image for an integer-form token.",
             "An integer-form token outside int64 range falls back to `JNum`.",
         )
-        self.assert_contract_fails("OP-2.*Overflow")
+        self.assert_contract_fails("OP-2.*JsonBigInt")
 
     def test_uniform_like_uses_one_common_float_dtype_and_own_width_fma(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -1421,17 +1423,18 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-35.*count >= 1")
 
-    def test_stdlib_manifest_has_exactly_eighty_three_unique_rows(self) -> None:
+    def test_stdlib_manifest_has_exactly_eighty_four_unique_rows(self) -> None:
         block = oracle.atom_blocks(
             (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
         )["05-OP-35"]
         rows = re.findall(r"^> \| (\d+) \| `([^`]+)` \|", block, re.MULTILINE)
-        self.assertEqual(len(rows), 83)
-        self.assertEqual(len({number for number, _identity in rows}), 83)
-        self.assertEqual(len({identity for _number, identity in rows}), 83)
+        self.assertEqual(len(rows), 84)
+        self.assertEqual(len({number for number, _identity in rows}), 84)
+        self.assertEqual(len({identity for _number, identity in rows}), 84)
         identities = {identity for _number, identity in rows}
         for identity in (
             "decimal::decimal_add",
+            "io/json::json_bigint",
             "io/json::load_json",
             "time::date_lt",
             "tokenizer::load_tokenizer",
@@ -1510,9 +1513,9 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "| 52 | `tensor/construct::arange` | "
+                "| 53 | `tensor/construct::arange` | "
                 "`(p_int,p_int)->tensor[n,p_int]` |",
-                "| 52 | `tensor/construct::arange` | "
+                "| 53 | `tensor/construct::arange` | "
                 "`(int32,int32)->tensor[n,int32]` |",
                 "OP-35.*exact manifest",
             ),
@@ -1676,33 +1679,33 @@ class ContractValidationTests(unittest.TestCase):
         path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "| 48 | `scalar::abs` | `(p_numeric)->p_numeric` |",
-                "| 48 | `scalar::abs` | `(f32)->f32` |",
+                "| 49 | `scalar::abs` | `(p_numeric)->p_numeric` |",
+                "| 49 | `scalar::abs` | `(f32)->f32` |",
             ),
             (
-                "| 49 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |",
-                "| 49 | `scalar::max` | `(f32,f32)->f32` |",
+                "| 50 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |",
+                "| 50 | `scalar::max` | `(f32,f32)->f32` |",
             ),
             (
-                "| 50 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |",
-                "| 50 | `scalar::min` | `(f32,f32)->f32` |",
+                "| 51 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |",
+                "| 51 | `scalar::min` | `(f32,f32)->f32` |",
             ),
             (
-                "| 58 | `test::assert_close` | "
+                "| 59 | `test::assert_close` | "
                 "`(p_float,p_float,p_float,string)->unit!{Test}` |",
-                "| 58 | `test::assert_close` | "
+                "| 59 | `test::assert_close` | "
                 "`(f32,f32,f32,string)->unit!{Test}` |",
             ),
             (
-                "| 59 | `test::assert_close_tensor` | "
+                "| 60 | `test::assert_close_tensor` | "
                 "`(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |",
-                "| 59 | `test::assert_close_tensor` | "
+                "| 60 | `test::assert_close_tensor` | "
                 "`(&tensor[..r,p_float],&tensor[..r,p_float],f32,string)->unit!{Test}` |",
             ),
             (
-                "| 60 | `test::assert_eq` | "
+                "| 61 | `test::assert_eq` | "
                 "`(Q,Q,string)->unit!{Test}` |",
-                "| 60 | `test::assert_eq` | `(f32,f32,string)->unit!{Test}` |",
+                "| 61 | `test::assert_eq` | `(f32,f32,string)->unit!{Test}` |",
             ),
         )
         for old, new in mutations:
@@ -2257,15 +2260,15 @@ class ContractValidationTests(unittest.TestCase):
                 "(&tensor[n,bool])->tensor[hits,int64]",
             ),
             (
-                "| 59 | `test::assert_close_tensor` | "
+                "| 60 | `test::assert_close_tensor` | "
                 "`(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |",
-                "| 59 | `test::assert_close_tensor` | "
+                "| 60 | `test::assert_close_tensor` | "
                 "`(&tensor[n,p_float],&tensor[n,p_float],p_float,string)->unit!{Test}` |",
             ),
             (
-                "| 61 | `test::assert_eq_tensor` | "
+                "| 62 | `test::assert_eq_tensor` | "
                 "`(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |",
-                "| 61 | `test::assert_eq_tensor` | "
+                "| 62 | `test::assert_eq_tensor` | "
                 "`(&tensor[n,p],&tensor[n,p],string)->unit!{Test}` |",
             ),
             (
