@@ -58,7 +58,7 @@
 
 ## 6. Hosted acceptance and issue closure
 
-- [ ] 6.1 Obtain a green required `Integration Tests (Linux)` check for the final commit.
-- [ ] 6.2 Confirm that hosted diagnostics and generated C match the local oracle evidence.
+- [x] 6.1 Obtain a green required `Integration Tests (Linux)` check for the final commit.
+- [x] 6.2 Confirm that hosted diagnostics and generated C match the local oracle evidence.
 - [x] 6.3 Confirm that all active cross-change oracles pass on the same revision.
 - [ ] 6.4 Link the merged fix to chelis#1184 and close the issue only after hosted acceptance is green.

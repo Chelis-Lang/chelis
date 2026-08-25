@@ -72,6 +72,18 @@ NEXTEST_TEST_THREADS=8 \
 devenv shell -- python3 scripts/gate.py --local
 ```
 
-## Remaining hosted evidence
+## Hosted evidence
 
-The required `Integration Tests (Linux)` result needs a pushed commit and hosted workflow run.
+Manual CI run `32873124904` tested implementation commit `60ed69671339994f6d88bb7f29151ac145b01f7d`.
+
+The required `Integration Tests (Linux)` check passed. Its dependent Linux workspace tests also passed.
+
+The first overall run found one unrelated policy-test false positive. A workflow comment contained lowercase `devenv shell`, which the literal command scanner rejected.
+
+The comment now uses the product name `Devenv`. The complete 955-test Python script suite passed after this correction.
+
+Run URL:
+
+```text
+https://github.com/Chelis-Lang/chelis/actions/runs/32873124904
+```
