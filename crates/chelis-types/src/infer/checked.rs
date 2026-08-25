@@ -285,6 +285,7 @@ pub(super) struct InferenceProduct {
     pub(super) owner_types: HashMap<usize, FinalOwnerType>,
     pub(super) type_headers: TypeResolutionEnv,
     pub(super) adt_registry: AdtRegistry,
+    pub(super) function_inference_plan: FunctionInferencePlan,
     shape_lambda_tvars: HashSet<TypeVar>,
     deferred_type_derivations: Vec<DeferredTypeDerivation>,
     next_deferred_shape_id: u64,
@@ -1045,8 +1046,7 @@ pub(crate) fn run_finalization_mutation_case(
         annotated,
         HashMap::new(),
         &signature_context,
-        &TypeResolutionEnv::default(),
-        &AdtRegistry::default(),
+        &InferenceProduct::default(),
         InferStats::default(),
         errors,
     );
@@ -1433,16 +1433,16 @@ pub(super) fn finalize_checked_program(
     annotated_exprs: Vec<deep::Expr>,
     type_env: HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
-    type_headers: &TypeResolutionEnv,
-    adt_registry: &AdtRegistry,
+    product: &InferenceProduct,
     infer_stats: InferStats,
     errors: &mut DiagnosticSink<'_>,
 ) -> CheckedProgram {
     let signature_inference = infer_signature_metadata_with_context_and_headers(
         &annotated_exprs,
+        &product.function_inference_plan,
         &type_env,
         signature_context,
-        type_headers,
+        &product.type_headers,
         errors,
     );
     let checked = CheckedProgram {
@@ -1450,8 +1450,8 @@ pub(super) fn finalize_checked_program(
         type_env,
         linearity: LinearityInfo::default(),
         signature_inference,
-        type_headers: type_headers.clone(),
-        adt_registry: adt_registry.clone(),
+        type_headers: product.type_headers.clone(),
+        adt_registry: product.adt_registry.clone(),
         infer_stats,
         library_proof_id: None,
         context_library_proof_id: None,
