@@ -162,6 +162,14 @@ Two rules follow, and both are cheap:
    stronger rule than the spec states, amend the spec first and say so in the PR;
    `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
 
+**Normative inventory registries.** A file under `spec/registry/` is
+numbered-spec-tier content, not a design doc: each is incorporated by
+reference into its owning `[05-OP-N]` atom, carries identity-keyed rows with
+no semantic ordinals, and is amended only as a numbered-spec change under the
+same review discipline and guard oracles as the chapter that owns it. The
+atom keeps the semantic rules; the registry holds the enumerable identities,
+and neither may duplicate the other's content.
+
 ### Numeric Surface Discipline
 
 The numeric remediation's covered-family surface ratchet and typed entry
@@ -209,7 +217,10 @@ numeric data, whether or not you have read that document:
   is not authority; existence means a normative definition line beginning
   `> **[05-OP-N]**`, not a cross-reference elsewhere. The atom states the signature,
   per-dtype semantics at [04-NUM-8]'s declared widths, adjoint or
-  non-differentiability rule, and accumulator rule where applicable. Tooling validates
+  non-differentiability rule, and accumulator rule where applicable; it may
+  hold its enumerable identity table in the normative `spec/registry/` file
+  it incorporates by reference, and rows there are part of the atom's
+  normative content. Tooling validates
   the atom group and existence; reviewers validate that the selected atom's normative
   text actually governs the callable. Review does not confer semantic authority: if
   no existing atom governs it, amend the numbered spec first and register that new

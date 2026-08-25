@@ -1592,22 +1592,11 @@ exact ADT identity by [05-OP-34].
 #### Exact public scalar and container boundaries
 
 > **[05-OP-31]** `scalar_carrier(value) -> result` governs exactly the ten
-> final public C callables in this table. The table is their canonical public
+> final public C callables enumerated in the normative registry
+> `spec/registry/c_scalar_carrier.md`, which this atom incorporates by
+> reference. That registry is their canonical public
 > identity; a differently named, typed-by-name, or raw-dtype successor is a
 > different callable and has no authority from this atom.
->
-> | callable | exact C signature |
-> |---|---|
-> | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
-> | scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
-> | value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
-> | value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
-> | rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
-> | rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
-> | tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
-> | scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
-> | scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
-> | exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |
 >
 > The final public declarations are exact:
 >
@@ -1717,40 +1706,9 @@ exact ADT identity by [05-OP-34].
 >
 > **[05-OP-32]** `shape_index(container, parameters...) -> result` governs
 > exactly the container, extent, index, byte-read, and recursive-observation
-> callable identities below. The signature is part of each identity.
->
-> | callable | exact C signature |
-> |---|---|
-> | string length | `int64_t chelis_string_len(chelis_string value)` |
-> | string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
-> | list length | `int64_t chelis_list_len(const chelis_list *list)` |
-> | list construction | `chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)` |
-> | list index | `chelis_value chelis_list_index(const chelis_list *list, int64_t index)` |
-> | list take | `chelis_list *chelis_list_take(const chelis_list *list, int64_t count)` |
-> | list drop | `chelis_list *chelis_list_drop(const chelis_list *list, int64_t count)` |
-> | list chunk | `chelis_list *chelis_list_chunk(const chelis_list *list, int64_t size)` |
-> | integer range | `chelis_list *chelis_range_i64(int64_t start, int64_t end)` |
-> | list enumerate | `chelis_list *chelis_list_enumerate(const chelis_list *list)` |
-> | tuple length | `int64_t chelis_tuple_len(const chelis_tuple *tuple)` |
-> | tuple construction | `chelis_tuple *chelis_tuple_from_values(const chelis_value *items, int64_t len)` |
-> | tuple index | `chelis_value chelis_tuple_get(const chelis_tuple *tuple, int64_t index)` |
-> | ADT construction | `chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len)` |
-> | ADT field count | `int64_t chelis_adt_field_count(const chelis_adt *adt)` |
-> | ADT field index | `chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index)` |
-> | dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
-> | dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
-> | dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
-> | dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
-> | dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
-> | dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
-> | dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |
-> | byte-file read | `chelis_list *chelis_read_bytes(chelis_string path)` |
-> | mapped byte read | `chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)` |
-> | mapped byte length | `int64_t chelis_mmap_len(const chelis_mapped_file *mapped)` |
-> | list print | `void chelis_print_list(const chelis_list *list)` |
-> | tuple print | `void chelis_print_tuple(const chelis_tuple *tuple)` |
-> | dictionary print | `void chelis_print_dict(const chelis_dict *dict)` |
-> | ADT print | `void chelis_print_adt(const chelis_adt *adt)` |
+> callable identities enumerated in the normative registry
+> `spec/registry/c_container_boundary.md`, which this atom incorporates by
+> reference. The signature is part of each identity.
 >
 > All lengths, indices, offsets, sizes, and returned counts are exact `int64`.
 > Negative lengths, indices, offsets, and counts trap `Domain`; an indexed
@@ -1808,42 +1766,18 @@ exact ADT identity by [05-OP-34].
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the twenty-three final public C callable identities below. These
+> exactly the twenty-three final public C callable identities enumerated in
+> the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
+> incorporates by reference. These
 > signatures are canonical: axes and rank are `int32_t`; extents, sizes,
 > offsets, counts, and element counts are `int64_t`; dtype arguments are
 > `chelis_dtype`; and an untyped, string-mode, or dtype-named successor has no
 > authority from this atom.
 >
-> | callable | exact C signature |
-> |---|---|
-> | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
-> | borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
-> | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
-> | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
-> | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
-> | contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
-> | typed list ingress | `chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype)` |
-> | row-major element egress | `chelis_list *chelis_tensor_elements(const chelis_tensor *tensor)` |
-> | inferred-width padding | `chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value)` |
-> | fixed-width padding | `chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value)` |
-> | concatenate | `chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis)` |
-> | split | `chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes)` |
-> | gather | `chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int32_t axis)` |
-> | replace scatter | `chelis_tensor *chelis_tensor_scatter_replace(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
-> | additive scatter | `chelis_tensor *chelis_tensor_scatter_add(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
-> | comparison | `chelis_tensor *chelis_tensor_cmplt(const chelis_tensor *left, const chelis_tensor *right)` |
-> | selection | `chelis_tensor *chelis_tensor_where(const chelis_tensor *condition, const chelis_tensor *then_tensor, const chelis_tensor *else_tensor)` |
-> | inclusive prefix sum | `chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int32_t axis)` |
-> | stable sort | `chelis_tuple *chelis_tensor_sort(const chelis_tensor *tensor, int32_t axis)` |
-> | diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
-> | trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
-> | clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
-> | contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |
->
 > This atom's selection rule also governs exactly the language builtin
 > `where(condition, then, else)` with signature
 > `(&tensor[D,bool], &tensor[D,p], &tensor[D,p]) -> tensor[D,p]` and its
-> exact public C counterpart `chelis_tensor_where` tabled above. All four
+> exact public C counterpart `chelis_tensor_where` in that registry. All four
 > tensors have identical dimensions, both branches and the result have the
 > same active element dtype `p`, and selection copies the chosen stored bits
 > without numeric conversion. On float branches the adjoint routes each
@@ -1981,16 +1915,10 @@ exact ADT identity by [05-OP-34].
 > compatibility alias. Except for the stated cumsum, trace, and einsum rules,
 > the family has no user-selectable accumulator.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly these five
-> exported stdlib ADT identities and no structurally similar successor:
->
-> | identity | exact variants and fields |
-> |---|---|
-> | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-> | `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
-> | `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
-> | `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
-> | `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the five
+> exported stdlib ADT identities enumerated in the normative registry
+> `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
+> reference, and no structurally similar successor.
 >
 > Every field crosses at its declared dtype and stored bits, without
 > arithmetic, conversion, or float funnel. An ordinary public ADT constructor
@@ -2021,97 +1949,12 @@ exact ADT identity by [05-OP-34].
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the eighty-four final exported stdlib numeric definitions in this table. A
-> signature and effect set are part of the identity. Only the exact table
+> the eighty-four final exported stdlib numeric definitions enumerated in the
+> normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
+> atom incorporates by reference. A
+> signature and effect set are part of the identity. Only the exact registry
 > identities exist: no effectless, wildcard-result, or otherwise weakened alias
 > is part of the language.
->
-> | # | identity | exact final signature |
-> |---:|---|---|
-> | 1 | `contracts::normal_cdf` | `(p_float)->p_float` |
-> | 2 | `contracts::normal_cdf_contract_samples` | `()->int64` |
-> | 3 | `contracts::normal_cdf_contract_seed` | `()->int64` |
-> | 4 | `contracts::standard_contract_tolerance` | `()->f32` |
-> | 5 | `decimal::decimal` | `(string)->Decimal` |
-> | 6 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
-> | 7 | `decimal::decimal_div` | `(Decimal,Decimal,int64,RoundingMode)->Decimal` |
-> | 8 | `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
-> | 9 | `decimal::decimal_from_int` | `(int64)->Decimal` |
-> | 10 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
-> | 11 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
-> | 12 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
-> | 13 | `decimal::decimal_lte` | `(Decimal,Decimal)->bool` |
-> | 14 | `decimal::decimal_mul` | `(Decimal,Decimal)->Decimal` |
-> | 15 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
-> | 16 | `decimal::decimal_to_float` | `(Decimal)->f64` |
-> | 17 | `decimal::decimal_to_string` | `(Decimal)->string` |
-> | 18 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
-> | 19 | `index::drop_list` | `(List[T],int64)->List[T]` |
-> | 20 | `index::list_index` | `(List[T],int64)->T` |
-> | 21 | `index::take_list` | `(List[T],int64)->List[T]` |
-> | 22 | `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-> | 23 | `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-> | 24 | `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 25 | `init/xavierext::trunc_normal` | `(&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 26 | `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 27 | `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 28 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
-> | 29 | `io/json::json_bigint` | `(Option[Json])->Option[string]` |
-> | 30 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
-> | 31 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
-> | 32 | `io/json::json_get` | `(Json,string)->Option[Json]` |
-> | 33 | `io/json::json_int` | `(Option[Json])->Option[int64]` |
-> | 34 | `io/json::json_is_null` | `(Option[Json])->bool` |
-> | 35 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
-> | 36 | `io/json::json_string` | `(Option[Json])->Option[string]` |
-> | 37 | `io/json::load_json` | `(string)->Json!{IO}` |
-> | 38 | `io/json::parse_json` | `(string)->Json` |
-> | 39 | `io/json::to_json` | `(Json)->string` |
-> | 40 | `io/json::try_load_json` | `(string)->Option[Json]!{IO}` |
-> | 41 | `io/json::try_parse_json` | `(string)->Option[Json]` |
-> | 42 | `io/json::try_to_json` | `(Json)->Option[string]` |
-> | 43 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
-> | 44 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
-> | 45 | `io::mmap_size` | `(string)->int64!{IO}` |
-> | 46 | `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
-> | 47 | `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
-> | 48 | `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
-> | 49 | `scalar::abs` | `(p_numeric)->p_numeric` |
-> | 50 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
-> | 51 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
-> | 52 | `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
-> | 53 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
-> | 54 | `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
-> | 55 | `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
-> | 56 | `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
-> | 57 | `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
-> | 58 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
-> | 59 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
-> | 60 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
-> | 61 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
-> | 62 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-> | 63 | `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
-> | 64 | `time::add_days` | `(Date,int64)->Date` |
-> | 65 | `time::date` | `(int64,int64,int64)->Date` |
-> | 66 | `time::date_gt` | `(Date,Date)->bool` |
-> | 67 | `time::date_gte` | `(Date,Date)->bool` |
-> | 68 | `time::date_lt` | `(Date,Date)->bool` |
-> | 69 | `time::date_lte` | `(Date,Date)->bool` |
-> | 70 | `time::date_to_string` | `(Date)->string` |
-> | 71 | `time::day_of_week` | `(Date)->DayOfWeek` |
-> | 72 | `time::day_of_week_name` | `(Date)->string` |
-> | 73 | `time::day_of_year` | `(Date)->int64` |
-> | 74 | `time::days_between` | `(Date,Date)->int64` |
-> | 75 | `time::duration` | `(int64,int64,int64,int64)->Duration` |
-> | 76 | `time::is_leap_year` | `(int64)->bool` |
-> | 77 | `time::parse_date` | `(string)->Option[Date]` |
-> | 78 | `time::sub_days` | `(Date,int64)->Date` |
-> | 79 | `time::try_date` | `(int64,int64,int64)->Option[Date]` |
-> | 80 | `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
-> | 81 | `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
-> | 82 | `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
-> | 83 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
-> | 84 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |
 >
 > `init/xavier::sample` is not a language operation and must not be exported.
 > It has no semantics, registration, alias, or stub disposition; a final
@@ -2421,7 +2264,8 @@ exact ADT identity by [05-OP-34].
 > uses the same schema and traps `Domain` instead of returning `None` after a
 > successful read.
 >
-> IO and process functions introduce the tabled `IO` effect. Process calls
+> IO and process functions introduce their registry-declared `IO` effect.
+> Process calls
 > pass the executable and argument vector directly without invoking a shell,
 > capture stdout/stderr and every ordinary nonzero exit, encode a signal exit
 > as status `-1`, and trap on spawn failure or non-UTF-8 captured text. `run`

@@ -39,6 +39,11 @@ CONTRACT_FILES = (
     "openspec/specs/serialization/spec.md",
     "openspec/specs/transformations/spec.md",
     "openspec/specs/type-system/spec.md",
+    "spec/registry/c_scalar_carrier.md",
+    "spec/registry/c_container_boundary.md",
+    "spec/registry/c_tensor_runtime.md",
+    "spec/registry/stdlib_adt_identities.md",
+    "spec/registry/stdlib_numeric_manifest.md",
 )
 FROZEN_FILE_DIGESTS = {
     "spec/02-surf-syntax.md": (
@@ -51,7 +56,7 @@ FROZEN_FILE_DIGESTS = {
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "931e0aab5a3600c70cebc8cbda6173fc1e3a1c6a06daf10a8f899e5ff9c61c0a"
+        "1fba5bb052b311a1a8d2c52fea3762b0170ffde2d5870efa9cf072dbe3130ce1"
     ),
     "spec/06-transformations.md": (
         "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
@@ -60,7 +65,7 @@ FROZEN_FILE_DIGESTS = {
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "ce3338f9e733eb9c38407455f1086c534b4cb85247af5bb5ae6a2b53db6c763b"
+        "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
         "8c5866494ba6c2d02ff0ebde12254f89bdb6c4ce13d5d4e5eb33069fa135fb47"
@@ -69,7 +74,7 @@ FROZEN_FILE_DIGESTS = {
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
     ),
     "spec/design/spec_provenance.md": (
-        "a2a84ab3a4d2925fc7a79f482e296eb979aadc24a0ebf21872c1fb257f7ea3fe"
+        "6e206f634ce6062d56701f0dea0bf57bcbdca4fbf630a6c12264a904f14ea426"
     ),
     "openspec/specs/risc-primitives/spec.md": (
         "875f1094b4fba6842f90fc96c17aa37c6c2be7a5a40957b0140a10992be601a6"
@@ -82,6 +87,21 @@ FROZEN_FILE_DIGESTS = {
     ),
     "openspec/specs/type-system/spec.md": (
         "135fd5d18b3bbbffa851720973984e3b61ed18ee0b83fa8884eb7e728b38c811"
+    ),
+    "spec/registry/c_scalar_carrier.md": (
+        "2e7b6a27b84e8c71d179b0ee10cd6c44651c4fcf66bb13dd56f0476245ffd22e"
+    ),
+    "spec/registry/c_container_boundary.md": (
+        "4a462ef8b452b5d744e8f8207d69cffd10512cd178c759a6c112f2600a6e56f5"
+    ),
+    "spec/registry/c_tensor_runtime.md": (
+        "cc57955f030ad18616333d6e1048e8607e54e9fd9c907bcd0698e6345b621f15"
+    ),
+    "spec/registry/stdlib_adt_identities.md": (
+        "59c8654819ffd315028f68a91e049a5f603464f4511ae604c3634e79f8667ce5"
+    ),
+    "spec/registry/stdlib_numeric_manifest.md": (
+        "2d6286daca1e7b16b79fcc863190d030c1291d54236b13f64a0a065090f22438"
     ),
 }
 OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
@@ -141,170 +161,170 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
 EXPECTED_OP_MANIFESTS = {
     "05-OP-31": tuple(
         """\
-> | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
-> | scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
-> | value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
-> | value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
-> | rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
-> | rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
-> | tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
-> | scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
-> | scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
-> | exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |""".splitlines()
+| dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
+| scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
+| value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
+| value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
+| rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
+| rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
+| tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
+| scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
+| scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
+| exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |""".splitlines()
     ),
     "05-OP-32": tuple(
         """\
-> | string length | `int64_t chelis_string_len(chelis_string value)` |
-> | string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
-> | list length | `int64_t chelis_list_len(const chelis_list *list)` |
-> | list construction | `chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)` |
-> | list index | `chelis_value chelis_list_index(const chelis_list *list, int64_t index)` |
-> | list take | `chelis_list *chelis_list_take(const chelis_list *list, int64_t count)` |
-> | list drop | `chelis_list *chelis_list_drop(const chelis_list *list, int64_t count)` |
-> | list chunk | `chelis_list *chelis_list_chunk(const chelis_list *list, int64_t size)` |
-> | integer range | `chelis_list *chelis_range_i64(int64_t start, int64_t end)` |
-> | list enumerate | `chelis_list *chelis_list_enumerate(const chelis_list *list)` |
-> | tuple length | `int64_t chelis_tuple_len(const chelis_tuple *tuple)` |
-> | tuple construction | `chelis_tuple *chelis_tuple_from_values(const chelis_value *items, int64_t len)` |
-> | tuple index | `chelis_value chelis_tuple_get(const chelis_tuple *tuple, int64_t index)` |
-> | ADT construction | `chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len)` |
-> | ADT field count | `int64_t chelis_adt_field_count(const chelis_adt *adt)` |
-> | ADT field index | `chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index)` |
-> | dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
-> | dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
-> | dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
-> | dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
-> | dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
-> | dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
-> | dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |
-> | byte-file read | `chelis_list *chelis_read_bytes(chelis_string path)` |
-> | mapped byte read | `chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)` |
-> | mapped byte length | `int64_t chelis_mmap_len(const chelis_mapped_file *mapped)` |
-> | list print | `void chelis_print_list(const chelis_list *list)` |
-> | tuple print | `void chelis_print_tuple(const chelis_tuple *tuple)` |
-> | dictionary print | `void chelis_print_dict(const chelis_dict *dict)` |
-> | ADT print | `void chelis_print_adt(const chelis_adt *adt)` |""".splitlines()
+| string length | `int64_t chelis_string_len(chelis_string value)` |
+| string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
+| list length | `int64_t chelis_list_len(const chelis_list *list)` |
+| list construction | `chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)` |
+| list index | `chelis_value chelis_list_index(const chelis_list *list, int64_t index)` |
+| list take | `chelis_list *chelis_list_take(const chelis_list *list, int64_t count)` |
+| list drop | `chelis_list *chelis_list_drop(const chelis_list *list, int64_t count)` |
+| list chunk | `chelis_list *chelis_list_chunk(const chelis_list *list, int64_t size)` |
+| integer range | `chelis_list *chelis_range_i64(int64_t start, int64_t end)` |
+| list enumerate | `chelis_list *chelis_list_enumerate(const chelis_list *list)` |
+| tuple length | `int64_t chelis_tuple_len(const chelis_tuple *tuple)` |
+| tuple construction | `chelis_tuple *chelis_tuple_from_values(const chelis_value *items, int64_t len)` |
+| tuple index | `chelis_value chelis_tuple_get(const chelis_tuple *tuple, int64_t index)` |
+| ADT construction | `chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len)` |
+| ADT field count | `int64_t chelis_adt_field_count(const chelis_adt *adt)` |
+| ADT field index | `chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index)` |
+| dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
+| dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
+| dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
+| dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
+| dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
+| dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
+| dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |
+| byte-file read | `chelis_list *chelis_read_bytes(chelis_string path)` |
+| mapped byte read | `chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)` |
+| mapped byte length | `int64_t chelis_mmap_len(const chelis_mapped_file *mapped)` |
+| list print | `void chelis_print_list(const chelis_list *list)` |
+| tuple print | `void chelis_print_tuple(const chelis_tuple *tuple)` |
+| dictionary print | `void chelis_print_dict(const chelis_dict *dict)` |
+| ADT print | `void chelis_print_adt(const chelis_adt *adt)` |""".splitlines()
     ),
     "05-OP-33": tuple(
         """\
-> | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
-> | borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
-> | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
-> | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
-> | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
-> | contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
-> | typed list ingress | `chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype)` |
-> | row-major element egress | `chelis_list *chelis_tensor_elements(const chelis_tensor *tensor)` |
-> | inferred-width padding | `chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value)` |
-> | fixed-width padding | `chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value)` |
-> | concatenate | `chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis)` |
-> | split | `chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes)` |
-> | gather | `chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int32_t axis)` |
-> | replace scatter | `chelis_tensor *chelis_tensor_scatter_replace(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
-> | additive scatter | `chelis_tensor *chelis_tensor_scatter_add(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
-> | comparison | `chelis_tensor *chelis_tensor_cmplt(const chelis_tensor *left, const chelis_tensor *right)` |
-> | selection | `chelis_tensor *chelis_tensor_where(const chelis_tensor *condition, const chelis_tensor *then_tensor, const chelis_tensor *else_tensor)` |
-> | inclusive prefix sum | `chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int32_t axis)` |
-> | stable sort | `chelis_tuple *chelis_tensor_sort(const chelis_tensor *tensor, int32_t axis)` |
-> | diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
-> | trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
-> | clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
-> | contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |""".splitlines()
+| owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
+| borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
+| rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
+| extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
+| element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
+| contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
+| typed list ingress | `chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype)` |
+| row-major element egress | `chelis_list *chelis_tensor_elements(const chelis_tensor *tensor)` |
+| inferred-width padding | `chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value)` |
+| fixed-width padding | `chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value)` |
+| concatenate | `chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis)` |
+| split | `chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes)` |
+| gather | `chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int32_t axis)` |
+| replace scatter | `chelis_tensor *chelis_tensor_scatter_replace(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
+| additive scatter | `chelis_tensor *chelis_tensor_scatter_add(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
+| comparison | `chelis_tensor *chelis_tensor_cmplt(const chelis_tensor *left, const chelis_tensor *right)` |
+| selection | `chelis_tensor *chelis_tensor_where(const chelis_tensor *condition, const chelis_tensor *then_tensor, const chelis_tensor *else_tensor)` |
+| inclusive prefix sum | `chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int32_t axis)` |
+| stable sort | `chelis_tuple *chelis_tensor_sort(const chelis_tensor *tensor, int32_t axis)` |
+| diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
+| trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
+| clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
+| contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |""".splitlines()
     ),
     "05-OP-34": tuple(
         """\
-> | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-> | `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
-> | `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
-> | `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
-> | `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |""".splitlines()
+| `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonBigInt(string) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
+| `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
+| `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
+| `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
+| `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |""".splitlines()
     ),
     "05-OP-35": tuple(
         """\
-> | 1 | `contracts::normal_cdf` | `(p_float)->p_float` |
-> | 2 | `contracts::normal_cdf_contract_samples` | `()->int64` |
-> | 3 | `contracts::normal_cdf_contract_seed` | `()->int64` |
-> | 4 | `contracts::standard_contract_tolerance` | `()->f32` |
-> | 5 | `decimal::decimal` | `(string)->Decimal` |
-> | 6 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
-> | 7 | `decimal::decimal_div` | `(Decimal,Decimal,int64,RoundingMode)->Decimal` |
-> | 8 | `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
-> | 9 | `decimal::decimal_from_int` | `(int64)->Decimal` |
-> | 10 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
-> | 11 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
-> | 12 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
-> | 13 | `decimal::decimal_lte` | `(Decimal,Decimal)->bool` |
-> | 14 | `decimal::decimal_mul` | `(Decimal,Decimal)->Decimal` |
-> | 15 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
-> | 16 | `decimal::decimal_to_float` | `(Decimal)->f64` |
-> | 17 | `decimal::decimal_to_string` | `(Decimal)->string` |
-> | 18 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
-> | 19 | `index::drop_list` | `(List[T],int64)->List[T]` |
-> | 20 | `index::list_index` | `(List[T],int64)->T` |
-> | 21 | `index::take_list` | `(List[T],int64)->List[T]` |
-> | 22 | `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-> | 23 | `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-> | 24 | `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 25 | `init/xavierext::trunc_normal` | `(&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 26 | `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 27 | `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 28 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
-> | 29 | `io/json::json_bigint` | `(Option[Json])->Option[string]` |
-> | 30 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
-> | 31 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
-> | 32 | `io/json::json_get` | `(Json,string)->Option[Json]` |
-> | 33 | `io/json::json_int` | `(Option[Json])->Option[int64]` |
-> | 34 | `io/json::json_is_null` | `(Option[Json])->bool` |
-> | 35 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
-> | 36 | `io/json::json_string` | `(Option[Json])->Option[string]` |
-> | 37 | `io/json::load_json` | `(string)->Json!{IO}` |
-> | 38 | `io/json::parse_json` | `(string)->Json` |
-> | 39 | `io/json::to_json` | `(Json)->string` |
-> | 40 | `io/json::try_load_json` | `(string)->Option[Json]!{IO}` |
-> | 41 | `io/json::try_parse_json` | `(string)->Option[Json]` |
-> | 42 | `io/json::try_to_json` | `(Json)->Option[string]` |
-> | 43 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
-> | 44 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
-> | 45 | `io::mmap_size` | `(string)->int64!{IO}` |
-> | 46 | `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
-> | 47 | `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
-> | 48 | `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
-> | 49 | `scalar::abs` | `(p_numeric)->p_numeric` |
-> | 50 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
-> | 51 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
-> | 52 | `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
-> | 53 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
-> | 54 | `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
-> | 55 | `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
-> | 56 | `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
-> | 57 | `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
-> | 58 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
-> | 59 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
-> | 60 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
-> | 61 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
-> | 62 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-> | 63 | `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
-> | 64 | `time::add_days` | `(Date,int64)->Date` |
-> | 65 | `time::date` | `(int64,int64,int64)->Date` |
-> | 66 | `time::date_gt` | `(Date,Date)->bool` |
-> | 67 | `time::date_gte` | `(Date,Date)->bool` |
-> | 68 | `time::date_lt` | `(Date,Date)->bool` |
-> | 69 | `time::date_lte` | `(Date,Date)->bool` |
-> | 70 | `time::date_to_string` | `(Date)->string` |
-> | 71 | `time::day_of_week` | `(Date)->DayOfWeek` |
-> | 72 | `time::day_of_week_name` | `(Date)->string` |
-> | 73 | `time::day_of_year` | `(Date)->int64` |
-> | 74 | `time::days_between` | `(Date,Date)->int64` |
-> | 75 | `time::duration` | `(int64,int64,int64,int64)->Duration` |
-> | 76 | `time::is_leap_year` | `(int64)->bool` |
-> | 77 | `time::parse_date` | `(string)->Option[Date]` |
-> | 78 | `time::sub_days` | `(Date,int64)->Date` |
-> | 79 | `time::try_date` | `(int64,int64,int64)->Option[Date]` |
-> | 80 | `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
-> | 81 | `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
-> | 82 | `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
-> | 83 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
-> | 84 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
+| `contracts::normal_cdf` | `(p_float)->p_float` |
+| `contracts::normal_cdf_contract_samples` | `()->int64` |
+| `contracts::normal_cdf_contract_seed` | `()->int64` |
+| `contracts::standard_contract_tolerance` | `()->f32` |
+| `decimal::decimal` | `(string)->Decimal` |
+| `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
+| `decimal::decimal_div` | `(Decimal,Decimal,int64,RoundingMode)->Decimal` |
+| `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
+| `decimal::decimal_from_int` | `(int64)->Decimal` |
+| `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
+| `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
+| `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
+| `decimal::decimal_lte` | `(Decimal,Decimal)->bool` |
+| `decimal::decimal_mul` | `(Decimal,Decimal)->Decimal` |
+| `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
+| `decimal::decimal_to_float` | `(Decimal)->f64` |
+| `decimal::decimal_to_string` | `(Decimal)->string` |
+| `decimal::try_decimal` | `(string)->Option[Decimal]` |
+| `index::drop_list` | `(List[T],int64)->List[T]` |
+| `index::list_index` | `(List[T],int64)->T` |
+| `index::take_list` | `(List[T],int64)->List[T]` |
+| `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
+| `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
+| `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+| `init/xavierext::trunc_normal` | `(&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]!{Random}` |
+| `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+| `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
+| `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
+| `io/json::json_bigint` | `(Option[Json])->Option[string]` |
+| `io/json::json_bool` | `(Option[Json])->Option[bool]` |
+| `io/json::json_float` | `(Option[Json])->Option[f64]` |
+| `io/json::json_get` | `(Json,string)->Option[Json]` |
+| `io/json::json_int` | `(Option[Json])->Option[int64]` |
+| `io/json::json_is_null` | `(Option[Json])->bool` |
+| `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
+| `io/json::json_string` | `(Option[Json])->Option[string]` |
+| `io/json::load_json` | `(string)->Json!{IO}` |
+| `io/json::parse_json` | `(string)->Json` |
+| `io/json::to_json` | `(Json)->string` |
+| `io/json::try_load_json` | `(string)->Option[Json]!{IO}` |
+| `io/json::try_parse_json` | `(string)->Option[Json]` |
+| `io/json::try_to_json` | `(Json)->Option[string]` |
+| `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
+| `io/json::write_json` | `(string,Json)->unit!{IO}` |
+| `io::mmap_size` | `(string)->int64!{IO}` |
+| `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
+| `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
+| `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
+| `scalar::abs` | `(p_numeric)->p_numeric` |
+| `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
+| `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
+| `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
+| `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
+| `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
+| `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
+| `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
+| `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
+| `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
+| `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
+| `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
+| `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
+| `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
+| `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
+| `time::add_days` | `(Date,int64)->Date` |
+| `time::date` | `(int64,int64,int64)->Date` |
+| `time::date_gt` | `(Date,Date)->bool` |
+| `time::date_gte` | `(Date,Date)->bool` |
+| `time::date_lt` | `(Date,Date)->bool` |
+| `time::date_lte` | `(Date,Date)->bool` |
+| `time::date_to_string` | `(Date)->string` |
+| `time::day_of_week` | `(Date)->DayOfWeek` |
+| `time::day_of_week_name` | `(Date)->string` |
+| `time::day_of_year` | `(Date)->int64` |
+| `time::days_between` | `(Date,Date)->int64` |
+| `time::duration` | `(int64,int64,int64,int64)->Duration` |
+| `time::is_leap_year` | `(int64)->bool` |
+| `time::parse_date` | `(string)->Option[Date]` |
+| `time::sub_days` | `(Date,int64)->Date` |
+| `time::try_date` | `(int64,int64,int64)->Option[Date]` |
+| `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
+| `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
+| `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
+| `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
+| `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |""".splitlines()
     ),
     "05-OP-38": tuple(
         """\
@@ -351,11 +371,11 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
     "05-OP-29": "3fc46cb450b49244dfea8859a662190128420ab2565f7d18f5f97d7ffb27fd0a",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
-    "05-OP-31": "be9dd899970a14b9c1765671915e6c722215a2cee6384faab0992966a4561753",
-    "05-OP-32": "4c6438ef1fa47bc6085d717e68c410030695bee86c59cbcf608f7948ca516e50",
-    "05-OP-33": "61d98d7e69bb94d5199a6a3358211cd9e9de6258109da5aa45b8cec7dd3e9bba",
-    "05-OP-34": "ad41103584e7c7b6bb2db415fd8e70a781ff8875fe3d31eb5c3f69e64113f319",
-    "05-OP-35": "bc99867ded92a1dfa99bf15d06156ae2d0dc24a54d61778cc8b3b2d4ac76042a",
+    "05-OP-31": "31e1d9d5be4b12496c6a5f9d3ee3cd8f134d9868e2c0e526bb36dea97b813538",
+    "05-OP-32": "e8102df69288ef68e023b236ef6e74bd82b327b50fd94f9aa9880cc6c8dfdeeb",
+    "05-OP-33": "fc529223469d814e4b9964bd95e721cd1ceabdd2033e8cbddb9e36151eb72ee1",
+    "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
+    "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
     "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
     "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
@@ -375,7 +395,7 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "684040ee468e9c95f40306d2eb4bcbd48a4785526259f9af4b02e509e5ca322f",
+        "135009bfe6e899a8703def7442e03817c3c1091d798ec7fc0c99896d29070ff2",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
@@ -499,8 +519,29 @@ def atom_blocks(text: str) -> dict[str, str]:
     return blocks
 
 
-def manifest_rows(block: str) -> tuple[str, ...]:
-    """Return normative Markdown data rows, excluding headers/separators."""
+OP_MANIFEST_REGISTRY_FILES = {
+    "05-OP-31": "spec/registry/c_scalar_carrier.md",
+    "05-OP-32": "spec/registry/c_container_boundary.md",
+    "05-OP-33": "spec/registry/c_tensor_runtime.md",
+    "05-OP-34": "spec/registry/stdlib_adt_identities.md",
+    "05-OP-35": "spec/registry/stdlib_numeric_manifest.md",
+}
+
+
+def manifest_rows(registry_text: str) -> tuple[str, ...]:
+    """Return normative registry data rows, excluding headers/separators."""
+
+    return tuple(
+        line
+        for line in registry_text.splitlines()
+        if line.startswith("| ")
+        and "`" in line
+        and not re.match(r"^\| (callable|identity) \|", line)
+    )
+
+
+def block_manifest_rows(block: str) -> tuple[str, ...]:
+    """Return in-atom Markdown data rows for atoms that keep their table."""
 
     return tuple(
         line
@@ -510,10 +551,30 @@ def manifest_rows(block: str) -> tuple[str, ...]:
 
 
 def validate_op_manifests(
-    blocks: dict[str, str], violations: list[str]
+    docs: dict[str, str], blocks: dict[str, str], violations: list[str]
 ) -> None:
     for atom, expected in EXPECTED_OP_MANIFESTS.items():
-        actual = manifest_rows(blocks.get(atom, ""))
+        block = blocks.get(atom, "")
+        relative = OP_MANIFEST_REGISTRY_FILES.get(atom)
+        if relative is None:
+            actual = block_manifest_rows(block)
+        else:
+            registry_text = docs.get(relative, "")
+            actual = manifest_rows(registry_text)
+            if f"`{relative}`" not in block:
+                violations.append(
+                    f"[{atom}] must incorporate its normative registry "
+                    f"{relative} by reference"
+                )
+            if re.search(r"^> \| ", block, re.MULTILINE):
+                violations.append(
+                    f"[{atom}] may not carry a second manifest copy; rows live "
+                    f"only in {relative}"
+                )
+            if f"[{atom}]" not in registry_text:
+                violations.append(
+                    f"registry {relative} must name its owning atom [{atom}]"
+                )
         if actual == expected:
             continue
         missing = [row for row in expected if row not in actual]
@@ -528,16 +589,15 @@ def validate_op_manifests(
         violations.append(f"[{atom}] exact manifest mismatch: {'; '.join(detail)}")
 
     stdlib_rows = re.findall(
-        r"^> \| (\d+) \| `([^`]+)` \| `([^`]+)` \|$",
-        blocks.get("05-OP-35", ""),
+        r"^\| `([^`]+)` \| `([^`]+)` \|$",
+        docs.get(OP_MANIFEST_REGISTRY_FILES["05-OP-35"], ""),
         re.MULTILINE,
     )
-    numbers = [int(number) for number, _identity, _signature in stdlib_rows]
-    identities = [identity for _number, identity, _signature in stdlib_rows]
-    if numbers != list(range(1, 85)) or len(set(identities)) != 84:
+    identities = [identity for identity, _signature in stdlib_rows]
+    if len(identities) != 84 or len(set(identities)) != 84:
         violations.append(
             "[05-OP-35] stdlib numeric manifest must have exactly eighty-four "
-            "unique identities numbered 1 through 84"
+            "unique identities"
         )
 
 
@@ -1401,7 +1461,7 @@ def validate_normative_contract(
             "supplies a compatibility alias",
         ),
         "05-OP-34": (
-            "exactly these five exported stdlib ADT identities",
+            "exported stdlib ADT identities enumerated in the normative registry",
             "`io/json::Json`",
             "`decimal::Decimal`",
             "`time::Date`",
@@ -1775,9 +1835,16 @@ def validate_normative_contract(
             "it is not semantic authority and does not alter legality",
         ),
     }
+    blocks_with_registries = dict(blocks)
+    for registry_atom, registry_relative in OP_MANIFEST_REGISTRY_FILES.items():
+        blocks_with_registries[registry_atom] = (
+            blocks.get(registry_atom, "")
+            + "\n"
+            + docs.get(registry_relative, "")
+        )
     for atom, requirements in atom_requirements.items():
-        require_atom(blocks, atom, requirements, violations)
-    validate_op_manifests(blocks, violations)
+        require_atom(blocks_with_registries, atom, requirements, violations)
+    validate_op_manifests(docs, blocks, violations)
 
     require_all(
         spec05,

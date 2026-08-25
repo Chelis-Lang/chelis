@@ -563,6 +563,17 @@ nonconforming; there is no unresolved semantic choice or compatibility cell.
    the external target-disposition registry; exported stdlib executability is
    derived transitively from its checked body. An overloaded builtin declares
    every domain it occupies.
+6. Enumerable identity inventories live as normative registry files under
+   `spec/registry/`, one per owning `[05-OP-N]` atom, identity-keyed with no
+   semantic ordinals; the atom incorporates its registry by reference and
+   keeps the semantic rules, and neither duplicates the other. These files
+   are numbered-spec-tier content under the AGENTS.md Documentation Authority
+   rules and are frozen by the owning guard oracles, so they are not the
+   "editable data file" decision 1 prohibits. Phase 4C's const-Rust machine
+   form is validated byte-wise against them (the [05-OBS-3] generated-table
+   pattern); the registry is the reviewed source and the machine form is the
+   executable authority, and a disagreement fails construction rather than
+   selecting either silently.
 
 `pad_sequences`/`pad_sequences_to` ([#1009]) are the completed backfill case:
 they predate the §C6 semantic-registration ratchet, and now bind their exact
