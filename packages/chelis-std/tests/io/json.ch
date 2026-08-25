@@ -1,5 +1,5 @@
 module Std.Tests.Io.Json
-import Std.Io.Json (Json, JsonNull, JsonBool, JsonInt, JsonFloat, JsonString, JsonArray, JsonObject, parse_json, try_parse_json, load_json, try_load_json, to_json, try_to_json, write_json, try_write_json, json_get, json_string, json_int, json_float, json_bool, json_array, json_is_null)
+import Std.Io.Json (Json, JsonNull, JsonBool, JsonInt, JsonBigInt, JsonFloat, JsonString, JsonArray, JsonObject, parse_json, try_parse_json, load_json, try_load_json, to_json, try_to_json, write_json, try_write_json, json_get, json_string, json_int, json_bigint, json_float, json_bool, json_array, json_is_null)
 import Std.Test (assert_eq, assert_true, assert_false, fail)
 def test_parse_null_returns_json_null() -> unit ! { Test } =
   match parse_json("null") with {
@@ -21,6 +21,33 @@ def test_parse_int_returns_json_int() -> unit ! { Test } = {
   match json_int(Some(parsed)) with {
     | Some(n) => assert_eq(n, cast(42, int64), "parse_json(\"42\") yields JsonInt(42)")
     | None => fail("parse_json(\"42\") did not yield JsonInt")
+  }
+}
+def test_parse_out_of_int64_integer_preserves_exact_bigint_spelling() -> unit ! { Test } = {
+  positive = parse_json("9223372036854775808")
+  negative = parse_json("-9223372036854775809")
+  _ = match json_bigint(Some(positive)) with {
+    | Some(text) => assert_eq(text, "9223372036854775808", "positive out-of-int64 token is byte-exact")
+    | None => fail("positive out-of-int64 token did not yield JsonBigInt")
+  }
+  match json_bigint(Some(negative)) with {
+    | Some(text) => assert_eq(text, "-9223372036854775809", "negative out-of-int64 token is byte-exact")
+    | None => fail("negative out-of-int64 token did not yield JsonBigInt")
+  }
+}
+def test_bigint_accessors_refuse_cross_variant_coercion() -> unit ! { Test } = {
+  value = Some(JsonBigInt("9223372036854775808"))
+  _ = match json_int(value) with {
+    | Some(_) => fail("json_int must refuse JsonBigInt")
+    | None => assert_true(true, "json_int(JsonBigInt) -> None")
+  }
+  _ = match json_float(value) with {
+    | Some(_) => fail("json_float must refuse JsonBigInt")
+    | None => assert_true(true, "json_float(JsonBigInt) -> None")
+  }
+  match json_bigint(Some(JsonInt(cast(1, int64)))) with {
+    | Some(_) => fail("json_bigint must refuse JsonInt")
+    | None => assert_true(true, "json_bigint(JsonInt) -> None")
   }
 }
 def test_parse_string_returns_json_string() -> unit ! { Test } = {
@@ -82,6 +109,23 @@ def test_to_json_scalars() -> unit ! { Test } = {
   _ = assert_eq(to_json(JsonBool(true)), "true", "to_json(JsonBool(true)) == true")
   _ = assert_eq(to_json(JsonBool(false)), "false", "to_json(JsonBool(false)) == false")
   assert_eq(to_json(JsonInt(cast(42, int64))), "42", "to_json(JsonInt(42)) == 42")
+}
+def test_to_json_canonical_bigint_is_verbatim_and_round_trips_as_bigint() -> unit ! { Test } = {
+  positive = JsonBigInt("9223372036854775808")
+  negative = JsonBigInt("-9223372036854775809")
+  _ = assert_eq(to_json(positive), "9223372036854775808", "canonical positive JsonBigInt emits verbatim")
+  _ = assert_eq(to_json(negative), "-9223372036854775809", "canonical negative JsonBigInt emits verbatim")
+  match parse_json(to_json(positive)) with {
+    | JsonBigInt(text) => assert_eq(text, "9223372036854775808", "JsonBigInt round-trips with its variant and bytes intact")
+    | _ => fail("canonical JsonBigInt did not round-trip as JsonBigInt")
+  }
+}
+def test_try_to_json_rejects_noncanonical_or_in_range_bigint_storage() -> unit ! { Test } = {
+  invalid = ["", "-", "0", "-0", "01", "-01", "+9223372036854775808", "9223372036854775807", "-9223372036854775808", "1.0"]
+  fold(fn (acc: unit, text: string) -> unit = match try_to_json(JsonBigInt(text)) with {
+    | Some(_) => fail(string_concat("try_to_json must reject invalid JsonBigInt storage: ", text))
+    | None => assert_true(true, string_concat("invalid JsonBigInt rejected: ", text))
+  }, (), invalid)
 }
 def test_to_json_float_is_shortest_round_trip() -> unit ! { Test } = assert_eq(to_json(JsonFloat(0.15110743269565682f64)), "0.15110743269565682", "17-significant-digit f64 survives to_json byte-exactly")
 def test_to_json_string_escapes_specials() -> unit ! { Test } = assert_eq(to_json(JsonString("a\"b\\c\nd\te\rf")), "\"a\\\"b\\\\c\\nd\\te\\rf\"", "quote, backslash, and control whitespace are escaped")
