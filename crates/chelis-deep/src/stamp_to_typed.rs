@@ -300,6 +300,11 @@ fn stamp_in_role(
 
 // ── RuntimeExpr ──────────────────────────────────────────────────────
 
+/// Stamp a child at an expression position.
+///
+/// A bare identifier here is the `spec/03-deep-syntax.md` [03-ROLE-2]
+/// ingress rejection: a name is not an expression, and the diagnostic
+/// names the `(var {} ...)` spelling that is one.
 fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(RawAtom::Symbol(name), span) => Err(StampError {
@@ -325,6 +330,12 @@ fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
 
 // ── Type ─────────────────────────────────────────────────────────────
 
+/// Stamp a child at a type position.
+///
+/// A bare identifier here is a name per [03-ROLE-1] (a dtype spelling, a
+/// type parameter), so atoms pass through; a non-empty list must decode
+/// to a vocabulary node, because type syntax is closed and an undecodable
+/// head has no type reading to fall back to.
 fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
@@ -370,6 +381,13 @@ fn stamp_bare(raw: RawExpr) -> Result<Expr, StampError> {
 /// first. If the head is a known tag AND element 1 is a metadata map, stamp
 /// as a Node (so `(params {} x)` becomes Node(Params)). Otherwise fall
 /// through to BareList (so `(x y z)` becomes BareList).
+///
+/// The conjunction is `spec/03-deep-syntax.md` [03-ROLE-3]'s disambiguator,
+/// and both fall-through rows are deliberate acceptance, not missed decode:
+/// a tag-word head without a metadata map is a real structural list (an
+/// import name list `(copy fill)`), and a metadata map behind an ordinary
+/// name head is a real annotated parameter (`(x {type: ...})`). Neither
+/// half of the conjunction may reinterpret the list on its own.
 fn stamp_bare_list(elements: Vec<RawExpr>, span: Span) -> Result<Expr, StampError> {
     // Try vocabulary decode: head must be a known DeepTag symbol AND the
     // list must have at least 2 elements with a map at index 1.
@@ -416,7 +434,6 @@ fn stamp_bypass(raw: RawExpr, expectation: BypassExpectation) -> Result<Expr, St
         BypassExpectation::RequiresTag(expected_tag) => stamp_as_bypass_tag(raw, expected_tag),
         BypassExpectation::RequiresPattern => stamp_as_bypass_pattern(raw),
         BypassExpectation::FormExpecting => stamp_form_expecting(raw),
-        BypassExpectation::Structural => stamp_bare(raw),
     }
 }
 
