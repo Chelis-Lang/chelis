@@ -59,6 +59,13 @@ fn bool_tensor_is_required_not_numeric_tensor_or_bool_scalar() {
         "def bad[p](x: tensor[4, p]) -> tensor[int64] = count(&x, 0)",
         "exactly a bool tensor",
     );
+    assert_rejects(
+        r#"
+def count_any[p](x: tensor[4, p]) -> tensor[int64] = count(&x, 0)
+def bad(x: tensor[4, int64]) -> tensor[int64] = count_any(x)
+"#,
+        "exactly a bool tensor",
+    );
 }
 
 #[test]

@@ -2523,14 +2523,16 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 // only the tensor operand contributes runtime requirements.
                 if name == "count" {
                     let app_children = children(list);
-                    if let (Some(input), Some(axes)) =
-                        (app_children.get(1), app_children.get(2..))
+                    if let (Some(input), Some(axes)) = (app_children.get(1), app_children.get(2..))
                         && !axes.is_empty()
                         && axes.iter().all(|axis| {
                             extract_int_axis(axis).is_some() || callable_ref_name(axis).is_some()
                         })
                     {
-                        return expr_requires_host_runtime_with_ctx(input, exempt_to_tensor_literal);
+                        return expr_requires_host_runtime_with_ctx(
+                            input,
+                            exempt_to_tensor_literal,
+                        );
                     }
                 }
                 if matches!(
