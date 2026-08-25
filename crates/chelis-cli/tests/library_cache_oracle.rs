@@ -87,21 +87,21 @@ fn stage_dep_fixture(scratch: &Path, dep_body: &str, entry_body: &str) -> PathBu
     write(
         &root.join("reef.toml"),
         &format!(
-            "[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"PseudoApp\"\n\n[dependencies]\nazdep = {{ path = \"./azdep\" }}\n"
+            "schema = \"1\"\n\n[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"PseudoApp\"\n\n[dependencies]\nazdep = {{ path = \"./azdep\" }}\n"
         ),
     );
     write(&root.join("src/main.ch"), entry_body);
     write(
         &root.join("azdep/reef.toml"),
         &format!(
-            "[package]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Azdep\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"Azdep\"\n"
         ),
     );
     write(&root.join("azdep/src/math.ch"), dep_body);
     write(
         &root.join("reef.lock"),
         &format!(
-            "[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./azdep\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"pseudo-app\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"azdep\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./azdep\"\n"
         ),
     );
     root.join("src/main.ch")
@@ -652,21 +652,21 @@ fn stage_named_dep_fixture(
     write(
         &root.join("reef.toml"),
         &format!(
-            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./{dep_name}\" }}\n"
+            "schema = \"1\"\n\n[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{root_prefix}\"\n\n[dependencies]\n{dep_name} = {{ path = \"./{dep_name}\" }}\n"
         ),
     );
     write(&root.join("src/main.ch"), entry_body);
     write(
         &root.join(format!("{dep_name}/reef.toml")),
         &format!(
-            "[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{dep_prefix}\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\nmodule_prefix = \"{dep_prefix}\"\n"
         ),
     );
     write(&root.join(format!("{dep_name}/src/math.ch")), dep_body);
     write(
         &root.join("reef.lock"),
         &format!(
-            "[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./{dep_name}\"\n"
+            "schema = \"1\"\n\n[package]\nname = \"{root_name}\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"{dep_name}\"\nversion = \"0.1.0\"\ncompiler = \"={COMPILER_VERSION}\"\narchive_sha256 = \"\"\nshell_sha256 = \"\"\n\n[dependencies.source]\nkind = \"path\"\npath = \"./{dep_name}\"\n"
         ),
     );
     root.join("src/main.ch")

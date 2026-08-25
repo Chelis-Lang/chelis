@@ -55,6 +55,34 @@ explicitly in `[dependencies]` (the installer soft-verifies that the
 declared version matches the bundled version, mismatches surface a
 typed error), but it is never required.
 
+### Package identities and local resolution
+
+Package names use lowercase ASCII letters, digits, and internal hyphens. Names start with a lowercase letter and contain at most 64 bytes.
+
+Package versions use complete Semantic Versions. Prerelease versions are valid, but package build metadata is not valid.
+
+Manifest schema 1 keeps exact dependency semantics. A schema-1 dependency version such as `0.7.2` selects only `0.7.2`.
+
+A path dependency can include an exact version. Reef verifies the loaded package name and version before graph construction.
+
+Reef contains a bounded resolver-2 model with Cargo-style requirements. Manifest schema 2 remains unsupported, so generated and migrated manifests stay on resolver 1.
+
+Schema-1 local resolution validates the same bounded resolver with one exact candidate per declaration. It does not perform compatible-version selection.
+
+The resolver-2 model sorts package names bytewise. It prefers compatible lock candidates, then sorts other candidates by descending Semantic Version precedence.
+
+Both modes select one version for each package name. The shared limits cover candidates, packages, dependencies, depth, and explored states.
+
+Normal commands prefer a valid exact `reef.lock`. Reef verifies root identity, requirements, source kinds, canonical paths, origins, and content hashes before reuse.
+
+A valid lock prevents an implicit compatible upgrade and remains byte-identical. A changed requirement or source declaration starts bounded local resolution.
+
+A locked hash failure or unavailable origin remains a hard error. Reef does not replace damaged locked bytes with another version.
+
+A malformed lock also fails closed. Inspect or remove the damaged lock, then run `chelis reef build` to create a verified replacement.
+
+Remote version enumeration and resolver-2 activation belong to `add-bounded-reef-remote-discovery`.
+
 ## Document Schemas and Upgrades
 
 Each new `reef.toml` and `reef.lock` declares an independent top-level schema.

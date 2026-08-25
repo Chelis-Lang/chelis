@@ -16,6 +16,7 @@ chelis-effects.workspace = true
 chelis-shell.workspace = true
 chelis-std-bundle.workspace = true
 serde.workspace = true
+semver.workspace = true
 bincode = "1"
 schemars = "0.8"
 reqwest = { version = "0.11", default-features = false, features = ["blocking", "rustls-tls"] }

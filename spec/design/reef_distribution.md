@@ -53,6 +53,30 @@ Versioned editor schemas under `docs/schemas/reef/` describe syntax only. Execut
 
 The schema allocation sequence is manifest 1, resolver-2 manifest 2, and package-metadata manifest 3. The lock remains schema 1 until its fields change.
 
+### Typed package identities and local candidates
+
+Reef parses each package name, package version, compiler pin, lock identity, index identity, release identity, and shell identity before use.
+
+Canonical package names use lowercase ASCII letters, digits, and internal hyphens. Complete package versions use Semantic Versioning without build metadata.
+
+Manifest schema 1 retains complete exact dependency versions. The resolver-2 model uses Cargo-style requirements, but schema 2 remains inactive.
+
+Local candidates can come from an exact lock, the local registry, the bundled runtime, or a path. No local candidate source enumerates a remote repository.
+
+Schema-1 local resolution uses the bounded resolver core with one exact candidate per declaration. It performs no compatible-version selection.
+
+The inactive resolver-2 model uses bytewise package order, lock preference, descending version precedence, bounded depth-first search, and failed-requirement memoization.
+
+Both modes limit candidates and resolved packages to 256. They limit dependencies to 256, depth to 128, and explored states to 100000.
+
+One active path source overrides registry candidates for its package name. Reef rejects two active paths or conflicting verified non-path sources.
+
+A valid lock is the preferred exact graph. Reef reuses it without search or rewrite after identity, requirement, source, path, origin, and hash verification.
+
+A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error.
+
+`add-bounded-reef-remote-discovery` owns the schema-2 DTO, migration, editor schema, remote providers, and resolver-2 activation.
+
 ### Shipped surface
 
 - `chelis reef init` scaffolds a new package with the newest supported manifest schema.
@@ -63,8 +87,8 @@ The schema allocation sequence is manifest 1, resolver-2 manifest 2, and package
   `dist/<name>-<version>.{chb,tar.zst}` plus a `reef.lock` recording the resolved
   dependency tuples.
 - `chelis check <package-source>` and `chelis build <package-source>` use the same
-  resolved package graph and MUST repair a missing or malformed `reef.lock`, including
-  when the prepared graph itself came from a warm cache (chelis#971).
+  resolved package graph and repair a missing `reef.lock`, including when the prepared
+  graph came from a warm cache. A malformed identity or integrity failure remains hard.
 - `chelis reef publish` runs build, then copies artifacts into
   `$CHELIS_REEF_HOME/packages/<name>/<version>/` and updates
   `$CHELIS_REEF_HOME/index.json`.
@@ -444,8 +468,8 @@ lockfile command is a thin wrapper over Item 6's helper.
 ### Item 10 — Public registry server (deferred)
 
 Post-launch endgame. A dedicated registry service replaces GitHub
-Releases as the artifact backend. Adds version search, semver
-resolution, multiple publishers, discoverability. Substantial product
+Releases as the artifact backend. It activates remote version search,
+multiple publishers, and discoverability around the typed local resolver. Substantial product
 work; do not start without a specific driver pulling for it. Recorded
 here for forward-compatibility so the design of Items 6-9 stays
 compatible with a future migration (the lockfile's `remote_origin`

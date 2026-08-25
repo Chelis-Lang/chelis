@@ -102,6 +102,22 @@ A later upgrade completes the lock step. The design does not claim a transaction
 
 Versioned JSON Schema artifacts provide editor support. They do not replace typed Reef parsing or artifact validation.
 
+### 3.2 Exact lock preference
+
+Reef parses package and lock identities before filesystem or registry use. Package versions are complete Semantic Versions without build metadata.
+
+A valid `reef.lock` is the preferred exact graph for build, check, eval, schema, and prepared-graph paths.
+
+Reef verifies the root identity, direct requirements, source kinds, canonical paths, origins, and hashes before lock reuse.
+
+A valid lock causes no version search and no lock rewrite. This rule prevents implicit compatible upgrades during normal commands.
+
+A changed requirement or source declaration invalidates the lock preference. Reef then runs bounded local resolution and publishes a replacement only after success.
+
+A locked hash failure or unavailable origin is an integrity failure. Reef does not search for replacement bytes after that failure.
+
+Manifest schema 1 retains exact dependency versions. Resolver-2 ranges remain inactive until `add-bounded-reef-remote-discovery` lands schema 2.
+
 ## 4. Store consolidation
 
 Chelis state is currently scattered and inconsistent:
@@ -413,8 +429,8 @@ build" walkthrough:
 
 ## 11. Out of scope
 
-Inherited from `reef_distribution.md` §Out of scope: semver / version-range
-resolution, a public registry server (Item 10), cryptographic artifact signing
+Inherited from `reef_distribution.md` §Out of scope: resolver-2 activation,
+remote version discovery, a public registry server (Item 10), cryptographic artifact signing
 (trust-stack Item 5), and bit-reproducible cross-machine artifact comparison.
 Additionally: garbage-collection / uninstall of the three stores — all of
 `~/.chelis/{toolchains,reef,src}` currently grow unbounded — is deferred to a

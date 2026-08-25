@@ -2602,6 +2602,11 @@ rec {
             packageId = "schemars";
           }
           {
+            name = "semver";
+            packageId = "semver";
+            features = [ "serde" ];
+          }
+          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" "rc" ];
@@ -2699,6 +2704,7 @@ rec {
           {
             name = "semver";
             packageId = "semver";
+            features = [ "serde" ];
           }
           {
             name = "serde";
@@ -9422,11 +9428,27 @@ rec {
         authors = [
           "David Tolnay <dtolnay@gmail.com>"
         ];
+        dependencies = [
+          {
+            name = "serde";
+            packageId = "serde";
+            optional = true;
+            usesDefaultFeatures = false;
+            target = { target, features }: false;
+          }
+          {
+            name = "serde_core";
+            packageId = "serde_core";
+            rename = "serde";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+        ];
         features = {
           "default" = [ "std" ];
           "serde" = [ "dep:serde" ];
         };
-        resolvedDefaultFeatures = [ "default" "std" ];
+        resolvedDefaultFeatures = [ "default" "serde" "std" ];
       };
       "serde" = rec {
         crateName = "serde";
