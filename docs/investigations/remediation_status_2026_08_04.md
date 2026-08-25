@@ -67,6 +67,19 @@ selection. Those existing guide statements are
 implementation divergence, not compatibility authority or permission to
 narrow the numbered specs.
 
+This revision supplies #1306's direct `Sub`, `MinElem`, and
+`ExtremaAdjoint` identities and the authoritative child command
+`.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`, whose success
+line is `DTYPE DIRECT ARITHMETIC ORACLE: PASS`. The executable normal-gate
+surface covers exact typed kernels, IR/eval/AD, folding, WireDag v6, typed
+target dispositions, compiled C behavior, HIP source generation, exhaustive
+consumer compilation, and standing mutations. The four ignored HIP execution
+cases remain a real-device manual gate:
+`scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1`;
+expected success is four passed and zero failed. The current Darwin arm64
+validation host has neither `hipcc` nor the documented ROCm wheel paths, so
+that hardware receipt is **BLOCKED**, not passed or waived.
+
 Everything still open falls into four groups: a defect inventory concentrated
 in #730's support cells and #729's GPU lanes, two engineering campaigns (the
 capability table and #912 root-boundary chain), the post-#1088 stamped-carrier

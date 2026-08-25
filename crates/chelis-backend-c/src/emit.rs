@@ -7317,23 +7317,40 @@ mod tests {
     }
 
     #[test]
-    fn max_elem_emits_fmaxf() {
-        let mut dag = Dag::new();
-        let a = dag.add_node(
-            RiscOp::synth_const(scalar_f32().precision, 1.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        let b = dag.add_node(
-            RiscOp::synth_const(scalar_f32().precision, 2.0),
-            vec![],
-            scalar_f32(),
-            None,
-        );
-        dag.add_node(RiscOp::MaxElem, vec![a, b], scalar_f32(), None);
-        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("fmaxf("));
+    fn direct_extrema_emit_exact_first_operand_selectors() {
+        for (op, comparison, forbidden) in [
+            (RiscOp::MaxElem, ">=", ["fmaxf(", "fmax("]),
+            (RiscOp::MinElem, "<=", ["fminf(", "fmin("]),
+        ] {
+            let mut dag = Dag::new();
+            let a = dag.add_node(
+                RiscOp::synth_const(scalar_f32().precision, 1.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            let b = dag.add_node(
+                RiscOp::synth_const(scalar_f32().precision, 2.0),
+                vec![],
+                scalar_f32(),
+                None,
+            );
+            dag.add_node(op, vec![a, b], scalar_f32(), None);
+            let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+            assert!(c.contains("isnan(__in_a_2[i])"), "{c}");
+            assert!(c.contains("!isnan(__in_b_2[i])"), "{c}");
+            assert!(
+                c.contains(&format!("(__in_a_2[i]) {comparison} (__in_b_2[i])")),
+                "{c}"
+            );
+            assert!(c.contains("? (__in_a_2[i]) : (__in_b_2[i])"), "{c}");
+            for function in forbidden {
+                assert!(
+                    !c.contains(function),
+                    "direct extrema must select an operand, not call {function}:\n{c}"
+                );
+            }
+        }
     }
 
     #[test]

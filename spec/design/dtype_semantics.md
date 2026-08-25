@@ -1714,6 +1714,28 @@ callable from bypassing review while the capability tables are built.
    [#1306] owns replacing the trap- and stored-bit-changing `sub` and
    `min_elem` arithmetic surrogates with direct typed identities in every lane.
 
+**Authoritative direct-arithmetic oracle ([#1306]):**
+`.venv/bin/python scripts/dtype_direct_arithmetic_oracle.py`; exit 0 and final
+line `DTYPE DIRECT ARITHMETIC ORACLE: PASS`. It runs the exact-width typed
+kernels, direct IR lowering/evaluation/AD, constant folding, WireDag v6 and
+target-disposition tests, compiled-C boundary/overflow/stored-bit cases, HIP
+source-generation tests, exhaustive downstream compilation, and its standing
+anti-surrogate mutations. [#1296] consumes this exact child command and success
+line; it does not reconstruct #1306 evidence from prose.
+
+The normal oracle compiles the ignored HIP execution cases but cannot claim
+device execution. The manual hardware gate is:
+
+```text
+scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness direct_ -- --ignored --test-threads=1
+```
+
+Expected success is four tests passed and zero failed: f32/f64 exact extrema
+and adjoints, f32/f64 subtraction agreement, fused direct subtraction followed
+by minimum, and signed-i32 extrema. A host without `hipcc`, the documented ROCm
+wheel paths, or a compatible device records this leg as **BLOCKED**, never as a
+pass; it does not weaken or remove the ignored hardware tests.
+
 **Frozen at exit:** the numbered-spec atoms authored or amended by this slice
 and the capability schema. This is not a claim that every older builtin already
 has exact atom authority: [#1294] owns that all-or-nothing closure before 4C.

@@ -921,9 +921,7 @@ pub fn int_unop(op: IntUnOp, value: ScalarValue) -> Result<ScalarValue, NumericK
 fn select_float_max_first<T: Copy + PartialOrd>(lhs: T, rhs: T, is_nan: impl Fn(T) -> bool) -> T {
     if is_nan(lhs) {
         lhs
-    } else if is_nan(rhs) {
-        rhs
-    } else if rhs > lhs {
+    } else if is_nan(rhs) || rhs > lhs {
         rhs
     } else {
         lhs
@@ -933,9 +931,7 @@ fn select_float_max_first<T: Copy + PartialOrd>(lhs: T, rhs: T, is_nan: impl Fn(
 fn select_float_min_first<T: Copy + PartialOrd>(lhs: T, rhs: T, is_nan: impl Fn(T) -> bool) -> T {
     if is_nan(lhs) {
         lhs
-    } else if is_nan(rhs) {
-        rhs
-    } else if rhs < lhs {
+    } else if is_nan(rhs) || rhs < lhs {
         rhs
     } else {
         lhs
