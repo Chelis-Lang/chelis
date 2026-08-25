@@ -24,14 +24,14 @@ pub fn constant_fold(dag: &mut Dag) {
     // the folded result.
     let mut replacements: Vec<(NodeId, chelis_types::ScalarValue, Vec<String>)> = Vec::new();
 
-    // The fold computes on the f64 wide image (the chelis#680 residue;
-    // exact integer folding arrives with the Phase 2 kernel split) and
-    // FINALIZES the result at the node's dtype through the sealed
-    // module. Two decline rules keep the fold conservative per the
-    // section C2 contract: an integer payload whose f64 image is not
-    // exact declines (never bake a collapsed value in, chelis#856), and
-    // a result that does not finalize at the node's dtype declines
-    // (never bake a trap away nor in - the runtime evaluates the
+    // Direct subtraction and value extrema fold through their exact typed
+    // kernels below. The remaining legacy fold set computes on the f64 wide
+    // image (the chelis#680 residue) and FINALIZES the result at the node's
+    // dtype through the sealed module. Two decline rules keep that older set
+    // conservative per the section C2 contract: an integer payload whose f64
+    // image is not exact declines (never bake a collapsed value in,
+    // chelis#856), and a result that does not finalize at the node's dtype
+    // declines (never bake a trap away nor in - the runtime evaluates the
     // unfolded graph and traps with its full diagnostic).
     let wide_image = |value: &chelis_types::ScalarValue| -> Option<f64> {
         if let Some(i) = value.as_i64_exact()
@@ -49,13 +49,45 @@ pub fn constant_fold(dag: &mut Dag) {
             if let (Some(l), Some(r)) = (lhs, rhs)
                 && let (RiscOp::Const { value: lval }, RiscOp::Const { value: rval }) =
                     (&l.op, &r.op)
-                && let (Some(lv), Some(rv)) = (wide_image(lval), wide_image(rval))
             {
+                let direct = match &node.op {
+                    RiscOp::Sub => Some(if node.output_type.precision.is_integer() {
+                        chelis_types::int_binop(chelis_types::IntBinOp::Sub, *lval, *rval)
+                    } else {
+                        chelis_types::float_binop(chelis_types::FloatBinOp::Sub, *lval, *rval)
+                    }),
+                    RiscOp::MaxElem => Some(if node.output_type.precision.is_integer() {
+                        chelis_types::int_binop(chelis_types::IntBinOp::Max, *lval, *rval)
+                    } else {
+                        chelis_types::float_binop(chelis_types::FloatBinOp::Max, *lval, *rval)
+                    }),
+                    RiscOp::MinElem => Some(if node.output_type.precision.is_integer() {
+                        chelis_types::int_binop(chelis_types::IntBinOp::Min, *lval, *rval)
+                    } else {
+                        chelis_types::float_binop(chelis_types::FloatBinOp::Min, *lval, *rval)
+                    }),
+                    _ => None,
+                };
+                if let Some(result) = direct {
+                    if let Ok(sealed) = result
+                        && sealed.prim() == node.output_type.precision
+                    {
+                        let merge_spans = collect_operand_spans(node, &[l, r]);
+                        replacements.push((node.id, sealed, merge_spans));
+                    }
+                    // A direct typed fold that traps or finds a malformed
+                    // dtype declines the fold; it must never fall through to
+                    // the legacy f64-wide optimizer path.
+                    continue;
+                }
+
+                let (Some(lv), Some(rv)) = (wide_image(lval), wide_image(rval)) else {
+                    continue;
+                };
                 let result = match &node.op {
                     RiscOp::Add => Some(lv + rv),
                     RiscOp::Mul => Some(lv * rv),
                     RiscOp::CmpLt => Some(if lv < rv { 1.0 } else { 0.0 }),
-                    RiscOp::MaxElem => Some(if lv >= rv { lv } else { rv }),
                     _ => None,
                 };
                 if let Some(val) = result
@@ -347,6 +379,7 @@ pub fn common_subexpr_eliminate(dag: &Dag) -> Dag {
 mod tests {
     use super::*;
     use crate::dag::{Dag, RiscOp, TensorType};
+    use chelis_types::{ElementRef, scalar_from_f64, scalar_from_i64};
 
     fn scalar_f32() -> TensorType {
         TensorType::scalar_f32()
@@ -423,6 +456,115 @@ mod tests {
             result.op,
             RiscOp::synth_const(chelis_types::types::Prim::F32, -5.0)
         );
+    }
+
+    #[test]
+    fn constant_fold_direct_integer_subtraction_is_exact_or_declines_overflow() {
+        let scalar_i64 = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::Int64,
+        };
+        let mut exact = Dag::new();
+        let lhs = exact.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, 9_007_199_254_740_993)
+                    .unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        let rhs = exact.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, 1).unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        exact.add_node(RiscOp::Sub, vec![lhs, rhs], scalar_i64.clone(), None);
+        constant_fold(&mut exact);
+        match &exact.get(NodeId(2)).unwrap().op {
+            RiscOp::Const { value } => {
+                assert_eq!(value.as_i64_exact(), Some(9_007_199_254_740_992));
+            }
+            other => panic!("exact int64 subtraction must fold directly, got {other:?}"),
+        }
+
+        let mut overflow = Dag::new();
+        let lhs = overflow.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, i64::MAX).unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        let rhs = overflow.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("test", scalar_i64.precision, -1).unwrap(),
+            },
+            vec![],
+            scalar_i64.clone(),
+            None,
+        );
+        overflow.add_node(RiscOp::Sub, vec![lhs, rhs], scalar_i64, None);
+        constant_fold(&mut overflow);
+        assert!(matches!(overflow.get(NodeId(2)).unwrap().op, RiscOp::Sub));
+    }
+
+    #[test]
+    fn constant_fold_direct_extrema_preserves_selected_f64_bits() {
+        let scalar_f64 = TensorType {
+            dims: vec![],
+            precision: chelis_types::types::Prim::F64,
+        };
+        let cases = [
+            (
+                f64::from_bits(0x7ff8_1111_2222_3333),
+                1.0,
+                0x7ff8_1111_2222_3333,
+            ),
+            (
+                1.0,
+                f64::from_bits(0xfff8_4444_5555_6666),
+                0xfff8_4444_5555_6666,
+            ),
+            (0.0, -0.0, 0),
+            (-0.0, 0.0, 0x8000_0000_0000_0000),
+        ];
+        for op in [RiscOp::MaxElem, RiscOp::MinElem] {
+            for (lhs_value, rhs_value, expected_bits) in cases {
+                let mut dag = Dag::new();
+                let lhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_f64("test", scalar_f64.precision, lhs_value).unwrap(),
+                    },
+                    vec![],
+                    scalar_f64.clone(),
+                    None,
+                );
+                let rhs = dag.add_node(
+                    RiscOp::Const {
+                        value: scalar_from_f64("test", scalar_f64.precision, rhs_value).unwrap(),
+                    },
+                    vec![],
+                    scalar_f64.clone(),
+                    None,
+                );
+                dag.add_node(op.clone(), vec![lhs, rhs], scalar_f64.clone(), None);
+                constant_fold(&mut dag);
+                match &dag.get(NodeId(2)).unwrap().op {
+                    RiscOp::Const { value } => match value.element_ref() {
+                        ElementRef::F64(observed) => {
+                            assert_eq!(observed.to_bits(), expected_bits, "{op:?}")
+                        }
+                        other => panic!("expected f64 folded value, got {other:?}"),
+                    },
+                    other => panic!("direct extrema must fold through exact selection: {other:?}"),
+                }
+            }
+        }
     }
 
     #[test]
