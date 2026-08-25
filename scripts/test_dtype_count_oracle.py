@@ -40,6 +40,7 @@ class CommandManifestTests(unittest.TestCase):
             "capacity_census_wire",
             "exec_count_",
             "count_with_issue_1291_receipt",
+            "issue_1287_count_device_reject",
             "count_is_registered_against_its_exact_authority_atom",
             "parity_count_bool_axes",
             "parity_corpus_is_complete",

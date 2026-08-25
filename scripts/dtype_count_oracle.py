@@ -94,8 +94,10 @@ def oracle_legs(python: str) -> tuple[OracleLeg, ...]:
                 "run",
                 "-p",
                 "chelis-compiler-api",
+                "-p",
+                "chelis-cli",
                 "-E",
-                "test(count_with_issue_1291_receipt)",
+                "test(count_with_issue_1291_receipt) | binary(issue_1287_count_device_reject)",
             ),
         ),
         OracleLeg(

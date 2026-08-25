@@ -3261,6 +3261,11 @@ fn cmd_build(
                         BuildTarget::Hip,
                     ),
                 )?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_hip_ops_in_host_program(
+                        host_program,
+                    ),
+                )?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3329,6 +3334,11 @@ fn cmd_build(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
                         BuildTarget::Metal,
+                    ),
+                )?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_metal_ops_in_host_program(
+                        host_program,
                     ),
                 )?;
             }
@@ -3560,6 +3570,11 @@ fn cmd_build_deep(
                         BuildTarget::Hip,
                     ),
                 )?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_hip_ops_in_host_program(
+                        host_program,
+                    ),
+                )?;
             }
             let host_requires_host_backend = compiled_program
                 .host
@@ -3623,6 +3638,11 @@ fn cmd_build_deep(
                     chelis_compiler_api::compiler::reject_unsupported_effect_ops_in_host_program(
                         host_program,
                         BuildTarget::Metal,
+                    ),
+                )?;
+                shared_compiler_gate(
+                    chelis_compiler_api::compiler::reject_unsupported_metal_ops_in_host_program(
+                        host_program,
                     ),
                 )?;
             }

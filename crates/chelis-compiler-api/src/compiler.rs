@@ -2049,6 +2049,7 @@ fn execution_artifact_from_compiled(
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
+                reject_unsupported_hip_ops_in_host_program(host_program)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
@@ -4151,6 +4152,24 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
         reject_symbolic_windowed_reduce(dag, target)?;
         reject_unsupported_reduce_window_precision(dag, target)
     })
+}
+
+/// Apply the HIP capability gate to every tensor-helper DAG emitted with a
+/// host program. A HIP request must not bypass device capability policy merely
+/// because its public artifact is produced through the C-host fallback.
+pub fn reject_unsupported_hip_ops_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, reject_unsupported_hip_ops)
+}
+
+/// Apply the Metal capability gate to every tensor-helper DAG emitted with a
+/// host program. A Metal request must not bypass device capability policy
+/// merely because its public artifact is produced through the C-host fallback.
+pub fn reject_unsupported_metal_ops_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, reject_unsupported_metal_ops)
 }
 
 /// Metal-specific early capability policy. The IR verifier and backend
