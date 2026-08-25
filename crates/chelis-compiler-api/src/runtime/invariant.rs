@@ -190,10 +190,22 @@ impl std::fmt::Display for InvariantViolation {
 ///   well-formedness (RFC D-WF) rejects malformed metadata before it can
 ///   reach a chelis-compiled module, but the decode chokepoint is the
 ///   contract for the next external/hand-built codec and must fail closed.
+/// - When the type-name child is NOT a readable symbol (chelis#1305), the
+///   entry is [`InvariantEntry::Malformed`] under the
+///   [`UNREADABLE_DEFTYPE_NAME`] placeholder. Dropping the whole deftype
+///   was the same fail-open reached through a different door: the absent
+///   entry was indistinguishable from "no declared invariant".
 ///
 /// A deftype with NO `invariant` entry is simply absent from the table:
 /// there is no invariant to check for its constructors, which is
 /// legitimate, not a failure.
+/// The placeholder type name recorded when an invariant-declaring `deftype`'s
+/// type-name child is not a readable symbol (chelis#1305). It is diagnostic
+/// wire data on a fail-closed path, not a [03-PROG-2] rejection
+/// identification, so the angle-bracket spelling follows the
+/// `UNKNOWN_FORM_NON_SYMBOL_HEAD` convention.
+pub(crate) const UNREADABLE_DEFTYPE_NAME: &str = "<unreadable deftype name>";
+
 pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, InvariantEntry> {
     let mut out = HashMap::new();
     for expr in top_level_items(exprs) {
@@ -204,21 +216,40 @@ pub(crate) fn collect_type_invariants(exprs: &[Expr]) -> HashMap<String, Invaria
             // No declared invariant: this type contributes no table entry.
             continue;
         };
-        let Some(type_name) = kids.first().and_then(symbol_name) else {
-            continue;
-        };
+        // chelis#1305 (fail-closed): a deftype that DECLARES an invariant
+        // but whose type-name child is not a readable symbol must not
+        // contribute zero entries. `revalidate_adt_value` treats an absent
+        // entry as "no declared invariant; nothing to check", so a
+        // `continue` here was the same fail-open the malformed-metadata arm
+        // below already closed, reached through a different door. The
+        // unreadable-name declaration is malformed as a whole, so every
+        // extractable constructor records `Malformed` under the placeholder
+        // name, whatever the invariant metadata itself parses to.
+        let readable_type_name = kids.first().and_then(symbol_name);
         // The deftype DECLARES an invariant, so it always contributes an
         // entry. Parse the metadata once; a malformed metadata becomes a
         // `Malformed` entry rather than being skipped (fail-closed).
-        let parsed = parse_invariant_fn(inv_value);
+        let parsed = match readable_type_name {
+            Some(_) => parse_invariant_fn(inv_value),
+            None => None,
+        };
+        let type_name = readable_type_name.unwrap_or(UNREADABLE_DEFTYPE_NAME);
         // Key by every record-variant constructor of the type. The RFC's
         // single-record-variant representation means there is exactly one
         // in V1, but iterating keeps the table honest if that widens.
         for variant in kids.iter().skip(2) {
             let Some((DeepTag::Variant, _, variant_kids)) = expr_parts(variant) else {
+                // Not a fail-open: a non-`variant` child declares no
+                // constructor, so there is no key this table could record
+                // (chelis#1305).
                 continue;
             };
             let Some(ctor) = variant_kids.first().and_then(symbol_name) else {
+                // Not a fail-open, but only because of the backstop: with no
+                // readable ctor name there is no key to insert under, and
+                // the same unreadable name is also absent from the
+                // field-type table, so `decode_adt`'s unknown-constructor
+                // guard rejects every payload claiming it (chelis#1305).
                 continue;
             };
             let entry = match &parsed {
@@ -567,7 +598,22 @@ fn strip_span_meta(expr: &mut Expr) {
                 _ => unreachable!(),
             }
         }
-        Expr::BareList(_, _) | Expr::UnknownForm(_) => {}
+        // chelis#1087: span metadata inside either transitional variant
+        // would otherwise leak into the rendered invariant text.
+        Expr::BareList(elements, _) => {
+            for element in elements {
+                strip_span_meta(element);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            data.meta.entries.retain(|(key, _)| key != "span");
+            for (_, value) in &mut data.meta.entries {
+                strip_span_meta(value);
+            }
+            for child in &mut data.children {
+                strip_span_meta(child);
+            }
+        }
     }
 }
 
@@ -801,5 +847,99 @@ pub(crate) fn revalidate_adt_value(
             invariant: invariant_text,
             reason,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chelis_deep::ast::{MetaMap, UnknownFormData};
+
+    fn sp() -> Span {
+        Span::new(0, 0)
+    }
+
+    fn span_entry() -> (String, Expr) {
+        (
+            "span".to_string(),
+            Expr::Atom(Atom::Str("surf:0..1".to_string()), sp()),
+        )
+    }
+
+    /// True when any metadata map anywhere in `expr` still carries a `span`
+    /// entry.
+    fn mentions_span_key(expr: &Expr) -> bool {
+        match expr {
+            Expr::Atom(_, _) => false,
+            Expr::Map(map, _) => {
+                map.entries.iter().any(|(key, _)| key == "span")
+                    || map.entries.iter().any(|(_, value)| mentions_span_key(value))
+            }
+            Expr::MetaExpr(meta, _) => {
+                meta.entries.iter().any(|(key, _)| key == "span")
+                    || meta.entries.iter().any(|(_, value)| mentions_span_key(value))
+                    || mentions_span_key(&meta.expr)
+            }
+            Expr::List(list, _) => list.elements.iter().any(mentions_span_key),
+            Expr::Node(node, _) => {
+                node.meta().entries.iter().any(|(key, _)| key == "span")
+                    || node
+                        .meta()
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || node.children_slice().iter().any(mentions_span_key)
+            }
+            Expr::BareList(elements, _) => elements.iter().any(mentions_span_key),
+            Expr::UnknownForm(data) => {
+                data.meta.entries.iter().any(|(key, _)| key == "span")
+                    || data
+                        .meta
+                        .entries
+                        .iter()
+                        .any(|(_, value)| mentions_span_key(value))
+                    || data.children.iter().any(mentions_span_key)
+            }
+        }
+    }
+
+    /// chelis#1087: `strip_span_meta` must reach span metadata inside both
+    /// transitional variants, or the rendered invariant text leaks
+    /// span-annotated desugar output.
+    #[test]
+    fn strip_span_meta_reaches_bare_list_and_unknown_form() {
+        let mut expr = Expr::BareList(
+            vec![
+                Expr::Map(
+                    MetaMap {
+                        entries: vec![span_entry()],
+                    },
+                    sp(),
+                ),
+                Expr::UnknownForm(Box::new(UnknownFormData {
+                    head: "mystery".to_string(),
+                    meta: MetaMap {
+                        entries: vec![span_entry()],
+                    },
+                    children: vec![Expr::BareList(
+                        vec![Expr::Map(
+                            MetaMap {
+                                entries: vec![span_entry()],
+                            },
+                            sp(),
+                        )],
+                        sp(),
+                    )],
+                    span: sp(),
+                })),
+            ],
+            sp(),
+        );
+        assert!(mentions_span_key(&expr), "fixture carries span metadata");
+        strip_span_meta(&mut expr);
+        assert!(
+            !mentions_span_key(&expr),
+            "span metadata inside transitional variants must be stripped: {expr:?}"
+        );
     }
 }
