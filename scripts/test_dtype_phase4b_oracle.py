@@ -50,7 +50,15 @@ class ContractValidationTests(unittest.TestCase):
         text = (REPO_ROOT / "spec/05-risc-primitives.md").read_text(
             encoding="utf-8"
         )
-        return oracle.normalize_atom_body(oracle.atom_blocks(text)[atom])
+        block = oracle.atom_blocks(text)[atom]
+        registry = oracle.OP_MANIFEST_REGISTRY_FILES.get(atom)
+        if registry is not None:
+            block = (
+                block
+                + "\n"
+                + (REPO_ROOT / registry).read_text(encoding="utf-8")
+            )
+        return oracle.normalize_atom_body(block)
 
     def test_repository_contract_passes(self) -> None:
         oracle.validate_contract(REPO_ROOT)
@@ -172,7 +180,7 @@ class ContractValidationTests(unittest.TestCase):
                 "OP-3.*csv_int",
             ),
             (
-                "It never truncates or rounds a float\n> into an integer",
+                "It never\n> truncates or rounds a float\n> into an integer",
                 "It truncates float variants into int64",
                 "OP-3.*never truncates",
             ),
@@ -306,11 +314,13 @@ class ContractValidationTests(unittest.TestCase):
     def test_integer_form_json_overflow_never_falls_back_to_jnum(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "An integer-form token outside int64 range is a loud `Overflow`\n"
-            "> error; punctuation never selects a lossy float fallback for an integer.",
+            "An integer-form token outside int64 range SHALL ingest as\n"
+            "> `JsonBigInt` carrying the token's exact decimal spelling; ingestion"
+            " never\n"
+            "> selects a lossy float image for an integer-form token.",
             "An integer-form token outside int64 range falls back to `JNum`.",
         )
-        self.assert_contract_fails("OP-2.*Overflow")
+        self.assert_contract_fails("OP-2.*JsonBigInt")
 
     def test_uniform_like_uses_one_common_float_dtype_and_own_width_fma(self) -> None:
         path = self.root / "spec/05-risc-primitives.md"
@@ -1173,9 +1183,7 @@ class ContractValidationTests(unittest.TestCase):
         self.assert_contract_fails("OP-32.*Dictionary keys")
 
     def test_shape_index_atom_pins_exact_c_signatures(self) -> None:
-        block = oracle.atom_blocks(
-            (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
-        )["05-OP-32"]
+        block = self.repository_atom("05-OP-32")
         for signature in (
             "chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)",
             "chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)",
@@ -1187,7 +1195,7 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_shape_index_signature_width_is_frozen(self) -> None:
         self.replace(
-            Path("spec/05-risc-primitives.md"),
+            Path("spec/registry/c_container_boundary.md"),
             "chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)",
             "chelis_string chelis_string_slice(chelis_string value, int32_t start, int32_t len)",
         )
@@ -1345,7 +1353,7 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_process_stdlib_identities_require_io_effects(self) -> None:
         self.replace(
-            Path("spec/05-risc-primitives.md"),
+            Path("spec/registry/stdlib_numeric_manifest.md"),
             "`process::run` | `(string,List[string])->(int64,string,string)!{IO}`",
             "`process::run` | `(string,List[string])->(int64,string,string)`",
         )
@@ -1421,17 +1429,17 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("OP-35.*count >= 1")
 
-    def test_stdlib_manifest_has_exactly_eighty_three_unique_rows(self) -> None:
-        block = oracle.atom_blocks(
-            (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
-        )["05-OP-35"]
-        rows = re.findall(r"^> \| (\d+) \| `([^`]+)` \|", block, re.MULTILINE)
-        self.assertEqual(len(rows), 83)
-        self.assertEqual(len({number for number, _identity in rows}), 83)
-        self.assertEqual(len({identity for _number, identity in rows}), 83)
-        identities = {identity for _number, identity in rows}
+    def test_stdlib_manifest_has_exactly_eighty_four_unique_rows(self) -> None:
+        registry = (
+            REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
+        ).read_text(encoding="utf-8")
+        rows = re.findall(r"^\| `([^`]+)` \|", registry, re.MULTILINE)
+        self.assertEqual(len(rows), 84)
+        self.assertEqual(len(set(rows)), 84)
+        identities = set(rows)
         for identity in (
             "decimal::decimal_add",
+            "io/json::json_bigint",
             "io/json::load_json",
             "time::date_lt",
             "tokenizer::load_tokenizer",
@@ -1441,9 +1449,9 @@ class ContractValidationTests(unittest.TestCase):
 
     def test_stdlib_manifest_duplicate_identity_fails(self) -> None:
         self.replace(
-            Path("spec/05-risc-primitives.md"),
-            "| 21 | `index::take_list` |",
-            "| 21 | `index::list_index` |",
+            Path("spec/registry/stdlib_numeric_manifest.md"),
+            "| `index::take_list` |",
+            "| `index::list_index` |",
         )
         self.assert_contract_fails("stdlib numeric manifest")
 
@@ -1507,12 +1515,13 @@ class ContractValidationTests(unittest.TestCase):
                     path.write_text(original, encoding="utf-8")
 
     def test_stdlib_arange_is_same_signed_dtype_with_checked_exact_bounds(self) -> None:
-        path = self.root / "spec/05-risc-primitives.md"
+        row_path = self.root / "spec/registry/stdlib_numeric_manifest.md"
+        prose_path = self.root / "spec/05-risc-primitives.md"
         mutations = (
             (
-                "| 52 | `tensor/construct::arange` | "
+                "| `tensor/construct::arange` | "
                 "`(p_int,p_int)->tensor[n,p_int]` |",
-                "| 52 | `tensor/construct::arange` | "
+                "| `tensor/construct::arange` | "
                 "`(int32,int32)->tensor[n,int32]` |",
                 "OP-35.*exact manifest",
             ),
@@ -1540,6 +1549,7 @@ class ContractValidationTests(unittest.TestCase):
             ),
         )
         for old, new, message in mutations:
+            path = row_path if old.startswith("| `") else prose_path
             with self.subTest(message=message):
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(old, original)
@@ -1550,8 +1560,11 @@ class ContractValidationTests(unittest.TestCase):
                     path.write_text(original, encoding="utf-8")
 
     def test_exact_op_manifest_row_deletion_fails(self) -> None:
-        path = self.root / "spec/05-risc-primitives.md"
         for atom, rows in oracle.EXPECTED_OP_MANIFESTS.items():
+            relative = oracle.OP_MANIFEST_REGISTRY_FILES.get(
+                atom, "spec/05-risc-primitives.md"
+            )
+            path = self.root / relative
             with self.subTest(atom=atom):
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(rows[0], original)
@@ -1585,8 +1598,11 @@ class ContractValidationTests(unittest.TestCase):
                 "(f32,((f32,int64)->f32),int64)->tensor[n,f32]",
             ),
         }
-        path = self.root / "spec/05-risc-primitives.md"
         for atom, (old, new) in mutations.items():
+            relative = oracle.OP_MANIFEST_REGISTRY_FILES.get(
+                atom, "spec/05-risc-primitives.md"
+            )
+            path = self.root / relative
             with self.subTest(atom=atom):
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(old, original)
@@ -1597,8 +1613,11 @@ class ContractValidationTests(unittest.TestCase):
                     path.write_text(original, encoding="utf-8")
 
     def test_exact_op_manifest_duplicate_label_or_identity_fails(self) -> None:
-        path = self.root / "spec/05-risc-primitives.md"
         for atom, rows in oracle.EXPECTED_OP_MANIFESTS.items():
+            relative = oracle.OP_MANIFEST_REGISTRY_FILES.get(
+                atom, "spec/05-risc-primitives.md"
+            )
+            path = self.root / relative
             with self.subTest(atom=atom):
                 original = path.read_text(encoding="utf-8")
                 self.assertIn(rows[1], original)
@@ -1611,7 +1630,9 @@ class ContractValidationTests(unittest.TestCase):
     def test_assert_close_tensor_is_float_only_and_own_width(self) -> None:
         block = oracle.atom_blocks(
             (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
-        )["05-OP-35"]
+        )["05-OP-35"] + "\n" + (
+            REPO_ROOT / "spec/registry/stdlib_numeric_manifest.md"
+        ).read_text(encoding="utf-8")
         self.assertIn("&tensor[..r,p_float]", block)
         self.assertIn(
             "&tensor[..r,p_float],p_float,string)->unit!{Test}", block
@@ -1673,36 +1694,36 @@ class ContractValidationTests(unittest.TestCase):
                     path.write_text(original, encoding="utf-8")
 
     def test_stdlib_scalar_and_assertion_manifest_domains_cannot_narrow(self) -> None:
-        path = self.root / "spec/05-risc-primitives.md"
+        path = self.root / "spec/registry/stdlib_numeric_manifest.md"
         mutations = (
             (
-                "| 48 | `scalar::abs` | `(p_numeric)->p_numeric` |",
-                "| 48 | `scalar::abs` | `(f32)->f32` |",
+                "| `scalar::abs` | `(p_numeric)->p_numeric` |",
+                "| `scalar::abs` | `(f32)->f32` |",
             ),
             (
-                "| 49 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |",
-                "| 49 | `scalar::max` | `(f32,f32)->f32` |",
+                "| `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |",
+                "| `scalar::max` | `(f32,f32)->f32` |",
             ),
             (
-                "| 50 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |",
-                "| 50 | `scalar::min` | `(f32,f32)->f32` |",
+                "| `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |",
+                "| `scalar::min` | `(f32,f32)->f32` |",
             ),
             (
-                "| 58 | `test::assert_close` | "
+                "| `test::assert_close` | "
                 "`(p_float,p_float,p_float,string)->unit!{Test}` |",
-                "| 58 | `test::assert_close` | "
+                "| `test::assert_close` | "
                 "`(f32,f32,f32,string)->unit!{Test}` |",
             ),
             (
-                "| 59 | `test::assert_close_tensor` | "
+                "| `test::assert_close_tensor` | "
                 "`(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |",
-                "| 59 | `test::assert_close_tensor` | "
+                "| `test::assert_close_tensor` | "
                 "`(&tensor[..r,p_float],&tensor[..r,p_float],f32,string)->unit!{Test}` |",
             ),
             (
-                "| 60 | `test::assert_eq` | "
+                "| `test::assert_eq` | "
                 "`(Q,Q,string)->unit!{Test}` |",
-                "| 60 | `test::assert_eq` | `(f32,f32,string)->unit!{Test}` |",
+                "| `test::assert_eq` | `(f32,f32,string)->unit!{Test}` |",
             ),
         )
         for old, new in mutations:
@@ -2218,9 +2239,7 @@ class ContractValidationTests(unittest.TestCase):
         self.assert_contract_fails("OP-35.*denominator")
 
     def test_stdlib_tensor_signatures_are_precision_generalized(self) -> None:
-        block = oracle.atom_blocks(
-            (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
-        )["05-OP-35"]
+        block = self.repository_atom("05-OP-35")
         for signature in (
             "`contracts::normal_cdf` | `(p_float)->p_float`",
             "`init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}`",
@@ -2234,7 +2253,7 @@ class ContractValidationTests(unittest.TestCase):
                 self.assertIn(signature, block)
 
     def test_stdlib_tensor_manifest_cannot_restore_fixed_current_ranks(self) -> None:
-        path = self.root / "spec/05-risc-primitives.md"
+        path = self.root / "spec/registry/stdlib_numeric_manifest.md"
         mutations = (
             (
                 "(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}",
@@ -2257,15 +2276,15 @@ class ContractValidationTests(unittest.TestCase):
                 "(&tensor[n,bool])->tensor[hits,int64]",
             ),
             (
-                "| 59 | `test::assert_close_tensor` | "
+                "| `test::assert_close_tensor` | "
                 "`(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |",
-                "| 59 | `test::assert_close_tensor` | "
+                "| `test::assert_close_tensor` | "
                 "`(&tensor[n,p_float],&tensor[n,p_float],p_float,string)->unit!{Test}` |",
             ),
             (
-                "| 61 | `test::assert_eq_tensor` | "
+                "| `test::assert_eq_tensor` | "
                 "`(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |",
-                "| 61 | `test::assert_eq_tensor` | "
+                "| `test::assert_eq_tensor` | "
                 "`(&tensor[n,p],&tensor[n,p],string)->unit!{Test}` |",
             ),
             (

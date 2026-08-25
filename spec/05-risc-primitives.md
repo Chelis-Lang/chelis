@@ -192,12 +192,15 @@ and float precisions as their tensor forms and use the same adjoint rule.
 > including signed-zero equality. Signed integers are compared exactly at their declared
 > width and likewise preserve the first operand on equality. For floats, the
 > adjoint routes the whole cotangent to the selected operand and exact zero to
-> the other operand; consequently `relu(x) = max_elem(x, 0)` routes the whole
-> cotangent to `x` at zero. Signed-integer forms are forward-only and `grad`
+> the other operand. `relu` is a distinct Tier-2 identity whose adjoint is
+> [05-OP-43]'s zero-at-zero rule, not this selection rule's tie behavior.
+> Signed-integer forms are forward-only and `grad`
 > rejects them. Both operations have no accumulator. `min_elem` is a direct
 > selection identity and never lowers through arithmetic negation. `bool`,
 > `string`, reserved dtype spellings, mixed dtypes or surfaces, and mismatched
 > tensor dimensions are type errors.
+
+*(Not fully implemented; chelis#1306.)*
 
 ### 2.2 Elementwise Unary
 
@@ -397,7 +400,10 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > graph reaching `count` is structurally rejected with
 > `AdRejectionReason::IntegerReductionOutput`; it never receives a silent zero
 > cotangent.
->
+
+*(Not fully implemented; chelis#1287 owns the evaluator and C delivery,
+chelis#1291 the HIP and Metal kernels.)*
+
 > **[05-OP-30]** `sum(x, axes..., accumulator = default(p)) -> result` admits
 > exactly a tensor operand whose dtype `p` is an active signed integer or
 > active float. `bool`, `string`, reserved dtype spellings, scalar, and all other operands are
@@ -783,6 +789,8 @@ differentiability rejection.
 > require host provenance, emit a statically guessed extent, or turn a backend
 > implementation gap into a language restriction.
 
+*(Not fully implemented; chelis#1298.)*
+
 ### 2.5 Memory
 
 | Name | Signature | Semantics |
@@ -851,6 +859,8 @@ values rather than baked at codegen time.
 > int32 axis. Its exact int64 result and zero-cotangent rule are
 > target-independent. No lowering may replace the axis or extent with a
 > constant, default, stub, host-width integer, or compile-time-only signature.
+
+*(Not fully implemented; chelis#1298.)*
 
 A `shape()` read whose `axis` is data- or metadata-derived remains the same
 operation as a literal-axis read. Using the extent as a runtime movement-op
@@ -978,6 +988,8 @@ program did not request.
 > has no accumulator. `bool`, `string`, reserved dtype spellings, mixed dtypes
 > or surfaces, and mismatched tensor dimensions are type errors.
 
+*(Not fully implemented; chelis#1306.)*
+
 ### 3.2 Comparison and Logical Operations
 
 | Name | Integer lowering | Float lowering |
@@ -1080,8 +1092,25 @@ rank-zero instance of the tensor operation; non-float operands are type
 errors. Each RISC primitive in the lowering computes at [04-NUM-8]'s declared
 arithmetic width and finalizes to the operand's storage width before the next
 primitive observes it, as required by [04-NUM-1]. The adjoint is the
-derivative of the lowering above, with `relu` using §2.1's `max_elem`
-subgradient convention.
+derivative of the lowering above for `sigmoid`, `tanh`, `silu`, and `gelu`;
+`relu` instead carries its own adjoint under [05-OP-43] and survives AD as an
+intact Tier-2 identity.
+
+> **[05-OP-43]** `relu(x) -> result` admits every active float dtype on a
+> scalar or tensor surface and returns that same surface, dimensions, and
+> dtype. Its forward value is exactly the §3.3 lowering
+> `max_elem(x, const(0.0))` under [05-OP-40], so a NaN input propagates with
+> its exact stored payload and sign bits and `relu(-0.0)` returns `-0.0` by
+> the first-operand equality rule. Its adjoint is its own, not [05-OP-40]'s:
+> the input cotangent is `g` exactly where `cmplt(0, x)` is true and exact
+> positive zero otherwise, including at `x = 0`, at both signed zeros, and at
+> a NaN input. The `relu` identity remains intact through AD and every other
+> semantic transform; only after its adjoint or zero rule has been applied
+> may it decompose to the lowering, so the adjoint attaches to the identity
+> rather than to `max_elem`'s tie rule. Non-float operands are type errors.
+> The operation has no accumulator.
+
+*(Not fully implemented; chelis#1313.)*
 
 ### 3.4 Higher-Level Operations
 
@@ -1409,8 +1438,8 @@ traps `Test` with its supplied label and the operation name.
 ### 3.7 Host-Lane Data I/O Numeric Operations
 
 The sole public JSON value family is `io/json::Json` and its `JsonNull`,
-`JsonBool`, `JsonInt`, `JsonFloat`, `JsonString`, `JsonArray`, and
-`JsonObject` constructors from [05-OP-34]. Its operations are the exact
+`JsonBool`, `JsonInt`, `JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`,
+and `JsonObject` constructors from [05-OP-34]. Its operations are the exact
 `io/json::*` definitions in [05-OP-35]. A second prelude `Json`, `JInt`/`JNum`
 constructors, `j*` helpers, or same-named builtin aliases do not exist. CSV is
 an untyped text table `List[Dict[string,string]]`; its `parse_csv`/`to_csv` and
@@ -1423,9 +1452,9 @@ The atoms below are the normative numeric authority for the family, in
 the sense `spec/design/capability_table.md` §New numeric ops requires: a
 callable in these families has exactly the numeric behavior its
 governing atom states, and a numeric behavior no atom governs does not
-ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
-`JsonFloat(f64)`) is decided by [05-OP-2] and its exact ADT identity by
-[05-OP-34].
+ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` and
+`JsonBigInt(string)` beside `JsonFloat(f64)`) is decided by [05-OP-2] and its
+exact ADT identity by [05-OP-34].
 
 #### Host-effect execution atom
 
@@ -1437,6 +1466,8 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > trap as evaluation. A device-only kernel may not perform `IO`, but that
 > effect-boundary fact SHALL NOT be represented as a language-wide rejection,
 > inert stub, default value, or evaluator-only signature.
+
+*(Not fully implemented; chelis#1297 owns compiled host execution.)*
 
 #### Decimal rounding atom
 
@@ -1480,8 +1511,9 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > the boundary"). A JSON number token containing `.`, `e`, or `E` SHALL
 > ingest as `JsonFloat` carrying the correctly-rounded f64 of the token; any
 > other number token SHALL ingest as `JsonInt` carrying its exact int64
-> value. An integer-form token outside int64 range is a loud `Overflow`
-> error; punctuation never selects a lossy float fallback for an integer.
+> value. An integer-form token outside int64 range SHALL ingest as
+> `JsonBigInt` carrying the token's exact decimal spelling; ingestion never
+> selects a lossy float image for an integer-form token.
 > A float-form token whose f64 image is non-finite is a loud error. CSV cells are TEXT at
 > parse time (no inferred numeric type); numeric meaning is assigned
 > only by an accessor, under the JSON number grammar with surrounding
@@ -1495,10 +1527,15 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 #### Exact read atom
 
 > **[05-OP-3]** `io/json::json_int` returns the stored `JsonInt` int64
-> exactly and returns `None` for every other variant. `io/json::json_float`
+> exactly and returns `None` for every other variant, including `JsonBigInt`.
+> `io/json::json_bigint` returns a stored `JsonBigInt`'s exact decimal string
+> and returns `None` for every other variant, including an in-range
+> `JsonInt`; converting that string to a numeric dtype is a caller decision
+> through an explicit parse, never an implicit widening. `io/json::json_float`
 > returns a stored `JsonFloat` f64 exactly; on `JsonInt` it performs the named
 > lossy int64-to-f64 widening (exact for magnitudes at or below 2^53), and on
-> every other variant it returns `None`. It never truncates or rounds a float
+> every other variant, including `JsonBigInt`, it returns `None`. It never
+> truncates or rounds a float
 > into an integer. The exact numeric CSV identities and argument order are:
 >
 > | identity | exact signature |
@@ -1526,7 +1563,9 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 
 > **[05-OP-4]** `JsonFloat(value)` accepts exactly f64 and
 > `JsonInt(value)` accepts exactly int64; every other operand width is a type
-> error naming an explicit checked cast. No construction path widens or narrows a
+> error naming an explicit checked cast. `JsonBigInt(value)` accepts exactly
+> `string`; the canonical-form check is [05-OP-5]'s serialization rule, not a
+> constructor special case. No construction path widens or narrows a
 > numeric value: the constructed `io/json::Json` document feeds the byte-exact
 > serialization channel of [05-OP-5], and a silent f32-to-f64 widening
 > would serialize the f32 literal's image (`0.1f32` as
@@ -1539,7 +1578,12 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > round-trip, and a stored f64 through the [05-OBS-1] shortest-
 > round-trip channel (`format_element` at `f64`; the §8.1 grammar —
 > every finite emission parses back to the identical f64 and is a valid
-> JSON number token). A non-finite `JsonFloat` is a loud serialization error.
+> JSON number token). A stored `JsonBigInt` emits its stored string verbatim
+> as the number token after validating that it is the canonical integer form
+> - an optional `-` followed by a nonzero leading digit and decimal digits -
+> denoting a value outside int64 range; any other stored string is a loud
+> serialization error, so a serialized document reparses to the identical
+> variant structure. A non-finite `JsonFloat` is a loud serialization error.
 > Equal documents serialize to identical bytes. `to_csv` accepts only the
 > text-table type `List[Dict[string,string]]`; it applies the CSV quoting and
 > row-order rules without inferring, preserving, or serializing a numeric cell
@@ -1548,22 +1592,11 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 #### Exact public scalar and container boundaries
 
 > **[05-OP-31]** `scalar_carrier(value) -> result` governs exactly the ten
-> final public C callables in this table. The table is their canonical public
+> final public C callables enumerated in the normative registry
+> `spec/registry/c_scalar_carrier.md`, which this atom incorporates by
+> reference. That registry is their canonical public
 > identity; a differently named, typed-by-name, or raw-dtype successor is a
 > different callable and has no authority from this atom.
->
-> | callable | exact C signature |
-> |---|---|
-> | dtype storage size | `int64_t chelis_dtype_size(chelis_dtype dtype)` |
-> | scalar validation/construction | `chelis_scalar chelis_scalar_from_bits(chelis_dtype dtype, uint64_t bits)` |
-> | value boxing | `chelis_value chelis_value_from_scalar(chelis_scalar value)` |
-> | value extraction | `chelis_scalar chelis_value_as_scalar(chelis_value value)` |
-> | rank-zero tensor construction | `chelis_tensor *chelis_scalar_tensor(chelis_scalar value)` |
-> | rank-zero tensor extraction | `chelis_scalar chelis_tensor_to_scalar(const chelis_tensor *tensor)` |
-> | tensor fill | `void chelis_fill_scalar(chelis_tensor *tensor, chelis_scalar value)` |
-> | scalar rendering | `chelis_string chelis_string_from_scalar(chelis_scalar value)` |
-> | scalar parsing | `chelis_option_scalar chelis_parse_scalar(chelis_string text, chelis_dtype dtype)` |
-> | exact dictionary scalar lookup | `chelis_option_scalar chelis_dict_get_scalar(const chelis_dict *dict, chelis_value key, chelis_dtype dtype)` |
 >
 > The final public declarations are exact:
 >
@@ -1673,40 +1706,9 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 >
 > **[05-OP-32]** `shape_index(container, parameters...) -> result` governs
 > exactly the container, extent, index, byte-read, and recursive-observation
-> callable identities below. The signature is part of each identity.
->
-> | callable | exact C signature |
-> |---|---|
-> | string length | `int64_t chelis_string_len(chelis_string value)` |
-> | string slice | `chelis_string chelis_string_slice(chelis_string value, int64_t start, int64_t len)` |
-> | list length | `int64_t chelis_list_len(const chelis_list *list)` |
-> | list construction | `chelis_list *chelis_list_from_values(const chelis_value *items, int64_t len)` |
-> | list index | `chelis_value chelis_list_index(const chelis_list *list, int64_t index)` |
-> | list take | `chelis_list *chelis_list_take(const chelis_list *list, int64_t count)` |
-> | list drop | `chelis_list *chelis_list_drop(const chelis_list *list, int64_t count)` |
-> | list chunk | `chelis_list *chelis_list_chunk(const chelis_list *list, int64_t size)` |
-> | integer range | `chelis_list *chelis_range_i64(int64_t start, int64_t end)` |
-> | list enumerate | `chelis_list *chelis_list_enumerate(const chelis_list *list)` |
-> | tuple length | `int64_t chelis_tuple_len(const chelis_tuple *tuple)` |
-> | tuple construction | `chelis_tuple *chelis_tuple_from_values(const chelis_value *items, int64_t len)` |
-> | tuple index | `chelis_value chelis_tuple_get(const chelis_tuple *tuple, int64_t index)` |
-> | ADT construction | `chelis_adt *chelis_adt_construct(chelis_string ctor, const chelis_value *fields, int64_t len)` |
-> | ADT field count | `int64_t chelis_adt_field_count(const chelis_adt *adt)` |
-> | ADT field index | `chelis_value chelis_adt_get_field(const chelis_adt *adt, int64_t index)` |
-> | dictionary length | `int64_t chelis_dict_len(const chelis_dict *dict)` |
-> | dictionary construction | `chelis_dict *chelis_dict_from_pairs(const chelis_list *pairs)` |
-> | dictionary membership | `bool chelis_dict_contains(const chelis_dict *dict, chelis_value key)` |
-> | dictionary lookup | `chelis_option_value chelis_dict_get(const chelis_dict *dict, chelis_value key)` |
-> | dictionary removal | `chelis_dict *chelis_dict_remove(const chelis_dict *dict, chelis_value key)` |
-> | dictionary insertion | `chelis_dict *chelis_dict_insert(const chelis_dict *dict, chelis_value key, chelis_value value)` |
-> | dictionary merge | `chelis_dict *chelis_dict_merge(const chelis_dict *left, const chelis_dict *right)` |
-> | byte-file read | `chelis_list *chelis_read_bytes(chelis_string path)` |
-> | mapped byte read | `chelis_list *chelis_mmap_read(const chelis_mapped_file *mapped, int64_t offset, int64_t len)` |
-> | mapped byte length | `int64_t chelis_mmap_len(const chelis_mapped_file *mapped)` |
-> | list print | `void chelis_print_list(const chelis_list *list)` |
-> | tuple print | `void chelis_print_tuple(const chelis_tuple *tuple)` |
-> | dictionary print | `void chelis_print_dict(const chelis_dict *dict)` |
-> | ADT print | `void chelis_print_adt(const chelis_adt *adt)` |
+> callable identities enumerated in the normative registry
+> `spec/registry/c_container_boundary.md`, which this atom incorporates by
+> reference. The signature is part of each identity.
 >
 > All lengths, indices, offsets, sizes, and returned counts are exact `int64`.
 > Negative lengths, indices, offsets, and counts trap `Domain`; an indexed
@@ -1764,42 +1766,18 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > accumulator.
 >
 > **[05-OP-33]** `runtime_tensor(value, parameters...) -> result` governs
-> exactly the twenty-three final public C callable identities below. These
+> exactly the twenty-three final public C callable identities enumerated in
+> the normative registry `spec/registry/c_tensor_runtime.md`, which this atom
+> incorporates by reference. These
 > signatures are canonical: axes and rank are `int32_t`; extents, sizes,
 > offsets, counts, and element counts are `int64_t`; dtype arguments are
 > `chelis_dtype`; and an untyped, string-mode, or dtype-named successor has no
 > authority from this atom.
 >
-> | callable | exact C signature |
-> |---|---|
-> | owned allocation | `chelis_tensor *chelis_alloc(int32_t rank, const int64_t *shape, chelis_dtype dtype)` |
-> | borrowed view | `chelis_tensor *chelis_alloc_view(int32_t rank, const int64_t *shape, chelis_dtype dtype, void *data, int64_t byte_capacity)` |
-> | rank | `int32_t chelis_tensor_rank(const chelis_tensor *tensor)` |
-> | extent | `int64_t chelis_tensor_shape(const chelis_tensor *tensor, int32_t axis)` |
-> | element count | `int64_t chelis_tensor_numel(const chelis_tensor *tensor)` |
-> | contiguous copy | `chelis_tensor *chelis_contiguous(const chelis_tensor *tensor)` |
-> | typed list ingress | `chelis_tensor *chelis_tensor_from_values(const chelis_list *list, chelis_dtype dtype)` |
-> | row-major element egress | `chelis_list *chelis_tensor_elements(const chelis_tensor *tensor)` |
-> | inferred-width padding | `chelis_tensor *chelis_pad_sequences(const chelis_list *sequences, chelis_scalar pad_value)` |
-> | fixed-width padding | `chelis_tensor *chelis_pad_sequences_to(const chelis_list *sequences, int64_t width, chelis_scalar pad_value)` |
-> | concatenate | `chelis_tensor *chelis_tensor_concat(const chelis_list *parts, int32_t axis)` |
-> | split | `chelis_list *chelis_tensor_split(const chelis_tensor *tensor, int32_t axis, const chelis_list *sizes)` |
-> | gather | `chelis_tensor *chelis_tensor_gather(const chelis_tensor *tensor, const chelis_tensor *indices, int32_t axis)` |
-> | replace scatter | `chelis_tensor *chelis_tensor_scatter_replace(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
-> | additive scatter | `chelis_tensor *chelis_tensor_scatter_add(const chelis_tensor *base, const chelis_tensor *indices, const chelis_tensor *updates, int32_t axis)` |
-> | comparison | `chelis_tensor *chelis_tensor_cmplt(const chelis_tensor *left, const chelis_tensor *right)` |
-> | selection | `chelis_tensor *chelis_tensor_where(const chelis_tensor *condition, const chelis_tensor *then_tensor, const chelis_tensor *else_tensor)` |
-> | inclusive prefix sum | `chelis_tensor *chelis_tensor_cumsum(const chelis_tensor *tensor, int32_t axis)` |
-> | stable sort | `chelis_tuple *chelis_tensor_sort(const chelis_tensor *tensor, int32_t axis)` |
-> | diagonal | `chelis_tensor *chelis_tensor_diagonal(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
-> | trace | `chelis_tensor *chelis_tensor_trace(const chelis_tensor *tensor, int32_t axis1, int32_t axis2)` |
-> | clamp | `chelis_tensor *chelis_tensor_clamp(const chelis_tensor *tensor, const chelis_tensor *lower, const chelis_tensor *upper)` |
-> | contraction | `chelis_tensor *chelis_tensor_einsum(chelis_string equation, const chelis_tensor *left, const chelis_tensor *right, chelis_dtype accumulator)` |
->
 > This atom's selection rule also governs exactly the language builtin
 > `where(condition, then, else)` with signature
 > `(&tensor[D,bool], &tensor[D,p], &tensor[D,p]) -> tensor[D,p]` and its
-> exact public C counterpart `chelis_tensor_where` tabled above. All four
+> exact public C counterpart `chelis_tensor_where` in that registry. All four
 > tensors have identical dimensions, both branches and the result have the
 > same active element dtype `p`, and selection copies the chosen stored bits
 > without numeric conversion. On float branches the adjoint routes each
@@ -1937,16 +1915,10 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > compatibility alias. Except for the stated cumsum, trace, and einsum rules,
 > the family has no user-selectable accumulator.
 >
-> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly these five
-> exported stdlib ADT identities and no structurally similar successor:
->
-> | identity | exact variants and fields |
-> |---|---|
-> | `io/json::Json` | `JsonNull | JsonBool(bool) | JsonInt(int64) | JsonFloat(f64) | JsonString(string) | JsonArray(List[Json]) | JsonObject(Dict[string,Json])` |
-> | `decimal::Decimal` | `Decimal { coefficient: int64, scale: int64 }` |
-> | `time::Date` | `Date { year: int64, month: int64, day: int64 }` |
-> | `time::Duration` | `Duration { days: int64, hours: int64, minutes: int64, seconds: int64 }` |
-> | `tokenizer::Tokenizer` | `BpeTokenizer(Dict[string,int64], Dict[string,int64], Dict[int64,string], int64)` |
+> **[05-OP-34]** `numeric_adt(fields...) -> value` governs exactly the five
+> exported stdlib ADT identities enumerated in the normative registry
+> `spec/registry/stdlib_adt_identities.md`, which this atom incorporates by
+> reference, and no structurally similar successor.
 >
 > Every field crosses at its declared dtype and stored bits, without
 > arithmetic, conversion, or float funnel. An ordinary public ADT constructor
@@ -1962,7 +1934,10 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > written in the signature. Every exported definition whose parameter or result reaches
 > a numeric field binds to [05-OP-35] or another exact numeric operation atom.
 > [05-OP-2] governs `io/json::Json`'s exact
-> integer/float source distinction. Decimal, date, duration, vocabulary,
+> integer/float source distinction. `JsonBigInt` carries the exact decimal
+> spelling of an integer-form source token outside int64 range ([05-OP-2]);
+> it is source-faithful text, never a float funnel, and its string field
+> compares and renders byte-exactly. Decimal, date, duration, vocabulary,
 > merge-rank, inverse-vocabulary, and unknown-token invariants are checked by
 > the named [05-OP-35] operations before use. There is no second prelude JSON
 > identity or constructor registry. Under spec/06 §2.1 and §2.10.1, an
@@ -1974,96 +1949,12 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > field cotangents. The constructors have no accumulator.
 >
 > **[05-OP-35]** `stdlib_numeric_def(arguments...) -> result` governs exactly
-> the eighty-three final exported stdlib numeric definitions in this table. A
-> signature and effect set are part of the identity. Only the exact table
+> the eighty-four final exported stdlib numeric definitions enumerated in the
+> normative registry `spec/registry/stdlib_numeric_manifest.md`, which this
+> atom incorporates by reference. A
+> signature and effect set are part of the identity. Only the exact registry
 > identities exist: no effectless, wildcard-result, or otherwise weakened alias
 > is part of the language.
->
-> | # | identity | exact final signature |
-> |---:|---|---|
-> | 1 | `contracts::normal_cdf` | `(p_float)->p_float` |
-> | 2 | `contracts::normal_cdf_contract_samples` | `()->int64` |
-> | 3 | `contracts::normal_cdf_contract_seed` | `()->int64` |
-> | 4 | `contracts::standard_contract_tolerance` | `()->f32` |
-> | 5 | `decimal::decimal` | `(string)->Decimal` |
-> | 6 | `decimal::decimal_add` | `(Decimal,Decimal)->Decimal` |
-> | 7 | `decimal::decimal_div` | `(Decimal,Decimal,int64,RoundingMode)->Decimal` |
-> | 8 | `decimal::decimal_eq` | `(Decimal,Decimal)->bool` |
-> | 9 | `decimal::decimal_from_int` | `(int64)->Decimal` |
-> | 10 | `decimal::decimal_gt` | `(Decimal,Decimal)->bool` |
-> | 11 | `decimal::decimal_gte` | `(Decimal,Decimal)->bool` |
-> | 12 | `decimal::decimal_lt` | `(Decimal,Decimal)->bool` |
-> | 13 | `decimal::decimal_lte` | `(Decimal,Decimal)->bool` |
-> | 14 | `decimal::decimal_mul` | `(Decimal,Decimal)->Decimal` |
-> | 15 | `decimal::decimal_sub` | `(Decimal,Decimal)->Decimal` |
-> | 16 | `decimal::decimal_to_float` | `(Decimal)->f64` |
-> | 17 | `decimal::decimal_to_string` | `(Decimal)->string` |
-> | 18 | `decimal::try_decimal` | `(string)->Option[Decimal]` |
-> | 19 | `index::drop_list` | `(List[T],int64)->List[T]` |
-> | 20 | `index::list_index` | `(List[T],int64)->T` |
-> | 21 | `index::take_list` | `(List[T],int64)->List[T]` |
-> | 22 | `init/kaiming::kaiming_normal` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-> | 23 | `init/kaiming::kaiming_uniform` | `(&tensor[..r,p_float],p_float)->tensor[..r,p_float]!{Random}` |
-> | 24 | `init/random::normal_like` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 25 | `init/xavierext::trunc_normal` | `(&tensor[..r,p_float],p_float,p_float,p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 26 | `init/xavierext::xavier_normal` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 27 | `init/xavierext::xavier_uniform` | `(&tensor[..r,p_float],p_float,p_float)->tensor[..r,p_float]!{Random}` |
-> | 28 | `io/json::json_array` | `(Option[Json])->Option[List[Json]]` |
-> | 29 | `io/json::json_bool` | `(Option[Json])->Option[bool]` |
-> | 30 | `io/json::json_float` | `(Option[Json])->Option[f64]` |
-> | 31 | `io/json::json_get` | `(Json,string)->Option[Json]` |
-> | 32 | `io/json::json_int` | `(Option[Json])->Option[int64]` |
-> | 33 | `io/json::json_is_null` | `(Option[Json])->bool` |
-> | 34 | `io/json::json_object` | `(Option[Json])->Option[Dict[string,Json]]` |
-> | 35 | `io/json::json_string` | `(Option[Json])->Option[string]` |
-> | 36 | `io/json::load_json` | `(string)->Json!{IO}` |
-> | 37 | `io/json::parse_json` | `(string)->Json` |
-> | 38 | `io/json::to_json` | `(Json)->string` |
-> | 39 | `io/json::try_load_json` | `(string)->Option[Json]!{IO}` |
-> | 40 | `io/json::try_parse_json` | `(string)->Option[Json]` |
-> | 41 | `io/json::try_to_json` | `(Json)->Option[string]` |
-> | 42 | `io/json::try_write_json` | `(string,Json)->Option[unit]!{IO}` |
-> | 43 | `io/json::write_json` | `(string,Json)->unit!{IO}` |
-> | 44 | `io::mmap_size` | `(string)->int64!{IO}` |
-> | 45 | `io::read_head_bytes` | `(string,int64)->List[int64]!{IO}` |
-> | 46 | `process::run` | `(string,List[string])->(int64,string,string)!{IO}` |
-> | 47 | `process::run_chelis` | `(List[string])->(int64,string,string)!{IO}` |
-> | 48 | `scalar::abs` | `(p_numeric)->p_numeric` |
-> | 49 | `scalar::max` | `(p_numeric,p_numeric)->p_numeric` |
-> | 50 | `scalar::min` | `(p_numeric,p_numeric)->p_numeric` |
-> | 51 | `sort::sort` | `(&tensor[..r,p_numeric],int32)->(tensor[..r,p_numeric],tensor[..r,int64])` |
-> | 52 | `tensor/construct::arange` | `(p_int,p_int)->tensor[n,p_int]` |
-> | 53 | `tensor/construct::linspace` | `(p_float,p_float,int64)->tensor[n,p_float]` |
-> | 54 | `tensor/construct::squeeze` | `(&tensor[..pre,1,..post,p],int32)->tensor[..pre,..post,p]` |
-> | 55 | `tensor/construct::stack` | `(List[tensor[..pre,..post,p]],int32)->tensor[..pre,rows,..post,p]` |
-> | 56 | `tensor/construct::unsqueeze` | `(&tensor[..pre,..post,p],int32)->tensor[..pre,1,..post,p]` |
-> | 57 | `tensor/mask::where_indices` | `(&tensor[..r,bool])->tensor[hits,int64]` |
-> | 58 | `test::assert_close` | `(p_float,p_float,p_float,string)->unit!{Test}` |
-> | 59 | `test::assert_close_tensor` | `(&tensor[..r,p_float],&tensor[..r,p_float],p_float,string)->unit!{Test}` |
-> | 60 | `test::assert_eq` | `(Q,Q,string)->unit!{Test}` |
-> | 61 | `test::assert_eq_tensor` | `(&tensor[..r,p],&tensor[..r,p],string)->unit!{Test}` |
-> | 62 | `test::assert_shape` | `(&tensor[..r,p],List[int64],string)->unit!{Test}` |
-> | 63 | `time::add_days` | `(Date,int64)->Date` |
-> | 64 | `time::date` | `(int64,int64,int64)->Date` |
-> | 65 | `time::date_gt` | `(Date,Date)->bool` |
-> | 66 | `time::date_gte` | `(Date,Date)->bool` |
-> | 67 | `time::date_lt` | `(Date,Date)->bool` |
-> | 68 | `time::date_lte` | `(Date,Date)->bool` |
-> | 69 | `time::date_to_string` | `(Date)->string` |
-> | 70 | `time::day_of_week` | `(Date)->DayOfWeek` |
-> | 71 | `time::day_of_week_name` | `(Date)->string` |
-> | 72 | `time::day_of_year` | `(Date)->int64` |
-> | 73 | `time::days_between` | `(Date,Date)->int64` |
-> | 74 | `time::duration` | `(int64,int64,int64,int64)->Duration` |
-> | 75 | `time::is_leap_year` | `(int64)->bool` |
-> | 76 | `time::parse_date` | `(string)->Option[Date]` |
-> | 77 | `time::sub_days` | `(Date,int64)->Date` |
-> | 78 | `time::try_date` | `(int64,int64,int64)->Option[Date]` |
-> | 79 | `tokenizer::batch_encode` | `(Tokenizer,List[string],int64,int64)->tensor[batch,seq,int64]` |
-> | 80 | `tokenizer::decode` | `(Tokenizer,List[int64])->string` |
-> | 81 | `tokenizer::encode` | `(Tokenizer,string)->List[int64]` |
-> | 82 | `tokenizer::load_tokenizer` | `(string)->Tokenizer!{IO}` |
-> | 83 | `tokenizer::try_load_tokenizer` | `(string)->Option[Tokenizer]!{IO}` |
 >
 > `init/xavier::sample` is not a language operation and must not be exported.
 > It has no semantics, registration, alias, or stub disposition; a final
@@ -2076,10 +1967,12 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > named as mathematical below use an exact internal domain; only their named
 > int64 input and final-representation boundaries can trap `Overflow`, and no
 > host integer width becomes observable. JSON access follows [05-OP-2..5]: an
-> integer-form token outside int64 traps `Overflow` and never becomes
+> integer-form token outside int64 ingests as `JsonBigInt` and never becomes
 > `JsonFloat`; `json_int`
-> refuses `JsonFloat`, while `json_float` performs [05-OP-3]'s named
-> int64-to-f64 widening and returns a stored f64 unchanged. Index wrappers
+> refuses `JsonFloat` and `JsonBigInt`, `json_bigint` is [05-OP-3]'s exact
+> big-integer projection, while `json_float` performs [05-OP-3]'s named
+> int64-to-f64 widening, refuses `JsonBigInt`, and returns a stored f64
+> unchanged. Index wrappers
 > follow [05-OP-32], sort wrappers follow [05-OP-33], and no tensor
 > constructor infers or casts an element dtype.
 > For a differentiable element type, `list_index(xs,i)` returns an input
@@ -2169,7 +2062,8 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 >
 > JSON accessors are exact variant projections. `json_get` returns the value
 > at a string key only for `JsonObject`; each `json_string`, `json_int`,
-> `json_float`, `json_bool`, `json_array`, and `json_object` returns `Some`
+> `json_bigint`, `json_float`, `json_bool`, `json_array`, and `json_object`
+> returns `Some`
 > only for its named variant, except [05-OP-3]'s explicit int64-to-f64 case.
 > `json_is_null` is true exactly for `Some(JsonNull)`. Every other shape,
 > including `None`, returns `None` or false without fabricating a payload.
@@ -2177,9 +2071,12 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > every required control. Object serialization orders members by increasing
 > Unicode scalar-value key sequence, recursively, so equal documents have
 > identical bytes. `try_to_json` returns `None` exactly when a reachable float
-> is non-finite; `to_json` traps `Domain`. `write_json` and `try_write_json`
+> is non-finite or a reachable `JsonBigInt` violates [05-OP-5]'s canonical
+> out-of-range integer form; `to_json` traps `Domain` for the same documents.
+> `write_json` and `try_write_json`
 > validate the complete document before opening or truncating the destination.
-> The try form returns `None` for non-finite content; both forms propagate a
+> The try form returns `None` for that same invalid content; both forms
+> propagate a
 > filesystem write failure as `IO` and otherwise write exactly the bytes of
 > `to_json`.
 >
@@ -2367,7 +2264,8 @@ ship. `io/json::Json`'s numeric capacity (`JsonInt(int64)` beside
 > uses the same schema and traps `Domain` instead of returning `None` after a
 > successful read.
 >
-> IO and process functions introduce the tabled `IO` effect. Process calls
+> IO and process functions introduce their registry-declared `IO` effect.
+> Process calls
 > pass the executable and argument vector directly without invoking a shell,
 > capture stdout/stderr and every ordinary nonzero exit, encode a signal exit
 > as status `-1`, and trap on spawn failure or non-UTF-8 captured text. `run`
@@ -2448,6 +2346,38 @@ checked-cast boundaries remain independently observable.
 
 ---
 
+### 3.9 Differentiation Barrier
+
+`stop_gradient` is a Tier-2 identity whose entire meaning lives at the
+transform layer: forward it is the identity, and under `grad` it is the
+boundary the transform does not cross.
+
+> **[05-OP-42]** `stop_gradient(value) -> result` admits exactly one value of
+> any checked type and returns that value unchanged: the same type,
+> dimensions, stored bits, and ownership. The argument expression evaluates
+> exactly once, in its ordinary order, with its ordinary effects and traps;
+> the operation itself is pure and adds none. Under differentiation the
+> operation is a barrier: the transform SHALL NOT traverse the argument's
+> subgraph for adjoint construction or for structural differentiability
+> analysis, so an operation whose atom structurally rejects `grad` does not
+> reject a graph that reaches it only through this barrier. The operation's
+> cotangent contract is spec/06 §2.1's shape-preserving exact zero for its
+> argument. Nested differentiation treats the barrier identically at every
+> order, and `vmap` maps the identity pointwise. The identity remains intact
+> through every semantic transform and only then erases to its argument. It
+> is a named operation, never a mode, annotation, or effect, and it has no
+> accumulator.
+
+The barrier is what makes gradient surgery expressible while the
+structural-rejection discipline stays intact: the straight-through estimator
+`add(x, stop_gradient(sub(round(x), x)))` differentiates as the identity
+path even though bare `round` under `grad` remains a structural
+`AdRejectionReason::PiecewiseConstant` rejection.
+
+*(Not fully implemented; chelis#1312.)*
+
+---
+
 ## 4. Standard Lowerings (Tier 2 → Tier 1)
 
 ### 4.1 Matrix Multiplication
@@ -2469,8 +2399,19 @@ Lowering:
                                                  ;; precision when acc != p
 ```
 
-This is the Einstein summation form. The compiler can recognize this pattern
-and emit optimized BLAS calls instead of the naive implementation.
+This is the Einstein summation form. The lowering's step-4 `sum` is
+[05-OP-30]'s canonical balanced tree, so `matmul`'s result bits are
+target-independent like every other operation absent from [05-OBS-3]'s
+tolerance table. A vendor GEMM library or fused kernel may implement it only
+where it reproduces those exact bits and traps; a target-selected
+accumulation order would be observable and is therefore never available
+implicitly. Vendor-kernel matmul, if wanted, requires a future named,
+explicit call-site opt-in authored as its own atom on [04-NUM-8]'s opt-in
+pattern - never a backend default, build flag, or global mode
+(chelis#1315 owns that design). `einsum` is likewise exact under
+[05-OP-33]'s pinned contraction tree; neither operation is a compatibility
+spelling for the other, and a lowering from one to the other is legal only
+where it preserves the owning atom's bits and traps.
 
 **Accumulator parameter.** Like `sum` (§2.3), `matmul` carries an optional
 accumulator-precision parameter. The defaults for matmul are:
@@ -2622,10 +2563,17 @@ because integer values do not carry cotangents. Integer `floor`, `ceil`, and
 reports a non-differentiable operation before execution.
 
 **Almost-everywhere differentiable:** `max_elem` routes the whole cotangent to
-the first operand when the inputs are equal. Consequently `relu` via
-`max_elem(x, 0)` has gradient one at `x = 0`. These are valid targets for
-`grad`; the first-operand tie rule is the language's exact subgradient
-convention.
+the first operand when the inputs are equal; that first-operand tie rule is
+the language's exact subgradient convention for the selection identities.
+`relu` carries [05-OP-43]'s own adjoint instead: its gradient is exactly zero
+at `x = 0`, matching the ecosystem's relu convention, while direct `max_elem`
+applications keep the selection rule. Both are valid targets for `grad`.
+
+**Differentiation barrier:** [05-OP-42] `stop_gradient` returns its
+argument's exact value and contributes the shape-preserving zero cotangent;
+its argument's subgraph is outside adjoint construction and structural
+rejection analysis, so a structurally rejected operation reached only through
+the barrier does not reject the surrounding graph.
 
 **Second-order derivatives:** `grad(grad(f))` is valid exactly when every
 operation reached by `f` has the required second-order adjoint.

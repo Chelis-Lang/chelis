@@ -306,7 +306,11 @@ converted into passing coverage because an ignored test or issue exists.
    definitions have no authored target cell: their per-backend result is a
    generated transitive dependency closure over the checked body, and an
    unresolved dependency or empty-by-default result fails construction. None
-   is forced into numeric `SurfaceClass` rows.
+   is forced into numeric `SurfaceClass` rows. Normative `spec/registry/`
+   inventory files are governed structural surfaces on the same terms: each
+   binds to its owning atom's current revision, its identity-keyed rows are
+   selected members like capability rows, and completeness checking reads the
+   registry, never a filtered copy.
 2. **Deep tags:** every member of the closed Deep vocabulary receives exactly
    one checker disposition and controlling atom revision.
 3. **Tolerance rows:** every governed cross-lane tolerance entry is explicit,
