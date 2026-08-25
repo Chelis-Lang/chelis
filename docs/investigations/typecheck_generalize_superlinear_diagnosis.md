@@ -5,16 +5,16 @@
 **Implementation plan:**
 [`spec/design/typecheck_levels_generalization_plan.md`](../../spec/design/typecheck_levels_generalization_plan.md)
 
-**Measured:** 2026-08-06 through 2026-08-10
+**Measured:** 2026-08-06 through 2026-08-10; implementation validated 2026-08-25
 
 ## Result
 
-`Env::generalize` applies the accumulated substitution to every binding in scope
-three times for every generalization. The affected axis is **binding count**, not
-definition count: local block bindings inside one definition reproduce the same
-growth as top-level definitions.
+The pre-remediation `Env::generalize` applied the accumulated substitution to every
+binding in scope three times for every generalization. The affected axis was
+**binding count**, not definition count: local block bindings inside one definition
+reproduced the same growth as top-level definitions.
 
-All three user-facing lanes pay the cost because all three type-check before their
+All three user-facing lanes paid the cost because all three type-check before their
 lane-specific work. At 200 generated bindings, `chelis check` was about 60 times
 slower than `build` or `eval` and grew more steeply. `build` and `eval` nevertheless
 showed approximately quadratic growth. The different `check` constant and exponent
@@ -30,8 +30,8 @@ record deliberately does not preserve as findings:
 
 ## Source mechanism
 
-Current `crates/chelis-types/src/env.rs` contains three separate full-environment
-walks:
+The pre-remediation `crates/chelis-types/src/env.rs` contained three separate
+full-environment walks:
 
 ```rust
 pub fn free_tvars(&self, subst: &Subst) -> HashSet<TypeVar> {
@@ -52,11 +52,11 @@ pub fn generalize(&self, ty: &Type, subst: &Subst) -> Scheme {
 }
 ```
 
-The three collectors are at `env.rs:212-253`; `generalize` calls all three at
-`env.rs:256-261`. Each collector applies the full substitution to every scheme in
-the environment. Seven generalization sites cover sequential block bindings, local
-transformed definitions, ordinary top-level definitions, implicit-generic
-signature/metadata resolution, and recursive-group completion.
+In the investigated source, `generalize` called all three collectors and each
+collector applied the full substitution to every scheme in the environment. Seven
+generalization sites covered sequential block bindings, local transformed
+definitions, ordinary top-level definitions, implicit-generic signature/metadata
+resolution, and recursive-group completion.
 
 The resulting work has three measured factors:
 
@@ -64,8 +64,8 @@ The resulting work has three measured factors:
 2. the number of environment bindings visited by each generalization; and
 3. the cost of `apply_scheme` under the accumulated substitution.
 
-That is why the affected fixtures grow faster than a simple quadratic while the
-`flat` control stays near linear.
+That is why the affected fixtures grew faster than a simple quadratic while the
+`flat` control stayed near linear.
 
 ## Binding-count corpus
 
@@ -88,10 +88,10 @@ definitions, entry definitions, and `out` bindings are excluded from N.
 
 The controls separate the claims:
 
-- `lets ≈ shallow`: local and top-level bindings both pay.
+- `lets ≈ shallow`: local and top-level bindings both paid.
 - `letsind ≈ lets`: substitution chaining between the generated bindings is not
   required.
-- `flat` stays near linear despite the same environment growth because it creates
+- `flat` stayed near linear despite the same environment growth because it created
   no inter-definition substitution workload.
 
 The affected rows grow by about O(N^2.3) over this range. That fit describes the
@@ -184,13 +184,60 @@ self-time attribution could not be reproduced reliably. It is not used here. The
 source walk, local/top-level controls, independent-binding control, split experiment,
 and per-lane scaling carry the diagnosis.
 
-## Remediation direction
+## Implementation validation
 
-Use eager, solver-local level-based generalization: mint inference variables at the
-current binding level, lower a younger variable's level whenever unification makes
-it reachable from an older one, and generalize only variables above the enclosing
-boundary. This replaces all three environment sweeps together; a preliminary
-"collapse three sweeps into one" optimization is subsumed rather than composed.
+The implementation replaces the three production sweeps with transactional solver
+levels for type, dimension, rank, and precision-slot variables. Its retained sweep
+implementation is compiled only by the `generalize-sweep-oracle` test feature. The
+authoritative command at the evidence commit was:
+
+```sh
+cargo nextest run --workspace \
+  --ignore-default-filter \
+  --features chelis-types/generalize-sweep-oracle \
+  --no-fail-fast
+```
+
+It passed all 8,408 discovered tests with 222 skipped. Every observed production
+generalization matched the retained sweep result exactly, and the independent-binding
+structural test observed zero production environment-binding visits.
+
+The optimized exact-head checker was then run on generated, formatted fixtures. Each
+timing was accepted only after asserting `score == 1` and an empty error list. The
+table reports the minimum of three successful runs, matching the original corpus
+method:
+
+| shape | N=200 | N=400 | N=800 | per doubling |
+|---|---:|---:|---:|---:|
+| `flat` | 1.28 s | 1.37 s | 1.99 s | x1.1, x1.5 |
+| `lets` | 1.26 s | 1.61 s | 3.33 s | x1.3, x2.1 |
+| `letsind` | 1.74 s | 2.47 s | 5.22 s | x1.4, x2.1 |
+
+The former x4.4 through x6.3 per-doubling binding-count curve is absent, and the
+local-binding shapes now follow the same broad scaling regime as `flat`. A separate
+successful N=800 lane comparison measured `check = 4.25 s`, `build = 7.99 s`, and
+`eval = 7.34 s`; the former roughly 60-fold checker-lane gap did not survive this
+change.
+
+The maintained Shoals 0.18.5 bump supplied the current-language real-program corpus;
+the repository's 0.14-pinned main checkout rejects legacy syntax before type
+checking. The fastest of two completed successful optimized runs of
+`src/modelfit.ch` was 50.86 seconds. The maintained bump also changes grammar and
+dependency revisions, so this is not a controlled one-for-one comparison with the
+historical 67.6-second result and does not support a percentage-improvement claim. It
+does establish substantial residual latency, which is not attributed to levels.
+Chelis#1316 tracks the independent SCC/reachability investigation, while chelis#1205
+continues to own deeply nested lowering. No result here claims either surface was
+fixed.
+
+## Implemented remediation
+
+The implementation uses eager, solver-local level-based generalization: it mints
+inference variables at the current binding level, lowers a younger variable's level
+whenever unification makes it reachable from an older one, and generalizes only
+variables above the enclosing boundary. This replaces all three environment sweeps
+together; a preliminary "collapse three sweeps into one" optimization is subsumed
+rather than composed.
 
 The algorithm follows Rémy's level formulation. Kiselyov's
 [*Efficient and Insightful Generalization*](https://okmij.org/ftp/ML/generalization.html)
