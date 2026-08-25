@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chelis_types::unsupported::Unsupported;
 use chelis_types::{
     ScalarValue, scalar_from_f64,
-    types::{Lane, Target},
+    types::{Lane, Prim, Target},
 };
 use chelis_vocab::DiagnosticKind;
 use schemars::JsonSchema;
@@ -1953,6 +1953,24 @@ impl WireDag {
     /// Validate fields whose exact encoding depends on surrounding DAG shape.
     pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
         for (index, node) in self.nodes.iter().enumerate() {
+            if let WireRiscOp::Pad { fill, .. } = &node.op {
+                let output_prim =
+                    Prim::parse_name(&node.output_type.precision).ok_or_else(|| {
+                        WireDagContractError::new(format!(
+                            "WireDag Pad node {} has unknown output dtype {}",
+                            node.id, node.output_type.precision
+                        ))
+                    })?;
+                if fill.prim() != output_prim {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag Pad fill dtype {} does not match node {} output dtype {}",
+                        fill.prim().name(),
+                        node.id,
+                        output_prim.name()
+                    )));
+                }
+            }
+
             let WireRiscOp::Count { axes } = &node.op else {
                 continue;
             };
@@ -2004,7 +2022,7 @@ impl WireDag {
     ///
     /// A serde parse failure surfaces as [`serde_json::Error`]; a
     /// version mismatch on an otherwise-parseable payload surfaces as
-    /// [`WireDagSchemaError`], and an invalid exact-version Count shape
+    /// [`WireDagSchemaError`], and an invalid exact-version cross-node shape
     /// surfaces as [`WireDagContractError`].
     pub fn from_validated_json(json: &str) -> Result<Self, WireDagDecodeError> {
         let value: serde_json::Value =

@@ -2,6 +2,7 @@ use chelis_compiler_api::schema::{
     WIRE_DAG_SCHEMA_VERSION, WireDag, WireDagDecodeError, WireDagNode, WireDagSchemaError,
     WireDimInfo, WireRiscOp, WireTensorType,
 };
+use chelis_types::{scalar_from_i64, types::Prim};
 
 fn bool_input() -> WireDagNode {
     WireDagNode {
@@ -194,6 +195,54 @@ fn wire_dag_v6_rejects_noncanonical_count_axes_on_encode_and_decode() {
             Err(WireDagDecodeError::Contract(_))
         ));
     }
+}
+
+#[test]
+fn wire_dag_v6_rejects_pad_fill_dtype_mismatch_on_encode_and_decode() {
+    let fill = scalar_from_i64("wire_pad_mismatch", Prim::Int64, 7).expect("exact int64 Pad fill");
+    let dag = WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        nodes: vec![WireDagNode {
+            id: 0,
+            op: WireRiscOp::Pad {
+                padding: vec![],
+                fill,
+            },
+            inputs: vec![],
+            output_type: WireTensorType {
+                dims: vec![],
+                precision: "f32".to_string(),
+            },
+        }],
+        roots: vec![0],
+    };
+
+    let encode_error = serde_json::to_string(&dag)
+        .expect_err("encoder must reject a Pad fill whose dtype differs from the output dtype");
+    assert!(encode_error.to_string().contains("Pad fill dtype int64"));
+    assert!(encode_error.to_string().contains("output dtype f32"));
+
+    let json = serde_json::json!({
+        "schema_version": WIRE_DAG_SCHEMA_VERSION,
+        "nodes": [{
+            "id": 0,
+            "op": {"kind": "pad", "padding": [], "fill": fill},
+            "inputs": [],
+            "output_type": {"dims": [], "precision": "f32"}
+        }],
+        "roots": [0]
+    })
+    .to_string();
+    let decode_error = WireDag::from_validated_json(&json)
+        .expect_err("validated decode must reject mismatched Pad fill dtype");
+    assert!(matches!(decode_error, WireDagDecodeError::Contract(_)));
+    assert!(decode_error.to_string().contains("Pad fill dtype int64"));
+    assert!(decode_error.to_string().contains("output dtype f32"));
+
+    let direct_error = serde_json::from_str::<WireDag>(&json)
+        .expect_err("direct decode must enforce the same Pad fill dtype contract");
+    assert!(direct_error.to_string().contains("Pad fill dtype int64"));
+    assert!(direct_error.to_string().contains("output dtype f32"));
 }
 
 #[test]
