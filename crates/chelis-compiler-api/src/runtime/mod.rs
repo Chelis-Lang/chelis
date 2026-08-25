@@ -4,7 +4,11 @@ use std::collections::{HashMap, HashSet};
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::eval::TensorValue as IrTensorValue;
 use chelis_ir::lower::top_level_lowering_map;
-use chelis_types::{CheckedProgram, types::Prim};
+use chelis_types::{
+    CheckedProgram,
+    manifest::{RootEntry, RootPathStep},
+    types::Prim,
+};
 
 use crate::schema::{DictEntryValue, ExecutionValue, TensorElements, TensorValue};
 
@@ -338,6 +342,11 @@ pub(crate) struct RuntimeOutcome {
     /// call). Keyed by bare root name; consulted by `eval_compiled` as a
     /// fallback after `lookup_runtime_value_for_root`.
     pub(crate) host_root_values: HashMap<String, RuntimeValue>,
+    /// Evaluation failures for those same applied nullary roots. Retained by
+    /// root name so the manifest consumer can report them through [05-UNS-1]
+    /// instead of either swallowing the cause or returning an unbranded host
+    /// evaluator error.
+    pub(crate) host_root_errors: HashMap<String, String>,
     pub(crate) transcript: Vec<String>,
 }
 
@@ -346,7 +355,7 @@ pub(crate) fn evaluate_host_program(
     program: &CheckedProgram,
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
 ) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_filtered(program, tensor_bindings, None)
+    evaluate_host_program_filtered(program, tensor_bindings, None, None)
 }
 
 /// Evaluate top-level non-fn bindings. When `selected_roots` is `Some`, only
@@ -362,8 +371,17 @@ pub(crate) fn evaluate_host_program_filtered(
     program: &CheckedProgram,
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&HashMap<String, bool>>,
 ) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_with_library(program, &[], None, tensor_bindings, selected_roots)
+    evaluate_host_program_with_library_and_types(
+        program,
+        &[],
+        &HashMap::new(),
+        None,
+        tensor_bindings,
+        selected_roots,
+        manifested_lowered_names,
+    )
 }
 
 /// Phase G' — host-runtime entry that seeds the `top_level_defs` table
@@ -384,26 +402,8 @@ pub(crate) fn evaluate_host_program_filtered(
 /// that the lowering pass identifies as "lives in the tensor DAG, not
 /// in the host runtime" stays out of the host runtime's eager-eval
 /// list. The new code's lowering map (computed locally below) merges
-/// on top.
-pub(crate) fn evaluate_host_program_with_library(
-    program: &CheckedProgram,
-    library_exprs: &[Expr],
-    library_lowered_names: Option<&HashMap<String, bool>>,
-    tensor_bindings: &HashMap<String, RuntimeTensorValue>,
-    selected_roots: Option<&[String]>,
-) -> Result<RuntimeOutcome, String> {
-    evaluate_host_program_with_library_and_types(
-        program,
-        library_exprs,
-        &HashMap::new(),
-        library_lowered_names,
-        tensor_bindings,
-        selected_roots,
-    )
-}
-
-/// Variant of [`evaluate_host_program_with_library`] that also takes the
-/// library's Deep type-env. Bucket 1 (`grad`/`vmap`/`realize` in the host
+/// on top. The function also takes the library's Deep type-env. Bucket 1
+/// (`grad`/`vmap`/`realize` in the host
 /// runtime) needs the merged type-env so the IR
 /// `lower_subexpr_program` call resolves library-name free vars in the
 /// inner fn body the same way the C backend does.
@@ -414,6 +414,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     library_lowered_names: Option<&HashMap<String, bool>>,
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
     selected_roots: Option<&[String]>,
+    manifested_lowered_names: Option<&HashMap<String, bool>>,
 ) -> Result<RuntimeOutcome, String> {
     // Lowered classification. A new-code value binding that references a
     // library function (e.g. `imported_val = lib_add(20, 22)`) must
@@ -435,7 +436,14 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     for (name, ty_expr) in program.type_env() {
         combined_type_env.insert(name.clone(), ty_expr.clone());
     }
-    let new_lowered_names = top_level_lowering_map(&combined_exprs, &combined_type_env);
+    let mut new_lowered_names = top_level_lowering_map(&combined_exprs, &combined_type_env);
+    if let Some(manifested) = manifested_lowered_names {
+        new_lowered_names.extend(
+            manifested
+                .iter()
+                .map(|(name, lowered)| (name.clone(), *lowered)),
+        );
+    }
     let mut lowered_names: HashMap<String, bool> = HashMap::new();
     if let Some(lib) = library_lowered_names {
         lowered_names.extend(lib.iter().map(|(k, v)| (k.clone(), *v)));
@@ -509,7 +517,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         let _ = ctx.resolve_top_level(&name)?;
     }
 
-    // Surface host-lane *zero-argument fn* roots. The arrow-form
+    // Surface host-lane selected callable roots. The arrow-form
     // `def priced() -> T = body` desugars to `(def priced (fn () body))`,
     // a nullary thunk of type `() -> T`. `register_top_level_defs`'
     // `is_fn` guard skips it from the eager value-binding order (it looks
@@ -520,42 +528,37 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     // in-context library call like `bs_call_f64_vector(...)` returned
     // `{"roots":[]}` instead of its value (chelis blocker2).
     //
-    // We evaluate the value here by APPLYING the thunk (zero args) rather
-    // than binding it in `ctx.bindings`, so the call-resolution frame is
-    // untouched and a `name()` call elsewhere still resolves the callable.
-    // Only host-lane roots are applied — a tensor-lane (lowered) nullary
-    // def surfaces through the DAG/`tensor_bindings` path instead. Apply
-    // failures are swallowed (the root stays unsurfaced, exactly as
-    // before) so this can only add values, never regress.
+    // We evaluate the value here by APPLYING the callable rather than binding
+    // it in `ctx.bindings`, so the call-resolution frame is untouched and an
+    // explicit `name()` call elsewhere still resolves the callable. A
+    // parameterized definition reaches this pass only after the manifest
+    // consumer has selected it and verified all live tensor inputs; unused
+    // authored parameters receive Unit placeholders solely to satisfy the
+    // closure's declared arity. Only Host-lane roots are applied — a
+    // Tensor-lane callable surfaces through the DAG/`tensor_bindings` path.
+    // Failures stay attached to the root and become [05-UNS-1]; no partial
+    // root is fabricated.
     let mut host_root_values = HashMap::new();
+    let mut host_root_errors = HashMap::new();
     for expr in top_level_items(program.exprs()) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
         let Some(body) = kids.get(1) else {
             continue;
         };
-        // Zero-argument fn wrapper only: `(fn (params-empty) inner)`.
-        let Expr::List(fn_list, _) = body else {
+        let Some((DeepTag::Fn, fn_children)) = tagged_expr_children(body) else {
             continue;
         };
-        let is_zero_arg_fn = tag(fn_list) == Some(DeepTag::Fn)
-            && matches!(
-                children(fn_list).first(),
-                Some(Expr::List(params, _))
-                    if tag(params) == Some(DeepTag::Params)
-                        && children(params).is_empty()
-            );
-        if !is_zero_arg_fn {
-            continue;
-        }
+        // Distinguish an automatic nullary observation from an explicitly
+        // selected parameterized call.
+        let is_zero_arg_fn = fn_children.first().is_some_and(|params| {
+            tagged_expr_children(params)
+                .is_some_and(|(tag, children)| tag == DeepTag::Params && children.is_empty())
+        });
         // Effect-free guard (chelis blocker2 red-team). Only surface a
         // root whose body carries NO effect row. The effects checker
         // (`chelis_effects::check_effects_with_context`, run in
@@ -569,7 +572,7 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         // stays unsurfaced: status quo, no regression, no display-time
         // effect. Purity is decided by the checker's annotation, not by
         // re-inferring here, so a library-inherited effect is honored too.
-        if carries_effect_row(fn_list) {
+        if is_zero_arg_fn && carries_effect_row(body) {
             continue;
         }
         // Host-lane only; tensor-lane roots come through the DAG.
@@ -588,29 +591,52 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         if !selected {
             continue;
         }
-        // If a host binding for this name already exists, the
-        // `lookup_runtime_value_for_root` path already surfaces it and
-        // this fallback would be dead. Skip so we do NOT re-apply the
-        // thunk a second time: another root may have called `name()`,
-        // binding its closure here, and a second application would re-run
-        // any effects in the body (e.g. `print`/`debug`) and waste the
-        // whole computation, whose value is then discarded anyway
-        // (chelis blocker2 red-team: double-execution of body effects).
-        if ctx.bindings.contains_key(name) {
-            continue;
-        }
-        // Apply the thunk: build the closure, call it with no args.
-        let applied = ctx
-            .eval_expr(body)
-            .and_then(|closure| ctx.apply_resolved_callable(closure, Vec::new()));
-        if let Ok(value) = applied {
-            host_root_values.insert(name.to_string(), value);
+        // Apply the selected callable. A missing authored parameter can only
+        // be dead here: live tensor parameters were part of the manifest's
+        // required-input set, and the compiler would not have selected this
+        // call without their bindings. Unit therefore supplies arity without
+        // inventing a numeric value; an incorrect reachability decision still
+        // fails loudly when the body tries to use it. If another root already
+        // resolved this declaration, `ctx.bindings[name]` is the callable
+        // closure, not its result. Reuse that closure but still apply it: an
+        // owed [05-OBS-7] root can never be represented by `<closure>`, and
+        // the effect-row guard above proves the automatic application pure.
+        let callable = ctx
+            .bindings
+            .get(name)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| ctx.eval_expr(body));
+        let applied = callable.and_then(|closure| {
+            let args = match &closure {
+                RuntimeValue::Closure { params, .. } => params
+                    .iter()
+                    .map(|param| {
+                        tensor_bindings
+                            .get(param)
+                            .cloned()
+                            .map(RuntimeValue::Tensor)
+                            .unwrap_or(RuntimeValue::Unit)
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            ctx.apply_resolved_callable(closure, args)
+        });
+        match applied {
+            Ok(value) => {
+                host_root_values.insert(name.to_string(), value);
+            }
+            Err(error) => {
+                host_root_errors.insert(name.to_string(), error);
+            }
         }
     }
 
     Ok(RuntimeOutcome {
         host_bindings: ctx.bindings,
         host_root_values,
+        host_root_errors,
         transcript: ctx.transcript,
     })
 }
@@ -624,13 +650,9 @@ fn register_top_level_defs(
     register_runtime_order: bool,
 ) {
     for expr in top_level_items(exprs) {
-        let Expr::List(list, _) = expr else {
+        let Some((DeepTag::Def, kids)) = tagged_expr_children(expr) else {
             continue;
         };
-        if tag(list) != Some(DeepTag::Def) {
-            continue;
-        }
-        let kids = children(list);
         let Some(name) = kids.first().and_then(symbol_name) else {
             continue;
         };
@@ -641,7 +663,7 @@ fn register_top_level_defs(
         if !register_runtime_order {
             continue;
         }
-        let is_fn = matches!(body, Expr::List(body_list, _) if tag(body_list) == Some(DeepTag::Fn));
+        let is_fn = tagged_expr_children(body).is_some_and(|(tag, _)| tag == DeepTag::Fn);
         if !is_fn && !lowered_names.get(name).copied().unwrap_or(false) {
             // chelis#614: a tuple- or ADT-valued binding `out = ...` owns
             // FLATTENED root names (`out.0`, `out.1`, ...) in the caller's
@@ -813,47 +835,41 @@ pub(crate) fn runtime_value_to_schema(value: &RuntimeValue) -> Result<ExecutionV
     })
 }
 
-pub(crate) fn lookup_runtime_value_for_root(
-    name: &str,
+pub(crate) fn lookup_runtime_value_for_manifest_root(
+    entry: &RootEntry,
     host_bindings: &HashMap<String, RuntimeValue>,
     tensor_bindings: &HashMap<String, RuntimeTensorValue>,
 ) -> Option<RuntimeValue> {
-    if let Some(value) = tensor_bindings.get(name) {
+    if let Some(value) = tensor_bindings.get(entry.name.as_str()) {
         return Some(RuntimeValue::Tensor(value.clone()));
     }
 
-    let mut parts = name.split('.');
-    let head = parts.next()?;
-    let mut value = host_bindings.get(head)?.clone();
-    for part in parts {
-        value = match value {
-            // Tuple components are keyed by positional index.
-            RuntimeValue::Tuple(items) => {
-                let index = part.parse::<usize>().ok()?;
-                items.into_iter().nth(index)?
-            }
-            // chelis#614/#520 D2: an ADT-valued component (e.g. the
-            // params slot of a multi-target `grad` result, or a field-wise
-            // gradient struct) is keyed by field NAME for a record
-            // constructor and by positional index for a positional one.
-            // Descend into it the same way `flatten_binding_into` /
-            // `add_named_roots` build the dotted key, so a nested ADT root
-            // reconstructs its value instead of being silently dropped.
-            RuntimeValue::Adt {
-                fields,
-                field_names,
-                ..
-            } => {
-                let index = field_names
-                    .as_ref()
-                    .and_then(|names| names.iter().position(|n| n == part))
-                    .or_else(|| part.parse::<usize>().ok())?;
-                fields.into_iter().nth(index)?
-            }
-            _ => return None,
-        };
+    let mut value = host_bindings
+        .get(entry.def_name.as_str())
+        .or_else(|| host_bindings.get(entry.name.as_str()))?
+        .clone();
+    for step in &entry.path {
+        value = descend_manifest_path(value, *step)?;
     }
     Some(value)
+}
+
+fn descend_manifest_path(value: RuntimeValue, step: RootPathStep) -> Option<RuntimeValue> {
+    match (step, value) {
+        (RootPathStep::Tuple(index), RuntimeValue::Tuple(items)) => items.into_iter().nth(index),
+        (RootPathStep::Adt(index), RuntimeValue::Adt { fields, .. }) => {
+            fields.into_iter().nth(index)
+        }
+        // Lists are the runtime representation of the prelude's recursive
+        // `Cons(head, tail)` / `Nil` ADT. Manifest construction sees the
+        // checked constructor tree, so preserve its structural indexing:
+        // field 0 is the head and field 1 is the remaining list.
+        (RootPathStep::Adt(0), RuntimeValue::List(items)) => items.into_iter().next(),
+        (RootPathStep::Adt(1), RuntimeValue::List(items)) => {
+            (!items.is_empty()).then(|| RuntimeValue::List(items.into_iter().skip(1).collect()))
+        }
+        _ => None,
+    }
 }
 
 struct EvalContext<'a> {
@@ -917,19 +933,28 @@ fn get_meta(list: &List) -> Option<&MetaMap> {
 /// signal that the body is effectful. The host-root surfacing pass uses
 /// this to keep effectful roots unsurfaced — an effectful zero-arg root
 /// must not run its effect at display time.
-fn carries_effect_row(list: &List) -> bool {
-    let Some(meta) = get_meta(list) else {
+fn carries_effect_row(expr: &Expr) -> bool {
+    let meta = match expr {
+        Expr::List(list, _) => get_meta(list),
+        Expr::Node(node, _) => Some(node.meta()),
+        _ => None,
+    };
+    let Some(meta) = meta else {
         return false;
     };
     meta.entries.iter().any(|(key, value)| {
         key == "effects"
-            && matches!(
-                value,
-                Expr::List(effects, _)
-                    if tag(effects) == Some(DeepTag::Effects)
-                        && !children(effects).is_empty()
-            )
+            && tagged_expr_children(value)
+                .is_some_and(|(tag, children)| tag == DeepTag::Effects && !children.is_empty())
     })
+}
+
+fn tagged_expr_children(expr: &Expr) -> Option<(DeepTag, &[Expr])> {
+    match expr {
+        Expr::List(list, _) => tag(list).map(|tag| (tag, children(list))),
+        Expr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        _ => None,
+    }
 }
 
 /// Extract the primitive dtype written into a `(lit {type: ...})` meta

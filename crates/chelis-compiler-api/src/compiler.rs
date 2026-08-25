@@ -1,5 +1,5 @@
 use chelis_deep::DeepTag;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use chelis_backend_c::CodegenResult;
 use chelis_backend_hip::HipCodegenResult;
@@ -13,12 +13,14 @@ use chelis_surf::ast::{
 use chelis_types::{
     CheckedProgram,
     errors::{CheckError, CheckErrorKind},
+    manifest::{ManifestedProgram, RootEntry, RootManifest},
+    types::{Lane, Target},
 };
 use sha2::{Digest, Sha256};
 
 use crate::runtime::{
     RuntimeTensorValue, evaluate_host_program_filtered,
-    evaluate_host_program_with_library_and_types, lookup_runtime_value_for_root,
+    evaluate_host_program_with_library_and_types, lookup_runtime_value_for_manifest_root,
     runtime_value_to_schema,
 };
 use crate::schema::{
@@ -30,13 +32,14 @@ use crate::schema::{
     DesugarResult, Diagnostic, EvalRequest, EvalResult, EvaluatedRoot, FitnessComponents,
     GeneralKind, GeneratedFile, GradRequest, GradResult, LowerRequest, LowerResult, ParseRequest,
     ParseResult, RenameRequest, RenameResult, ReplaceFunctionRequest, ReplaceFunctionResult,
-    SourceKind, Span, ValidateMode, ValidateRequest, ValidateResult, WireBinOp, WireDag,
-    WireDagNode, WireDagSchemaError, WireDeepAtom, WireDeepExpr, WireDeepExprKind, WireDimExpr,
-    WireDimInfo, WireFusedInput, WireFusedStep, WireFusedStepOp, WireImportKind, WireLetBinding,
-    WireLetPattern, WireLiteral, WireMatchArm, WireMetaEntry, WireParam, WirePattern,
-    WirePropertyOption, WireRecordExprField, WireRecordPatternField, WireRecordTypeField,
-    WireRiscOp, WireRtDim, WireSurfDecl, WireSurfExpr, WireSurfTypeExpr, WireTensorType,
-    WireTypeInvariant, WireUnaryOp, WireVariant, WireVariantFields,
+    RootManifestEntryResult, RootManifestResult, SourceKind, Span, ValidateMode, ValidateRequest,
+    ValidateResult, WireBinOp, WireDag, WireDagNode, WireDagSchemaError, WireDeepAtom,
+    WireDeepExpr, WireDeepExprKind, WireDimExpr, WireDimInfo, WireFusedInput, WireFusedStep,
+    WireFusedStepOp, WireImportKind, WireLetBinding, WireLetPattern, WireLiteral, WireMatchArm,
+    WireMetaEntry, WireParam, WirePattern, WirePropertyOption, WireRecordExprField,
+    WireRecordPatternField, WireRecordTypeField, WireRiscOp, WireRtDim, WireSurfDecl, WireSurfExpr,
+    WireSurfTypeExpr, WireTensorType, WireTypeInvariant, WireUnaryOp, WireVariant,
+    WireVariantFields,
 };
 use crate::schema::{stage_error, stage_error_with_span, unsupported_stage_error};
 
@@ -841,6 +844,7 @@ pub fn lower(request: LowerRequest) -> Result<LowerResult> {
         request.source_kind,
         &request.source,
         request.entry.as_deref(),
+        Target::Eval,
     )?;
     let dag = wire_dag(&compiled.dag);
     // WI-2 validate-on-consume: fail closed before this DAG crosses the
@@ -1515,7 +1519,11 @@ fn compile_for_execution_impl(
     request: CompileRequest,
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_source(request.source_kind, &request.source)?;
+    let compiled = compile_source_for_target(
+        request.source_kind,
+        &request.source,
+        manifest_target(request.target),
+    )?;
     execution_artifact_from_compiled(
         compiled,
         request.target,
@@ -1547,7 +1555,7 @@ pub fn compile_for_execution_in_context(
     target: CompileTarget,
     entry_name: Option<&str>,
 ) -> Result<CompiledExecutionArtifact> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, manifest_target(target))?;
     // The in-context lane is a callable surface: strict entry integrity.
     execution_artifact_from_compiled(compiled, target, entry_name, EntryStrictness::Strict)
 }
@@ -1720,9 +1728,9 @@ fn execution_artifact_from_compiled(
     strictness: EntryStrictness,
 ) -> Result<CompiledExecutionArtifact> {
     let build_target = BuildTarget::from(target);
-    reject_host_only_builtins_before_host_lowering(&compiled.checked, build_target)?;
+    reject_host_only_builtins_before_host_lowering(compiled.checked(), build_target)?;
     let host_compiled =
-        chelis_ir::host::try_lower_compiled_program(&compiled.checked).map_err(|diagnostic| {
+        chelis_ir::host::try_lower_manifested_program(&compiled.program).map_err(|diagnostic| {
             stage_error_with_span(
                 "lower",
                 diagnostic.to_string(),
@@ -1826,7 +1834,7 @@ fn execution_artifact_from_compiled(
             } else if let Some(host_program) = host_compiled.host.as_ref() {
                 match entry_lane_decision(
                     entry_name,
-                    &compiled.checked,
+                    compiled.checked(),
                     host_program,
                     host_only,
                     strictness,
@@ -1861,10 +1869,10 @@ fn execution_artifact_from_compiled(
                 )
                 .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
-                    target,
                     entry_symbol,
                     None,
                     compile_result_c(target, entry_symbol, &result),
+                    manifest_result(&compiled.program),
                     execution_input_specs(&entry_dag, &result.input_labels)?,
                     execution_output_specs(&entry_dag, &result.output_labels)?,
                     result.symbolic_dims,
@@ -1935,11 +1943,27 @@ fn execution_artifact_from_compiled(
                 )?;
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
+                // Preserve a more specific host-emitter rejection (for
+                // example the function-value ABI) when one exists. The
+                // scalar-global shape is the one strict #817 fallback that
+                // remains unsafe here: source-level detection sees the global,
+                // while host lowering has no global product to expose. Real
+                // host globals and GradLike entries retain their established
+                // host-lane artifact with an explicit decline reason.
+                if strictness == EntryStrictness::Strict
+                    && matches!(entry_lane_decline, Some(EntryLaneDecline::HasGlobals))
+                    && host_program
+                        .globals
+                        .iter()
+                        .all(|global| matches!(&global.ty, chelis_ir::ConcreteHostType::Scalar(_)))
+                {
+                    return Err(strict_entry_decline_error(EntryLaneDecline::HasGlobals));
+                }
                 let mut artifact = compiled_execution_artifact(
-                    target,
                     &func_name,
                     None,
                     compile_result_c(target, &func_name, &result),
+                    manifest_result(&compiled.program),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -1963,10 +1987,10 @@ fn execution_artifact_from_compiled(
             )
             .map_err(unsupported_stage_error)?;
             let mut artifact = compiled_execution_artifact(
-                target,
                 &func_name,
                 None,
                 compile_result_c(target, &func_name, &result),
+                manifest_result(&compiled.program),
                 execution_input_specs(&compiled.dag, &result.input_labels)?,
                 execution_output_specs(&compiled.dag, &result.output_labels)?,
                 result.symbolic_dims,
@@ -2017,7 +2041,7 @@ fn execution_artifact_from_compiled(
                 .as_ref()
                 .and_then(chelis_ir::host::preferred_tensor_entry_name)
                 .and_then(|name| {
-                    chelis_ir::host::lower_named_tensor_entry_dag(&compiled.checked, name)
+                    chelis_ir::host::lower_named_tensor_entry_dag(compiled.checked(), name)
                 });
             if compiled.dag.roots().is_empty()
                 && preferred_entry_dag.is_none()
@@ -2028,10 +2052,10 @@ fn execution_artifact_from_compiled(
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
-                    target,
                     &func_name,
                     None,
                     compile_result_hip_host(target, &func_name, &result),
+                    manifest_result(&compiled.program),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -2053,10 +2077,10 @@ fn execution_artifact_from_compiled(
             let result = chelis_backend_hip::codegen_hip(&fused, &func_name)
                 .map_err(unsupported_stage_error)?;
             Ok(compiled_execution_artifact(
-                target,
                 &func_name,
                 Some(format!("{func_name}_device")),
                 compile_result_hip(target, &func_name, &result),
+                manifest_result(&compiled.program),
                 execution_input_specs(&hip_dag, &result.input_labels)?,
                 execution_output_specs(&hip_dag, &result.output_labels)?,
                 result.symbolic_dims,
@@ -2066,12 +2090,27 @@ fn execution_artifact_from_compiled(
 }
 
 pub fn eval(request: EvalRequest) -> Result<EvalResult> {
-    let compiled = compile_source(request.source_kind, &request.source)?;
+    eval_for_target(request, Target::Eval)
+}
+
+/// Evaluate through a manifest computed for `target`. Execution still uses
+/// the local evaluator, but lane assignment, required inputs, and surfaced
+/// roots are exactly the contract the requested backend would consume.
+pub fn eval_for_target(request: EvalRequest, target: Target) -> Result<EvalResult> {
+    let compiled = compile_source_for_target(request.source_kind, &request.source, target)?;
     eval_compiled(&compiled, request.bindings, None)
 }
 
 pub fn eval_selected(request: EvalRequest, selected_root_names: &[String]) -> Result<EvalResult> {
-    let compiled = compile_source(request.source_kind, &request.source)?;
+    eval_selected_for_target(request, selected_root_names, Target::Eval)
+}
+
+pub fn eval_selected_for_target(
+    request: EvalRequest,
+    selected_root_names: &[String],
+    target: Target,
+) -> Result<EvalResult> {
+    let compiled = compile_source_for_target(request.source_kind, &request.source, target)?;
     eval_compiled(&compiled, request.bindings, Some(selected_root_names))
 }
 
@@ -2194,6 +2233,7 @@ fn flatten_module_decls(decls: &[Decl]) -> Vec<Decl> {
 fn compile_new_source_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
+    target: Target,
 ) -> Result<CompiledSource> {
     // RFC v5 (RT-1 F2 bypass): the new entry decls are reef-rewritten
     // (`rewrite_entry_decls_with_reef_graph` mangles them) before this
@@ -2250,8 +2290,18 @@ fn compile_new_source_in_context(
     .map_err(|error| cancelled_or("lower", error))?;
     let lowered_parts = lowered.into_parts();
     let (_, _, new_checked, root_metadata) = lowered_parts.checked.into_parts();
-    let all_root_names = root_metadata.all_names().clone();
     let new_tensor_root_names = root_metadata.tensor_names().clone();
+    let realizability = chelis_effects::realizability::infer_realizability(
+        &new_checked,
+        crate::target_capability::tensor_capable_prims(target),
+    );
+    let mut manifest =
+        chelis_effects::realizability::compute_root_manifest(&new_checked, &realizability);
+    route_tensor_inputs_from_dag(
+        &mut manifest,
+        &lowered_parts.dag,
+        &lowered_parts.named_roots,
+    );
 
     // Phase G' — carry the library defs + lowered classification into
     // the runtime. Without this, the host evaluator's `top_level_defs`
@@ -2268,9 +2318,8 @@ fn compile_new_source_in_context(
     };
 
     Ok(CompiledSource {
-        checked: new_checked,
+        program: ManifestedProgram::new(new_checked, manifest, target),
         dag: lowered_parts.dag,
-        all_root_names,
         tensor_root_names: new_tensor_root_names,
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
@@ -2287,7 +2336,15 @@ pub fn eval_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<EvalResult> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    eval_in_context_for_target(context, new_source, Target::Eval)
+}
+
+pub fn eval_in_context_for_target(
+    context: &crate::context::CompiledContext,
+    new_source: &str,
+    target: Target,
+) -> Result<EvalResult> {
+    let compiled = compile_new_source_in_context(context, new_source, target)?;
     eval_compiled(&compiled, BTreeMap::new(), None)
 }
 
@@ -2301,7 +2358,7 @@ pub fn eval_in_context_with_bindings(
     new_source: &str,
     bindings: BTreeMap<String, crate::schema::TensorValue>,
 ) -> Result<EvalResult> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
     eval_compiled(&compiled, bindings, None)
 }
 
@@ -2313,12 +2370,12 @@ pub fn check_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<CheckResult> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
     // Mirror `check`'s shape: derive a fitness-style report from the
     // composed checked program. The total/typed counts only cover
     // new-code nodes — library nodes are checked once at context build
     // time and counted there.
-    let total_nodes = compiled.checked.exprs().len();
+    let total_nodes = compiled.checked().exprs().len();
     Ok(CheckResult {
         score: 1.0,
         components: FitnessComponents {
@@ -2344,7 +2401,7 @@ pub fn eval_many_in_context(
     new_source: &str,
     roots: &[String],
 ) -> Vec<(String, Result<EvalResult>)> {
-    let compiled = match compile_new_source_in_context(context, new_source) {
+    let compiled = match compile_new_source_in_context(context, new_source, Target::Eval) {
         Ok(compiled) => compiled,
         Err(err) => {
             return roots
@@ -2397,7 +2454,7 @@ pub fn prepare_eval_in_context(
     context: &crate::context::CompiledContext,
     new_source: &str,
 ) -> Result<PreparedEvalInContext> {
-    let compiled = compile_new_source_in_context(context, new_source)?;
+    let compiled = compile_new_source_in_context(context, new_source, Target::Eval)?;
     Ok(PreparedEvalInContext {
         compiled: std::sync::Arc::new(compiled),
     })
@@ -2408,22 +2465,46 @@ fn eval_compiled(
     bindings: BTreeMap<String, crate::schema::TensorValue>,
     selected_root_names: Option<&[String]>,
 ) -> Result<EvalResult> {
+    // A parameterized tensor entry is a callable declaration in the checked
+    // manifest until evaluation selects it and supplies all of its runtime
+    // inputs. Specialize that selection into a new manifested program before
+    // consuming any roots, so the legacy in-context `main(x)` surface remains
+    // manifest-authoritative instead of bypassing the phase boundary.
+    let effective_program = manifested_program_for_eval(
+        compiled,
+        bindings.keys().map(String::as_str),
+        selected_root_names,
+    );
+    let manifest = effective_program.manifest();
     let selected = selected_root_names.map(|roots| {
         roots
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<String>>()
     });
-    if compiled.dag.roots().is_empty() && compiled.all_root_names.is_empty() {
-        return Err(stage_error(
-            "eval",
-            "program produced no evaluable roots",
-            GeneralKind::Other,
-        ));
-    }
+    let observed_entries = manifest
+        .entries
+        .iter()
+        .filter(|entry| {
+            selected.as_ref().is_none_or(|set| {
+                set.contains(entry.name.as_str())
+                    || set.iter().any(|root| {
+                        entry
+                            .name
+                            .strip_prefix(root.as_str())
+                            .is_some_and(|suffix| suffix.starts_with('.'))
+                    })
+            })
+        })
+        .collect::<Vec<_>>();
+    let required_inputs = observed_entries
+        .iter()
+        .flat_map(|entry| entry.required_inputs.iter().cloned())
+        .collect::<HashSet<_>>();
 
     let bindings = bindings
         .into_iter()
+        .filter(|(name, _)| required_inputs.contains(name))
         .map(|(name, value)| {
             let tensor = crate::decode::wire_tensor_to_ir(&value).map_err(|message| {
                 stage_error(
@@ -2436,20 +2517,23 @@ fn eval_compiled(
         })
         .collect::<Result<HashMap<_, _>>>()?;
 
-    let roots = compiled
-        .tensor_root_names
+    let tensor_entries = observed_entries
         .iter()
-        .enumerate()
-        .filter_map(|(index, name)| {
-            if selected
-                .as_ref()
-                .is_some_and(|set| !set.contains(name.as_str()))
-            {
-                return None;
-            }
-            compiled.dag.roots().get(index).copied()
-        })
+        .copied()
+        .filter(|entry| entry.lane == Lane::Tensor)
         .collect::<Vec<_>>();
+    let roots = tensor_entries
+        .iter()
+        .map(|entry| {
+            let name = crate::pipeline::IrName::new(entry.name.as_str());
+            compiled.named_roots.get(&name).copied().ok_or_else(|| {
+                unavailable_root_error(
+                    entry,
+                    "the Tensor-lane root is absent from the lowered named-root map",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let tensor_values = if roots.is_empty() {
         HashMap::new()
     } else {
@@ -2460,21 +2544,18 @@ fn eval_compiled(
     };
 
     let mut tensor_values_by_name = HashMap::<String, RuntimeTensorValue>::new();
-    for name in compiled.tensor_root_names.iter() {
-        if selected
-            .as_ref()
-            .is_some_and(|set| !set.contains(name.as_str()))
-        {
-            continue;
-        }
-        let Some(node_id) = compiled.named_roots.get(name) else {
-            continue;
-        };
+    for entry in &tensor_entries {
+        let name = crate::pipeline::IrName::new(entry.name.as_str());
+        let node_id = compiled.named_roots.get(&name).ok_or_else(|| {
+            unavailable_root_error(
+                entry,
+                "the Tensor-lane root is absent from the lowered named-root map",
+            )
+        })?;
         let value = tensor_values.get(node_id).ok_or_else(|| {
-            stage_error(
-                "eval",
-                format!("missing tensor root `{name}`"),
-                GeneralKind::EvalError,
+            unavailable_root_error(
+                entry,
+                "the Tensor evaluator returned no value for the owed root",
             )
         })?;
         let precision = compiled
@@ -2493,10 +2574,7 @@ fn eval_compiled(
             precision,
             "the DAG evaluator finalizes at the root's declared dtype"
         );
-        tensor_values_by_name.insert(
-            name.as_str().to_string(),
-            RuntimeTensorValue::new(value.clone()),
-        );
+        tensor_values_by_name.insert(entry.name.clone(), RuntimeTensorValue::new(value.clone()));
     }
 
     // When a selected-roots filter is set (eval_selected / eval_many), push it
@@ -2510,52 +2588,87 @@ fn eval_compiled(
     // chelis-std functions) are reachable from new-code calls. Without
     // this carry-over, the runtime errored
     // `unknown runtime name pkg__chelis__std__...`.
+    let host_selected_root_names = observed_entries
+        .iter()
+        .map(|entry| entry.def_name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let host_selected_root_names = Some(host_selected_root_names.as_slice());
+    let manifested_lowered_names = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.def_name.clone(), entry.lane == Lane::Tensor))
+        .collect::<HashMap<_, _>>();
     let host_outcome = if let Some(library) = compiled.library_runtime.as_ref() {
         evaluate_host_program_with_library_and_types(
-            &compiled.checked,
+            compiled.checked(),
             &library.exprs,
             &library.type_env,
             Some(&library.lowered_names),
             &tensor_values_by_name,
-            selected_root_names,
+            host_selected_root_names,
+            Some(&manifested_lowered_names),
         )
     } else {
         evaluate_host_program_filtered(
-            &compiled.checked,
+            compiled.checked(),
             &tensor_values_by_name,
-            selected_root_names,
+            host_selected_root_names,
+            Some(&manifested_lowered_names),
         )
     }
     .map_err(eval_stage_error)?;
 
-    let roots = compiled
-        .all_root_names
+    let roots = observed_entries
         .iter()
+        .copied()
         .enumerate()
-        .filter(|(_, name)| {
-            selected
-                .as_ref()
-                .is_none_or(|set| set.contains(name.as_str()))
-        })
-        .filter_map(|(index, name)| {
-            // Host value bindings and tensor-lane roots first; then fall
-            // back to a host-lane *zero-argument fn* root's applied value
-            // (arrow-form `def name() -> T = body`), which is a display root
-            // but not a value binding, so it never lands in
-            // `host_bindings` (chelis blocker2).
-            let value = lookup_runtime_value_for_root(
-                name.as_str(),
-                &host_outcome.host_bindings,
-                &tensor_values_by_name,
-            )
-            .or_else(|| host_outcome.host_root_values.get(name.as_str()).cloned())?;
+        .map(|(index, entry)| {
+            // A host-lane *zero-argument fn* root is the result of applying
+            // the callable, never the closure stored in `host_bindings` when
+            // another root resolved that declaration. Prefer the applied
+            // root value, then fall back to ordinary host value bindings and
+            // tensor-lane roots.
+            let value = host_outcome
+                .host_root_values
+                .get(entry.def_name.as_str())
+                .cloned()
+                .and_then(|value| {
+                    let synthetic_bindings = HashMap::from([(entry.def_name.clone(), value)]);
+                    lookup_runtime_value_for_manifest_root(
+                        entry,
+                        &synthetic_bindings,
+                        &tensor_values_by_name,
+                    )
+                })
+                .or_else(|| {
+                    lookup_runtime_value_for_manifest_root(
+                        entry,
+                        &host_outcome.host_bindings,
+                        &tensor_values_by_name,
+                    )
+                })
+                .ok_or_else(|| {
+                    let reason = host_outcome
+                        .host_root_errors
+                        .get(entry.def_name.as_str())
+                        .map(|error| format!("the Host-lane nullary root failed: {error}"))
+                        .unwrap_or_else(|| {
+                            "the assigned lane returned no value for the owed root".to_string()
+                        });
+                    unavailable_root_error(entry, &reason)
+                })?;
+            let ir_name = crate::pipeline::IrName::new(entry.name.as_str());
             let node_id = compiled
                 .named_roots
-                .get(name)
+                .get(&ir_name)
                 .map(|id| id.0)
                 .unwrap_or(index);
-            Some((node_id, name.as_str().to_string(), value))
+            Ok((node_id, entry.name.clone(), value))
         })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .map(|(node_id, name, value)| {
             Ok(EvaluatedRoot {
                 node_id,
@@ -2572,8 +2685,29 @@ fn eval_compiled(
     Ok(EvalResult {
         schema_version: crate::schema::EXECUTION_VALUE_SCHEMA_VERSION,
         roots,
+        manifest: manifest_result(&effective_program),
         transcript: host_outcome.transcript,
     })
+}
+
+fn unavailable_root_error(entry: &RootEntry, reason: &str) -> CompilerError {
+    let routing_reason = entry
+        .reasons
+        .first()
+        .map(|reason| format!("; routing evidence: {reason:?}"))
+        .unwrap_or_default();
+    unsupported_stage_error(chelis_types::unsupported::Unsupported::new(
+        chelis_types::unsupported::UnsupportedKind::Construct(format!(
+            "[05-UNS-1] unavailable root `{}`",
+            entry.name
+        )),
+        format!("{:?} lane: {reason}{routing_reason}", entry.lane),
+        chelis_types::unsupported::Stage::Runtime,
+        chelis_types::unimplemented_rejection!(
+            912,
+            "this is a root-realization defect; file a bug with the program and target"
+        ),
+    ))
 }
 
 pub fn grad(request: GradRequest) -> Result<GradResult> {
@@ -2761,9 +2895,11 @@ pub fn result_envelope<T>(result: Result<T>) -> crate::schema::ApiEnvelope<T> {
 }
 
 struct CompiledSource {
-    checked: CheckedProgram,
+    program: ManifestedProgram,
     dag: Dag,
-    all_root_names: crate::pipeline::AllRootNames,
+    // Callable function-entry selection is a separate surface from value-root
+    // observation. Keep the pipeline's typed set for that API; eval/build
+    // observation below consumes `program.manifest` exclusively.
     tensor_root_names: crate::pipeline::TensorRootNames,
     named_roots: crate::pipeline::NamedRoots,
     forward_node_index: crate::pipeline::ForwardNodeIndex,
@@ -2773,6 +2909,327 @@ struct CompiledSource {
     /// path (no separate library to merge); `Some` on the in-context
     /// path produced by `compile_new_source_in_context`.
     library_runtime: Option<LibraryRuntime>,
+}
+
+impl CompiledSource {
+    fn checked(&self) -> &CheckedProgram {
+        self.program.checked()
+    }
+
+    fn manifest(&self) -> &RootManifest {
+        self.program.manifest()
+    }
+}
+
+fn manifest_result(program: &ManifestedProgram) -> RootManifestResult {
+    RootManifestResult {
+        target: program.target(),
+        entries: program
+            .manifest()
+            .entries
+            .iter()
+            .map(|entry| RootManifestEntryResult {
+                name: entry.name.clone(),
+                lane: entry.lane,
+                required_inputs: entry.required_inputs.iter().cloned().collect(),
+            })
+            .collect(),
+        requires_main: program.manifest().requires_main(),
+    }
+}
+
+/// Specialize callable tensor entries selected for evaluation into owed
+/// roots once all authored parameters have bindings. The checked manifest
+/// intentionally excludes parameterized declarations in the abstract; this
+/// produces a new `ManifestedProgram` for the concrete evaluation request
+/// rather than reaching around the manifest to the legacy named-root map.
+fn manifested_program_for_eval<'a>(
+    compiled: &CompiledSource,
+    binding_names: impl Iterator<Item = &'a str>,
+    selected_root_names: Option<&[String]>,
+) -> ManifestedProgram {
+    let available = binding_names.collect::<HashSet<_>>();
+    let candidate_names = selected_root_names
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.split('.').next())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_else(|| BTreeSet::from(["main"]));
+    let mut manifest = compiled.manifest().clone();
+    let realizability = chelis_effects::realizability::infer_realizability(
+        compiled.checked(),
+        crate::target_capability::tensor_capable_prims(compiled.program.target()),
+    );
+
+    for candidate in candidate_names {
+        if manifest
+            .entries
+            .iter()
+            .any(|entry| entry.def_name == candidate)
+        {
+            continue;
+        }
+        let Some(signature) = compiled
+            .checked()
+            .signature_inference()
+            .functions
+            .get(candidate)
+        else {
+            continue;
+        };
+        if signature.params.is_empty() {
+            continue;
+        }
+        let Some(function_ty) = compiled.checked().type_env().get(candidate) else {
+            continue;
+        };
+        let Some(return_ty) = deep_tagged_children(function_ty)
+            .filter(|(tag, _)| *tag == DeepTag::TFn)
+            .and_then(|(_, children)| children.last())
+            .cloned()
+        else {
+            continue;
+        };
+        let template = RootEntry {
+            name: candidate.to_string(),
+            path: Vec::new(),
+            def_name: candidate.to_string(),
+            ty: return_ty,
+            lane: Lane::Tensor,
+            required_inputs: BTreeSet::new(),
+            reasons: Vec::new(),
+        };
+        let Some(body) = selected_callable_result_expr(compiled.checked(), candidate) else {
+            continue;
+        };
+        let mut selected_entries = chelis_effects::realizability::expand_manifest_root(
+            template,
+            Some(body),
+            compiled.checked().adt_registry(),
+        );
+        let selected_roots = selected_entries
+            .iter()
+            .filter_map(|entry| {
+                compiled
+                    .named_roots
+                    .get(&crate::pipeline::IrName::new(entry.name.as_str()))
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        let parameter_names = signature
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<HashSet<_>>();
+        let live_parameter_names =
+            chelis_effects::realizability::referenced_runtime_inputs(body, &parameter_names);
+        if live_parameter_names.iter().any(|name| {
+            signature
+                .params
+                .iter()
+                .find(|param| param.name == *name)
+                .is_none_or(|param| !type_is_tensor_runtime_input(&param.checked_type))
+        }) {
+            // EvalRequest bindings carry tensors. A live scalar/container
+            // parameter therefore has not been supplied through this API and
+            // the callable remains a declaration.
+            continue;
+        }
+        let mut required_inputs = selected_roots
+            .iter()
+            .flat_map(|root| required_inputs_for_dag_root(&compiled.dag, *root))
+            .collect::<BTreeSet<_>>();
+        required_inputs.extend(live_parameter_names);
+        if let Some(top_level_inputs) = realizability.required_inputs_by_def.get(candidate) {
+            required_inputs.extend(top_level_inputs.iter().cloned());
+        }
+        if !required_inputs
+            .iter()
+            .all(|input| available.contains(input.as_str()))
+        {
+            continue;
+        }
+        let unsupported_prim = selected_roots.iter().find_map(|root| {
+            compiled
+                .dag
+                .get(*root)
+                .map(|node| node.output_type.precision)
+                .filter(|prim| {
+                    !crate::target_capability::tensor_capable_prims(compiled.program.target())
+                        .contains(prim)
+                })
+        });
+        let lane = if unsupported_prim.is_some() || selected_roots.len() != selected_entries.len() {
+            Lane::Host
+        } else {
+            Lane::Tensor
+        };
+        for entry in &mut selected_entries {
+            entry.lane = lane;
+            entry.required_inputs.clone_from(&required_inputs);
+            if let Some(prim) = unsupported_prim {
+                entry
+                    .reasons
+                    .push(chelis_types::manifest::HostReason::PrecisionExceedsCapability { prim });
+            } else if lane == Lane::Host {
+                entry
+                    .reasons
+                    .push(chelis_types::manifest::HostReason::StructuralForm {
+                        tag: "selected-callable-result".to_string(),
+                    });
+            }
+        }
+        manifest.entries.extend(selected_entries);
+    }
+
+    route_tensor_inputs_from_dag(&mut manifest, &compiled.dag, &compiled.named_roots);
+    let declaration_order = checked_def_order(compiled.checked());
+    manifest.entries.sort_by_key(|entry| {
+        declaration_order
+            .get(entry.def_name.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    ManifestedProgram::new(
+        compiled.checked().clone(),
+        manifest,
+        compiled.program.target(),
+    )
+}
+
+fn type_is_tensor_runtime_input(ty: &chelis_types::types::Type) -> bool {
+    match ty {
+        chelis_types::types::Type::Tensor(_, _) => true,
+        chelis_types::types::Type::Ref(inner) => type_is_tensor_runtime_input(inner),
+        _ => false,
+    }
+}
+
+fn selected_callable_result_expr<'a>(
+    program: &'a CheckedProgram,
+    selected: &str,
+) -> Option<&'a DeepExpr> {
+    fn find<'a>(expr: &'a DeepExpr, selected: &str) -> Option<&'a DeepExpr> {
+        let (tag, children) = deep_tagged_children(expr)?;
+        if tag == DeepTag::Module {
+            return children
+                .iter()
+                .skip(1)
+                .find_map(|child| find(child, selected));
+        }
+        if tag != DeepTag::Def || children.first().and_then(symbol_name) != Some(selected) {
+            return None;
+        }
+        let body = children.get(1)?;
+        deep_tagged_children(body)
+            .filter(|(body_tag, _)| *body_tag == DeepTag::Fn)
+            .and_then(|(_, fn_children)| fn_children.last())
+    }
+
+    program
+        .annotated_exprs()
+        .iter()
+        .find_map(|expr| find(expr, selected))
+}
+
+fn checked_def_order(program: &CheckedProgram) -> HashMap<&str, usize> {
+    fn collect<'a>(expr: &'a DeepExpr, names: &mut Vec<&'a str>) {
+        let Some((tag, children)) = deep_tagged_children(expr) else {
+            return;
+        };
+        if tag == DeepTag::Module {
+            for child in children.iter().skip(1) {
+                collect(child, names);
+            }
+        } else if tag == DeepTag::Def
+            && let Some(name) = children.first().and_then(symbol_name)
+        {
+            names.push(name);
+        }
+    }
+
+    let mut names = Vec::new();
+    for expr in program.annotated_exprs() {
+        collect(expr, &mut names);
+    }
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| (name, index))
+        .collect()
+}
+
+fn deep_tagged_children(expr: &DeepExpr) -> Option<(DeepTag, &[DeepExpr])> {
+    match expr {
+        DeepExpr::Node(node, _) => Some((node.tag(), node.children_slice())),
+        DeepExpr::List(list, _) => {
+            let tag = list.tag()?;
+            let children = if list.elements.len() > 2
+                && matches!(list.elements.get(1), Some(DeepExpr::Map(_, _)))
+            {
+                &list.elements[2..]
+            } else if list.elements.len() > 1 {
+                &list.elements[1..]
+            } else {
+                &[]
+            };
+            Some((tag, children))
+        }
+        _ => None,
+    }
+}
+
+/// Replace the checked walk's conservative input set with the exact Load
+/// closure of every root which has a lowered representation. Host-only roots
+/// have no named DAG root and keep the checked top-level dependency closure.
+/// Sibling roots cannot make an unrelated binding or symbolic dimension live.
+fn route_tensor_inputs_from_dag(
+    manifest: &mut RootManifest,
+    dag: &Dag,
+    named_roots: &crate::pipeline::NamedRoots,
+) {
+    let mut required_by_def = BTreeMap::<String, BTreeSet<String>>::new();
+    for entry in &manifest.entries {
+        if entry.lane != Lane::Tensor {
+            continue;
+        }
+        let name = crate::pipeline::IrName::new(entry.name.as_str());
+        let Some(root) = named_roots.get(&name).copied() else {
+            continue;
+        };
+        required_by_def
+            .entry(entry.def_name.clone())
+            .or_default()
+            .extend(required_inputs_for_dag_root(dag, root));
+    }
+    for entry in &mut manifest.entries {
+        if entry.lane == Lane::Tensor
+            && let Some(required_inputs) = required_by_def.get(entry.def_name.as_str())
+        {
+            entry.required_inputs.clone_from(required_inputs);
+        }
+    }
+}
+
+fn required_inputs_for_dag_root(dag: &Dag, root: NodeId) -> BTreeSet<String> {
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    let mut required = BTreeSet::new();
+    while let Some(node_id) = stack.pop() {
+        if !seen.insert(node_id) {
+            continue;
+        }
+        let Some(node) = dag.get(node_id) else {
+            continue;
+        };
+        if let RiscOp::Load { name } = &node.op {
+            required.insert(name.as_str().to_string());
+        }
+        stack.extend(node.inputs.iter().copied());
+    }
+    required
 }
 
 /// The library payload threaded through `eval_compiled` so the host
@@ -2797,7 +3254,15 @@ struct LibraryRuntime {
 }
 
 fn compile_source(source_kind: SourceKind, source: &str) -> Result<CompiledSource> {
-    compile_source_scoped(source_kind, source, None)
+    compile_source_for_target(source_kind, source, Target::Eval)
+}
+
+fn compile_source_for_target(
+    source_kind: SourceKind,
+    source: &str,
+    target: Target,
+) -> Result<CompiledSource> {
+    compile_source_scoped(source_kind, source, None, target)
 }
 
 /// Like [`compile_source`], but when `entry` is `Some`, prune the expanded
@@ -2812,6 +3277,7 @@ fn compile_source_scoped(
     source_kind: SourceKind,
     source: &str,
     entry: Option<&str>,
+    target: Target,
 ) -> Result<CompiledSource> {
     bail_if_cancelled("parse")?;
     let outcome = crate::pipeline::run_source(crate::pipeline::PipelineRequest {
@@ -2826,51 +3292,29 @@ fn compile_source_scoped(
         unreachable!("the lower goal returns only a lowered outcome")
     };
     bail_if_cancelled("lower")?;
-    // Issue #912: compute realizability and manifest alongside existing
-    // routing. This is observe-only. The manifest will replace the old
-    // root classification at Task 8.
+    // chelis#1079: realizability is a production phase boundary. The target
+    // is chosen before inference, and the checked program cannot proceed to
+    // root observation without its manifest attached.
     let checked_program = lowered.checked().program();
     let realizability_result = chelis_effects::realizability::infer_realizability(
         checked_program,
-        crate::target_capability::tensor_capable_prims(chelis_types::types::Target::C),
+        crate::target_capability::tensor_capable_prims(target),
     );
-    let _manifest = chelis_effects::realizability::compute_root_manifest(
+    let mut manifest = chelis_effects::realizability::compute_root_manifest(
         checked_program,
         &realizability_result,
     );
-    // Task 8 migration diff: compare manifest lane assignments against
-    // the old predicate's root classification. Log disagreements.
-    #[cfg(debug_assertions)]
-    {
-        use chelis_types::types::Lane;
-        let old_tensor_set = lowered
-            .checked()
-            .root_metadata()
-            .tensor_names()
-            .iter()
-            .map(|name| name.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        for entry in &_manifest.entries {
-            let old_is_tensor = old_tensor_set.contains(entry.name.as_str());
-            let new_is_tensor = entry.lane == Lane::Tensor;
-            if old_is_tensor != new_is_tensor {
-                eprintln!(
-                    "[#912 migration-diff] def `{}`: old={} new={}",
-                    entry.name,
-                    if old_is_tensor { "Tensor" } else { "Host" },
-                    if new_is_tensor { "Tensor" } else { "Host" },
-                );
-            }
-        }
-    }
-
     let lowered_parts = lowered.into_parts();
     let (_, _, checked, root_metadata) = lowered_parts.checked.into_parts();
+    route_tensor_inputs_from_dag(
+        &mut manifest,
+        &lowered_parts.dag,
+        &lowered_parts.named_roots,
+    );
 
     Ok(CompiledSource {
-        checked,
+        program: ManifestedProgram::new(checked, manifest, target),
         dag: lowered_parts.dag,
-        all_root_names: root_metadata.all_names().clone(),
         tensor_root_names: root_metadata.tensor_names().clone(),
         named_roots: lowered_parts.named_roots,
         forward_node_index: lowered_parts.forward_node_index,
@@ -2992,14 +3436,15 @@ fn symbol_name(expr: &DeepExpr) -> Option<&str> {
 }
 
 fn compiled_execution_artifact(
-    _target: CompileTarget,
     host_entry_name: &str,
     device_entry_name: Option<String>,
-    compile_result: CompileResult,
+    mut compile_result: CompileResult,
+    manifest: RootManifestResult,
     inputs: Vec<ExecutionTensorSpec>,
     outputs: Vec<ExecutionTensorSpec>,
     symbolic_dims: Vec<String>,
 ) -> CompiledExecutionArtifact {
+    compile_result.manifest = manifest;
     CompiledExecutionArtifact {
         compile_result,
         host_entry_name: host_entry_name.to_string(),
@@ -3048,6 +3493,7 @@ fn compile_result_c(
         compile_flags: toolchain.compile_flags,
         link_flags: toolchain.link_flags,
         peak_device_bytes_estimate: None,
+        manifest: RootManifestResult::default(),
     }
 }
 
@@ -3084,6 +3530,7 @@ fn compile_result_hip(
         compile_flags: result.compile_flags.clone(),
         link_flags: result.link_flags.clone(),
         peak_device_bytes_estimate: result.peak_device_bytes_estimate,
+        manifest: RootManifestResult::default(),
     }
 }
 
@@ -3123,6 +3570,7 @@ fn compile_result_hip_host(
         compile_flags: toolchain.compile_flags,
         link_flags: toolchain.link_flags,
         peak_device_bytes_estimate: None,
+        manifest: RootManifestResult::default(),
     }
 }
 
@@ -3386,6 +3834,13 @@ impl From<CompileTarget> for BuildTarget {
             CompileTarget::C => Self::C,
             CompileTarget::Hip => Self::Hip,
         }
+    }
+}
+
+const fn manifest_target(target: CompileTarget) -> Target {
+    match target {
+        CompileTarget::C => Target::C,
+        CompileTarget::Hip => Target::Hip,
     }
 }
 
@@ -5880,7 +6335,7 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
 
         assert_eq!(
             compiled
-                .all_root_names
+                .tensor_root_names
                 .iter()
                 .map(crate::pipeline::IrName::as_str)
                 .collect::<Vec<_>>(),
@@ -5898,17 +6353,19 @@ def loss(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[f32] =
     }
 
     #[test]
-    fn compile_source_arrow_form_def_appears_in_all_root_names() {
+    fn compile_source_arrow_form_def_appears_in_manifest() {
         // Issue #947: arrow-form `def n() -> T = body` must appear in
-        // all_root_names so eval_compiled can surface it.
+        // the production manifest so eval_compiled can surface it.
         let source = "def n() -> int32 = add(cast(20, int32), cast(22, int32))\n";
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
         assert!(
             compiled
-                .all_root_names
-                .contains(&crate::pipeline::IrName::new("n")),
-            "arrow-form def `n` must be in all_root_names; got: {:?}",
-            compiled.all_root_names
+                .manifest()
+                .entries
+                .iter()
+                .any(|entry| entry.name == "n"),
+            "arrow-form def `n` must be in the manifest; got: {:?}",
+            compiled.manifest().entries
         );
     }
 
@@ -6024,11 +6481,12 @@ def logits(x: tensor[2, 2, f32], w: tensor[2, 2, f32]) -> tensor[2, 2, f32] =
 
         assert_eq!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .map(crate::pipeline::IrName::as_str)
+                .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>(),
-            ["label", "logits"]
+            ["label"]
         );
         assert_eq!(
             compiled
@@ -6069,6 +6527,7 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             &context,
             "module App.Eval\nimport Mylib.Copy (consume)\n\n\
              def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))\n",
+            Target::Eval,
         )
         .expect("compile new source in context");
         let context_root = *compiled
@@ -6155,6 +6614,13 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         );
         let eval_result = eval_in_context_with_bindings(&context, source, bindings)
             .expect("eval in context succeeds");
+        assert_eq!(eval_result.manifest.entries.len(), 1);
+        assert_eq!(eval_result.manifest.entries[0].name, "main");
+        assert_eq!(
+            eval_result.manifest.entries[0].required_inputs,
+            ["x".to_string()],
+            "the concrete bound callable must be promoted into the consumed eval manifest"
+        );
         let main_root = eval_result
             .roots
             .iter()
@@ -6184,6 +6650,187 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
             vec![Some(2)],
             "compiled output shape agrees with the [2] eval value"
         );
+    }
+
+    #[test]
+    fn manifested_callable_requires_only_reachable_runtime_inputs() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "live".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            },
+        );
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "def main(dead: tensor[2, f32], live: tensor[2, f32]) \
+                     -> tensor[2, f32] = add(live, live)\n"
+                .to_string(),
+            bindings,
+        })
+        .expect("a dead authored parameter is not a required runtime input");
+
+        assert_eq!(result.manifest.entries.len(), 1);
+        assert_eq!(result.manifest.entries[0].name, "main");
+        assert_eq!(
+            result.manifest.entries[0].required_inputs,
+            ["live".to_string()]
+        );
+        assert_eq!(result.roots.len(), 1);
+    }
+
+    #[test]
+    fn manifested_callable_expands_tuple_roots_with_originating_inputs() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        bindings.insert(
+            "y".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            },
+        );
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "def main(x: tensor[2, f32], y: tensor[2, f32]) \
+                     -> (tensor[2, f32], tensor[2, f32]) = (x, y)\n"
+                .to_string(),
+            bindings,
+        })
+        .expect("a fully supplied tuple-returning callable is observable");
+
+        let manifest = result
+            .manifest
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.required_inputs.as_slice()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            manifest,
+            vec![
+                ("main.0", ["x".to_string(), "y".to_string()].as_slice()),
+                ("main.1", ["x".to_string(), "y".to_string()].as_slice()),
+            ],
+            "[05-OBS-7..9] require selected callable products to use dotted \
+             topology and inherit the originating call's reachable input closure"
+        );
+        assert_eq!(
+            result
+                .roots
+                .iter()
+                .map(|root| root.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("main.0"), Some("main.1")]
+        );
+    }
+
+    #[test]
+    fn manifested_callable_tuple_stays_a_declaration_when_an_input_is_missing() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: "def main(x: tensor[2, f32], y: tensor[2, f32]) \
+                     -> (tensor[2, f32], tensor[2, f32]) = (x, y)\n"
+                .to_string(),
+            bindings,
+        })
+        .expect("an incompletely supplied callable remains a declaration");
+
+        assert!(result.manifest.entries.is_empty());
+        assert!(result.roots.is_empty());
+    }
+
+    #[test]
+    fn manifested_callable_expands_static_record_adt_roots() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        bindings.insert(
+            "y".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![3.0, 4.0]),
+            },
+        );
+        let source = "type Pair =\n\
+                     \x20 | Pair { left: tensor[2, f32], right: tensor[2, f32] }\n\n\
+                     def main(x: tensor[2, f32], y: tensor[2, f32]) -> Pair = \
+                     Pair { left: x, right: y }\n";
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings,
+        })
+        .expect("a fully supplied static-ADT callable is observable");
+
+        assert_eq!(
+            result
+                .manifest
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["main.left", "main.right"]
+        );
+        assert!(
+            result
+                .manifest
+                .entries
+                .iter()
+                .all(|entry| { entry.required_inputs == vec!["x".to_string(), "y".to_string()] })
+        );
+        assert_eq!(
+            result
+                .roots
+                .iter()
+                .map(|root| root.name.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("main.left"), Some("main.right")]
+        );
+    }
+
+    #[test]
+    fn manifested_callable_static_adt_stays_a_declaration_when_an_input_is_missing() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "x".to_string(),
+            crate::schema::TensorValue {
+                shape: vec![2],
+                data: crate::schema::TensorElements::F32(vec![1.0, 2.0]),
+            },
+        );
+        let source = "type Pair =\n\
+                     \x20 | Pair { left: tensor[2, f32], right: tensor[2, f32] }\n\n\
+                     def main(x: tensor[2, f32], y: tensor[2, f32]) -> Pair = \
+                     Pair { left: x, right: y }\n";
+        let result = eval(EvalRequest {
+            source_kind: SourceKind::Surf,
+            source: source.to_string(),
+            bindings,
+        })
+        .expect("an incompletely supplied static-ADT callable remains a declaration");
+
+        assert!(result.manifest.entries.is_empty());
+        assert!(result.roots.is_empty());
     }
 
     // In-context scalar-entry rejection: a scalar-signature entry has no
@@ -6325,21 +6972,24 @@ def out(x: tensor[2, f32]) -> tensor[2, f32] = add(consume(x), consume(x))
         assert!(compiled.named_roots.is_empty());
         assert!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .any(|name| name.as_str() == "status")
+                .any(|entry| entry.name == "status")
         );
         assert!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .any(|name| name.as_str() == "loss")
+                .any(|entry| entry.name == "loss")
         );
         assert!(
             compiled
-                .all_root_names
+                .manifest()
+                .entries
                 .iter()
-                .any(|name| name.as_str() == "should_stop")
+                .any(|entry| entry.name == "should_stop")
         );
     }
 
@@ -6350,7 +7000,7 @@ def id(let: int64) -> int64 = let
 "#;
 
         let compiled = compile_source(SourceKind::Surf, source).expect("compile");
-        let deep = chelis_deep::printer::print_canonical(compiled.checked.exprs());
+        let deep = chelis_deep::printer::print_canonical(compiled.checked().exprs());
         assert!(deep.contains("^{:type (t-prim {} int64)} let"));
     }
 
@@ -6727,15 +7377,15 @@ def load_tokenizer(path: string) -> Option[Tokenizer] =
         )
         .expect("compile");
 
-        let host = chelis_ir::host::try_lower_compiled_program(&compiled.checked)
+        let host = chelis_ir::host::try_lower_compiled_program(compiled.checked())
             .expect("checked host program must lower")
             .host
             .expect("host lowering");
         let lowered = chelis_ir::lower::top_level_lowering_map(
-            compiled.checked.exprs(),
-            compiled.checked.type_env(),
+            compiled.checked().exprs(),
+            compiled.checked().type_env(),
         );
-        let checked_text = chelis_deep::printer::print_canonical(compiled.checked.exprs());
+        let checked_text = chelis_deep::printer::print_canonical(compiled.checked().exprs());
 
         let find_ret = |suffix: &str| {
             host.functions
@@ -6839,6 +7489,74 @@ b: tensor[2, f32] = b
             "expected eval error mentioning `b`, got {:?}",
             b_err.errors
         );
+    }
+
+    #[test]
+    fn manifested_tensor_roots_carry_only_their_own_lowered_inputs() {
+        let compiled = compile_source(
+            SourceKind::Surf,
+            "a: tensor[2, f32] = a\nb: tensor[2, f32] = b\n",
+        )
+        .expect("compile independent input roots");
+        let inputs_for = |name: &str| {
+            compiled
+                .manifest()
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing manifest entry {name}"))
+                .required_inputs
+                .clone()
+        };
+        assert_eq!(inputs_for("a"), ["a".to_string()].into_iter().collect());
+        assert_eq!(inputs_for("b"), ["b".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn manifested_host_root_inherits_only_its_top_level_input_dependency() {
+        let compiled = compile_source_for_target(
+            SourceKind::Surf,
+            "input: tensor[2, f64] = input\nother: tensor[2, f64] = other\n\
+             values = to_list(input)\n",
+            Target::C,
+        )
+        .expect("compile Host root with one runtime input");
+        let entry = compiled
+            .manifest()
+            .entries
+            .iter()
+            .find(|entry| entry.name == "values")
+            .expect("values manifest entry");
+        assert_eq!(entry.lane, Lane::Host);
+        assert_eq!(
+            entry.required_inputs,
+            ["input".to_string()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn unavailable_owed_root_fails_with_named_lane_and_authority() {
+        let mut compiled = compile_source(SourceKind::Surf, "answer = cast(42, int32)\n")
+            .expect("compile fault-injection fixture");
+        let mut manifest = compiled.manifest().clone();
+        let mut unavailable = manifest.entries[0].clone();
+        unavailable.name = "missing_root".to_string();
+        unavailable.lane = Lane::Tensor;
+        manifest.entries.push(unavailable);
+        compiled.program =
+            ManifestedProgram::new(compiled.checked().clone(), manifest, Target::Eval);
+
+        let error = eval_compiled(&compiled, BTreeMap::new(), None)
+            .expect_err("an owed root absent from its assigned lane must fail loudly");
+        let diagnostic = error.errors.first().expect("one typed diagnostic");
+        assert_eq!(
+            diagnostic.kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+        assert!(diagnostic.message.contains("[05-UNS-1]"));
+        assert!(diagnostic.message.contains("missing_root"));
+        assert!(diagnostic.message.contains("Tensor lane"));
+        assert!(diagnostic.message.contains("unimplemented chelis#912"));
     }
 
     #[test]

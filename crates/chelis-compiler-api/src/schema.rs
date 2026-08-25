@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use chelis_types::types::Prim;
 use chelis_types::unsupported::Unsupported;
-use chelis_types::{ScalarValue, scalar_from_f64};
+use chelis_types::{
+    ScalarValue, scalar_from_f64,
+    types::{Lane, Target},
+};
 use chelis_vocab::DiagnosticKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1067,6 +1070,34 @@ pub struct GeneratedFile {
     pub contents: String,
 }
 
+/// Stable machine-facing projection of one checked root-manifest entry.
+/// Internal type expressions and routing evidence stay on `RootEntry`; the
+/// public wire carries only the facts consumers need to route observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootManifestEntryResult {
+    pub name: String,
+    pub lane: Lane,
+    pub required_inputs: Vec<String>,
+}
+
+/// Target-carrying root contract returned by production eval/build APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootManifestResult {
+    pub target: Target,
+    pub entries: Vec<RootManifestEntryResult>,
+    pub requires_main: bool,
+}
+
+impl Default for RootManifestResult {
+    fn default() -> Self {
+        Self {
+            target: Target::Eval,
+            entries: Vec::new(),
+            requires_main: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompileResult {
     pub target: CompileTarget,
@@ -1076,6 +1107,7 @@ pub struct CompileResult {
     pub link_flags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_device_bytes_estimate: Option<usize>,
+    pub manifest: RootManifestResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1113,6 +1145,8 @@ pub struct EvalResult {
     #[serde(deserialize_with = "require_execution_value_schema_version")]
     pub schema_version: u32,
     pub roots: Vec<EvaluatedRoot>,
+    #[serde(default)]
+    pub manifest: RootManifestResult,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<String>,
 }

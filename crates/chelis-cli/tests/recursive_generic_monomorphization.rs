@@ -410,9 +410,15 @@ fn compile_generated_object(out_dir: &std::path::Path, stem: &str) -> PathBuf {
         },
     );
     let object = out_dir.join(format!("{stem}.o"));
+    let isolated_main = format!("{stem}__manifest_main");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(out_dir)
         .args(&toolchain.compile_flags)
+        // These are independently executable manifested programs. Rename
+        // each generated driver while combining their relocatable objects so
+        // this oracle isolates specialization-symbol collisions from the two
+        // intentionally present C entry points.
+        .arg(format!("-Dmain={isolated_main}"))
         .args(["-I.", "-c", &format!("{stem}.c"), "-o"])
         .arg(&object)
         .output()

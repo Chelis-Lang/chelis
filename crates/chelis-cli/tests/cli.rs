@@ -977,7 +977,10 @@ fn eval_json_def_only_emits_empty_roots_json() {
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
     // Execution wire v2 (chelis#729): EvalResult stamps its payload
     // version.
-    assert_eq!(stdout.trim(), r#"{"schema_version":2,"roots":[]}"#);
+    assert_eq!(
+        stdout.trim(),
+        r#"{"schema_version":2,"roots":[],"manifest":{"target":"Eval","entries":[],"requires_main":false}}"#
+    );
     let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["roots"].as_array().expect("roots").len(), 0);
 }
@@ -1555,12 +1558,10 @@ int main(void) {
 }
 
 #[test]
-fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
-    // Regression guard for Nautilus benchmark ask: when `chelis build` produces a
-    // self-contained binary (top-level `result = ...` triggers main emission), any
-    // user-defined `def` in the same TU should be marked `static inline` so -O2
-    // cross-call inlining kicks in without LTO / -Wl,-Bsymbolic on the downstream
-    // shell. Object-mode builds (no main) keep external linkage.
+fn build_c_user_defined_exports_remain_linkable_when_main_is_emitted() {
+    // A root-bearing build is both executable and a published C translation
+    // unit. Its authored definitions must match the external declarations in
+    // the generated header; `main` emission cannot silently hide them.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("inline_helpers.ch");
     let out_dir = dir.path().join("inline-helpers-build-out");
@@ -1587,8 +1588,9 @@ fn build_c_user_defined_helpers_are_static_inline_when_main_is_emitted() {
 
     let c_src = fs::read_to_string(out_dir.join("inline_helpers.c")).expect("read generated C");
     assert!(
-        c_src.contains("static inline chelis_tensor* combine("),
-        "expected combine() to be emitted as `static inline` in self-contained binary, got:\n{c_src}"
+        c_src.contains("chelis_tensor* combine(")
+            && !c_src.contains("static inline chelis_tensor* combine("),
+        "expected combine() to retain external linkage in the executable translation unit, got:\n{c_src}"
     );
     assert!(
         c_src.contains("int main("),
@@ -1640,6 +1642,13 @@ fn build_c_tuple_return_header_supports_driver_extraction() {
         header.contains("chelis_tuple* eig_pair("),
         "expected tuple-returning C ABI in generated header, got:\n{header}"
     );
+    let generated = out_dir.join("tuple_abi.c");
+    let source = fs::read_to_string(&generated).expect("generated c");
+    fs::write(
+        &generated,
+        source.replace("int main(void)", "int chelis_manifest_main(void)"),
+    )
+    .expect("rename the generated observation driver for library-link probing");
 
     write_file(
         &out_dir.join("driver.c"),
@@ -2015,9 +2024,11 @@ fn build_c_tensor_grad_with_host_branching_dependency_builds() {
     let source = fs::read_to_string(out_dir.join("grad_rows_branching.c")).expect("generated c");
     // WS-4: the `x: f32` scalar param makes the host loss helper return a
     // `float` (the declared width), not the previously-widened `double`.
+    // The generated public header declares authored functions externally, so
+    // adding a manifest observation driver must not make this definition local.
     assert!(
-        source.contains("static inline float loss("),
-        "expected host-side scalar loss helper to be emitted:\n{source}"
+        source.contains("float loss(") && !source.contains("static inline float loss("),
+        "expected an externally linked host-side scalar loss helper:\n{source}"
     );
     assert!(
         source.contains("if (__cond"),
@@ -2063,8 +2074,9 @@ fn build_c_tensor_grad_lm_style_mixed_scalar_tensor_args_builds() {
 
     let source = fs::read_to_string(out_dir.join("tensor_grad_lm_canary.c")).expect("generated c");
     assert!(
-        source.contains("static inline chelis_tensor* row("),
-        "expected a host wrapper for the gradient row helper:\n{source}"
+        source.contains("chelis_tensor* row(")
+            && !source.contains("static inline chelis_tensor* row("),
+        "expected an externally linked host wrapper for the gradient row helper:\n{source}"
     );
     assert!(
         source.contains("__tensor_arg1_") && source.contains("chelis_alloc(0, NULL, CHELIS_F32)"),
@@ -2980,8 +2992,9 @@ fn build_c_recursive_tensor_function_stays_on_host_path() {
 
     let source = fs::read_to_string(out_dir.join("recursive_tensor.c")).expect("generated c");
     assert!(
-        source.contains("static inline chelis_tensor* recur("),
-        "expected recursive tensor helper to stay in the host lane:\n{source}"
+        source.contains("chelis_tensor* recur(")
+            && !source.contains("static inline chelis_tensor* recur("),
+        "expected externally linked recursive tensor helper to stay in the host lane:\n{source}"
     );
     assert!(
         source.contains("__result = recur("),
@@ -3112,9 +3125,9 @@ fn build_c_preserves_unreachable_host_defs_for_driver_linking() {
 
     fs::write(
         &generated,
-        source.replace("float main", "float chelis_entry"),
+        source.replace("int main(void)", "int chelis_manifest_main(void)"),
     )
-    .expect("rename generated entry point");
+    .expect("rename the generated observation driver for library-link probing");
     write_file(
         &out_dir.join("driver.c"),
         r#"#include <stdio.h>
@@ -5450,7 +5463,10 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
     let dir = tempdir().expect("tempdir");
     let out_dir = dir.path().join("hip-output");
     let source = dir.path().join("matmul.ch");
-    write_matmul_program(&source);
+    write_file(
+        &source,
+        "def matmul_kernel(a: tensor[2, 3, f32], b: tensor[3, 4, f32]) -> tensor[2, 4, f32] = (matmul(a, b) : tensor[2, 4, f32])\n",
+    );
 
     Command::cargo_bin("chelis")
         .expect("binary")
@@ -5471,6 +5487,39 @@ fn build_hip_matmul_surfaces_hipblas_link_flag_when_specialized() {
     assert!(
         hip_src.contains("chelis_hipblas_sgemm_row_major"),
         "HIP build should surface hipBLAS specialization for a simple matmul program"
+    );
+}
+
+#[test]
+fn build_hip_unbound_observation_root_fails_before_writing_an_artifact() {
+    let dir = tempdir().expect("tempdir");
+    let out_dir = dir.path().join("hip-output");
+    let source = dir.path().join("matmul.ch");
+    write_matmul_program(&source);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--target",
+            "hip",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unsupported:")
+                .and(predicate::str::contains("[05-UNS-1]"))
+                .and(predicate::str::contains("root `a`"))
+                .and(predicate::str::contains("codegen:hip"))
+                .and(predicate::str::contains("required input(s) `a`")),
+        );
+    assert!(
+        !out_dir.exists(),
+        "an unavailable owed root must fail before any partial artifact is written"
     );
 }
 
@@ -8694,9 +8743,10 @@ fn build_c_higher_order_scalar_fn_param_emits_wrapper() {
     // 4-byte `float` type. Before the precision fix the host lane collapsed
     // these to `double`, silently widening the declared `f32` signature.
     assert!(
-        source.contains("static inline float apply(float (*model)(float), float x) {"),
-        "expected `apply` wrapper definition in the C source; only a forward \
-         declaration would leave gcc with `implicit declaration`. Source:\n{source}",
+        source.contains("float apply(float (*model)(float), float x) {")
+            && !source.contains("static inline float apply("),
+        "expected externally linked `apply` wrapper definition in the C source; only a \
+         forward declaration would leave gcc with `implicit declaration`. Source:\n{source}",
     );
     // Parity with the tensor case: the same shape with `tensor[n, f32]`
     // already emits the wrapper. Make sure both shapes succeed in this

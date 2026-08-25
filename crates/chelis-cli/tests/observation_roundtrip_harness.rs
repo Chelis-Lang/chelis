@@ -161,9 +161,10 @@ fn c_stdout(program: &str, name: &str) -> Result<String, String> {
 /// rendered it (chelis#750), so this harness inlined the body as a
 /// workaround. chelis#750 is fixed (the host lane now re-attaches a
 /// def-call-valued display root to `emit_main`), so `troot` calls `mk()`
-/// directly and the render-count assertions below pin BOTH lanes to
-/// exactly two tensor / two list renders — this harness is the regression
-/// lock for chelis#750.
+/// directly. [05-OBS-7] also makes the pure nullary `mk` declaration an
+/// owed root, so the render-count assertions below pin BOTH lanes to the
+/// transcript, `mk`, and the explicit value root for each exit — this
+/// harness is the regression lock for both contracts.
 fn exits_program(ret: &str, body: &str) -> String {
     format!(
         "module M.Main\n\
@@ -175,8 +176,8 @@ fn exits_program(ret: &str, body: &str) -> String {
     )
 }
 
-/// Lines rendering the tensor itself: the `print` transcript line plus the
-/// `troot = ...` labeled root. Exactly two per lane.
+/// Lines rendering the tensor itself: the `print` transcript line, the
+/// automatic `mk = ...` root, and the `troot = ...` labeled root.
 fn tensor_lines(stdout: &str) -> Vec<&str> {
     stdout
         .lines()
@@ -656,9 +657,9 @@ const INT_ROWS: &[(&str, &[IRow])] = &[
 // Shared assertions
 // ---------------------------------------------------------------------------
 
-/// Tier 2 over a float dtype: all four exit renders decode to the table's
-/// bits at `w`. `print_filter` limits which rows the two print lines are
-/// held to and `list_filter` the two to_list lines (eval passes `all_rows`
+/// Tier 2 over a float dtype: every exit render decodes to the table's bits
+/// at `w`. `print_filter` limits which rows the three tensor lines are held
+/// to and `list_filter` the two to_list lines (eval passes `all_rows`
 /// for both; the C tests carve out the C-lane exclusions and the
 /// print-format discovery cells).
 fn assert_float_exits(
@@ -669,18 +670,17 @@ fn assert_float_exits(
     list_filter: fn(&FRow) -> bool,
     ctx: &str,
 ) {
-    // Full four-exit programs (`exits_program`) render the print transcript
-    // AND the `troot` value root: exactly two tensor renders.
-    assert_float_print_exits(stdout, w, rows, print_filter, 2, ctx);
+    // Full exit programs render the transcript, [05-OBS-7]'s automatic
+    // pure-nullary `mk` root, and the explicit `troot` value root.
+    assert_float_print_exits(stdout, w, rows, print_filter, 3, ctx);
     let llines = list_lines(stdout);
-    // chelis#750: exactly two — the `print(to_list(mk()))` transcript line
-    // and the `lroot = [...]` labeled root. Both lanes render both now that
-    // the def-call root drop is fixed; a count other than two is a
-    // regression (a dropped or duplicated root render).
+    // The automatic `mk` root renders the tensor value itself; it does not
+    // invent a second to_list conversion. This exit therefore remains the
+    // transcript and explicit `lroot` only.
     assert_eq!(
         llines.len(),
         2,
-        "[{ctx}] expected the transcript and root to_list renders, got:\n{stdout}"
+        "[{ctx}] expected transcript and explicit-root to_list renders, got:\n{stdout}"
     );
     for line in llines {
         let elems = list_payload_elems(line);
@@ -706,11 +706,10 @@ fn assert_float_exits(
 /// and each red cell must fail on ITS OWN exit).
 ///
 /// `expected_tensor_renders` pins the exact tensor-render count: a full
-/// `exits_program` passes 2 (the `print(mk())` transcript plus the
-/// `troot = tensor(...)` value root — chelis#750 now emits both in both
-/// lanes), while a print-only program (no value root, e.g. the chelis#716
-/// f16/bf16 cells) passes 1. An off-by-one here is a dropped or duplicated
-/// root render.
+/// `exits_program` passes 3 (the `print(mk())` transcript, [05-OBS-7]'s
+/// automatic `mk = tensor(...)` root, and `troot = tensor(...)`). A
+/// print-only program with the same pure nullary def passes 2. An off-by-one
+/// here is a dropped or duplicated root render.
 fn assert_float_print_exits(
     stdout: &str,
     w: Width,
@@ -744,21 +743,19 @@ fn assert_float_print_exits(
     }
 }
 
-/// Tier 2 over an integer dtype (both exits, both renders).
+/// Tier 2 over an integer dtype (three tensor renders and two list renders).
 fn assert_int_exits(stdout: &str, rows: &[IRow], ctx: &str) {
-    // chelis#750: exactly two per exit — the `print(...)` transcript line
-    // and the labeled root (`troot`/`lroot`). The def-call root drop is
-    // fixed, so both lanes render both; a count other than two is a
-    // regression (a dropped or duplicated root render).
+    // Tensor rendering observes the transcript, automatic `mk` root, and
+    // explicit `troot`; to_list observes its transcript and explicit `lroot`.
     assert_eq!(
         tensor_lines(stdout).len(),
-        2,
-        "[{ctx}] expected the transcript and root tensor renders, got:\n{stdout}"
+        3,
+        "[{ctx}] expected transcript, automatic, and explicit-root tensor renders, got:\n{stdout}"
     );
     assert_eq!(
         list_lines(stdout).len(),
         2,
-        "[{ctx}] expected the transcript and root to_list renders, got:\n{stdout}"
+        "[{ctx}] expected transcript and explicit-root to_list renders, got:\n{stdout}"
     );
     for line in tensor_lines(stdout) {
         let elems = tensor_elems(line);
@@ -919,7 +916,7 @@ fn eval_int64_above_2p53_exits_agree_within_lane() {
     for line in list_lines(&out) {
         decoded.push(text_int_lenient(&list_payload_elems(line)[0]).expect("to_list exit"));
     }
-    assert_eq!(decoded.len(), 4, "four exit renders expected:\n{out}");
+    assert_eq!(decoded.len(), 5, "five exit renders expected:\n{out}");
     assert!(
         decoded.windows(2).all(|w| w[0] == w[1]),
         "eval exits disagree on one stored int64 tensor: {decoded:?}\n{out}"
@@ -961,7 +958,7 @@ fn eval_scalar_exits_round_trip() {
     ];
     for (expr, w, value) in float_rows {
         let out = eval_stdout(&format!("module M.Main\nshown = print({expr})\n")).expect("eval");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 1) {
             let got = text_bits_at(&line, *w)
                 .unwrap_or_else(|e| panic!("[eval scalar {expr}] {e}\n{out}"));
             assert_eq!(
@@ -979,36 +976,37 @@ fn eval_scalar_exits_round_trip() {
     ];
     for (expr, value) in int_rows {
         let out = eval_stdout(&format!("module M.Main\nshown = print({expr})\n")).expect("eval");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 1) {
             let got =
                 text_int_lenient(&line).unwrap_or_else(|e| panic!("[eval scalar {expr}] {e}"));
             assert_eq!(got, *value, "[eval scalar {expr}] text `{line}`");
         }
     }
     let out = eval_stdout("module M.Main\nshown = print(true)\n").expect("eval");
-    for line in scalar_render_lines(&out) {
+    for line in scalar_render_lines(&out, 1) {
         assert_eq!(line, "true", "bool scalar exit");
     }
 }
 
-/// The scalar print-transcript render of a single `shown = print(expr)`
-/// program. The print root itself renders as `()` (print returns unit) and
-/// is dropped. Scalar VALUE roots - deliberately undriven at Phase 0 while
-/// the canonical scalar-root rendering was undecided (chelis#775) - are
-/// driven since chelis#732 Phase 1 by `eval_scalar_value_roots_render_bare`
-/// below: [05-OBS-4] makes the bare scalar canonical at every exit, so the
-/// eval-internal rank-0 realization no longer leaks into root renders.
-fn scalar_render_lines(stdout: &str) -> Vec<String> {
+/// Scalar payloads from a program's transcript and value roots. Unit-valued
+/// print roots are excluded, and a labeled root is reduced to its payload so
+/// every observed exit can be compared through the same dtype decoder.
+/// [05-OBS-4] makes that bare scalar payload canonical at every exit, so the
+/// eval-internal rank-0 realization never leaks into the comparison.
+fn scalar_render_lines(stdout: &str, expected_renders: usize) -> Vec<String> {
     let lines: Vec<String> = stdout
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.ends_with("()"))
-        .map(str::to_string)
+        .map(|line| {
+            line.split_once(" = ")
+                .map_or_else(|| line.to_string(), |(_, payload)| payload.to_string())
+        })
         .collect();
     assert_eq!(
         lines.len(),
-        1,
-        "expected exactly the scalar print transcript, got:\n{stdout}"
+        expected_renders,
+        "expected exactly {expected_renders} scalar render(s), got:\n{stdout}"
     );
     lines
 }
@@ -1082,8 +1080,8 @@ fn eval_f64_cast_tensor_root_renders_stored_width() {
         let tlines = tensor_lines(&out);
         assert_eq!(
             tlines.len(),
-            2,
-            "{case}: transcript and root renders:\n{out}"
+            3,
+            "{case}: transcript, automatic, and explicit-root renders:\n{out}"
         );
         // Green half (control): the transcript renders the STORED bits (the
         // f64 images of the f32-constructed elements) at the stored width.
@@ -1091,12 +1089,17 @@ fn eval_f64_cast_tensor_root_renders_stored_width() {
             tlines[0], "tensor(shape=[2], data=[0.10000000149011612, 0.30000001192092896])",
             "{case}: the print transcript must keep rendering the stored bits"
         );
+        assert_eq!(
+            tlines[1],
+            format!("mk = {}", tlines[0]),
+            "{case}: the automatic nullary root must render the same stored bits as print"
+        );
         // The labeled root must agree with the transcript ([05-OBS-1]
         // intra-lane exit agreement). Before chelis#864 the static DAG
         // shortcut could widen unfinalized lexical decimals instead of the
         // host path's stored f32 values.
         assert_eq!(
-            tlines[1],
+            tlines[2],
             format!("troot = {}", tlines[0]),
             "{case}: the labeled root must render the same stored bits as print"
         );
@@ -1404,12 +1407,17 @@ fn eval_tensor_renders_truncate_at_32_with_marker() {
     let tlines = tensor_lines(&out);
     assert_eq!(
         tlines.len(),
-        2,
-        "expected the transcript and root renders:\n{out}"
+        3,
+        "expected transcript, automatic, and explicit-root renders:\n{out}"
     );
     assert_eq!(tlines[0], expected, "transcript truncation form");
     assert_eq!(
         tlines[1],
+        format!("mk = {expected}"),
+        "automatic-root truncation form"
+    );
+    assert_eq!(
+        tlines[2],
         format!("troot = {expected}"),
         "labeled-root truncation form"
     );
@@ -1601,7 +1609,7 @@ fn c_scalar_exits_round_trip() {
     for (i, (ret, expr, w, value)) in float_rows.iter().enumerate() {
         let program = format!("module M.Main\ndef run() -> {ret} = {expr}\nshown = print(run())\n");
         let out = c_stdout(&program, &format!("obs_sc_f{i}")).expect("C lane");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 2) {
             let got = text_bits_at(&line, *w).unwrap_or_else(|e| panic!("[c scalar {expr}] {e}"));
             assert_eq!(
                 got,
@@ -1617,7 +1625,7 @@ fn c_scalar_exits_round_trip() {
     for (i, (expr, value)) in int_rows.iter().enumerate() {
         let program = format!("module M.Main\ndef run() -> int64 = {expr}\nshown = print(run())\n");
         let out = c_stdout(&program, &format!("obs_sc_i{i}")).expect("C lane");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 2) {
             assert_eq!(
                 text_int_lenient(&line).expect("int scalar"),
                 *value,
@@ -1630,7 +1638,7 @@ fn c_scalar_exits_round_trip() {
         "obs_sc_b",
     )
     .expect("C lane");
-    for line in scalar_render_lines(&out) {
+    for line in scalar_render_lines(&out, 2) {
         assert_eq!(line, "true", "bool scalar exit");
     }
 }
@@ -1945,7 +1953,11 @@ fn eval_bool_tensor_print_matches_to_list_exit() {
 
     let out = eval_stdout(&program).expect("eval");
     let tlines = tensor_lines(&out);
-    assert_eq!(tlines.len(), 2, "transcript and root renders:\n{out}");
+    assert_eq!(
+        tlines.len(),
+        3,
+        "transcript, automatic, and explicit-root renders:\n{out}"
+    );
     for line in tlines {
         assert_eq!(
             tensor_elems(line),
@@ -1957,7 +1969,7 @@ fn eval_bool_tensor_print_matches_to_list_exit() {
     assert_eq!(
         llines.len(),
         2,
-        "transcript and root to_list renders:\n{out}"
+        "transcript and explicit-root to_list renders:\n{out}"
     );
     for line in llines {
         assert_eq!(list_payload_elems(line), expected, "eval to_list: {line}");
@@ -2015,10 +2027,9 @@ fn c_f16_bf16_tensor_print_is_dtype_faithful() {
         );
         let out = c_stdout(&program, &format!("obs_{dt}_print"))
             .unwrap_or_else(|e| panic!("chelis#716: the {dt} program must run: {e}"));
-        // Print-only program (no value root): exactly one tensor render, the
-        // `print(mk())` transcript. This cell fails on the VALUE assertion
-        // below (chelis#716 reads f16/bf16 as f32), not on the render count.
-        assert_float_print_exits(&out, w, rows, all_rows, 1, &format!("c/{dt}"));
+        // Print-only still owes two renders: the transcript and the pure
+        // nullary `mk` root required by [05-OBS-7].
+        assert_float_print_exits(&out, w, rows, all_rows, 2, &format!("c/{dt}"));
     }
 }
 
@@ -2141,7 +2152,7 @@ fn c_print_format_selection_preserves_small_and_17_digit_values() {
     {
         let program = format!("module M.Main\ndef run() -> f64 = {expr}\nshown = print(run())\n");
         let out = c_stdout(&program, &format!("obs_sc_red{i}")).expect("C lane");
-        for line in scalar_render_lines(&out) {
+        for line in scalar_render_lines(&out, 2) {
             let got =
                 text_bits_at(&line, Width::F64).unwrap_or_else(|e| panic!("[c scalar {expr}] {e}"));
             assert_eq!(

@@ -90,7 +90,7 @@ an unshipped repair release.
 | plan | landed | remaining |
 |---|---|---|
 | **#729 dtype semantics** | P0-P3 + §C6 census, all CI-wired (PRs #758, #956, #1033, #1049, #1054, #1065, #1118); the dtype ledger landed in PR #1181; [04-NUM-15] was authored in PR #1169 and enforced by PR #1189; scalar numeric families aligned in PR #1188 and shipped in v0.18.5. This change is Phase 4B: [05-OP-1..41], [04-NUM-16], spec/06's recursive List/ADT cotangents, reduction tie/NaN/infinity rules, direct stored-bit extrema selection and checked subtraction, canonical balanced sum/product/count trees, canonical gradient consumer-edge order by forward node ordinal and input slot, canonical scalar/tensor/recursive-List `to_string`, byte-exact runtime List/tuple/Dict/ADT observation, bool-only logical truth tables, exact NaN-aware comparisons, all-active-signed sparse indices across IR and public C, first-class multi-axis `count`, exact-only WireDag v6 numeric fields, the sole public JSON ADT, exact `IO` effect spelling, and zero-exception external-family semantics are frozen; `dtype_phase4b_oracle.py` is the authoritative freeze check | **Prerequisites before 4C:** #893/#1289 seal tensor access and replace the C ABI with exact tagged carriers; #1288 replaces every frozen capacity disposition with a total final authority map; #1290 lands the balanced reduction trees; #1287 lands `count` in eval/C and exact-only WireDag v6 decoding, while #1291 owns loud HIP/Metal count cells; #1292 removes the tensor-close f64 funnel; #1293 aligns all 83 recursively discovered stdlib numeric definitions, removes duplicate JSON/prelude identities, and removes the unimplemented generic `sample` export; #1294 proves exact atom authority for the union of every canonical Table-A IR/RISC identity and every sibling builtin declaration; #1295 implements the all-active-dtype parameter contracts; #1296 locks the complete v0.19 child set; #1297 implements the legal compiled host-effect builtins; #1298 implements runtime axes and target-independent reduction windows; and #1306 implements direct typed subtraction/extrema without arithmetic surrogates. No 4C key/cell type, macro, or partial row may land before #1294 and #1296 are green and merged, and no authored cell may claim support before its behavior prerequisite is executable. **4C:** populate Table A/B, host-constructor and sibling-builtin registries, external target dispositions, and exact effect-disposition rows, with authoritative `dtype_phase4c_oracle.py`. **4D:** derive checker/reporting, backend dispatch, build gates, host casts/ABI, #912 projections, effect lookup, and exported-stdlib dependency closures, with authoritative `dtype_phase4d_oracle.py`. **4E:** generate the complete executable product and final `dtype_phase4_oracle.py`, then fresh red team. No compatibility wrapper, reader, cast-counting idiom, unnumbered authority, grandfathered behavior, or capacity exception is accepted. #735 retains the unauthored device-selection meaning; its resource cases cannot default to support |
-| **#730 loud unsupported** | P0-P2; P3's typed `RejectionAuthority` + sealed 48-kind `DiagnosticKind` slices (PR #1037); P3's gate contract in two slices - PR #1175 (one typed compiler-api policy behind both public build paths, the `reject_unsupported_hip_ops` pair deduped, `COMPILED_HOST_ONLY_BUILTINS` deleted, the C precision preflights removed, a syntactic `reject_*` source manifest over both crates) and PR #1186 (Metal and seeded-effect policy moved into those same typed definitions, one shared host tensor-helper traversal, entry-scoped pure-DAG effect rejection, the single Phase 3 runner). Closed #697, #698, #705, #959, and - via LU6 in PR #1189 - #1150, whose `_ => input` host-emission fallback is deleted. Closed #1158 via PR #1204 (after the tag): recursive generic host calls compile through bounded memoized monomorphization under the new [04-INF-2]/[04-INF-3] uniform-recursive-instantiation atoms (spec/04 §3.1.1) - a BREAKING check-time rejection of polymorphic recursion, lane-uniform - with PRs #1215/#1218 extending the same specialization to non-recursive generics (#1201) and recursive erased-dim generics (#1216), and the surviving fail-closed residue re-cited to the open tracker #1226 | **Phase 3 is not complete**: `scripts/loud_unsupported_phase3_oracle.py` passes five legs and is red on the sixth, the independently owned #912 root-realizability interlock. Also owed: the recorded gate contract as a written rule, deletion of gates that duplicate emitter rejections, a no-duplicate-gates tripwire beyond the syntactic manifest, and the first-error-vs-accumulate decision affirmed before the contract freezes; deliverable 6 rides the #912 chain; Phase 4 (ratchet totality, #990) is entirely unbuilt - no phase-4 oracle script, no nightly workflow |
+| **#730 loud unsupported** | P0-P2; P3's typed `RejectionAuthority` + sealed 48-kind `DiagnosticKind` slices (PR #1037); P3's gate contract in two slices - PR #1175 (one typed compiler-api policy behind both public build paths, the `reject_unsupported_hip_ops` pair deduped, `COMPILED_HOST_ONLY_BUILTINS` deleted, the C precision preflights removed, a syntactic `reject_*` source manifest over both crates) and PR #1186 (Metal and seeded-effect policy moved into those same typed definitions, one shared host tensor-helper traversal, entry-scoped pure-DAG effect rejection, the single Phase 3 runner). Closed #697, #698, #705, #959, and - via LU6 in PR #1189 - #1150, whose `_ => input` host-emission fallback is deleted. Closed #1158 via PR #1204 (after the tag): recursive generic host calls compile through bounded memoized monomorphization under the new [04-INF-2]/[04-INF-3] uniform-recursive-instantiation atoms (spec/04 §3.1.1) - a BREAKING check-time rejection of polymorphic recursion, lane-uniform - with PRs #1215/#1218 extending the same specialization to non-recursive generics (#1201) and recursive erased-dim generics (#1216), and the surviving fail-closed residue re-cited to the open tracker #1226. This revision makes the sixth Phase 3 leg executable: the integrated #912 manifested-root boundary | **Phase 3's executable oracle is green in this revision but completion awaits the fresh exact-head red-team pass**: `scripts/loud_unsupported_phase3_oracle.py` passes all six legs, including the #912 root-realizability interlock. Outside Phase 3, still owed: the recorded gate contract as a written rule, deletion of gates that duplicate emitter rejections, a no-duplicate-gates tripwire beyond the syntactic manifest, and the first-error-vs-accumulate decision affirmed before the contract freezes. Phase 4 (ratchet totality, #990) is entirely unbuilt - no phase-4 oracle script, no nightly workflow |
 | **#731 checker totality** | P0-P3 implemented, incl. the construction gate (PR #1101) and authoring-scope fixes (PR #1136); **PP1 + PP2** (PR #1178): the function-parameter typing channel under [04-INF-1], the writeback information-ordering gate, the atom/primitive agreement matrix under [04-LIT-1] and `spec/03` §6.4, the orphan-`defsig` rule in `spec/03` §2.2, and the registered-builtin arm tripwire - closing #780, #783, #847, #851, #1131, #1147. PR #1285 closed #1088 by moving every compiler-API Deep ingress onto the declaration-role stamp, authoring [03-PROG-1..3], and wiring the #908 oracle continuously | The decode-once rework's fresh-context red team is named pending in `checker_totality.md`'s header, but the round ran on PR #855 (an exact-head architectural pass and an explicitly fresh local-subagent pass, both FAIL, findings folded before merge), so that line is stale text rather than unmet work; #850's build half; #1125's stamped-Node ingress-parity sweep; #1134's ingress-divergence decision; #874's tag-keyed exemption with #887 under it; carrier deletion last (#1029, whose stated precondition - no producer exists - is false: 1,024 `Expr::List` and 77 `Atom::Tag` matching lines under `crates/`, and the `Node::to_list` bridges plus `chelis-surf`'s desugar output are live producers) |
 | **#732 faithful observation - CLOSED 2026-08-21** | All four phases (P3 via PRs #1099/#1115/#1118, shipped in v0.18.3); both known-red ledgers empty (`KNOWN_RED_CELLS` is `()` at `faithful_observation_phase2_oracle.py:159`, and `C_LANE_EXCLUDED` has no production occurrences left); tolerance table + #687 handshake shipped; Phase 2's empty-ledger acceptance repaired and continuously wired by PR #1185; and the last direct debt - #997's structural `FO-DIAG` diagnostic-rendering migration - retired by PR #1250, which is the tracker's own stated closing condition. META #728 closed with it | Nothing, and the closure says so in a form that can be checked: zero open children at close, both owning documents (`faithful_observation.md`, `remediation_roadmap.md`) audited by full read, and every live thread touching this class's artifacts assigned elsewhere by name - own-width eval tensor digits to #729's v0.19 D1 step, the `OBSERVATION_EXIT_SURFACES` derived-universe revisit to #730 Phase 4 §C7.1, root set/order/artifact acceptance to #912/#1023, the shell-invokable comparator gate to #754, the bool decode exception to #894, `chelis_format_shortest` hardening to the #729/#893 pair, and the scheduled full-matrix package to #990. #1059's C-host `to_string` is separate capability work and was re-homed under #1170 before the close, not left dangling. What outlives the tracker are the recurrence guards: the three no-third-formatter tripwire classes, the round-trip harness, and both phase oracles - Phase 2 as its own blocking job, Phase 3 nested inside the `Dtype Phase 0-3 Oracle` job, both on every non-docs-only PR |
 | **#733 spec provenance** | #898's missing numeric-operation authorities are authored by this change, but no provenance phase is activated: no oracle suite, PR template, `governance` gate stage, or `spec/**` CODEOWNERS coverage | P0 remains Chelis-owned and self-contained; P1-P3 additionally wait on three Buoy prerequisites (the pinned revision's `devenv test` oracle, the `buoy.adapter-sdk/v1` pin, and approved host parsed-item schema). The remaining children are #735, #797, and #895. v0.20 is formally blocked on P3 |
@@ -114,37 +114,24 @@ an unshipped repair release.
   declaration-role stamp, plus the third non-strict `parse_deep` door at
   `compiler.rs:2903` that its body did not name - was closed by merged PR
   #1285, which migrated every door, added an ingress-parity oracle, and wired
-  #908's behavioral oracle into a continuous job. #1029, blocked on #1082,
-  is next behind it.
-- **#912** (root boundary; open children #1079, #1080, #1082, #1083, #1102,
-  #1148, plus closed #820/#862/#947/#1081/#1084/#1095): Face 2
-  (the `name = ` prefix) shipped in v0.18.1; Face 1 (existence) is partial -
-  manifest walkers are `Expr::Node`-blind (#1082), and anonymous tuple/ADT
-  roots still drop from the manifest: the dotted-root expansion is a live
-  `TODO` at `chelis-effects/src/realizability.rs:506`. #1083 owns that half;
-  it was briefly closed on 2026-08-21, two seconds after PR #1231 merged and
-  against that PR's own "this does not close #1083" record, and reopened an
-  hour later with the conflict recorded on the thread. The manifest is
-  non-empty today only because of the
-  transitional `normalize_nodes_to_lists` bridge, so **#1029's carrier
-  deletion silently empties manifests unless #1082 lands first** - the two
-  sibling classes are coupled in that order. Face 4 (artifact) is open, and
-  worse than the checklist wording suggests: `requires_main()` has exactly one
-  production caller, `compute_manifest_json` at `main.rs:1839`, which
-  decorates `eval --json` and decides nothing. All three `cmd_build_c_result`
-  sites pass `None`, so `c_source.contains("int main(")` at `main.rs:8596`
-  decides, and `cmd_build_hip_host` never takes the parameter at all - it runs
-  the same text search at `main.rs:8673`. spec/05 says a source-text scanner
-  cannot satisfy [05-UNS-1]. #1023 §C is the live
-  acceptance checklist. The chain still gates a second plan's oracle as well
-  as its own: #730's Phase 3 runner ends at a leg that runs
-  `issue_912_root_boundary` with `--run-ignored all`. PR #1231 re-ran that
-  target's six ignored cells against `main`, found four quietly green
-  (un-ignored, after a review round caught three of them passing vacuously),
-  and declared the remaining two - both `todo!` manifest-completeness cells -
-  in an enforced `IGNORE_LEDGER` citing #1079, so the leg is red on exactly
-  those two until #1079 lands. #1084's surviving ask (the ledger itself) is
-  what #1231 delivered; its first two asks had already landed unrecorded.
+  #908's behavioral oracle into a continuous job. #1029 is next behind it and
+  is unblocked by the #1082 delivery below.
+- **#912** (root boundary): the integrated #1079/#1082/#1083 delivery is in
+  this revision. Manifest discovery walks stamped `Expr::Node` directly;
+  `ManifestedProgram` is the compiler-API observation authority; Tensor roots
+  receive their own DAG-derived input closure; statically fixed tuple/ADT
+  roots expand structurally; C-target f64 roots route Host without narrowing;
+  and C/HIP artifact kind comes from `requires_main()` with no emitted-source
+  scan. Effectful nullary declarations are never auto-applied, variable-size
+  built-in containers remain bare, and selected parameterized callables owe
+  only the reachable inputs in their concrete DAG. Missing or unbound owed
+  roots fail through [05-UNS-1] before a partial result or artifact. The two
+  former `todo!` completeness cells are active, the ignore ledger is empty,
+  and all seventeen `issue_912_root_boundary` cells pass. That
+  unblocks #1029's carrier deletion and #730's Phase 3 integration leg. The
+  parent tracker remains open for the separately owned #1102 zero-gradient
+  value defect and #1148 `trace` result-type decision; neither is implemented
+  by the root-manifest integration.
 - **#909** (typed host function values / C-host callable ABI; children #866,
   #867, #879): no longer paperless - `spec/design/host_function_values.md`
   is written and re-authored against current `main` (PR #1173), and the
@@ -656,9 +643,9 @@ fixes nothing.
 | The next silent value substitution | #730's typed channels (landed) + Phase 4 ratchet totality (§C7) | Phase 4 unstarted (#990) |
 | Gate drift / duplicate gates | #730 P3 gate contract + dedup + deletion | the gates themselves are done (PRs #1175 and #1186: one shared typed policy per target, zero `fn reject_` definitions left in `chelis-cli`, the syntactic `reject_*` source manifest, #697/#698/#705/#959 closed); the recorded contract, the deletion pass, and a semantic no-duplicate tripwire remain |
 | A breaking release reaching shells before anyone runs their suites | the ecosystem-drift canary (auto-files per shell) + `conform bump-check` | neither detects nor gates this. The canary checks each shell out at `main` and never runs `chelis migrate surf`, so it only ever exercises pre-migration source - and #1200 appears only after migration rewrites record patterns to the mandatory v0.19 pun, which makes the existing leg structurally incapable of seeing it. The canary has also been red continuously since 2026-08-02 - its last success is the 2026-08-01 run, and all twenty-four runs since, through 2026-08-21, have failed - so it gates nothing in practice either. The missing leg applies a release candidate's own named migration to each shell tree and then runs that shell's suite |
-| Unhandleable AST states reappearing | #731/#908: stamped-only ingress (#1088), then carrier deletion (#1029) | PR #1285 landed the stamped-ingress and parity-oracle half and closed #1088. Carrier deletion (#1029) remains behind it, blocked on #1082 |
+| Unhandleable AST states reappearing | #731/#908: stamped-only ingress (#1088), then carrier deletion (#1029) | PR #1285 landed the stamped-ingress and parity-oracle half and closed #1088. This revision's Node-native manifest walkers deliver #1082, so carrier deletion (#1029) is no longer blocked by the #912 consumer |
 | Spec silence and stale claims | #733 end-to-end | nothing active - the weakest link, with the #891/#904 twenty-builtins-no-spec instance as its measured cost |
-| Guards existing but not running | #1089's inventory of oracles outside continuous jobs; #990's scheduled/change-gated package | partial: #732's Phase 2 oracle has a dedicated blocking job and Phase 3 runs nested continuously, and #729's Phase 1/2 oracles run nested inside Phase 3. PR #1285 wired `unrepresentable_domain_oracle.py` (#908) into `gate.py`'s `integration` stage, which hosted CI runs in the `workspace-tests` job on every non-docs-only PR, with `test_gate.py` locking the membership and the pairing to a nextest-installing job. Still unwired: `loud_unsupported_phase2_oracle.py` (#730), `compiler_pipeline_oracle.py` (its three controls run in the gate's `lint-and-unit` stage, but the oracle itself is invoked nowhere - `grep -n compiler_pipeline_oracle scripts/gate.py` returns one comment line and no call - which is not what #1089 asks for), and the new `loud_unsupported_phase3_oracle.py`, which is red on its #912 leg by design. #1090 closed as refuted - the canary already auto-files into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64). **A fresh instance of this exact mode landed on 2026-08-21 outside the oracle inventory**, and its two intervals are worth keeping apart. The guard's dormancy is the long one: `nix-packages.yml` declares an unconditional `pull_request` trigger and has not executed since 2026-08-03, eighteen days, for a reason nobody has diagnosed - #1237's body deliberately leaves trigger bug, disabled workflow, and runner availability all open. The divergence it would have caught is the short one: the Nix and devenv lanes resolved a different rustc than CI only once stable moved to 1.98.0 after 2026-08-20, about a day before #1236's toolchain pin turned that silent disagreement into a loud failure. A guard that has been dark for eighteen days is not measured by the defect that happened to arrive on day eighteen |
+| Guards existing but not running | #1089's inventory of oracles outside continuous jobs; #990's scheduled/change-gated package | partial: #732's Phase 2 oracle has a dedicated blocking job and Phase 3 runs nested continuously, and #729's Phase 1/2 oracles run nested inside Phase 3. PR #1285 wired `unrepresentable_domain_oracle.py` (#908) into `gate.py`'s `integration` stage, which hosted CI runs in the `workspace-tests` job on every non-docs-only PR, with `test_gate.py` locking the membership and the pairing to a nextest-installing job. Still unwired: `loud_unsupported_phase2_oracle.py` (#730), `compiler_pipeline_oracle.py` (its three controls run in the gate's `lint-and-unit` stage, but the oracle itself is invoked nowhere - `grep -n compiler_pipeline_oracle scripts/gate.py` returns one comment line and no call - which is not what #1089 asks for), and `loud_unsupported_phase3_oracle.py`; its former #912 red leg is green in this revision, but the runner is still not continuously invoked. #1090 closed as refuted - the canary already auto-files into the shell repos (coral#23, school#189, hull#14, hello-chelis#19, octant#42, hydronnx#64). **A fresh instance of this exact mode landed on 2026-08-21 outside the oracle inventory**, and its two intervals are worth keeping apart. The guard's dormancy is the long one: `nix-packages.yml` declares an unconditional `pull_request` trigger and has not executed since 2026-08-03, eighteen days, for a reason nobody has diagnosed - #1237's body deliberately leaves trigger bug, disabled workflow, and runner availability all open. The divergence it would have caught is the short one: the Nix and devenv lanes resolved a different rustc than CI only once stable moved to 1.98.0 after 2026-08-20, about a day before #1236's toolchain pin turned that silent disagreement into a loud failure. A guard that has been dark for eighteen days is not measured by the defect that happened to arrive on day eighteen |
 | Silent lane divergence | #754/#763 cross-lane gate; #738 shell compiled lanes | unblocked by #732 P2, undelivered |
 | Agent-driven recurrence | #740's enforcement-ladder backlog; #895 executable plan inventories | entirely unchecked, dormant |
 | Wrong issue closures | the liveness manifest (detects after the fact); a keyword-auto-close guard (prevention) | the guard is missing - three incidents (#716, #729, #912), one reverted overreach (#1151/#1159), and 22 more class closures on 2026-08-05 through the same unguarded path. The 2026-08-17/21 audit-and-pin wave (evidence-comment closures for #916/#646/#986; pinned-test PRs #1230-#1232 for #862/#1084/#683) is the closure discipline done right by hand - and the same wave produced the #1083 conflict (closed against PR #1231's own record, reopened the same day), which argues for the guard, not against the wave. **#732's own closure is the sharpest illustration of why the guard is owed**, because the substance was right and the mechanism was still an accident. Right: #1059 was re-homed before PR #1250 merged, and the merge itself retired the last open child (#997), leaving zero at close; both owning documents were audited by full read, and every live thread had a named home elsewhere. Accidental: the close itself was a keyword auto-close at 23:31:48Z, two seconds after the merge, fired by narrative prose in PR #1250's body (`... then close #732`) rather than by any deliberate directive - the squash message carries no closing keyword at all. The full evidence record landed seventy-two seconds later, at 23:33:00Z, and its own first line says so. A guard would not have blocked this close; it would have made it deliberate |
@@ -694,18 +681,16 @@ same program gets the same diagnostic on every entry path - which is what the
 drift between the two `reject_unsupported_hip_ops` copies originally broke.
 
 **Phase 3 is still not complete, and the oracle says so out loud.**
-`scripts/loud_unsupported_phase3_oracle.py` runs six legs; the first five
-(shared gate + rejected-cell corpus + gate inventory, the sealed
-diagnostic-kind contract, the typed rejection-authority tests, the
-rejection-authority boundary, the live issue-authority manifest) pass, and the
-sixth - the #912 root-realizability integration - does not. That leg runs
-`cargo nextest run -p chelis-cli --test issue_912_root_boundary --run-ignored
-all`. PR #1231 re-ran the target's six ignored cells against `main`, found
-four quietly green (now active, after a review round caught three of them
-passing vacuously), and declared the remaining two - both `todo!`
-manifest-completeness cells - in an enforced `IGNORE_LEDGER` citing #1079: an
-`#[ignore]` without a ledger row, or a stale row, now fails the target. The
-leg is red on exactly those two cells until #1079 lands, which is the point. Also owed: the recorded gate
+`scripts/loud_unsupported_phase3_oracle.py` runs six legs. All six pass at
+this revision: the shared gate + rejected-cell corpus + gate inventory, the
+sealed diagnostic-kind contract and its mutations, the typed
+rejection-authority tests, the rejection-authority boundary, the live
+issue-authority manifest, and the #912 root-realizability integration. The
+last leg runs `cargo nextest run -p chelis-cli --test
+issue_912_root_boundary --run-ignored all`; its ledger is empty and all seventeen
+cells pass. The #912 interlock no longer blocks Phase 3, so Phase 3 is
+executable-oracle green; its completion claim still awaits this delivery's
+fresh exact-head red-team pass. Also owed outside Phase 3: the recorded gate
 contract as a written rule
 (a gate may only make a diagnostic earlier or more specific), deletion of
 gates that duplicate emitter rejections (proven by the rejected-cells corpus),
@@ -782,30 +767,26 @@ authoring-scope commits were already on main via PR #1136.
 The remaining queue is #731's §C4.2 deletion clauses and #1029's deletion of
 `Expr::List`/`Atom::Tag`. That make-illegal-states-unrepresentable payoff of
 the entire #908 arc, still 1,024 and 77 matching lines deep respectively, is
-next in the chain and remains blocked on #1082.
+next in the chain and is unblocked by this revision's #1082 delivery.
 
-### 4. #912 Faces 1 and 4 - half of v0.19, and now a second plan's blocker
+### 4. #912 Faces 1 and 4 - manifested boundary delivered for v0.19
 
-Face 1 (existence): the manifest walkers are `Expr::Node`-blind (#1082), so a
-stamped program can produce a silently empty manifest; anonymous tuple/ADT
-roots still drop from the manifest - the dotted-root expansion is a live
-`TODO` at `chelis-effects/src/realizability.rs:506`, owned by #1083 (briefly
-closed on 2026-08-21 against PR #1231's own record; reopened the same
-day). Face 4 (artifact): `requires_main` reaches one production
-caller that decides nothing (`compute_manifest_json`, which decorates
-`eval --json`). All three `cmd_build_c_result` sites pass `None`, leaving
-`c_source.contains("int main(")` as the deciding authority, and
-`cmd_build_hip_host` never takes the parameter at all. spec/05 says a
-source-text scanner cannot satisfy [05-UNS-1]. The dependency order is
-written: #1082 -> #1079
-(consume `ManifestedProgram`, delete the source_arch guard) -> thread
-`requires_main` incl. HIP -> the dotted-root expansion -> the C1 f64
-build-routing. #1084's surviving ask is delivered: PR #1231's enforced
-`IGNORE_LEDGER` declares the two remaining `todo!` cells against #1079 and
-un-ignored the four that had quietly gone green.
-Jeff's chain; #1097 landed its fail-closed disposition piece;
-#730's deliverable 6 lands inside it. Its cost is not confined to its own
-class: #730's Phase 3 runner cannot go green until this chain does.
+The dependency chain was executed in order in one integration: #1082's
+Node-native walkers, #1079's production `ManifestedProgram` consumption,
+per-root input routing, C/HIP `requires_main()`, #1083's structural dotted
+tuple/ADT expansion, and C1's target-aware f64 route. [05-OBS-7..11] now own
+the normative root-manifest contract: automatic roots exclude effectful
+nullaries, built-in variable-size containers do not expand, and a concrete
+selected callable carries only its reachable runtime inputs. `source_arch.rs`
+rejects both the old observe-and-discard shape and a restored emitted-C `main`
+scan. The executable acceptance surface has an empty ignore ledger and passes
+all seventeen cells, including the manifest-completeness and nullary-product
+cells that previously blocked #730's sixth Phase 3 leg. The additive `spec/05`
+change follows
+`dtype_semantics.md` §B1: it changes no frozen [05-OP] atom or capability
+schema, and the complete Phase 4B oracle passes. This delivery unblocks #1029;
+it does not absorb #1102 or #1148, which remain separate semantic work under
+the parent tracker.
 
 ### 5. Twelve defects are owned but not scheduled
 

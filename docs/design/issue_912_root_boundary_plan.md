@@ -1,5 +1,26 @@
 # Implementation Plan — GH Issue #912: Authoring What a Top-Level Root IS
 
+## Delivery Status (2026-08-25)
+
+The integrated manifested-root boundary is implemented in this revision:
+stamped-Node traversal, target-carrying `ManifestedProgram` consumption,
+per-root input closure, static dotted tuple/ADT topology, target-aware lane
+routing, C/HIP `requires_main()`, and fail-closed [05-UNS-1] diagnostics.
+Automatic observation applies only effect-free nullary definitions with a
+concrete value result; an uninstantiated generic remains callable-only. Opaque
+or variable-size built-in containers remain bare roots, and a parameterized
+callable becomes a root only when selected with every reachable runtime input.
+The authoritative acceptance command is:
+
+```sh
+cargo nextest run -p chelis-cli --test issue_912_root_boundary --run-ignored all
+```
+
+Its ignore ledger is empty and all seventeen cells pass. This delivery resolves
+#1079, #1082, and #1083. It does not close the #912 parent while the separately
+owned #1102 zero-gradient-value defect and #1148 `trace` result-type decision
+remain open.
+
 ## Problem Statement
 
 Nothing authoritatively defines what a top-level root IS at the observation
@@ -46,21 +67,23 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
 5. **`ManifestedProgram` carries `Target`.**
    ```rust
    pub struct ManifestedProgram {
-       pub checked: CheckedProgram,
-       pub manifest: RootManifest,
-       pub target: Target,
+       checked: CheckedProgram,
+       manifest: RootManifest,
+       target: Target,
    }
    ```
+   Construction is the phase chokepoint; read-only accessors expose the three
+   facts after the manifest has been attached.
 
 6. **`requires_main()` is a method**: `!self.entries.is_empty()`. Empty = object.
-   All-[05-UNS-1] = runnable artifact printing summary.
+   A non-empty manifest selects an executable observation artifact before
+   emission; emitted-source inspection is never an authority.
 
 7. **`[05-UNS-1]` is a realizability-defect alarm.** On a healthy corpus it
-   never fires. Suggested-fix on the diagnostic: "file a bug against the
-   realizability inference." Backend rejection paths (e.g. "only supports
-   f32/bool/bf16/f16") are wired to emit `[05-UNS-1]` with
-   `PrecisionExceedsCapability`, so declaration-only backends (HIP, Metal)
-   self-check in the field.
+   never fires. If an assigned lane does not produce an owed root, eval/build
+   fails nonzero through the existing typed diagnostic envelope, naming the
+   root, lane, and failure reason. It returns no partial result or artifact.
+   The suggested fix is "file a bug against the realizability inference."
 
 8. **Byte-identity per target.** For a given target T, eval-manifested-for-T and
    T's artifact agree. Golden gate until #732 Phase 2 delivers
@@ -87,6 +110,29 @@ for f32-declared tensors) is the eval-f64-intermediate vs C-f32-float gap —
 
 14. **Effects and realizability share one call-graph build** so they cannot
     disagree about it.
+
+15. **Stamped `Expr::Node` is the native manifest carrier.** The realizability,
+    definition, type-metadata, and topology walks consume Node children and
+    metadata directly. Legacy Lists remain accepted during migration, but the
+    manifest path never reconstructs one with `to_list`.
+
+16. **Dotted topology is static-only.** Tuples expand recursively. An ADT
+    expands by declared field name/position only when the constructor is
+    statically fixed; a value whose variant is not statically known remains one
+    bare root. Variable-sized and opaque built-in containers (`List`, `Dict`,
+    `Option`, and `MappedFile`) are not fixed products and remain bare roots.
+
+17. **Observing a declaration cannot add an effect.** Top-level value bindings
+    and effect-free zero-parameter definitions are automatic owed roots.
+    Effectful zero-parameter definitions and unapplied parameterized definitions
+    remain callable values. Evaluation may select a parameterized definition as
+    a root only after supplying every runtime input; the resulting concrete call
+    is manifested with its own exact input closure.
+
+18. **An owed root with unavailable runtime inputs fails before emission.** A
+    build does not turn an unbound top-level tensor into an implicit callable or
+    emit a partial executable. It returns [05-UNS-1], naming the root and the
+    missing input, and leaves no artifact behind.
 
 ## Coordination
 
@@ -233,11 +279,7 @@ Tested: `add(a, b)` over int32 and int64 tensors.
       pub required_inputs: BTreeSet<String>,
       pub reasons: Vec<HostReason>,
   }
-  pub struct ManifestedProgram {
-      pub checked: CheckedProgram,
-      pub manifest: RootManifest,
-      pub target: Target,
-  }
+  pub struct ManifestedProgram { /* private phase-boundary fields */ }
   ```
 - Expanded entries (tuple/ADT dotted names) inherit lane/inputs/reasons from
   `realizability.lane_by_def[def_name]` keyed on originating def.
@@ -263,19 +305,18 @@ Tested: `add(a, b)` over int32 and int64 tensors.
 
 - `infer_symbolic_bindings_from_inputs` takes `required: &BTreeSet<String>` and
   skips bindings whose canonical Load label is not in the set.
-- Equality check against post-lowering/pre-optimization DAG Loads: **observe-only
-  first**. Log disagreements across corpus. Classify (materialized constants,
-  static branches, actual closure bugs). Tighten to assertion where equality
-  holds; document exceptions.
+- Tensor entries derive their exact input closure from their own
+  post-lowering/pre-optimization DAG root. Host entries retain the checked
+  free-input closure because they do not have a Tensor DAG root.
 - Required-inputs stored as `BTreeSet<String>` (normalized, deduplicated).
 - Exit: #848 repro green. Disagreement log classified.
 
 ### Task 10: Fix #947/#946 — manifest-driven surfacing, both lanes
 
 - Both lanes iterate manifest entries. For each: render value or emit [05-UNS-1].
-- C lane: [05-UNS-1] emitted at build time on stderr as structured diagnostic
-  (per #883: `{ root_name, lane, reason, suggested_fix }`).
-- All-unsupported artifact's `main` prints summary to stdout.
+- [05-UNS-1] is emitted through the structured diagnostic failure channel
+  (`{ root_name, lane, reason, suggested_fix }`) and the operation returns no
+  partial artifact.
 - Completeness test: `(build stderr ∪ artifact stdout) ⊇ manifest entries`.
 - `lookup_runtime_value_for_root` extended for arrow-form (nullary thunk) defs.
 - **Backend rejection → [05-UNS-1] wiring**: the C backend's existing "only
@@ -315,7 +356,8 @@ Fresh-context adversarial review. Probes:
 - (k) Input-closure observe-only log: disagreements classified.
 - (l) Within-lane measurement: documented result (bit-level or tolerance).
 - (m) Fault-injected [05-UNS-1]: fires correctly, diagnostic shape correct.
-- (n) Empty manifest → no main. All-UNS-1 → runnable main.
+- (n) Empty manifest → no main. An unavailable owed root → nonzero failure and
+  no partial artifact.
 - (o) `ManifestedProgram` carries target, prevents pre-manifest access.
 - (p) Backend capability constants match actual rejection for CI-runnable targets.
 - (q) Backend rejection path emits [05-UNS-1] (not raw error).
@@ -343,8 +385,9 @@ residue as own issue.
   precision determines what both lanes target. A lane that cannot target the
   declared precision SHALL NOT realize the root."
 - §8.2 "Root Manifest": completeness per lane per target.
-  `realized ∪ [05-UNS-1] = manifest`. `requires_main()` = non-empty.
-  All-UNS-1 = runnable. Empty = object.
+  Successful realization equals the selected manifest exactly;
+  `requires_main()` = non-empty. Empty = object. An unavailable owed root
+  fails the whole operation through [05-UNS-1].
 - [05-UNS-1] for this class: realizability-defect alarm. Suggested-fix: "file a
   bug." Distinct from `RootEntry.reasons` (routing rationale).
 - Cross-lane intermediate precision: [05-OBS-3]'s domain, stated honestly.
@@ -360,8 +403,8 @@ residue as own issue.
 - Golden gate: observation_roundtrip_harness at full coverage.
 - Absence: deleted predicates gone.
 - Empty-manifest edge case against release binary.
-- (Fault-injected and all-UNS-1 cases stay in-tree only — test-only hook not in
-  release binary.)
+- (The fault-injected [05-UNS-1] case stays in-tree only; no test hook enters
+  the release binary.)
 
 ### Task 16: PR, self-review, merge
 

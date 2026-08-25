@@ -175,8 +175,18 @@ impl<T> Default for HostProgram<T> {
 pub struct HostBinding<T = HostTypeTerm> {
     pub name: String,
     pub display_name: Option<String>,
+    /// Manifest-selected leaf observations. Empty preserves the legacy
+    /// `display_name` behavior; non-empty entries carry structural paths so
+    /// compiled observation never rediscovers tuple/ADT topology.
+    pub display_roots: Vec<HostDisplayRoot>,
     pub ty: T,
     pub value: HostExpr<T>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostDisplayRoot {
+    pub name: String,
+    pub path: Vec<chelis_types::manifest::RootPathStep>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1055,6 +1065,7 @@ fn resolve_host_binding(
     Ok(ConcreteHostBinding {
         name: binding.name,
         display_name: binding.display_name,
+        display_roots: binding.display_roots,
         ty: binding.ty.into_concrete()?,
         value: resolve_host_expr(binding.value)?,
     })
@@ -1321,8 +1332,43 @@ fn resolve_host_expr(expr: HostExpr) -> Result<ConcreteHostExpr, crate::HostType
 pub fn try_lower_compiled_program(
     program: &CheckedProgram,
 ) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
+    try_lower_compiled_program_with_lane_overrides(program, None)
+}
+
+/// Lower through the realizability phase boundary carried by a manifested
+/// program. Observable definitions use the manifest's target-specific lane;
+/// non-root helper definitions retain the legacy classifier until the
+/// manifest grows an all-def lane table.
+pub fn try_lower_manifested_program(
+    program: &chelis_types::manifest::ManifestedProgram,
+) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
+    try_lower_compiled_program_with_manifest(program.checked(), program.manifest())
+}
+
+/// Lower a checked program using the supplied root manifest as the authority
+/// for observable-definition lanes. This is the CLI bridge, whose pipeline
+/// owns the checked program and manifest as separate values.
+pub fn try_lower_compiled_program_with_manifest(
+    program: &CheckedProgram,
+    manifest: &chelis_types::manifest::RootManifest,
+) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
+    try_lower_compiled_program_with_lane_overrides(program, Some(manifest))
+}
+
+fn try_lower_compiled_program_with_lane_overrides(
+    program: &CheckedProgram,
+    manifest: Option<&chelis_types::manifest::RootManifest>,
+) -> Result<CompiledProgram, crate::lower::LowerDiagnostic> {
     let _cache_guard = HostLoweringCacheGuard::begin();
-    let lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
+    let mut lowered_names = top_level_lowering_map(program.exprs(), program.type_env());
+    if let Some(manifest) = manifest {
+        for entry in &manifest.entries {
+            lowered_names.insert(
+                entry.def_name.clone(),
+                entry.lane == chelis_types::types::Lane::Tensor,
+            );
+        }
+    }
     // Issue #197: a *fatal* diagnostic from IR lowering (e.g. the AD
     // pass refused to differentiate a non-differentiable op) must
     // propagate to the user. Falling through to the host path here
@@ -1911,6 +1957,7 @@ fn lower_host_program(
             host.globals.push(HostBinding {
                 name: name.to_string(),
                 display_name: None,
+                display_roots: Vec::new(),
                 ty: ty.clone(),
                 value: value.clone(),
             });
@@ -4304,6 +4351,7 @@ fn lower_host_expr_kind(
                 bindings.push(HostBinding {
                     name: format!("__chelis_block_{index}"),
                     display_name: None,
+                    display_roots: Vec::new(),
                     ty,
                     value,
                 });
@@ -4345,6 +4393,7 @@ fn lower_host_expr_kind(
                         bindings.push(HostBinding {
                             name: name.to_string(),
                             display_name: None,
+                            display_roots: Vec::new(),
                             ty: bind_ty.clone(),
                             value,
                         });
@@ -8533,6 +8582,7 @@ fn hoist_host_lane_tensor_bindings(
             bindings.push(HostBinding {
                 name: name.clone(),
                 display_name: None,
+                display_roots: Vec::new(),
                 ty: ty.clone(),
                 value,
             });
@@ -13522,6 +13572,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         program.globals.push(HostBinding {
             name: "probe".into(),
             display_name: None,
+            display_roots: Vec::new(),
             ty: HostTypeTerm::Unit,
             value: HostExpr::new(HostExprKind::Builtin {
                 name: builtin.into(),
@@ -13567,6 +13618,7 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
         marker_call.globals.push(HostBinding {
             name: "probe".into(),
             display_name: None,
+            display_roots: Vec::new(),
             ty: HostTypeTerm::Unit,
             value: HostExpr::new(HostExprKind::Call {
                 function: HOST_UNRESOLVED_CALLABLE_MARKER.into(),
@@ -13667,6 +13719,46 @@ def from_column[n, a](column: Column[n, a]) -> Frame[n, a] =
                 .iter()
                 .any(|function| function.origin == HostFunctionOrigin::Monomorphized),
             "the non-recursive generic must reach lowering as a specialization, not an inline paste"
+        );
+    }
+
+    #[test]
+    fn manifested_host_lane_overrides_legacy_tensor_root_classification() {
+        let checked = surf_check(
+            "x = expand(scalar_to_tensor(cast(0.1, f64)), 0, 4i64)\n\
+             y = mul(x, x)\n",
+        );
+        let realizability = chelis_effects::realizability::infer_realizability(
+            &checked,
+            &[
+                Prim::F32,
+                Prim::Bool,
+                Prim::Bf16,
+                Prim::F16,
+                Prim::Int32,
+                Prim::Int64,
+            ],
+        );
+        let manifest =
+            chelis_effects::realizability::compute_root_manifest(&checked, &realizability);
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .any(|entry| entry.name == "y" && entry.lane == chelis_types::types::Lane::Host),
+            "the C-like capability set must route the f64 root to Host"
+        );
+
+        let legacy = try_lower_compiled_program(&checked).expect("legacy lowering");
+        assert!(
+            legacy.host.is_none(),
+            "the fixture must exercise the legacy classifier's Tensor decision"
+        );
+        let manifested = try_lower_compiled_program_with_manifest(&checked, &manifest)
+            .expect("manifested lowering");
+        assert!(
+            manifested.host.is_some(),
+            "manifested lowering must retain the C-target Host realization"
         );
     }
 

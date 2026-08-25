@@ -1237,6 +1237,7 @@ numeric form is type-unrepresentable.
 | §C2 trap kinds + exact message strings | Phase 2 | this doc + [#687] corpus update in the same PR |
 | §C4 element-formatting rules 1-4 and 6 | Phase 1 (Rust) / Phase 3 (C parity) | this doc + [#687] corpus update |
 | §C4 root envelope rule 7 | [05-OBS-6] authored 2026-07-31; full implementation acceptance pending [#1023] | spec/05 [05-OBS-6] + `faithful_observation.md` + this doc + the release roadmap + root-boundary corpus, one change set |
+| §C4 root-manifest topology and routing | [05-OBS-7..11] authored 2026-08-25; implementation acceptance in [#1310] | spec/05 [05-OBS-7..11] + `issue_912_root_boundary_plan.md` + this doc + the release roadmap and current-state record + root-boundary corpus, one change set; a numeric capability change also reruns the full matrix |
 | §C5 kernel signatures | Phase 2 | this doc |
 | §C6 covered-family census + tripwire | canonical row identities, complete derived classifications, stdlib ADT shapes and capacity flags, exact callable-to-`[05-OP-N]` registrations for every numeric identity, structural recognition of exact tagged carriers, public-header context invariance, and a total bijection from every discovered row to `Nonnumeric`, `TaggedTransport`, or `Numeric(atom)` with zero exception rows | this doc + the executable tripwire/registry artifacts and their positive/negative controls, same change set |
 | §C6 typed wire/PyO3 leg state | before Phase 1 entry: frozen when each named enumerator and mutation command is green; an editable baseline field cannot change coverage | this doc + the typed leg manifest + owning enumerator/oracle in the same change set |
@@ -1246,6 +1247,14 @@ numeric form is type-unrepresentable.
 behavior. If your phase needs a frozen contract to change, stop, update
 this document and [#729] first, and say so in the PR - that is the
 protocol, not a failure.
+
+[#1310] adds the root-manifest atoms [05-OBS-7..11], so it deliberately moves
+the tamper-evident complete-file digest for `spec/05-risc-primitives.md`. It
+does not amend a frozen [05-OP] atom, the §C1 semantics table, the capability
+schema, or a numeric-surface identity. In particular, routing a C-target f64
+root to Host adopts C's existing capability boundary without changing f64
+semantics. The full Phase 4B oracle is nevertheless rerun so that the unchanged
+numeric matrix is executable evidence rather than an inference from scope.
 
 ## B2. Invariants that hold across every boundary
 
@@ -1976,3 +1985,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
 [#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
 [#1314]: https://github.com/Chelis-Lang/chelis/issues/1314
+[#1310]: https://github.com/Chelis-Lang/chelis/pull/1310

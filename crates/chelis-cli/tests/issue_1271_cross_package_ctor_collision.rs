@@ -105,6 +105,17 @@ impl Built {
         if !host_compiler_available(&toolchain.compiler) {
             return None;
         }
+        // [05-OBS-11] makes this generated unit independently executable.
+        // This probe supplies its own driver to call the public entry symbol,
+        // so rename only the generated observation entry point and retain all
+        // authored exports exactly as published by the header.
+        if source.contains("int main(void)") {
+            fs::write(
+                self.out_dir.join(&self.unit),
+                source.replace("int main(void)", "int chelis_manifest_main(void)"),
+            )
+            .expect("rename generated observation driver for the ABI probe");
+        }
         let unit_header = self.unit.replace(".c", ".h");
         write_file(
             &self.out_dir.join("driver.c"),

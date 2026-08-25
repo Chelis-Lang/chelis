@@ -412,7 +412,17 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
         if self.lookup_top_level_def(name).is_some() {
-            return self.resolve_top_level(name);
+            let value = self.resolve_top_level(name)?;
+            // A zero-parameter top-level declaration is a value thunk when
+            // referenced in expression position. Calls still resolve their
+            // callee directly in `eval_app`, so `name()` receives the closure
+            // and applies it exactly once; a bare `name` consumes its value.
+            // This mirrors the checker/lowerer's nullary-def treatment and is
+            // required when manifest routing selects the host evaluator.
+            if matches!(&value, RuntimeValue::Closure { params, .. } if params.is_empty()) {
+                return self.apply_resolved_callable(value, Vec::new());
+            }
+            return Ok(value);
         }
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new()));

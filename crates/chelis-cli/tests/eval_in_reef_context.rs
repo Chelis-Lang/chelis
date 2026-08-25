@@ -227,16 +227,10 @@ fn cmd_eval_json_reef_package_simple_def_emits_json() {
         .iter()
         .find(|r| r["name"] == "simple_value")
         .expect("simple_value root present");
-    // `42` is an int literal lowered through the IR evaluator, so it
-    // surfaces as a scalar tensor (shape []), matching the human path.
-    assert_eq!(simple["value"]["type"], "tensor");
-    assert_eq!(
-        simple["value"]["value"]["shape"]
-            .as_array()
-            .expect("shape")
-            .len(),
-        0
-    );
+    // [05-OBS-4]: scalar-typed roots are bare scalars at every exit even
+    // when a lane internally realizes them through a rank-0 tensor.
+    assert_eq!(simple["value"]["type"], "int32");
+    assert_eq!(simple["value"]["value"], 42);
 }
 
 /// Fixture #2: reef package with a path-dep import. Covers the
@@ -470,7 +464,8 @@ module_prefix = "Mylib"
         .expect("result root");
     assert_eq!(
         result["value"]["value"],
-        serde_json::json!({"shape": [], "data": {"dtype": "f32", "values": [7.0]}})
+        serde_json::json!(7.0),
+        "[05-OBS-4] requires a scalar-typed root to stay bare"
     );
 }
 
@@ -580,19 +575,15 @@ fn cmd_eval_host_arrow_effectful_root_stays_unsurfaced_and_effect_does_not_run()
 ///
 /// When a pure host-arrow root is also CONSUMED (something calls `name()`),
 /// resolving that call binds the root's closure in the runtime frame. The
-/// surfacing pass then SKIPS it (the existing binding already satisfies
-/// `lookup_runtime_value_for_root`), so the thunk is not applied a second
-/// time — there is no wasted recompute and, for an effectful body, no
-/// double-run (that path is additionally covered by the guard in case (b)).
+/// manifest realization pass must still apply the effect-free declaration
+/// exactly once for its own owed root; it cannot mistake the closure binding
+/// for the declaration's concrete result.
 ///
-/// A pure re-application would be behaviorally invisible (deterministic,
-/// and the existing binding wins the lookup regardless), so this locks the
-/// observable contract: the consumer evaluates correctly exactly once
-/// (`base() + 100 == 142`) and the consumed root surfaces via its existing
-/// binding rather than a re-applied value (it displays as a closure — the
-/// documented consumed-root shape).
+/// This locks both observable values: the consumer evaluates correctly
+/// (`base() + 100 == 142`) and the automatically selected `base` root realizes
+/// the declaration result as `42`, never as the intermediate closure value.
 #[test]
-fn cmd_eval_host_arrow_consumed_pure_root_is_not_double_applied() {
+fn cmd_eval_host_arrow_consumed_pure_root_realizes_concrete_value() {
     let (_dir, root) = path_dep_package();
     let entry_path = root.join("src/arrowconsumed.ch");
     let snippet = "module App.ArrowConsumed\n\
@@ -626,17 +617,16 @@ fn cmd_eval_host_arrow_consumed_pure_root_is_not_double_applied() {
         "the consumer of a host-arrow root must evaluate it once and correctly \
          (42 + 100); got roots: {roots:?}"
     );
-    // The consumed root still surfaces, but via its existing closure
-    // binding (the pass deferred to it rather than re-applying the thunk).
+    // The consumed root surfaces as its concrete result, not the closure
+    // binding installed while evaluating `consumer`.
     let base = roots.iter().find(|r| r["name"].as_str() == Some("base"));
     assert!(
         base.is_some(),
         "the consumed root `base` must still surface; got roots: {roots:?}"
     );
     assert_eq!(
-        base.and_then(|r| r["value"]["value"].as_str()),
-        Some("<closure>"),
-        "a consumed host-arrow root surfaces via its existing closure binding, \
-         not a re-applied value (fix #3 skip); got roots: {roots:?}"
+        base.and_then(|r| r["value"]["value"].as_i64()),
+        Some(42),
+        "a consumed pure nullary root must surface its concrete result; got roots: {roots:?}"
     );
 }
