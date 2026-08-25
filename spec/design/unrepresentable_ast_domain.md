@@ -109,7 +109,7 @@ inspecting element zero.
 | Role | Name atom? | List at this slot? |
 |------|-----------|-------------------|
 | RuntimeExpr | **StampError** | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (checker rung, scored) |
-| Type | Permitted | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (type resolver diagnoses) |
+| Type | Permitted | Vocabulary head → Node. Undecodable head → **StampError** (`UndecodableTypeHead`; see the 2026-08-24 amendment) |
 | EffectHandler | Permitted | Vocabulary head → Node. Undecodable head → **`UnknownForm`** (form-expecting) |
 | Syntax | Permitted | → **BareList** without head decode |
 | Binder | Permitted | → **BareList** without head decode |
@@ -118,10 +118,14 @@ inspecting element zero.
 
 ### Strict/Lenient Reasoning Per Row
 
-- **RuntimeExpr, Type, EffectHandler** — lenient (→ UnknownForm). A
-  typo'd head does not produce a vacuous pass; the checker/type-resolver
-  scores it and the rest of the program is assessed. Leniency preserves
-  the fitness gradient.
+- **RuntimeExpr, EffectHandler** — lenient (→ UnknownForm). A typo'd
+  head does not produce a vacuous pass; the checker scores it and the
+  rest of the program is assessed. Leniency preserves the fitness
+  gradient.
+- **Type** — strict as shipped (→ StampError `UndecodableTypeHead`).
+  This diverges from the original lenient row; the 2026-08-24 amendment
+  records why the shipped rule stands and the table was corrected
+  rather than the code.
 - **Bypass with declared expectation** — strict (→ StampError). A wrong
   child in these slots gets **skipped** rather than scored — the walker
   doesn't enter it and the invariant is satisfied vacuously. That is
@@ -303,6 +307,19 @@ parse rung (to be filled during implementation):
 | `dp_bare_keyword_body_unit_defsig` | check | parse | same |
 | `dp_bare_keyword_toplevel_def` | check | parse | same |
 | `dp_bare_keyword_unused_let_binding` | check | parse | same |
+
+## Symbol Ladder Argument
+
+The three bare-symbol corpus members moved rungs the same way when the
+role-directed stamp landed ([03-ROLE-2]); recorded per case beside the
+keyword table, and locked by the corpus test
+`bare_atom_expression_position_rejects_at_parse`:
+
+| Corpus case | Old rung | New rung | Reason |
+|-------------|----------|----------|--------|
+| `dp_bare_symbol_body_no_defsig` | check | parse (ingress) | a name is not an expression; the stamp rejection identifies the name and the `(var {} ...)` remediation |
+| `dp_bare_symbol_body_unit_defsig` | check | parse (ingress) | same |
+| `dp_bare_symbol_toplevel_def` | check | parse (ingress) | same |
 
 ## Unknown-Head Ladder Argument
 
@@ -500,4 +517,47 @@ unknown head below a declaration is deliberately preserved as
 identity and the checker owns the rejection; the authoring doors keep the
 vocabulary sweep, so an unknown head still cannot reach a rewriter.
 
-(To be recorded here if implementation diverges from the above.)
+**2026-08-24 (chelis#885 / chelis#1023 §B row 1): the Type row diverged,
+and the shipped strict rule stands.** The Per-Role table originally made an
+undecodable head at a Type slot lenient (`UnknownForm`, "type resolver
+diagnoses"). The implementation shipped strict: `stamp_type` rejects an
+undecodable non-empty list head with `StampErrorKind::UndecodableTypeHead`
+at ingress. The strict rule is the right one, and the table above now
+records it: type syntax is a closed vocabulary with no user-extensible
+heads, so unlike an expression head there is no later consumer whose
+scoring the leniency would preserve — the type resolver's only possible
+verdict on an unknown head is the same rejection, later and with less
+location context. The table row and the reasoning bullet were corrected
+rather than the code.
+
+The same change set recorded four related decisions:
+
+- **The Keyword design choice is RESOLVED.** #885's Form left "Keyword
+  either becomes metadata-position-only or joins Name" open. `Atom::Keyword`
+  is deleted; a colon-prefixed keyword is metadata-key syntax only,
+  rejected by the parser outside metadata-key position (spec/03 §8.1). It
+  did not join `Name`.
+- **`Atom::Tag` deletion (Task 5 names it) is DEFERRED to chelis#1029**
+  (blocked on chelis#1082): `Node::to_list` constructs it, 39 production
+  `.to_list(` call sites and three normalize bridges consume it, so the
+  deletion belongs to the same atomic change that removes `Expr::List`
+  (#1023 §B row 5), not to the #885 contract slice.
+- **`spec/03-deep-syntax.md` §7.2 now owns the role contract** as
+  numbered-spec text: [03-ROLE-1] (total (tag, index) → role
+  classification; a bare identifier at a structural/type/effect-handler
+  position is a name even when it spells a tag), [03-ROLE-2] (a bare
+  identifier at an expression position rejects at ingress, identified per
+  [03-PROG-2] with the `(var {} ...)` remediation), and [03-ROLE-3] (the
+  metadata-map-at-element-1 disambiguator for lists at structural
+  positions — neither the head alone nor the map alone reinterprets a
+  structural list). This document's stamp tables elaborate those atoms;
+  where they disagree, the numbered spec wins.
+- **The continuous oracle gained obligation 7** (`NAME_IN_EXPR_FIXTURES`):
+  a bare identifier at def-body / fn-body / app-argument / bind-RHS
+  positions rejects with the [03-ROLE-2] identification and remediation
+  spelling, and the structural-name score-one controls extend to
+  record-head / kv-key / access-field / export / deftype positions as the
+  over-application guard. This closes #885's demand that its oracle not
+  repeat the manual scratch-variant shape.
+
+(Further divergences to be recorded here.)
