@@ -3677,6 +3677,53 @@ fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
     }
 }
 
+/// Flatten exactly the scalar/tensor leaves of a recursively nested List.
+/// A non-List structured element is outside this staging boundary and fails
+/// closed; empty Lists contribute no leaves while retaining their position in
+/// the separate reconstruction template.
+fn recursive_list_leaf_nodes(value: &LoweredValue) -> Option<Vec<NodeId>> {
+    fn walk(value: &LoweredValue, out: &mut Vec<NodeId>) -> Option<()> {
+        match value {
+            LoweredValue::Node(node) => out.push(*node),
+            LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
+                for item in adt_cons_chain_values(value).expect("guarded above") {
+                    walk(&item, out)?;
+                }
+            }
+            LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => return None,
+        }
+        Some(())
+    }
+
+    adt_cons_chain_values(value)?;
+    let mut leaves = Vec::new();
+    walk(value, &mut leaves)?;
+    Some(leaves)
+}
+
+/// Rebuild a recursively nested List from its primal structure and a flat
+/// sequence of replacement leaves. This is used symmetrically for staged
+/// parameter Loads and for the returned recursive cotangent.
+fn rebuild_recursive_list_like(
+    template: &LoweredValue,
+    leaves: &mut impl Iterator<Item = LoweredValue>,
+) -> LoweredValue {
+    match template {
+        LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
+        LoweredValue::Adt { .. } if adt_cons_chain_values(template).is_some() => {
+            let items = adt_cons_chain_values(template)
+                .expect("guarded above")
+                .into_iter()
+                .map(|item| rebuild_recursive_list_like(&item, leaves))
+                .collect();
+            rebuild_cons_chain(items)
+        }
+        LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
+            unreachable!("recursive List template was validated before reconstruction")
+        }
+    }
+}
+
 /// Rebuild a `Cons`/`Nil` spine from element values (chelis#620): the
 /// inverse of [`adt_cons_chain_values`], used to materialize a static
 /// list-append result.
@@ -5755,6 +5802,13 @@ impl LowerCtx {
                 self.append_current_span_to_lowered_value(&cached);
                 return cached;
             }
+            if self.allow_host_list_ad_rewrites && name == "Nil" {
+                return LoweredValue::Adt {
+                    ctor: "Nil".to_string(),
+                    field_names: None,
+                    fields: Vec::new(),
+                };
+            }
             // Reject `(var X)` where X is a known builtin name. The DAG
             // emits a Load when it encounters a free var, but a builtin
             // like `fold`, `map`, or `einsum` is a language-level operator,
@@ -5844,6 +5898,13 @@ impl LowerCtx {
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
+            if self.allow_host_list_ad_rewrites && func_name == "Cons" && elems.len() == 5 {
+                return LoweredValue::Adt {
+                    ctor: "Cons".to_string(),
+                    field_names: None,
+                    fields: vec![self.lower_expr(&elems[3]), self.lower_expr(&elems[4])],
+                };
+            }
             // chelis#520: a positional ADT constructor application
             // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
             // as `lower_var`'s nullary-constructor branch; a constructor
@@ -5872,6 +5933,19 @@ impl LowerCtx {
             if func_name == "concat"
                 && elems.len() == 5
                 && let Some(value) = self.try_lower_static_list_concat(&elems[3], &elems[4])
+            {
+                return value;
+            }
+            // [05-OP-35] List adjoints: inside `grad`, runtime List
+            // arguments are staged as a closed Cons/Nil spine of tensor
+            // leaves. Preserve that structure through the three exported
+            // index wrappers so ordinary tensor AD assigns cotangents to
+            // the exact selected/taken/dropped positions.
+            if self.allow_host_list_ad_rewrites
+                && matches!(func_name.as_str(), "index" | "take" | "drop")
+                && elems.len() == 5
+                && let Some(value) =
+                    self.try_lower_static_list_selection(func_name, &elems[3], &elems[4])
             {
                 return value;
             }
@@ -6180,6 +6254,10 @@ impl LowerCtx {
         // loudly). A `Tuple` argument has never been accepted here.
         enum GradArgPlan {
             Tensor(NodeId),
+            List {
+                template: LoweredValue,
+                leaf_nodes: Vec<NodeId>,
+            },
             Adt {
                 ctor: String,
                 field_names: Option<Vec<String>>,
@@ -6199,6 +6277,22 @@ impl LowerCtx {
             .enumerate()
             .map(|(index, arg)| match arg {
                 LoweredValue::Node(id) => GradArgPlan::Tensor(*id),
+                LoweredValue::Adt { .. } if adt_cons_chain_values(arg).is_some() => {
+                    let leaf_nodes = recursive_list_leaf_nodes(arg).unwrap_or_else(|| {
+                        raise_fatal_lowering_error(
+                            format!(
+                                "`grad(...)` List argument {index} contains a recursive \
+                                 element that is not a List, scalar, or tensor leaf"
+                            ),
+                            Some(app_span),
+                            None,
+                        )
+                    });
+                    GradArgPlan::List {
+                        template: arg.clone(),
+                        leaf_nodes,
+                    }
+                }
                 LoweredValue::Adt {
                     ctor,
                     field_names,
@@ -6363,6 +6457,10 @@ impl LowerCtx {
         // it owns and how to reshape them.
         enum GradResultPlan {
             Tensor,
+            List {
+                template: LoweredValue,
+                leaf_count: usize,
+            },
             Adt {
                 ctor: String,
                 field_names: Option<Vec<String>>,
@@ -6376,6 +6474,58 @@ impl LowerCtx {
             .enumerate()
         {
             match plans.get(index) {
+                Some(GradArgPlan::List {
+                    template,
+                    leaf_nodes,
+                }) => {
+                    let differentiable = leaf_nodes
+                        .iter()
+                        .all(|node| node_type(self, *node).precision.is_float());
+                    let selected = differentiable
+                        && wrt_indices.is_none_or(|indices| indices.contains(&index));
+                    let mut leaf_values = Vec::with_capacity(leaf_nodes.len());
+                    for (leaf_index, element_node) in leaf_nodes.iter().enumerate() {
+                        let element_ty = node_type(self, *element_node);
+                        if selected && !element_ty.precision.is_float() {
+                            raise_fatal_lowering_error(
+                                format!(
+                                    "`grad(...)` over List parameter `{name}`: element \
+                                     leaf {leaf_index} is not a floating scalar or tensor"
+                                ),
+                                Some(app_span),
+                                None,
+                            );
+                        }
+                        let load_name = format!("{name}__list_leaf_{leaf_index}");
+                        let load = subctx.dag.add_node(
+                            RiscOp::Load {
+                                name: load_name.as_str().into(),
+                            },
+                            vec![],
+                            element_ty.clone(),
+                            subctx.current_span_id.clone(),
+                        );
+                        if selected {
+                            wrt.push(load);
+                            wrt_actuals.push(*element_node);
+                        }
+                        remap_formal_types.push(element_ty.clone());
+                        remap_actual_types.push(element_ty);
+                        adt_arg_map_entries.push((load_name, *element_node));
+                        leaf_values.push(LoweredValue::Node(load));
+                    }
+                    if selected {
+                        result_plans.push(GradResultPlan::List {
+                            template: template.clone(),
+                            leaf_count: leaf_nodes.len(),
+                        });
+                    }
+                    let mut leaf_values = leaf_values.into_iter();
+                    subctx.bindings.insert(
+                        name.clone(),
+                        rebuild_recursive_list_like(template, &mut leaf_values),
+                    );
+                }
                 Some(GradArgPlan::Adt {
                     ctor,
                     field_names,
@@ -6520,7 +6670,7 @@ impl LowerCtx {
             .filter_map(|(name, plan)| match plan {
                 GradArgPlan::Tensor(actual) => Some((name.clone(), *actual)),
                 // ADT params are served by their per-field load entries.
-                GradArgPlan::Adt { .. } => None,
+                GradArgPlan::List { .. } | GradArgPlan::Adt { .. } => None,
             })
             .chain(adt_arg_map_entries)
             .chain(captured_bindings)
@@ -6576,6 +6726,25 @@ impl LowerCtx {
                         }
                     }
                 }
+                GradResultPlan::List {
+                    template,
+                    leaf_count,
+                } => {
+                    let mut leaves = Vec::with_capacity(*leaf_count);
+                    for _ in 0..*leaf_count {
+                        let grad_node = grad_iter.next().flatten();
+                        let actual = wrt_actual_iter.next();
+                        let node = grad_node.unwrap_or_else(|| {
+                            let element_ty = actual
+                                .map(|id| node_type(self, id))
+                                .unwrap_or_else(Self::default_type);
+                            self.zero_tensor_node(&element_ty)
+                        });
+                        leaves.push(LoweredValue::Node(node));
+                    }
+                    let mut leaves = leaves.into_iter();
+                    packed.push(rebuild_recursive_list_like(template, &mut leaves));
+                }
                 GradResultPlan::Adt {
                     ctor,
                     field_names,
@@ -6613,7 +6782,7 @@ impl LowerCtx {
                     .iter()
                     .filter_map(|plan| match plan {
                         GradArgPlan::Tensor(actual) => Some(*actual),
-                        GradArgPlan::Adt { .. } => None,
+                        GradArgPlan::List { .. } | GradArgPlan::Adt { .. } => None,
                     })
                     .collect();
                 if candidate_inputs.len() == plans.len() {
@@ -9294,6 +9463,45 @@ impl LowerCtx {
         let right = self.lower_expr(second_arg);
         items.extend(adt_cons_chain_values(&right)?);
         Some(rebuild_cons_chain(items))
+    }
+
+    fn try_lower_static_list_selection(
+        &mut self,
+        name: &str,
+        list_arg: &Expr,
+        count_arg: &Expr,
+    ) -> Option<LoweredValue> {
+        let list = self.lower_expr(list_arg);
+        let items = adt_cons_chain_values(&list)?;
+        let raw = self.static_i64_from_expr_or_binding(count_arg)?;
+        let count = usize::try_from(raw).ok()?;
+        match name {
+            "index" => items.get(count).cloned(),
+            "take" => Some(rebuild_cons_chain(items.into_iter().take(count).collect())),
+            "drop" => Some(rebuild_cons_chain(items.into_iter().skip(count).collect())),
+            _ => None,
+        }
+    }
+
+    fn static_i64_from_expr_or_binding(&mut self, expr: &Expr) -> Option<i64> {
+        if let Some(value) = extract_int_for_dim(expr) {
+            return Some(value);
+        }
+        let node = self.lower_expr(expr).as_single_node()?;
+        self.static_i64_from_node(node)
+    }
+
+    fn static_i64_from_node(&self, node: NodeId) -> Option<i64> {
+        let node = self.dag.get(node)?;
+        match &node.op {
+            RiscOp::Const { value } => value.as_i64_exact(),
+            // Integer count arguments are commonly materialized as
+            // `cast(<literal>, int64)` before an imported wrapper is
+            // inlined. The checker has already established an integer
+            // result type, so an exact integer input survives the cast.
+            RiscOp::Cast { .. } | RiscOp::Copy => self.static_i64_from_node(*node.inputs.first()?),
+            _ => None,
+        }
     }
 
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {

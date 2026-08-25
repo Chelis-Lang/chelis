@@ -193,6 +193,14 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
         // rejected (`wrt`-selected) exactly as before. Generic ADTs
         // fall out naturally: an uninstantiated param var is not a
         // float tensor.
+        // [06] §2.1: List is a recursive cotangent carrier. Preserve
+        // every container layer, but only admit the argument as a grad
+        // target when its element type recursively contains a float leaf.
+        // A recursively all-discrete List is forward-only.
+        Type::Adt(name, args) if name == "List" && args.len() == 1 => {
+            grad_argument_type(&args[0], adt_reg)
+                .map(|element| Type::Adt(name.clone(), vec![element]))
+        }
         Type::Adt(name, args) => {
             let def = adt_reg.defs.get(name)?;
             let all_float_fields = def.variants.iter().all(|variant| {
@@ -215,6 +223,29 @@ pub(super) fn grad_argument_type(arg: &Type, adt_reg: &AdtRegistry) -> Option<Ty
         }
         Type::Ref(inner) => grad_argument_type(inner, adt_reg),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod grad_argument_type_tests {
+    use super::*;
+
+    #[test]
+    fn list_cotangent_recurses_and_preserves_the_container_shape() {
+        let registry = AdtRegistry::default();
+        let floats = Type::Adt("List".to_string(), vec![Type::Prim(Prim::F32)]);
+        let nested = Type::Adt("List".to_string(), vec![floats.clone()]);
+
+        assert_eq!(grad_argument_type(&floats, &registry), Some(floats));
+        assert_eq!(grad_argument_type(&nested, &registry), Some(nested));
+    }
+
+    #[test]
+    fn recursively_all_discrete_list_is_not_a_gradient_target() {
+        let registry = AdtRegistry::default();
+        let ints = Type::Adt("List".to_string(), vec![Type::Prim(Prim::Int64)]);
+
+        assert_eq!(grad_argument_type(&ints, &registry), None);
     }
 }
 

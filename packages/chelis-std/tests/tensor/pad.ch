@@ -1,5 +1,5 @@
 module Std.Tests.Tensor.Pad
-import Std.Test (assert_close_tensor, assert_eq_int)
+import Std.Test (assert_close_tensor, assert_eq)
 def test_pad_uses_supplied_fill_value() -> unit ! { Test } = {
   padded = pad_sequences_to([[cast(5.0, f32)]], cast(3, int64), cast(99.0, f32))
   flat = reshape(padded, [cast(3, int64)])
@@ -22,7 +22,7 @@ def test_pad_int64_uses_supplied_fill_value() -> unit ! { Test } = {
   padded = pad_sequences_to([[cast(5, int64)]], cast(3, int64), cast(7, int64))
   flat = reshape(padded, [cast(3, int64)])
   xs = to_list(flat)
-  _ = assert_eq_int(cast(index(xs, cast(0, int64)), int64), cast(5, int64), "int64 pad [0] = 5")
-  _ = assert_eq_int(cast(index(xs, cast(1, int64)), int64), cast(7, int64), "int64 pad [1] = 7 (fill)")
-  assert_eq_int(cast(index(xs, cast(2, int64)), int64), cast(7, int64), "int64 pad [2] = 7 (fill)")
+  _ = assert_eq(cast(index(xs, cast(0, int64)), int64), cast(5, int64), "int64 pad [0] = 5")
+  _ = assert_eq(cast(index(xs, cast(1, int64)), int64), cast(7, int64), "int64 pad [1] = 7 (fill)")
+  assert_eq(cast(index(xs, cast(2, int64)), int64), cast(7, int64), "int64 pad [2] = 7 (fill)")
 }

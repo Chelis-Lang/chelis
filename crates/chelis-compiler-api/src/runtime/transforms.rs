@@ -11,6 +11,30 @@ use chelis_types::types::Prim;
 use super::named_axis::*;
 use super::*;
 
+#[derive(Clone)]
+enum GradListShape {
+    Leaf,
+    List(Vec<GradListShape>),
+}
+
+impl GradListShape {
+    fn leaf_count(&self) -> usize {
+        match self {
+            Self::Leaf => 1,
+            Self::List(items) => items.iter().map(Self::leaf_count).sum(),
+        }
+    }
+
+    fn repack(&self, leaves: &mut impl Iterator<Item = RuntimeValue>) -> RuntimeValue {
+        match self {
+            Self::Leaf => leaves.next().expect("gradient leaf count checked above"),
+            Self::List(items) => {
+                RuntimeValue::List(items.iter().map(|item| item.repack(leaves)).collect())
+            }
+        }
+    }
+}
+
 impl<'a> EvalContext<'a> {
     /// Bucket 1 entry point: evaluate `(grad f)(args...)` /
     /// `(vmap f)(args...)` in the host runtime. Synthesizes a Deep
@@ -51,6 +75,9 @@ impl<'a> EvalContext<'a> {
         // (the body may read it) but owns no gradient root.
         enum ArgRepack {
             Tensor,
+            List {
+                shape: GradListShape,
+            },
             Adt {
                 ctor: String,
                 field_names: Option<Vec<String>>,
@@ -99,6 +126,27 @@ impl<'a> EvalContext<'a> {
 
         let span = Span::new(0, 0);
         for (index, value) in args.iter().enumerate() {
+            if let (TransformKind::Grad, RuntimeValue::List(_)) = (&kind, value) {
+                let mut leaf_index = 0;
+                let (expr, shape, differentiable) = stage_grad_list_value(
+                    value,
+                    index,
+                    &mut leaf_index,
+                    &mut placeholder_names,
+                    &mut placeholder_types,
+                    &mut placeholder_tensors,
+                    span,
+                )?;
+                arg_exprs.push(expr);
+                let selected = differentiable
+                    && grad_wrt
+                        .as_ref()
+                        .is_none_or(|indices| indices.contains(&index));
+                if selected {
+                    arg_repacks.push(ArgRepack::List { shape });
+                }
+                continue;
+            }
             // chelis#520 D2: an ADT-valued grad argument marshals as one
             // placeholder per field plus a synthesized construction expr,
             // so the IR lowering sees the static constructor shape and
@@ -315,6 +363,25 @@ impl<'a> EvalContext<'a> {
         let tensor_bindings = self.tensor_bindings;
         let roots: Vec<chelis_ir::dag::NodeId> = dag.roots().to_vec();
         if roots.is_empty() {
+            if matches!(kind, TransformKind::Grad)
+                && !arg_repacks.is_empty()
+                && arg_repacks.iter().all(
+                    |slot| matches!(slot, ArgRepack::List { shape } if shape.leaf_count() == 0),
+                )
+            {
+                let mut no_leaves = std::iter::empty();
+                let mut empty_slots = arg_repacks.iter().map(|slot| match slot {
+                    ArgRepack::List { shape } => shape.repack(&mut no_leaves),
+                    ArgRepack::Tensor | ArgRepack::Adt { .. } => {
+                        unreachable!("guarded by empty List repack check")
+                    }
+                });
+                return Ok(if arg_repacks.len() == 1 {
+                    empty_slots.next().expect("one empty List slot")
+                } else {
+                    RuntimeValue::Tuple(empty_slots.collect())
+                });
+            }
             let kind_label = match kind {
                 TransformKind::Grad => "grad",
                 TransformKind::Vmap => "vmap",
@@ -429,10 +496,10 @@ impl<'a> EvalContext<'a> {
         // bare gradient). A pure-tensor grad needs no re-collapse: `packed`
         // is already the flat tuple the pre-#520 contract specifies, and
         // the eval-root display (chelis#614) walks it component-wise.
-        let has_adt_slot = arg_repacks
+        let has_structured_slot = arg_repacks
             .iter()
-            .any(|slot| matches!(slot, ArgRepack::Adt { .. }));
-        if matches!(kind, TransformKind::Grad) && has_adt_slot {
+            .any(|slot| matches!(slot, ArgRepack::List { .. } | ArgRepack::Adt { .. }));
+        if matches!(kind, TransformKind::Grad) && has_structured_slot {
             let flat: Vec<RuntimeValue> = match packed {
                 RuntimeValue::Tuple(items) => items,
                 single => vec![single],
@@ -450,6 +517,7 @@ impl<'a> EvalContext<'a> {
                 .iter()
                 .map(|slot| match slot {
                     ArgRepack::Tensor => 1,
+                    ArgRepack::List { shape } => shape.leaf_count(),
                     ArgRepack::Adt { field_count, .. } => *field_count,
                 })
                 .sum();
@@ -469,6 +537,7 @@ impl<'a> EvalContext<'a> {
                     ArgRepack::Tensor => {
                         slots.push(flat_iter.next().expect("count checked above"));
                     }
+                    ArgRepack::List { shape } => slots.push(shape.repack(&mut flat_iter)),
                     ArgRepack::Adt {
                         ctor,
                         field_names,
@@ -579,6 +648,106 @@ fn make_adt_construction_expr(
             Expr::List(List { elements }, span)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_grad_list_value(
+    value: &RuntimeValue,
+    argument_index: usize,
+    leaf_index: &mut usize,
+    placeholder_names: &mut Vec<String>,
+    placeholder_types: &mut Vec<TensorType>,
+    placeholder_tensors: &mut HashMap<String, IrTensorValue>,
+    span: Span,
+) -> Result<(Expr, GradListShape, bool), String> {
+    match value {
+        RuntimeValue::List(items) => {
+            let mut item_exprs = Vec::with_capacity(items.len());
+            let mut item_shapes = Vec::with_capacity(items.len());
+            let mut differentiable = true;
+            for item in items {
+                let (expr, shape, item_differentiable) = stage_grad_list_value(
+                    item,
+                    argument_index,
+                    leaf_index,
+                    placeholder_names,
+                    placeholder_types,
+                    placeholder_tensors,
+                    span,
+                )?;
+                item_exprs.push(expr);
+                item_shapes.push(shape);
+                differentiable &= item_differentiable;
+            }
+            Ok((
+                make_list_construction_expr(item_exprs, span),
+                GradListShape::List(item_shapes),
+                differentiable,
+            ))
+        }
+        RuntimeValue::Tensor(_) | RuntimeValue::Scalar(_) => {
+            let current_leaf = *leaf_index;
+            *leaf_index += 1;
+            let (tensor_value, tensor_type) =
+                runtime_value_to_dag_input_lossy(value, None, current_leaf)?;
+            let placeholder =
+                format!("__chelis_xform_arg_{argument_index}_list_leaf_{current_leaf}");
+            placeholder_tensors.insert(placeholder.clone(), tensor_value);
+            placeholder_names.push(placeholder.clone());
+            placeholder_types.push(tensor_type.clone());
+            let differentiable = tensor_type.precision.is_float();
+            Ok((
+                make_var_with_type(&placeholder, &tensor_type, span),
+                GradListShape::Leaf,
+                differentiable,
+            ))
+        }
+        _ => Err(format!(
+            "host runtime: `grad(...)` List argument {argument_index}: recursive element \
+             is not a List, scalar, or tensor leaf"
+        )),
+    }
+}
+
+/// Build the exact closed `Cons`/`Nil` value used to stage a runtime List
+/// through the tensor DAG transform. Elements may themselves be staged Lists;
+/// every scalar or tensor leaf owns one typed placeholder, so reverse mode can
+/// reconstruct the complete primal runtime shape and order.
+fn make_list_construction_expr(elements: Vec<Expr>, span: Span) -> Expr {
+    let mut tail = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name("Nil".to_string()), span),
+            ],
+        },
+        span,
+    );
+    for element in elements.into_iter().rev() {
+        tail = Expr::List(
+            List {
+                elements: vec![
+                    Expr::Atom(Atom::Tag(DeepTag::App), span),
+                    Expr::Map(MetaMap::default(), span),
+                    Expr::List(
+                        List {
+                            elements: vec![
+                                Expr::Atom(Atom::Tag(DeepTag::Var), span),
+                                Expr::Map(MetaMap::default(), span),
+                                Expr::Atom(Atom::Name("Cons".to_string()), span),
+                            ],
+                        },
+                        span,
+                    ),
+                    element,
+                    tail,
+                ],
+            },
+            span,
+        );
+    }
+    tail
 }
 
 /// Bucket 1 helper: lossily convert a host-runtime argument into the legacy
