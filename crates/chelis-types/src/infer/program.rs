@@ -252,7 +252,8 @@ pub(super) fn infer_program_with_product_in_session(
     let user_def_names = collect_user_def_names(&top_level_decl_items(exprs));
     let declared_signatures = collect_declared_sig_metadata(items.iter().map(|(_, expr)| *expr));
     let metadata_prebound_names = HashSet::new();
-    let inference_groups = primary_inference_groups(exprs, &items);
+    product.function_inference_plan = FunctionInferencePlan::build(&items);
+    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
     // Match the persisted-state driver: cache the TLS token once and poll at
     // declaration granularity. In particular, an incomplete recursive SCC
     // must consume its structured scope through `abort` before this schedule
@@ -675,8 +676,7 @@ pub(crate) fn build_compiled_library_context_in_session(
         library_annotated,
         library_ir_annotated,
         &SignatureInferenceMetadata::default(),
-        &product.type_headers,
-        &product.adt_registry,
+        &product,
         stats,
         errors,
     );
@@ -847,8 +847,7 @@ pub(crate) fn build_compiled_library_context_with_base_in_session(
         library_annotated,
         checked_type_env,
         &SignatureInferenceMetadata::default(),
-        &product.type_headers,
-        &product.adt_registry,
+        &product,
         stats,
         errors,
     );
@@ -1018,8 +1017,7 @@ pub(crate) fn check_ir_with_signature_context_in_session(
         annotated_exprs,
         annotated_type_env,
         signature_context,
-        &product.type_headers,
-        &product.adt_registry,
+        &product,
         stats,
         errors,
     );
@@ -1066,8 +1064,7 @@ pub(crate) fn check_typed_program_in_session(
             annotated_exprs,
             annotated_type_env,
             &SignatureInferenceMetadata::default(),
-            &product.type_headers,
-            &product.adt_registry,
+            &product,
             stats,
             errors,
         );
@@ -1257,7 +1254,8 @@ pub(super) fn infer_ir_program_with_state(
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
-    let inference_groups = primary_inference_groups(exprs, &items);
+    product.function_inference_plan = FunctionInferencePlan::build(&items);
+    let inference_groups = primary_inference_groups(&product.function_inference_plan, &items);
     // chelis#930: cooperative cancellation at top-level-declaration
     // granularity. Body inference is one of the two front-end passes whose
     // cost scales with declaration count, so an abandoned compile has to be
@@ -1423,31 +1421,30 @@ pub(super) fn infer_ir_program_with_state(
 /// values are original flattened ordinals: scheduling never changes diagnostic
 /// ownership, collected-type origins, or output order.
 pub(super) fn primary_inference_schedule(
-    exprs: &[deep::Expr],
+    function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<usize> {
-    let module_fn_by_key = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, (module, expr))| {
-            module.as_ref()?;
-            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
-                return None;
-            };
-            kids.get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn))?;
-            Some((expr_key(expr), index))
+    if !function_plan.complete {
+        return Vec::new();
+    }
+    let module_fn_indices = function_plan
+        .ordered_members()
+        .filter_map(|member| {
+            items[member.item_index]
+                .0
+                .as_ref()
+                .map(|_| member.item_index)
         })
-        .collect::<HashMap<_, _>>();
-    if module_fn_by_key.is_empty() {
+        .collect::<HashSet<_>>();
+    if module_fn_indices.is_empty() {
         return (0..items.len()).collect();
     }
 
-    let ordered_module_fns = signature_inference_def_order(exprs)
-        .into_iter()
-        .filter_map(|expr| module_fn_by_key.get(&expr_key(expr)).copied())
+    let ordered_module_fns = function_plan
+        .ordered_members()
+        .map(|member| member.item_index)
+        .filter(|index| module_fn_indices.contains(index))
         .collect::<Vec<_>>();
-    let module_fn_indices = module_fn_by_key.values().copied().collect::<HashSet<_>>();
     let insertion = module_fn_indices.iter().copied().min().unwrap_or(0);
     let mut schedule = Vec::with_capacity(items.len());
     for index in 0..items.len() {
@@ -1472,23 +1469,19 @@ pub(super) struct PrimaryInferenceGroup {
 /// retain dependency order. Only a genuine recursive component is grouped
 /// and prebound, so a bare acyclic forward helper remains unavailable.
 pub(super) fn primary_inference_groups(
-    exprs: &[deep::Expr],
+    function_plan: &FunctionInferencePlan,
     items: &[(Option<String>, &deep::Expr)],
 ) -> Vec<PrimaryInferenceGroup> {
-    let schedule = primary_inference_schedule(exprs, items);
-    let item_by_key = items
+    let schedule = primary_inference_schedule(function_plan, items);
+    let recursive_components = function_plan
+        .components
         .iter()
-        .enumerate()
-        .map(|(index, (_, expr))| (expr_key(expr), index))
-        .collect::<HashMap<_, _>>();
-    let recursive_components = function_inference_sccs(exprs)
-        .into_iter()
         .filter(|component| component.recursive)
         .map(|component| {
             component
                 .members
-                .into_iter()
-                .filter_map(|expr| item_by_key.get(&expr_key(expr)).copied())
+                .iter()
+                .map(|member| member.item_index)
                 .collect::<Vec<_>>()
         })
         .filter(|indices| !indices.is_empty())
