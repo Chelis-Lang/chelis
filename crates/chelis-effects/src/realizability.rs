@@ -522,6 +522,7 @@ fn expr_type_metadata(expr: &Expr) -> Option<&Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_deep::ast::MetaMap;
     use chelis_types::types::Prim;
 
     fn check_program_from_source(source: &str) -> CheckedProgram {
@@ -777,6 +778,73 @@ mod tests {
                 tag: "app".to_string(),
             }]
         );
+    }
+
+    // #1080 red-team finding: testing the disposition table alone did not
+    // prove that the production realizability walker consulted it. Keep the
+    // Host-forcing tag below a propagating parent so this test covers both the
+    // stamped Node bridge and the recursive consumer connection.
+    #[test]
+    fn stamped_host_forcing_tag_routes_host_through_propagating_parent() {
+        let span = chelis_deep::Span::new(0, 0);
+        let record = Expr::node(
+            DeepTag::Record,
+            MetaMap::default(),
+            vec![Expr::Atom(Atom::Name("R".to_string()), span)],
+            span,
+        );
+        let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![record], span);
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+
+        assert!(expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        ));
+        assert_eq!(
+            reasons,
+            [HostReason::StructuralForm {
+                tag: "record".to_string(),
+            }]
+        );
+        assert!(inputs.is_empty());
+    }
+
+    // Negative parity for the production connection above: propagating tags
+    // must not invent a Host requirement or reason.
+    #[test]
+    fn stamped_propagating_tags_preserve_tensor_lane() {
+        let span = chelis_deep::Span::new(0, 0);
+        let literal = Expr::node(
+            DeepTag::Lit,
+            MetaMap::default(),
+            vec![Expr::Atom(Atom::Int(1), span)],
+            span,
+        );
+        let expr = Expr::node(DeepTag::Block, MetaMap::default(), vec![literal], span);
+        let lane_by_def: HashMap<String, Lane> = HashMap::new();
+        let target: HashSet<Prim> = C_PRIMS.iter().copied().collect();
+        let type_env: HashMap<String, Expr> = HashMap::new();
+        let mut reasons = Vec::new();
+        let mut inputs = BTreeSet::new();
+
+        assert!(!expr_needs_host(
+            &expr,
+            &lane_by_def,
+            &target,
+            &type_env,
+            &mut reasons,
+            &mut inputs,
+        ));
+        assert!(reasons.is_empty());
+        assert!(inputs.is_empty());
     }
 
     // #1084 / red-team Finding 1: the Host case alone cannot prove the manifest
