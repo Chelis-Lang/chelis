@@ -384,6 +384,10 @@ NON_GATE_JOBS = {
     # the workspace and dtype legs and is aggregated under the stable
     # branch-protection context.
     "faithful-observation-phase2-oracle",
+    # Rule-id: GATE-SCOPE-GENERALIZE-SWEEP-ORACLE -- chelis#1207's exact
+    # sweep-versus-level parity corpus intentionally bypasses nextest's
+    # default filter and is owned by its dedicated blocking CI leg.
+    "generalize-sweep-oracle",
     "integration",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
@@ -945,7 +949,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
             "needs: [changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle]",
+            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
             aggregate_block,
         )
         self.assertNotIn("always()", aggregate_block)
@@ -977,6 +981,26 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn(command, dtype_block)
         self.assertIn(
             "faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}",
+            aggregate_block,
+        )
+
+    def test_generalize_sweep_oracle_is_a_dedicated_blocking_job(self):
+        oracle_block = _ci_job_block("generalize-sweep-oracle")
+        aggregate_block = _ci_job_block("integration")
+        command = (
+            "cargo nextest run --workspace --ignore-default-filter "
+            "--features chelis-types/generalize-sweep-oracle --no-fail-fast"
+        )
+
+        self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
+        self.assertIn("needs: [changes]", oracle_block)
+        self.assertIn("contents: read", oracle_block)
+        self.assertIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertIn("python3 scripts/ci_setup_uv_python.py", oracle_block)
+        self.assertIn("taiki-e/install-action@nextest", oracle_block)
+        self.assertIn(command, oracle_block)
+        self.assertIn(
+            "generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}",
             aggregate_block,
         )
 
@@ -1483,12 +1507,13 @@ class DocsOnlySkipTests(unittest.TestCase):
         "workspace-tests",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
+        "generalize-sweep-oracle",
         "macos-smoke",
         "backend-sanitizers",
         "smt-build",
     }
-    # The stable required context aggregates the two parallel integration
-    # legs, so it needs their results as well as the docs-only classification.
+    # The stable required context aggregates the parallel integration legs,
+    # so it needs their results as well as the docs-only classification.
     HEAVY_AGGREGATOR_JOBS = {"integration"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
@@ -1573,7 +1598,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertEqual(
             integration.get("needs"),
             "[changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle]",
+            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
         )
         cond = integration.get("if", "")
         self.assertNotIn("always()", cond)
@@ -1584,6 +1609,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.workspace-tests.result", block)
         self.assertIn("needs.dtype-phase3-oracle.result", block)
         self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
+        self.assertIn("needs.generalize-sweep-oracle.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
     def test_always_run_jobs_are_not_gated(self):

@@ -352,32 +352,65 @@ pub(super) fn single_record_variant<'a>(
         .then_some(variant)
 }
 
-/// Instantiate `variant` of `adt_def` with fresh type variables:
-/// returns the per-field types and the ADT result type with the
-/// def's registration-time param vars renamed fresh. Bypasses the
-/// name-keyed env so same-named constructors from colliding ADTs
-/// (chelis#148) cannot cross-wire field types.
+/// Instantiate `variant` of `adt_def` with fresh variables of every kind:
+/// returns the per-field types and the ADT result type with the definition's
+/// registration-time variables renamed fresh. Bypasses the name-keyed env so
+/// same-named constructors from colliding ADTs (chelis#148) cannot cross-wire
+/// field types.
+///
+/// Dimension, rank, and precision variables in a variant field are quantified
+/// by the constructor scheme just like nominal type parameters. Reusing their
+/// registration-time IDs here would let a constructor occurrence escape its
+/// ordinary inference level and make an otherwise generic imported signature
+/// monomorphic (chelis#1207, exposed by chelis#968's stacked-context oracle).
 pub(super) fn instantiate_variant_of(
     adt_def: &crate::adt::AdtDef,
     variant: &crate::adt::VariantInfo,
     vg: &mut VarGen,
 ) -> (Vec<Type>, Type) {
-    let map: HashMap<TypeVar, Type> = adt_def
-        .param_vars
-        .iter()
-        .map(|tv| (*tv, vg.fresh_type()))
-        .collect();
+    let mut type_vars = adt_def.param_vars.clone();
+    let mut dim_vars = Vec::new();
+    let mut rank_vars = Vec::new();
+    for (_, field_type) in &variant.fields {
+        for var in crate::env::free_tvars(field_type) {
+            if !type_vars.contains(&var) {
+                type_vars.push(var);
+            }
+        }
+        for var in crate::env::free_dvars(field_type) {
+            if !dim_vars.contains(&var) {
+                dim_vars.push(var);
+            }
+        }
+        for var in crate::env::free_rvars(field_type) {
+            if !rank_vars.contains(&var) {
+                rank_vars.push(var);
+            }
+        }
+    }
+
+    let mut renaming = Subst::new();
+    for var in type_vars {
+        renaming.insert_type(var, vg.fresh_type());
+    }
+    for var in dim_vars {
+        renaming.insert_dim(var, vg.fresh_dim());
+    }
+    for var in rank_vars {
+        renaming.insert_rank(var, vec![Dim::Rank(vg.fresh_rvar())]);
+    }
+
     let args: Vec<Type> = variant
         .fields
         .iter()
-        .map(|(_, t)| crate::adt::substitute_alias_type(t, &map))
+        .map(|(_, field_type)| renaming.apply(field_type))
         .collect();
     let ret = Type::Adt(
         adt_def.name.clone(),
         adt_def
             .param_vars
             .iter()
-            .map(|tv| map.get(tv).cloned().expect("map covers param_vars"))
+            .map(|var| renaming.apply(&Type::Var(*var)))
             .collect(),
     );
     (args, ret)
@@ -772,7 +805,7 @@ pub(super) fn infer_cast(
                 }
             }
         }
-        ResolvedCastTarget::Type(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+        ResolvedCastTarget::Type(ty) => resolve_type_aliases(&ty.into_type(), adt_reg, vg),
     };
 
     // RFC D-CHECK cast gates operate on the same resolved target as ordinary

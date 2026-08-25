@@ -134,6 +134,46 @@ fn fix2_unsound_generalization_rejected() {
     );
 }
 
+#[test]
+fn level_generalization_quantifies_only_the_ignored_inner_argument() {
+    // [04-INF-1] positive twin for `fix2_unsound_generalization_rejected`:
+    // `x` belongs to the enclosing lambda and must remain monomorphic, while
+    // the ignored `z` is created by the let RHS and may be generalized.
+    check_ok(
+        "(def {} test \
+           (fn {} (params {} x) \
+             (let {} (bind {} y (fn {} (params {} z) (var {} x))) \
+               (tuple {} \
+                 (app {} (var {} y) (lit {type: (t-prim {} int32)} 1)) \
+                 (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
+    );
+}
+
+#[cfg(feature = "generalize-sweep-oracle")]
+#[test]
+fn independent_binding_generalization_visits_zero_environment_bindings() {
+    let mut source = String::new();
+    for index in 0..128 {
+        source.push_str(&format!(
+            "(def {{}} independent_{index} \
+               (fn {{}} (params {{}} value_{index}) (var {{}} value_{index})))\n"
+        ));
+    }
+
+    crate::env::reset_generalize_sweep_env_visits();
+    let result = crate::env::without_generalize_sweep_oracle(|| check(&source));
+    assert!(
+        result.errors.is_empty(),
+        "generated independent-binding fixture must check: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        crate::env::generalize_sweep_env_visits(),
+        0,
+        "the production level path must not enumerate environment bindings"
+    );
+}
+
 // Fix 3: defsig not enforced — body must match declared signature
 #[test]
 fn fix3_defsig_enforced() {

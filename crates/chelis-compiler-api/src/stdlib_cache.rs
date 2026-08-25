@@ -69,12 +69,16 @@ use crate::schema::{Diagnostic, GeneralKind};
 
 /// Internal struct-format version. Bumped when [`StdLibContext`]'s shape
 /// changes so a stale on-disk entry is a clean miss, not a bad decode.
-/// Mixed into the content-addressed key. V5 unifies two independent V4
+/// Mixed into the content-addressed key. V6 accounts for the serialized
+/// type-checker generalization-level state added to `TypeEnv`; a V5 payload
+/// is a clean miss rather than a positional bincode decode.
+///
+/// V5 unified two independent V4
 /// bumps: the pipeline-core `CheckedLibrary`/proof-identity products
 /// (branch) and chelis#942's serialized positional-expand obligations
 /// inside `TypeEnv` (main). Bincode is positional, so a V4 entry from
 /// either side is a clean miss.
-const STDLIB_CACHE_FORMAT_VERSION: u32 = 5;
+const STDLIB_CACHE_FORMAT_VERSION: u32 = 6;
 
 /// The typechecked + lowered chelis-std library sub-context.
 ///
@@ -221,9 +225,16 @@ impl<'de> Deserialize<'de> for StdLibContext {
 /// that consumes the unmodified bundled stdlib (their linked stdlib
 /// decls are bit-identical, see the module docs).
 pub fn stdlib_cache_key(stdlib_decls: &[chelis_surf::ast::Decl]) -> [u8; 32] {
+    stdlib_cache_key_at_version(stdlib_decls, STDLIB_CACHE_FORMAT_VERSION)
+}
+
+fn stdlib_cache_key_at_version(
+    stdlib_decls: &[chelis_surf::ast::Decl],
+    format_version: u32,
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"chelis_std_typecheck_v");
-    hasher.update(STDLIB_CACHE_FORMAT_VERSION.to_le_bytes());
+    hasher.update(format_version.to_le_bytes());
     // Compiler build identity. `STDLIB_CACHE_FORMAT_VERSION` only guards
     // the on-disk struct SHAPE; it does not change when the compiler's
     // typecheck / lowering SEMANTICS change while the bundled chelis-std
@@ -477,8 +488,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cache_format_version_tracks_deferred_reshape_relations() {
-        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 5);
+    fn cache_format_version_tracks_typecheck_generalization_levels() {
+        assert_eq!(STDLIB_CACHE_FORMAT_VERSION, 6);
+    }
+
+    #[test]
+    fn preceding_payload_version_is_a_clean_cache_miss() {
+        let decls = sample_decls("preceding_version");
+        let current_key = stdlib_cache_key(&decls);
+        let preceding_key = stdlib_cache_key_at_version(&decls, 5);
+        assert_ne!(current_key, preceding_key);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let context = build_stdlib_context(&decls).expect("sample context must build");
+        let preceding_path = stdlib_cache_path(dir.path(), preceding_key);
+        cache_envelope::save(&preceding_path, preceding_key, &context)
+            .expect("preceding-version fixture must save");
+
+        let current_path = stdlib_cache_path(dir.path(), current_key);
+        let loaded: Option<StdLibContext> = cache_envelope::load(&current_path, current_key)
+            .expect("a preceding-version fixture must be a clean miss");
+        assert!(loaded.is_none());
+        assert!(
+            preceding_path.exists(),
+            "negative-control fixture must exist"
+        );
+        assert_ne!(current_path, preceding_path);
     }
 
     /// A minimal well-formed `Decl` slice for key-stability tests. The

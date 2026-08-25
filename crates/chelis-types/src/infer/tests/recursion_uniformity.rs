@@ -11,6 +11,15 @@ fn surf_errors(src: &str) -> Vec<CheckError> {
     infer_program(&exprs).errors
 }
 
+fn surf_ir_errors(src: &str) -> Vec<CheckError> {
+    let decls = chelis_surf::parser::parse_str(src).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    match check_ir_program(&exprs) {
+        Ok(_) => Vec::new(),
+        Err(result) => result.errors,
+    }
+}
+
 fn assert_no_polymorphic_recursion_error(errors: &[CheckError]) {
     assert!(
         !errors
@@ -88,8 +97,7 @@ def main() -> int32 = f(1, 3)
 
 #[test]
 fn mutual_uniform_recursion_is_accepted() {
-    let errors = surf_errors(
-        "\
+    let source = "\
 type Box[a] =
   | Empty
   | Full { value: a }
@@ -98,12 +106,61 @@ def ping[a](box: Box[a], n: int32) -> int32 =
 def pong[a](box: Box[a], n: int32) -> int32 =
   if n <= 0 then 100 else ping(box, n - 1) + 1
 def concrete() -> int32 = ping(Full { value: cast(1.0, f32) }, 4)
-",
-    );
+";
+    let errors = surf_errors(source);
     assert!(
         errors.is_empty(),
         "uniform twin must check clean: {errors:?}"
     );
+    let ir_errors = surf_ir_errors(source);
+    assert!(
+        ir_errors.is_empty(),
+        "IR recursive driver must generalize authored members after SCC exit: {ir_errors:?}"
+    );
+}
+
+#[test]
+fn inferred_recursive_members_generalize_after_both_driver_scc_boundaries() {
+    let source = "(def {} left
+            (fn {} (params {} x stop)
+              (if {} (var {} stop) (var {} x)
+                (app {} (var {} right) (var {} x)
+                  (lit {type: (t-prim {} bool)} true)))))
+         (def {} right
+            (fn {} (params {} x stop)
+              (if {} (var {} stop) (var {} x)
+                (app {} (var {} left) (var {} x)
+                  (lit {type: (t-prim {} bool)} true)))))
+         (def {} int_use
+            (app {} (var {} left) (lit {type: (t-prim {} int32)} 1)
+              (lit {type: (t-prim {} bool)} false)))
+         (def {} bool_use
+            (app {} (var {} left) (lit {type: (t-prim {} bool)} true)
+              (lit {type: (t-prim {} bool)} false)))";
+    let exprs = chelis_deep::parser::parse_str(source).expect("Deep fixture parses");
+    let inferred = infer_program(&exprs);
+    assert!(
+        inferred.errors.is_empty(),
+        "primary driver must generalize inferred SCC members: {:?}",
+        inferred.errors
+    );
+    check_ir_program(&exprs).expect("IR driver must generalize inferred SCC members");
+}
+
+#[test]
+fn recursive_group_errors_clear_scope_before_the_next_check_in_both_drivers() {
+    let broken = "\
+def left(x: int32) -> int32 = right(x)
+def right(x: int32) -> int32 = left(x) + missing(x)
+";
+    assert!(!surf_errors(broken).is_empty());
+    assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
+    assert!(!surf_ir_errors(broken).is_empty());
+    assert_eq!(super::super::recursion::group_state_counts(), (0, 0));
+
+    let clean = "def clean(x: int32) -> int32 = x";
+    assert!(surf_errors(clean).is_empty());
+    assert!(surf_ir_errors(clean).is_empty());
 }
 
 #[test]

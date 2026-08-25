@@ -28,6 +28,39 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::*;
 
+/// A level change and the variable-generator state at which it took effect.
+/// Transitions are append-only between persisted-context resumptions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum LevelTransitionKind {
+    Enter,
+    Leave,
+    Resume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct LevelTransition {
+    kind: LevelTransitionKind,
+    level: u32,
+    watermarks: VarWatermarks,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VarClass {
+    Type,
+    Dim,
+    Rank,
+}
+
+/// Linear token proving which child level must be left next.
+///
+/// The token is deliberately neither `Copy` nor `Clone`: every successful
+/// enter must have exactly one matching leave, and leaves must be LIFO.
+#[derive(Debug)]
+pub(crate) struct LevelToken {
+    parent_level: u32,
+    child_level: u32,
+}
+
 /// Type error produced during unification.
 #[derive(Debug, Clone)]
 pub struct TypeError {
@@ -102,6 +135,24 @@ pub struct Subst {
     /// selects one pair. This prevents a wildcard summary from forgetting
     /// which reshape output belongs to the eventual expand shape.
     deferred_reshape_constraints: Mutex<HashMap<TypeVar, Vec<DeferredReshapeConstraint>>>,
+    /// Current lexical generalization level. Serialized because a cloned
+    /// checking context must preserve in-flight transactional state.
+    #[serde(default)]
+    current_level: u32,
+    /// Ordered enter/leave/resume watermarks used to recover mint levels.
+    #[serde(default)]
+    level_transitions: Vec<LevelTransition>,
+    /// Sparse overrides for variables unified into an older scope.
+    #[serde(default)]
+    lowered_tvar_levels: HashMap<TypeVar, u32>,
+    #[serde(default)]
+    lowered_dvar_levels: HashMap<DimVar, u32>,
+    #[serde(default)]
+    lowered_rvar_levels: HashMap<RankVar, u32>,
+    /// IDs below these floors came from an earlier persisted check and are
+    /// always level zero in the resumed check.
+    #[serde(default)]
+    resume_floors: VarWatermarks,
 }
 
 /// The two-shape obligation carried by an unresolved positional `expand`
@@ -167,6 +218,12 @@ impl Clone for Subst {
                     .expect("subst.deferred_reshape_constraints poisoned")
                     .clone(),
             ),
+            current_level: self.current_level,
+            level_transitions: self.level_transitions.clone(),
+            lowered_tvar_levels: self.lowered_tvar_levels.clone(),
+            lowered_dvar_levels: self.lowered_dvar_levels.clone(),
+            lowered_rvar_levels: self.lowered_rvar_levels.clone(),
+            resume_floors: self.resume_floors,
         }
     }
 }
@@ -174,6 +231,169 @@ impl Clone for Subst {
 impl Subst {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn current_level(&self) -> u32 {
+        self.current_level
+    }
+
+    /// Enter a lexical inference scope and record the first IDs minted there.
+    pub(crate) fn enter_level(&mut self, var_gen: &VarGen) -> LevelToken {
+        let parent_level = self.current_level;
+        let child_level = parent_level
+            .checked_add(1)
+            .expect("type-checker generalization level overflow");
+        self.current_level = child_level;
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Enter,
+            level: child_level,
+            watermarks: var_gen.watermarks(),
+        });
+        LevelToken {
+            parent_level,
+            child_level,
+        }
+    }
+
+    /// Leave the most recently entered lexical inference scope.
+    pub(crate) fn leave_level(&mut self, token: LevelToken, var_gen: &VarGen) {
+        assert_eq!(
+            self.current_level, token.child_level,
+            "generalization levels must be left in LIFO order"
+        );
+        self.current_level = token.parent_level;
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Leave,
+            level: token.parent_level,
+            watermarks: var_gen.watermarks(),
+        });
+    }
+
+    /// Normalize a persisted solver before it is reused for a new check.
+    /// Existing IDs become level-zero imports; only work performed after this
+    /// point contributes level metadata to the serialized context.
+    pub(crate) fn resume_for_new_check(&mut self, var_gen: &VarGen) {
+        assert_eq!(
+            self.current_level, 0,
+            "a persisted type environment cannot resume inside an inference scope"
+        );
+        let floors = var_gen.watermarks();
+        self.resume_floors = floors;
+        self.level_transitions.clear();
+        self.lowered_tvar_levels
+            .retain(|var, _| var.0 >= floors.next_tvar);
+        self.lowered_dvar_levels
+            .retain(|var, _| var.0 >= floors.next_dvar);
+        self.lowered_rvar_levels
+            .retain(|var, _| var.0 >= floors.next_rvar);
+        self.level_transitions.push(LevelTransition {
+            kind: LevelTransitionKind::Resume,
+            level: 0,
+            watermarks: floors,
+        });
+    }
+
+    fn mint_level(&self, id: u32, class: VarClass) -> u32 {
+        let floor = match class {
+            VarClass::Type => self.resume_floors.next_tvar,
+            VarClass::Dim => self.resume_floors.next_dvar,
+            VarClass::Rank => self.resume_floors.next_rvar,
+        };
+        if id < floor {
+            return 0;
+        }
+        let transition_index = self.level_transitions.partition_point(|transition| {
+            let watermark = match class {
+                VarClass::Type => transition.watermarks.next_tvar,
+                VarClass::Dim => transition.watermarks.next_dvar,
+                VarClass::Rank => transition.watermarks.next_rvar,
+            };
+            watermark <= id
+        });
+        transition_index
+            .checked_sub(1)
+            .map_or(0, |index| self.level_transitions[index].level)
+    }
+
+    pub(crate) fn level_of_tvar(&self, var: TypeVar) -> u32 {
+        self.lowered_tvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Type))
+    }
+
+    pub(crate) fn level_of_dvar(&self, var: DimVar) -> u32 {
+        self.lowered_dvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Dim))
+    }
+
+    pub(crate) fn level_of_rvar(&self, var: RankVar) -> u32 {
+        self.lowered_rvar_levels
+            .get(&var)
+            .copied()
+            .unwrap_or_else(|| self.mint_level(var.0, VarClass::Rank))
+    }
+
+    fn lower_tvar_to(&mut self, var: TypeVar, level: u32) {
+        if level < self.level_of_tvar(var) {
+            self.lowered_tvar_levels.insert(var, level);
+        }
+    }
+
+    fn lower_dvar_to(&mut self, var: DimVar, level: u32) {
+        if level < self.level_of_dvar(var) {
+            self.lowered_dvar_levels.insert(var, level);
+        }
+    }
+
+    fn lower_rvar_to(&mut self, var: RankVar, level: u32) {
+        if level < self.level_of_rvar(var) {
+            self.lowered_rvar_levels.insert(var, level);
+        }
+    }
+
+    /// Lower every variable reachable through the post-substitution type.
+    fn lower_type_to(&mut self, ty: &Type, level: u32) {
+        let ty = self.apply(ty);
+        for var in crate::env::free_tvars(&ty) {
+            self.lower_tvar_to(var, level);
+        }
+        for var in crate::env::free_dvars(&ty) {
+            self.lower_dvar_to(var, level);
+        }
+        for var in crate::env::free_rvars(&ty) {
+            self.lower_rvar_to(var, level);
+        }
+    }
+
+    fn lower_dim_to(&mut self, dim: &Dim, level: u32) {
+        match self.apply_dim(dim) {
+            Dim::Var(var) => self.lower_dvar_to(var, level),
+            Dim::Rank(var) => self.lower_rvar_to(var, level),
+            Dim::Lit(_) | Dim::Name(_) | Dim::Wildcard => {}
+        }
+    }
+
+    fn lower_ground_rank_to(&mut self, dims: &[Dim], level: u32) {
+        for dim in dims {
+            self.lower_dim_to(dim, level);
+        }
+    }
+
+    pub(crate) fn lower_type_to_current(&mut self, ty: &Type) {
+        self.lower_type_to(ty, self.current_level);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn level_metadata_counts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.level_transitions.len(),
+            self.lowered_tvar_levels.len(),
+            self.lowered_dvar_levels.len(),
+            self.lowered_rvar_levels.len(),
+        )
     }
 
     /// Snapshot of the type-variable bindings (cloned out of the lock).
@@ -1600,6 +1820,12 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
             }
         }
     }
+    // An older variable that becomes bound to a younger composite makes all
+    // reachable variables part of the older scope. Deferred shape trials
+    // above run on cloned substitutions; wait until they accept so a rejected
+    // candidate cannot leak a level override into the committed solver.
+    let target_level = subst.level_of_tvar(v);
+    subst.lower_type_to(ty, target_level);
     subst.insert_type(v, ty.clone());
     if let Type::Var(target) = ty {
         subst.transfer_deferred_reshape_alias(v, *target);
@@ -1621,6 +1847,8 @@ fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
             message: format!("infinite dimension: d{} occurs in {dim:?}", v.0),
         });
     }
+    let target_level = subst.level_of_dvar(v);
+    subst.lower_dim_to(dim, target_level);
     subst.insert_dim(v, dim.clone());
     Ok(())
 }
@@ -1873,6 +2101,8 @@ fn unify_row_against_row(d1: &[Dim], d2: &[Dim], subst: &mut Subst) -> Result<()
         match (a, b) {
             (Dim::Rank(r1), Dim::Rank(r2)) => {
                 if r1 != r2 {
+                    let target_level = subst.level_of_rvar(*r1);
+                    subst.lower_rvar_to(*r2, target_level);
                     subst.insert_rank(*r1, vec![Dim::Rank(*r2)]);
                 }
             }
@@ -1906,6 +2136,8 @@ fn bind_rvar(r: RankVar, dims: &[Dim], subst: &mut Subst) -> Result<(), TypeErro
             ),
         });
     }
+    let target_level = subst.level_of_rvar(r);
+    subst.lower_ground_rank_to(dims, target_level);
     subst.insert_rank(r, dims.to_vec());
     Ok(())
 }
@@ -1943,6 +2175,245 @@ mod tests {
 
     fn var_gen() -> VarGen {
         VarGen::default()
+    }
+
+    #[test]
+    fn level_transitions_restore_parent_mint_levels_for_every_id_class() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+
+        let child = subst.enter_level(&vg);
+        let child_t = vg.fresh_tvar();
+        let child_d = vg.fresh_dvar();
+        let child_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(child_t), 1);
+        assert_eq!(subst.level_of_dvar(child_d), 1);
+        assert_eq!(subst.level_of_rvar(child_r), 1);
+
+        subst.leave_level(child, &vg);
+        let parent_t = vg.fresh_tvar();
+        let parent_d = vg.fresh_dvar();
+        let parent_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(parent_t), 0);
+        assert_eq!(subst.level_of_dvar(parent_d), 0);
+        assert_eq!(subst.level_of_rvar(parent_r), 0);
+
+        let sibling = subst.enter_level(&vg);
+        let sibling_t = vg.fresh_tvar();
+        let sibling_d = vg.fresh_dvar();
+        let sibling_r = vg.fresh_rvar();
+        assert_eq!(subst.level_of_tvar(sibling_t), 1);
+        assert_eq!(subst.level_of_dvar(sibling_d), 1);
+        assert_eq!(subst.level_of_rvar(sibling_r), 1);
+        subst.leave_level(sibling, &vg);
+        assert_eq!(subst.current_level(), 0);
+        assert_eq!(subst.level_of_tvar(child_t), 1);
+        assert_eq!(subst.level_of_dvar(child_d), 1);
+        assert_eq!(subst.level_of_rvar(child_r), 1);
+        assert_eq!(subst.level_of_tvar(parent_t), 0);
+        assert_eq!(subst.level_of_dvar(parent_d), 0);
+        assert_eq!(subst.level_of_rvar(parent_r), 0);
+    }
+
+    #[test]
+    fn binding_older_type_to_younger_composite_lowers_every_reachable_class() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older = vg.fresh_tvar();
+        let mut env = crate::env::Env::new();
+        env.bind("outer".to_string(), Scheme::mono(Type::Var(older)));
+        let inner = subst.enter_level(&vg);
+        let younger_t = vg.fresh_tvar();
+        let younger_d = vg.fresh_dvar();
+        let younger_r = vg.fresh_rvar();
+
+        let composite = Type::Tuple(vec![
+            Type::Var(younger_t),
+            Type::Tensor(
+                vec![Dim::Var(younger_d), Dim::Rank(younger_r)],
+                TensorPrec::Var(younger_t),
+            ),
+        ]);
+        unify(&Type::Var(older), &composite, &mut subst).expect("composite bind");
+
+        assert_eq!(subst.level_of_tvar(younger_t), 0);
+        assert_eq!(subst.level_of_dvar(younger_d), 0);
+        assert_eq!(subst.level_of_rvar(younger_r), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(&composite, &subst);
+        assert!(escaped.tvars.is_empty());
+        assert!(escaped.dvars.is_empty());
+        assert!(escaped.rvars.is_empty());
+    }
+
+    #[test]
+    fn dimension_rank_and_rank_alias_bindings_lower_younger_variables() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older_d = vg.fresh_dvar();
+        let older_ground_r = vg.fresh_rvar();
+        let older_alias_r = vg.fresh_rvar();
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "outer".to_string(),
+            Scheme::mono(Type::Tuple(vec![
+                Type::Tensor(vec![Dim::Var(older_d)], TensorPrec::Concrete(Prim::F32)),
+                Type::Tensor(
+                    vec![Dim::Rank(older_ground_r)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(
+                    vec![Dim::Rank(older_alias_r)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+            ])),
+        );
+        let inner = subst.enter_level(&vg);
+        let younger_d_alias = vg.fresh_dvar();
+        let younger_d_in_rank = vg.fresh_dvar();
+        let younger_r = vg.fresh_rvar();
+
+        unify_dim(&Dim::Var(older_d), &Dim::Var(younger_d_alias), &mut subst)
+            .expect("dimension alias");
+        bind_rvar(older_ground_r, &[Dim::Var(younger_d_in_rank)], &mut subst)
+            .expect("ground rank bind");
+        unify_row_against_row(
+            &[Dim::Rank(older_alias_r)],
+            &[Dim::Rank(younger_r)],
+            &mut subst,
+        )
+        .expect("rank alias");
+
+        assert_eq!(subst.level_of_dvar(younger_d_alias), 0);
+        assert_eq!(subst.level_of_dvar(younger_d_in_rank), 0);
+        assert_eq!(subst.level_of_rvar(younger_r), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(
+            &Type::Tuple(vec![
+                Type::Tensor(
+                    vec![Dim::Var(younger_d_alias)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(
+                    vec![Dim::Var(younger_d_in_rank)],
+                    TensorPrec::Concrete(Prim::F32),
+                ),
+                Type::Tensor(vec![Dim::Rank(younger_r)], TensorPrec::Concrete(Prim::F32)),
+            ]),
+            &subst,
+        );
+        assert!(escaped.dvars.is_empty());
+        assert!(escaped.rvars.is_empty());
+    }
+
+    #[test]
+    fn expanded_rank_dimensions_and_precision_aliases_are_lowered() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let older_type = vg.fresh_tvar();
+        let older_precision = vg.fresh_tvar();
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "outer".to_string(),
+            Scheme::mono(Type::Tuple(vec![
+                Type::Var(older_type),
+                Type::Tensor(vec![], TensorPrec::Var(older_precision)),
+            ])),
+        );
+        let inner = subst.enter_level(&vg);
+        let younger_rank = vg.fresh_rvar();
+        let younger_dim = vg.fresh_dvar();
+        let younger_precision = vg.fresh_tvar();
+
+        bind_rvar(younger_rank, &[Dim::Var(younger_dim)], &mut subst)
+            .expect("inner ground rank bind");
+        unify(
+            &Type::Var(older_type),
+            &Type::Tensor(
+                vec![Dim::Rank(younger_rank)],
+                TensorPrec::Concrete(Prim::F32),
+            ),
+            &mut subst,
+        )
+        .expect("expanded rank reaches the older type");
+        unify_tensor_prec(
+            &TensorPrec::Var(older_precision),
+            &TensorPrec::Var(younger_precision),
+            &mut subst,
+        )
+        .expect("precision alias");
+
+        assert_eq!(subst.level_of_dvar(younger_dim), 0);
+        assert_eq!(subst.level_of_tvar(younger_precision), 0);
+        subst.leave_level(inner, &vg);
+        let escaped = env.generalize(
+            &Type::Tuple(vec![
+                Type::Tensor(vec![Dim::Var(younger_dim)], TensorPrec::Concrete(Prim::F32)),
+                Type::Tensor(vec![], TensorPrec::Var(younger_precision)),
+            ]),
+            &subst,
+        );
+        assert!(escaped.tvars.is_empty());
+        assert!(escaped.dvars.is_empty());
+    }
+
+    #[test]
+    fn tensor_precision_variables_generalize_at_an_ordinary_boundary() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let boundary = subst.enter_level(&vg);
+        let precision = vg.fresh_tvar();
+        let linked = vg.fresh_tvar();
+        unify_tensor_prec(
+            &TensorPrec::Var(precision),
+            &TensorPrec::Var(linked),
+            &mut subst,
+        )
+        .expect("precision variables link");
+        subst.leave_level(boundary, &vg);
+
+        let scheme = crate::env::Env::new()
+            .generalize(&Type::Tensor(vec![], TensorPrec::Var(precision)), &subst);
+        assert_eq!(scheme.tvars, vec![linked]);
+
+        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg);
+        let Type::Tensor(_, TensorPrec::Var(fresh_precision)) = instantiated else {
+            panic!("precision instantiation must remain a tensor precision variable");
+        };
+        unify_tensor_prec(
+            &TensorPrec::Var(fresh_precision),
+            &TensorPrec::Concrete(Prim::F32),
+            &mut subst,
+        )
+        .expect("precision variable binds to a concrete precision");
+        assert_eq!(
+            subst.apply_tensor_prec(&TensorPrec::Var(fresh_precision)),
+            TensorPrec::Concrete(Prim::F32)
+        );
+    }
+
+    #[test]
+    fn pp1_monomorphic_binding_is_lowered_before_a_sibling_boundary() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let pp1_level = subst.enter_level(&vg);
+        let pp1_var = vg.fresh_tvar();
+        subst.leave_level(pp1_level, &vg);
+        subst.lower_type_to_current(&Type::Var(pp1_var));
+
+        let mut env = crate::env::Env::new();
+        env.bind(
+            "pending_shape".to_string(),
+            Scheme::mono(Type::Var(pp1_var)),
+        );
+        let sibling_level = subst.enter_level(&vg);
+        let sibling_var = vg.fresh_tvar();
+        subst.leave_level(sibling_level, &vg);
+        let scheme = env.generalize(
+            &Type::Tuple(vec![Type::Var(pp1_var), Type::Var(sibling_var)]),
+            &subst,
+        );
+        assert_eq!(scheme.tvars, vec![sibling_var]);
     }
 
     #[test]
@@ -2667,13 +3138,36 @@ mod tests {
             panic!("ambiguous reshape output must remain deferred");
         };
 
-        let incompatible = Type::Tensor(vec![Dim::Lit(5)], TensorPrec::Concrete(Prim::F32));
+        let inner = s.enter_level(&g);
+        let younger_precision = g.fresh_tvar();
+        let before_level_state = (
+            s.current_level,
+            s.level_transitions.clone(),
+            s.lowered_tvar_levels.clone(),
+            s.lowered_dvar_levels.clone(),
+            s.lowered_rvar_levels.clone(),
+            s.resume_floors,
+        );
+        let incompatible = Type::Tensor(vec![Dim::Lit(5)], TensorPrec::Var(younger_precision));
         unify(&Type::Var(output_var), &incompatible, &mut s)
             .expect_err("five elements match neither deferred reshape candidate");
+        assert_eq!(
+            (
+                s.current_level,
+                s.level_transitions.clone(),
+                s.lowered_tvar_levels.clone(),
+                s.lowered_dvar_levels.clone(),
+                s.lowered_rvar_levels.clone(),
+                s.resume_floors,
+            ),
+            before_level_state,
+            "a rejected speculative shape candidate must not mutate level state"
+        );
         assert!(
             s.has_deferred_shape_constraint(output_var),
             "a rejected consumer must not erase the deferred relation"
         );
+        s.leave_level(inner, &g);
     }
 
     #[test]

@@ -372,7 +372,9 @@ pub(super) fn infer_def(
         None => return malformed_form(list, "def", "a symbol name as its first child", errors),
     };
 
+    let body_level = subst.enter_level(vg);
     let body_ty = infer_expr(&kids[1], env, vg, subst, adt_reg, errors, product);
+    subst.leave_level(body_level, vg);
     let scheme = env.generalize(&body_ty, subst);
     // chelis#397/#469: record the size provenance (see `infer_top_level` /
     // `infer_let`) so a later `expand` size built from this binding can be

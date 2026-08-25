@@ -8,6 +8,7 @@ repository.workspace = true
 
 [features]
 checkpoint-compile-probe = []
+generalize-sweep-oracle = []
 
 [dependencies]
 chelis-deep.workspace = true

@@ -75,6 +75,15 @@ pub(super) fn reset() {
     GROUP_CTX.with(|ctx| *ctx.borrow_mut() = None);
 }
 
+/// Abandon an in-flight recursive group without validating occurrences.
+/// Cancellation and other structured-abort paths use this to discard both
+/// the group record and every temporary generalization pin.
+pub(super) fn abort_group() {
+    GROUP_CTX.with(|ctx| {
+        ctx.borrow_mut().take();
+    });
+}
+
 /// Install the context for one recursive binding group. Member schemes are
 /// snapshotted after any monomorphic prebinding so occurrence recording can
 /// verify it resolved the top-level member.
@@ -229,6 +238,15 @@ pub(super) fn record_occurrence(
 /// member stays monomorphic in the group's instantiation variables.
 pub(crate) fn tvar_pinned(v: TypeVar) -> bool {
     GROUP_CTX.with(|ctx| ctx.borrow().as_ref().is_some_and(|c| c.pinned.contains(&v)))
+}
+
+#[cfg(test)]
+pub(super) fn group_state_counts() -> (usize, usize) {
+    GROUP_CTX.with(|ctx| {
+        ctx.borrow()
+            .as_ref()
+            .map_or((0, 0), |group| (group.members.len(), group.pinned.len()))
+    })
 }
 
 /// Validate every recorded in-group instantiation under the group's final
