@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
+use crate::dag::{
+    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, NodeId, RiscOp, RtDim, TensorType,
+};
 use crate::tier2;
 use chelis_types::types::Prim;
 
@@ -35,6 +37,9 @@ pub enum AdRejectionReason {
     /// The op is non-differentiable because it produces an integer-valued
     /// reduction result rather than a differentiable float value (`Count`).
     IntegerReductionOutput,
+    /// The operation is a numeric forward identity over a signed-integer
+    /// dtype, whose values carry no cotangents.
+    IntegerArithmeticOutput,
     /// The op is piecewise constant; the analytic derivative is zero
     /// almost everywhere and undefined at the breakpoints (e.g.
     /// `Floor`, `Ceil`).
@@ -100,6 +105,11 @@ impl fmt::Display for AdError {
                     f,
                     "grad: {op} is non-differentiable (integer-reduction output); \
                      remove it from the gradient path or wrap it in a stop-gradient"
+                ),
+                AdRejectionReason::IntegerArithmeticOutput => write!(
+                    f,
+                    "grad: {op} is non-differentiable (signed-integer arithmetic output); \
+                     use a float dtype or remove it from the gradient path"
                 ),
                 AdRejectionReason::PiecewiseConstant => write!(
                     f,
@@ -191,6 +201,14 @@ pub fn grad_dag_checked(
             continue;
         }
         match &node.op {
+            RiscOp::Sub | RiscOp::MaxElem | RiscOp::MinElem
+                if node.output_type.precision.is_integer() =>
+            {
+                return Err(AdError::NotSupported {
+                    op: risc_op_name(&node.op),
+                    reason: AdRejectionReason::IntegerArithmeticOutput,
+                });
+            }
             RiscOp::Argmax { .. } => {
                 return Err(AdError::NotSupported {
                     op: "argmax",
@@ -297,12 +315,15 @@ pub fn grad_dag_checked(
 fn risc_op_name(op: &RiscOp) -> &'static str {
     match op {
         RiscOp::Add => "add",
+        RiscOp::Sub => "sub",
         RiscOp::Mul => "mul",
         RiscOp::Div => "div",
         RiscOp::FloorDiv => "floor_div",
         RiscOp::TruncDiv => "trunc_div",
         RiscOp::CmpLt => "cmplt",
         RiscOp::MaxElem => "max_elem",
+        RiscOp::MinElem => "min_elem",
+        RiscOp::ExtremaAdjoint { .. } => "extrema_adjoint",
         RiscOp::Neg => "neg",
         RiscOp::Recip => "recip",
         RiscOp::Exp => "exp",
@@ -691,6 +712,13 @@ fn compute_adjoints(
             let b = node.inputs[1];
             Some(vec![(a, g), (b, g)])
         }
+        RiscOp::Sub => {
+            let a = node.inputs[0];
+            let b = node.inputs[1];
+            let ty = forward.get(a).unwrap().output_type.clone();
+            let neg_g = dag.add_node(RiscOp::Neg, vec![g], ty, None);
+            Some(vec![(a, g), (b, neg_g)])
+        }
         RiscOp::Mul => {
             let a = node.inputs[0];
             let b = node.inputs[1];
@@ -722,37 +750,54 @@ fn compute_adjoints(
             let zb = dag.add_node(RiscOp::synth_const(ty_b.precision, 0.0), vec![], ty_b, None);
             Some(vec![(a, za), (b, zb)])
         }
-        RiscOp::MaxElem => {
-            // Subgradient per spec: da = g * (x >= y), db = g * (x < y)
-            // (x >= y) = NOT(x < y) = 1 - cmplt(a, b)
+        RiscOp::MaxElem | RiscOp::MinElem => {
             let a = node.inputs[0];
             let b = node.inputs[1];
             let ty = forward.get(a).unwrap().output_type.clone();
-            let bool_ty = TensorType {
-                dims: ty.dims.clone(),
-                precision: Prim::Bool,
+            let kind = if matches!(node.op, RiscOp::MaxElem) {
+                ExtremaKind::Max
+            } else {
+                ExtremaKind::Min
             };
-            let a_lt_b_bool = dag.add_node(RiscOp::CmpLt, vec![a, b], bool_ty, None);
-            let a_lt_b = dag.add_node(
-                RiscOp::Cast {
-                    new_precision: ty.precision,
+            let da = dag.add_node(
+                RiscOp::ExtremaAdjoint {
+                    kind,
+                    operand: ExtremaOperand::Left,
                 },
-                vec![a_lt_b_bool],
+                vec![a, b, g],
                 ty.clone(),
                 None,
             );
-            let one = dag.add_node(
-                RiscOp::synth_const(ty.precision, 1.0),
-                vec![],
-                ty.clone(),
+            let db = dag.add_node(
+                RiscOp::ExtremaAdjoint {
+                    kind,
+                    operand: ExtremaOperand::Right,
+                },
+                vec![a, b, g],
+                ty,
                 None,
             );
-            // a_ge_b = 1 - cmplt(a, b)  (NOT via subtraction since bools are 0/1)
-            let neg_a_lt_b = dag.add_node(RiscOp::Neg, vec![a_lt_b], ty.clone(), None);
-            let a_ge_b = dag.add_node(RiscOp::Add, vec![one, neg_a_lt_b], ty.clone(), None);
-            let da = dag.add_node(RiscOp::Mul, vec![g, a_ge_b], ty.clone(), None);
-            let db = dag.add_node(RiscOp::Mul, vec![g, a_lt_b], ty, None);
             Some(vec![(a, da), (b, db)])
+        }
+        RiscOp::ExtremaAdjoint { kind, operand } => {
+            let a = node.inputs[0];
+            let b = node.inputs[1];
+            let cotangent = node.inputs[2];
+            let ty_a = forward.get(a).unwrap().output_type.clone();
+            let ty_b = forward.get(b).unwrap().output_type.clone();
+            let ty_g = forward.get(cotangent).unwrap().output_type.clone();
+            let zero_a = dag.add_node(RiscOp::synth_const(ty_a.precision, 0.0), vec![], ty_a, None);
+            let zero_b = dag.add_node(RiscOp::synth_const(ty_b.precision, 0.0), vec![], ty_b, None);
+            let dg = dag.add_node(
+                RiscOp::ExtremaAdjoint {
+                    kind: *kind,
+                    operand: *operand,
+                },
+                vec![a, b, g],
+                ty_g,
+                None,
+            );
+            Some(vec![(a, zero_a), (b, zero_b), (cotangent, dg)])
         }
 
         // --- Unary elementwise ---

@@ -586,6 +586,7 @@ pub struct FusedStep {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FusedStepOp {
     Add,
+    Sub,
     Mul,
     Div,
     /// Floor division step (chelis#178); see [`RiscOp::FloorDiv`].
@@ -594,6 +595,7 @@ pub enum FusedStepOp {
     /// (chelis#178); see [`RiscOp::TruncDiv`].
     TruncDiv,
     MaxElem,
+    MinElem,
     CmpLt,
     Neg,
     Recip,
@@ -626,6 +628,20 @@ pub enum ReduceWindowKind {
     Mean,
 }
 
+/// Direct extrema identity used by the reverse-mode selection adjoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExtremaKind {
+    Max,
+    Min,
+}
+
+/// Forward operand whose complete extrema cotangent is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExtremaOperand {
+    Left,
+    Right,
+}
+
 impl ReduceWindowKind {
     /// Canonical Surf builtin name. Used by [`crate::grad::risc_op_name`]
     /// and by the AD rejection error so error messages reference the
@@ -654,6 +670,10 @@ pub enum FusedInput {
 pub enum RiscOp {
     // --- Binary elementwise ---
     Add,
+    /// Direct element-wise subtraction. Integer execution checks the exact
+    /// mathematical difference at the stored width; this identity must not
+    /// be rewritten as `Add(Neg(rhs))`.
+    Sub,
     Mul,
     /// Element-wise IEEE-754 division `a / b`. Primitive because the
     /// algebraic rewrite `mul(a, exp(neg(log(b))))` is NaN for
@@ -678,6 +698,18 @@ pub enum RiscOp {
     TruncDiv,
     CmpLt,
     MaxElem,
+    /// Direct element-wise minimum selection. This identity preserves the
+    /// selected operand bits and must not be rewritten through negation.
+    MinElem,
+
+    /// AD-only exact selected-operand cotangent for [`RiscOp::MaxElem`] and
+    /// [`RiscOp::MinElem`]. Inputs are `(left, right, cotangent)`; output is
+    /// the complete cotangent where `operand` was selected and exact zero
+    /// elsewhere under [05-OP-40].
+    ExtremaAdjoint {
+        kind: ExtremaKind,
+        operand: ExtremaOperand,
+    },
 
     // --- Unary elementwise ---
     Neg,
@@ -1241,7 +1273,13 @@ impl RiscOp {
             // drives branch-and-bound on piecewise definitions such as
             // the `erf64` sign/small-x folds) all have sound interval /
             // linear-relaxation transformers (beacon_plan.md §3.1, §3.3).
-            RiscOp::Add | RiscOp::Mul | RiscOp::Div | RiscOp::CmpLt | RiscOp::MaxElem => true,
+            RiscOp::Add
+            | RiscOp::Sub
+            | RiscOp::Mul
+            | RiscOp::Div
+            | RiscOp::CmpLt
+            | RiscOp::MaxElem
+            | RiscOp::MinElem => true,
 
             // --- Unary elementwise math ---
             // `Exp`, `Log`, `Sqrt` are direct ports of the auto_LiRPA
@@ -1353,6 +1391,10 @@ impl RiscOp {
             // path is a later Beacon item (WI-B8 verified Greeks), not the
             // pinned forward surface today.
             RiscOp::ReduceWindowGrad { .. } => false,
+
+            // Internal reverse-mode selection node; Beacon targets the
+            // forward extrema identity rather than its generated adjoint.
+            RiscOp::ExtremaAdjoint { .. } => false,
 
             // `FusedElem` is a backend specialization that bundles
             // elementwise steps into one kernel; Beacon targets the
@@ -2115,7 +2157,13 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
     let node = dag.get(id)?;
     match &node.op {
         RiscOp::Load { name } => Some((name.as_str().to_string(), axis)),
-        RiscOp::Add | RiscOp::Mul | RiscOp::CmpLt | RiscOp::MaxElem => node
+        RiscOp::Add
+        | RiscOp::Sub
+        | RiscOp::Mul
+        | RiscOp::CmpLt
+        | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. } => node
             .inputs
             .iter()
             .find_map(|input| shape_source_for_axis(dag, *input, axis)),

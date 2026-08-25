@@ -72,17 +72,19 @@ fn is_fusible_elementwise(node: &DagNode) -> bool {
     // kernel is still deliberately unavailable. Keep integer Abs
     // materialized so ordinary source programs cannot be optimized back
     // onto the float-only fused path. Float Abs remains fusible.
-    if matches!(node.op, RiscOp::Abs) && node.output_type.precision.is_integer() {
+    if matches!(node.op, RiscOp::Abs | RiscOp::Sub) && node.output_type.precision.is_integer() {
         return false;
     }
     matches!(
         node.op,
         RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::MaxElem
+            | RiscOp::MinElem
             | RiscOp::CmpLt
             | RiscOp::Neg
             | RiscOp::Recip
@@ -104,11 +106,13 @@ fn is_fusible_elementwise(node: &DagNode) -> bool {
 fn to_fused_step_op(op: &RiscOp) -> FusedStepOp {
     match op {
         RiscOp::Add => FusedStepOp::Add,
+        RiscOp::Sub => FusedStepOp::Sub,
         RiscOp::Mul => FusedStepOp::Mul,
         RiscOp::Div => FusedStepOp::Div,
         RiscOp::FloorDiv => FusedStepOp::FloorDiv,
         RiscOp::TruncDiv => FusedStepOp::TruncDiv,
         RiscOp::MaxElem => FusedStepOp::MaxElem,
+        RiscOp::MinElem => FusedStepOp::MinElem,
         RiscOp::CmpLt => FusedStepOp::CmpLt,
         RiscOp::Neg => FusedStepOp::Neg,
         RiscOp::Recip => FusedStepOp::Recip,

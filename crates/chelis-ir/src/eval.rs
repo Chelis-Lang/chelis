@@ -18,16 +18,17 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dag::{
-    Dag, DagNode, DimExpr, DimInfo, FusedInput, FusedStepOp, NodeId, ReduceWindowKind, RiscOp,
-    RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType, bind_symbolic_dims, symbolic_bindings,
+    Dag, DagNode, DimExpr, DimInfo, ExtremaKind, ExtremaOperand, FusedInput, FusedStepOp, NodeId,
+    ReduceWindowKind, RiscOp, RtDim, SHRINK_TO_END, SymbolicDimSource, TensorType,
+    bind_symbolic_dims, symbolic_bindings,
 };
 use chelis_types::dtype_semantics::{
-    ArgReduceOp, CheckedCastPlan, CompareOp, FloatBinOp, FloatUnOp, IndexedTrapCandidate, IntBinOp,
-    IntUnOp, RawTensor, ReduceWindowGradOp, TensorReduceOp, TensorStorage,
-    arg_reduce_tensor_groups, compare_tensors, count_tensor_groups, finalize_tensor,
-    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
-    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
-    tensor_from_scalars, uniform_sample,
+    ArgReduceOp, CheckedCastPlan, CompareOp, ExtremaOperand as KernelExtremaOperand, FloatBinOp,
+    FloatExtremaOp, FloatUnOp, IndexedTrapCandidate, IntBinOp, IntUnOp, RawTensor,
+    ReduceWindowGradOp, TensorReduceOp, TensorStorage, arg_reduce_tensor_groups, compare_tensors,
+    count_tensor_groups, finalize_tensor, float_extrema_adjoint, float_tensor_binop,
+    float_tensor_unop, int_tensor_binop, int_tensor_unop, integer_is_exactly_representable,
+    reduce_tensor_groups, reduce_window_grad_tensor_groups, tensor_from_scalars, uniform_sample,
 };
 use chelis_types::types::Prim;
 
@@ -425,32 +426,38 @@ fn uniform_like(
 #[derive(Debug, Clone, Copy)]
 enum ElementwiseBinOp {
     Add,
+    Sub,
     Mul,
     Div,
     FloorDiv,
     TruncDiv,
     Max,
+    Min,
 }
 
 impl ElementwiseBinOp {
     const fn name(self) -> &'static str {
         match self {
             Self::Add => "add",
+            Self::Sub => "sub",
             Self::Mul => "mul",
             Self::Div => "div",
             Self::FloorDiv => "floor_div",
             Self::TruncDiv => "trunc_div",
             Self::Max => "max_elem",
+            Self::Min => "min_elem",
         }
     }
 
     const fn int_op(self) -> Option<IntBinOp> {
         match self {
             Self::Add => Some(IntBinOp::Add),
+            Self::Sub => Some(IntBinOp::Sub),
             Self::Mul => Some(IntBinOp::Mul),
             Self::FloorDiv => Some(IntBinOp::FloorDiv),
             Self::TruncDiv => Some(IntBinOp::TruncDiv),
             Self::Max => Some(IntBinOp::Max),
+            Self::Min => Some(IntBinOp::Min),
             Self::Div => None,
         }
     }
@@ -458,10 +465,12 @@ impl ElementwiseBinOp {
     const fn float_op(self) -> Option<FloatBinOp> {
         match self {
             Self::Add => Some(FloatBinOp::Add),
+            Self::Sub => Some(FloatBinOp::Sub),
             Self::Mul => Some(FloatBinOp::Mul),
             Self::Div => Some(FloatBinOp::Div),
             Self::FloorDiv => Some(FloatBinOp::FloorDiv),
             Self::Max => Some(FloatBinOp::Max),
+            Self::Min => Some(FloatBinOp::Min),
             Self::TruncDiv => None,
         }
     }
@@ -2013,6 +2022,11 @@ where
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
+            RiscOp::Sub => binary_elementwise(
+                ElementwiseBinOp::Sub,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+            )?,
             RiscOp::Mul => binary_elementwise(
                 ElementwiseBinOp::Mul,
                 &values[&node.inputs[0]],
@@ -2108,6 +2122,33 @@ where
                 &values[&node.inputs[0]],
                 &values[&node.inputs[1]],
             )?,
+            RiscOp::MinElem => binary_elementwise(
+                ElementwiseBinOp::Min,
+                &values[&node.inputs[0]],
+                &values[&node.inputs[1]],
+            )?,
+            RiscOp::ExtremaAdjoint { kind, operand } => {
+                let lhs = &values[&node.inputs[0]];
+                let rhs = &values[&node.inputs[1]];
+                let cotangent = &values[&node.inputs[2]];
+                let kind = match kind {
+                    ExtremaKind::Max => FloatExtremaOp::Max,
+                    ExtremaKind::Min => FloatExtremaOp::Min,
+                };
+                let operand = match operand {
+                    ExtremaOperand::Left => KernelExtremaOperand::Left,
+                    ExtremaOperand::Right => KernelExtremaOperand::Right,
+                };
+                let storage = float_extrema_adjoint(
+                    kind,
+                    operand,
+                    lhs.storage(),
+                    rhs.storage(),
+                    cotangent.storage(),
+                )
+                .map_err(|error| error.to_string())?;
+                TensorValue::from_storage(lhs.shape.clone(), storage)
+            }
             RiscOp::CmpLt => compare_elementwise(
                 CompareOp::Lt,
                 &values[&node.inputs[0]],
@@ -2273,6 +2314,11 @@ where
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
                         )?,
+                        FusedStepOp::Sub => binary_elementwise(
+                            ElementwiseBinOp::Sub,
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                        )?,
                         FusedStepOp::Mul => binary_elementwise(
                             ElementwiseBinOp::Mul,
                             resolve(&step.input_indices[0]),
@@ -2298,6 +2344,11 @@ where
                         }
                         FusedStepOp::MaxElem => binary_elementwise(
                             ElementwiseBinOp::Max,
+                            resolve(&step.input_indices[0]),
+                            resolve(&step.input_indices[1]),
+                        )?,
+                        FusedStepOp::MinElem => binary_elementwise(
+                            ElementwiseBinOp::Min,
                             resolve(&step.input_indices[0]),
                             resolve(&step.input_indices[1]),
                         )?,

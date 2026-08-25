@@ -14095,17 +14095,17 @@ mod tests {
     }
 
     #[test]
-    fn lower_sub_decomposes() {
+    fn lower_sub_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} c (app {} (var {} sub) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a=Const(3), b=Const(1), Neg(b), Add(a, Neg(b))
-        assert_eq!(non_drop_len(&dag), 4);
+        // a=Const(3), b=Const(1), Sub(a, b)
+        assert_eq!(non_drop_len(&dag), 3);
         assert!(verify::verify(&dag).is_empty());
-        assert_eq!(root_node(&dag).op, RiscOp::Add);
+        assert_eq!(root_node(&dag).op, RiscOp::Sub);
     }
 
     #[test]
@@ -14851,16 +14851,16 @@ mod tests {
     }
 
     #[test]
-    fn lower_min_elem_decomposes() {
+    fn lower_min_elem_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} min_elem) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, neg(a), neg(b), max(neg_a, neg_b), neg(max)
-        assert_eq!(non_drop_len(&dag), 6);
-        assert_eq!(root_node(&dag).op, RiscOp::Neg);
+        // a, b, MinElem(a, b)
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(root_node(&dag).op, RiscOp::MinElem);
         assert!(verify::verify(&dag).is_empty());
     }
 

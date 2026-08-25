@@ -1,5 +1,11 @@
-use chelis_ir::dag::{Dag, RiscOp, TensorType};
+use std::collections::HashMap;
+
+use chelis_ir::dag::{Dag, ExtremaKind, ExtremaOperand, RiscOp, TensorType};
+use chelis_ir::eval::{TensorValue, eval_tensor};
+use chelis_ir::grad::{AdError, AdRejectionReason, grad_dag_checked};
 use chelis_ir::{tier2, verify};
+use chelis_types::dtype_semantics::{RawTensor, finalize_tensor};
+use chelis_types::types::Prim;
 
 fn scalar_f32() -> TensorType {
     TensorType::scalar_f32()
@@ -73,4 +79,147 @@ fn min_elem_lowers_to_one_direct_selection_without_arithmetic_surrogate() {
             .all(|node| !matches!(node.op, RiscOp::Neg | RiscOp::MaxElem)),
         "min_elem must not introduce neg or max_elem"
     );
+}
+
+fn scalar_at(precision: Prim) -> TensorType {
+    TensorType {
+        dims: vec![],
+        precision,
+    }
+}
+
+fn exact_f64(value: f64) -> TensorValue {
+    TensorValue::from_storage(
+        vec![],
+        finalize_tensor("test", Prim::F64, RawTensor::Float(vec![value])).unwrap(),
+    )
+}
+
+#[test]
+fn extrema_adjoint_routes_ties_and_nan_cotangents_to_the_forward_selected_operand() {
+    for op in [RiscOp::MaxElem, RiscOp::MinElem] {
+        let mut dag = Dag::new();
+        let ty = scalar_at(Prim::F64);
+        let left = dag.add_node(
+            RiscOp::Load {
+                name: "left".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let right = dag.add_node(
+            RiscOp::Load {
+                name: "right".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let output = dag.add_node(op.clone(), vec![left, right], ty, None);
+        let differentiated = grad_dag_checked(&dag, output, &[left, right]).unwrap();
+
+        let kind = if matches!(op, RiscOp::MaxElem) {
+            ExtremaKind::Max
+        } else {
+            ExtremaKind::Min
+        };
+        assert!(differentiated.dag.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtremaAdjoint {
+                    kind: observed,
+                    operand: ExtremaOperand::Left,
+                } if observed == kind
+            )
+        }));
+        assert!(differentiated.dag.nodes().iter().any(|node| {
+            matches!(
+                node.op,
+                RiscOp::ExtremaAdjoint {
+                    kind: observed,
+                    operand: ExtremaOperand::Right,
+                } if observed == kind
+            )
+        }));
+        assert!(
+            differentiated
+                .dag
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::CmpLt)),
+            "NaN selection cannot be reconstructed from ordered comparison"
+        );
+
+        let cases = [
+            (0.0, -0.0, 1.0, 0.0),
+            (f64::from_bits(0xfff8_1234_5678_9abc), 1.0, 1.0, 0.0),
+            (1.0, f64::from_bits(0x7ff8_abcd_1234_5678), 0.0, 1.0),
+        ];
+        for (left_value, right_value, expected_left, expected_right) in cases {
+            let inputs = HashMap::from([
+                ("left".to_string(), exact_f64(left_value)),
+                ("right".to_string(), exact_f64(right_value)),
+            ]);
+            let values = eval_tensor(&differentiated.dag, &inputs).unwrap();
+            assert_eq!(
+                values[&differentiated.grad_nodes[&left]].to_f64_lossy_vec(),
+                vec![expected_left]
+            );
+            assert_eq!(
+                values[&differentiated.grad_nodes[&right]].to_f64_lossy_vec(),
+                vec![expected_right]
+            );
+        }
+    }
+}
+
+#[test]
+fn integer_direct_sub_and_extrema_are_forward_only() {
+    for op in [RiscOp::Sub, RiscOp::MaxElem, RiscOp::MinElem] {
+        let mut dag = Dag::new();
+        let int_ty = scalar_at(Prim::Int64);
+        let left = dag.add_node(
+            RiscOp::Load {
+                name: "left".into(),
+            },
+            vec![],
+            int_ty.clone(),
+            None,
+        );
+        let right = dag.add_node(
+            RiscOp::Load {
+                name: "right".into(),
+            },
+            vec![],
+            int_ty.clone(),
+            None,
+        );
+        let integer = dag.add_node(op.clone(), vec![left, right], int_ty, None);
+        let output = dag.add_node(
+            RiscOp::Cast {
+                new_precision: Prim::F64,
+            },
+            vec![integer],
+            scalar_at(Prim::F64),
+            None,
+        );
+
+        let error = match grad_dag_checked(&dag, output, &[left]) {
+            Ok(_) => panic!("signed-integer arithmetic must reject reverse-mode AD"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            AdError::NotSupported {
+                op: match op {
+                    RiscOp::Sub => "sub",
+                    RiscOp::MaxElem => "max_elem",
+                    RiscOp::MinElem => "min_elem",
+                    _ => unreachable!(),
+                },
+                reason: AdRejectionReason::IntegerArithmeticOutput,
+            }
+        );
+    }
 }
