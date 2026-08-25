@@ -2167,6 +2167,10 @@ boundary, pinned:
   `HostReason` is diagnostic context. The deciding atom/issue enters through
   `RejectionAuthority`, and `DiagnosticKind` supplies the stable machine
   spelling; after Tables A/B land, their cell supplies that authority.
+- **Deep structural realizability is not numeric capability policy.** [#912]'s
+  wildcard-free typed `DeepTag` lane disposition decides whether a structural
+  form forces Host or propagates to its children. Tables A/B neither generate
+  nor override that disposition; they own builtin and dtype capability cells.
 
 ## I2. Interlocks added 2026-07-30
 
