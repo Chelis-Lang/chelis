@@ -395,14 +395,11 @@ fn pruning_fires_macro_hygiene_monolithic_vs_layered_c_identical() {
 
 // ── Accept/reject parity under the eval-only transitive drop (chelis#1168) ──
 //
-// `cmd_build` drops UNREACHABLE defs that (transitively) reference an eval-only
-// host builtin BEFORE the monolithic full-program check, but the layered cache
-// path checks the intact pre-drop decls. If the drop were non-transitive, an
-// unreachable wrapper of a dropped def would keep a DANGLING reference: the
-// monolithic path manufactures an unbound-variable error the layered path never
-// sees, so build accept/reject would flip on cache state. The existing C-bytes
-// oracles all assert success on both arms, so they are structurally blind to
-// this — hence a dedicated negative parity oracle (chelis#1168 fable-verify).
+// `cmd_build` now checks the intact selected program before it drops
+// UNREACHABLE defs that transitively reference an eval-only host builtin. The
+// drop remains a transitive closure, so a well-typed wrapper chain leaves no
+// dangling reference in the retained compile target. Cache-disabled, cold, and
+// warm paths must preserve both acceptance and diagnostic bytes.
 
 /// Build `entry` and capture `(success, stderr)` WITHOUT asserting the outcome,
 /// so the monolithic and cache-warm paths can be compared for accept/reject
@@ -421,6 +418,151 @@ fn build_capture(entry: &Path, cache_home: &Path, extra_env: &[(&str, &str)]) ->
         output.status.success(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+fn check_capture(entry: &Path) -> (bool, String) {
+    let mut cmd = Command::cargo_bin("chelis").expect("chelis binary");
+    cmd.env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .arg("check")
+        .arg(entry);
+    let output = cmd.output().expect("run chelis check");
+    let mut report = String::from_utf8_lossy(&output.stdout).into_owned();
+    report.push_str(&String::from_utf8_lossy(&output.stderr));
+    (output.status.success(), report)
+}
+
+fn surf_spans(report: &str) -> Vec<String> {
+    report
+        .match_indices("surf:")
+        .filter_map(|(start, _)| {
+            let range: String = report[start + "surf:".len()..]
+                .chars()
+                .take_while(|character| character.is_ascii_digit() || *character == '.')
+                .collect();
+            (!range.is_empty()).then(|| format!("surf:{range}"))
+        })
+        .collect()
+}
+
+fn assert_semantic_rejection_in_all_build_modes(
+    dependency: &str,
+    expected_fragments: &[&str],
+    require_shared_span: bool,
+) {
+    let (scratch, cache_home) = fresh_cache_home();
+    let (_, entry_body) = plain_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dependency, entry_body);
+
+    let (disabled_ok, disabled_error) =
+        build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let (cold_ok, cold_error) = build_capture(&entry, &cache_home, &[]);
+    let (warm_ok, warm_error) = build_capture(&entry, &cache_home, &[]);
+    let (check_ok, check_report) = check_capture(&entry);
+    assert!(!check_ok, "chelis check must reject: {check_report:?}");
+    assert!(
+        !disabled_ok && !cold_ok && !warm_ok,
+        "check rejected, but build accepted: disabled={disabled_ok}, cold={cold_ok}, warm={warm_ok}"
+    );
+    assert_eq!(disabled_error, cold_error);
+    assert_eq!(cold_error, warm_error);
+
+    for fragment in expected_fragments {
+        assert!(
+            disabled_error.contains(fragment),
+            "build report lacks {fragment:?}: {disabled_error:?}"
+        );
+        assert!(
+            check_report.contains(fragment),
+            "check report lacks {fragment:?}: {check_report:?}"
+        );
+    }
+
+    if require_shared_span {
+        let build_spans = surf_spans(&disabled_error);
+        let check_spans = surf_spans(&check_report);
+        assert!(
+            build_spans
+                .iter()
+                .any(|span| check_spans.iter().any(|check_span| check_span == span)),
+            "build and check must report the same source location: build={build_spans:?}, check={check_spans:?}"
+        );
+    }
+}
+
+/// The direct eval-only user contains a type error. The two wrappers make the
+/// taint closure three definitions deep.
+fn eval_only_tainted_type_error_body() -> &'static str {
+    "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_broken(x: f64) -> f64 = add(round_to(x, cast(2, int32)), cast(1, int32))\ndef dep_wrapper(x: f64) -> f64 = dep_broken(x)\ndef dep_outer(x: f64) -> f64 = dep_wrapper(x)\n"
+}
+
+#[test]
+fn unreachable_eval_only_type_error_matches_check_in_all_build_cache_modes() {
+    assert_semantic_rejection_in_all_build_modes(
+        eval_only_tainted_type_error_body(),
+        &["precision mismatch"],
+        true,
+    );
+}
+
+#[test]
+fn depth_three_eval_only_effect_error_rejects_in_all_build_cache_modes() {
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, int32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64) -> f64 ! {} = {\n  seen: unit = print(x)\n  dep_wrapper(x)\n}\n";
+    assert_semantic_rejection_in_all_build_modes(
+        dependency,
+        &["body performs effects", "not declared"],
+        false,
+    );
+}
+
+#[test]
+fn depth_three_eval_only_linearity_error_rejects_in_all_build_cache_modes() {
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_runner(x: f64) -> f64 = round_to(x, cast(2, int32))\ndef dep_wrapper(x: f64) -> f64 = dep_runner(x)\ndef dep_outer(x: f64, t: tensor[4, f32]) -> tensor[4, f32] = {\n  rounded: f64 = dep_wrapper(x)\n  y: tensor[4, f32] = realize(t)\n  add(t, y)\n}\n";
+    assert_semantic_rejection_in_all_build_modes(dependency, &["already consumed"], true);
+}
+
+#[test]
+fn reef_file_outside_selected_target_is_not_checked() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let (dependency, entry_body) = plain_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dependency, entry_body);
+    let package_root = entry.parent().and_then(Path::parent).expect("package root");
+    write(
+        &package_root.join("tests/unselected.ch"),
+        "def broken(x: f64) -> f64 = add(x, cast(1, int32))\n",
+    );
+
+    let disabled = build_probe(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let cold = build_probe(&entry, &cache_home, &[]);
+    let warm = build_probe(&entry, &cache_home, &[]);
+
+    assert!(disabled.0 && cold.0 && warm.0);
+    assert_eq!(disabled.1, cold.1);
+    assert_eq!(cold.1, warm.1);
+    assert_eq!(disabled.2, cold.2);
+    assert_eq!(cold.2, warm.2);
+}
+
+#[test]
+fn entry_unreachable_tensor_scan_remains_rejected_in_all_build_cache_modes() {
+    let (scratch, cache_home) = fresh_cache_home();
+    let dependency = "module Azdep.Math\nexport (az_add)\n\ndef az_add(x: int32, y: int32) -> int32 = add(x, y)\ndef dep_scan(x: int64) -> tensor[*, int64] = tensor_scan(\n  x,\n  fn (previous: int64, _index: int64) -> add(previous, cast(1, int64)),\n  cast(3, int64)\n)\n";
+    let (_, entry_body) = plain_bodies();
+    let entry = stage_dep_fixture(scratch.path(), dependency, entry_body);
+
+    let (disabled_ok, disabled_error) =
+        build_capture(&entry, &cache_home, &[("CHELIS_STDLIB_CACHE_DISABLE", "1")]);
+    let (cold_ok, cold_error) = build_capture(&entry, &cache_home, &[]);
+    let (warm_ok, warm_error) = build_capture(&entry, &cache_home, &[]);
+    assert!(!disabled_ok && !cold_ok && !warm_ok);
+    assert_eq!(disabled_error, cold_error);
+    assert_eq!(cold_error, warm_error);
+    assert!(disabled_error.contains("tensor_scan"));
+
+    let (check_ok, check_report) = check_capture(&entry);
+    assert!(
+        check_ok,
+        "the whole-program tensor_scan rule is a build gate: {check_report:?}"
+    );
 }
 
 /// The dependency has an unreachable eval-only CHAIN: `dep_runner` uses the

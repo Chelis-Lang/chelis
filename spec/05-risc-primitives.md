@@ -1193,8 +1193,8 @@ The JSON and CSV I/O builtin families (`parse_json`/`to_json`, the
 `json_*` accessors, the `j*` constructors, `round_to`, `parse_csv`/
 `to_csv`, and the `csv_*` accessors; surface inventory in
 `docs/CHELIS_SURFACE.md` §3.8–§3.9) are **host-runtime only**: they run
-under `chelis eval` / `chelis test`, and every compiled target rejects a
-program that reaches one, whole-program, through the §7 `Unsupported`
+under `chelis eval` / `chelis test`, and every compiled target rejects one
+when the retained compile target reaches it, through the §7 `Unsupported`
 channel (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`). None of these
 operations is in the RISC DAG and none carries an AD adjoint — the whole
 family is **non-differentiable**, and no operation in it accumulates, so
@@ -1218,12 +1218,20 @@ family, whose members have no tensor-lane composition equivalent.
 > **[05-HOST-2]** An eval-only data-I/O builtin (this section's JSON and
 > CSV families, `round_to`, and `process_run`; the
 > `chelis_ir::host::EVAL_ONLY_HOST_BUILTINS` roster) SHALL be rejected
-> when a compiled target is requested, whole-program, through the §7
-> `Unsupported` channel. It SHALL NOT be lowered to a stub or default
-> value. The diagnostic SHALL direct the caller to the host evaluator
-> (`chelis eval` / `chelis test`).
+> when a compiled target is requested and the retained compile target
+> reaches it, through the §7 `Unsupported` channel. It SHALL NOT be
+> lowered to a stub or default value. The diagnostic SHALL direct the
+> caller to the host evaluator (`chelis eval` / `chelis test`). Build
+> SHALL remove a well-typed unreachable definition from a linked Reef target
+> when that definition reaches this roster. Removal occurs before backend
+> checks and code emission. Complete semantic checks
+> of the selected program SHALL occur before that removal.
 
-(chelis#1184 tracks a `chelis build` / `chelis check` divergence on this rule.)
+This package requirement does not prohibit the existing loose-source removal.
+The loose C path still preserves its authored host-library surface.
+
+The `tensor_scan` rule in §3.6 remains a separate whole-program rule. It
+is not narrowed by the retained compile-target scope of this atom.
 
 #### Decimal rounding atom
 

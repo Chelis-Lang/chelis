@@ -644,10 +644,14 @@ as `OpaqueTypeViolation` is therefore visible on `check` (a non-zero exit
 with the error listed), never a silent score-1 pass. The front-end
 surfaces that consume a program -- `chelis build`, `chelis eval --file`,
 and the in-process check entry the prove pipeline calls -- gate on a
-non-empty error list and refuse to proceed. `chelis validate` is a
-structural Deep/Surf well-formedness validator and does not run the type
-or opacity checker, so it does not gate on these semantic declaration
-errors; use `check`/`build`/`eval` for that.
+non-empty error list and refuse to proceed. Before build-specific
+eval-only removal or reachability pruning, `chelis build` SHALL complete
+type, effect, and linearity checks for every definition in its selected
+program. A definition outside that selected source or linked Reef target
+is outside this gate. `chelis validate` is a structural Deep/Surf
+well-formedness validator and does not run the type or opacity checker, so
+it does not gate on these semantic declaration errors; use
+`check`/`build`/`eval` for that.
 
 #### 2.5.1 Invariant Declaration Well-Formedness
 

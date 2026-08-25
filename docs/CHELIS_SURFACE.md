@@ -307,9 +307,10 @@ above the width fully shift out the value, while negative counts trap
 Native JSON over the prelude `Json` ADT
 (`Json = JNull | JBool bool | JInt int64 | JNum f64 | JStr string |
 JList List[Json] | JDict Dict[string, Json]`). **Eval/test-only**:
-`chelis build` and the public `compile()` API reject every name below
-whole-program (`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`), like
-`process_run`. The compiled-lane counterpart is `Std.Io.{Json,Csv}` (§11):
+`chelis build` and the public `compile()` API reject every name below when the retained compile target reaches it
+(`chelis_ir::host::EVAL_ONLY_HOST_BUILTINS`), like `process_run`. Build
+checks the complete selected program before it removes well-typed
+unreachable definitions. The compiled-lane counterpart is `Std.Io.{Json,Csv}` (§11):
 ordinary package defs that `chelis build` accepts, over std's own distinct
 `Json` ADT — reef package name-rewriting keeps its same-named
 `parse_json`/`to_json` from colliding with these builtins in either lane.

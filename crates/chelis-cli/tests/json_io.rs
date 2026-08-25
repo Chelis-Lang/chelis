@@ -159,9 +159,9 @@ done = write_file("{}", to_json(jnum(value)))
     );
 }
 
-/// The JSON builtins are eval-only: `chelis build` rejects them
-/// whole-program with the eval-only diagnostic (the same gate as
-/// `process_run`), instead of emitting a silently-wrong compiled value.
+/// The JSON builtins are eval-only: `chelis build` rejects them when the
+/// retained compile target reaches them, instead of emitting a silently-wrong
+/// compiled value. Build checks selected definitions before pruning.
 #[test]
 fn json_io_builtins_are_rejected_by_build() {
     let dir = tempdir().expect("tempdir");

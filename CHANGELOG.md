@@ -196,6 +196,16 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - Devenv builds portable `chelisup` release files with `outputs.release-chelisup`. The output includes one native executable and its SHA-256 sidecar.
   Releases support static Linux x86-64 and Apple Silicon macOS. Intel macOS now fails as unsupported instead of requesting an absent asset.
 
+### Fixed
+
+- **BREAKING: build now rejects dormant semantic errors in selected code
+  (chelis#1184).** `chelis build` checks every definition in the selected
+  source or linked Reef target before eval-only and reachability pruning.
+  It now reports the same type, effect, or linearity error as `chelis check`.
+  Previously, pruning hid errors inside unreachable eval-only-tainted
+  definitions. Remove or correct each dormant source error before the build.
+  Well-typed unreachable eval-only definitions remain outside the emitted target.
+
 ## [0.18.4] — 2026-08-05
 
 This release is dominated by breaking boundary changes: the published C

@@ -2958,114 +2958,92 @@ fn cmd_build(
     }
     let full_deep_exprs = expanded_desugared_program(&decls).map_err(boxed_string_error)?;
     let entry_deep_exprs = expanded_desugared_program(&entry_decls).map_err(boxed_string_error)?;
-    // chelis#334: drop dead library defs that use an eval-only host builtin
-    // (`process_run`) so an unused transitive dependency module — e.g.
-    // chelis-std's `Std.Process` — cannot force them into the compiled
-    // lowering target and trip the build gate. These defs can never appear
-    // in a compiled artifact, so they are not part of the host-library
-    // surface worth preserving. A *reachable* eval-only use is left in place
-    // for the build gate to reject with a clean diagnostic.
-    let full_deep_exprs = drop_unreachable_eval_only_defs(full_deep_exprs, &entry_deep_exprs);
+    // Keep the selected program intact until its complete semantic gate
+    // succeeds. Build-specific removal happens only after this proof.
+    let selected_deep_exprs = full_deep_exprs;
+
+    // A clean layered result proves the selected program. `Ok(None)` and
+    // cache-disabled builds use the same monolithic selected-program path so
+    // their diagnostics stay byte-identical.
+    let selected_checked = match &prepared {
+        Some(prepared) if !chelis_compiler_api::cache_disabled() => {
+            let (dependency_decls, entry_layer_decls) = prepared.dependency_entry_partition();
+            chelis_compiler_api::check_layered_for_build(
+                &prepared.stdlib_decls,
+                dependency_decls,
+                entry_layer_decls,
+            )
+            .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
+        }
+        _ => None,
+    };
+    let selected_checked = match selected_checked {
+        Some(checked) => checked,
+        None => checked_compilation_with_effects(&selected_deep_exprs)
+            .map_err(|e| format!("Check errors: {e}"))?,
+    };
+
+    // `tensor_scan` keeps its separate whole-program build rule. Run only
+    // that host-only gate on the semantically accepted selected program.
+    // Eval-only data I/O remains scoped to the retained compile target.
+    shared_compiler_gate(
+        chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
+            selected_checked.program(),
+            target,
+        ),
+    )?;
+
+    // Remove the complete transitive eval-only closure, then prune ordinary
+    // unreachable definitions. Both transformations run after semantic
+    // success, and the exact retained program gets a fresh check when changed.
+    let eval_pruned_deep_exprs =
+        drop_unreachable_eval_only_defs(selected_deep_exprs.clone(), &entry_deep_exprs);
     let pruned_deep_exprs =
-        prune_build_program_to_reachable_defs(&full_deep_exprs, &entry_deep_exprs);
-    // Whether build-time pruning dropped any decls. The single predicate the
-    // layered-cache and cross-module-check decisions below all key off, rather
-    // than re-deriving it from `.len()` comparisons across differently-sourced
-    // decl lists (chelis#1176 review).
-    let pruning_fired = pruned_deep_exprs.len() != full_deep_exprs.len();
+        prune_build_program_to_reachable_defs(&eval_pruned_deep_exprs, &entry_deep_exprs);
+    let pruning_fired = pruned_deep_exprs != selected_deep_exprs;
 
-    // Layered build check: when the input resolves inside a reef package and
-    // the typecheck cache is enabled, reuse the cached chelis-std + dependency
-    // sub-contexts (chelis#1168) instead of re-inferring the whole library.
-    // This runs whether or not build-time pruning fires:
-    //   - no pruning: the layered whole-program `CheckedCompilation` IS the
-    //     lowering target (selected directly below);
-    //   - pruning fires (any chelis-std/shell package): the layered check
-    //     still covers the FULL program, so it subsumes the cross-module
-    //     `checked_program_with_effects(&full_deep_exprs)` re-inference below —
-    //     the ~full-library type-inference cost this cache exists to remove.
-    //     (The pruned program is still re-checked for the lowering target.)
-    // `check_layered_for_build` returns `Ok(None)` on ANY dependency/entry
-    // type/effect/linearity error (including the opaque-encapsulation
-    // violation), so the monolithic full-program check below still runs on the
-    // fallback path and the error output stays byte-identical.
-    let layered_full_checked: Option<chelis_compiler_api::pipeline::CheckedCompilation> =
-        match &prepared {
-            Some(prepared) if !chelis_compiler_api::cache_disabled() => {
-                // chelis#1168: split the non-chelis-std decls into the
-                // stable dependency prefix (Layer 2, cached) and the
-                // volatile entry suffix (re-analyzed). The concatenation
-                // equals `non_stdlib_decls`, so the composed whole program
-                // is byte-identical to the pre-split two-layer path.
-                let (dependency_decls, entry_layer_decls) = prepared.dependency_entry_partition();
-                chelis_compiler_api::check_layered_for_build(
-                    &prepared.stdlib_decls,
-                    dependency_decls,
-                    entry_layer_decls,
-                )
-                .map_err(|e| boxed_string_error(compiler_error_messages(&e)))?
-            }
-            _ => None,
-        };
-
+    // Loose C sources preserve their authored host-library surface when that
+    // surface requires the host backend. Determine this property from the
+    // post-drop program, so removed eval-only code cannot select preservation.
+    let mut eval_pruned_checked = None;
     let preserve_host_library_surface =
-        if prepared.is_none() && target == BuildTarget::C && pruning_fired {
-            let full_checked = checked_program_with_effects(&full_deep_exprs)
-                .map_err(|e| format!("Check errors: {e}"))?;
-            shared_compiler_gate(
-                chelis_compiler_api::compiler::reject_host_only_builtins_before_host_lowering(
-                    &full_checked,
-                    target,
-                ),
-            )?;
-            chelis_ir::host::try_lower_compiled_program(&full_checked)
+        prepared.is_none() && target == BuildTarget::C && pruning_fired && {
+            let post_drop_checked = if eval_pruned_deep_exprs == selected_deep_exprs {
+                &selected_checked
+            } else {
+                eval_pruned_checked = Some(
+                    checked_compilation_with_effects(&eval_pruned_deep_exprs)
+                        .map_err(|e| format!("Check errors: {e}"))?,
+                );
+                eval_pruned_checked
+                    .as_ref()
+                    .expect("post-drop check is present")
+            };
+            chelis_ir::host::try_lower_compiled_program(post_drop_checked.program())
                 .map_err(|diagnostic| format!("Lowering error: {diagnostic}"))?
                 .host
                 .as_ref()
                 .map(chelis_ir::host::host_program_requires_host_backend)
                 .unwrap_or(false)
-        } else {
-            false
         };
-    // Cross-module checks (e.g. the §opaque-encapsulation rule) reject a
-    // reference to an unexported producer whose signature mentions an
-    // opaque type. That producer is unreachable from the entry point, so
-    // build-time pruning drops it; checking only the pruned program would
-    // then report the bare reference as a plain unbound variable and mask
-    // the `OpaqueTypeViolation`. Mirror `chelis check`: when pruning fired
-    // for a reef-prepared package, run the cross-module check against the
-    // full program so the encapsulation diagnostic surfaces. When the layered
-    // check above already covered the full program (`Some`), it performed this
-    // exact whole-program check from the cached contexts, so skip the
-    // redundant monolithic re-inference (chelis#1168) — the whole point of the
-    // cache; only run it on the layered fallback path (`None`), where the
-    // full-program error report must stay byte-identical.
-    if prepared.is_some() && pruning_fired && layered_full_checked.is_none() {
-        checked_program_with_effects(&full_deep_exprs).map_err(|e| format!("Check errors: {e}"))?;
-    }
     let deep_exprs = if preserve_host_library_surface {
-        full_deep_exprs
+        eval_pruned_deep_exprs.clone()
     } else {
         pruned_deep_exprs
     };
     let symbolic_dims = collect_symbolic_dims_from_deep(&deep_exprs);
-    // Use the layered whole-program `CheckedProgram` as the lowering target
-    // only when `deep_exprs` IS that same whole program — neither the eval-only
-    // drop nor build pruning removed anything. The length compare against the
-    // layered program's own expr count is the exact test, and it is
-    // deliberately NOT `!pruning_fired`: `deep_exprs` also reflects
-    // `drop_unreachable_eval_only_defs` (the layered check runs on the PRE-drop
-    // decls), so when the drop shrank the program but pruning did not fire, the
-    // layered program still carries the dropped eval-only defs and must not be
-    // the codegen target. When either shrank it, re-check the actual (pruned,
-    // post-drop) lowering target monolithically. The lengths are ordered
-    // `pruned <= full(post-drop) <= layered(pre-drop)` by construction, so a
-    // single equality is SUFFICIENT: it forces all three equal, and the guard
-    // can never select a length-coincident-but-different program.
-    let checked_compilation = match layered_full_checked {
-        Some(checked) if deep_exprs.len() == checked.program().exprs().len() => checked,
-        _ => checked_compilation_with_effects(&deep_exprs)
-            .map_err(|e| format!("Check errors: {e}"))?,
+    // Reuse a structural proof only when its input equals the emission program.
+    // Otherwise, check the exact retained program before backend gates.
+    let checked_compilation = if deep_exprs == selected_deep_exprs {
+        selected_checked
+    } else if deep_exprs == eval_pruned_deep_exprs {
+        match eval_pruned_checked {
+            Some(checked) => checked,
+            None => checked_compilation_with_effects(&deep_exprs)
+                .map_err(|e| format!("Check errors: {e}"))?,
+        }
+    } else {
+        checked_compilation_with_effects(&deep_exprs).map_err(|e| format!("Check errors: {e}"))?
     };
     let checked = checked_compilation.program();
     chelis_effects::validate_build_target(checked, target.as_str())
@@ -9357,13 +9335,11 @@ const EVAL_ONLY_HOST_BUILTINS: &[&str] = chelis_ir::host::EVAL_ONLY_HOST_BUILTIN
 /// raises, and one the layered cache path (which sees the intact pre-drop
 /// decls) does not, so build accept/reject would flip on cache state.
 ///
-/// Divergence note (tracked in chelis#1184; the direct case originated with the
-/// closed chelis#334): because these unreachable defs are removed before the
-/// build's type check, `chelis build` alone does NOT surface a real error (e.g.
-/// a type error or non-termination) that lives inside an unreachable,
-/// eval-only-tainted def — such a def can never reach a compiled artifact, and
-/// the transitive closure widens this to arbitrary depth. `chelis check`
-/// remains the gate for those.
+/// The selected program passes the complete semantic gate before this drop.
+/// Therefore a type, effect, or linearity error inside an unreachable
+/// eval-only-tainted definition cannot be hidden by the transitive removal.
+/// After that proof, the drop remains build-specific and preserves the
+/// compiled-target scope of the eval-only backend rule.
 fn drop_unreachable_eval_only_defs(
     exprs: Vec<DeepExpr>,
     entry_exprs: &[DeepExpr],
@@ -10200,6 +10176,39 @@ mod eval_only_pruning_tests {
             !names.contains(&"unused_runner"),
             "unreachable eval-only def must be dropped: {names:?}"
         );
+    }
+
+    /// The closure removes each direct user, every dependent, and each paired
+    /// signature. A one-hop implementation leaves `outer` behind.
+    #[test]
+    fn drops_transitive_eval_only_chain_and_paired_signatures() {
+        let full = desugar(
+            "def runner(cmd: string) -> (int64, string, string) = process_run(cmd, [])\n\
+             def wrapper(cmd: string) -> (int64, string, string) = runner(cmd)\n\
+             def outer(cmd: string) -> (int64, string, string) = wrapper(cmd)\n\
+             def main() -> int32 = cast(0, int32)\n",
+        );
+        let full_names: Vec<&str> = full.iter().filter_map(deep_named_decl_name).collect();
+        for name in ["runner", "wrapper", "outer"] {
+            assert!(
+                full_names
+                    .iter()
+                    .filter(|candidate| **candidate == name)
+                    .count()
+                    >= 2,
+                "fixture must contain a def and defsig for {name}: {full_names:?}"
+            );
+        }
+
+        let entry = desugar("def main() -> int32 = cast(0, int32)\n");
+        let kept = drop_unreachable_eval_only_defs(full, &entry);
+        let kept_names: Vec<&str> = kept.iter().filter_map(deep_named_decl_name).collect();
+        for name in ["runner", "wrapper", "outer"] {
+            assert!(
+                !kept_names.contains(&name),
+                "transitive removal must drop {name} and its signature: {kept_names:?}"
+            );
+        }
     }
 
     /// Negative parity: a *reachable* eval-only use is preserved so the

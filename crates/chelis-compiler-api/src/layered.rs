@@ -243,11 +243,11 @@ pub fn stdlib_structural_stats(
 /// `dependency_decls` and takes the exact two-layer path unchanged.
 ///
 /// Returns:
-/// - `Ok(Some(checked))` — the whole program passes all checks. `checked`
-///   is the composed whole-program state that the caller lowers.
+/// - `Ok(Some(checked))` — the selected pre-prune program passes all checks.
+///   `checked` is the composed selected-program state that the caller can reuse.
 /// - `Ok(None)` — a dependency or entry decl does NOT type-check clean
-///   (type, effect, linearity, or macro error). The caller falls back to
-///   the monolithic `checked_program_with_effects` so the error path stays
+///   (type, effect, linearity, or macro error). The caller checks the selected
+///   pre-prune program through the monolithic path, so diagnostics stay
 ///   byte-identical.
 /// - `Err(CompilerError)` — building the chelis-std sub-context failed.
 pub fn check_layered_for_build(
