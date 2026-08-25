@@ -1342,11 +1342,12 @@ traps `Test` with its supplied label and the operation name.
 ### 3.6.3 Canonical value-to-string conversion
 
 > **[05-OP-25]** `to_string(value) -> result` borrows exactly one value
-> without consuming it and returns `string`. It admits unit; an active
-> numeric, `bool`, or `string` scalar; a tensor whose element dtype is active;
-> or a `List`, tuple, `Dict`, `Option`, or ADT whose reachable values are
-> recursively admitted by this rule. Functions and resource
-> handles are type errors. A `string`
+> without consuming it and returns `string`. It admits exactly an active
+> numeric, `bool`, or `string` scalar; a tensor whose element dtype is one of
+> the nine active tensor element dtypes in spec/04 §1.1; or a `List` whose
+> reachable elements are recursively admitted by this rule. Unit, tuples,
+> `Dict`, `Option`, ADTs, functions, resource handles, and
+> deferred values are type errors. A `string`
 > scalar returns `value` byte-for-byte unchanged. Numeric and boolean scalar
 > and tensor elements render under [05-OBS-1..5] and §8.1. A rank-`r > 0`
 > tensor with dimensions `[d0, ..., d_(r-1)]` and `N` elements renders as
@@ -1357,12 +1358,8 @@ traps `Test` with its supplied label and the operation name.
 > element's recursive rendering in source order, separated by `, `, and then
 > `]`; `[]` is the empty-list rendering. A List boundary never truncates or
 > elides elements, although a tensor nested within it retains [05-OBS-5]
-> tensor truncation. Unit renders `()`. A tuple renders `()`, `(x,)`, or
-> `(x, y, ...)` for zero, one, or multiple fields. A dictionary renders `{}`
-> or `{key: value, ...}` in [05-OP-32]'s canonical key order. `None` renders `None` and
-> `Some(x)` renders with that constructor spelling. An ADT renders its exact
-> constructor name alone when it has no fields and as `Ctor(x, y, ...)`
-> otherwise. Each nested value uses this same rule. String elements are inserted verbatim, without quoting or
+> tensor truncation. Each nested List element uses this same rule. String
+> elements are inserted verbatim, without quoting or
 > escaping: this is a non-injective display form, not a serialization. Every
 > lane produces byte-identical text for the same admitted stored value. The
 > operation is pure, performs no arithmetic or dtype conversion, is

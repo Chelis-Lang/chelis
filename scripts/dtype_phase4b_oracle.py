@@ -47,10 +47,10 @@ FROZEN_FILE_DIGESTS = {
         "d3ff8af2d85519ea71a48c84f05a1a230b20b6d4700d26d28912bc6a57ff2590"
     ),
     "spec/04-type-system.md": (
-        "a268d9702c77019a5845d274eaaff93434753bec94ce7798daae7636da3a3a3b"
+        "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "13183ec5da6461758a5de262fa9db0a62327e68a4abd4aaf1ff30c3ea41ad990"
+        "6135bb430a9b4c59e23616cc8fc4423afa448b02b2dad172e24a394f8c549d05"
     ),
     "spec/06-transformations.md": (
         "68628d2039fa364b6eafb7fa73cc868e5520b0fb6f00950f5639b3f160638dbf"
@@ -59,10 +59,10 @@ FROZEN_FILE_DIGESTS = {
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "a643bf65a28072265536030b36c9b123ecfb8e8b2f392e0b5181ab818891c2d7"
+        "8fb4953e69c8df80e444f825d7fd224b365303e7ba2c16af5d586c2caa439912"
     ),
     "spec/design/dtype_semantics.md": (
-        "ef88527c6212ce1402e8196093ef3588f5234a77443e28acab4a94f9636538ab"
+        "c76c5a73b4976687f24b06422bd8a5e9b5fd7d8524945652ec5a632408868a36"
     ),
     "spec/design/loud_unsupported.md": (
         "146cca6092dac7fd60c83bc4e519f653a07bfeee0a6fab385669e27f731f313e"
@@ -80,7 +80,7 @@ FROZEN_FILE_DIGESTS = {
         "c7b76d7749c930bf8beadf0663fd542c1d675ab6e503455bc32f2f00f25f1e57"
     ),
     "openspec/specs/type-system/spec.md": (
-        "91dd50f8eb408f3eab0881f6be405a1fba0d4c1f2eb9dd18b5b40f953bff385f"
+        "135fd5d18b3bbbffa851720973984e3b61ed18ee0b83fa8884eb7e728b38c811"
     ),
 }
 OP_ATOM = re.compile(r"^> \*\*\[05-OP-(\d+)\]\*\*", re.MULTILINE)
@@ -339,7 +339,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-22": "f7c7c00b0fbea5176eb3427b517f5fb9f7434e24caaacd86fc1408455658329a",
     "05-OP-23": "1e0adc2fc7abf416c131f9ad5b6b054581eabf0365a9707b985fbaaa06e5e5b7",
     "05-OP-24": "2f3009f8b80b944f11fa2cf378409d85eb7891a59cdc1024e58ce2b67af5b800",
-    "05-OP-25": "65133d4498f9e4e649d4932f162cd102b99e35c93160e0e4375429f60bec9480",
+    "05-OP-25": "29f27a57545efd179e0f6b2766f48d7fdafb7c2ac6c3bbaeeaf5b0c0646ed502",
     "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
     "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
@@ -401,7 +401,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 3.6.3 Canonical value-to-string conversion",
         "### 3.7 Host-Lane Data I/O Numeric Operations",
-        "80e8e151e92defa0e7f336e12f890abc3bf27c8326bc0d77415adb4bf04bb632",
+        "8520543d576332fce2cd9821a3d917b083bfeb54e16f2054ccc7b94217dcecda",
     ),
     "named lossy cast section": (
         "spec/05-risc-primitives.md",
@@ -413,19 +413,19 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## The two-table design",
         "## Seed dispositions the table must ship with",
-        "5c73ae55be30692ffbb88f37be36ec3ac27389fa1784773240fc3ab22363d7a8",
+        "c53763a406f164f8ae333a6648932b9961a0fae1d344dbe1b901dc497c96ee33",
     ),
     "capability seed dispositions": (
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "721aecd9ddabf8bf96af5222df58c691f849d258c4473a2bcabd36912248bdc2",
+        "6c10a10ce86425db91681ad292bdd1ce73bff4263ac6ed15f5c7d17827d16d40",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "028a4114bf4b0219680b1125d6e349f5b518f27ceef12cf7e3a0359d85d4daed",
+        "cc2d50fbd9c77e3539721d92d1202e239f2f049aa978e217d4deb0dd9abd6280",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -443,13 +443,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "96dbc48a16f60daa992f56e6091c86065647ce5c4dfb600504689660bacc9fbf",
+        "cc5e8671969fe383b81dede7953d951a91237fdbcbb5c0e3478cc6f4aeba942b",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
         "| **#729 dtype semantics** |",
         "| **#730 loud unsupported** |",
-        "39eead2c2ed58e455a590c0c3c8409898f69a12d2db935fae3168c2b51a13173",
+        "9847b1e21efd800346d4a769c7da70f40a1303b02583b72c8aafbc6d54fb339b",
     ),
 }
 
@@ -701,6 +701,18 @@ def validate_normative_contract(
                 "Deep literal exclusion",
             ),
             ("**Reduce:** `sum`, `count`, `max_reduce`", "Deep count builtin"),
+        ),
+        violations,
+    )
+    require_all(
+        spec04,
+        (
+            ("The active primitive set is exactly ten names", "ten active primitives"),
+            (
+                "one of the ten active primitives is well-typed",
+                "backend-neutral active primitive set",
+            ),
+            ("nine active tensor element dtypes", "nine tensor element dtypes"),
         ),
         violations,
     )
@@ -1163,21 +1175,16 @@ def validate_normative_contract(
         "05-OP-25": (
             "`to_string(value) -> result` borrows exactly one value",
             "without consuming it and returns `string`",
-            "It admits unit; an active numeric, `bool`, or `string` scalar",
-            "a tensor whose element dtype is active",
-            "a `List`, tuple, `Dict`, `Option`, or ADT whose reachable values are "
-            "recursively admitted by this rule",
-            "Functions and resource handles are type errors",
+            "It admits exactly an active numeric, `bool`, or `string` scalar",
+            "a tensor whose element dtype is one of the nine active tensor element dtypes",
+            "a `List` whose reachable elements are recursively admitted by this rule",
+            "Unit, tuples, `Dict`, `Option`, ADTs, functions, resource handles, and "
+            "deferred values are type errors",
             "returns `value` byte-for-byte unchanged",
             "dimensions `[d0, ..., d_(r-1)]` and `N` elements",
             "all `N` elements when `N <= 32`, otherwise the first 32",
             "A List boundary never truncates or elides elements",
-            "Unit renders `()`",
-            "A tuple renders `()`, `(x,)`, or `(x, y, ...)`",
-            "A dictionary renders `{}` or `{key: value, ...}` in [05-OP-32]'s "
-            "canonical key order",
-            "`None` renders `None` and `Some(x)` renders with that constructor spelling",
-            "An ADT renders its exact constructor name",
+            "Each nested List element uses this same rule",
             "String elements are inserted verbatim, without quoting or escaping",
             "non-injective display form, not a serialization",
             "Every lane produces byte-identical text",
@@ -1796,8 +1803,7 @@ def validate_schema_and_consumers(
                 "disjoint to_string cases",
             ),
             (
-                "exact case enumerator covers unit, scalar, tensor, List, tuple, "
-                "Dict, Option, and ADT values",
+                "exact case enumerator is the closed set scalar, tensor, and List",
                 "to_string semantic authority",
             ),
             ("[#1282] owns checker/evaluator alignment", "to_string checker owner"),
@@ -1893,9 +1899,9 @@ def validate_schema_and_consumers(
                 "host numeric capability owner",
             ),
             (
-                "No narrow case allowlist or unsupported-nested-carrier exception "
-                "survives",
-                "recursive to_string full domain",
+                "Unit, tuple, `Dict`, `Option`, ADT, function, deferred, and "
+                "resource cases are semantic `Rejected` rows",
+                "to_string rejected cases",
             ),
             (
                 "The domain and case declarations\n  themselves are [#1294] "
@@ -1944,7 +1950,8 @@ def validate_schema_and_consumers(
             ("[#1281] mean/extrema/argument-reduction", "dtype-plan reduction owner"),
             ("[#1284]\n   owns replacing", "dtype-plan logical owner"),
             (
-                "recursive `to_string`; boolean\n   `and`/`or`/`not`; NaN-aware "
+                "scalar/tensor/recursive-List `to_string`; boolean\n   "
+                "`and`/`or`/`not`; NaN-aware "
                 "comparison/equality; exact scalar/container/C\n   tensor carriers",
                 "dtype-plan to_string semantics",
             ),
@@ -1953,11 +1960,11 @@ def validate_schema_and_consumers(
                 "zero capacity exceptions",
             ),
             (
-                "[#1282] [05-OP-25] recursive `to_string` domain",
+                "[#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain",
                 "dtype-plan to_string checker owner",
             ),
             (
-                "[#1059] compiled recursive rendering cells",
+                "[#1059] compiled C-host Tensor/List rendering cells",
                 "dtype-plan to_string backend owner",
             ),
             (
@@ -2132,12 +2139,14 @@ def validate_schema_and_consumers(
             ("[#1281] owns the remaining reduction rows", "roadmap reduction owner"),
             ("Phase 4B froze semantics", "roadmap Phase 4B boundary"),
             (
-                "recursive canonical `to_string` and compiled rendering "
+                "canonical scalar/tensor/recursive-List `to_string` and compiled "
+                "C-host Tensor/List rendering "
                 "([#1282]/[#1059])",
                 "roadmap to_string checker owner",
             ),
             (
-                "recursive canonical `to_string` and compiled rendering "
+                "canonical scalar/tensor/recursive-List `to_string` and compiled "
+                "C-host Tensor/List rendering "
                 "([#1282]/[#1059])",
                 "roadmap to_string backend owner",
             ),

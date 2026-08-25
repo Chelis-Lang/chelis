@@ -1897,6 +1897,14 @@ class ContractValidationTests(unittest.TestCase):
         self.assertIn("`bf16` | `f32`, `f64` | `bf16`", text)
         self.assertIn("`int32` | `int32`, `int64` | accumulator dtype `a`", text)
 
+    def test_backend_neutral_contract_keeps_all_ten_active_primitives(self) -> None:
+        self.replace(
+            Path("spec/04-type-system.md"),
+            "one of the ten active primitives is well-typed",
+            "one of the nine active primitives is well-typed",
+        )
+        self.assert_contract_fails("backend-neutral active primitive set")
+
     def test_sum_result_rule_cannot_drop_explicit_wider_accumulators(self) -> None:
         self.replace(
             Path("spec/04-type-system.md"),
@@ -1906,13 +1914,14 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("total sum result precision rule")
 
-    def test_to_string_domain_admits_recursive_values_but_rejects_opaque_values(self) -> None:
+    def test_to_string_domain_rejects_non_list_composites_and_opaque_values(self) -> None:
         self.replace(
             Path("spec/05-risc-primitives.md"),
-            "Functions and resource\n> handles are type errors",
-            "Functions and resource handles are rendered opaquely",
+            "Unit, tuples,\n> `Dict`, `Option`, ADTs, functions, resource handles, "
+            "and\n> deferred values are type errors",
+            "Unit and tuples are rendered recursively",
         )
-        self.assert_contract_fails("OP-25.*Functions")
+        self.assert_contract_fails("OP-25.*Unit")
 
     def test_to_string_raw_string_display_is_explicitly_non_injective(self) -> None:
         self.replace(
@@ -1925,9 +1934,8 @@ class ContractValidationTests(unittest.TestCase):
     def test_to_string_seed_cells_require_the_normative_atom(self) -> None:
         self.replace(
             Path("spec/design/capability_table.md"),
-            "exact case enumerator covers unit, scalar, tensor, List, tuple, Dict, "
-            "Option, and ADT values",
-            "case enumerator covers only tensor and List values",
+            "exact case enumerator is the closed set scalar, tensor, and List",
+            "case enumerator also accepts unit",
         )
         self.assert_contract_fails("to_string semantic authority")
 
@@ -2443,10 +2451,10 @@ class ContractValidationTests(unittest.TestCase):
                 "host numeric capability owner",
             ),
             (
-                "No narrow case allowlist or unsupported-nested-carrier exception "
-                "survives",
-                "nested carriers may remain permanently unsupported",
-                "recursive to_string full domain",
+                "Unit, tuple, `Dict`, `Option`, ADT, function, deferred, and "
+                "resource cases are semantic `Rejected` rows",
+                "Unit is a supported sibling case",
+                "to_string rejected cases",
             ),
         )
         for old, new, message in mutations:

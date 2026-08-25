@@ -333,7 +333,7 @@ failed nodes with error metadata plus structured repair suggestions.
 - **WHEN** the fitness score is 1.0
 - **THEN** the error list is empty (a report cannot claim perfect success with errors present)
 
-### Requirement: Phase-2a effect subset
+### Requirement: Boundary effect subset
 
 The checker SHALL infer a function's effect set as the union of its body's compiler-known
 effects, with `Random` (from `dropout`/tensor RNG), `IO` (from `print`/`debug`/file

@@ -146,7 +146,7 @@ matching numpy and Arrow. All of these spellings are rejected under
 #### 1.1.3 Per-Backend Dtype Support Matrix
 
 The active primitive set in §1.1 is the **language-level** dtype contract: a
-program that mentions one of the nine active primitives is well-typed in
+program that mentions one of the ten active primitives is well-typed in
 every Chelis pass that does not select a backend (parser, type checker, IR
 evaluator). Backend code generation is a separate surface; not every backend
 admits every active dtype. This sub-section is the authoritative per-backend
