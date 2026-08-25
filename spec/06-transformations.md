@@ -107,17 +107,21 @@ output's recursive cotangent type.
 
 Process nodes in **reverse topological order** (from output toward inputs). For each node `n_i`:
 
-1. Look up the operation's exact adjoint, zero-cotangent, or structural
+1. Except for the seeded output node, materialize `adjoint[n_i]` from its
+   queued contributions using §2.4's canonical key order and balanced tree.
+2. Look up the operation's exact adjoint, zero-cotangent, or structural
    rejection contract in its controlling numbered-spec atom.
-2. For an adjoint contract, compute each input's recursive contribution from
+3. For an adjoint contract, compute each input's recursive contribution from
    `adjoint[n_i]`. For a zero-cotangent contract, contribute the exact
    shape-preserving zero. For a rejection contract, stop with its named
    `AdRejectionReason`.
-3. **Accumulate:** combine the contribution into `n_j`'s cotangent using
-   §2.4's recursive rule.
+4. **Queue:** store the contribution for `n_j` under the consumer's canonical
+   forward ordinal and the exact input-slot index. Do not incrementally build
+   an addition tree during traversal.
 
 ```
-adjoint[n_j] = Add(adjoint[n_j], contribution_from_n_i)
+contributions[n_j][(canonical_forward_ordinal(n_i), input_slot)] =
+    contribution_from_n_i
 ```
 
 **Step 3 -- Emit output.**

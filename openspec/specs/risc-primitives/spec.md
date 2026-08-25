@@ -51,19 +51,38 @@ remain owned tensors and the borrow distinction SHALL be erased before IR loweri
 ### Requirement: Two tiers
 
 Tier-1 RISC primitives SHALL be the irreducible set the IR operates on, each with a defined AD
-adjoint rule. Tier-2 derived built-ins SHALL be convenience functions the desugarer emits and
-the IR lowers to Tier-1 compositions during IR construction; they SHALL exist in Deep AST only,
-not in the RISC DAG.
+adjoint or rejection rule. Tier-2 derived built-ins SHALL be convenience functions the desugarer
+emits and the IR lowers to semantics-preserving Tier-1 compositions during IR construction; they
+SHALL exist in Deep AST only, not in the RISC DAG. `sub`, `max_elem`, and `min_elem` are Tier-1
+identities because an arithmetic surrogate can introduce a trap or alter selected stored bits.
 
-#### Scenario: Derived builtin lowers to primitives
+#### Scenario: Subtraction stays direct
 
-- **WHEN** `sub(a, b)` is lowered
-- **THEN** it becomes `add(a, neg(b))` during IR construction
+- **WHEN** `sub(a, b)` reaches RISC IR
+- **THEN** it remains direct checked subtraction rather than becoming `add(a, neg(b))`
 
-#### Scenario: Derived builtin is not in the RISC DAG
+#### Scenario: Minimum stays a selection
 
-- **WHEN** the IR DAG is inspected after lowering
-- **THEN** it contains only Tier-1 primitives, with `sub` decomposed rather than present as a node
+- **WHEN** `min_elem(a, b)` reaches RISC IR
+- **THEN** it remains direct selection rather than becoming `neg(max_elem(neg(a), neg(b)))`
+
+### Requirement: Direct subtraction and extrema semantics
+
+Checked signed-integer subtraction SHALL trap only when its exact mathematical result is
+unrepresentable at the operand width. Float subtraction SHALL execute at the declared arithmetic
+width. Float extrema SHALL select the first NaN in operand order with exact stored bits and SHALL
+otherwise preserve the first operand on every equality, including signed-zero equality. Integer
+extrema SHALL compare exactly at the stored width and use the same first-operand tie rule.
+
+#### Scenario: Representable subtraction cannot trap at an invented negation
+
+- **WHEN** `sub(-1i64, INT64_MIN)` executes
+- **THEN** it returns `INT64_MAX` without evaluating `neg(INT64_MIN)`
+
+#### Scenario: Extrema preserve the selected stored value
+
+- **WHEN** two float extrema operands include a NaN or compare equal
+- **THEN** the first selected operand is returned bit-for-bit and receives the whole cotangent
 
 ### Requirement: Division semantics
 

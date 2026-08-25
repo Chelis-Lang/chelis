@@ -280,7 +280,7 @@ The host lane is eager (no lazy list fusion).
   selected runtime extent as `int64`; reductions/expands still need
   compile-time-constant axes regardless.
 
-### 3.5 I/O and process — introduces `Io`
+### 3.5 I/O and process — introduces `IO`
 
 `read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`,
 `mmap_file`, `mmap_read`, `mmap_len`, `process_run`.
@@ -532,7 +532,7 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
 | Effect | Introduced by | Handled by |
 |---|---|---|
 | `Random` | `dropout`, `uniform_like` | `with seed(Ni64) { ... }` |
-| `Io` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
+| `IO` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
 | `Test` | `test_assert*` | pinned at root, no handler |
 | `Accum` | accumulation contexts | — |
 | `Resource(String)` | device/resource pinning | `with device("gpu:0"|"cpu") { ... }` |

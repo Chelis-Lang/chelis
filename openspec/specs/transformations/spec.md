@@ -102,10 +102,12 @@ Float-to-float casts use `cast(g, source_dtype)`. An explicit `wrt` target
 must contain a differentiable float leaf; mixed List/tuple/ADT targets are
 legal and preserve discrete fields as `unit`.
 
-#### Scenario: grad through an internal comparison is valid
+#### Scenario: grad through internal extrema and comparison is valid
 
-- **WHEN** `grad` is applied to a function using `Max`/`CmpLt` internally with float tensor parameters
-- **THEN** it is valid (zero gradient at the non-differentiable point) rather than an error
+- **WHEN** `grad` is applied to a function using `MaxElem`/`MinElem`/`CmpLt`
+  internally with float tensor parameters
+- **THEN** it is valid: the selected operand receives the whole cotangent,
+  including the first operand on equality, while the comparison contributes zero
 
 #### Scenario: grad over a bool parameter is a type error
 

@@ -33,6 +33,7 @@ CONTRACT_FILES = (
     "spec/design/loud_unsupported.md",
     "spec/design/spec_provenance.md",
     "spec/design/remediation_roadmap.md",
+    "docs/CHELIS_SURFACE.md",
     "docs/investigations/remediation_status_2026_08_04.md",
     "openspec/specs/risc-primitives/spec.md",
     "openspec/specs/serialization/spec.md",
@@ -50,19 +51,19 @@ FROZEN_FILE_DIGESTS = {
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "4d7149ed1e6dfd4d8dad4163adc5b3b14bbbf12289e7f78bf2c5ef33bf0c8329"
+        "6645d94ea8c1375997c7cd388f9b4165d5f1ccd0159c8b8cf8c4b894888f12a5"
     ),
     "spec/06-transformations.md": (
-        "57f0797f5d79fe6cf752c277ff74c290c595d179be166a8b294ba6f52f5ce374"
+        "36d84cd0c3c73af85300c6563773890413a602b6f0e63f624cb4ab0801883d38"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
     ),
     "spec/design/capability_table.md": (
-        "2ed5a35ef6878593213272875e6f6a93ffd432d63350417ecb0aa22b88055eab"
+        "6bcf6a335132a0f347f3a0b8b715a578c910c0442e682e352bf9699fdebde008"
     ),
     "spec/design/dtype_semantics.md": (
-        "f0fbdd18d9bd5b20fb1e656d2ac5c5685d91a3a0ae61814ec9ea582dc40ab73e"
+        "53d79d87613499cce6e0427ad3dac21e02d2abfbb01f9ce453e9844d0b28f27f"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -71,13 +72,13 @@ FROZEN_FILE_DIGESTS = {
         "a2a84ab3a4d2925fc7a79f482e296eb979aadc24a0ebf21872c1fb257f7ea3fe"
     ),
     "openspec/specs/risc-primitives/spec.md": (
-        "c1590d1f4d06564af18e38b790c1d0b8701c5384944aa58d96de1b3381a7ec27"
+        "c4dd1448d0a1e865de4c6cba1e58a597a4d29d806668fb93e5ca34c82f88044d"
     ),
     "openspec/specs/serialization/spec.md": (
         "ef0139de7e1da5ec986ec5ec4bfb12710a5cee8e77e9c91840d478404907b5ed"
     ),
     "openspec/specs/transformations/spec.md": (
-        "d35aa126ab9075bc893169e9124047ee76fd64302c5bc2ca892dc61e3fd92172"
+        "85249429f5d2fdd3e1390567565143e180af1aafb143a7dad454b517cfbba342"
     ),
     "openspec/specs/type-system/spec.md": (
         "135fd5d18b3bbbffa851720973984e3b61ed18ee0b83fa8884eb7e728b38c811"
@@ -127,6 +128,8 @@ EXPECTED_PHASE4B_OP_HEADINGS = {
     37: "`dropout(input, rate) -> result`",
     38: "`host_numeric_builtin(arguments...) -> result`",
     39: "`window_reduction(arguments...) -> result`",
+    40: "`max_elem(left, right) -> result` and",
+    41: "`sub(left, right) -> result`",
 }
 
 # These are independent, executable copies of the exact normative manifests.
@@ -343,7 +346,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-26": "90050a454489c33ba0afb9caa41763591f22461eca947dd3525109c97976362f",
     "05-OP-27": "03a81560ae84cb4dd151e57da34d117a9e616a33700957796edea98c2afaf82f",
     "05-OP-28": "9eb81ed515be3e016371f951a75a3b65c4bae2cd8bfbc8de22c510f8e71be56b",
-    "05-OP-29": "3993f9bbfd12ac2e0123859ec2c4664ee9aac341090d31f217cd74e23ab23f50",
+    "05-OP-29": "383b90bb09a7cdd0dc0a18343bbcd1bf8469e18228fb5ce88532621b154f07c1",
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "be9dd899970a14b9c1765671915e6c722215a2cee6384faab0992966a4561753",
     "05-OP-32": "4c6438ef1fa47bc6085d717e68c410030695bee86c59cbcf608f7948ca516e50",
@@ -354,6 +357,8 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-37": "2b27734c6956b706e031130b2c444cb69f0ff5a6a6886d1935611f61767f02b0",
     "05-OP-38": "46685ae74bc05fac13ce0ff877e92978bea109b4660f7d7ca637222819cb368e",
     "05-OP-39": "c23d7e9e0964df3655319ce26c486a8c006097cdb8ff714d8f7a1b8fcfecaa14",
+    "05-OP-40": "4bde2e959c3cf5c4d22d0d5db2564e195c877b3c2bd291faaca523532aa77ce4",
+    "05-OP-41": "7bbbba7450bf89f9eac66a7f660f7352940a41e4baf6f7497873e46a29be41db",
 }
 
 # The markers are part of the freeze contract: each must occur exactly once,
@@ -377,7 +382,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "32060a20400f7c982c109ff6a5072d3a286ee6ae72af02546358ae8d2c7c9fc6",
+        "3bfff46b97216e66f2a7acf0f0e4d148093947ef7f5e6d21a43025e9201e07ad",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -419,13 +424,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/capability_table.md",
         "## Seed dispositions the table must ship with",
         "## New numeric ops before the table lands (added 2026-07-30)",
-        "6c10a10ce86425db91681ad292bdd1ce73bff4263ac6ed15f5c7d17827d16d40",
+        "034da3246b3321dce194f5906884e5fa997aa8a15dbecf5970fda8a0b1678827",
     ),
     "Phase 4 handoff": (
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "7ce271ebf8c18d5298fe4ca8ab126de034c2347a2affbe31d9eb5aec2cde3bdb",
+        "030724afca5b47a7dfd0b56077732cc2b773177fd90ce07e8ac806e73228838a",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -443,13 +448,13 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "cc5e8671969fe383b81dede7953d951a91237fdbcbb5c0e3478cc6f4aeba942b",
+        "a33d0214a08ab35dc45e1c4eb76cbe3220c8cc5846be7f765b0d14b3830bff39",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",
         "| **#729 dtype semantics** |",
         "| **#730 loud unsupported** |",
-        "c1b138171925733b57ab4d6c50f701d064bea492dd6b7b61793f09ffd37386e6",
+        "bbb8be3bf01b8143b368b59211a1f123318a53df2a8f6b803d088878c2c34793",
     ),
 }
 
@@ -662,6 +667,8 @@ def validate_normative_contract(
     spec05 = docs["spec/05-risc-primitives.md"]
     spec06 = docs["spec/06-transformations.md"]
     spec10 = docs["spec/10-serialization.md"]
+    captured_risc = docs["openspec/specs/risc-primitives/spec.md"]
+    captured_transformations = docs["openspec/specs/transformations/spec.md"]
 
     atoms = [int(number) for number in OP_ATOM.findall(spec05)]
     counts = Counter(atoms)
@@ -862,6 +869,11 @@ def validate_normative_contract(
             (
                 "values_sorted_by_key(contributions[n])",
                 "key-sorted formal accumulation",
+            ),
+            (
+                "contributions[n_j][(canonical_forward_ordinal(n_i), input_slot)] =\n"
+                "    contribution_from_n_i",
+                "keyed backward-traversal contribution queue",
             ),
             (
                 "return pack_wrt_gradients(grads)",
@@ -1246,7 +1258,7 @@ def validate_normative_contract(
             "not a composition of nested `count` calls",
             "Numeric, scalar `bool`, `string`, reserved dtype spellings",
             "no accumulator",
-            "structurally rejected with `AdRejectionReason::IntegerIndexOutput`",
+            "structurally rejected with `AdRejectionReason::IntegerReductionOutput`",
             "never receives a silent zero cotangent",
         ),
         "05-OP-30": (
@@ -1639,6 +1651,30 @@ def validate_normative_contract(
             "No target-specific rank, reducer, dtype, first-order-only, host-fallback, "
             "alias, or compatibility identity belongs to this atom",
         ),
+        "05-OP-40": (
+            "active\n> signed-integer or float dtype",
+            "same scalar surface or on tensor\n> surfaces with identical dimensions",
+            "performs selection, not arithmetic or numeric conversion",
+            "first NaN in operand order",
+            "exact stored bits, including payload and sign",
+            "returns the first operand on every equality",
+            "signed-zero equality",
+            "Signed integers are compared exactly at their declared\n> width",
+            "whole cotangent to the selected operand",
+            "Signed-integer forms are forward-only",
+            "no accumulator",
+            "never lowers through arithmetic negation",
+        ),
+        "05-OP-41": (
+            "active\n> signed-integer or float dtype",
+            "direct checked\n> subtraction computes the exact mathematical difference",
+            "traps\n> `Overflow` as operation `sub`",
+            "never lowers through\n> `neg`",
+            "[04-NUM-8]'s declared arithmetic width",
+            "adjoint is `(g, neg(g))`",
+            "Signed-integer forms are forward-only",
+            "no accumulator",
+        ),
         "05-RNG-1": (
             "Every conforming evaluation of a `with seed(N)` program produces "
             "byte-identical random results",
@@ -1783,6 +1819,88 @@ def validate_normative_contract(
                 "`count`, `argmax_reduce`, and `argmin_reduce` likewise reject `grad`",
                 "count structural AD rejection",
             ),
+            (
+                "`max_elem` routes the whole cotangent to\n"
+                "the first operand when the inputs are equal",
+                "max_elem first-operand tie adjoint",
+            ),
+            (
+                "| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | "
+                "Element-wise maximum | Whole `g` flows to the operand selected by "
+                "[05-OP-40] |",
+                "max_elem table tie adjoint",
+            ),
+            (
+                "On\n> floats, it returns the first NaN in operand order when either "
+                "operand is NaN",
+                "max_elem first-NaN selection",
+            ),
+            (
+                "returns the first operand on every equality, preserving its exact "
+                "stored bits,\n> including signed-zero equality",
+                "max_elem signed-zero tie selection",
+            ),
+            (
+                "`relu` via\n`max_elem(x, 0)` has gradient one at `x = 0`",
+                "relu zero-boundary adjoint",
+            ),
+            (
+                "out[i] = select_max_first(a[i], b[i]);",
+                "max_elem first-operand reference selection",
+            ),
+            (
+                "illustrative\nimplementation shapes for the C backend; it is not a "
+                "semantic oracle",
+                "illustrative reference status",
+            ),
+            (
+                "`sub` is a Tier 1 primitive governed by [05-OP-41]",
+                "direct sub lowering",
+            ),
+            (
+                "`min_elem` is a Tier 1 primitive governed by [05-OP-40]",
+                "direct min_elem lowering",
+            ),
+            (
+                "out[i] = select_min_first(a[i], b[i]);",
+                "min_elem first-operand reference selection",
+            ),
+        ),
+        violations,
+    )
+
+    require_all(
+        captured_risc,
+        (
+            (
+                "`sub`, `max_elem`, and `min_elem` are Tier-1\nidentities",
+                "captured direct arithmetic identities",
+            ),
+            (
+                "it remains direct checked subtraction rather than becoming "
+                "`add(a, neg(b))`",
+                "captured direct sub lowering",
+            ),
+            (
+                "it remains direct selection rather than becoming "
+                "`neg(max_elem(neg(a), neg(b)))`",
+                "captured direct min_elem lowering",
+            ),
+            (
+                "first NaN in operand order with exact stored bits",
+                "captured extrema stored-bit selection",
+            ),
+        ),
+        violations,
+    )
+    require_all(
+        captured_transformations,
+        (
+            (
+                "the selected operand receives the whole cotangent,\n  including "
+                "the first operand on equality",
+                "captured extrema tie rule",
+            ),
         ),
         violations,
     )
@@ -1796,7 +1914,17 @@ def validate_schema_and_consumers(
     loud = docs["spec/design/loud_unsupported.md"]
     provenance = docs["spec/design/spec_provenance.md"]
     roadmap = docs["spec/design/remediation_roadmap.md"]
+    surface = docs["docs/CHELIS_SURFACE.md"]
     status = docs["docs/investigations/remediation_status_2026_08_04.md"]
+
+    require_all(
+        surface,
+        (
+            ("I/O and process — introduces `IO`", "surface IO spelling"),
+            ("| `IO` | file ops", "surface IO spelling"),
+        ),
+        violations,
+    )
 
     require_all(
         capability,
@@ -1907,6 +2035,21 @@ def validate_schema_and_consumers(
                 "bool reduction rejection",
             ),
             ("[05-OP-29], [#1287], [#1291]", "count capability owner"),
+            (
+                "`max_elem`/`min_elem` x Scalar/Tensor x active numeric dtypes "
+                "([05-OP-40], [#715], [#1306])",
+                "extrema capability owner",
+            ),
+            (
+                "`sub` x Scalar/Tensor x active numeric dtypes "
+                "([05-OP-41], [#1306])",
+                "sub capability owner",
+            ),
+            (
+                "Unimplemented { issue: #1306, diagnostic_kind: "
+                "UnsupportedFeature }",
+                "direct arithmetic implementation owner",
+            ),
             (
                 "They do not prescribe an explicit cast or arithmetic lowering",
                 "no cast counting compatibility",
@@ -2103,14 +2246,18 @@ def validate_schema_and_consumers(
                 "Phase 4C entry includes exact atom closure",
             ),
             (
-                "[#1284], and [#1287]-[#1298]",
+                "[#1284], [#1287]-[#1298], and [#1306]",
                 "composite gate includes every late prerequisite",
             ),
             (
                 "chelis#1295's all-active-float random/rounding rules, chelis#1297's "
-                "compiled\nhost effects, and chelis#1298's runtime-axis/window "
-                "operations have landed",
+                "compiled\nhost effects, chelis#1298's runtime-axis/window operations, "
+                "and chelis#1306's\ndirect subtraction/extrema identities have landed",
                 "Phase 4C issue-owned behavior prerequisites",
+            ),
+            (
+                "[#1306] direct checked subtraction and stored-bit extrema selection",
+                "dtype-plan direct arithmetic owner",
             ),
         ),
         violations,
@@ -2224,6 +2371,15 @@ def validate_schema_and_consumers(
                 "roadmap runtime-axis owner",
             ),
             (
+                "direct stored-bit extrema plus direct checked subtraction "
+                "[05-OP-40..41] ([#1306])",
+                "roadmap direct arithmetic owner",
+            ),
+            (
+                "[#1306]'s direct arithmetic/extrema oracle",
+                "roadmap direct arithmetic prerequisite",
+            ),
+            (
                 "exported-stdlib dependency closure",
                 "roadmap stdlib derivation",
             ),
@@ -2233,8 +2389,25 @@ def validate_schema_and_consumers(
     require_all(
         status,
         (
+            (
+                "this revision is `main` at `4e200061`",
+                "status reviewed execution basis",
+            ),
+            ("`main` is eight commits ahead", "status release distance"),
+            (
+                "refreshed\nagainst `4e200061` wherever this revision changes it",
+                "status refreshed execution basis",
+            ),
+            (
+                "describes `main` at\n`4e200061`",
+                "status live-inventory execution basis",
+            ),
             ("This change is Phase 4B", "status Phase 4B statement"),
-            ("[05-OP-1..39]", "status Phase 4B atom range"),
+            ("[05-OP-1..41]", "status Phase 4B atom range"),
+            (
+                "direct stored-bit extrema selection and checked subtraction",
+                "status direct arithmetic semantics",
+            ),
             ("canonical balanced sum/product/count tree", "status balanced tree"),
             (
                 "canonical gradient consumer-edge order by forward node ordinal "
@@ -2261,10 +2434,11 @@ def validate_schema_and_consumers(
             ("#1296", "status composite gate owner"),
             ("#1297", "status host-effect owner"),
             ("#1298", "status runtime-axis owner"),
+            ("#1306", "status direct arithmetic owner"),
             ("No compatibility wrapper, reader", "status no compatibility"),
-            ("Of the 138 issues parented", "status parented count"),
-            ("53 remain open", "status open count"),
-            ("#729 | 26 / 64", "status #729 count"),
+            ("Of the 139 issues parented", "status parented count"),
+            ("54 remain open", "status open count"),
+            ("#729 | 27 / 65", "status #729 count"),
             (
                 "#1293 aligns all 83 recursively discovered stdlib numeric "
                 "definitions",
@@ -2305,10 +2479,10 @@ def validate_schema_and_consumers(
     ]
     if len(tracker_counts) != 5:
         violations.append("status issue graph must contain exactly five tracker rows")
-    elif sum(open_count for open_count, _total in tracker_counts) != 53:
-        violations.append("status issue graph tracker rows must sum to 53 open issues")
-    elif sum(total for _open_count, total in tracker_counts) != 138:
-        violations.append("status issue graph tracker rows must sum to 138 total issues")
+    elif sum(open_count for open_count, _total in tracker_counts) != 54:
+        violations.append("status issue graph tracker rows must sum to 54 open issues")
+    elif sum(total for _open_count, total in tracker_counts) != 139:
+        violations.append("status issue graph tracker rows must sum to 139 total issues")
 
 
 def validate_contract(root: Path = REPO_ROOT) -> None:

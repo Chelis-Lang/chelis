@@ -2840,15 +2840,16 @@ class ContractValidationTests(unittest.TestCase):
                 "entry includes exact atom closure",
             ),
             (
-                "[#1284], and [#1287]-[#1298]",
-                "[#1284], and [#1287]-[#1296]",
+                "[#1284], [#1287]-[#1298], and [#1306]",
+                "[#1284], [#1287]-[#1298]",
                 "includes every late prerequisite",
             ),
             (
                 "chelis#1295's all-active-float random/rounding rules, chelis#1297's "
                 "compiled\n"
-                "host effects, and chelis#1298's runtime-axis/window operations have "
-                "landed",
+                "host effects, chelis#1298's runtime-axis/window operations, and "
+                "chelis#1306's\n"
+                "direct subtraction/extrema identities have landed",
                 "chelis#1295 and chelis#1298 may land after table population",
                 "issue-owned behavior prerequisites",
             ),
@@ -2891,13 +2892,42 @@ class ContractValidationTests(unittest.TestCase):
         )
         self.assert_contract_fails("status external target authority")
 
+    def test_surface_uses_exact_language_IO_spelling(self) -> None:
+        path = Path("docs/CHELIS_SURFACE.md")
+        original = (self.root / path).read_text(encoding="utf-8")
+        mutated = original.replace("introduces `IO`", "introduces `Io`", 1).replace(
+            "| `IO` | file ops", "| `Io` | file ops", 1
+        )
+        self.assertNotEqual(mutated, original)
+        (self.root / path).write_text(mutated, encoding="utf-8")
+        try:
+            self.assert_contract_fails("surface IO spelling")
+        finally:
+            (self.root / path).write_text(original, encoding="utf-8")
+
+    def test_status_execution_basis_is_the_reviewed_base(self) -> None:
+        self.replace(
+            Path("docs/investigations/remediation_status_2026_08_04.md"),
+            "this revision is `main` at `4e200061`",
+            "this revision is `main` at `1c52c05e`",
+        )
+        self.assert_contract_fails("status reviewed execution basis")
+
+    def test_status_release_distance_matches_the_reviewed_base(self) -> None:
+        self.replace(
+            Path("docs/investigations/remediation_status_2026_08_04.md"),
+            "`main` is eight commits ahead",
+            "`main` is six commits ahead",
+        )
+        self.assert_contract_fails("status release distance")
+
     def test_status_issue_graph_counts_are_cross_checked(self) -> None:
         self.replace(
             Path("docs/investigations/remediation_status_2026_08_04.md"),
             "| #730 | 17 / 37 |",
             "| #730 | 16 / 37 |",
         )
-        self.assert_contract_fails("sum to 53 open issues")
+        self.assert_contract_fails("sum to 54 open issues")
 
     def test_status_keeps_stdlib_alignment_owner(self) -> None:
         self.replace(
@@ -2961,6 +2991,12 @@ class ContractValidationTests(unittest.TestCase):
                 "values(contributions[n])",
                 "key-sorted formal accumulation",
             ),
+            (
+                "contributions[n_j][(canonical_forward_ordinal(n_i), input_slot)] =\n"
+                "    contribution_from_n_i",
+                "adjoint[n_j] = Add(adjoint[n_j], contribution_from_n_i)",
+                "keyed backward-traversal contribution queue",
+            ),
         )
         for old, new, message in mutations:
             with self.subTest(message=message):
@@ -2989,6 +3025,140 @@ class ContractValidationTests(unittest.TestCase):
             "`Random | Accum | Io | Test | Resource(ResourceId)`",
         )
         self.assert_contract_fails("closed effect requirement domain")
+
+    def test_count_uses_a_truthful_integer_reduction_AD_reason(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "AdRejectionReason::IntegerReductionOutput",
+            "AdRejectionReason::IntegerIndexOutput",
+        )
+        self.assert_contract_fails("05-OP-29.*IntegerReductionOutput")
+
+    def test_max_elem_ties_and_reference_pseudocode_select_the_first_operand(
+        self,
+    ) -> None:
+        path = Path("spec/05-risc-primitives.md")
+        original = (self.root / path).read_text(encoding="utf-8")
+        mutations = (
+            (
+                "| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | "
+                "Element-wise maximum | Whole `g` flows to the operand selected by "
+                "[05-OP-40] |",
+                "| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | "
+                "Element-wise maximum | `(g * (x >= y), g * (x < y))` |",
+                "max_elem table tie adjoint",
+            ),
+            (
+                "On\n> floats, it returns the first NaN in operand order when either "
+                "operand is NaN",
+                "Float max/min use target-native NaN selection",
+                "max_elem first-NaN selection",
+            ),
+            (
+                "`max_elem` routes the whole cotangent to\n"
+                "the first operand when the inputs are equal",
+                "`max_elem` has a zero gradient when the inputs are equal",
+                "max_elem first-operand tie adjoint",
+            ),
+            (
+                "out[i] = select_max_first(a[i], b[i]);",
+                "out[i] = a[i] > b[i] ? a[i] : b[i];",
+                "max_elem first-operand reference selection",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                self.assertIn(old, original)
+                (self.root / path).write_text(
+                    original.replace(old, new, 1), encoding="utf-8"
+                )
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    (self.root / path).write_text(original, encoding="utf-8")
+
+    def test_reference_pseudocode_cannot_claim_semantic_authority(self) -> None:
+        self.replace(
+            Path("spec/05-risc-primitives.md"),
+            "illustrative\nimplementation shapes for the C backend; it is not a "
+            "semantic oracle",
+            "the direct reference implementation used as the C-backend semantic "
+            "oracle",
+        )
+        self.assert_contract_fails("illustrative reference status")
+
+    def test_extrema_have_one_exact_selection_atom(self) -> None:
+        blocks = oracle.atom_blocks(
+            (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
+        )
+        self.assertIn("05-OP-40", blocks)
+        body = oracle.normalize_atom_body(blocks["05-OP-40"])
+        for required in (
+            "active signed-integer or float",
+            "first NaN in operand order",
+            "exact stored bits",
+            "first operand on every equality",
+            "signed-zero equality",
+            "whole cotangent to the selected operand",
+            "no accumulator",
+            "never lowers through arithmetic negation",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, body)
+
+    def test_sub_has_direct_checked_operation_semantics(self) -> None:
+        blocks = oracle.atom_blocks(
+            (REPO_ROOT / "spec/05-risc-primitives.md").read_text(encoding="utf-8")
+        )
+        self.assertIn("05-OP-41", blocks)
+        body = oracle.normalize_atom_body(blocks["05-OP-41"])
+        for required in (
+            "exact mathematical difference",
+            "traps `Overflow`",
+            "direct checked subtraction",
+            "never lowers through `neg`",
+            "adjoint is `(g, neg(g))`",
+            "no accumulator",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, body)
+
+    def test_extrema_and_sub_cannot_regain_arithmetic_surrogate_lowerings(
+        self,
+    ) -> None:
+        path = Path("spec/05-risc-primitives.md")
+        original = (self.root / path).read_text(encoding="utf-8")
+        mutations = (
+            (
+                "`sub` is a Tier 1 primitive governed by [05-OP-41]",
+                "`sub(a, b)` lowers to `add(a, neg(b))`",
+                "direct sub lowering",
+            ),
+            (
+                "`min_elem` is a Tier 1 primitive governed by [05-OP-40]",
+                "`min_elem(a, b)` lowers to `neg(max_elem(neg(a), neg(b)))`",
+                "direct min_elem lowering",
+            ),
+        )
+        for old, new, message in mutations:
+            with self.subTest(message=message):
+                self.assertIn(old, original)
+                (self.root / path).write_text(
+                    original.replace(old, new, 1), encoding="utf-8"
+                )
+                try:
+                    self.assert_contract_fails(message)
+                finally:
+                    (self.root / path).write_text(original, encoding="utf-8")
+
+    def test_captured_transformations_match_the_extrema_tie_rule(self) -> None:
+        self.replace(
+            Path("openspec/specs/transformations/spec.md"),
+            "the selected operand receives the whole cotangent,\n  including the first "
+            "operand on equality",
+            "the gradient is zero at the non-differentiable point",
+        )
+        self.assert_contract_fails("captured extrema tie rule")
 
 
 class RunnerTests(unittest.TestCase):

@@ -71,6 +71,7 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | Name | Signature | Semantics | AD Adjoint (∂L/∂inputs given ∂L/∂output = g) |
 |---|---|---|---|
 | `add` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise addition | `(g, g)` |
+| `sub` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise direct subtraction | `(g, -g)` |
 | `mul` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise multiplication | `(g * y, g * x)` |
 | `div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise IEEE-754 division `a / b` (**float operands only**) | `(g / b, -g * (a/b) / b)` (= `(g/b, -g*y/b)` using `y = a/b`) |
 | `floor_div` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise floor division: `floor(a / b)`, rounding toward −∞ | Non-differentiable (piecewise constant); `grad` rejects it |
@@ -79,7 +80,8 @@ runtime reject them during execution; compiled C exits non-zero rather than abor
 | `wrap_sub` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise modular subtraction | Non-differentiable; `grad` rejects it |
 | `wrap_mul` | `(&tensor[D,p_int], &tensor[D,p_int]) -> tensor[D,p_int]` | Element-wise modular multiplication | Non-differentiable; `grad` rejects it |
 | `cmplt` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,bool]` | Element-wise less-than comparison | Non-differentiable (zero gradient) |
-| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | `(g * (x >= y), g * (x < y))` — gradient flows to the max input |
+| `max_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise maximum | Whole `g` flows to the operand selected by [05-OP-40] |
+| `min_elem` | `(&tensor[D,p], &tensor[D,p]) -> tensor[D,p]` | Element-wise minimum | Whole `g` flows to the operand selected by [05-OP-40] |
 
 > **[05-OP-17]** `wrap_add(left, right) -> result` admits two signed-integer
 > scalar operands or two signed-integer tensor operands with the same dtype
@@ -170,12 +172,32 @@ scalar operands wherever [05-OP-17..19] admit the tensor form. The result is a
 scalar of the same signed-integer dtype. A scalar and a non-scalar tensor do
 not broadcast.
 
-**Scalar `max_elem`/`min_elem`.** The element-wise maximum and its §3.4
-`min_elem` lowering also admit two scalar operands of the same numeric dtype
+**Scalar `max_elem`/`min_elem`.** The element-wise extrema also admit two
+scalar operands of the same numeric dtype
 and return a scalar of that dtype. This is the rank-zero instance of the
 tensor rule, not scalar/tensor broadcasting: a scalar and a non-scalar tensor
 remain a dimension mismatch. The scalar forms admit the same signed-integer
 and float precisions as their tensor forms and use the same adjoint rule.
+
+> **[05-OP-40]** `max_elem(left, right) -> result` and
+> `min_elem(left, right) -> result` each admit two values of one active
+> signed-integer or float dtype on the same scalar surface or on tensor
+> surfaces with identical dimensions. The result has that same surface,
+> dimensions, and dtype. Each operand is read at its exact stored width; the
+> operation performs selection, not arithmetic or numeric conversion. On
+> floats, it returns the first NaN in operand order when either operand is NaN,
+> preserving that value's exact stored bits, including payload and sign.
+> Otherwise it returns the numerical maximum or minimum respectively and
+> returns the first operand on every equality, preserving its exact stored bits,
+> including signed-zero equality. Signed integers are compared exactly at their declared
+> width and likewise preserve the first operand on equality. For floats, the
+> adjoint routes the whole cotangent to the selected operand and exact zero to
+> the other operand; consequently `relu(x) = max_elem(x, 0)` routes the whole
+> cotangent to `x` at zero. Signed-integer forms are forward-only and `grad`
+> rejects them. Both operations have no accumulator. `min_elem` is a direct
+> selection identity and never lowers through arithmetic negation. `bool`,
+> `string`, reserved dtype spellings, mixed dtypes or surfaces, and mismatched
+> tensor dimensions are type errors.
 
 ### 2.2 Elementwise Unary
 
@@ -373,7 +395,7 @@ denotes the input dimensions with the complete selected axis set `K` removed.
 > composition of nested `count` calls. Numeric, scalar `bool`, `string`, reserved dtype spellings, and all
 > other operands are type errors. `count` has no accumulator. A differentiated
 > graph reaching `count` is structurally rejected with
-> `AdRejectionReason::IntegerIndexOutput`; it never receives a silent zero
+> `AdRejectionReason::IntegerReductionOutput`; it never receives a silent zero
 > cotangent.
 >
 > **[05-OP-30]** `sum(x, axes..., accumulator = default(p)) -> result` admits
@@ -935,13 +957,26 @@ rule has been applied.
 
 ### 3.1 Arithmetic
 
-| Name | Lowering to RISC |
-|---|---|
-| `sub(a, b)` | `add(a, neg(b))` |
+`sub` is a Tier 1 primitive governed by [05-OP-41], not a derived
+`add`/`neg` composition. `div` and `neg` are likewise Tier 1 RISC primitives
+(see §2.1 and §2.2), and `recip` is Tier 1 (§2.2). No Tier 2 arithmetic
+operation introduces an intermediate numeric operation that the source
+program did not request.
 
-Note: `div` and `neg` are Tier 1 RISC primitives (see §2.1, §2.2),
-not Tier 2 derived built-ins. `recip` is also a Tier 1 primitive
-(§2.2). No Tier 2 operation lowers `div` through `log` and `exp`.
+> **[05-OP-41]** `sub(left, right) -> result` admits two values of one active
+> signed-integer or float dtype on the same scalar surface or on tensor
+> surfaces with identical dimensions, returning that same surface,
+> dimensions, and dtype. At a signed-integer width `w`, direct checked
+> subtraction computes the exact mathematical difference and returns its
+> signed `w`-bit representation when representable; otherwise it traps
+> `Overflow` as operation `sub` at the operand dtype. It never lowers through
+> `neg`, so an unrepresentable intermediate negation cannot replace the exact
+> subtraction's own result or trap. On floats, subtraction executes at
+> [04-NUM-8]'s declared arithmetic width and finalizes once to the operand
+> storage dtype. The float adjoint is `(g, neg(g))` at that dtype.
+> Signed-integer forms are forward-only and `grad` rejects them. The operation
+> has no accumulator. `bool`, `string`, reserved dtype spellings, mixed dtypes
+> or surfaces, and mismatched tensor dimensions are type errors.
 
 ### 3.2 Comparison and Logical Operations
 
@@ -1056,7 +1091,9 @@ subgradient convention.
 | `softmax(x, axis)` | See §4.2 |
 | `linear(x, w, b)` | `add(matmul(x, w), b)` (with appropriate expand on b) |
 | `cross_entropy(logits, labels)` | See §4.3 |
-| `min_elem(a, b)` | `neg(max_elem(neg(a), neg(b)))` |
+
+`min_elem` is a Tier 1 primitive governed by [05-OP-40], not a higher-level
+arithmetic lowering.
 
 `mean` remains a Tier 2 builtin. Its complete contract is [05-OP-11], and its
 lowering is that atom's exact guarded sum-then-div composition.
@@ -2584,7 +2621,11 @@ because integer values do not carry cotangents. Integer `floor`, `ceil`, and
 `round` are exact identities and may be erased before AD. The `Diff` effect
 reports a non-differentiable operation before execution.
 
-**Almost-everywhere differentiable:** `max_elem` (gradient is zero at the boundary where inputs are equal), `relu` via `max_elem(x, 0)` (gradient is zero at x=0). These are valid targets for `grad` — the subgradient convention (pick one side) is standard in ML.
+**Almost-everywhere differentiable:** `max_elem` routes the whole cotangent to
+the first operand when the inputs are equal. Consequently `relu` via
+`max_elem(x, 0)` has gradient one at `x = 0`. These are valid targets for
+`grad`; the first-operand tie rule is the language's exact subgradient
+convention.
 
 **Second-order derivatives:** `grad(grad(f))` is valid exactly when every
 operation reached by `f` has the required second-order adjoint.
@@ -2593,8 +2634,9 @@ operation reached by `f` has the required second-order adjoint.
 
 ## 6. Reference Implementations
 
-For each RISC primitive, the following pseudocode gives the direct reference
-implementation used as the C-backend semantic oracle.
+For each RISC primitive, the following pseudocode gives illustrative
+implementation shapes for the C backend; it is not a semantic oracle. Each
+primitive's governing numbered rule or operation atom remains authoritative.
 
 ```c
 // add: element-wise
@@ -2621,8 +2663,11 @@ for (int i = 0; i < n; i++) out[i] = sqrtf(a[i]);
 // cmplt: element-wise
 for (int i = 0; i < n; i++) out[i] = a[i] < b[i] ? 1.0f : 0.0f;
 
-// max_elem: element-wise
-for (int i = 0; i < n; i++) out[i] = a[i] > b[i] ? a[i] : b[i];
+// max_elem: first NaN, then the numerical maximum, preserving lhs on equality
+for (int i = 0; i < n; i++) out[i] = select_max_first(a[i], b[i]);
+
+// min_elem: first NaN, then the numerical minimum, preserving lhs on equality
+for (int i = 0; i < n; i++) out[i] = select_min_first(a[i], b[i]);
 
 // sum: reduce over axis
 // (pseudocode for axis=last, generalized via stride/shape logic)

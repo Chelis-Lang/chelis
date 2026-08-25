@@ -1635,12 +1635,13 @@ callable from bypassing review while the capability tables are built.
 
 **Delivered:**
 
-1. This slice freezes the complete timeless [05-OP-1..39] authority set,
+1. This slice freezes the complete timeless [05-OP-1..41] authority set,
    including exact decimal rounding; source-faithful JSON/CSV boundaries;
    checked, truncating, saturating, and wrapping casts; runtime shape and
    movement values; all-active-dtype random and dropout parameters; recursive
    List/ADT padding and host-value adjoints; `mean`, extrema, product,
-   argument reductions, and canonical multi-axis sum/count; modular
+   argument reductions, direct stored-bit extrema selection, direct checked
+   subtraction, and canonical multi-axis sum/count; modular
    arithmetic; float classification; scalar/tensor/recursive-List `to_string`; boolean
    `and`/`or`/`not`; NaN-aware comparison/equality; exact scalar/container/C
    tensor carriers; byte-exact recursive runtime List/tuple/Dict/ADT
@@ -1669,6 +1670,8 @@ callable from bypassing review while the capability tables are built.
    honest `Unimplemented` cells until those implementations land. [#1284]
    owns replacing the pre-table boolean numeric aliases used by logical
    operations, comparison-derived negation, and `where`.
+   [#1306] owns replacing the trap- and stored-bit-changing `sub` and
+   `min_elem` arithmetic surrogates with direct typed identities in every lane.
 
 **Frozen at exit:** the numbered-spec atoms authored or amended by this slice
 and the capability schema. This is not a claim that every older builtin already
@@ -1715,7 +1718,7 @@ adversarial mutations must be green and merged before Phase 4C begins.
 After the individual behavior, storage, census, and [#1294] atom-closure
 oracles land, [#1296] wires every exact oracle in the `v0.19 behavior` row —
 including [#722], [#753], [#759], [#893], [#965], [#1059], [#1281], [#1282],
-[#1284], and [#1287]-[#1298] — into
+[#1284], [#1287]-[#1298], and [#1306] — into
 `.venv/bin/python scripts/dtype_pre_phase4c_oracle.py`. Success ends with
 `DTYPE PRE-PHASE-4C ORACLE: PASS`. The runner fails for a missing, duplicate,
 skipped, stale, nonzero, or success-line-free leg and includes the structural
@@ -1732,7 +1735,8 @@ chelis#893/chelis#1289's typed carrier, chelis#1290's balanced reductions,
 chelis#1287/chelis#1291's first-class count cells, chelis#1292's own-width
 tensor comparison, chelis#1293's complete 83-definition stdlib alignment,
 chelis#1295's all-active-float random/rounding rules, chelis#1297's compiled
-host effects, and chelis#1298's runtime-axis/window operations have landed.
+host effects, chelis#1298's runtime-axis/window operations, and chelis#1306's
+direct subtraction/extrema identities have landed.
 No grandfather, permanent-disposition, successor-override,
 integer-plumbing, bare numeric-carrier, legacy callable, or semantics-divergent
 registered identity remains. Phase 4C may not populate tables around a
@@ -1883,9 +1887,9 @@ updates this section, `loud_unsupported.md` §I1, and
 | 1 | [#684], [#717], [#720] (with Phase 2's fold work), [#724] eval half, [#726] eval half |
 | 2 | [#680], [#688], [#711], [#718] eval cells, [#722] eval half |
 | 3 | [#714], [#715] dtype rows, [#716], [#718] C cells, [#723], [#728]; [#687] fully unblocked |
-| 4A-4B | §C6 capacity detection; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions; [05-OP-29] first-class `count` authority; canonical reduction-order authority; WireDag v6 schema freeze |
+| 4A-4B | §C6 capacity detection; [#898] reduction authorities; [#753]/[#759]/[#965] language decisions; [05-OP-29] first-class `count` authority; [05-OP-40..41] direct extrema/subtraction authority; canonical reduction-order authority; WireDag v6 schema freeze |
 | pre-4C authority and executable closure | [#1294] closed exhaustive `BuiltinDecl` domain/case declarations plus exact `[05-OP-N]` authority for every discovered Table-A IR/RISC operation and sibling-builtin identity; [#1296] one normal-gate composite over every prerequisite oracle and structural mutation; no machine key/cell type, authoring macro, or row may land first |
-| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287]/[#1291] exact-only WireDag v6 plus first-class count delivery; [#1292] own-width tensor-close assertions; [#1293] the exact 83-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions |
+| v0.19 behavior | [#1290] balanced sum/product backend work (also part of [#170]); [#1281] mean/extrema/argument-reduction and windowed-extrema behavior; [#722] remaining compiled integer unary/AD cells; [#753]/[#759]/[#965] numeric callables; [#1282] [05-OP-25] scalar/tensor/recursive-List `to_string` domain; [#1059] compiled C-host Tensor/List rendering cells; [#1284] typed non-numeric logical/comparison/`where` lowering; [#893]/[#1289] typed C carrier; [#1288] zero-exception census; [#1287]/[#1291] exact-only WireDag v6 plus first-class count delivery; [#1292] own-width tensor-close assertions; [#1293] the exact 83-definition stdlib, sole public JSON surface, pathwise random/List adjoints, and stub removal; [#1295] all-active-float `round_to`/`uniform_like`/`dropout` and all-dtype padding; [#1297] legal compiled host-effect operations; [#1298] runtime-axis shape and target-independent window reductions; [#1306] direct checked subtraction and stored-bit extrema selection across every admitted surface and lane |
 | 4C-4E | [#692], [#712], [#715] lane-skew mechanisms; [#724]/[#726] generated policy; future lane skew as a class |
 | maintenance | [#878] delivered the internal typed Pad carrier but not the exact-only v6 break owned by [#1287]; [#937] delivered the earlier f64 sampler repair but [#1295] owns the final same-dtype parameter contract; [#1150]/[#1152] are one checked-cast source x target construction with [#730] LU6 owning only host-emission totality and rejection rendering |
 
@@ -1967,3 +1971,4 @@ substitute fixes (needed for [#722]'s C half regardless of this plan).
 [#1296]: https://github.com/Chelis-Lang/chelis/issues/1296
 [#1297]: https://github.com/Chelis-Lang/chelis/issues/1297
 [#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
+[#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
