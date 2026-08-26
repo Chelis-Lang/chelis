@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "legs": {
     "covered": [
       {
@@ -82,8 +82,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -94,32 +93,27 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -130,8 +124,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -218,8 +211,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -300,8 +292,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -320,8 +311,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -356,20 +346,17 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -380,8 +367,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -420,8 +406,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -693,8 +678,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-export",
@@ -793,8 +777,7 @@
       "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int32_t axis ) ;",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1112 axis-domain narrowing per [05-DIM-1]; semantic authority [05-OP-7], registered in capacity_census_tripwire.rs"
+      ]
     },
     {
       "kind": "header-export",
@@ -1019,8 +1002,7 @@
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "header-struct",
@@ -1079,8 +1061,7 @@
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "flags": []
     },
     {
       "kind": "prelude-adt-numeric",
