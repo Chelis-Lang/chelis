@@ -13272,44 +13272,153 @@ def bad[b](box: Box[b]) -> bool =
             .name("issue-1205-nested-callable-scopes".to_string())
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
-                let mut rows = Vec::new();
-                for depth in [20, 40, 80, 160] {
-                    let mut body = "bc(c)".to_string();
-                    for index in (0..depth).rev() {
-                        body = format!("(fn (p{index}: f32) -> {body})(c)");
+                for nested_fns in [true, false] {
+                    let mut rows = Vec::new();
+                    for depth in [20, 40, 80, 160] {
+                        let body = if nested_fns {
+                            let mut body = "bc(c)".to_string();
+                            for index in (0..depth).rev() {
+                                body = format!("(fn (p{index}: f32) -> {body})(c)");
+                            }
+                            body
+                        } else {
+                            let mut body = format!("f{}(c)", depth - 1);
+                            for index in (0..depth).rev() {
+                                let target = if index == 0 {
+                                    "bc".to_string()
+                                } else {
+                                    format!("f{}", index - 1)
+                                };
+                                body = format!("{{ f{index} = {target}\n{body}\n}}");
+                            }
+                            body
+                        };
+                        let shape = if nested_fns { "Fn" } else { "Let" };
+                        let source = format!(
+                            "module FrontEndPerformance.Nested{shape}{depth}\n\
+                             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+                             def nested(c: f32) -> tensor[1, f32] = {body}\n\
+                             out = index(to_list(nested(cast(1.0, f32))), 0i64)\n"
+                        );
+                        let typed = surf_check(&source);
+                        let defs = cached_program_defs(&typed);
+                        let nested_body = lookup_program_def(&defs, "nested")
+                            .expect("nested definition is present");
+
+                        reset_host_work_profile();
+                        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+                        assert_eq!(summaries.get("nested"), Some(&true));
+                        let summary_profile = take_host_work_profile();
+                        let summary_work = summary_profile.tensor_helper_preflight_nodes
+                            + summary_profile.callable_scope_work;
+
+                        reset_host_work_profile();
+                        let mut facts = HashMap::new();
+                        let nested_facts =
+                            analyze_tensor_helper_preflight(nested_body, &summaries, &mut facts);
+                        assert!(nested_facts.reaches_dynamic_to_tensor);
+                        let expression_profile = take_host_work_profile();
+                        let expression_work = expression_profile.tensor_helper_preflight_nodes
+                            + expression_profile.callable_scope_work;
+
+                        eprintln!(
+                            "#1205 callable scopes shape={shape} depth={depth} \
+                             summary={summary_profile:?} summary_work={summary_work} \
+                             expression={expression_profile:?} expression_work={expression_work}"
+                        );
+                        rows.push((depth, summary_work, expression_work));
                     }
-                    let source = format!(
-                        "module FrontEndPerformance.NestedFn{depth}\n\
-                         def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
-                         def nested(c: f32) -> tensor[1, f32] = {body}\n\
-                         out = index(to_list(nested(cast(1.0, f32))), 0i64)\n"
-                    );
-                    let typed = surf_check(&source);
-                    reset_host_work_profile();
-                    let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
-                    assert_eq!(summaries.get("nested"), Some(&true));
-                    let profile = take_host_work_profile();
-                    let total_work =
-                        profile.tensor_helper_preflight_nodes + profile.callable_scope_work;
-                    eprintln!(
-                        "#1205 callable scopes depth={depth} profile={profile:?} total_work={total_work}"
-                    );
-                    rows.push((depth, total_work));
-                }
-                for pair in rows.windows(2) {
-                    let (previous_depth, previous_work) = pair[0];
-                    let (current_depth, current_work) = pair[1];
-                    assert!(
-                        current_work * 10 <= previous_work * 22,
-                        "#1205 callable-scope work must grow linearly: \
-                         depth {previous_depth}->{current_depth} \
-                         previous={previous_work} current={current_work}"
-                    );
+                    for pair in rows.windows(2) {
+                        let (previous_depth, previous_summary, previous_expression) = pair[0];
+                        let (current_depth, current_summary, current_expression) = pair[1];
+                        for (path, previous_work, current_work) in [
+                            ("definition summary", previous_summary, current_summary),
+                            (
+                                "per-expression facts",
+                                previous_expression,
+                                current_expression,
+                            ),
+                        ] {
+                            assert!(
+                                current_work * 10 <= previous_work * 23,
+                                "#1205 callable-scope work must grow linearly: \
+                                 shape={} path={path} depth {previous_depth}->{current_depth} \
+                                 previous={previous_work} current={current_work}",
+                                if nested_fns { "Fn" } else { "Let" }
+                            );
+                        }
+                    }
                 }
             })
             .expect("#1205 nested callable scope profile thread starts")
             .join()
             .expect("#1205 nested callable scope profile thread completes");
+    }
+
+    #[test]
+    fn issue_1205_callable_scope_restore_semantics() {
+        let mut direct = CallableScope::default();
+        let outer = direct.bind("f".to_string(), Some("bc".to_string()));
+        let duplicate = direct.bind("f".to_string(), Some("other".to_string()));
+        let inner = direct.bind("f".to_string(), None);
+        direct.restore([inner, duplicate, outer]);
+        assert!(
+            !direct.contains_key("f"),
+            "restoring repeated shadow bindings must recover the absent outer scope"
+        );
+
+        let typed = surf_check(
+            "module FrontEndPerformance.ScopeRestore\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def sibling(c: f32) -> tensor[1, f32] = {\n\
+               probe = (fn (bc: f32) -> bc)(c)\n\
+               bc(c)\n\
+             }\n\
+             def nested(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               probe = (fn (f: f32) -> (fn (f: f32) -> f)(f))(c)\n\
+               f(c)\n\
+             }\n\
+             def duplicate(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               f = f\n\
+               f(c)\n\
+             }\n\
+             def sequential(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               g = f\n\
+               h = g\n\
+               h(c)\n\
+             }\n\
+             out = index(to_list(sibling(cast(1.0, f32))), 0i64)\n",
+        );
+        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+        let defs = cached_program_defs(&typed);
+        for (definition, final_callee) in [
+            ("sibling", "bc"),
+            ("nested", "f"),
+            ("duplicate", "f"),
+            ("sequential", "h"),
+        ] {
+            assert_eq!(
+                summaries.get(definition),
+                Some(&true),
+                "lexical shadow restoration must preserve the final dynamic call in {definition}"
+            );
+            let body = lookup_program_def(&defs, definition).expect("fixture definition exists");
+            let final_app = issue_1205_find_named_app(body, final_callee)
+                .expect("fixture contains its final named application");
+            let mut facts = HashMap::new();
+            let body_facts = analyze_tensor_helper_preflight(body, &summaries, &mut facts);
+            assert!(
+                body_facts.reaches_dynamic_to_tensor,
+                "per-expression analysis must preserve the final call in {definition}"
+            );
+            assert!(
+                facts[&(final_app as *const Expr as usize)].reaches_dynamic_to_tensor,
+                "the final {final_callee} application in {definition} must inherit its dynamic summary"
+            );
+        }
     }
 
     #[test]
