@@ -3327,6 +3327,36 @@ fn lower_tensor_helper_dag(
     Some(remap_tensor_helper_dim_symbols(&dag, scope, expected))
 }
 
+fn lower_tensor_helper_dag_with_controls(
+    expr: &Expr,
+    program: &CheckedProgram,
+    scope: &HashMap<String, HostTypeTerm>,
+    expected: &TensorType,
+) -> Option<crate::lower::LoweredSubexprWithControls> {
+    let defs = cached_program_defs(program);
+    if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut HashSet::new()) {
+        record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
+        return None;
+    }
+    let context = cached_subexpr_lowering_context(program);
+    let mut lowered = match crate::lower::try_lower_subexpr_program_with_context_and_controls(
+        expr,
+        collect_tensor_scope(scope),
+        &context,
+    ) {
+        Ok(lowered) => lowered,
+        Err(diagnostic) if diagnostic.fatal => {
+            crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
+        }
+        Err(_) => {
+            record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
+            return None;
+        }
+    };
+    lowered.dag = remap_tensor_helper_dim_symbols(&lowered.dag, scope, expected);
+    Some(lowered)
+}
+
 fn finish_tensor_helper_call(
     dag: crate::Dag,
     scope: &HashMap<String, HostTypeTerm>,
@@ -6761,141 +6791,181 @@ fn try_lower_scalar_grad_app(
     }
 }
 
-/// Preserve runtime Bool control around a differentiated body as host control.
-/// Each branch is an ordinary statically specialized reverse-mode graph, but
-/// only the selected helper executes, so handled Random ordinals advance by
-/// the runtime path rather than by both statically visited arms. Recursion
-/// through this function handles additional Bool parameters one at a time.
-fn try_lower_runtime_bool_grad_app(
-    app_expr: &Expr,
-    list: &List,
-    program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
-    tensor_helpers: &mut Vec<HostTensorHelper>,
-    expected_ty: Option<&HostTypeTerm>,
-) -> Result<Option<HostExpr>, crate::lower::LowerDiagnostic> {
-    let kids = children(list);
-    let Some(grad) = kids.first().and_then(as_list) else {
-        return Ok(None);
-    };
-    if tag(grad) != Some(DeepTag::Grad) {
-        return Ok(None);
-    }
-    let Some(fn_name) = children(grad).first().and_then(direct_var_name) else {
-        return Ok(None);
-    };
-    let Some((_, fn_expr)) = find_top_level_def_named(program.exprs(), fn_name) else {
-        return Ok(None);
-    };
-    let Some(fn_list) = as_list(fn_expr).filter(|body| tag(body) == Some(DeepTag::Fn)) else {
-        return Ok(None);
-    };
-    let Some(params) = children(fn_list)
-        .first()
-        .and_then(as_list)
-        .filter(|params| tag(params) == Some(DeepTag::Params))
-    else {
-        return Ok(None);
-    };
-    let Some((param_index, selector_expr)) = children(params)
-        .iter()
-        .enumerate()
-        .filter(|(_, param)| matches!(param_host_type(param), Some(HostTypeTerm::Bool)))
-        .find_map(|(index, _)| {
-            let actual = kids.get(index + 1)?;
-            expr_bool_literal(actual)
-                .is_none()
-                .then_some((index, actual))
-        })
-    else {
-        return Ok(None);
-    };
-
-    let selector = lower_host_expr(selector_expr, program, scope, tensor_helpers)?;
-    let checked_ty = expr_host_type(app_expr, program, scope);
-    let mut result_ty = expected_ty
-        .filter(|_| checked_ty.is_unresolved())
-        .cloned()
-        .unwrap_or(checked_ty);
-    let mut lower_branch = |value: bool| {
-        let mut specialized = list.elements.clone();
-        specialized[param_index + 3] = typed_bool_literal(value, app_expr.span());
-        let specialized_expr = Expr::List(
-            List {
-                elements: specialized,
-            },
-            app_expr.span(),
-        );
-        lower_host_expr_with_expected(&specialized_expr, program, scope, tensor_helpers, None)
-    };
-    let then_raw = lower_branch(true)?;
-    let else_raw = lower_branch(false)?;
-    if result_ty.is_unresolved() {
-        result_ty = host_expr_type(&then_raw);
-    }
-    let then_expr = scalarize_rank0_grad_result(then_raw, &result_ty, tensor_helpers);
-    let else_expr = scalarize_rank0_grad_result(else_raw, &result_ty, tensor_helpers);
-    let selector_name = format!("__grad_bool_{}", tensor_helpers.len());
-    let body = HostExpr::new(HostExprKind::If {
-        cond: Box::new(HostExpr::new(HostExprKind::Var(
-            selector_name.clone(),
-            HostTypeTerm::Bool,
-        ))),
-        then_expr: Box::new(then_expr),
-        else_expr: Box::new(else_expr),
-        ty: result_ty.clone(),
-    });
-    Ok(Some(HostExpr::new(HostExprKind::Let {
-        bindings: vec![HostBinding {
-            name: selector_name,
-            display_name: None,
-            display_roots: Vec::new(),
-            ty: HostTypeTerm::Bool,
-            value: selector,
-        }],
-        body: Box::new(body),
-        ty: result_ty,
-    })))
+#[derive(Clone)]
+enum ListGradPackPlan {
+    Leaf(HostTypeTerm),
+    List {
+        ty: HostTypeTerm,
+        items: Vec<ListGradPackPlan>,
+    },
+    Tuple {
+        ty: HostTypeTerm,
+        items: Vec<ListGradPackPlan>,
+    },
 }
 
-fn scalarize_rank0_grad_result(
-    expr: HostExpr,
-    result_ty: &HostTypeTerm,
-    tensor_helpers: &[HostTensorHelper],
-) -> HostExpr {
-    let actual = match &expr.kind {
-        HostExprKind::TensorCall { helper, .. } => tensor_helpers
-            .get(*helper)
-            .map(|helper| helper.output.clone()),
-        _ => match host_expr_type(&expr) {
-            HostTypeTerm::Tensor(actual) => Some(actual),
-            _ => None,
-        },
-    };
-    let Some(actual) = actual else { return expr };
-    let Some(expected) = tensor_type_from_host_input(result_ty) else {
-        return expr;
-    };
-    if !actual.dims.is_empty()
-        || !expected.dims.is_empty()
-        || actual.precision != expected.precision
-    {
-        return expr;
+impl ListGradPackPlan {
+    fn host_type(&self) -> HostTypeTerm {
+        match self {
+            Self::Leaf(ty) | Self::List { ty, .. } | Self::Tuple { ty, .. } => ty.clone(),
+        }
     }
-    let expr = force_host_expr_type(expr, HostTypeTerm::Tensor(actual));
+
+    fn leaf_count(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 1,
+            Self::List { items, .. } | Self::Tuple { items, .. } => {
+                items.iter().map(Self::leaf_count).sum()
+            }
+        }
+    }
+
+    fn first_tensor_type(&self) -> Option<TensorType> {
+        match self {
+            Self::Leaf(ty) => tensor_type_from_host_input(ty),
+            Self::List { items, .. } | Self::Tuple { items, .. } => {
+                items.iter().find_map(Self::first_tensor_type)
+            }
+        }
+    }
+}
+
+fn static_list_spine_items(expr: &Expr) -> Option<Vec<Expr>> {
+    let mut items = Vec::new();
+    let mut cursor = expr;
+    loop {
+        let (node_tag, _, kids) = stamped_parts(cursor)?;
+        match node_tag {
+            DeepTag::Var if kids.first().and_then(symbol_name) == Some("Nil") => {
+                return Some(items);
+            }
+            DeepTag::App => {
+                let callee = kids.first().and_then(direct_var_name)?;
+                if terminal_name(callee) != "Cons" {
+                    return None;
+                }
+                items.push(kids.get(1)?.clone());
+                cursor = kids.get(2)?;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Resolve only the finite recursive shape of a List actual. This uses the
+/// ordinary binder-aware call inliner and top-level definition lookup, so
+/// result reconstruction is independent of whether the caller wrote a
+/// literal, a named value, or one or more pure List-returning wrappers. The
+/// executable helper still receives the original argument expression; this
+/// walk is shape evidence, not argument evaluation.
+fn resolve_list_grad_shape_expr(
+    actual: &Expr,
+    program: &CheckedProgram,
+    defs: &HashMap<String, Expr>,
+) -> Expr {
+    let mut resolved = actual.clone();
+    for _ in 0..=MAX_DUAL_INLINE_DEPTH {
+        if static_list_spine_items(&resolved).is_some() {
+            break;
+        }
+        if let Some(name) = direct_var_name(&resolved)
+            && let Some(body) = lookup_program_def(defs, name)
+        {
+            resolved = body.clone();
+            continue;
+        }
+        if let Some(inlined) = beta_reduce_inline_host_call(&resolved)
+            .or_else(|| inline_top_level_host_call(&resolved, program))
+        {
+            resolved = inlined;
+            continue;
+        }
+        break;
+    }
+    resolved
+}
+
+fn list_grad_pack_plan(ty: &HostTypeTerm, actual: &Expr) -> Option<ListGradPackPlan> {
+    match ty {
+        HostTypeTerm::List(element_ty) => {
+            let items = static_list_spine_items(actual)?;
+            let items = items
+                .iter()
+                .map(|item| list_grad_pack_plan(element_ty, item))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ListGradPackPlan::List {
+                ty: ty.clone(),
+                items,
+            })
+        }
+        _ => tensor_type_from_host_input(ty).map(|_| ListGradPackPlan::Leaf(ty.clone())),
+    }
+}
+
+fn tensor_helper_root_expr(
+    binding_name: &str,
+    binding_ty: &HostTypeTerm,
+    root_tys: &[TensorType],
+    index: usize,
+) -> HostExpr {
+    let binding = || {
+        HostExpr::new(HostExprKind::Var(
+            binding_name.to_string(),
+            binding_ty.clone(),
+        ))
+    };
+    if root_tys.len() == 1 {
+        return force_host_expr_type(binding(), HostTypeTerm::Tensor(root_tys[index].clone()));
+    }
     HostExpr::new(HostExprKind::Builtin {
-        name: "tensor_to_scalar".to_string(),
-        args: vec![expr],
-        ty: result_ty.clone(),
+        name: "tuple-get".to_string(),
+        args: vec![binding(), HostExpr::new(HostExprKind::Int(index as i64))],
+        ty: HostTypeTerm::Tensor(root_tys[index].clone()),
     })
 }
 
-/// Lower a direct `grad(f)(...)` whose public result is a flat List of scalar
-/// cotangents. The reverse-mode engine already emits one rank-0 tensor root
-/// per List leaf; this bridge keeps that owning transform route and only
-/// repacks those roots into the host List representation required by the C
-/// ABI. It is deliberately a host-lowering rule, not a CLI exception.
-fn try_lower_scalar_list_grad_app(
+fn pack_list_grad_roots(
+    plan: &ListGradPackPlan,
+    roots: &mut impl Iterator<Item = HostExpr>,
+) -> HostExpr {
+    match plan {
+        ListGradPackPlan::Leaf(ty) => {
+            let root = roots.next().expect("List gradient root count was checked");
+            let Some(tensor_ty) = tensor_type_from_host_input(ty) else {
+                unreachable!("List gradient leaf type was checked")
+            };
+            if tensor_ty.dims.is_empty() {
+                HostExpr::new(HostExprKind::Builtin {
+                    name: "tensor_to_scalar".to_string(),
+                    args: vec![root],
+                    ty: ty.clone(),
+                })
+            } else {
+                force_host_expr_type(root, ty.clone())
+            }
+        }
+        ListGradPackPlan::List { ty, items } => HostExpr::new(HostExprKind::List(
+            items
+                .iter()
+                .map(|item| pack_list_grad_roots(item, roots))
+                .collect(),
+            ty.clone(),
+        )),
+        ListGradPackPlan::Tuple { ty, items } => HostExpr::new(HostExprKind::Tuple(
+            items
+                .iter()
+                .map(|item| pack_list_grad_roots(item, roots))
+                .collect(),
+            ty.clone(),
+        )),
+    }
+}
+
+/// Own the public reconstruction for every finite List cotangent. The IR
+/// stages a List as finite payload plus runtime offset/length control, emits
+/// one reverse DAG, and appends private check roots. This host step only
+/// projects those roots back into the checked recursive result type.
+fn try_lower_general_list_grad_app(
     app_expr: &Expr,
     list: &List,
     program: &CheckedProgram,
@@ -6910,572 +6980,255 @@ fn try_lower_scalar_list_grad_app(
     if tag(callee) != Some(DeepTag::Grad) {
         return Ok(None);
     }
-    let result_ty = expected_ty
-        .filter(|ty| !ty.is_unresolved())
-        .cloned()
-        .unwrap_or_else(|| expr_host_type(app_expr, program, scope));
-    let HostTypeTerm::List(element_ty) = result_ty.clone() else {
+    let defs = cached_program_defs(program);
+    let grad_kids = children(callee);
+    let Some(fn_name) = grad_kids.first().and_then(direct_var_name) else {
         return Ok(None);
     };
-    let Some(expected_root) = tensor_type_from_host_input(&element_ty) else {
+    let Some(Expr::List(fn_list, _)) = lookup_program_def(&defs, fn_name) else {
         return Ok(None);
     };
-    if !expected_root.dims.is_empty() || !expected_root.precision.is_float() {
+    if tag(fn_list) != Some(DeepTag::Fn) {
+        return Ok(None);
+    }
+    let fn_kids = children(fn_list);
+    let Some(params) = fn_kids.first().and_then(as_list) else {
+        return Ok(None);
+    };
+    let params = children(params);
+    if params.len() != kids.len().saturating_sub(1) {
+        return Ok(None);
+    }
+    let param_names = params.iter().map(param_name).collect::<Option<Vec<_>>>();
+    let Some(param_names) = param_names else {
+        return Ok(None);
+    };
+    let Some(wrt_names) = grad_wrt_param_names(callee, &param_names) else {
+        return Ok(None);
+    };
+
+    let mut rewritten_elements = list.elements.clone();
+    let mut selected_plans = Vec::new();
+    for (param_index, param) in params.iter().enumerate() {
+        let Some(param_ty) = param_host_type(param) else {
+            return Ok(None);
+        };
+        let actual_index = param_index + 1;
+        let Some(actual) = kids.get(actual_index) else {
+            return Ok(None);
+        };
+        let mut rewritten_actual = actual.clone();
+        if matches!(param_ty, HostTypeTerm::List(_))
+            && let Some(name) = direct_var_name(actual)
+            && let Some(body) = lookup_program_def(&defs, name)
+        {
+            rewritten_actual = body.clone();
+            rewritten_elements[actual_index + 2] = rewritten_actual.clone();
+        }
+        if wrt_names.contains(&param_names[param_index]) {
+            let shape_actual =
+                resolve_list_grad_shape_expr(&rewritten_actual, program, defs.as_ref());
+            let Some(plan) = list_grad_pack_plan(&param_ty, &shape_actual) else {
+                return Ok(None);
+            };
+            rewritten_actual = shape_actual;
+            rewritten_elements[actual_index + 2] = rewritten_actual;
+            selected_plans.push(plan);
+        }
+    }
+    if !selected_plans
+        .iter()
+        .any(|plan| matches!(plan, ListGradPackPlan::List { .. }))
+    {
         return Ok(None);
     }
 
-    // Top-level List values are host globals, while the reverse-mode lowerer
-    // needs their finite spine to create one leaf Load/wrt root. Substitute
-    // only List-typed actuals from the checked program definition map; scalar
-    // selectors/counts stay as ordinary scoped Loads and remain runtime-fed.
-    let defs = cached_program_defs(program);
-    let mut rewritten_elements = list.elements.clone();
-    for (index, arg) in kids.iter().enumerate().skip(1) {
-        let Some(name) = direct_var_name(arg) else {
-            continue;
-        };
-        if !matches!(scope.get(name), Some(HostTypeTerm::List(_))) {
-            continue;
+    let checked_ty = expr_host_type(app_expr, program, scope);
+    let inferred_result_ty = if selected_plans.len() == 1 {
+        selected_plans[0].host_type()
+    } else {
+        HostTypeTerm::Tuple(
+            selected_plans
+                .iter()
+                .map(ListGradPackPlan::host_type)
+                .collect(),
+        )
+    };
+    let result_ty = expected_ty
+        .filter(|ty| !ty.is_unresolved())
+        .cloned()
+        .or_else(|| (!checked_ty.is_unresolved()).then_some(checked_ty))
+        .unwrap_or(inferred_result_ty);
+    let plan = if selected_plans.len() == 1 {
+        selected_plans.pop().expect("one selected plan")
+    } else {
+        ListGradPackPlan::Tuple {
+            ty: result_ty.clone(),
+            items: selected_plans,
         }
-        if let Some(body) = lookup_program_def(&defs, name) {
-            rewritten_elements[index + 2] = body.clone();
-        }
-    }
+    };
+    let expected = plan
+        .first_tensor_type()
+        .unwrap_or_else(TensorType::scalar_f32);
     let rewritten = Expr::List(
         List {
             elements: rewritten_elements,
         },
         app_expr.span(),
     );
-
-    // A runtime-fed `list_index` selector cannot be hidden behind a tensor
-    // Load: the staged List spine must still choose exactly one element and
-    // preserve the ordinary bounds trap. The public call has a finite literal
-    // spine, so retain host control flow and specialize one normal reverse-
-    // mode helper per legal position. Generated C evaluates the selector once
-    // and executes only the selected helper.
-    let grad_kids = children(callee);
-    let fn_name = grad_kids
-        .first()
-        .and_then(direct_var_name)
-        .map(str::to_string);
-    let fn_info = fn_name
-        .as_deref()
-        .and_then(|name| lookup_program_def(&defs, name))
-        .and_then(|body| {
-            let Expr::List(fn_list, _) = body else {
-                return None;
-            };
-            (tag(fn_list) == Some(DeepTag::Fn)).then_some(fn_list)
-        });
-    let Some((list_param_index, list_param_name)) = fn_info.and_then(|fn_list| {
-        let params = children(fn_list).first().and_then(as_list)?;
-        children(params)
-            .iter()
-            .enumerate()
-            .find_map(|(index, param)| {
-                matches!(param_host_type(param), Some(HostTypeTerm::List(_)))
-                    .then(|| param_name(param).map(|name| (index, name)))?
-            })
-    }) else {
+    let Some(lowered) =
+        lower_tensor_helper_dag_with_controls(&rewritten, program, scope, &expected)
+    else {
         return Ok(None);
     };
-    let Expr::List(rewritten_list, _) = &rewritten else {
-        unreachable!("rewritten grad app is a List")
-    };
-    let Some(list_actual) = children(rewritten_list).get(list_param_index + 1) else {
+    if lowered.value_root_count != plan.leaf_count() {
         return Ok(None);
-    };
-    let Some(list_len) = static_list_spine_len(list_actual) else {
-        return Ok(None);
-    };
-    let runtime_index = fn_info.and_then(|fn_list| {
-        let fn_kids = children(fn_list);
-        let params = fn_kids.first().and_then(as_list)?;
-        let body = fn_kids.get(1)?;
-        children(params)
-            .iter()
-            .enumerate()
-            .find_map(|(index, param)| {
-                if !matches!(param_host_type(param), Some(HostTypeTerm::Int64)) {
-                    return None;
-                }
-                let name = param_name(param)?;
-                (list_selection_parameter_kind(body, &name, &list_param_name)
-                    == Some(ListSelectionKind::Index))
-                .then_some(index)
-            })
-    });
-    if let Some(param_index) = runtime_index {
-        let actual_index = param_index + 1;
-        let Some(selector_expr) = kids.get(actual_index) else {
-            return Ok(None);
-        };
-        if expr_int_literal(selector_expr).is_none() {
-            let selector_value = lower_host_expr(selector_expr, program, scope, tensor_helpers)?;
-            let selector_name = format!("__list_grad_index_{}", tensor_helpers.len());
-            let selector_var = || {
-                HostExpr::new(HostExprKind::Var(
-                    selector_name.clone(),
-                    HostTypeTerm::Int64,
-                ))
-            };
-            let rendered_index = HostExpr::new(HostExprKind::Builtin {
-                name: "to_string".to_string(),
-                args: vec![selector_var()],
-                ty: HostTypeTerm::String,
-            });
-            let out_of_bounds_message = HostExpr::new(HostExprKind::Builtin {
-                name: "string_concat".to_string(),
-                args: vec![
-                    HostExpr::new(HostExprKind::String("index ".to_string())),
-                    HostExpr::new(HostExprKind::Builtin {
-                        name: "string_concat".to_string(),
-                        args: vec![
-                            rendered_index,
-                            HostExpr::new(HostExprKind::String(format!(
-                                " out of bounds for list of len {list_len}"
-                            ))),
-                        ],
-                        ty: HostTypeTerm::String,
-                    }),
-                ],
-                ty: HostTypeTerm::String,
-            });
-            let mut branch = HostExpr::new(HostExprKind::Builtin {
-                name: "fail".to_string(),
-                args: vec![out_of_bounds_message],
-                ty: result_ty.clone(),
-            });
-            for value in (0..list_len).rev() {
-                let mut specialized = rewritten_elements_for(&rewritten);
-                specialized[actual_index + 2] = typed_int64_literal(value as i64, app_expr.span());
-                let specialized_expr = Expr::List(
-                    List {
-                        elements: specialized,
-                    },
-                    app_expr.span(),
-                );
-                let Some(dag) =
-                    lower_tensor_helper_dag(&specialized_expr, program, scope, &expected_root)
-                else {
-                    return Ok(None);
-                };
-                let Some(value_expr) = pack_scalar_list_grad_dag(
-                    dag,
-                    scope,
-                    tensor_helpers,
-                    expected_root.clone(),
-                    result_ty.clone(),
-                    (*element_ty).clone(),
-                    list_len,
-                ) else {
-                    return Ok(None);
-                };
-                let cond = HostExpr::new(HostExprKind::Builtin {
-                    name: "eq".to_string(),
-                    args: vec![
-                        selector_var(),
-                        HostExpr::new(HostExprKind::Int(value as i64)),
-                    ],
-                    ty: HostTypeTerm::Bool,
-                });
-                branch = HostExpr::new(HostExprKind::If {
-                    cond: Box::new(cond),
-                    then_expr: Box::new(value_expr),
-                    else_expr: Box::new(branch),
-                    ty: result_ty.clone(),
-                });
-            }
-            let negative_cond = HostExpr::new(HostExprKind::Builtin {
-                name: "lt".to_string(),
-                args: vec![selector_var(), HostExpr::new(HostExprKind::Int(0))],
-                ty: HostTypeTerm::Bool,
-            });
-            branch = HostExpr::new(HostExprKind::If {
-                cond: Box::new(negative_cond),
-                then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
-                    name: "fail".to_string(),
-                    args: vec![HostExpr::new(HostExprKind::String(
-                        "index requires non-negative index".to_string(),
-                    ))],
-                    ty: result_ty.clone(),
-                })),
-                else_expr: Box::new(branch),
-                ty: result_ty.clone(),
-            });
-            return Ok(Some(HostExpr::new(HostExprKind::Let {
-                bindings: vec![HostBinding {
-                    name: selector_name,
-                    display_name: None,
-                    display_roots: Vec::new(),
-                    ty: HostTypeTerm::Int64,
-                    value: selector_value,
-                }],
-                body: Box::new(branch),
-                ty: result_ty,
-            })));
-        }
     }
-
-    // `take_list` and `drop_list` have a finite observable selection state
-    // for a finite staged spine: negative counts trap, 0..len select exact
-    // prefixes/suffixes, and every count above len is equivalent to len.
-    // When an integer parameter is used only as one of those counts, retain
-    // it as host control and lower one ordinary reverse-mode helper per
-    // selection state. This keeps the transform general (the differentiated
-    // body is still lowered by the normal AD engine) while avoiding a
-    // synthetic runtime Load that the staged List rewrite cannot inspect.
-    let runtime_count = fn_info.and_then(|fn_list| {
-        let fn_kids = children(fn_list);
-        let params = fn_kids.first().and_then(as_list)?;
-        let body = fn_kids.get(1)?;
-        children(params)
-            .iter()
-            .enumerate()
-            .find_map(|(index, param)| {
-                if !matches!(param_host_type(param), Some(HostTypeTerm::Int64)) {
-                    return None;
-                }
-                let name = param_name(param)?;
-                list_selection_parameter_kind(body, &name, &list_param_name)
-                    .filter(|kind| *kind != ListSelectionKind::Index)
-                    .map(|kind| (index, kind))
-            })
-    });
-    if let Some((param_index, selection_kind)) = runtime_count {
-        let actual_index = param_index + 1;
-        let Some(count_expr) = kids.get(actual_index) else {
-            return Ok(None);
-        };
-        if expr_int_literal(count_expr).is_none() {
-            let count_value = lower_host_expr(count_expr, program, scope, tensor_helpers)?;
-            let count_name = format!("__list_grad_count_{}", tensor_helpers.len());
-            let count_var =
-                || HostExpr::new(HostExprKind::Var(count_name.clone(), HostTypeTerm::Int64));
-            let mut lower_specialized = |value: usize| {
-                let mut specialized = rewritten_elements_for(&rewritten);
-                specialized[actual_index + 2] = typed_int64_literal(value as i64, app_expr.span());
-                let specialized_expr = Expr::List(
-                    List {
-                        elements: specialized,
-                    },
-                    app_expr.span(),
-                );
-                let dag =
-                    lower_tensor_helper_dag(&specialized_expr, program, scope, &expected_root)?;
-                pack_scalar_list_grad_dag(
-                    dag,
-                    scope,
-                    tensor_helpers,
-                    expected_root.clone(),
-                    result_ty.clone(),
-                    (*element_ty).clone(),
-                    list_len,
-                )
-            };
-
-            // Counts at or beyond the spine length share the same
-            // truncation result. The syntactic ownership check below
-            // proves the parameter has no other value-dependent use, so
-            // specializing that saturated state is semantics-preserving.
-            let Some(mut branch) = lower_specialized(list_len) else {
-                return Ok(None);
-            };
-            for value in (0..list_len).rev() {
-                let Some(value_expr) = lower_specialized(value) else {
-                    return Ok(None);
-                };
-                let cond = HostExpr::new(HostExprKind::Builtin {
-                    name: "eq".to_string(),
-                    args: vec![count_var(), HostExpr::new(HostExprKind::Int(value as i64))],
-                    ty: HostTypeTerm::Bool,
-                });
-                branch = HostExpr::new(HostExprKind::If {
-                    cond: Box::new(cond),
-                    then_expr: Box::new(value_expr),
-                    else_expr: Box::new(branch),
-                    ty: result_ty.clone(),
-                });
-            }
-            let negative_cond = HostExpr::new(HostExprKind::Builtin {
-                name: "lt".to_string(),
-                args: vec![count_var(), HostExpr::new(HostExprKind::Int(0))],
-                ty: HostTypeTerm::Bool,
-            });
-            branch = HostExpr::new(HostExprKind::If {
-                cond: Box::new(negative_cond),
-                then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
-                    name: "fail".to_string(),
-                    args: vec![HostExpr::new(HostExprKind::String(format!(
-                        "{} requires non-negative count",
-                        selection_kind.name()
-                    )))],
-                    ty: result_ty.clone(),
-                })),
-                else_expr: Box::new(branch),
-                ty: result_ty.clone(),
-            });
-            return Ok(Some(HostExpr::new(HostExprKind::Let {
-                bindings: vec![HostBinding {
-                    name: count_name,
-                    display_name: None,
-                    display_roots: Vec::new(),
-                    ty: HostTypeTerm::Int64,
-                    value: count_value,
-                }],
-                body: Box::new(branch),
-                ty: result_ty,
-            })));
-        }
-    }
-
-    let Some(dag) = lower_tensor_helper_dag(&rewritten, program, scope, &expected_root) else {
-        return Ok(None);
-    };
-    Ok(pack_scalar_list_grad_dag(
-        dag,
-        scope,
-        tensor_helpers,
-        expected_root,
-        result_ty,
-        (*element_ty).clone(),
-        list_len,
-    ))
-}
-
-fn pack_scalar_list_grad_dag(
-    dag: crate::Dag,
-    scope: &HashMap<String, HostTypeTerm>,
-    tensor_helpers: &mut Vec<HostTensorHelper>,
-    expected_root: TensorType,
-    result_ty: HostTypeTerm,
-    element_ty: HostTypeTerm,
-    expected_len: usize,
-) -> Option<HostExpr> {
-    let root_tys = dag
+    let root_tys = lowered
+        .dag
         .roots()
         .iter()
-        .filter_map(|root| dag.get(*root).map(|node| node.output_type.clone()))
+        .filter_map(|root| lowered.dag.get(*root).map(|node| node.output_type.clone()))
         .collect::<Vec<_>>();
-    if root_tys.len() != expected_len {
-        return None;
+    let expected_control_roots = lowered
+        .list_checks
+        .iter()
+        .map(|check| match check {
+            crate::lower::RuntimeListCheckDescriptor::NonNegative { .. } => 1,
+            crate::lower::RuntimeListCheckDescriptor::IndexBounds => 2,
+        })
+        .sum::<usize>();
+    if root_tys.len() != lowered.value_root_count + expected_control_roots {
+        return Ok(None);
     }
     if root_tys.is_empty() {
-        return Some(HostExpr::new(HostExprKind::List(Vec::new(), result_ty)));
+        let mut roots = std::iter::empty();
+        return Ok(Some(pack_list_grad_roots(&plan, &mut roots)));
     }
+
     let helper_number = tensor_helpers.len();
-    let call = finish_tensor_helper_call(dag, scope, tensor_helpers, expected_root);
+    let call = finish_tensor_helper_call(lowered.dag, scope, tensor_helpers, expected);
+    let binding_name = format!("__list_grad_result_{helper_number}");
+    let binding_ty = host_expr_type(&call);
+    let mut value_roots = (0..lowered.value_root_count)
+        .map(|index| tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, index));
+    let mut body = pack_list_grad_roots(&plan, &mut value_roots);
 
-    let scalarize = |tensor: HostExpr, scalar_ty: HostTypeTerm| {
-        HostExpr::new(HostExprKind::Builtin {
-            name: "tensor_to_scalar".to_string(),
-            args: vec![tensor],
-            ty: scalar_ty,
-        })
-    };
-    if root_tys.len() == 1 {
-        return Some(HostExpr::new(HostExprKind::List(
-            vec![scalarize(call, element_ty.clone())],
-            result_ty,
-        )));
+    let mut control_offset = lowered.value_root_count + expected_control_roots;
+    for check in lowered.list_checks.iter().rev() {
+        match check {
+            crate::lower::RuntimeListCheckDescriptor::NonNegative {
+                operation,
+                argument,
+            } => {
+                control_offset -= 1;
+                let value =
+                    tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, control_offset);
+                let value = HostExpr::new(HostExprKind::Builtin {
+                    name: "tensor_to_scalar".to_string(),
+                    args: vec![value],
+                    ty: HostTypeTerm::Int64,
+                });
+                let cond = HostExpr::new(HostExprKind::Builtin {
+                    name: "lt".to_string(),
+                    args: vec![value, HostExpr::new(HostExprKind::Int(0))],
+                    ty: HostTypeTerm::Bool,
+                });
+                body = HostExpr::new(HostExprKind::If {
+                    cond: Box::new(cond),
+                    then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
+                        name: "fail".to_string(),
+                        args: vec![HostExpr::new(HostExprKind::String(format!(
+                            "{operation} requires non-negative {argument}"
+                        )))],
+                        ty: result_ty.clone(),
+                    })),
+                    else_expr: Box::new(body),
+                    ty: result_ty.clone(),
+                });
+            }
+            crate::lower::RuntimeListCheckDescriptor::IndexBounds => {
+                control_offset -= 2;
+                let index =
+                    tensor_helper_root_expr(&binding_name, &binding_ty, &root_tys, control_offset);
+                let len = tensor_helper_root_expr(
+                    &binding_name,
+                    &binding_ty,
+                    &root_tys,
+                    control_offset + 1,
+                );
+                let index = HostExpr::new(HostExprKind::Builtin {
+                    name: "tensor_to_scalar".to_string(),
+                    args: vec![index],
+                    ty: HostTypeTerm::Int64,
+                });
+                let len = HostExpr::new(HostExprKind::Builtin {
+                    name: "tensor_to_scalar".to_string(),
+                    args: vec![len],
+                    ty: HostTypeTerm::Int64,
+                });
+                let message = HostExpr::new(HostExprKind::Builtin {
+                    name: "string_concat".to_string(),
+                    args: vec![
+                        HostExpr::new(HostExprKind::String("index ".to_string())),
+                        HostExpr::new(HostExprKind::Builtin {
+                            name: "string_concat".to_string(),
+                            args: vec![
+                                HostExpr::new(HostExprKind::Builtin {
+                                    name: "to_string".to_string(),
+                                    args: vec![index.clone()],
+                                    ty: HostTypeTerm::String,
+                                }),
+                                HostExpr::new(HostExprKind::Builtin {
+                                    name: "string_concat".to_string(),
+                                    args: vec![
+                                        HostExpr::new(HostExprKind::String(
+                                            " out of bounds for list of len ".to_string(),
+                                        )),
+                                        HostExpr::new(HostExprKind::Builtin {
+                                            name: "to_string".to_string(),
+                                            args: vec![len.clone()],
+                                            ty: HostTypeTerm::String,
+                                        }),
+                                    ],
+                                    ty: HostTypeTerm::String,
+                                }),
+                            ],
+                            ty: HostTypeTerm::String,
+                        }),
+                    ],
+                    ty: HostTypeTerm::String,
+                });
+                let cond = HostExpr::new(HostExprKind::Builtin {
+                    name: "gte".to_string(),
+                    args: vec![index, len],
+                    ty: HostTypeTerm::Bool,
+                });
+                body = HostExpr::new(HostExprKind::If {
+                    cond: Box::new(cond),
+                    then_expr: Box::new(HostExpr::new(HostExprKind::Builtin {
+                        name: "fail".to_string(),
+                        args: vec![message],
+                        ty: result_ty.clone(),
+                    })),
+                    else_expr: Box::new(body),
+                    ty: result_ty.clone(),
+                });
+            }
+        }
     }
-
-    // A multi-root helper must execute exactly once. Bind its tuple result,
-    // project each root, scalarize it, and rebuild the public List in root
-    // order (which is primal List order by the grad lowering contract).
-    let tuple_name = format!("__list_grad_result_{helper_number}");
-    let tuple_ty = host_expr_type(&call);
-    let items = root_tys
-        .iter()
-        .enumerate()
-        .map(|(index, tensor_ty)| {
-            let tuple_get = HostExpr::new(HostExprKind::Builtin {
-                name: "tuple-get".to_string(),
-                args: vec![
-                    HostExpr::new(HostExprKind::Var(tuple_name.clone(), tuple_ty.clone())),
-                    HostExpr::new(HostExprKind::Int(index as i64)),
-                ],
-                ty: HostTypeTerm::Tensor(tensor_ty.clone()),
-            });
-            scalarize(tuple_get, element_ty.clone())
-        })
-        .collect();
-    let body = HostExpr::new(HostExprKind::List(items, result_ty.clone()));
-    Some(HostExpr::new(HostExprKind::Let {
+    debug_assert_eq!(control_offset, lowered.value_root_count);
+    Ok(Some(HostExpr::new(HostExprKind::Let {
         bindings: vec![HostBinding {
-            name: tuple_name,
+            name: binding_name,
             display_name: None,
             display_roots: Vec::new(),
-            ty: tuple_ty,
+            ty: binding_ty,
             value: call,
         }],
         body: Box::new(body),
         ty: result_ty,
-    }))
-}
-
-fn rewritten_elements_for(expr: &Expr) -> Vec<Expr> {
-    match expr {
-        Expr::List(list, _) => list.elements.clone(),
-        _ => unreachable!("rewritten grad app is a List"),
-    }
-}
-
-fn static_list_spine_len(expr: &Expr) -> Option<usize> {
-    let (tag, _, kids) = stamped_parts(expr)?;
-    match tag {
-        DeepTag::Var if kids.first().and_then(symbol_name) == Some("Nil") => Some(0),
-        DeepTag::App => {
-            let callee = kids.first().and_then(direct_var_name)?;
-            (terminal_name(callee) == "Cons")
-                .then(|| static_list_spine_len(kids.get(2)?).map(|len| len + 1))?
-        }
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ListSelectionKind {
-    Index,
-    Take,
-    Drop,
-}
-
-impl ListSelectionKind {
-    fn from_name(name: &str) -> Option<Self> {
-        match terminal_name(name) {
-            "index" | "list_index" => Some(Self::Index),
-            "take" | "take_list" => Some(Self::Take),
-            "drop" | "drop_list" => Some(Self::Drop),
-            _ => None,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Index => "index",
-            Self::Take => "take",
-            Self::Drop => "drop",
-        }
-    }
-}
-
-/// Return the one List selection operation whose selector/count is
-/// `parameter`, but only when every semantic occurrence of that parameter is
-/// exactly the bare selector/count argument of that same operation over the
-/// differentiated List parameter. Besides preventing an unrelated int64
-/// parameter from acquiring index traps, this proof makes the `count >= len`
-/// saturated take/drop dispatch state exact.
-fn list_selection_parameter_kind(
-    expr: &Expr,
-    parameter: &str,
-    list_parameter: &str,
-) -> Option<ListSelectionKind> {
-    fn walk(
-        expr: &Expr,
-        parameter: &str,
-        list_parameter: &str,
-        selected: &mut Option<ListSelectionKind>,
-    ) -> bool {
-        if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
-            && let Some(kind) = kids
-                .first()
-                .and_then(direct_var_name)
-                .and_then(ListSelectionKind::from_name)
-            && kids.len() == 3
-            && kids.get(1).and_then(direct_var_name) == Some(list_parameter)
-            && kids.get(2).and_then(direct_var_name) == Some(parameter)
-        {
-            if selected.is_some_and(|existing| existing != kind) {
-                return false;
-            }
-            *selected = Some(kind);
-            return kids
-                .get(1)
-                .is_some_and(|list| walk(list, parameter, list_parameter, selected));
-        }
-        if direct_var_name(expr) == Some(parameter) {
-            return false;
-        }
-        match expr {
-            Expr::List(list, _) => list
-                .elements
-                .iter()
-                .all(|child| walk(child, parameter, list_parameter, selected)),
-            Expr::Node(node, _) => node
-                .children_slice()
-                .iter()
-                .all(|child| walk(child, parameter, list_parameter, selected)),
-            Expr::MetaExpr(meta, _) => walk(&meta.expr, parameter, list_parameter, selected),
-            Expr::BareList(items, _) => items
-                .iter()
-                .all(|child| walk(child, parameter, list_parameter, selected)),
-            Expr::Map(_, _) | Expr::Atom(_, _) => true,
-            Expr::UnknownForm(_) => false,
-        }
-    }
-
-    let mut selected = None;
-    walk(expr, parameter, list_parameter, &mut selected)
-        .then_some(selected)
-        .flatten()
-}
-
-fn typed_int64_literal(value: i64, span: chelis_deep::Span) -> Expr {
-    let ty = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Name("int64".to_string()), span),
-            ],
-        },
-        span,
-    );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                Expr::Map(
-                    MetaMap {
-                        entries: vec![("type".to_string(), ty)],
-                    },
-                    span,
-                ),
-                Expr::Atom(Atom::Int(value), span),
-            ],
-        },
-        span,
-    )
-}
-
-fn typed_bool_literal(value: bool, span: chelis_deep::Span) -> Expr {
-    let ty = Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
-                Expr::Map(MetaMap::default(), span),
-                Expr::Atom(Atom::Name("bool".to_string()), span),
-            ],
-        },
-        span,
-    );
-    Expr::List(
-        List {
-            elements: vec![
-                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
-                Expr::Map(
-                    MetaMap {
-                        entries: vec![("type".to_string(), ty)],
-                    },
-                    span,
-                ),
-                Expr::Atom(Atom::Bool(value), span),
-            ],
-        },
-        span,
-    )
+    })))
 }
 
 /// Read the `wrt` meta off a `grad` list and resolve it to a list of
@@ -7816,7 +7569,7 @@ fn lower_app_host_expr(
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
-    if let Some(grad_lowered) = try_lower_runtime_bool_grad_app(
+    if let Some(grad_lowered) = try_lower_general_list_grad_app(
         app_expr,
         list,
         program,
@@ -7824,11 +7577,6 @@ fn lower_app_host_expr(
         tensor_helpers,
         expected_ty,
     )? {
-        return Ok(grad_lowered);
-    }
-    if let Some(grad_lowered) =
-        try_lower_scalar_list_grad_app(app_expr, list, program, scope, tensor_helpers, expected_ty)?
-    {
         return Ok(grad_lowered);
     }
     // chelis#405: host-lane scalar forward-mode AD. When the callee is a
@@ -11382,17 +11130,6 @@ fn expr_int_literal(expr: &Expr) -> Option<i64> {
         // binding into an unsupported host-lane builtin (issue #300).
         Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::Cast) => {
             stamped_parts(expr)?.2.first().and_then(expr_int_literal)
-        }
-        _ => None,
-    }
-}
-
-fn expr_bool_literal(expr: &Expr) -> Option<bool> {
-    match expr {
-        Expr::Atom(Atom::Bool(value), _) => Some(*value),
-        Expr::MetaExpr(meta, _) => expr_bool_literal(&meta.expr),
-        Expr::List(_, _) | Expr::Node(_, _) if expr.tag() == Some(DeepTag::Lit) => {
-            stamped_parts(expr)?.2.first().and_then(expr_bool_literal)
         }
         _ => None,
     }

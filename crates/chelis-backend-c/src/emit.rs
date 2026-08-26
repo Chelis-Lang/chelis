@@ -524,7 +524,7 @@ impl CEmitter {
             // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
             RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
             RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like(id, *low, *high, *seed, &node.output_type)
+                self.emit_uniform_like(id, *low, *high, *seed, &node.inputs, &node.output_type)
             }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before C code generation")
@@ -3028,11 +3028,29 @@ impl CEmitter {
         }
     }
 
-    fn emit_uniform_like(&mut self, id: usize, low: f64, high: f64, seed: u64, ty: &TensorType) {
+    fn emit_uniform_like(
+        &mut self,
+        id: usize,
+        low: f64,
+        high: f64,
+        seed: u64,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
-        ));
+        if let Some(activation) = inputs.get(1) {
+            self.line(&format!(
+                "int t{id}_active = ((float*)t{}->data)[0] != 0.0f ? 1 : 0;",
+                activation.0
+            ));
+            self.line(&format!(
+                "uint64_t t{id}_seed = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL) : {seed}ULL;"
+            ));
+        } else {
+            self.line(&format!(
+                "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
+            ));
+        }
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -7711,6 +7729,42 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_BOOL);"));
+    }
+
+    #[test]
+    fn path_sensitive_uniform_reads_float_backed_bool_and_gates_counter() {
+        let mut dag = Dag::new();
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            vec_f32(2),
+            None,
+        );
+        let activation = dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 11,
+            },
+            vec![template, activation],
+            vec_f32(2),
+            None,
+        );
+        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        assert!(c.contains("((float*)t1->data)[0] != 0.0f"));
+        assert!(c.contains("? CHELIS_EFFECTIVE_UNIFORM_SEED(11ULL) : 11ULL"));
+        assert!(!c.contains("((bool*)t1->data)"));
     }
 
     #[test]

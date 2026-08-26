@@ -52,7 +52,7 @@
         "expected_success": "capacity_census_matches_public_surface passes",
         "mutations": [
           "planted_prelude_adt_with_f64_variant_is_detected",
-          "final_surface_has_no_duplicate_prelude_json_or_legacy_builtin_aliases"
+          "final_surface_has_no_duplicate_prelude_json"
         ]
       },
       {
@@ -1068,8 +1068,7 @@
       "id": "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-adt-numeric",
@@ -1077,604 +1076,516 @@
       "flags": [
         "float-carrier",
         "numeric-op"
-      ],
-      "citation": "maintainer-override(source-faithful JsonBigInt successor directed for PR #1302, chelis#1314)"
+      ]
     },
     {
       "kind": "std-adt-numeric",
       "id": "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-adt-numeric",
       "id": "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-adt-numeric",
       "id": "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "contracts::normal_cdf: (t-fn {} (t-var {} p_float) (t-var {} p_float))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "contracts::standard_contract_tolerance: (t-fn {} (t-prim {} f32))",
       "flags": [
         "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal: (t-fn {} (t-prim {} string) (t-adt {} Decimal))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_add: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_gt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_gte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_lt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_lte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_mul: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
       "flags": [
         "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::decimal_to_string: (t-fn {} (t-adt {} Decimal) (t-prim {} string))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_array: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} List (t-adt {} Json))))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_bigint: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
-      "flags": [],
-      "citation": "chelis#1314 exact [05-OP-35] json_bigint surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_bool: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} bool)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
       "flags": [
         "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_get: (t-fn {} (t-adt {} Json) (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_is_null: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_object: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} Dict (t-prim {} string) (t-adt {} Json))))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::json_string: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::parse_json: (t-fn {} (t-prim {} string) (t-adt {} Json))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::to_json: (t-fn {} (t-adt {} Json) (t-prim {} string))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::try_load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::try_parse_json: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::try_to_json: (t-fn {} (t-adt {} Json) (t-adt {} Option (t-prim {} string)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::try_write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-adt {} Option (t-unit {})))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io/json::write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-unit {}))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "scalar::abs: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "scalar::max: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "scalar::min: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "sort::sort: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tensor/construct::arange: (t-fn {} (t-var {} p_int) (t-var {} p_int) (t-tensor {} (d-var {} n) (t-var {} p_int)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "tensor/construct::linspace: (t-fn {} (t-var {} p_float) (t-var {} p_float) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p_float)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "test::assert_close: (t-fn {eff: (effects {} test)} (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
       "flags": [
         "float-carrier"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      ]
     },
     {
       "kind": "std-def-numeric",
-      "id": "test::assert_eq: (t-fn {eff: (effects {} test)} (t-var {} Q) (t-var {} Q) (t-prim {} string) (t-unit {}))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "id": "test::assert_eq: (t-fn {eff: (effects {} test)} (t-var {} q) (t-var {} q) (t-prim {} string) (t-unit {}))",
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "test::assert_eq_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} string) (t-unit {}))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::day_of_week: (t-fn {} (t-adt {} Date) (t-adt {} DayOfWeek))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::day_of_week_name: (t-fn {} (t-adt {} Date) (t-prim {} string))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
       "flags": [
         "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      ]
     },
     {
       "kind": "std-def-numeric",
       "id": "tokenizer::load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Tokenizer))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     },
     {
       "kind": "std-def-numeric",
       "id": "tokenizer::try_load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Tokenizer)))",
-      "flags": [],
-      "citation": "chelis#1293 exact [05-OP-35] stdlib surface"
+      "flags": []
     }
   ]
 }

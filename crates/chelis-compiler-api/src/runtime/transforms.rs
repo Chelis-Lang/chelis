@@ -396,10 +396,14 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
-        // Lowering a handled transform consumes the same Random stream as
-        // surrounding host evaluation. Commit its next unused ordinal before
-        // evaluating the DAG so a later expression cannot replay those words.
-        self.random_counter = next_random_counter;
+        let starting_random_counter = self.random_counter;
+        let path_sensitive_random = dag.nodes().iter().any(|node| {
+            matches!(node.op, chelis_ir::dag::RiscOp::UniformLike { .. }) && node.inputs.len() == 2
+        });
+        if !path_sensitive_random {
+            // The ordinary baked-seed lane computes progression statically.
+            self.random_counter = next_random_counter;
+        }
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -512,20 +516,29 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         }
-        let values = chelis_ir::eval::eval_tensor_roots_with_strict(&dag, &roots, |name| {
-            placeholder_tensors
-                .get(name)
-                .cloned()
-                .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
-                .or_else(|| captured_tensors.get(name).cloned())
-        })
-        .map_err(|err| {
-            let kind_label = match kind {
-                TransformKind::Grad => "grad",
-                TransformKind::Vmap => "vmap",
-            };
-            format!("host runtime `{kind_label}` evaluation failed: {err}")
-        })?;
+        let (values, executed_random_counter) =
+            chelis_ir::eval::eval_tensor_roots_with_strict_random_progress(
+                &dag,
+                &roots,
+                starting_random_counter,
+                |name| {
+                    placeholder_tensors
+                        .get(name)
+                        .cloned()
+                        .or_else(|| tensor_bindings.get(name).map(|t| t.value.clone()))
+                        .or_else(|| captured_tensors.get(name).cloned())
+                },
+            )
+            .map_err(|err| {
+                let kind_label = match kind {
+                    TransformKind::Grad => "grad",
+                    TransformKind::Vmap => "vmap",
+                };
+                format!("host runtime `{kind_label}` evaluation failed: {err}")
+            })?;
+        if path_sensitive_random {
+            self.random_counter = executed_random_counter;
+        }
 
         // Pack roots back into a RuntimeValue.
         let kind_label = match kind {

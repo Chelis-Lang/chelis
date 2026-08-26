@@ -52,96 +52,6 @@ const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
 const HEADER_ROOTS: &[&str] = &["chelis_runtime.h", "chelis_blas.h", "chelis_math.h"];
 const STD_SRC_REL: &str = "packages/chelis-std/src";
 const CONTROLLING_SPEC_REL: &str = "spec/05-risc-primitives.md";
-/// The final exported stdlib numeric identities decided by [05-OP-35].
-///
-/// Signatures remain enforced by the ordinary census row identity. This
-/// separate closed set makes removals, aliases, and recursive-discovery holes
-/// fail under the operation names a cold reviewer recognizes.
-const FINAL_STDLIB_NUMERIC_IDENTITIES: &[&str] = &[
-    "contracts::normal_cdf",
-    "contracts::normal_cdf_contract_samples",
-    "contracts::normal_cdf_contract_seed",
-    "contracts::standard_contract_tolerance",
-    "decimal::decimal",
-    "decimal::decimal_add",
-    "decimal::decimal_div",
-    "decimal::decimal_eq",
-    "decimal::decimal_from_int",
-    "decimal::decimal_gt",
-    "decimal::decimal_gte",
-    "decimal::decimal_lt",
-    "decimal::decimal_lte",
-    "decimal::decimal_mul",
-    "decimal::decimal_sub",
-    "decimal::decimal_to_float",
-    "decimal::decimal_to_string",
-    "decimal::try_decimal",
-    "index::drop_list",
-    "index::list_index",
-    "index::take_list",
-    "init/kaiming::kaiming_normal",
-    "init/kaiming::kaiming_uniform",
-    "init/random::normal_like",
-    "init/xavierext::trunc_normal",
-    "init/xavierext::xavier_normal",
-    "init/xavierext::xavier_uniform",
-    "io/json::json_array",
-    "io/json::json_bool",
-    "io/json::json_float",
-    "io/json::json_get",
-    "io/json::json_int",
-    "io/json::json_is_null",
-    "io/json::json_object",
-    "io/json::json_string",
-    "io/json::load_json",
-    "io/json::parse_json",
-    "io/json::to_json",
-    "io/json::try_load_json",
-    "io/json::try_parse_json",
-    "io/json::try_to_json",
-    "io/json::try_write_json",
-    "io/json::write_json",
-    "io::mmap_size",
-    "io::read_head_bytes",
-    "process::run",
-    "process::run_chelis",
-    "scalar::abs",
-    "scalar::max",
-    "scalar::min",
-    "sort::sort",
-    "tensor/construct::arange",
-    "tensor/construct::linspace",
-    "tensor/construct::squeeze",
-    "tensor/construct::stack",
-    "tensor/construct::unsqueeze",
-    "tensor/mask::where_indices",
-    "test::assert_close",
-    "test::assert_close_tensor",
-    "test::assert_eq",
-    "test::assert_eq_tensor",
-    "test::assert_shape",
-    "time::add_days",
-    "time::date",
-    "time::date_gt",
-    "time::date_gte",
-    "time::date_lt",
-    "time::date_lte",
-    "time::date_to_string",
-    "time::day_of_week",
-    "time::day_of_week_name",
-    "time::day_of_year",
-    "time::days_between",
-    "time::duration",
-    "time::is_leap_year",
-    "time::parse_date",
-    "time::sub_days",
-    "time::try_date",
-    "tokenizer::batch_encode",
-    "tokenizer::decode",
-    "tokenizer::encode",
-    "tokenizer::load_tokenizer",
-    "tokenizer::try_load_tokenizer",
-];
 const NUMERIC_PRIMS: &[&str] = &[
     "f64", "f32", "f16", "bf16", "f8e4m3", "int8", "int16", "int32", "int64",
 ];
@@ -217,12 +127,6 @@ unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break
 /// receive it.
 const PERMANENT_PLAIN_DISPOSITION: &str =
     "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)";
-
-/// The one reviewed permanent capacity exception: the source-faithful Json
-/// carrier distinguishes exact source integers from source floats and is
-/// governed by [05-OP-2]. The complete enforcement descriptor is closed.
-const PERMANENT_JSON_DISPOSITION: &str = "permanent-disposition([05-OP-2] source-faithful prelude Json numeric split; exact descriptor ratified 2026-08-04)";
-const PERMANENT_JSON_ID: &str = "prelude::Json: JNull | JBool(bool) | JInt(int64) | JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrozenDispositionRow {
@@ -1388,407 +1292,653 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
     ),
 ];
 
-/// The exact tagged-carrier declarations of the chelis#1289 public C ABI:
-/// the dtype tag enumeration, the canonical `chelis_scalar` image, the
-/// tagged `chelis_value` (tag enum, payload union, carrier struct), both
-/// option carriers, and the dtype-tagged `chelis_tensor`. These rows ARE the
-/// tagged transport; the callables operating on them register as numeric
-/// operations below. [05-OP-31] states each declaration verbatim.
-const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 }",
-        &[],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: typedef struct { chelis_dtype dtype ; uint8_t reserved [ 7 ] ; uint64_t bits ; } chelis_scalar",
-        &["numeric-op"],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
-        &["numeric-op"],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_scalar value ; } chelis_option_scalar",
-        &["numeric-op"],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_value value ; } chelis_option_value",
-        &["numeric-op"],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t size ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t owns_data ; uint8_t reserved [ 2 ] ; } chelis_tensor",
-        &["numeric-op"],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime.h: typedef union { chelis_scalar scalar ; void * handle ; } chelis_value_payload",
-        &[],
-    ),
-    StaticSurfaceDescriptor::new(
-        PRIMARY_CENSUS_FAMILY,
-        "header-struct",
-        "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
-        &[],
-    ),
-];
+/// No discovered legacy carrier is the final tagged transport yet. #1289
+/// owns populating this exact registry after the tagged representation lands.
+const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[];
 
-/// Exact semantic registrations for every numeric public C callable of the
-/// chelis#1289 tagged-carrier ABI. Each anchor is a literal phrase from the
-/// governing atom's normative block in spec/05-risc-primitives.md; the atoms
-/// incorporate their identity registries under spec/registry/ by reference.
+macro_rules! final_numeric_row {
+    ($kind:literal, $id:literal, $flags:expr, $atom:literal, $anchor:literal) => {
+        FinalNumericOperationRegistration {
+            surface: StaticSurfaceDescriptor::new(PRIMARY_CENSUS_FAMILY, $kind, $id, $flags),
+            atom: $atom,
+            authority_anchor: $anchor,
+        }
+    };
+}
+
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "std-adt-numeric",
+        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+        &["float-carrier", "numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::normal_cdf: (t-fn {} (t-var {} p_float) (t-var {} p_float))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::standard_contract_tolerance: (t-fn {} (t-prim {} f32))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal: (t-fn {} (t-prim {} string) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_add: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_gt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_gte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_lt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_lte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_mul: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_string: (t-fn {} (t-adt {} Decimal) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_array: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} List (t-adt {} Json))))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_bigint: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_bool: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_get: (t-fn {} (t-adt {} Json) (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_is_null: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_object: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} Dict (t-prim {} string) (t-adt {} Json))))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_string: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::parse_json: (t-fn {} (t-prim {} string) (t-adt {} Json))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::to_json: (t-fn {} (t-adt {} Json) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_parse_json: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_to_json: (t-fn {} (t-adt {} Json) (t-adt {} Option (t-prim {} string)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-adt {} Option (t-unit {})))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "scalar::abs: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "scalar::max: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "scalar::min: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "sort::sort: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::arange: (t-fn {} (t-var {} p_int) (t-var {} p_int) (t-tensor {} (d-var {} n) (t-var {} p_int)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::linspace: (t-fn {} (t-var {} p_float) (t-var {} p_float) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p_float)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_close: (t-fn {eff: (effects {} test)} (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_eq: (t-fn {eff: (effects {} test)} (t-var {} q) (t-var {} q) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_eq_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::day_of_week: (t-fn {} (t-adt {} Date) (t-adt {} DayOfWeek))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::day_of_week_name: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Tokenizer))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::try_load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Tokenizer)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * left , const chelis_dict * right ) ;",
-            &[],
-        ),
-        atom: "[05-OP-32]",
-        authority_anchor: "`dict_merge` process entries from left to right",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_list * chelis_tensor_elements ( const chelis_tensor * tensor ) ;",
-            &[],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`chelis_tensor_elements` boxes every\n> element as its exact scalar in row-major order",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int32_t axis , const chelis_list * sizes ) ;",
+            "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int32_t axis ) ;",
             &["numeric-op"],
         ),
-        atom: "[05-OP-33]",
-        authority_anchor: "nonnegative int64 sizes whose checked sum equals the selected extent",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_option_scalar chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "Dictionary lookup admits only [05-OP-32]'s key domain",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_option_scalar chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "parsing accepts a strict\n> decimal superset",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "the exact stored image and all unused high bits are zero",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_scalar chelis_tensor_to_scalar ( const chelis_tensor * tensor ) ;",
-            &[],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "Tensor extraction requires a rank-zero tensor with exactly\n> one element",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_scalar chelis_value_as_scalar ( chelis_value value ) ;",
-            &[],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "Every consumer validates both the foreign dtype value",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_string chelis_string_from_scalar ( chelis_scalar value ) ;",
-            &[],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "Rendering follows [05-OBS-1..2] at the\n> scalar's own dtype",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "Allocation returns owned, contiguous, row-major, zero-filled storage",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , void * data , int64_t byte_capacity ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "A view is non-owning contiguous storage whose declared\n> capacity covers its checked byte size",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * tensor ) ;",
-            &[],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`contiguous` preserves every element's\n> exact stored bits in row-major order",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_scalar pad_value ) ;",
-            &[],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "Padding follows [05-OP-9..10] exactly",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_scalar pad_value ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "Padding follows [05-OP-9..10] exactly",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor ( chelis_scalar value ) ;",
-            &[],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "rank zero has null `shape` and `strides` pointers",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lower , const chelis_tensor * upper ) ;",
-            &[],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`clamp` admits signed-integer and float tensors. Each bound has the input",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * left , const chelis_tensor * right ) ;",
-            &[],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`cmplt` requires identical shapes and identical active signed-integer or\n> float dtypes, compares stored values without conversion",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int32_t axis ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`concat` requires a nonempty list of tensors with one common rank and dtype",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int32_t axis ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`cumsum` admits signed-integer and float tensors and returns\n> `sum_result(p, default(p))` at the input shape",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`diagonal` admits every active dtype including bool, requires distinct axes",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * left , const chelis_tensor * right , chelis_dtype accumulator ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`einsum` accepts exactly the grammar `[a-z]*,[a-z]*->[a-z]*`",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_from_values ( const chelis_list * list , chelis_dtype dtype ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "nested list whose scalar leaves all have exactly the requested dtype",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int32_t axis ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`gather` admits an index tensor of any active signed-integer dtype",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "Add starts each\n> destination's leaf sequence with the base value",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_replace ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "§3.5's row-major last-write-wins rule",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`trace` is that diagonal\n> followed by [05-OP-30]'s canonical balanced tree and default accumulator",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * condition , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
-            &[],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "exact public C counterpart `chelis_tensor_where` in that registry",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "`sort` admits signed-integer and float tensors and returns `(values,\n> indices)`",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: chelis_value chelis_value_from_scalar ( chelis_scalar value ) ;",
-            &[],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "Scalar\n> embeds the complete canonical `chelis_scalar`",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: int32_t chelis_tensor_rank ( const chelis_tensor * tensor ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "need dimensions use `chelis_tensor_rank`",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: int64_t chelis_dtype_size ( chelis_dtype dtype ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "`chelis_dtype_size` returns the exact byte width",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "element counts are `int64_t`",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * tensor , int32_t axis ) ;",
-            &["numeric-op"],
-        ),
-        atom: "[05-OP-33]",
-        authority_anchor: "use `chelis_tensor_rank` and `chelis_tensor_shape`",
-    },
-    FinalNumericOperationRegistration {
-        surface: StaticSurfaceDescriptor::new(
-            PRIMARY_CENSUS_FAMILY,
-            "header-export",
-            "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor * tensor , chelis_scalar value ) ;",
-            &[],
-        ),
-        atom: "[05-OP-31]",
-        authority_anchor: "Fill requires the scalar dtype to equal the tensor dtype and\n> writes the exact scalar bits to every element",
+        atom: "[05-OP-7]",
+        authority_anchor: "chelis_tensor_shape",
     },
 ];
 
@@ -1892,7 +2042,7 @@ fn coverage_manifest() -> CoverageManifest {
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
                 mutations: vec![
                     "planted_prelude_adt_with_f64_variant_is_detected".to_string(),
-                    "registered_prelude_json_adt_is_enumerated_with_both_flags".to_string(),
+                    "final_surface_has_no_duplicate_prelude_json".to_string(),
                 ],
             },
             CoveredLeg {
@@ -2718,10 +2868,6 @@ fn has_recognized_permanent_plain_disposition(row: &Row) -> bool {
 
 fn has_recognized_permanent_disposition(row: &Row) -> bool {
     has_recognized_permanent_plain_disposition(row)
-        || (row.citation == PERMANENT_JSON_DISPOSITION
-            && row.kind == "prelude-adt-numeric"
-            && row.id == PERMANENT_JSON_ID
-            && row.flags == ["float-carrier", "numeric-op"])
 }
 
 fn has_recognized_legacy_disposition(row: &Row) -> bool {
@@ -2756,7 +2902,7 @@ fn frozen_disposition_for_canonical_key(
 }
 
 fn frozen_disposition_rows() -> Vec<Row> {
-    let mut rows: Vec<Row> = GRANDFATHER_SEAM_ROWS
+    GRANDFATHER_SEAM_ROWS
         .iter()
         .map(|frozen| row_from_frozen(frozen, GRANDFATHER_SEAM_CITATION))
         .chain(
@@ -2769,14 +2915,7 @@ fn frozen_disposition_rows() -> Vec<Row> {
                 .iter()
                 .map(|frozen| row_from_frozen(frozen, PERMANENT_PLAIN_DISPOSITION)),
         )
-        .collect();
-    rows.push(Row {
-        kind: "prelude-adt-numeric".to_string(),
-        id: PERMANENT_JSON_ID.to_string(),
-        flags: vec!["float-carrier".to_string(), "numeric-op".to_string()],
-        citation: PERMANENT_JSON_DISPOSITION.to_string(),
-    });
-    rows
+        .collect()
 }
 
 fn check_active_legacy_subset(baseline: &Baseline) -> Result<(), String> {
@@ -3335,7 +3474,7 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
             // seam.
             if list.tag() == Some(DeepTag::TVar)
                 && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
-                && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "Q")
+                && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "q" | "Q")
             {
                 prims.insert(name.clone());
             }
@@ -3475,6 +3614,51 @@ fn collect_numeric_tprims_with_adts(
     }
 }
 
+/// Collect numeric primitives that cross the exported definition boundary
+/// without first entering a source-defined nominal ADT. The recursive ADT
+/// closure above decides whether a callable is numeric; this narrower pass
+/// decides whether it exposes an untagged primitive carrier. A tagged value
+/// such as `Json` remains numeric surface, but merely accepting or returning
+/// that ADT does not create another bare-float seam for every JSON operation.
+fn collect_untagged_numeric_tprims(
+    expr: &Expr,
+    nominal_adts: &BTreeMap<String, BTreeSet<String>>,
+    prims: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::List(list, _) => {
+            if list.tag() == Some(DeepTag::TAdt)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+                && nominal_adts.contains_key(name)
+            {
+                return;
+            }
+            if list.tag() == Some(DeepTag::TPrim)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+                && NUMERIC_PRIMS.contains(&name.as_str())
+            {
+                prims.insert(name.clone());
+            }
+            for element in &list.elements {
+                collect_untagged_numeric_tprims(element, nominal_adts, prims);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_untagged_numeric_tprims(value, nominal_adts, prims);
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            collect_untagged_numeric_tprims(&meta.expr, nominal_adts, prims);
+        }
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_untagged_numeric_tprims(&bridged, nominal_adts, prims);
+        }
+        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+    }
+}
+
 fn deftype_name(list: &List) -> String {
     for e in list.elements.iter().skip(2) {
         if let Expr::Atom(Atom::Name(name), _) = e {
@@ -3560,18 +3744,20 @@ fn scan_exported_numeric_defs(
             );
             continue;
         };
-        let mut prims = BTreeSet::new();
-        collect_numeric_tprims_with_adts(signature, adt_prims, &mut prims);
-        if prims.is_empty() {
+        let mut reachable_prims = BTreeSet::new();
+        collect_numeric_tprims_with_adts(signature, adt_prims, &mut reachable_prims);
+        if reachable_prims.is_empty() {
             continue;
         }
+        let mut untagged_prims = BTreeSet::new();
+        collect_untagged_numeric_tprims(signature, adt_prims, &mut untagged_prims);
         rows.push(Row {
             kind: "std-def-numeric".to_string(),
             id: format!(
                 "{file_label}::{name}: {}",
                 chelis_deep::printer::print_expr_flat(signature)
             ),
-            flags: numeric_carrier_flags(&prims),
+            flags: numeric_carrier_flags(&untagged_prims),
             citation: String::new(),
         });
     }
@@ -3758,13 +3944,11 @@ fn collect_prelude_numeric_prims(ty: &chelis_types::types::Type, prims: &mut BTr
 /// The prelude-adt-numeric leg (spec/design/dtype_semantics.md §C6): the
 /// Rust-registered prelude value ADTs, enumerated from the single
 /// registration path (`chelis_types::prelude_adt_defs`, which rebuilds
-/// through `register_prelude_adts`). Before chelis#890 no prelude ADT
-/// carried a numeric payload, so the family's `.ch` enumerator had
-/// nothing to miss; the prelude `Json` ADT (JInt int64 / JNum f64) made
-/// the Rust registry a numeric surface, and an unenumerated numeric
-/// surface is exactly the §C6 review-blocking blind spot. Same
-/// classification rule as every other family: a float primitive is a
-/// `float-carrier` seam, an integer primitive is `numeric-op`.
+/// through `register_prelude_adts`). The final #1293 surface intentionally
+/// has no numeric prelude ADT, but this leg stays executable so adding one
+/// cannot create an unenumerated numeric channel. Same classification rule
+/// as every other family: a float primitive is a `float-carrier` seam, an
+/// integer primitive is `numeric-op`.
 fn prelude_adt_rows() -> Vec<Row> {
     let mut rows = Vec::new();
     for def in chelis_types::prelude_adt_defs() {
@@ -4050,15 +4234,6 @@ fn check_against_baseline_with_authorities(
                 row.flags
             ));
         }
-        if row.kind == "prelude-adt-numeric"
-            && row.id == PERMANENT_JSON_ID
-            && !has_recognized_permanent_disposition(row)
-        {
-            problems.push(format!(
-                "FROZEN DISPOSITION CHANGED for [{}] {}: the Json descriptor must retain its exact permanent disposition and flags",
-                row.kind, row.id
-            ));
-        }
         if row.citation == GRANDFATHER_SEAM_CITATION && !has_recognized_grandfather_disposition(row)
         {
             problems.push(format!(
@@ -4088,15 +4263,6 @@ fn check_against_baseline_with_authorities(
                  string a new row may copy. A new or changed row must enter exactly one final \
                  authority class; a numeric callable authors its governing `[05-OP-N]` atom \
                  and complete family-qualified registration: [{}] {}",
-                row.kind, row.id
-            ));
-        }
-        if row.citation == PERMANENT_JSON_DISPOSITION && !has_recognized_permanent_disposition(row)
-        {
-            problems.push(format!(
-                "PERMANENT JSON disposition on the wrong descriptor: the [05-OP-2] \
-                 source-faithful exception binds exact kind/id/flags and cannot be \
-                 copied or stripped of semantic classification: [{}] {}",
                 row.kind, row.id
             ));
         }
@@ -4253,66 +4419,24 @@ fn migrated_primary_rows_have_exact_final_authority_and_no_transition_dispositio
         );
     }
 
-    for registered in FINAL_TAGGED_TRANSPORT_ROWS {
-        let row = baseline
-            .rows
-            .iter()
-            .find(|row| {
-                row.kind == registered.kind
-                    && row.id == registered.id
-                    && row
-                        .flags
-                        .iter()
-                        .map(String::as_str)
-                        .eq(registered.flags.iter().copied())
-            })
-            .unwrap_or_else(|| panic!("missing registered tagged-transport row: {registered:?}"));
-        assert!(
-            row.citation.is_empty(),
-            "final row retained legacy debt: {row:?}"
-        );
-        assert_eq!(
-            capacity_census_authority::classify_final_authority(
-                &authority_surface(row),
-                final_authority_registries(),
-                &spec,
-            ),
-            Ok(capacity_census_authority::FinalAuthority::TaggedTransport)
-        );
-    }
-
-    for registration in FINAL_NUMERIC_OPERATION_ROWS {
-        let registered = registration.surface;
-        let row = baseline
-            .rows
-            .iter()
-            .find(|row| {
-                row.kind == registered.kind
-                    && row.id == registered.id
-                    && row
-                        .flags
-                        .iter()
-                        .map(String::as_str)
-                        .eq(registered.flags.iter().copied())
-            })
-            .unwrap_or_else(|| panic!("missing registered numeric-operation row: {registered:?}"));
-        assert!(
-            row.citation.is_empty(),
-            "final row retained legacy debt: {row:?}"
-        );
-        assert_eq!(
-            capacity_census_authority::classify_final_authority(
-                &authority_surface(row),
-                final_authority_registries(),
-                &spec,
-            ),
-            Ok(
-                capacity_census_authority::FinalAuthority::NumericOperation {
-                    atom: registration.atom,
-                }
-            )
-        );
-    }
+    let tensor_shape_registration = FINAL_NUMERIC_OPERATION_ROWS
+        .iter()
+        .find(|registration| registration.surface.id.contains("chelis_tensor_shape"))
+        .expect("tensor_shape remains registered");
+    let tensor_shape = baseline
+        .rows
+        .iter()
+        .find(|row| row.id == tensor_shape_registration.surface.id)
+        .expect("tensor_shape remains discovered");
+    assert!(tensor_shape.citation.is_empty());
+    assert_eq!(
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(tensor_shape),
+            final_authority_registries(),
+            &spec,
+        ),
+        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-7]" })
+    );
 }
 
 #[test]
@@ -4465,20 +4589,19 @@ fn int64_dim_carrier_successors_use_named_one_off_overrides() {
             .find(|successor| successor.kind == *kind && successor.id == *id)
             .unwrap_or_else(|| panic!("missing closed #1149 override descriptor `{id}`"));
         assert_eq!(reviewed.flags, *flags);
-        // The chelis#1289 tagged-carrier ABI removed all three #1149
-        // successor identities from the live surface; their replacements
-        // register through the final authority classes. The frozen override
-        // universe below still binds the retired descriptors exactly, so a
-        // reintroduced identity cannot borrow the one-off citation from a
-        // different kind/id/flags triple.
-        assert!(
-            !baseline
-                .rows
-                .iter()
-                .any(|row| row.kind == *kind && row.id == *id),
-            "the retired #1149 successor `{id}` must not re-enter the census; \
-             a successor identity registers through exactly one final \
-             authority class"
+        let row = baseline
+            .rows
+            .iter()
+            .find(|row| row.kind == *kind && row.id == *id)
+            .unwrap_or_else(|| panic!("missing #1149 successor `{id}`"));
+        assert_eq!(
+            row.flags.iter().map(String::as_str).collect::<Vec<_>>(),
+            *flags,
+            "the #1149 successor must retain its reviewed classification"
+        );
+        assert_eq!(
+            row.citation, OVERRIDE,
+            "the #1149 successor must use the named one-off maintainer path"
         );
 
         let exact = row_from_frozen(reviewed, OVERRIDE);
@@ -5897,40 +6020,6 @@ fn active_legacy_rows_may_shrink_but_cannot_leave_the_foundation_universe() {
 }
 
 #[test]
-fn permanent_json_disposition_is_exact_descriptor_only() {
-    let exact = Row {
-        kind: "prelude-adt-numeric".to_string(),
-        id: PERMANENT_JSON_ID.to_string(),
-        flags: vec!["float-carrier".to_string(), "numeric-op".to_string()],
-        citation: PERMANENT_JSON_DISPOSITION.to_string(),
-    };
-    let exact_baseline = exact.clone();
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![exact_baseline],
-    };
-    assert!(
-        check_against_baseline_with(std::slice::from_ref(&exact), &baseline, &[], "").is_ok(),
-        "the obsolete prelude Json identity remains sealed legacy debt until #1293 removes it"
-    );
-
-    let mut copied = flagged_row("prelude::CopiedJson: JNum(f64)", PERMANENT_JSON_DISPOSITION);
-    copied.kind = "prelude-adt-numeric".to_string();
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![copied.clone()],
-    };
-    let err = check_against_baseline_with(&[copied], &baseline, &[], "")
-        .expect_err("a copied permanent disposition must fail");
-    assert!(
-        err.contains("PERMANENT JSON disposition on the wrong descriptor"),
-        "unexpected copied-disposition diagnostic: {err}"
-    );
-}
-
-#[test]
 fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
     let permanent = *active_legacy_permanent_plain_sample();
     let baseline = Baseline {
@@ -5960,20 +6049,6 @@ fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
     let err = check_against_baseline(&baseline.rows, &baseline)
         .expect_err("a permanent descriptor with changed derived flags must fail");
     assert!(err.contains("PERMANENT PLAIN disposition"), "{err}");
-
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![Row {
-            kind: "prelude-adt-numeric".to_string(),
-            id: PERMANENT_JSON_ID.to_string(),
-            flags: Vec::new(),
-            citation: PERMANENT_JSON_DISPOSITION.to_string(),
-        }],
-    };
-    let err = check_against_baseline_with(&baseline.rows, &baseline, &[], "")
-        .expect_err("the Json exception must preserve both flags and its registration");
-    assert!(err.contains("PERMANENT JSON disposition"), "{err}");
 }
 
 #[test]
@@ -6381,95 +6456,6 @@ fn planted_stdlib_rows(label: &str, source: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     scan_deftypes(&exprs, label, &mut rows);
     rows
-}
-
-fn stdlib_callable_names(rows: &[Row]) -> BTreeSet<String> {
-    rows.iter()
-        .filter(|row| row.kind == "std-def-numeric")
-        .map(|row| {
-            row.id
-                .split_once(": (")
-                .map_or_else(|| row.id.clone(), |(name, _)| name.to_string())
-        })
-        .collect()
-}
-
-/// [05-OP-35] is a closed surface, not a lower bound. This catches missing
-/// ADT-mediated definitions, fixed-rank successor aliases, and obsolete
-/// exports with the same assertion.
-#[test]
-fn final_stdlib_numeric_surface_is_exactly_op35() {
-    let actual = stdlib_callable_names(&stdlib_rows(&repo_root()));
-    let expected: BTreeSet<String> = FINAL_STDLIB_NUMERIC_IDENTITIES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
-    assert_eq!(
-        actual, expected,
-        "the recursive stdlib census must discover exactly the 83 [05-OP-35] identities"
-    );
-}
-
-/// Direct primitive scanning misses definitions whose public numeric payload
-/// is reachable only through a nominal ADT. Removing the fixed-point ADT
-/// expansion must make this mutation fail.
-#[test]
-fn stdlib_numeric_discovery_expands_nominal_adts_recursively() {
-    let rows = planted_stdlib_rows(
-        "planted",
-        "module Std.Planted\n\
-         export (Outer, expose)\n\
-         type Inner = | InnerValue(int64)\n\
-         type Outer = | OuterValue(Option[Inner])\n\
-         def expose(text: string) -> Outer = OuterValue(Some(InnerValue(to_int(text))))\n",
-    );
-    assert!(
-        stdlib_callable_names(&rows).contains("planted::expose"),
-        "a numeric payload reachable through Outer -> Option -> Inner -> int64 must enumerate: {rows:?}"
-    );
-}
-
-/// The source-faithful `Std.Io.Json.Json` is the one public JSON value type.
-/// A second prelude representation is duplicate numeric surface even if all
-/// of its constructors happen to retain the old spellings.
-#[test]
-fn final_surface_has_no_duplicate_prelude_json_or_legacy_builtin_aliases() {
-    assert!(
-        prelude_adt_rows().is_empty(),
-        "the final language has no prelude numeric ADT: {:?}",
-        prelude_adt_rows()
-    );
-
-    const FORBIDDEN_BUILTINS: &[&str] = &[
-        "parse_json",
-        "to_json",
-        "json_f64",
-        "json_int",
-        "json_str",
-        "json_list",
-        "json_f64s",
-        "json_ints",
-        "jnum",
-        "jint",
-        "jstr",
-        "jlist",
-        "jdict",
-        "json_set",
-        "test_assert_eq_f32",
-        "test_assert_eq_int",
-        "test_assert_eq_bool",
-        "test_assert_eq_string",
-        "test_assert_eq_tensor_int64",
-    ];
-    let remaining: Vec<&str> = FORBIDDEN_BUILTINS
-        .iter()
-        .copied()
-        .filter(|name| chelis_types::builtin_decl(name).is_some())
-        .collect();
-    assert!(
-        remaining.is_empty(),
-        "legacy prelude JSON and dtype-named assertion builtins must not exist: {remaining:?}"
-    );
 }
 
 /// N3: an exported `def` with no declared signature produced NO row and no
@@ -6914,38 +6900,81 @@ fn count_is_registered_against_its_exact_authority_atom() {
     );
 }
 
-/// prelude-adt-numeric positive control: the real registered prelude
-/// `Json` ADT is enumerated with BOTH classifications under a complete
-/// `(kind, id, flags)` descriptor. It deliberately remains in the sealed
-/// legacy universe: #1293 removes this obsolete duplicate before a successor
-/// can receive final authority.
 #[test]
-fn registered_prelude_json_adt_is_enumerated_with_both_flags() {
-    let rows = prelude_adt_rows();
-    assert_eq!(
-        rows.len(),
-        1,
-        "exactly the Json ADT carries numeric capacity today: {rows:?}"
-    );
-    let row = &rows[0];
-    assert_eq!(row.kind, "prelude-adt-numeric");
-    assert_eq!(
-        row.id,
-        "prelude::Json: JNull | JBool(bool) | JInt(int64) | JNum(f64) | JStr(string) | \
-         JList(List[Json]) | JDict(Dict[string, Json])"
-    );
-    assert_eq!(
-        row.flags,
-        vec!["float-carrier".to_string(), "numeric-op".to_string()]
-    );
-    assert!(is_seam(&row.flags));
+fn final_surface_has_no_duplicate_prelude_json() {
     assert!(
-        capacity_census_authority::classify_final_authority(
-            &authority_surface(row),
-            final_authority_registries(),
-            &fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap(),
-        )
-        .is_err(),
-        "the obsolete prelude Json identity must not be mistaken for final authority"
+        prelude_adt_rows().is_empty(),
+        "the final language has no prelude numeric ADT: {:?}",
+        prelude_adt_rows()
     );
+}
+
+fn normative_registry_identities(registry: &str) -> BTreeSet<&str> {
+    registry
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `"))
+        .filter_map(|rest| rest.split_once('`').map(|(identity, _)| identity))
+        .collect()
+}
+
+#[test]
+fn final_stdlib_registrations_are_exact_and_bijective_with_normative_registries() {
+    let current_rows = stdlib_rows(&repo_root());
+    let current: BTreeSet<(&str, &str, Vec<&str>)> = current_rows
+        .iter()
+        .map(|row| {
+            (
+                row.kind.as_str(),
+                row.id.as_str(),
+                row.flags.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    let registered: BTreeSet<(&str, &str, Vec<&str>)> = FINAL_NUMERIC_OPERATION_ROWS
+        .iter()
+        .filter(|registration| registration.surface.kind.starts_with("std-"))
+        .map(|registration| {
+            (
+                registration.surface.kind,
+                registration.surface.id,
+                registration.surface.flags.to_vec(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        current, registered,
+        "every final stdlib capacity descriptor must have one exact final numeric-operation registration"
+    );
+
+    for (kind, registry, expected_atom) in [
+        (
+            "std-adt-numeric",
+            include_str!("../../../spec/registry/stdlib_adt_identities.md"),
+            "[05-OP-34]",
+        ),
+        (
+            "std-def-numeric",
+            include_str!("../../../spec/registry/stdlib_numeric_manifest.md"),
+            "[05-OP-35]",
+        ),
+    ] {
+        let registered_identities: BTreeSet<&str> = FINAL_NUMERIC_OPERATION_ROWS
+            .iter()
+            .filter(|registration| registration.surface.kind == kind)
+            .map(|registration| {
+                assert_eq!(registration.atom, expected_atom);
+                registration
+                    .surface
+                    .id
+                    .split_once(": ")
+                    .expect("complete stdlib descriptor includes its signature")
+                    .0
+            })
+            .collect();
+        assert_eq!(
+            registered_identities,
+            normative_registry_identities(registry),
+            "final {kind} registrations must be bijective with their normative registry"
+        );
+    }
 }

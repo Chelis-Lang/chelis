@@ -124,7 +124,9 @@ clipped = clamp(running, floor15, ceil30)
 
 All initializers carry the `Random` effect. A `with seed(...)` handler advances
 only for draws that actually execute: an untaken conditional branch inside a
-forward call or `grad(...)` consumes no stream positions.
+forward call or `grad(...)` consumes no stream positions. This includes
+computed and nested predicates, branches with different numbers of draws, and
+repeated or nested seed handlers.
 
 ### Sorting and scanning
 
@@ -143,8 +145,11 @@ forward call or `grad(...)` consumes no stream positions.
   Their adjoints preserve the input List's runtime length and positions: index
   routes the cotangent to the selected element, while take/drop fill excluded
   positions with zeros. Negative indices/counts fail; take/drop counts beyond
-  the length retain their ordinary truncation behavior. These direct public
-  `grad(...)` calls run in both evaluator and generated-C programs.
+  the length retain their ordinary truncation behavior. Scalar, tensor, empty,
+  nested, and multiple-List targets use the same rule, including runtime
+  selectors/counts reused elsewhere in the differentiated body and selection
+  composed through wrappers. These public `grad(...)` calls run in both the
+  evaluator and generated-C programs.
 
 ### Decimal and time
 
