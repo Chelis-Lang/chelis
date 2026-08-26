@@ -133,3 +133,84 @@ def indirect_pipe(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, 
         );
     }
 }
+
+#[test]
+fn unresolved_callable_only_blocks_a_gradient_when_its_result_reaches_the_output() {
+    let library = surf_to_library(
+        r#"
+def sumsq(x: tensor[3, f32]) -> f32 =
+  tensor_to_scalar(sum(mul(x, x), 0))
+
+def dead_callable(
+  model: tensor[3, f32] -> f32,
+  x: tensor[3, f32]
+) -> tensor[3, f32] = {
+  target = fn (v: tensor[3, f32]) -> {
+    dead = model(v)
+    cast(1.0, f32)
+  }
+  grad(target, wrt=v)(x)
+}
+
+def live_callable(
+  model: tensor[3, f32] -> f32,
+  x: tensor[3, f32]
+) -> tensor[3, f32] = {
+  target = fn (v: tensor[3, f32]) -> model(v)
+  grad(target, wrt=v)(x)
+}
+
+def dead_specialized(x: tensor[3, f32]) -> tensor[3, f32] =
+  dead_callable(sumsq, x)
+
+def live_specialized(x: tensor[3, f32]) -> tensor[3, f32] =
+  live_callable(sumsq, x)
+"#,
+    )
+    .expect("dead and live callable controls must remain representable");
+
+    assert!(
+        !library.rootless_defs().contains("dead_callable"),
+        "an unresolved pure call whose result cannot reach the output cannot block the exact zero cotangent"
+    );
+    let dead_root = library
+        .symbol_table()
+        .get("dead_callable")
+        .copied()
+        .expect("the dead-call gradient must publish its shaped zero");
+    let dead_node = library
+        .dag()
+        .get(dead_root)
+        .expect("the dead-call gradient root must identify a live DAG node");
+    assert_eq!(dead_node.output_type.dims, vec![DimInfo::Lit(3)]);
+    assert_eq!(dead_node.output_type.precision, Prim::F32);
+    assert!(library.dag().is_root(dead_root));
+
+    assert!(
+        library.rootless_defs().contains("live_callable"),
+        "an unresolved call whose result is the output remains unknown until specialization"
+    );
+    assert!(
+        !library.symbol_table().contains_key("live_callable"),
+        "the live unresolved call must not publish a fabricated gradient"
+    );
+
+    for name in ["dead_specialized", "live_specialized"] {
+        assert!(
+            !library.rootless_defs().contains(name),
+            "a concrete call-site specialization must realize `{name}`"
+        );
+        let root = library
+            .symbol_table()
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| panic!("`{name}` must publish a specialized gradient"));
+        let node = library
+            .dag()
+            .get(root)
+            .unwrap_or_else(|| panic!("`{name}` must identify a live DAG node"));
+        assert_eq!(node.output_type.dims, vec![DimInfo::Lit(3)]);
+        assert_eq!(node.output_type.precision, Prim::F32);
+        assert!(library.dag().is_root(root));
+    }
+}

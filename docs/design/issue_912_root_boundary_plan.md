@@ -18,13 +18,13 @@ cargo nextest run -p chelis-cli --test issue_912_root_boundary --run-ignored all
 
 Its ignore ledger is empty and all seventeen cells pass. This delivery resolves
 #1079, #1082, and #1083. The complementary #1102 delivery now materializes an
-exact shaped zero for a completely lowered missing adjoint while preserving
-#1095's rootless placeholder for an unresolved callable dependency. The #1148
-`trace` result-type question was subsequently settled by spec/04 section 4.3
-and [05-OP-33]. For the f32 case in #1148, matrix-trace inference already
-returns rank-zero `tensor[f32]`; the associated change adds explicit
-positive/negative coverage and corrects fixture signatures. That evidence does
-not establish full per-dtype [05-OP-33] conformance.
+exact shaped zero when no unresolved callable result is reverse-reachable from
+the differentiated output, while preserving #1095's rootless placeholder when
+one is. The #1148 `trace` result-type question was subsequently settled by
+spec/04 section 4.3 and [05-OP-33]. For the f32 case in #1148, matrix-trace
+inference already returns rank-zero `tensor[f32]`; the associated change adds
+explicit positive/negative coverage and corrects fixture signatures. That
+evidence does not establish full per-dtype [05-OP-33] conformance.
 
 ## Problem Statement
 

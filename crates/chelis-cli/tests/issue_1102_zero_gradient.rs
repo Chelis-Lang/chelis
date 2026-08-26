@@ -49,6 +49,23 @@ x = to_tensor([1.0, 2.0, 3.0])\n\
 direct_out = indirect(sumsq, x)\n\
 pipe_out = indirect_pipe(sumsq, x)\n";
 
+const DEAD_AND_LIVE_CALLABLE_PROGRAM: &str = "\
+def sumsq(x: tensor[3, f32]) -> f32 = tensor_to_scalar(sum(mul(x, x), 0))\n\
+def dead_callable(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] = {\n\
+  target = fn (v: tensor[3, f32]) -> {\n\
+    dead = model(v)\n\
+    cast(1.0, f32)\n\
+  }\n\
+  grad(target, wrt=v)(x)\n\
+}\n\
+def live_callable(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] = {\n\
+  target = fn (v: tensor[3, f32]) -> model(v)\n\
+  grad(target, wrt=v)(x)\n\
+}\n\
+x = to_tensor([1.0, 2.0, 3.0])\n\
+dead_out = dead_callable(sumsq, x)\n\
+live_out = live_callable(sumsq, x)\n";
+
 fn eval_program(source: &str, name: &str) -> String {
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join(format!("{name}.ch"));
@@ -147,6 +164,22 @@ fn generated_c_specializes_indirect_callable_dependencies() {
          direct_out = tensor(shape=[3], data=[2.0, 4.0, 6.0])\n\
          pipe_out = tensor(shape=[3], data=[2.0, 4.0, 6.0])",
         "concrete call-site specialization must recover both helper-mediated gradients"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn generated_c_preserves_dead_zero_and_live_specialized_callable_results() {
+    let stdout = common::build_and_run(
+        DEAD_AND_LIVE_CALLABLE_PROGRAM,
+        "dead_and_live_callable_grad",
+    );
+    assert_eq!(
+        stdout.trim_end(),
+        "x = tensor(shape=[3], data=[1.0, 2.0, 3.0])\n\
+         dead_out = tensor(shape=[3], data=[0.0, 0.0, 0.0])\n\
+         live_out = tensor(shape=[3], data=[2.0, 4.0, 6.0])",
+        "generated C must distinguish a dead unresolved contribution from a live specialized contribution"
     );
 }
 
