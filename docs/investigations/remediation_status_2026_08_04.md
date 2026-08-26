@@ -129,8 +129,10 @@ an unshipped repair release.
   former `todo!` completeness cells are active, the ignore ledger is empty,
   and all seventeen `issue_912_root_boundary` cells pass. That
   unblocks #1029's carrier deletion and #730's Phase 3 integration leg. The
-  parent tracker remains open for the separately owned #1102 zero-gradient
-  value defect. For #1148, spec/04 section 4.3 and [05-OP-33] require an f32
+  complementary #1102 delivery now distinguishes a missing adjoint whose
+  output-reachable dataflow is complete (an exact shaped zero) from an
+  output-reachable unresolved callable result (the existing rootless
+  placeholder). For #1148, spec/04 section 4.3 and [05-OP-33] require an f32
   matrix trace to have the rank-zero carrier `tensor[f32]`; current inference
   already has that shape. The #1148 change adds explicit f32 tests and corrects
   fixture signatures without changing trace implementation. It does not claim
@@ -787,9 +789,10 @@ all seventeen cells, including the manifest-completeness and nullary-product
 cells that previously blocked #730's sixth Phase 3 leg. The additive `spec/05`
 change follows
 `dtype_semantics.md` §B1: it changes no frozen [05-OP] atom or capability
-schema, and the complete Phase 4B oracle passes. This delivery unblocks #1029;
-it does not absorb #1102. It also did not implement #1148: the numbered specs
-settled the f32 rank/carrier question in favor of the existing rank-zero
+schema, and the complete Phase 4B oracle passes. This delivery unblocks #1029.
+The complementary #1102 value fix is now implemented with explicit
+output-reachable callable-dependency evidence. The numbered specs settled
+#1148's f32 rank/carrier question in favor of the existing rank-zero
 `tensor[f32]` inference, and the #1148 change is limited to explicit f32 tests
 and fixture-signature corrections. That evidence does not establish full
 per-dtype [05-OP-33] conformance.

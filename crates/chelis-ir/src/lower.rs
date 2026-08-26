@@ -4171,12 +4171,10 @@ enum CallableExpr {
     /// represent a call to it because there is no `RiscOp::Call`. Call
     /// sites that pass a concrete function for this parameter (via
     /// `lower_plain_callable_app`) insert the resolved callable into
-    /// `local_callables` *before* lowering the inlined body, so the
-    /// resolver never produces this variant on the inlined-body path.
-    /// `Parameter` therefore appears only on the standalone-def lowering
-    /// path, where the right thing to do is no-op (see `lower_pipe`'s
-    /// arm) — the standalone DAG entry is never user-visible because
-    /// every caller re-inlines.
+    /// `local_callables` before lowering the inlined body. An unresolved
+    /// parameter forwarded through a helper remains this variant under the
+    /// helper's formal name, so its eventual application records a provisional
+    /// result marker instead of fabricating a zero.
     Parameter {
         #[allow(dead_code)]
         name: String,
@@ -4208,10 +4206,10 @@ impl LoweredValue {
     /// Whether `add_named_roots` would contribute zero roots for this
     /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
     ///
-    /// The empty aggregate is reachable: the single-target arm of the
-    /// `grad` result packing drops an absent adjoint instead of
-    /// materializing a zero, so a `grad` over a body that resolves to
-    /// [`CallableExpr::Parameter`] leaves `packed` empty. This is
+    /// The empty aggregate is reachable: a `grad` body that actually calls
+    /// an unresolved [`CallableExpr::Parameter`] has no sound standalone
+    /// value until call-site specialization supplies the callable, so its
+    /// lowering returns an empty placeholder. This is
     /// deliberately not "added no NEW root": `Dag::add_root` also
     /// deduplicates, so two defs sharing one node would answer yes to
     /// that question while genuinely owning a root.
@@ -4288,6 +4286,45 @@ impl LoweredValue {
                     .collect(),
             },
         }
+    }
+}
+
+/// Provisional DAG results whose values stand in for unresolved callable
+/// applications.
+///
+/// A missing adjoint is exact zero only when no unresolved result can reach
+/// the differentiated output. Each application gets a fresh identity marker,
+/// so a dead call does not taint the argument node that the legacy fallback
+/// used as its placeholder. Ordinary call-site specialization produces no
+/// marker because the concrete callable is inlined (chelis#1095/#1102).
+#[derive(Clone, Debug, Default)]
+struct CallableDependencyState {
+    unresolved_results: HashSet<NodeId>,
+}
+
+impl CallableDependencyState {
+    fn record_unresolved_result(&mut self, result: NodeId) {
+        self.unresolved_results.insert(result);
+    }
+
+    fn output_depends_on_unresolved(&self, dag: &Dag, output: NodeId) -> bool {
+        let mut pending = vec![output];
+        let mut visited = HashSet::new();
+        while let Some(node_id) = pending.pop() {
+            if !visited.insert(node_id) {
+                continue;
+            }
+            if self.unresolved_results.contains(&node_id) {
+                return true;
+            }
+            if let Some(node) = dag.get(node_id) {
+                // Only value inputs participate. `shape_deps` retain runtime
+                // extent sources for codegen but are not numeric contributions
+                // to the output's reverse dataflow.
+                pending.extend(node.inputs.iter().copied());
+            }
+        }
+        false
     }
 }
 
@@ -4466,6 +4503,11 @@ struct LowerCtx {
     /// alongside `bindings` and `local_callables`. See
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: HashSet<String>,
+    /// Dataflow-local completeness evidence for unresolved callable
+    /// applications. Grad subcontexts record a fresh result marker for each
+    /// unresolved application, then reject only when one is reverse-reachable
+    /// from the differentiated output.
+    callable_dependency_state: CallableDependencyState,
     /// chelis#1095: top-level def names whose lowered value held no tensor
     /// node, so they contributed no DAG root. `chelis-pipeline-core`
     /// subtracts these from the declared root names before aligning them
@@ -4554,6 +4596,7 @@ impl LowerCtx {
             inlining_depths: HashMap::new(),
             inlining_active: 0,
             fn_typed_params: HashSet::new(),
+            callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
@@ -4755,6 +4798,12 @@ impl LowerCtx {
                 .iter()
                 .filter(|(name, _)| !shadowed.contains(*name))
                 .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        subctx.fn_typed_params.extend(
+            self.fn_typed_params
+                .iter()
+                .filter(|name| !shadowed.contains(*name))
+                .cloned(),
         );
         captures
     }
@@ -5772,6 +5821,7 @@ impl LowerCtx {
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
+            && !self.fn_typed_params.contains(func_name)
         {
             // chelis#520: a positional ADT constructor application
             // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
@@ -5862,16 +5912,55 @@ impl LowerCtx {
             CallableExpr::Grad { fn_expr, wrt } => {
                 Some(self.lower_grad_callable_app(&fn_expr, wrt.as_deref(), args, app_span))
             }
-            // `Parameter` carries no body the IR can inline. Fall back to
-            // `lower_app`'s existing "lower func and args, return last"
-            // path (`lower.rs:2644`–`2649`), which is the same broken-but-
-            // silent shape `lower_app` already produces for fn-typed-
-            // parameter calls today. Real semantics come from call-site
-            // inlining (`lower_plain_callable_app` substitutes the
-            // concrete callable into `local_callables` before lowering
-            // the inlined body, so the resolver sees a `Plain` not a
-            // `Parameter`).
-            CallableExpr::Parameter { .. } => None,
+            // `Parameter` carries no body the IR can inline. Preserve the
+            // legacy provisional value shape (lower func and args, take the
+            // last) but wrap its leaves in fresh marker nodes. The marker is
+            // what lets `grad` distinguish a dead unresolved application from
+            // one whose value reaches the output; marking the argument itself
+            // would taint independent live uses of that argument.
+            CallableExpr::Parameter { .. } => {
+                let mut provisional = self.lower_expr(func);
+                for arg in args {
+                    provisional = self.lower_expr(arg);
+                }
+                Some(self.mark_unresolved_callable_value(provisional))
+            }
+        }
+    }
+
+    fn mark_unresolved_callable_value(&mut self, value: LoweredValue) -> LoweredValue {
+        match value {
+            LoweredValue::Node(input) => {
+                let ty = self
+                    .dag
+                    .get(input)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                let marker =
+                    self.dag
+                        .add_node(RiscOp::Copy, vec![input], ty, self.current_span_id.clone());
+                self.callable_dependency_state
+                    .record_unresolved_result(marker);
+                LoweredValue::Node(marker)
+            }
+            LoweredValue::Tuple(items) => LoweredValue::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| self.mark_unresolved_callable_value(item))
+                    .collect(),
+            ),
+            LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields,
+            } => LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields: fields
+                    .into_iter()
+                    .map(|field| self.mark_unresolved_callable_value(field))
+                    .collect(),
+            },
         }
     }
 
@@ -5907,11 +5996,14 @@ impl LowerCtx {
                 // x |> g` typecheck), but it has no body to recurse into
                 // — the DAG can't represent a call to it (no
                 // `RiscOp::Call`). Surface it as
-                // `CallableExpr::Parameter` so `lower_pipe` can no-op the
-                // stage on the standalone-def lowering path; call-site
-                // inlining replaces this with the resolved callable via
-                // `local_callables`, so this variant only appears when
-                // the def is lowered in isolation. See
+                // `CallableExpr::Parameter` so a direct application or pipe
+                // stage can wrap its provisional result in a fresh `Copy`
+                // marker. Gradient lowering treats the application as
+                // incomplete only when that marker is reverse-reachable from
+                // the scalar output. Concrete call-site inlining replaces
+                // this with the resolved callable via `local_callables`, while
+                // unresolved helper forwarding preserves the parameter until
+                // its eventual application. See
                 // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
                 if let Some(body) = self
                     .local_callables
@@ -6372,9 +6464,19 @@ impl LowerCtx {
                 }
             }
         }
-        let output = subctx
-            .lower_expr(body)
-            .expect_node("grad requires a scalar floating output");
+        let lowered_output = subctx.lower_expr(body);
+        let output = lowered_output.expect_node("grad requires a scalar floating output");
+        if subctx
+            .callable_dependency_state
+            .output_depends_on_unresolved(&subctx.dag, output)
+        {
+            // The standalone higher-order definition cannot know the
+            // contribution from an unresolved callable result that reaches
+            // the output. Preserve chelis#1095's rootless placeholder; when a
+            // concrete callable is supplied, ordinary call-site inlining
+            // re-lowers this body without markers and computes the real value.
+            return LoweredValue::Tuple(Vec::new());
+        }
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
         // non-differentiable op in the gradient body (argmax/argmin,
@@ -6408,11 +6510,10 @@ impl LowerCtx {
             &remap_actual_types,
         );
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
-        // Per-wrt gradient node (post-splice). A `None` entry means the
-        // wrt input has no adjoint because it does not influence the
-        // output; the tensor lane preserves the pre-#520 behavior of
-        // dropping it from the result, and the ADT lane packs an explicit
-        // zero tensor so the gradient struct keeps its field structure.
+        // Per-wrt gradient node (post-splice). Any output-reachable unresolved
+        // callable result returned above, so a `None` entry here is proven to
+        // mean that the wrt input does not influence the known output
+        // dataflow. Its cotangent is therefore an exact shape-preserving zero.
         let grad_per_wrt: Vec<Option<NodeId>> = wrt
             .iter()
             .map(|wrt_node| {
@@ -6432,11 +6533,6 @@ impl LowerCtx {
         let mut grad_iter = grad_per_wrt.iter().copied();
         let mut wrt_actual_iter = wrt_actuals.iter().copied();
         let mut packed: Vec<LoweredValue> = Vec::with_capacity(result_plans.len());
-        // A multi-target result is displayed as a tuple keyed by fixed,
-        // type-derived slot names (`out.0..out.N`, chelis#614): slot position
-        // is significant. A single-target result is a bare value with no
-        // sibling slots to shift.
-        let multi_target = result_plans.len() > 1;
         for plan in &result_plans {
             match plan {
                 GradResultPlan::Tensor => {
@@ -6444,25 +6540,19 @@ impl LowerCtx {
                     let actual = wrt_actual_iter.next();
                     match grad_node {
                         Some(node) => packed.push(LoweredValue::Node(node)),
-                        // The differentiated tensor argument does not
-                        // influence the output: its gradient is exactly zero.
-                        // In a multi-target result, dropping the slot would
-                        // shift every later gradient into the wrong tuple
-                        // position and mislabel it, so materialize the shaped
-                        // zero, the same way the ADT field zero-fill below
-                        // does (chelis#520 D2 / chelis#614).
-                        None if multi_target => {
+                        // The known output dataflow does not depend on this
+                        // argument, so its gradient is exactly zero.
+                        // Materialize it for single- and multi-target results;
+                        // dropping a single target loses the root (chelis#1102),
+                        // while dropping a multi-target slot mislabels every
+                        // later value (chelis#520 D2 / chelis#614).
+                        None => {
                             let field_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
-                            let zero = self.zero_tensor_node(&field_ty);
+                            let zero = self.zero_tensor_node(&field_ty, actual);
                             packed.push(LoweredValue::Node(zero));
                         }
-                        // Single-target result: preserve the pre-#520
-                        // bare-tensor drop and its reuse-hint path (the
-                        // `[LoweredValue::Node(single)]` arm below). A lone
-                        // target has no sibling slot to mislabel.
-                        None => {}
                     }
                 }
                 GradResultPlan::Adt {
@@ -6482,7 +6572,7 @@ impl LowerCtx {
                             let field_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
-                            self.zero_tensor_node(&field_ty)
+                            self.zero_tensor_node(&field_ty, actual)
                         });
                         fields.push(LoweredValue::Node(node));
                     }
@@ -6522,9 +6612,12 @@ impl LowerCtx {
 
     /// A zero-valued tensor of the given type: `Const 0.0`, cast to the
     /// target precision, expanded axis-by-axis to the target dims
-    /// (mirrors the `lower_if_mask` expansion pattern). Used by the ADT
-    /// gradient packing (chelis#520 D2) for fields with no adjoint.
-    fn zero_tensor_node(&mut self, ty: &TensorType) -> NodeId {
+    /// (mirrors the `lower_if_mask` expansion pattern). A symbolic expansion
+    /// retains a shape-only dependency on the differentiated primal so codegen
+    /// can bind the runtime extent without introducing a value dependency.
+    /// Used by gradient packing for every proven-zero tensor slot
+    /// (chelis#520 D2/#1102).
+    fn zero_tensor_node(&mut self, ty: &TensorType, primal: Option<NodeId>) -> NodeId {
         let mut node = self.dag.add_node(
             RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
@@ -6547,11 +6640,10 @@ impl LowerCtx {
         let mut dims = Vec::new();
         for (axis, dim) in ty.dims.iter().enumerate() {
             dims.push(dim.clone());
+            let size = DimExpr::from(dim);
+            let symbolic = size.as_concrete().is_none();
             node = self.dag.add_node(
-                RiscOp::Expand {
-                    axis,
-                    size: DimExpr::from(dim),
-                },
+                RiscOp::Expand { axis, size },
                 vec![node],
                 TensorType {
                     dims: dims.clone(),
@@ -6559,6 +6651,9 @@ impl LowerCtx {
                 },
                 self.current_span_id.clone(),
             );
+            if symbolic && let Some(primal) = primal {
+                self.dag.add_shape_dep(node, primal);
+            }
         }
         node
     }
@@ -6633,9 +6728,28 @@ impl LowerCtx {
             // resolver anyway, but bindings-only shadowing (non-callable
             // arg for a non-callable param) would otherwise leak the
             // outer `fn_typed_params` entry.
+            // Resolve the actual in the caller's scope before the callee's
+            // same-named formal shadows it. Removing the marker first would
+            // erase the only evidence that `model` in `apply(model, x)` is an
+            // unresolved outer callable.
+            let callable = self.resolve_callable_expr(arg_expr);
             self.fn_typed_params.remove(name);
-            if let Some(callable) = self.callable_binding_expr(arg_expr) {
-                self.local_callables.insert(name.clone(), callable);
+            if let Some(callable) = callable {
+                match callable {
+                    // Preserve structural incompleteness when an unresolved
+                    // outer function parameter is forwarded through a helper.
+                    // Installing the raw argument as a local alias here would
+                    // create a self-cycle whenever the formal and actual share
+                    // a name, causing resolution to return `None` and laundering
+                    // the missing callable dependency into a proven zero.
+                    CallableExpr::Parameter { .. } => {
+                        self.local_callables.remove(name);
+                        self.fn_typed_params.insert(name.clone());
+                    }
+                    _ => {
+                        self.local_callables.insert(name.clone(), arg_expr.clone());
+                    }
+                }
             } else {
                 let arg_id = self.lower_expr(arg_expr);
                 if let LoweredValue::Node(node_id) = &arg_id
@@ -11219,19 +11333,14 @@ impl LowerCtx {
                             func_expr.span(),
                         )
                     }
-                    // Item 2-extended G10: `x |> f` where `f` is a fn-
-                    // typed parameter. The DAG has no `RiscOp::Call`, so
-                    // the standalone-def lowering can't actually apply
-                    // `f` — leave `current` unchanged. This is correct on
-                    // every reachable path: standalone-def lowering only
-                    // builds a DAG entry that `try_lower_program`
-                    // produces eagerly but no caller ever references (every
-                    // caller re-inlines through `lower_plain_callable_app`,
-                    // which substitutes the concrete callable into
-                    // `local_callables` so the resolver returns
-                    // `Plain`/`Vmap`/`Grad`/`VmapGrad`, not `Parameter`).
+                    // Item 2-extended G10: `x |> f` where `f` is a fn-typed
+                    // parameter. The DAG has no `RiscOp::Call`, so mark the
+                    // provisional result as unresolved. A surrounding `grad`
+                    // rejects it only when that fresh marker reaches the
+                    // differentiated output; a dead pure pipe stage cannot
+                    // erase an otherwise-proven zero cotangent (chelis#1102).
                     // See `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
-                    CallableExpr::Parameter { .. } => current,
+                    CallableExpr::Parameter { .. } => self.mark_unresolved_callable_value(current),
                 };
                 continue;
             }
