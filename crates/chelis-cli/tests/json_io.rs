@@ -95,9 +95,9 @@ fn expected_output() -> String {
     let round =
         |x: f64, places: usize| -> f64 { format!("{x:.places$}").parse().expect("round parse") };
     format!(
-        r#"{{"base_currency":"GEN","results":{{"total_exposure":{:?},"blended_rate":{:?}}},"meta":{{"instrument_count":2.0}}}}"#,
-        round(total_exposure, 2),
+        r#"{{"base_currency":"GEN","meta":{{"instrument_count":2.0}},"results":{{"blended_rate":{:?},"total_exposure":{:?}}}}}"#,
         round(blended_rate, 6),
+        round(total_exposure, 2),
     )
 }
 

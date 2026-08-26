@@ -134,9 +134,17 @@ def test_to_json_array_and_empty_containers() -> unit ! { Test } = {
   _ = assert_eq(to_json(JsonArray([])), "[]", "empty array renders []")
   assert_eq(to_json(JsonObject(dict_of([]))), "{}", "empty object renders {}")
 }
-def test_to_json_object_preserves_insertion_order() -> unit ! { Test } = {
-  doc = JsonObject(dict_of([("b", JsonInt(cast(1, int64))), ("a", JsonInt(cast(2, int64)))]))
-  assert_eq(to_json(doc), "{\"b\":1,\"a\":2}", "object keys render in insertion order")
+def test_to_json_object_uses_recursive_canonical_unicode_key_order() -> unit ! { Test } = {
+  ba = JsonObject(dict_of([("b", JsonInt(cast(1, int64))), ("a", JsonFloat(2.0f64))]))
+  ab = JsonObject(dict_of([("a", JsonFloat(2.0f64)), ("b", JsonInt(cast(1, int64)))]))
+  ba_bytes = to_json(ba)
+  ab_bytes = to_json(ab)
+  _ = assert_eq(ba_bytes, "{\"a\":2.0,\"b\":1}", "canonical order is independent of insertion history and preserves JsonFloat/JsonInt spelling")
+  _ = assert_eq(ba_bytes, ab_bytes, "equal mappings serialize to identical bytes")
+  nested = JsonObject(dict_of([("outer", JsonObject(dict_of([("z", JsonInt(cast(3, int64))), ("m", JsonInt(cast(4, int64)))]))), ("a", JsonNull)]))
+  _ = assert_eq(to_json(nested), "{\"a\":null,\"outer\":{\"m\":4,\"z\":3}}", "canonical key ordering applies recursively")
+  unicode_and_escaped = JsonObject(dict_of([("😀", JsonInt(cast(4, int64))), ("é", JsonInt(cast(3, int64))), ("a\\", JsonInt(cast(2, int64))), ("a\"", JsonInt(cast(1, int64)))]))
+  assert_eq(to_json(unicode_and_escaped), "{\"a\\\"\":1,\"a\\\\\":2,\"é\":3,\"😀\":4}", "keys order by Unicode scalar values before JSON escaping")
 }
 def test_try_to_json_non_finite_returns_none() -> unit ! { Test } = {
   _ = match try_to_json(JsonFloat(div(0.0f64, 0.0f64))) with {

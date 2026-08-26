@@ -118,7 +118,7 @@ fn expected_outputs() -> (String, String) {
     let round =
         |x: f64, places: usize| -> f64 { format!("{x:.places$}").parse().expect("round parse") };
     let results = format!(
-        r#"{{"base_currency":"GEN","portfolio":{{"gross_value":{:?},"net_value":{:?},"risk_weighted":{:?}}},"meta":{{"positions":3.0}}}}"#,
+        r#"{{"base_currency":"GEN","meta":{{"positions":3.0}},"portfolio":{{"gross_value":{:?},"net_value":{:?},"risk_weighted":{:?}}}}}"#,
         round(gross, 2),
         round(net, 2),
         round(risk, 4),
@@ -325,7 +325,7 @@ done_csv = write_file("{ids_out}", to_csv(table))
     // visibly distinct in the same output document.
     assert_eq!(
         results,
-        r#"{"first_id":9007199254740993,"totals":{"qty":1000},"lossy":{"first_id_f64":9007199254740992.0}}"#
+        r#"{"first_id":9007199254740993,"lossy":{"first_id_f64":9007199254740992.0},"totals":{"qty":1000}}"#
     );
     let ids_csv = fs::read_to_string(&ids_path).expect("ids.csv written");
     assert_eq!(ids_csv, "trade_id\n9007199254740993\n9007199254740995\n");

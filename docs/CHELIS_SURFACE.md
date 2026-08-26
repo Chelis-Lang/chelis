@@ -548,11 +548,11 @@ chelis-std 0.4.0 — there is no upstream NN fallback. Use these; do not reimple
 |---|---|
 | `Std.Tensor.Construct` | `linspace`, `arange`, `stack`, `squeeze`, `unsqueeze` |
 | `Std.Tensor.Mask` | `where_indices` |
-| `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller) |
+| `Std.Init.{Random,Xavier,Kaiming,XavierExt}` | `normal_like`, `kaiming_*`, `xavier_*`, `trunc_normal` (seeded, Box-Muller; handlers advance only for draws on the executed runtime path, including inside `grad`) |
 | `Std.Sort` | `sort_1d`, `sort_2d` |
 | `Std.Scan` | `scan_list` (list lane; tensor lane is the `tensor_scan` builtin) |
-| `Std.Index` | `list_index`, `take_list`, `drop_list` |
-| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(int64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`. Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
+| `Std.Index` | `list_index`, `take_list`, `drop_list` (direct List adjoints preserve runtime length/positions in eval and generated C) |
+| `Std.Io.{Csv,Json,Parquet,Safetensors}` | `read_csv`/`to_csv`/`write_csv`, `load_json`/`parse_json`/`to_json`/`write_json` (+ exported `Json` constructors/accessors and `try_*` twins). Ordinary package defs, so they run under **`chelis build`**. `Std.Io.Json` is the sole public JSON value surface: integer-form tokens use `JsonInt(int64)` or exact `JsonBigInt(string)` without a float funnel, while decimal/exponent tokens use `JsonFloat(f64)`; object serialization recursively orders keys by Unicode scalar-value sequence, independent of insertion history. Caveats: `to_csv` rejects CR/LF in fields (line-based reader cannot round-trip them, chelis#954); `to_json` passes control chars other than `\n \t \r` through unescaped (no `char_code` primitive, chelis#953). `save_tensors`/`load_tensors`, … |
 | `Std.Text` | `join(parts, sep)` |
 | `Std.Test` | `assert_*`, `assert_close*`, `assert_shape`, `fail` |
 | `Std.Time`, `Std.Decimal`, `Std.Tokenizer`, `Std.Process`, `Std.Contracts` | dates, fixed-point, tokenization, `run`/`run_chelis`, contract predicates |

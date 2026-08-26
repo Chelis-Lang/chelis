@@ -122,7 +122,9 @@ clipped = clamp(running, floor15, ceil30)
 - `xavier_uniform(template, fan_in, fan_out)`, `xavier_normal(template, fan_in, fan_out)`.
 - `trunc_normal(template, mean, std, a, b)` draws a normal tensor clipped to `[a, b]`.
 
-All initializers carry the `Random` effect.
+All initializers carry the `Random` effect. A `with seed(...)` handler advances
+only for draws that actually execute: an untaken conditional branch inside a
+forward call or `grad(...)` consumes no stream positions.
 
 ### Sorting and scanning
 
@@ -141,7 +143,8 @@ All initializers carry the `Random` effect.
   Their adjoints preserve the input List's runtime length and positions: index
   routes the cotangent to the selected element, while take/drop fill excluded
   positions with zeros. Negative indices/counts fail; take/drop counts beyond
-  the length retain their ordinary truncation behavior.
+  the length retain their ordinary truncation behavior. These direct public
+  `grad(...)` calls run in both evaluator and generated-C programs.
 
 ### Decimal and time
 
@@ -189,10 +192,12 @@ image is non-finite are rejected:
 - `load_json(path)`, `parse_json(text)` and their `try_` variants.
 - `json_get`, and the typed accessors `json_string`, `json_int`, `json_bigint`,
   `json_float`, `json_bool`, `json_array`, `json_object`, plus `json_is_null`.
-- `to_json(value)` renders a `Json` value compactly (object keys in dictionary
-  insertion order, f64 via `to_string`'s shortest-round-trip form — a claim
-  made for **f64 specifically**, the dtype `JsonFloat` carries — escapes for
-  `\" \\ \n \t \r`). Non-finite numbers have no JSON representation: `to_json`
+- `to_json(value)` renders a `Json` value compactly (object keys recursively
+  sorted by increasing Unicode scalar-value sequence before escaping, f64 via
+  `to_string`'s shortest-round-trip form — a claim made for **f64
+  specifically**, the dtype `JsonFloat` carries — escapes for `\" \\ \n \t
+  \r`). Equal object mappings therefore produce the same bytes regardless of
+  insertion history. Non-finite numbers have no JSON representation: `to_json`
   fails on them and `try_to_json` returns `None`. `write_json(path, value)`
   writes the rendered text and names the path on failure; `try_write_json` is
   its `Option` twin. Control characters outside the escaped set pass through

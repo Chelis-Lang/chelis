@@ -9417,7 +9417,7 @@ fn build_c_program_using_std_io_serializers_emits_exact_documents() {
 
     let json_text = fs::read_to_string(&json_path).expect("out.json written");
     assert_eq!(
-        json_text, "{\"cap_price\":0.15110743269565682,\"name\":\"a\\\"b\\\\c\",\"n\":3}",
+        json_text, "{\"cap_price\":0.15110743269565682,\"n\":3,\"name\":\"a\\\"b\\\\c\"}",
         "compiled write_json output must be byte-exact"
     );
     let csv_text = fs::read_to_string(&csv_path).expect("out.csv written");

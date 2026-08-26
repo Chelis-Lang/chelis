@@ -689,10 +689,29 @@ pub(crate) fn emit_host_abi_program(
         emit_main(&mut body, program_name, program, &returns_arg, &hoisted)?;
     }
 
+    // Keep the JSON-only sorting machinery out of unrelated generated
+    // translation units. Detect the structured call emitted above, then
+    // prepend its definition so C never relies on an implicit declaration.
+    let needs_json_canonical_object_helper = body
+        .iter()
+        .any(|line| line.contains(" = chelis_json_canonical_object_entries("));
+    if needs_json_canonical_object_helper {
+        let mut json_helpers = Vec::new();
+        append_json_canonical_object_helpers(&mut json_helpers);
+        json_helpers.push(String::new());
+        json_helpers.extend(body);
+        body = json_helpers;
+    }
+
     let mut out: Vec<String> = vec![
         "#include \"chelis_runtime.h\"".to_string(),
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
+    ];
+    if needs_json_canonical_object_helper {
+        out.push("#include <stdlib.h>".to_string());
+    }
+    out.extend([
         String::new(),
         // chelis#943: emitter-internal accumulator ABI. Deliberately absent
         // from the published chelis_runtime.h (the capacity census governs
@@ -702,7 +721,7 @@ pub(crate) fn emit_host_abi_program(
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
         "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
         "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
-    ];
+    ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
     }
@@ -841,6 +860,83 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(seed)"
             .to_string(),
     );
+}
+
+/// Translation-unit-local support for Std.Io.Json's canonical object
+/// observation. Generic Dict iteration remains insertion ordered; this helper
+/// sorts only the private JSON serializer boundary. Comparing one Unicode
+/// scalar slice at a time handles prefixes and embedded U+0000, while UTF-8's
+/// byte order preserves scalar-value order for every nonzero scalar.
+fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
+    for line in [
+        "static int chelis_json_compare_strings(chelis_string lhs, chelis_string rhs) {",
+        "    int64_t lhs_len = chelis_string_len(lhs);",
+        "    int64_t rhs_len = chelis_string_len(rhs);",
+        "    int64_t common = lhs_len < rhs_len ? lhs_len : rhs_len;",
+        "    for (int64_t index = 0; index < common; ++index) {",
+        "        chelis_string lhs_scalar = chelis_string_slice(lhs, index, 1);",
+        "        chelis_string rhs_scalar = chelis_string_slice(rhs, index, 1);",
+        "        const unsigned char *lhs_bytes = (const unsigned char *)chelis_string_data(lhs_scalar);",
+        "        const unsigned char *rhs_bytes = (const unsigned char *)chelis_string_data(rhs_scalar);",
+        "        int result = 0;",
+        "        int64_t byte = 0;",
+        "        while (lhs_bytes[byte] != 0 && rhs_bytes[byte] != 0 && lhs_bytes[byte] == rhs_bytes[byte]) {",
+        "            ++byte;",
+        "        }",
+        "        if (lhs_bytes[byte] < rhs_bytes[byte]) result = -1;",
+        "        if (lhs_bytes[byte] > rhs_bytes[byte]) result = 1;",
+        "        chelis_string_release(lhs_scalar);",
+        "        chelis_string_release(rhs_scalar);",
+        "        if (result != 0) return result;",
+        "    }",
+        "    return lhs_len < rhs_len ? -1 : (lhs_len > rhs_len ? 1 : 0);",
+        "}",
+        "",
+        "static int chelis_json_compare_entry_keys(chelis_value lhs_entry, chelis_value rhs_entry) {",
+        "    chelis_value lhs_key = chelis_tuple_get(chelis_value_as_tuple(lhs_entry), 0);",
+        "    chelis_value rhs_key = chelis_tuple_get(chelis_value_as_tuple(rhs_entry), 0);",
+        "    int result = chelis_json_compare_strings(chelis_value_as_string(lhs_key), chelis_value_as_string(rhs_key));",
+        "    chelis_value_release(lhs_key);",
+        "    chelis_value_release(rhs_key);",
+        "    return result;",
+        "}",
+        "",
+        "static chelis_list *chelis_json_canonical_object_entries(const chelis_dict *dict) {",
+        "    chelis_list *source = chelis_dict_entries(dict);",
+        "    int64_t len = chelis_list_len(source);",
+        "    int64_t *order = len > 0 ? (int64_t *)malloc((size_t)len * sizeof(int64_t)) : NULL;",
+        "    if (len > 0 && order == NULL) {",
+        "        chelis_fail(chelis_string_from_cstr(\"JSON canonical object ordering allocation failed\"));",
+        "    }",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        order[index] = index;",
+        "        int64_t cursor = index;",
+        "        while (cursor > 0) {",
+        "            chelis_value lhs = chelis_list_index(source, order[cursor - 1]);",
+        "            chelis_value rhs = chelis_list_index(source, order[cursor]);",
+        "            int comparison = chelis_json_compare_entry_keys(lhs, rhs);",
+        "            chelis_value_release(lhs);",
+        "            chelis_value_release(rhs);",
+        "            if (comparison <= 0) break;",
+        "            int64_t swap = order[cursor - 1];",
+        "            order[cursor - 1] = order[cursor];",
+        "            order[cursor] = swap;",
+        "            --cursor;",
+        "        }",
+        "    }",
+        "    chelis_list *result = chelis_list_with_capacity(len);",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        chelis_value entry = chelis_list_index(source, order[index]);",
+        "        chelis_list_push(result, entry);",
+        "        chelis_value_release(entry);",
+        "    }",
+        "    free(order);",
+        "    chelis_list_release(source);",
+        "    return result;",
+        "}",
+    ] {
+        out.push(line.to_string());
+    }
 }
 
 /// Instantiate the scalar host-expression path at each concrete float ABI.
@@ -3082,6 +3178,20 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        if name == "__json_canonical_object_entries" {
+            if arg_vars.len() != 1 || !matches!(arg_vars[0].1, HostType::Dict(_, _)) {
+                return Err(invalid_abi_shape(
+                    "JSON canonical object ordering requires one Dict argument".to_string(),
+                    "C host JSON serialization",
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = chelis_json_canonical_object_entries({});",
+                self.indent, arg_vars[0].0
+            ));
+            return Ok(());
         }
 
         if name == "cast" {

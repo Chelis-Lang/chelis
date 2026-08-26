@@ -6001,6 +6001,39 @@ impl LowerCtx {
                     fields: vec![self.lower_expr(&elems[3]), self.lower_expr(&elems[4])],
                 };
             }
+            // [05-OP-35] A statically staged List keeps its exact spine, so
+            // `len` is discrete compile-time data inside a differentiated
+            // body. Materialize that exact int64 constant before `lower_if`
+            // sees it; leaving `len` as a synthetic tensor Load would make a
+            // static empty/non-empty guard look runtime-dependent and mix an
+            // int64 mask into the floating adjoint branches.
+            if self.allow_host_list_ad_rewrites
+                && func_name == "len"
+                && elems.len() == 4
+                && let Some(items) = adt_cons_chain_values(&self.lower_expr(&elems[3]))
+            {
+                let value = i64::try_from(items.len()).unwrap_or_else(|_| {
+                    raise_fatal_lowering_error(
+                        "statically staged List length does not fit int64",
+                        Some(elems[3].span()),
+                        elems[3].span_id().map(ToOwned::to_owned),
+                    )
+                });
+                return LoweredValue::Node(
+                    self.dag.add_node(
+                        RiscOp::Const {
+                            value: scalar_from_i64("len", Prim::Int64, value)
+                                .expect("usize converted to int64 is representable"),
+                        },
+                        vec![],
+                        TensorType {
+                            dims: Vec::new(),
+                            precision: Prim::Int64,
+                        },
+                        self.current_span_id.clone(),
+                    ),
+                );
+            }
             // chelis#520: a positional ADT constructor application
             // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
             // as `lower_var`'s nullary-constructor branch; a constructor
@@ -6695,6 +6728,29 @@ impl LowerCtx {
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
+                    // Bool parameters are non-differentiable control data.
+                    // When their call-site value is statically known, bind
+                    // the grad body directly to that exact scalar instead of
+                    // hiding it behind a Load. `lower_if` can then prune the
+                    // untaken arm before Random nodes are lowered, making the
+                    // returned stream ordinal path-sensitive rather than the
+                    // sum of both statically visited branches.
+                    if param_ty.precision == Prim::Bool
+                        && let Some(value) = self.static_bool_from_node(*actual)
+                    {
+                        let constant = subctx.dag.add_node(
+                            RiscOp::synth_const(Prim::Bool, if value { 1.0 } else { 0.0 }),
+                            vec![],
+                            param_ty.clone(),
+                            subctx.current_span_id.clone(),
+                        );
+                        remap_formal_types.push(param_ty.clone());
+                        remap_actual_types.push(node_type(self, *actual));
+                        subctx
+                            .bindings
+                            .insert(name.clone(), LoweredValue::Node(constant));
+                        continue;
+                    }
                     // [05-OP-35] List selection counts are discrete scalar
                     // parameters, but the staged List spine still needs their
                     // exact call-site value while the grad body is lowered.
@@ -9680,6 +9736,15 @@ impl LowerCtx {
             // inlined. The checker has already established an integer
             // result type, so an exact integer input survives the cast.
             RiscOp::Cast { .. } | RiscOp::Copy => self.static_i64_from_node(*node.inputs.first()?),
+            _ => None,
+        }
+    }
+
+    fn static_bool_from_node(&self, node: NodeId) -> Option<bool> {
+        let node = self.dag.get(node)?;
+        match &node.op {
+            RiscOp::Const { value } => value.as_bool_exact(),
+            RiscOp::Cast { .. } | RiscOp::Copy => self.static_bool_from_node(*node.inputs.first()?),
             _ => None,
         }
     }

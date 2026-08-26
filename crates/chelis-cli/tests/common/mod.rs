@@ -288,6 +288,44 @@ pub fn build_and_run(source: &str, name: &str) -> String {
     String::from_utf8(run_output.stdout).expect("utf-8 stdout")
 }
 
+/// Build a Reef-linked application to C, link the generated translation unit,
+/// run it, and return stdout. This is the package-aware counterpart to
+/// [`build_and_run`]: imports resolve through `reef_home`, and build output is
+/// kept inside the per-test application directory.
+pub fn build_and_run_app(reef_home: &Path, app_pkg: &Path, name: &str) -> String {
+    let out_dir = app_pkg.join(format!("{name}-out"));
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let source_file = format!("{name}.c");
+    let status = link_generated(&out_dir, &source_file, name);
+    assert!(status.success(), "link failed: {status}");
+
+    let run_output = StdCommand::new(out_dir.join(name))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "binary failed: {}\nstderr: {}",
+        run_output.status,
+        String::from_utf8_lossy(&run_output.stderr),
+    );
+    String::from_utf8(run_output.stdout).expect("utf-8 stdout")
+}
+
 // ---------------------------------------------------------------------------
 // WS-C packaging-orchestration fixtures
 //

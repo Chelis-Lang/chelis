@@ -10,7 +10,28 @@ use predicates::prelude::*;
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{make_app, write_file};
+use common::{build_and_run_app, make_app, write_file};
+
+fn eval_app_stdout(reef_home: &std::path::Path, app_pkg: &std::path::Path) -> String {
+    let output = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("eval should run");
+    assert!(
+        output.status.success(),
+        "eval failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8 stdout")
+}
 
 #[test]
 fn json_bigint_preserves_exact_tokens_and_refuses_numeric_accessors() {
@@ -128,4 +149,58 @@ bad = to_json(JsonBigInt("9223372036854775807"))
         .stderr(predicate::str::contains(
             "to_json failed: invalid JsonBigInt storage",
         ));
+}
+
+#[test]
+fn json_object_serialization_is_recursive_canonical_unicode_order_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1314-json-object-order");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Io.Json (JsonNull, JsonInt, JsonFloat, JsonObject, to_json)
+
+ba = to_json(JsonObject(dict_of([
+  ("b", JsonInt(cast(1, int64))),
+  ("a", JsonFloat(2.0f64))
+])))
+ab = to_json(JsonObject(dict_of([
+  ("a", JsonFloat(2.0f64)),
+  ("b", JsonInt(cast(1, int64)))
+])))
+equal_mappings = eq(ba, ab)
+nested = to_json(JsonObject(dict_of([
+  ("outer", JsonObject(dict_of([
+    ("z", JsonInt(cast(3, int64))),
+    ("m", JsonInt(cast(4, int64)))
+  ]))),
+  ("a", JsonNull)
+])))
+unicode_and_escaped = to_json(JsonObject(dict_of([
+  ("😀", JsonInt(cast(4, int64))),
+  ("é", JsonInt(cast(3, int64))),
+  ("a\\", JsonInt(cast(2, int64))),
+  ("a\"", JsonInt(cast(1, int64)))
+])))
+"#,
+    );
+
+    let eval = eval_app_stdout(&reef_home, &app_pkg);
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    for expected in [
+        "ba = {\"a\":2.0,\"b\":1}",
+        "ab = {\"a\":2.0,\"b\":1}",
+        "equal_mappings = true",
+        "nested = {\"a\":null,\"outer\":{\"m\":4,\"z\":3}}",
+        "unicode_and_escaped = {\"a\\\"\":1,\"a\\\\\":2,\"é\":3,\"😀\":4}",
+    ] {
+        assert!(
+            eval.contains(expected),
+            "eval missing `{expected}`:\n{eval}"
+        );
+        assert!(
+            compiled.contains(expected),
+            "compiled C missing `{expected}`:\n{compiled}"
+        );
+    }
 }

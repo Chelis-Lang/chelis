@@ -520,6 +520,35 @@ impl<'a> EvalContext<'a> {
             .map(|arg| self.eval_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Std.Io.Json's private serializer intrinsic. Keep generic
+        // `dict_entries` insertion-ordered for CSV/tokenizer callers; only
+        // the owning JSON boundary canonicalizes string keys. Rust `str` Ord
+        // is UTF-8 lexicographic, which preserves Unicode scalar-value order
+        // for valid Rust strings.
+        if let Some(name) = var_name(func)
+            && self
+                .lookup_top_level_def(name)
+                .is_some_and(|(resolved, _)| {
+                    matches!(
+                        resolved.as_str(),
+                        "Pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                            | "pkg__chelis__std__Std__Io__Json__canonical_object_entries"
+                    )
+                })
+        {
+            let mut entries = expect_dict_arg(&args, 0)?;
+            entries.sort_by(|(lhs, _), (rhs, _)| match (lhs, rhs) {
+                (RuntimeValue::String(lhs), RuntimeValue::String(rhs)) => lhs.cmp(rhs),
+                _ => std::cmp::Ordering::Equal,
+            });
+            return Ok(RuntimeValue::List(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| RuntimeValue::Tuple(vec![key, value]))
+                    .collect(),
+            ));
+        }
+
         if let Some(name) = var_name(func)
             && name.chars().next().is_some_and(|ch| ch.is_uppercase())
         {

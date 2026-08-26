@@ -126,6 +126,19 @@ impl<'a> EvalContext<'a> {
 
         let span = Span::new(0, 0);
         for (index, value) in args.iter().enumerate() {
+            // A handled grad must allocate Random ordinals along the branch
+            // actually selected by a concrete discrete argument. Keeping a
+            // bool behind a synthetic Load makes `lower_if` lower both arms,
+            // so an untaken Random arm advances the stream. The evaluator
+            // already has the exact runtime value at this boundary: embed it
+            // as a typed literal so the lowering context can prune the
+            // untaken arm before it allocates Random nodes or ordinals.
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::Bool(value) = value
+            {
+                arg_exprs.push(make_bool_literal_with_type(*value, span));
+                continue;
+            }
             // A grad body may use an integer scalar as a discrete selector
             // (for example list_index/take_list/drop_list). A synthetic Load
             // preserves its dtype but erases its exact runtime value before
@@ -1123,6 +1136,33 @@ fn make_integer_literal_with_type(value: i64, precision: Prim, span: Span) -> Ex
                 Expr::Atom(Atom::Tag(DeepTag::Lit), span),
                 Expr::Map(meta, span),
                 Expr::Atom(Atom::Int(value), span),
+            ],
+        },
+        span,
+    )
+}
+
+/// Build a `(lit {type: (t-prim {} bool)} value)` expression for a concrete
+/// non-differentiable transform argument.
+fn make_bool_literal_with_type(value: bool, span: Span) -> Expr {
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name("bool".to_string()), span),
+            ],
+        },
+        span,
+    );
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), prim_node));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
+                Expr::Map(meta, span),
+                Expr::Atom(Atom::Bool(value), span),
             ],
         },
         span,

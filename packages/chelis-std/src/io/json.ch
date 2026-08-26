@@ -116,7 +116,7 @@ def json_serializable(value: Json) -> bool =
     | JsonFloat(x) => finite_f64(x)
     | JsonString(_) => true
     | JsonArray(items) => fold(fn (acc: bool, item: Json) -> and(acc, json_serializable(item)), true, items)
-    | JsonObject(entries) => fold(fn (acc: bool, kv: (string, Json)) -> and(acc, json_serializable(kv.1)), true, dict_entries(entries))
+    | JsonObject(entries) => fold(fn (acc: bool, kv: (string, Json)) -> and(acc, json_serializable(kv.1)), true, canonical_object_entries(entries))
   }
 def finite_f64(x: f64) -> bool = not(or(neq(x, x), or(eq(x, div(1.0f64, 0.0f64)), eq(x, div(-1.0f64, 0.0f64)))))
 def render_json(value: Json) -> string =
@@ -128,8 +128,13 @@ def render_json(value: Json) -> string =
     | JsonFloat(x) => to_string(x)
     | JsonString(text) => quote_string(text)
     | JsonArray(items) => string_concat("[", string_concat(join(map(fn (item: Json) -> render_json(item), items), ","), "]"))
-    | JsonObject(entries) => string_concat("{", string_concat(join(map(fn (kv: (string, Json)) -> string_concat(quote_string(kv.0), string_concat(":", render_json(kv.1))), dict_entries(entries)), ","), "}"))
+    | JsonObject(entries) => string_concat("{", string_concat(join(map(fn (kv: (string, Json)) -> string_concat(quote_string(kv.0), string_concat(":", render_json(kv.1))), canonical_object_entries(entries)), ","), "}"))
   }
+-- Compiler/runtime intrinsic boundary for [05-OP-5]/[05-OP-35]'s canonical
+-- object observation. The fallback body preserves ordinary checking and
+-- interpretation structure; both executable lanes recognize this private,
+-- package-owned identity and return the entries in Unicode scalar-key order.
+def canonical_object_entries(entries: Dict[string, Json]) -> List[(string, Json)] = dict_entries(entries)
 def write_json(path: string, value: Json) -> unit ! { IO } =
   match try_to_json(value) with {
     | Some(text) => write_file(path, text)
