@@ -520,6 +520,13 @@ When a public surface has an implicit invariant, make it explicit and test it.
 - Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
   for the same PR or immediate follow-up work after checking ownership, exact head,
   status, and active processes.
+- When a PR is otherwise ready to merge and `origin/main` has advanced, do not rebase
+  merely to refresh its base. Fetch current refs, check GitHub's current mergeability,
+  and inspect the prospective merge result with `git merge-tree` or an equivalent
+  temporary integration. If GitHub's merge produces the intended semantic and
+  structural result without a dangerous conflict, preserve the reviewed head and its CI
+  evidence. Rebase only when that result differs, is unsafe or unclear, or another
+  identified semantic or structural issue requires a changed head.
 - A non-trivial rebase or hand-resolved conflict requires review of the resolution
   before any history rewrite is published. Run `python3 scripts/gate.py --local` for a
   non-documentation change or the focused documentation checks for a docs-only change.
