@@ -9719,8 +9719,12 @@ fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashM
 
     for (name, body) in defs.iter() {
         let mut referenced_defs = HashSet::new();
-        let directly_dynamic =
-            collect_dynamic_to_tensor_def_refs(body, &def_names, &mut referenced_defs);
+        let directly_dynamic = collect_dynamic_to_tensor_def_refs(
+            body,
+            &def_names,
+            &HashMap::new(),
+            &mut referenced_defs,
+        );
         if directly_dynamic {
             summaries.insert(name.clone(), true);
             queue.push_back(name.clone());
@@ -9761,20 +9765,107 @@ fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashM
 fn collect_dynamic_to_tensor_def_refs(
     expr: &Expr,
     def_names: &HashSet<String>,
+    callable_scope: &HashMap<String, Option<String>>,
     referenced_defs: &mut HashSet<String>,
 ) -> bool {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
-    let mut directly_dynamic = expr_is_runtime_shaped_to_tensor(expr);
-    if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
-        && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
-        && let Some(name) = callee_kids.first().and_then(symbol_name)
-        && def_names.contains(name)
+    let mut directly_dynamic =
+        !callable_scope.contains_key("to_tensor") && expr_is_runtime_shaped_to_tensor(expr);
+    if let Some(name) = app_callee_name(expr)
+        && let Some(target) = resolve_top_level_callable_from_names(name, callable_scope, def_names)
     {
-        referenced_defs.insert(name.to_string());
+        referenced_defs.insert(target);
     }
-    visit_semantic_expr_children(expr, |child| {
-        directly_dynamic |= collect_dynamic_to_tensor_def_refs(child, def_names, referenced_defs);
-    });
+
+    let Some((expr_tag, _, kids)) = stamped_parts(expr) else {
+        visit_semantic_expr_children(expr, |child| {
+            directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                child,
+                def_names,
+                callable_scope,
+                referenced_defs,
+            );
+        });
+        return directly_dynamic;
+    };
+    match expr_tag {
+        DeepTag::Fn => {
+            let mut body_scope = callable_scope.clone();
+            if let Some(params) = kids.first().and_then(as_list) {
+                for param in children(params) {
+                    if let Some(name) = param_name(param) {
+                        body_scope.insert(name, None);
+                    }
+                }
+            }
+            if let Some(params) = kids.first() {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    params,
+                    def_names,
+                    callable_scope,
+                    referenced_defs,
+                );
+            }
+            if let Some(body) = kids.get(1) {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    body,
+                    def_names,
+                    &body_scope,
+                    referenced_defs,
+                );
+            }
+        }
+        DeepTag::Let => {
+            let mut body_scope = callable_scope.clone();
+            if let Some(bind_list) = kids.first().and_then(as_list)
+                && tag(bind_list) == Some(DeepTag::Bind)
+            {
+                let bind_kids = children(bind_list);
+                for index in (0..bind_kids.len()).step_by(2) {
+                    let Some(name) = bind_kids.get(index).and_then(symbol_name) else {
+                        continue;
+                    };
+                    let Some(value) = bind_kids.get(index + 1) else {
+                        body_scope.insert(name.to_string(), None);
+                        continue;
+                    };
+                    directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                        value,
+                        def_names,
+                        &body_scope,
+                        referenced_defs,
+                    );
+                    let target = direct_var_name(value).and_then(|target| {
+                        resolve_top_level_callable_from_names(target, &body_scope, def_names)
+                    });
+                    body_scope.insert(name.to_string(), target);
+                }
+            } else if let Some(bindings) = kids.first() {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    bindings,
+                    def_names,
+                    callable_scope,
+                    referenced_defs,
+                );
+            }
+            if let Some(body) = kids.get(1) {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    body,
+                    def_names,
+                    &body_scope,
+                    referenced_defs,
+                );
+            }
+        }
+        _ => visit_semantic_expr_children(expr, |child| {
+            directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                child,
+                def_names,
+                callable_scope,
+                referenced_defs,
+            );
+        }),
+    }
     directly_dynamic
 }
 
@@ -9783,26 +9874,131 @@ fn analyze_tensor_helper_preflight(
     def_summaries: &HashMap<String, bool>,
     out: &mut HashMap<usize, TensorHelperPreflightFacts>,
 ) -> TensorHelperPreflightFacts {
+    analyze_tensor_helper_preflight_scoped(expr, def_summaries, &HashMap::new(), out)
+}
+
+fn analyze_tensor_helper_preflight_scoped(
+    expr: &Expr,
+    def_summaries: &HashMap<String, bool>,
+    callable_scope: &HashMap<String, Option<String>>,
+    out: &mut HashMap<usize, TensorHelperPreflightFacts>,
+) -> TensorHelperPreflightFacts {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
     let mut facts = TensorHelperPreflightFacts {
-        reaches_dynamic_to_tensor: expr_is_runtime_shaped_to_tensor(expr),
+        reaches_dynamic_to_tensor: !callable_scope.contains_key("to_tensor")
+            && expr_is_runtime_shaped_to_tensor(expr),
         contains_grad_like: stamped_parts(expr)
             .is_some_and(|(tag, _, _)| matches!(tag, DeepTag::Grad | DeepTag::Vmap))
             || matches!(expr, Expr::List(list, _) if list.unknown_tag_symbol() == Some("vmap-grad")),
     };
-    if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
-        && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
-        && let Some(name) = callee_kids.first().and_then(symbol_name)
+    if let Some(name) = app_callee_name(expr)
+        && let Some(target) =
+            resolve_top_level_callable_from_summaries(name, callable_scope, def_summaries)
     {
-        facts.reaches_dynamic_to_tensor |= def_summaries.get(name).copied().unwrap_or(false);
+        facts.reaches_dynamic_to_tensor |= def_summaries.get(&target).copied().unwrap_or(false);
     }
-    visit_semantic_expr_children(expr, |child| {
-        let child_facts = analyze_tensor_helper_preflight(child, def_summaries, out);
+
+    let mut merge_child = |child: &Expr, child_scope: &HashMap<String, Option<String>>| {
+        let child_facts =
+            analyze_tensor_helper_preflight_scoped(child, def_summaries, child_scope, out);
         facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
         facts.contains_grad_like |= child_facts.contains_grad_like;
-    });
+    };
+    match stamped_parts(expr) {
+        Some((DeepTag::Fn, _, kids)) => {
+            let mut body_scope = callable_scope.clone();
+            if let Some(params) = kids.first().and_then(as_list) {
+                for param in children(params) {
+                    if let Some(name) = param_name(param) {
+                        body_scope.insert(name, None);
+                    }
+                }
+            }
+            if let Some(params) = kids.first() {
+                merge_child(params, callable_scope);
+            }
+            if let Some(body) = kids.get(1) {
+                merge_child(body, &body_scope);
+            }
+        }
+        Some((DeepTag::Let, _, kids)) => {
+            let mut body_scope = callable_scope.clone();
+            if let Some(bind_list) = kids.first().and_then(as_list)
+                && tag(bind_list) == Some(DeepTag::Bind)
+            {
+                let bind_kids = children(bind_list);
+                for index in (0..bind_kids.len()).step_by(2) {
+                    let Some(name) = bind_kids.get(index).and_then(symbol_name) else {
+                        continue;
+                    };
+                    let Some(value) = bind_kids.get(index + 1) else {
+                        body_scope.insert(name.to_string(), None);
+                        continue;
+                    };
+                    merge_child(value, &body_scope);
+                    let target = direct_var_name(value).and_then(|target| {
+                        resolve_top_level_callable_from_summaries(
+                            target,
+                            &body_scope,
+                            def_summaries,
+                        )
+                    });
+                    body_scope.insert(name.to_string(), target);
+                }
+            } else if let Some(bindings) = kids.first() {
+                merge_child(bindings, callable_scope);
+            }
+            if let Some(body) = kids.get(1) {
+                merge_child(body, &body_scope);
+            }
+        }
+        _ => visit_semantic_expr_children(expr, |child| {
+            merge_child(child, callable_scope);
+        }),
+    }
     out.insert(expr as *const Expr as usize, facts);
     facts
+}
+
+fn app_callee_name(expr: &Expr) -> Option<&str> {
+    let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    direct_var_name(kids.first()?)
+}
+
+fn direct_var_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::MetaExpr(meta, _) => direct_var_name(&meta.expr),
+        _ => {
+            let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            kids.first().and_then(symbol_name)
+        }
+    }
+}
+
+fn resolve_top_level_callable_from_names(
+    name: &str,
+    callable_scope: &HashMap<String, Option<String>>,
+    def_names: &HashSet<String>,
+) -> Option<String> {
+    match callable_scope.get(name) {
+        Some(target) => target.clone(),
+        None => def_names.contains(name).then(|| name.to_string()),
+    }
+}
+
+fn resolve_top_level_callable_from_summaries(
+    name: &str,
+    callable_scope: &HashMap<String, Option<String>>,
+    def_summaries: &HashMap<String, bool>,
+) -> Option<String> {
+    match callable_scope.get(name) {
+        Some(target) => target.clone(),
+        None => def_summaries.contains_key(name).then(|| name.to_string()),
+    }
 }
 
 fn visit_semantic_expr_children(expr: &Expr, mut visit: impl FnMut(&Expr)) {
@@ -12930,6 +13126,38 @@ def bad[b](box: Box[b]) -> bool =
             .expect("#1205 host profile thread completes")
     }
 
+    fn issue_1205_find_named_app<'expr>(expr: &'expr Expr, expected: &str) -> Option<&'expr Expr> {
+        if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+            && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+            && callee_kids.first().and_then(symbol_name) == Some(expected)
+        {
+            return Some(expr);
+        }
+        match expr {
+            Expr::List(list, _) => list
+                .elements
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::Node(node, _) => node
+                .children_slice()
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::MetaExpr(meta, _) => issue_1205_find_named_app(&meta.expr, expected),
+            Expr::BareList(elements, _) => elements
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::UnknownForm(data) => data
+                .children
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::Map(map, _) => map
+                .entries
+                .iter()
+                .find_map(|(_, value)| issue_1205_find_named_app(value, expected)),
+            Expr::Atom(_, _) => None,
+        }
+    }
+
     #[test]
     fn issue_1205_host_lowering_work_is_linear() {
         for flat in [false, true] {
@@ -13055,48 +13283,87 @@ def bad[b](box: Box[b]) -> bool =
             "the top-level bc definition must exercise the transitive summary"
         );
 
-        fn find_named_app<'expr>(expr: &'expr Expr, expected: &str) -> Option<&'expr Expr> {
-            if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
-                && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
-                && callee_kids.first().and_then(symbol_name) == Some(expected)
-            {
-                return Some(expr);
-            }
-            match expr {
-                Expr::List(list, _) => list
-                    .elements
-                    .iter()
-                    .find_map(|child| find_named_app(child, expected)),
-                Expr::Node(node, _) => node
-                    .children_slice()
-                    .iter()
-                    .find_map(|child| find_named_app(child, expected)),
-                Expr::MetaExpr(meta, _) => find_named_app(&meta.expr, expected),
-                Expr::BareList(elements, _) => elements
-                    .iter()
-                    .find_map(|child| find_named_app(child, expected)),
-                Expr::UnknownForm(data) => data
-                    .children
-                    .iter()
-                    .find_map(|child| find_named_app(child, expected)),
-                Expr::Map(map, _) => map
-                    .entries
-                    .iter()
-                    .find_map(|(_, value)| find_named_app(value, expected)),
-                Expr::Atom(_, _) => None,
-            }
-        }
-
         let add = typed
             .exprs()
             .iter()
-            .find_map(|expr| find_named_app(expr, "add"))
+            .find_map(|expr| issue_1205_find_named_app(expr, "add"))
             .expect("fixture contains the twice body");
         let mut facts = HashMap::new();
         let add_facts = analyze_tensor_helper_preflight(add, &summaries, &mut facts);
         assert!(
             !add_facts.reaches_dynamic_to_tensor,
             "a tensor operand named bc is not a call to the top-level bc definition"
+        );
+    }
+
+    #[test]
+    fn issue_1205_preflight_tracks_callable_shadowing_and_aliases() {
+        let shadowed = surf_check(
+            "module FrontEndPerformance.ShadowedCallable\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def local(x: tensor[1, f32]) -> tensor[1, f32] = {\n\
+               bc = fn (y: tensor[1, f32]) -> add(y, y)\n\
+               bc(x)\n\
+             }\n\
+             def wrapper(x: tensor[1, f32]) -> tensor[1, f32] = local(x)\n\
+             out = index(to_list(wrapper(to_tensor([cast(1.0, f32)]))), 0i64)\n",
+        );
+        let shadowed_summaries = cached_dynamic_to_tensor_def_summaries(&shadowed);
+        assert_eq!(shadowed_summaries.get("bc"), Some(&true));
+        for name in ["local", "wrapper", "out"] {
+            assert_eq!(
+                shadowed_summaries.get(name),
+                Some(&false),
+                "a local callable named bc must shadow the top-level helper in {name}"
+            );
+        }
+        let shadowed_defs = cached_program_defs(&shadowed);
+        let local_body = lookup_program_def(&shadowed_defs, "local").expect("local definition");
+        let local_call = issue_1205_find_named_app(local_body, "bc").expect("local bc call");
+        let mut shadowed_facts = HashMap::new();
+        analyze_tensor_helper_preflight(local_body, &shadowed_summaries, &mut shadowed_facts);
+        assert!(
+            !shadowed_facts[&(local_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+            "the local bc call must not inherit the top-level bc summary"
+        );
+
+        let aliased = surf_check(
+            "module FrontEndPerformance.AliasedCallable\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def aliased(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               f(c)\n\
+             }\n\
+             def wrapper(c: f32) -> tensor[1, f32] = aliased(c)\n\
+             out = index(to_list(wrapper(cast(1.0, f32))), 0i64)\n",
+        );
+        let aliased_summaries = cached_dynamic_to_tensor_def_summaries(&aliased);
+        for name in ["bc", "aliased", "wrapper", "out"] {
+            assert_eq!(
+                aliased_summaries.get(name),
+                Some(&true),
+                "the alias f = bc must propagate the dynamic helper summary through {name}"
+            );
+        }
+        let aliased_defs = cached_program_defs(&aliased);
+        let aliased_body =
+            lookup_program_def(&aliased_defs, "aliased").expect("aliased definition");
+        let alias_call = issue_1205_find_named_app(aliased_body, "f").expect("local f call");
+        let mut aliased_facts = HashMap::new();
+        analyze_tensor_helper_preflight(aliased_body, &aliased_summaries, &mut aliased_facts);
+        assert!(
+            aliased_facts[&(alias_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+            "the local f call must inherit the aliased top-level bc summary"
+        );
+
+        let effected = chelis_effects::check_program(&aliased).expect("effect check");
+        let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+        reset_host_work_profile();
+        try_lower_compiled_program(&checked).expect("aliased fixture lowers");
+        let profile = take_host_work_profile();
+        assert_eq!(
+            profile.tensor_helper_builtin_load_rejections, 0,
+            "aliased dynamic helpers must be rejected by preflight, not after DAG lowering: {profile:?}"
         );
     }
 

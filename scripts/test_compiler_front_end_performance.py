@@ -36,6 +36,7 @@ class CompilerFrontEndPerformanceOracleTests(unittest.TestCase):
             "issue_1205_host_lowering_work_is_linear",
             "issue_1205_preflight_preserves_static_to_tensor_literals",
             "issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls",
+            "issue_1205_preflight_tracks_callable_shadowing_and_aliases",
             "cargo test -p chelis-cli --test issue_1205_front_end_performance",
             "--ignored --test-threads=1",
         ):

@@ -8,7 +8,8 @@ use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_deep::{Span, decode_effect_kind};
 use chelis_types::types::{Effect, EffectSet};
 use chelis_types::{CheckedProgram, InferResult};
-use chelis_vocab::{EffectKind, EffectKindDecodeError};
+use chelis_vocab::EffectKind;
+use chelis_vocab::EffectKindDecodeError;
 
 pub mod realizability;
 
