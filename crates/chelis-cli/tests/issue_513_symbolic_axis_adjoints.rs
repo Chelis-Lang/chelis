@@ -537,12 +537,12 @@ fn matrix_driver(rows: usize, cols: usize, values: &[f64]) -> String {
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {{
     int64_t shape[2] = {{{rows}, {cols}}};
-    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     float xd[{n}] = {{{init}}};
     memcpy(x->data, xd, sizeof(xd));
     chelis_tensor* g = out(x);
     if (g->size != {n}) {{ printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }}
-    for (int i = 0; i < {n}; i++) printf("%.6f\n", g->data[i]);
+    for (int i = 0; i < {n}; i++) printf("%.6f\n", ((float *)g->data)[i]);
     return 0;
 }}
 "#

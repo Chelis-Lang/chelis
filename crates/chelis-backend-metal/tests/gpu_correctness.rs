@@ -168,7 +168,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
             let (ndim, c_dims) = c_shape(&input.shape);
             if ndim == 0 {
                 body.push(format!(
-                    "    input_storage[{slot}] = chelis_alloc(0, NULL, CHELIS_F32);"
+                    "    input_storage[{slot}] = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);"
                 ));
             } else {
                 let dims = c_dims
@@ -178,7 +178,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
                     .join(", ");
                 body.push(format!("    int64_t shape_{slot}[{ndim}] = {{ {dims} }};"));
                 body.push(format!(
-                    "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_F32);"
+                    "    input_storage[{slot}] = chelis_alloc({ndim}, shape_{slot}, CHELIS_DTYPE_F32);"
                 ));
             }
             for (idx, value) in input.data.iter().enumerate() {
@@ -187,7 +187,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
                 // `chelis_runtime.h`), not a lossy `{:.8}f` decimal.
                 let bits = value.to_bits();
                 body.push(format!(
-                    "    input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    "    ((float *)input_storage[{slot}]->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
         }
@@ -204,7 +204,7 @@ fn build_driver_mm(func_name: &str, input_labels: &[String], inputs: &[TestInput
     );
     body.push("    for (int i = 0; i < outputs[0]->size; i++) {".to_string());
     body.push("        if (i > 0) printf(\" \");".to_string());
-    body.push("        printf(\"%.6f\", outputs[0]->data[i]);".to_string());
+    body.push("        printf(\"%.6f\", ((float *)outputs[0]->data)[i]);".to_string());
     body.push("    }".to_string());
     body.push("    printf(\"\\n\");".to_string());
     body.push("    chelis_free(outputs[0]);".to_string());

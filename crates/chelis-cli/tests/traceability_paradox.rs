@@ -74,23 +74,26 @@ fn measure_seq_polynomial(c_source: &str) -> (usize, usize, usize, usize) {
     let mut seq1_bytes = 0usize;
     let mut seq2_bytes = 0usize;
 
-    let mut idx = 0;
-    while let Some(start) = c_source[idx..].find("chelis_alloc(") {
-        let pos = idx + start;
-        let after = &c_source[pos..];
+    for line in c_source.lines().filter(|line| {
+        line.contains("chelis_tensor *chelis_slot") && line.contains(" = chelis_alloc(")
+    }) {
+        let pos = line
+            .find("chelis_alloc(")
+            .expect("filtered allocation line");
+        let after = &line[pos..];
         alloc_count += 1;
 
         // Look ahead a bounded window — long enough to cover the type tag.
         let window_end = (256).min(after.len());
         let window = &after[..window_end];
-        let dtype_size: usize = if window.contains("CHELIS_F64") {
+        let dtype_size: usize = if window.contains("CHELIS_DTYPE_F64") {
             8
-        } else if window.contains("CHELIS_BOOL") {
+        } else if window.contains("CHELIS_DTYPE_BOOL") {
             1
-        } else if window.contains("CHELIS_I64") {
+        } else if window.contains("CHELIS_DTYPE_I64") {
             8
         } else {
-            // CHELIS_F32 / CHELIS_I32 / unknown all default to 4 bytes.
+            // CHELIS_DTYPE_F32 / CHELIS_DTYPE_I32 / unknown all default to 4 bytes.
             4
         };
 
@@ -136,8 +139,6 @@ fn measure_seq_polynomial(c_source: &str) -> (usize, usize, usize, usize) {
         } else if window.starts_with("chelis_alloc(0, NULL,") {
             const_bytes += dtype_size;
         }
-
-        idx = pos + "chelis_alloc(".len();
     }
 
     (alloc_count, const_bytes, seq1_bytes, seq2_bytes)
@@ -177,7 +178,12 @@ fn transformer_block_traceability_state_is_locked() {
         .filter(|l| l.contains("// span: surf:"))
         .count();
     let fused_kernels = source.matches("parallel for simd").count();
-    let allocations = source.matches("chelis_alloc(").count();
+    let planned_allocations = source
+        .lines()
+        .filter(|line| {
+            line.contains("chelis_tensor *chelis_slot") && line.contains(" = chelis_alloc(")
+        })
+        .count();
     let slot_allocations = source.matches("chelis_tensor *chelis_slot").count();
     let blas_calls = source.matches("cblas_sgemm").count()
         + source.matches("chelis_blas_matmul").count()
@@ -205,9 +211,11 @@ fn transformer_block_traceability_state_is_locked() {
          MHA+FFN block; got {fused_kernels}"
     );
     assert_eq!(
-        allocations, slot_allocations,
-        "expected every backing allocation in the C backend to be a planned \
-         chelis_slot after M2a; got {allocations} chelis_alloc calls and \
+        planned_allocations, slot_allocations,
+        "expected every C memory-planner backing allocation to be a planned \
+         chelis_slot after M2a; host-boundary allocations use the same runtime \
+         primitive but are outside the planner. Got {planned_allocations} planned \
+         chelis_alloc calls and \
          {slot_allocations} slot declarations"
     );
     assert_eq!(

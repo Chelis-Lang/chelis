@@ -17,6 +17,7 @@ chelis-vocab.workspace = true
 half = { workspace = true }
 libc.workspace = true
 memmap2 = "0.9"
+num-bigint = "0.4"
 
 [dev-dependencies]
 # Test-only: the byte-equality lock against the reference renderer

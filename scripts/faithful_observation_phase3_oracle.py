@@ -466,7 +466,7 @@ def comparator_violations(sources: Mapping[Path, str] | None = None) -> list[str
         PARITY_SOURCE: ("compare_exact_observations",),
         EVAL_AGREEMENT_SOURCE: (
             "compare_rendered_elements",
-            "chelis_format_shortest",
+            "chelis_string_from_scalar",
             "agreement_op_for_risc",
             "agreement_compiled_observation_reaches_comparator",
             "agreement_width_nonconformance_is_behavioral",

@@ -154,6 +154,21 @@ fn hip_runtime_header() -> String {
         .expect("read HIP runtime header")
 }
 
+#[test]
+fn hip_runtime_header_owns_its_rank_cap_and_dtype_sizing_dependencies() {
+    let header = hip_runtime_header();
+    assert!(header.contains("#include \"chelis_runtime_dtype.h\""));
+    assert!(header.contains("CHELIS_GPU_MAX_DIM"));
+    assert!(header.contains("case CHELIS_DTYPE_F64:"));
+    assert!(header.contains("case CHELIS_DTYPE_BOOL:"));
+    for removed in ["CHELIS_MAX_DIM", "chelis_runtime_dtype_size_checked"] {
+        assert!(
+            !header.contains(removed),
+            "HIP runtime header still depends on removed host symbol `{removed}`"
+        );
+    }
+}
+
 /// Build a simple DAG: const(a) + const(b)
 fn dag_add_consts() -> Dag {
     let mut dag = Dag::new();
@@ -545,7 +560,7 @@ fn s5_realize_materializes_with_kernel_not_view() {
     );
     assert!(
         !result.c_source.contains(
-            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_F32, d_t1->data, d_t1->storage_size)"
+            "chelis_gpu_alloc_view(1, (int[]){ 3 }, CHELIS_DTYPE_F32, d_t1->data, d_t1->storage_size)"
         ),
         "Realize must not lower to a metadata-only view"
     );
@@ -1308,7 +1323,7 @@ fn sparse_gather_i64_emits_typed_hip_kernel_and_runtime_allocation() {
     let result = codegen_hip(&dag, "test_sparse_gather_i64").unwrap();
     assert!(result.c_source.contains("kernel_gather_i64"));
     assert!(result.c_source.contains("const long long *indices"));
-    assert!(result.c_source.contains("CHELIS_I64"));
+    assert!(result.c_source.contains("CHELIS_DTYPE_I64"));
     assert!(
         result
             .c_source

@@ -6,11 +6,12 @@ use chelis_ir::eval::{TensorValue as IrTensorValue, eval_tensor_roots_with};
 use chelis_ir::tier2;
 use chelis_types::{
     ArgReduceOp, BUILTIN_NAMES, CompareOp, FloatBinOp, FloatUnOp, IntBinOp, IntUnOp, ScalarValue,
-    TensorReduceOp, arg_reduce_tensor_groups, compare_scalar_tensor, compare_scalars,
+    TensorReduceOp, arg_reduce_tensor_groups, cast_scalar, compare_scalar_tensor, compare_scalars,
     compare_tensor_scalar, compare_tensors, float_binop, float_scalar_tensor_binop,
     float_tensor_binop, float_tensor_scalar_binop, float_tensor_unop, float_unop, int_binop,
     int_scalar_tensor_binop, int_tensor_binop, int_tensor_scalar_binop, int_tensor_unop, int_unop,
-    reduce_tensor_groups, scalar_from_i64, tensor_from_scalars, types::Prim, uniform_sample,
+    reduce_tensor_groups, scalar_from_f64, scalar_from_i64, tensor_from_scalars, types::Prim,
+    uniform_sample,
 };
 
 use super::transforms::*;
@@ -2464,7 +2465,6 @@ pub(super) fn tensor_scatter_value(
         .to_i64_exact_vec()
         .expect("integer tensor storage reads exactly");
     let mut writes = Vec::with_capacity(updates.value.len());
-    let mut seen = std::collections::HashSet::new();
     for linear in 0..updates.value.len() {
         let update_index = linear_to_indices(linear, &updates.value.shape);
         let mut out_index = Vec::with_capacity(base.value.shape.len());
@@ -2480,12 +2480,6 @@ pub(super) fn tensor_scatter_value(
         out_index.push(value as usize);
         out_index.extend_from_slice(&update_index[axis + indices.value.shape.len()..]);
         let out_linear = indices_to_linear(&out_index, &base.value.shape);
-        if mode == "replace" && !seen.insert(out_linear) {
-            return Err(format!(
-                "scatter replace mode rejects duplicate target index {}",
-                out_linear
-            ));
-        }
         writes.push((out_linear, linear));
     }
     match mode {
@@ -2746,33 +2740,103 @@ pub(super) fn tensor_diagonal_value(
     )))
 }
 
+fn trace_balanced_sum(
+    tensor: &RuntimeTensorValue,
+    group: &[usize],
+    accumulator: Prim,
+    result: Prim,
+) -> Result<ScalarValue, String> {
+    let mut level = group
+        .iter()
+        .map(|&index| {
+            cast_scalar(
+                "trace",
+                tensor.value.storage().scalar_at(index),
+                accumulator,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if level.is_empty() {
+        let zero = if accumulator.is_integer() {
+            scalar_from_i64("trace", accumulator, 0)
+        } else {
+            scalar_from_f64("trace", accumulator, 0.0)
+        }
+        .map_err(|error| error.to_string())?;
+        return cast_scalar("trace", zero, result).map_err(|error| error.to_string());
+    }
+    while level.len() > 1 {
+        let mut source = level.into_iter();
+        let mut next = Vec::with_capacity(source.len().div_ceil(2));
+        while let Some(left) = source.next() {
+            let combined = match source.next() {
+                Some(right) if accumulator.is_integer() => {
+                    int_binop(IntBinOp::Add, left, right).map_err(|error| error.to_string())?
+                }
+                Some(right) => {
+                    float_binop(FloatBinOp::Add, left, right).map_err(|error| error.to_string())?
+                }
+                None => left,
+            };
+            next.push(combined);
+        }
+        level = next;
+    }
+    cast_scalar("trace", level[0], result).map_err(|error| error.to_string())
+}
+
 pub(super) fn tensor_trace_value(
     tensor: &RuntimeTensorValue,
     axis1: i64,
     axis2: i64,
 ) -> Result<RuntimeTensorValue, String> {
     // chelis#1349: the diagonal occupies output slot `axis1 - 1` when
-    // `axis2 < axis1`, else `axis1` (see `tensor_diagonal_value`), and
-    // that slot is the axis trace must reduce so both source axes are
-    // removed, matching `infer_trace_result_type`. `min(axis1, axis2)`
-    // named it only for `axis1 < axis2` and for adjacent reversed pairs;
-    // elsewhere it reduced a retained axis and produced a shape the
-    // checker never declared. Normalize against the SOURCE rank with `?`
-    // so an out-of-range axis rejects loud instead of the prior
-    // `unwrap_or` silent fallback to the last axis.
+    // `axis2 < axis1`, else `axis1` (see `tensor_diagonal_value`), and that
+    // slot is the axis trace must reduce so both source axes are removed,
+    // matching `infer_trace_result_type`. `min(axis1, axis2)` named it only
+    // for `axis1 < axis2` and for adjacent reversed pairs; elsewhere it
+    // reduced a retained axis and produced a shape the checker never
+    // declared. Normalizing against the SOURCE rank with `?` also replaces
+    // the prior `unwrap_or` silent fallback to the last axis.
     let source_rank = tensor.value.shape.len();
     let axis1 = normalize_axis(source_rank, axis1, "trace")?;
     let axis2 = normalize_axis(source_rank, axis2, "trace")?;
     let diagonal = tensor_diagonal_value(tensor, axis1 as i64, axis2 as i64)?;
-    let diag_out_axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
-    // #170: trace = sum over the diagonal. Route the diagonal reduction
-    // through `tensor_reduce_host`'s `Sum` path so it uses the SAME
-    // stride-4 ILP f32 cascade as `RiscOp::Sum` (issue #163, torch
-    // `row_sum` parity). The prior hand-rolled `sum += ...` left-fold in
-    // f64 diverged from `torch.trace` (== `torch.sum(diagonal)`) by ~1 ULP
-    // for diagonals longer than 16 f32 elements. Reusing the one verified
-    // cascade also prevents the two summation orders from drifting apart.
-    tensor_reduce_host(&diagonal, diag_out_axis as i64, ReduceOp::Sum)
+    let rank = diagonal.value.shape.len();
+    let axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
+    let mut out_shape = diagonal.value.shape.clone();
+    let axis_len = out_shape.remove(axis);
+    let out_numel = tensor_numel(&out_shape);
+    let mut groups = Vec::with_capacity(out_numel);
+    for out_linear in 0..out_numel {
+        let out_indices = linear_to_indices(out_linear, &out_shape);
+        let mut group = Vec::with_capacity(axis_len);
+        for axis_index in 0..axis_len {
+            let mut input_indices = Vec::with_capacity(rank);
+            let mut output_position = 0;
+            for dimension in 0..rank {
+                if dimension == axis {
+                    input_indices.push(axis_index);
+                } else {
+                    input_indices.push(out_indices[output_position]);
+                    output_position += 1;
+                }
+            }
+            group.push(indices_to_linear(&input_indices, &diagonal.value.shape));
+        }
+        groups.push(group);
+    }
+    let accumulator = diagonal.precision.default_reduce_sum_accumulator()?;
+    let result = diagonal.precision.default_reduce_sum_result_precision()?;
+    let values = groups
+        .iter()
+        .map(|group| trace_balanced_sum(&diagonal, group, accumulator, result))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RuntimeTensorValue::new(IrTensorValue::from_storage(
+        out_shape,
+        tensor_from_scalars(result, &values),
+    )))
 }
 
 pub(super) fn tensor_clamp_value(
@@ -2816,21 +2880,41 @@ pub(super) fn tensor_einsum_value(
     lhs: &RuntimeTensorValue,
     rhs: &RuntimeTensorValue,
 ) -> Result<RuntimeTensorValue, String> {
-    if equation.contains("...") {
-        return Err("einsum ellipsis support is deferred in 3h".to_string());
-    }
     let (inputs, output) = equation
         .split_once("->")
-        .ok_or_else(|| "einsum equation must contain explicit output".to_string())?;
-    let operands = inputs.split(',').collect::<Vec<_>>();
-    if operands.len() != 2 {
-        return Err("einsum 3h currently supports exactly two operands".to_string());
+        .ok_or_else(|| "einsum equation must match [a-z]*,[a-z]*->[a-z]*".to_string())?;
+    if output.contains("->") {
+        return Err("einsum equation must contain exactly one `->`".to_string());
     }
-    let lhs_labels = operands[0].chars().collect::<Vec<_>>();
-    let rhs_labels = operands[1].chars().collect::<Vec<_>>();
+    let (lhs_input, rhs_input) = inputs
+        .split_once(',')
+        .ok_or_else(|| "einsum equation must contain exactly two operands".to_string())?;
+    if rhs_input.contains(',') {
+        return Err("einsum equation must contain exactly two operands".to_string());
+    }
+    if !lhs_input
+        .bytes()
+        .chain(rhs_input.bytes())
+        .chain(output.bytes())
+        .all(|label| label.is_ascii_lowercase())
+    {
+        return Err("einsum labels must be lowercase ASCII `a` through `z`".to_string());
+    }
+    let lhs_labels = lhs_input.chars().collect::<Vec<_>>();
+    let rhs_labels = rhs_input.chars().collect::<Vec<_>>();
     let out_labels = output.chars().collect::<Vec<_>>();
     if lhs_labels.len() != lhs.value.shape.len() || rhs_labels.len() != rhs.value.shape.len() {
         return Err("einsum label count must match operand rank".to_string());
+    }
+    let mut output_seen = [false; 26];
+    for &label in &out_labels {
+        let index = (label as u8 - b'a') as usize;
+        if output_seen[index] {
+            return Err(format!(
+                "einsum output label `{label}` must occur exactly once"
+            ));
+        }
+        output_seen[index] = true;
     }
     let mut dims = std::collections::BTreeMap::<char, usize>::new();
     for (label, size) in lhs_labels.iter().zip(&lhs.value.shape) {
@@ -2865,6 +2949,15 @@ pub(super) fn tensor_einsum_value(
         .iter()
         .map(|label| dims.get(label).copied().unwrap_or(1))
         .collect::<Vec<_>>();
+    let checked_product = |shape: &[usize], context: &str| {
+        shape.iter().try_fold(1usize, |product, &extent| {
+            product
+                .checked_mul(extent)
+                .ok_or_else(|| format!("Overflow: einsum {context} extent product"))
+        })
+    };
+    let output_total = checked_product(&out_shape, "output")?;
+    let reduction_total = checked_product(&reduction_shape, "reduction")?;
     // #170 (DO NOT "fix" into the cascade): einsum is a contraction sum,
     // same shape as matmul, and shares matmul's disposition. torch's f32
     // einsum follows its GEMM order (strict-f32 left-fold), NOT the #163
@@ -2875,14 +2968,13 @@ pub(super) fn tensor_einsum_value(
     // in `tensor_matmul_host`.
     let lhs_wide = lhs.value.to_f64_lossy_vec();
     let rhs_wide = rhs.value.to_f64_lossy_vec();
-    let mut out = vec![0.0; tensor_numel(&out_shape)];
+    let mut out = vec![0.0; output_total];
     for (out_linear, slot) in out.iter_mut().enumerate() {
         let out_index = linear_to_indices(out_linear, &out_shape);
         let mut label_values = std::collections::HashMap::<char, usize>::new();
         for (label, value) in out_labels.iter().zip(out_index.iter()) {
             label_values.insert(*label, *value);
         }
-        let reduction_total = tensor_numel(&reduction_shape);
         let mut acc = 0.0_f64;
         for reduction_linear in 0..reduction_total {
             let reduction_index = linear_to_indices(reduction_linear, &reduction_shape);

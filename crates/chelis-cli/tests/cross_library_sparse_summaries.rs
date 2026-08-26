@@ -162,7 +162,7 @@ fn count_gather_out_index_lines(body: &str) -> usize {
 }
 
 fn count_gather_dtype_dispatch(body: &str) -> usize {
-    body.matches("->dtype == CHELIS_I64) ? (int64_t)((const int64_t*)")
+    body.matches("->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)")
         .count()
 }
 
@@ -289,8 +289,8 @@ fn user_def_scatter_add_helper_emits_inline_sparse_scatter_add_loop() {
     // This test asserts the surface invariant: there is no Surf
     // construct today whose tensor-lane lowering goes to
     // `RiscOp::ScatterAdd`. The host-lane `scatter(base, indices,
-    // updates, axis, "add")` pentaop emits a `chelis_tensor_scatter()`
-    // runtime call (the generic dispatch path; see
+    // updates, axis, "add")` pentaop emits a `chelis_tensor_scatter_add()`
+    // runtime call (the exact tagged dispatch path; see
     // `specialization_dispatch.rs::scatter`), not `RiscOp::ScatterAdd`.
     // We confirm that pentaop path remains generic and that no false
     // summary is registered.

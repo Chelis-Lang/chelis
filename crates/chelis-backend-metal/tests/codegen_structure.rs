@@ -422,8 +422,8 @@ fn m2_root_without_store_writes_output_back() {
 #[test]
 fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
     // Reduction returns a scalar. The output_specs+root_writeback path
-    // must emit `chelis_alloc(0, NULL, CHELIS_F32)` for a true rank-0
-    // scalar — not `chelis_alloc(1, {1}, CHELIS_F32)` which would lie
+    // must emit `chelis_alloc(0, NULL, CHELIS_DTYPE_F32)` for a true rank-0
+    // scalar — not `chelis_alloc(1, {1}, CHELIS_DTYPE_F32)` which would lie
     // about ndim to the host.
     let mut dag = Dag::new();
     let a = dag.add_node(
@@ -446,7 +446,7 @@ fn m4_reduce_root_emits_rank_zero_scalar_alloc() {
     let result = codegen_metal(&dag, "sumv");
     let src = &result.mm_source;
     assert!(
-        src.contains("outputs[0] = chelis_alloc(0, NULL, CHELIS_F32);"),
+        src.contains("outputs[0] = chelis_alloc(0, NULL, CHELIS_DTYPE_F32);"),
         "scalar reduce output must allocate as rank-0 (ndim=0, NULL shape): {src}"
     );
 }

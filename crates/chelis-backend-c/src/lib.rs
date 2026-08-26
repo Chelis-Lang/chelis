@@ -989,13 +989,11 @@ int main(void) {
 #include "chelis_runtime.h"
 int main(void) {
     int64_t shape[2] = {2, 3};
-    chelis_tensor *base = chelis_alloc(2, shape, CHELIS_F32);
-    base->data[4] = 7.0f;
-    chelis_tensor *view = chelis_alloc_view(2, shape, CHELIS_F32, base->data);
-    view->strides[0] = 0;
-    view->strides[1] = 1;
+    chelis_tensor *base = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
+    ((float*)base->data)[4] = 7.0f;
+    chelis_tensor *view = chelis_alloc_view(2, shape, CHELIS_DTYPE_F32, base->data, base->byte_capacity);
     chelis_free(view);
-    if (base->data[4] != 7.0f) return 2;
+    if (((float*)base->data)[4] != 7.0f) return 2;
     chelis_free(base);
     return 0;
 }
@@ -1054,7 +1052,7 @@ void test_add(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_o
 int main() {
     chelis_tensor *outputs[1] = {0};
     test_add(NULL, 0, outputs, 1);
-    printf("%.1f\n", outputs[0]->data[0]);
+    printf("%.1f\n", ((float*)outputs[0]->data)[0]);
     chelis_free(outputs[0]);
     return 0;
 }
@@ -1107,13 +1105,31 @@ int main() {
         let main_c = format!(
             r#"
 #include "chelis_runtime.h"
+static double chelis_test_element_as_f64(const chelis_tensor *tensor, int64_t index) {{
+    switch (tensor->dtype) {{
+        case CHELIS_DTYPE_F32: return ((const float*)tensor->data)[index];
+        case CHELIS_DTYPE_F64: return ((const double*)tensor->data)[index];
+        case CHELIS_DTYPE_I8: return ((const int8_t*)tensor->data)[index];
+        case CHELIS_DTYPE_I16: return ((const int16_t*)tensor->data)[index];
+        case CHELIS_DTYPE_I32: return ((const int32_t*)tensor->data)[index];
+        case CHELIS_DTYPE_I64: return (double)((const int64_t*)tensor->data)[index];
+        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)tensor->data)[index]);
+        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)tensor->data)[index]);
+        case CHELIS_DTYPE_BOOL: {{
+            uint8_t value = ((const uint8_t*)tensor->data)[index];
+            if (value > UINT8_C(1)) abort();
+            return value;
+        }}
+        default: abort();
+    }}
+}}
 void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main() {{
     chelis_tensor *outputs[1] = {{0}};
     {func_name}(NULL, 0, outputs, 1);
     for (int i = 0; i < outputs[0]->size; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[0]->data[i]);
+        printf("%.6f", chelis_test_element_as_f64(outputs[0], i));
     }}
     printf("\n");
     chelis_free(outputs[0]);
@@ -1184,7 +1200,11 @@ int main() {{
     /// f32 bits when the emitted C reparsed the literal.
     fn harness_input_fill_line(lhs: &str, value: f32) -> String {
         let bits = value.to_bits();
-        format!("{lhs} = chelis_f32_from_bits(0x{bits:08x}u);")
+        let (tensor, index) = lhs
+            .split_once("->data[")
+            .and_then(|(tensor, index)| index.strip_suffix(']').map(|index| (tensor, index)))
+            .expect("f32 harness destination must be a tensor data index");
+        format!("((float*){tensor}->data)[{index}] = chelis_f32_from_bits(0x{bits:08x}u);")
     }
 
     /// Issue #252: the test-harness fill must round-trip every f32 value
@@ -1278,7 +1298,7 @@ int main() {{
                     format!("shape_{case_idx}_{slot}")
                 };
                 lines.push(format!(
-                    "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, {shape_arg}, CHELIS_F32);"
+                    "chelis_tensor *input_{case_idx}_{slot} = chelis_alloc({ndim}, {shape_arg}, CHELIS_DTYPE_F32);"
                 ));
                 for (i, value) in input.data.iter().enumerate() {
                     let lhs = format!("input_{case_idx}_{slot}->data[{i}]");
@@ -1301,7 +1321,7 @@ int main() {{
             ));
             lines.push("        if (out_idx > 0 || i > 0) printf(\" \");".to_string());
             lines.push(format!(
-                "        printf(\"%.6f\", outputs_{case_idx}[out_idx]->data[i]);"
+                "        printf(\"%.6f\", chelis_test_element_as_f64(outputs_{case_idx}[out_idx], i));"
             ));
             lines.push("    }".to_string());
             lines.push("    if (out_idx + 1 < n_out) printf(\" |\");".to_string());
@@ -1323,6 +1343,24 @@ int main() {{
         let main_c = format!(
             r#"
 #include "chelis_runtime.h"
+static double chelis_test_element_as_f64(const chelis_tensor *tensor, int64_t index) {{
+    switch (tensor->dtype) {{
+        case CHELIS_DTYPE_F32: return ((const float*)tensor->data)[index];
+        case CHELIS_DTYPE_F64: return ((const double*)tensor->data)[index];
+        case CHELIS_DTYPE_I8: return ((const int8_t*)tensor->data)[index];
+        case CHELIS_DTYPE_I16: return ((const int16_t*)tensor->data)[index];
+        case CHELIS_DTYPE_I32: return ((const int32_t*)tensor->data)[index];
+        case CHELIS_DTYPE_I64: return (double)((const int64_t*)tensor->data)[index];
+        case CHELIS_DTYPE_BF16: return chelis_bf16_to_f32(((const uint16_t*)tensor->data)[index]);
+        case CHELIS_DTYPE_F16: return chelis_f16_to_f32(((const uint16_t*)tensor->data)[index]);
+        case CHELIS_DTYPE_BOOL: {{
+            uint8_t value = ((const uint8_t*)tensor->data)[index];
+            if (value > UINT8_C(1)) abort();
+            return value;
+        }}
+        default: abort();
+    }}
+}}
 void {func_name}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
     int n_out = {n_out};
@@ -1574,7 +1612,15 @@ int main(void) {{
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::CmpLt,
+            vec![a, b],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
         let out = compile_and_run(&dag, "test_cmplt");
         assert_float_eq(&out, 1.0);
     }
@@ -1597,7 +1643,15 @@ int main(void) {{
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::CmpLt,
+            vec![a, b],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
         let out = compile_and_run(&dag, "test_cmplt_f");
         assert_float_eq(&out, 0.0);
     }
@@ -2060,13 +2114,13 @@ int main(void) {{
             match label.as_str() {
                 "values" => input_lines.push(
                     r#"int64_t shape_values[2] = { 4, 2 };
-    chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_F32);
+    chelis_tensor *values = chelis_alloc(2, shape_values, CHELIS_DTYPE_F32);
     float values_data[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
-    for (int i = 0; i < 8; i++) values->data[i] = values_data[i];
+    for (int i = 0; i < 8; i++) ((float*)values->data)[i] = values_data[i];
     inputs[SLOT] = values;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
-                // #476: a CHELIS_I32 index tensor stores int32 values
+                // #476: a CHELIS_DTYPE_I32 index tensor stores int32 values
                 // bit-packed into the float-typed `data` buffer; they MUST be
                 // written through an `(int32_t*)` cast, not as floats. The
                 // pre-fix fixture wrote `indices->data[i] = 2.0f` (the FLOAT
@@ -2076,7 +2130,7 @@ int main(void) {{
                 // what real generated input code and the runtime do.
                 "indices" => input_lines.push(
                     r#"int64_t shape_indices[1] = { 3 };
-    chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_I32);
+    chelis_tensor *indices = chelis_alloc(1, shape_indices, CHELIS_DTYPE_I32);
     int32_t *indices_i32 = (int32_t*)indices->data;
     indices_i32[0] = 0; indices_i32[1] = 2; indices_i32[2] = 0;
     inputs[SLOT] = indices;"#
@@ -2084,15 +2138,15 @@ int main(void) {{
                 ),
                 "target" => input_lines.push(
                     r#"int64_t shape_target[2] = { 4, 2 };
-    chelis_tensor *target = chelis_alloc(2, shape_target, CHELIS_F32);
+    chelis_tensor *target = chelis_alloc(2, shape_target, CHELIS_DTYPE_F32);
     inputs[SLOT] = target;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
                 "updates" => input_lines.push(
                     r#"int64_t shape_updates[2] = { 3, 2 };
-    chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_F32);
+    chelis_tensor *updates = chelis_alloc(2, shape_updates, CHELIS_DTYPE_F32);
     float updates_data[6] = { 1, 10, 2, 20, 3, 30 };
-    for (int i = 0; i < 6; i++) updates->data[i] = updates_data[i];
+    for (int i = 0; i < 6; i++) ((float*)updates->data)[i] = updates_data[i];
     inputs[SLOT] = updates;"#
                         .replace("SLOT", &slot.to_string()),
                 ),
@@ -2109,12 +2163,12 @@ int main(void) {{
     test_sparse(inputs, {n_in}, outputs, 2);
     for (int i = 0; i < outputs[0]->size; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[0]->data[i]);
+        printf("%.6f", ((float*)outputs[0]->data)[i]);
     }}
     printf(" |");
     for (int i = 0; i < outputs[1]->size; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[1]->data[i]);
+        printf("%.6f", ((float*)outputs[1]->data)[i]);
     }}
     printf("\n");
     for (int i = 0; i < {n_in}; i++) chelis_free(inputs[i]);
@@ -2618,7 +2672,7 @@ void test_multi(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n
 int main(void) {
     chelis_tensor *outputs[2] = {0};
     test_multi(NULL, 0, outputs, 2);
-    printf("%.1f %.1f\n", outputs[0]->data[0], outputs[1]->data[0]);
+    printf("%.1f %.1f\n", ((float*)outputs[0]->data)[0], ((float*)outputs[1]->data)[0]);
     chelis_free(outputs[0]);
     chelis_free(outputs[1]);
     return 0;
@@ -2661,17 +2715,17 @@ int main(void) {
 void test_load_copy(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {
     int64_t shape[1] = {2};
-    chelis_tensor *input = chelis_alloc(1, shape, CHELIS_F32);
-    input->data[0] = 3.0f;
-    input->data[1] = 4.0f;
+    chelis_tensor *input = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    ((float*)input->data)[0] = 3.0f;
+    ((float*)input->data)[1] = 4.0f;
     chelis_tensor *inputs[1] = {input};
     chelis_tensor *outputs[1] = {0};
     test_load_copy(inputs, 1, outputs, 1);
     printf("%d %d %.1f %.1f\n",
            outputs[0] == input,
            outputs[0]->data == input->data,
-           outputs[0]->data[0],
-           outputs[0]->data[1]);
+           ((float*)outputs[0]->data)[0],
+           ((float*)outputs[0]->data)[1]);
     chelis_free(outputs[0]);
     chelis_free(input);
     return 0;
@@ -3142,15 +3196,15 @@ int main(void) {
 void test_simd_compile(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
     int64_t shape[1] = {{ {n} }};
-    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
-    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
-    for (int i = 0; i < {n}; i++) {{ ta->data[i] = 0.5f; tb->data[i] = 0.5f; }}
+    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    for (int i = 0; i < {n}; i++) {{ ((float*)ta->data)[i] = 0.5f; ((float*)tb->data)[i] = 0.5f; }}
     chelis_tensor *inputs[2] = {{ta, tb}};
     chelis_tensor *outputs[1] = {{0}};
     test_simd_compile(inputs, 2, outputs, 1);
     float expected = expf(1.0f);
     for (int i = 0; i < {n}; i++) {{
-        float diff = outputs[0]->data[i] - expected;
+        float diff = ((float*)outputs[0]->data)[i] - expected;
         if (diff < 0) diff = -diff;
         if (diff > 1e-5f) {{ return 1; }}
     }}
@@ -3255,15 +3309,15 @@ int main(void) {{
 void test_oracle(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
     int64_t shape[1] = {{ {n} }};
-    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_F32);
-    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_F32);
+    chelis_tensor *ta = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
+    chelis_tensor *tb = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     {a_init}
     {b_init}
     chelis_tensor *inputs[2] = {{ta, tb}};
     chelis_tensor *outputs[1] = {{0}};
     test_oracle(inputs, 2, outputs, 1);
     for (int i = 0; i < {n}; i++) {{
-        printf("%.8f\n", outputs[0]->data[i]);
+        printf("%.8f\n", ((float*)outputs[0]->data)[i]);
     }}
     chelis_free(ta);
     chelis_free(tb);
@@ -3403,13 +3457,13 @@ int main(void) {{
 void test_single_exp_run(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
 int main(void) {{
     int64_t shape[1] = {{ {n} }};
-    chelis_tensor *tx = chelis_alloc(1, shape, CHELIS_F32);
+    chelis_tensor *tx = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     {x_init}
     chelis_tensor *inputs[1] = {{tx}};
     chelis_tensor *outputs[1] = {{0}};
     test_single_exp_run(inputs, 1, outputs, 1);
     for (int i = 0; i < {n}; i++) {{
-        printf("%.8f\n", outputs[0]->data[i]);
+        printf("%.8f\n", ((float*)outputs[0]->data)[i]);
     }}
     chelis_free(tx);
     chelis_free(outputs[0]);
@@ -3790,7 +3844,7 @@ int main(void) {{
     // gcc compile, and numerical correctness at the ~15-digit precision that
     // the host f64 path reaches. Reading outputs as `double*` via the shared
     // data pointer relies on chelis_alloc sizing the allocation by 8 bytes
-    // for CHELIS_F64 (see chelis_alloc in chelis-runtime).
+    // for CHELIS_DTYPE_F64 (see chelis_alloc in chelis-runtime).
 
     fn vec_f64(n: usize) -> TensorType {
         TensorType {

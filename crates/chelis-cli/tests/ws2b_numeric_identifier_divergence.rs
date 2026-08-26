@@ -21,15 +21,14 @@
 //! * #379 — top-level bindings spelled like C keywords or the emitted
 //!   helper scheme must produce compilable C (identifier mangling).
 //! * #365 — a `Bool` comparison-mask const (max-reduce / softmax backward)
-//!   must fill through the dtype-correct `chelis_fill_bool_bits`, not
-//!   `chelis_fill_f32_bits`, so a debug-runtime build does not abort on the
-//!   dtype assertion. (The test links the debug `libchelis_runtime.a`, whose
-//!   `debug_assert` is active.)
+//!   must fill through `chelis_fill_scalar` with a Bool-tagged exact scalar,
+//!   so a debug-runtime build does not abort on the dtype assertion. (The test
+//!   links the debug `libchelis_runtime.a`, whose `debug_assert` is active.)
 //!
 //! #378 (route a captured top-level scalar binding into `HostProgram::globals`)
 //! landed in chelis-ir, so the #381 program now compiles on the C backend and
 //! its arm is a full eval-vs-C parity oracle (the captured f64 scalar is packed
-//! into a `CHELIS_F64` rank-0 tensor for the tensor-helper input). All arms
+//! into a `CHELIS_DTYPE_F64` rank-0 tensor for the tensor-helper input). All arms
 //! here exercise eval-vs-C agreement.
 
 use assert_cmd::Command;
@@ -603,8 +602,8 @@ out = d(1.0, 5.0)\n";
 /// The C-backend arm is now live: #378 (chelis-ir, merged) routes the
 /// captured scalar binding into `HostProgram::globals` so the C emitter
 /// declares it, and #381 (this PR) packs that captured f64 scalar into a
-/// `CHELIS_F64` rank-0 tensor for the tensor-helper input (the pre-fix
-/// catch-all packed it as `CHELIS_F32`, storing only the low 4 bytes, so the
+/// `CHELIS_DTYPE_F64` rank-0 tensor for the tensor-helper input (the pre-fix
+/// catch-all packed it as `CHELIS_DTYPE_F32`, storing only the low 4 bytes, so the
 /// f64 kernel read garbage and silently dropped the value -- the eval-vs-C
 /// divergence this arm exists to lock). `out` is a rank-1 f64 tensor, so
 /// both lanes render it identically; the comparison uses the value to stay
@@ -630,12 +629,13 @@ out = make(to_tensor([cast(1.0, f64), cast(2.0, f64)]))\n";
     // f32 and the C output was [1.0, 2.0] (the captured 1.1 dropped to ~0).
     let build = chelis_build_c(source, "s2t_capture");
     let kernel_c = build.path().join("s2t_capture.c");
-    // Emit-shape: the captured f64 scalar packs into a CHELIS_F64 rank-0
-    // tensor through a double*, not CHELIS_F32.
+    // Emit-shape: the captured f64 scalar packs into a CHELIS_DTYPE_F64 rank-0
+    // tensor through a double*, not CHELIS_DTYPE_F32.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_alloc(0, NULL, CHELIS_F64)") && c_source.contains("((double*)"),
-        "captured f64 scalar must pack into a CHELIS_F64 rank-0 tensor (#381); \
+        c_source.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F64)")
+            && c_source.contains("((double*)"),
+        "captured f64 scalar must pack into a CHELIS_DTYPE_F64 rank-0 tensor (#381); \
          emitted C=\n{c_source}",
     );
     let stdout = compile_and_run_emitted(build.path(), &kernel_c);
@@ -849,15 +849,14 @@ out = add(w, to_tensor([1.0, 2.0]))\n";
 }
 
 // -----------------------------------------------------------------------------
-// #365 — Bool comparison-mask const fills through the dtype-correct helper
+// #365 / #1289 - Bool comparison-mask const uses the tagged scalar fill
 // -----------------------------------------------------------------------------
 
 /// POSITIVE + emit-shape: a `max_reduce` backward materializes a `Bool`
-/// comparison mask. The mask const must fill through `chelis_fill_bool_bits`
-/// (dtype-correct for CHELIS_BOOL), NOT `chelis_fill_f32_bits` (which asserts
-/// CHELIS_F32). The build links the debug `libchelis_runtime.a`, so the
-/// debug-build dtype assertion is active: a regression aborts the run.
-/// Pre-fix the Bool const used `chelis_fill_f32_bits` and aborted here.
+/// comparison mask. The mask const must cross the runtime boundary as a
+/// dtype-tagged scalar and fill through `chelis_fill_scalar`, never through a
+/// removed dtype-specific helper. The build links the debug runtime, so an
+/// invalid scalar/tensor dtype pairing aborts the run.
 #[test]
 fn issue_365_max_reduce_backward_bool_mask_fill_is_dtype_correct() {
     let source = "def f(x: tensor[3, f32]) -> f32 = tensor_to_scalar(max_reduce(x, 0))\n\
@@ -867,12 +866,17 @@ out = df(to_tensor([1.0, 5.0, 3.0]))\n";
     let build = chelis_build_c(source, "maxback");
     let kernel_c = build.path().join("maxback.c");
 
-    // Emit-shape: the Bool mask const must use the dtype-correct fill.
+    // Emit-shape: the Bool mask const must use the exact tagged carrier.
     let c_source = fs::read_to_string(&kernel_c).expect("read emitted C");
     assert!(
-        c_source.contains("chelis_fill_bool_bits("),
-        "a Bool mask const must fill through chelis_fill_bool_bits (#365); \
+        c_source.contains("chelis_fill_scalar(")
+            && c_source.contains("chelis_scalar_from_bits(CHELIS_DTYPE_BOOL"),
+        "a Bool mask const must fill through a Bool-tagged chelis_scalar (#365/#1289); \
          emitted C=\n{c_source}",
+    );
+    assert!(
+        !c_source.contains("chelis_fill_bool_bits("),
+        "the removed dtype-specific Bool fill must not reappear; emitted C=\n{c_source}"
     );
 
     // Compile + run against the (debug) runtime; a dtype-assert abort would
@@ -929,13 +933,13 @@ out = df(to_tensor([1.0, 2.0, 3.0]))\n";
 // #476 — inline sparse gather/scatter read int32 indices through the
 // dtype-correct pointer, not `(int)t->data[i]`. Same #347 class as the
 // argmax/argmin index prints above: int tensors bit-pack their values into
-// the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_I32 index
+// the float-typed `->data`, so `(int)t->data[i]` on a CHELIS_DTYPE_I32 index
 // `(int)`-truncates the FLOAT reinterpretation of the int32 bits (index `2`
 // → `(int)2.8e-45f` → `0`), silently gathering the WRONG row. The user
 // surface defaults integer literals to int32 (`to_tensor([2, 0, 1])` is a
-// CHELIS_I32 tensor), so this fires on ordinary index code; the pre-fix
+// CHELIS_DTYPE_I32 tensor), so this fires on ordinary index code; the pre-fix
 // corpus never reproduced it because every gather fixture cast indices to
-// int64 (`cast(_, int64)`), which took the always-correct CHELIS_I64 branch.
+// int64 (`cast(_, int64)`), which took the always-correct CHELIS_DTYPE_I64 branch.
 //
 // The acceptance oracle is BIT-IDENTITY eval-vs-C on the integer/index path
 // (no float summation here — indices are exact), PLUS a negative assertion

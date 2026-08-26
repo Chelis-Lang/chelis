@@ -116,6 +116,15 @@ class LoudUnsupportedPhase2OracleTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "RuntimeDType owner shape drifted"):
             oracle.mutate_runtime_dtype(drifted)
 
+    def test_dtype_mutation_refuses_a_drifted_c_macro_owner_shape(self) -> None:
+        source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_text(encoding="utf-8")
+        drifted = source.replace(
+            'Self::I16 => "CHELIS_DTYPE_I16",',
+            'Self::I16 => "CHELIS_DTYPE_I16_DRIFTED",',
+        )
+        with self.assertRaisesRegex(oracle.OracleFailure, "RuntimeDType owner shape drifted"):
+            oracle.mutate_runtime_dtype(drifted)
+
     def test_controlled_mutation_restores_original_bytes_on_failure(self) -> None:
         source = (oracle.REPO_ROOT / oracle.VOCAB_SOURCE).read_bytes()
         with tempfile.TemporaryDirectory() as raw_dir:

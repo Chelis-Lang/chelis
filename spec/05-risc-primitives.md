@@ -56,11 +56,12 @@ The primitive surface includes
 `diagonal` / `trace`, and `clamp`. `School.Nn.Embedding` (moved to the `school` library
 in chelis-std) is the named library surface over `gather`.
 
-Chelis rejects deterministic literal-driven value errors
-at check time when enough information is concrete in source (for example, statically
-inconsistent `einsum` extents or duplicate indices in `scatter(..., "replace")`).
-When those constraints depend on runtime values instead, the evaluator and generated C
-runtime reject them during execution; compiled C exits non-zero rather than aborting.
+Chelis rejects deterministic literal-driven value errors at check time when enough
+information is concrete in source (for example, statically inconsistent `einsum`
+extents or out-of-bounds scatter indices). When those constraints depend on runtime
+values instead, the evaluator and generated C runtime reject them during execution;
+compiled C exits non-zero rather than aborting. Duplicate replace-scatter indices are
+not errors: they follow §3.5's deterministic last-write-wins rule.
 
 ---
 
@@ -1835,8 +1836,8 @@ exact ADT identity by [05-OP-34].
 > inverse gather shape contract: `updates.shape` is
 > `base[..axis] ++ indices.shape ++ base[axis+1..]`, while base, updates, and
 > result have one dtype. Replace admits every active dtype, including bool,
-> and is [05-SPARSE-1..2]'s row-major
-> last-write-wins operation and structurally rejects `grad`. Add starts each
+> and follows [05-SPARSE-1] plus §3.5's row-major last-write-wins rule; it
+> structurally rejects `grad`. Add starts each
 > destination's leaf sequence with the base value, admits exactly active
 > signed-integer and float dtypes, and follows the base by targeting
 > updates in increasing row-major flat-index order, and combines those leaves

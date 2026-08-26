@@ -87,7 +87,7 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
     dag.add_root(mm);
     let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     assert!(
-        src.contains("chelis_bf16_buffer_to_f32"),
+        src.contains("chelis_bf16_to_f32"),
         "WS-1: bf16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
@@ -95,7 +95,7 @@ fn c_backend_blas_matmul_bf16_routes_through_convert_then_sgemm_post_ws_1() {
         "WS-1: bf16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(
-        src.contains("chelis_f32_buffer_to_bf16"),
+        src.contains("chelis_f32_to_bf16"),
         "WS-1: bf16 matmul must downcast the f32 accumulator buffer back to bf16 storage; got:\n{src}"
     );
 }
@@ -130,7 +130,7 @@ fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
     dag.add_root(mm);
     let src = CEmitter::emit_dag(&dag, "test_fn").unwrap();
     assert!(
-        src.contains("chelis_f16_buffer_to_f32"),
+        src.contains("chelis_f16_to_f32"),
         "WS-1: f16 matmul must convert operands to f32 before BLAS dispatch; got:\n{src}"
     );
     assert!(
@@ -138,7 +138,7 @@ fn c_backend_blas_matmul_f16_routes_through_convert_then_sgemm_post_ws_1() {
         "WS-1: f16 matmul must dispatch cblas_sgemm against the f32 scratch buffers; got:\n{src}"
     );
     assert!(
-        src.contains("chelis_f32_buffer_to_f16"),
+        src.contains("chelis_f32_to_f16"),
         "WS-1: f16 matmul must downcast the f32 accumulator buffer back to f16 storage; got:\n{src}"
     );
 }

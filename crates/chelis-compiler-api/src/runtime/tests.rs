@@ -804,100 +804,42 @@ y = sum(seq, cast(0, int32))
     );
 }
 
-/// #170: `trace` (= sum over the diagonal) must use the SAME stride-4 ILP
-/// f32 cascade as `RiscOp::Sum`, so `chelis trace` is bit-exact with
-/// `torch.trace` (== `torch.sum(diagonal)`). The 20-element diagonal below
-/// (torch.rand, manual_seed(7)) is longer than 16, so the cascade and the
-/// prior f32 left-fold differ by 1 ULP: torch trace = `0x4125e023`
-/// (10.367220878601074), the old left-fold = `0x4125e024`. Pinning the
-/// torch bit pattern catches a regression back to a left-fold (or to f64
-/// accumulation, which would also miss torch's f32 rounding).
+/// Trace is diagonal followed by [05-OP-30]'s canonical adjacent-pair tree.
+/// This cancellation sequence distinguishes it from both retired orders.
 #[test]
-fn host_runtime_trace_f32_matches_torch_stride4_cascade() {
-    // Diagonal values as f64 literals that round-trip to the same f32.
-    let diag: [f64; 20] = [
-        0.5349225401878357,
-        0.41317272186279297,
-        0.23315048217773438,
-        0.10808825492858887,
-        0.2942635416984558,
-        0.18491309881210327,
-        0.06628626585006714,
-        0.47317826747894287,
-        0.8760198354721069,
-        0.6712021827697754,
-        0.4092898368835449,
-        0.6157153248786926,
-        0.35706937313079834,
-        0.7855499386787415,
-        0.5738610625267029,
-        0.9782199859619141,
-        0.11917394399642944,
-        0.8441763520240784,
-        0.9919543266296387,
-        0.8370135426521301,
-    ];
-    // Build a 20x20 matrix whose diagonal is `diag` and off-diagonals are 0,
-    // so `trace` sums exactly `diag` in the same order torch does.
-    let mut m = vec![0.0_f64; 20 * 20];
+fn host_runtime_trace_f32_uses_canonical_balanced_tree() {
+    let diag = [1e20_f64, 1.0, -1e20_f64, 1.0, 1.0];
+    let mut m = vec![0.0_f64; 5 * 5];
     for (i, &v) in diag.iter().enumerate() {
-        m[i * 20 + i] = v;
+        m[i * 5 + i] = v;
     }
     let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![20, 20], m),
+        value: IrTensorValue::from_vec(vec![5, 5], m),
         precision: Prim::F32,
     };
     let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
     assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
-    // torch.trace bit pattern (stride-4 cascade in f32).
-    let torch_bits = 0x4125e023_u32;
-    let left_fold_bits = 0x4125e024_u32;
     assert_eq!(
         (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-        torch_bits,
-        "trace must be bit-exact with torch.trace (stride-4 cascade, #170); got {} (bits {:#x})",
-        out.value.to_f64_lossy_vec()[0],
-        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-    );
-    assert_ne!(
-        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-        left_fold_bits,
-        "regression: trace matches the old f32 left-fold value the cascade replaced (#170)",
+        1.0_f32.to_bits()
     );
 }
 
-/// #170 eval-vs-compiled parity (eval lane): the f64 `trace` eval reference
-/// sums the diagonal in the stride-4 cascade (it delegates to
-/// `tensor_reduce_host`, whose f64 `Sum` path is a cascade). The catastrophic
-/// diagonal `[2^53.., 1.0x18, -2^53..]` makes the cascade and a strict
-/// left-fold disagree dramatically: the cascade keeps the eighteen `1.0`s
-/// (`-> 12.0`, matching torch and the emitted f64 `sum`), the left-fold gives
-/// `0.0`. The matching compiled-lane assertion lives in `chelis-runtime`
-/// (`chelis_tensor_trace_f64_cascade_matches_eval_not_left_fold`); both lanes
-/// pin `12.0`, so `chelis eval` and the compiled binary agree.
+/// The f64 host lane uses the same canonical tree at f64 arithmetic width.
 #[test]
-fn host_runtime_trace_f64_matches_eval_cascade() {
-    let mut diag = vec![1e16_f64];
-    diag.extend(std::iter::repeat_n(1.0_f64, 18));
-    diag.push(-1e16_f64);
-    let k = diag.len(); // 20
-    let mut m = vec![0.0_f64; k * k];
+fn host_runtime_trace_f64_uses_canonical_balanced_tree() {
+    let diag = [1e300_f64, 1.0, -1e300_f64, 1.0, 1.0];
+    let mut m = vec![0.0_f64; 5 * 5];
     for (i, &v) in diag.iter().enumerate() {
-        m[i * k + i] = v;
+        m[i * 5 + i] = v;
     }
     let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![k, k], m),
+        value: IrTensorValue::from_vec(vec![5, 5], m),
         precision: Prim::F64,
     };
     let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
     assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
-    assert_eq!(
-        out.value.to_f64_lossy_vec()[0],
-        12.0,
-        "f64 trace eval must use the stride-4 cascade (== compiled, == torch); \
-         got {}. A left-fold gives 0.0.",
-        out.value.to_f64_lossy_vec()[0],
-    );
+    assert_eq!(out.value.to_f64_lossy_vec()[0].to_bits(), 1.0_f64.to_bits());
 }
 
 /// #172 sibling (eval lane): windowed Max/Min DROP NaN — Rust `f64::max`/`min`
@@ -1013,6 +955,47 @@ fn host_runtime_einsum_f32_keeps_f64_accumulator_not_strict_f32() {
         vec![40.0_f64],
         "f32 einsum keeps the f64 eval accumulator (#170 decision); got {:?}",
         out.value.to_f64_lossy_vec()
+    );
+}
+
+#[test]
+fn host_runtime_einsum_accepts_the_legal_rank_zero_grammar() {
+    let lhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![], vec![2.0]),
+        precision: Prim::F32,
+    };
+    let rhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![], vec![3.0]),
+        precision: Prim::F32,
+    };
+    let output = tensor_einsum_value(",->", &lhs, &rhs).expect("rank-zero einsum is legal");
+    assert_eq!(output.value.shape, Vec::<usize>::new());
+    assert_eq!(output.value.to_f64_lossy_vec(), vec![6.0]);
+}
+
+#[test]
+fn host_runtime_einsum_rejects_non_lowercase_labels() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1], vec![1.0]),
+        precision: Prim::F32,
+    };
+    for equation in ["I,I->", "_,i->"] {
+        assert!(
+            tensor_einsum_value(equation, &operand, &operand).is_err(),
+            "host einsum accepted non-lowercase equation `{equation}`"
+        );
+    }
+}
+
+#[test]
+fn host_runtime_einsum_rejects_duplicate_output_labels() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1], vec![1.0]),
+        precision: Prim::F32,
+    };
+    assert!(
+        tensor_einsum_value("i,i->ii", &operand, &operand).is_err(),
+        "host einsum accepted a duplicate output label"
     );
 }
 

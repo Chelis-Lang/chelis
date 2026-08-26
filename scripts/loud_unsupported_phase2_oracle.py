@@ -191,9 +191,9 @@ def mutate_runtime_dtype(source: str) -> str:
             '            Self::Phase2OracleDType => "phase2-oracle-dtype",\n',
         ),
         (
-            '            Self::I16 => "CHELIS_I16",\n',
-            '            Self::I16 => "CHELIS_I16",\n'
-            '            Self::Phase2OracleDType => "CHELIS_PHASE2_ORACLE_DTYPE",\n',
+            '            Self::I16 => "CHELIS_DTYPE_I16",\n',
+            '            Self::I16 => "CHELIS_DTYPE_I16",\n'
+            '            Self::Phase2OracleDType => "CHELIS_DTYPE_PHASE2_ORACLE",\n',
         ),
         (
             "            Self::I16 => Repr::TwosComplement16,\n",

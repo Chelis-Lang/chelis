@@ -94,7 +94,7 @@ impl TestInput {
     /// WS-A4: i8 input. Stored as f32 in the carrier `data` field for
     /// API symmetry; the harness reinterpret-casts to `int8_t*` before
     /// writing into the runtime-allocated buffer, and `chelis_alloc`
-    /// is called with `CHELIS_I8` so the buffer is sized at 1 byte
+    /// is called with `CHELIS_DTYPE_I8` so the buffer is sized at 1 byte
     /// per element.
     #[allow(dead_code, reason = "WS-A4 manual HIP gate; constructed by i8 tests")]
     fn int8(name: &str, shape: &[usize], data: &[i8]) -> Self {
@@ -320,12 +320,12 @@ fn append_case_lines(
             lines.push(format!(
                 "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
                 dtype = match input.dtype {
-                    Prim::F32 => "CHELIS_F32",
+                    Prim::F32 => "CHELIS_DTYPE_F32",
                     // WS-A4: narrow signed integer dtypes per spec/04-type-system.md §1.1.
-                    Prim::Int8 => "CHELIS_I8",
-                    Prim::Int16 => "CHELIS_I16",
-                    Prim::Int32 => "CHELIS_I32",
-                    Prim::Int64 => "CHELIS_I64",
+                    Prim::Int8 => "CHELIS_DTYPE_I8",
+                    Prim::Int16 => "CHELIS_DTYPE_I16",
+                    Prim::Int32 => "CHELIS_DTYPE_I32",
+                    Prim::Int64 => "CHELIS_DTYPE_I64",
                     other => panic!("unsupported manual HIP test dtype {}", other.name()),
                 }
             ));
@@ -335,7 +335,7 @@ fn append_case_lines(
                     // `chelis_f32_from_bits` (from the included
                     // `chelis_runtime.h`), not a lossy `{:.8}f` decimal.
                     Prim::F32 => lines.push(format!(
-                        "    {prefix}_input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+                        "    ((float *){prefix}_input_storage[{slot}]->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
                         bits = value.to_bits()
                     )),
                     // WS-A4: i8/i16 inputs are written via reinterpret cast on
@@ -378,7 +378,7 @@ fn append_case_lines(
     ));
     lines.push(format!("            if ({prefix}_i > 0) printf(\" \");"));
     lines.push(format!(
-        "            printf(\"%.6f\", {prefix}_outputs[{prefix}_out_idx]->data[{prefix}_i]);"
+        "            printf(\"%.6f\", ((float *){prefix}_outputs[{prefix}_out_idx]->data)[{prefix}_i]);"
     ));
     lines.push("        }".to_string());
     lines.push("        printf(\"\\n\");".to_string());
@@ -697,7 +697,7 @@ int main(void) {{
     {func_name}(nullptr, 0, outputs, 1);
     for (int i = 0; i < outputs[0]->size; i++) {{
         if (i > 0) printf(" ");
-        float v = outputs[0]->data[i];
+        float v = ((float *)outputs[0]->data)[i];
         uint32_t bits;
         memcpy(&bits, &v, sizeof(bits));
         printf("0x%08x", bits);
@@ -2066,6 +2066,55 @@ fn g16_sparse_scatter_add_i32_matches_eval_with_duplicate_indices() {
     );
 }
 
+#[test]
+#[ignore = "manual gate: requires HIP-capable GPU and hipcc"]
+fn g16_sparse_scatter_replace_i64_duplicate_indices_are_last_write_wins() {
+    let mut dag = Dag::new();
+    let target = dag.add_node(
+        RiscOp::Load {
+            name: "target".into(),
+        },
+        vec![],
+        mat_f32(3, 2),
+        None,
+    );
+    let indices = dag.add_node(
+        RiscOp::Load {
+            name: "indices".into(),
+        },
+        vec![],
+        vec_i64(2),
+        None,
+    );
+    let updates = dag.add_node(
+        RiscOp::Load {
+            name: "updates".into(),
+        },
+        vec![],
+        mat_f32(2, 2),
+        None,
+    );
+    let out = dag.add_node(
+        RiscOp::Scatter { axis: 0 },
+        vec![target, indices, updates],
+        mat_f32(3, 2),
+        None,
+    );
+    dag.add_root(out);
+
+    let inputs = [
+        TestInput::new("target", &[3, 2], &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        TestInput::int64("indices", &[2], &[1, 1]),
+        TestInput::new("updates", &[2, 2], &[5.0, 5.0, 6.0, 6.0]),
+    ];
+    let expected = vec![0.0, 0.0, 6.0, 6.0, 0.0, 0.0];
+    assert_eq!(expected_single_output(&dag, &inputs), expected);
+    assert_eq!(
+        compile_and_run_single_output(&dag, "g16_sparse_scatter_replace_i64", &inputs),
+        expected
+    );
+}
+
 // ===========================================================================
 // G17+ : f64 acceptance suite (WS-A2)
 //
@@ -2158,7 +2207,7 @@ fn append_case_lines_f64(
             lines.push(format!(
                 "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
                 dtype = match input.dtype {
-                    Prim::F64 => "CHELIS_F64",
+                    Prim::F64 => "CHELIS_DTYPE_F64",
                     other => panic!("f64 harness expected f64 input, got {}", other.name()),
                 }
             ));

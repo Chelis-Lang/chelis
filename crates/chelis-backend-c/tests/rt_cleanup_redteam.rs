@@ -217,21 +217,21 @@ const HARNESS: &str = r#"
 
 static chelis_tensor *bf16_tensor_from_bits(const uint16_t *bits, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
     memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
     return t;
 }
 
 static chelis_tensor *f16_tensor_from_bits(const uint16_t *bits, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
     memcpy(t->data, bits, (size_t)n * sizeof(uint16_t));
     return t;
 }
 
 static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_bf16(src[i]);
     return t;
@@ -239,7 +239,7 @@ static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
 
 static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_f16(src[i]);
     return t;
@@ -609,7 +609,7 @@ int main(void) {{
 /// so a bf16-input/f32-output matmul still routes through the
 /// convert-then-sgemm wrapper. Lock this behavior: building a
 /// BlasMatmul with bf16 operands and an f32-typed output node must
-/// still emit `chelis_bf16_buffer_to_f32` in the generated C.
+/// still emit element-wise `chelis_bf16_to_f32` conversion in the generated C.
 #[test]
 fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     use chelis_ir::dag::DimExpr;
@@ -641,9 +641,9 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "bf16_mm_f32_out").unwrap();
     assert!(
-        result.c_source.contains("chelis_bf16_buffer_to_f32"),
+        result.c_source.contains("chelis_bf16_to_f32"),
         "bf16-operand matmul with f32 output must convert operands through \
-         chelis_bf16_buffer_to_f32, not read them as raw f32:\n{}",
+         chelis_bf16_to_f32, not read them as raw f32:\n{}",
         result.c_source
     );
     assert!(
@@ -651,10 +651,10 @@ fn bf16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
         "must dispatch cblas_sgemm:\n{}",
         result.c_source
     );
-    // When output is f32, no chelis_f32_buffer_to_bf16 downcast is
+    // When output is f32, no chelis_f32_to_bf16 downcast is
     // emitted (cblas_sgemm writes directly into t{id}->data).
     assert!(
-        !result.c_source.contains("chelis_f32_buffer_to_bf16"),
+        !result.c_source.contains("chelis_f32_to_bf16"),
         "bf16-operand matmul with f32 output must NOT downcast back to bf16:\n{}",
         result.c_source
     );
@@ -686,12 +686,12 @@ fn f16_matmul_with_f32_output_still_routes_through_convert_wrapper() {
     dag.add_node(mm, vec![a, b], mat_ty(2, 4, Prim::F32), None);
     let result = codegen(&dag, "f16_mm_f32_out").unwrap();
     assert!(
-        result.c_source.contains("chelis_f16_buffer_to_f32"),
+        result.c_source.contains("chelis_f16_to_f32"),
         "f16-operand matmul with f32 output must convert operands:\n{}",
         result.c_source
     );
     assert!(
-        !result.c_source.contains("chelis_f32_buffer_to_f16"),
+        !result.c_source.contains("chelis_f32_to_f16"),
         "must not downcast back to f16 when output is f32:\n{}",
         result.c_source
     );

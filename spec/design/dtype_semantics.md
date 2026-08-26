@@ -1277,6 +1277,14 @@ root to Host adopts C's existing capability boundary without changing f64
 semantics. The full Phase 4B oracle is nevertheless rerun so that the unchanged
 numeric matrix is executable evidence rather than an inference from scope.
 
+[#1308] corrects the duplicated replace-scatter prose in the primitive-surface
+introduction and [05-OP-33] to cite §3.5's existing deterministic row-major
+last-write-wins rule. This deliberately moves the complete-file digest for
+`spec/05-risc-primitives.md` and the [05-OP-33] atom digest; it does not add a
+compatibility exception or change the governing sparse semantic. Static
+checking, host evaluation, generated C, and the HIP execution fixture all lock
+the same rule, while reverse-mode AD remains fail-closed.
+
 ## B2. Invariants that hold across every boundary
 
 1. **Controls never move.** Every green control in the audit test files
