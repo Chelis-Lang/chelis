@@ -101,3 +101,35 @@ def grad_sumsq(
         "the unknown standalone gradient must not publish a fabricated value"
     );
 }
+
+#[test]
+fn unresolved_callable_forwarded_through_helpers_remains_rootless() {
+    let library = surf_to_library(
+        r#"
+def apply(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> f32 = model(x)
+def apply_pipe(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> f32 = x |> model
+
+def indirect(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] = {
+  target = fn (v: tensor[3, f32]) -> apply(model, v)
+  grad(target, wrt=v)(x)
+}
+
+def indirect_pipe(model: tensor[3, f32] -> f32, x: tensor[3, f32]) -> tensor[3, f32] = {
+  target = fn (v: tensor[3, f32]) -> apply_pipe(model, v)
+  grad(target, wrt=v)(x)
+}
+"#,
+    )
+    .expect("forwarding an unresolved callable must remain representable");
+
+    for name in ["indirect", "indirect_pipe"] {
+        assert!(
+            library.rootless_defs().contains(name),
+            "`{name}` depends on an unresolved callable and must remain rootless"
+        );
+        assert!(
+            !library.symbol_table().contains_key(name),
+            "`{name}` must not publish a fabricated zero gradient"
+        );
+    }
+}

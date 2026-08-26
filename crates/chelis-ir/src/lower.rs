@@ -4171,12 +4171,10 @@ enum CallableExpr {
     /// represent a call to it because there is no `RiscOp::Call`. Call
     /// sites that pass a concrete function for this parameter (via
     /// `lower_plain_callable_app`) insert the resolved callable into
-    /// `local_callables` *before* lowering the inlined body, so the
-    /// resolver never produces this variant on the inlined-body path.
-    /// `Parameter` therefore appears only on the standalone-def lowering
-    /// path, where the right thing to do is no-op (see `lower_pipe`'s
-    /// arm) — the standalone DAG entry is never user-visible because
-    /// every caller re-inlines.
+    /// `local_callables` before lowering the inlined body. An unresolved
+    /// parameter forwarded through a helper remains this variant under the
+    /// helper's formal name, so reaching its eventual call poisons the
+    /// provisional gradient's completeness instead of fabricating a zero.
     Parameter {
         #[allow(dead_code)]
         name: String,
@@ -5908,11 +5906,10 @@ impl LowerCtx {
             // `lower_app`'s existing "lower func and args, return last"
             // path (`lower.rs:2644`–`2649`), which is the same broken-but-
             // silent shape `lower_app` already produces for fn-typed-
-            // parameter calls today. Real semantics come from call-site
-            // inlining (`lower_plain_callable_app` substitutes the
-            // concrete callable into `local_callables` before lowering
-            // the inlined body, so the resolver sees a `Plain` not a
-            // `Parameter`).
+            // parameter calls today. Concrete semantics come from call-site
+            // inlining (`lower_plain_callable_app` substitutes the callable
+            // into `local_callables`); unresolved helper forwarding preserves
+            // this marker until an application reaches this arm.
             CallableExpr::Parameter { .. } => {
                 self.callable_dependency_state = CallableDependencyState::UnresolvedParameter;
                 None
@@ -5953,10 +5950,10 @@ impl LowerCtx {
                 // — the DAG can't represent a call to it (no
                 // `RiscOp::Call`). Surface it as
                 // `CallableExpr::Parameter` so `lower_pipe` can no-op the
-                // stage on the standalone-def lowering path; call-site
-                // inlining replaces this with the resolved callable via
-                // `local_callables`, so this variant only appears when
-                // the def is lowered in isolation. See
+                // stage on an incompletely specialized lowering path;
+                // concrete call-site inlining replaces this with the
+                // resolved callable via `local_callables`, while unresolved
+                // helper forwarding retains the marker. See
                 // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
                 if let Some(body) = self
                     .local_callables
@@ -6500,7 +6497,7 @@ impl LowerCtx {
                             let field_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
-                            let zero = self.zero_tensor_node(&field_ty);
+                            let zero = self.zero_tensor_node(&field_ty, actual);
                             packed.push(LoweredValue::Node(zero));
                         }
                     }
@@ -6522,7 +6519,7 @@ impl LowerCtx {
                             let field_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
-                            self.zero_tensor_node(&field_ty)
+                            self.zero_tensor_node(&field_ty, actual)
                         });
                         fields.push(LoweredValue::Node(node));
                     }
@@ -6562,9 +6559,12 @@ impl LowerCtx {
 
     /// A zero-valued tensor of the given type: `Const 0.0`, cast to the
     /// target precision, expanded axis-by-axis to the target dims
-    /// (mirrors the `lower_if_mask` expansion pattern). Used by gradient
-    /// packing for every proven-zero tensor slot (chelis#520 D2/#1102).
-    fn zero_tensor_node(&mut self, ty: &TensorType) -> NodeId {
+    /// (mirrors the `lower_if_mask` expansion pattern). A symbolic expansion
+    /// retains a shape-only dependency on the differentiated primal so codegen
+    /// can bind the runtime extent without introducing a value dependency.
+    /// Used by gradient packing for every proven-zero tensor slot
+    /// (chelis#520 D2/#1102).
+    fn zero_tensor_node(&mut self, ty: &TensorType, primal: Option<NodeId>) -> NodeId {
         let mut node = self.dag.add_node(
             RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
@@ -6587,11 +6587,10 @@ impl LowerCtx {
         let mut dims = Vec::new();
         for (axis, dim) in ty.dims.iter().enumerate() {
             dims.push(dim.clone());
+            let size = DimExpr::from(dim);
+            let symbolic = size.as_concrete().is_none();
             node = self.dag.add_node(
-                RiscOp::Expand {
-                    axis,
-                    size: DimExpr::from(dim),
-                },
+                RiscOp::Expand { axis, size },
                 vec![node],
                 TensorType {
                     dims: dims.clone(),
@@ -6599,6 +6598,9 @@ impl LowerCtx {
                 },
                 self.current_span_id.clone(),
             );
+            if symbolic && let Some(primal) = primal {
+                self.dag.add_shape_dep(node, primal);
+            }
         }
         node
     }
@@ -6673,9 +6675,28 @@ impl LowerCtx {
             // resolver anyway, but bindings-only shadowing (non-callable
             // arg for a non-callable param) would otherwise leak the
             // outer `fn_typed_params` entry.
+            // Resolve the actual in the caller's scope before the callee's
+            // same-named formal shadows it. Removing the marker first would
+            // erase the only evidence that `model` in `apply(model, x)` is an
+            // unresolved outer callable.
+            let callable = self.resolve_callable_expr(arg_expr);
             self.fn_typed_params.remove(name);
-            if let Some(callable) = self.callable_binding_expr(arg_expr) {
-                self.local_callables.insert(name.clone(), callable);
+            if let Some(callable) = callable {
+                match callable {
+                    // Preserve structural incompleteness when an unresolved
+                    // outer function parameter is forwarded through a helper.
+                    // Installing the raw argument as a local alias here would
+                    // create a self-cycle whenever the formal and actual share
+                    // a name, causing resolution to return `None` and laundering
+                    // the missing callable dependency into a proven zero.
+                    CallableExpr::Parameter { .. } => {
+                        self.local_callables.remove(name);
+                        self.fn_typed_params.insert(name.clone());
+                    }
+                    _ => {
+                        self.local_callables.insert(name.clone(), arg_expr.clone());
+                    }
+                }
             } else {
                 let arg_id = self.lower_expr(arg_expr);
                 if let LoweredValue::Node(node_id) = &arg_id
