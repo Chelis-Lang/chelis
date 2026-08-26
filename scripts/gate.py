@@ -239,6 +239,16 @@ UNREPRESENTABLE_DOMAIN_ORACLE: list[str] = [
     "scripts/unrepresentable_domain_oracle.py",
 ]
 
+# chelis#1205's authoritative front-end complexity and parity oracle. It
+# reruns the focused structural counters after the workspace suite so their
+# 20/40/80/160 growth evidence has a named continuous acceptance marker.
+# Work counts, not wall time, own the threshold; hosted-runner CPU contention
+# therefore cannot make the gate flaky.
+COMPILER_FRONT_END_PERFORMANCE_ORACLE: list[str] = [
+    MANAGED_PYTHON,
+    "scripts/compiler_front_end_performance.py",
+]
+
 # chelis#1322. The oracle's `resolve_chelis_binary()` runs its own
 # `cargo build -p chelis-cli --bin chelis` before its first `.dp` fixture.
 # Inside a gate run that binary already exists: every command list this
@@ -275,6 +285,7 @@ STAGES: dict[str, list[list[str]]] = {
     ],
     "integration": [
         NEXTEST_WORKSPACE_CI,
+        COMPILER_FRONT_END_PERFORMANCE_ORACLE,
         UNREPRESENTABLE_DOMAIN_ORACLE,
     ],
 }
