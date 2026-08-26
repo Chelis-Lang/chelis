@@ -11,7 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from capacity_census_liveness import (
-    PERMANENT_DISPOSITIONS,
+    LEGACY_TRANSITION_DISPOSITIONS,
     IssueKind,
     IssueRecord,
     IssueState,
@@ -71,7 +71,9 @@ class Adjudicate(unittest.TestCase):
 
     def test_exact_permanent_disposition_passes_without_issue_lookup(self) -> None:
         disposition = next(
-            value for value in PERMANENT_DISPOSITIONS if "initial non-seam" in value
+            value
+            for value in LEGACY_TRANSITION_DISPOSITIONS
+            if "initial non-seam" in value
         )
         problems = adjudicate([row(disposition)], {})
         self.assertEqual(problems, [])
@@ -82,13 +84,13 @@ class Adjudicate(unittest.TestCase):
         self.assertIn("UNRECOGNIZED disposition", problems[0])
 
     def test_near_miss_permanent_disposition_fails_closed(self) -> None:
-        disposition = next(iter(PERMANENT_DISPOSITIONS))
+        disposition = next(iter(LEGACY_TRANSITION_DISPOSITIONS))
         problems = adjudicate([row(f"{disposition} copied")], {})
         self.assertEqual(len(problems), 1)
         self.assertIn("UNRECOGNIZED disposition", problems[0])
 
     def test_permanent_disposition_cannot_move_between_census_families(self) -> None:
-        dispositions = sorted(PERMANENT_DISPOSITIONS)
+        dispositions = sorted(LEGACY_TRANSITION_DISPOSITIONS)
         wire = next(value for value in dispositions if "wire schema" in value)
         bindings = next(value for value in dispositions if "PyO3" in value)
 
@@ -120,11 +122,10 @@ class Adjudicate(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("chelis#894", problems[0])
 
-    def test_todo_and_empty_citations_fail(self) -> None:
+    def test_todo_fails_but_missing_citation_is_final_authority_owned(self) -> None:
         problems = adjudicate([row("TODO"), row("")], {})
-        self.assertEqual(len(problems), 2)
-        for problem in problems:
-            self.assertIn("UNCITED", problem)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("TODO legacy disposition", problems[0])
 
     def test_unresolvable_citation_fails(self) -> None:
         problems = adjudicate([row("chelis#999999")], {})

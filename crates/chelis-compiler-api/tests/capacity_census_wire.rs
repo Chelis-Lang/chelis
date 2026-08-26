@@ -10,8 +10,13 @@ use std::process::{Command, Output};
 
 use serde::Deserialize;
 
+#[path = "../../../tests/support/capacity_census_authority.rs"]
+mod capacity_census_authority;
 #[path = "../../../tests/support/managed_python.rs"]
 mod managed_python;
+use capacity_census_authority::{
+    AuthorityRegistries, NumericOperationRegistration, StaticSurfaceDescriptor, SurfaceDescriptor,
+};
 
 const PERMANENT_WIRE_DISPOSITION: &str = "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)";
 
@@ -450,27 +455,19 @@ const FROZEN_WIRE_ROWS: &[FrozenSurfaceRow] = &[
 ///
 /// This is deliberately separate from `FROZEN_WIRE_ROWS` and the JSON
 /// baseline: a new field cannot copy the old permanent disposition. The
-/// corresponding compiler-builtin identity is registered in
-/// `capacity_census_tripwire.rs::SEMANTIC_REGISTRATIONS`; both sites name the
-/// same exact callable and numbered atom until chelis#1288 replaces every
-/// transitional disposition with the final zero-exception census.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RegisteredWireRow {
-    surface: FrozenSurfaceRow,
-    callable: &'static str,
-    atom: &'static str,
-}
-
-const COUNT_CALLABLE: &str = "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) -> tensor[D\\axes, int64]";
-
-const REGISTERED_WIRE_ROWS: &[RegisteredWireRow] = &[RegisteredWireRow {
-    surface: FrozenSurfaceRow {
-        kind: "wire-schema-numeric-field",
-        id: "chelis_compiler_api::schema::WireRiscOp::Count.axes: Vec<usize>",
-        flags: &["numeric-field"],
-    },
-    callable: COUNT_CALLABLE,
+/// Count is the first real wire descriptor routed through #1288's shared
+/// exact final-authority classifier.
+const WIRE_CENSUS_FAMILY: &str = "wire-schema";
+const COUNT_WIRE_SURFACE: StaticSurfaceDescriptor = StaticSurfaceDescriptor::new(
+    WIRE_CENSUS_FAMILY,
+    "wire-schema-numeric-field",
+    "chelis_compiler_api::schema::WireRiscOp::Count.axes: Vec<usize>",
+    &["numeric-field"],
+);
+const REGISTERED_WIRE_ROWS: &[NumericOperationRegistration] = &[NumericOperationRegistration {
+    surface: COUNT_WIRE_SURFACE,
     atom: "[05-OP-29]",
+    authority_anchor: "count(x, axes...)",
 }];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -527,18 +524,19 @@ fn frozen_surface_rows() -> Vec<SurfaceRow> {
         .collect()
 }
 
-fn row_from_frozen(row: FrozenSurfaceRow) -> SurfaceRow {
-    SurfaceRow {
-        kind: row.kind.to_string(),
-        id: row.id.to_string(),
-        flags: row.flags.iter().map(|flag| (*flag).to_string()).collect(),
-    }
-}
-
 fn registered_surface_rows() -> Vec<SurfaceRow> {
     REGISTERED_WIRE_ROWS
         .iter()
-        .map(|registration| row_from_frozen(registration.surface))
+        .map(|registration| SurfaceRow {
+            kind: registration.surface.kind.to_string(),
+            id: registration.surface.id.to_string(),
+            flags: registration
+                .surface
+                .flags
+                .iter()
+                .map(|flag| (*flag).to_string())
+                .collect(),
+        })
         .collect()
 }
 
@@ -549,44 +547,52 @@ fn expected_current_surface_rows() -> Vec<SurfaceRow> {
     rows
 }
 
-fn registered_wire_problem(registrations: &[RegisteredWireRow], spec: &str) -> Option<String> {
-    for (index, registration) in registrations.iter().enumerate() {
-        if FROZEN_WIRE_ROWS.contains(&registration.surface) {
-            return Some(format!(
-                "registered wire row {index} copied the frozen permanent cohort"
-            ));
+fn registered_wire_problem(
+    registrations: &[NumericOperationRegistration],
+    spec: &str,
+) -> Option<String> {
+    let surface = SurfaceDescriptor::new(
+        COUNT_WIRE_SURFACE.family,
+        COUNT_WIRE_SURFACE.kind,
+        COUNT_WIRE_SURFACE.id,
+        COUNT_WIRE_SURFACE.flags,
+    );
+    capacity_census_authority::classify_final_authority(
+        &surface,
+        AuthorityRegistries {
+            nonnumeric: &[],
+            tagged_transports: &[],
+            numeric_operations: registrations,
+        },
+        spec,
+    )
+    .map(|_| ())
+    .err()
+}
+
+fn current_authority_problem(current: &[SurfaceRow], spec: &str) -> Option<String> {
+    let legacy = frozen_surface_rows();
+    for row in current {
+        if legacy.contains(row) {
+            continue;
         }
-        if registration.surface.kind != "wire-schema-numeric-field"
-            || registration.surface.flags != ["numeric-field"]
-        {
-            return Some(format!(
-                "registered wire row {index} changed its exact kind/id/flags descriptor"
-            ));
+        let surface = SurfaceDescriptor {
+            family: WIRE_CENSUS_FAMILY.to_string(),
+            kind: row.kind.clone(),
+            id: row.id.clone(),
+            flags: row.flags.clone(),
+        };
+        if let Err(problem) = capacity_census_authority::classify_final_authority(
+            &surface,
+            AuthorityRegistries {
+                nonnumeric: &[],
+                tagged_transports: &[],
+                numeric_operations: REGISTERED_WIRE_ROWS,
+            },
+            spec,
+        ) {
+            return Some(problem);
         }
-        if registration.callable != COUNT_CALLABLE || registration.atom != "[05-OP-29]" {
-            return Some(format!(
-                "registered wire row {index} is not bound to Count's exact callable and [05-OP-29]"
-            ));
-        }
-        if !spec
-            .lines()
-            .any(|line| line.starts_with("> **[05-OP-29]**"))
-        {
-            return Some("[05-OP-29] is not a normative definition line".to_string());
-        }
-    }
-    let unique: std::collections::BTreeSet<_> = registrations
-        .iter()
-        .map(|registration| {
-            (
-                registration.surface.kind,
-                registration.surface.id,
-                registration.surface.flags,
-            )
-        })
-        .collect();
-    if unique.len() != registrations.len() {
-        return Some("registered wire descriptors are duplicated".to_string());
     }
     None
 }
@@ -648,6 +654,11 @@ fn wire_schema_numeric_fields_match_the_reviewed_baseline() {
     let current: Vec<SurfaceRow> =
         serde_json::from_slice(&output.stdout).expect("typed wire census JSON");
     assert_eq!(
+        current_authority_problem(&current, &spec),
+        None,
+        "every non-legacy wire row requires exactly one final authority"
+    );
+    assert_eq!(
         current,
         expected_current_surface_rows(),
         "public serialized numeric wire carrier shape changed. Do not decide root/manifest \
@@ -686,10 +697,7 @@ fn count_wire_axes_are_registered_without_inheriting_the_permanent_disposition()
     wrong_atom[0].atom = "[05-OP-28]";
     let problem = registered_wire_problem(&wrong_atom, &spec)
         .expect("a semantically adjacent atom cannot authorize Count axes");
-    assert!(
-        problem.contains("exact callable and [05-OP-29]"),
-        "{problem}"
-    );
+    assert!(problem.contains("unrelated"), "{problem}");
 }
 
 #[test]

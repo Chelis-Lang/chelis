@@ -554,9 +554,16 @@ walked published-header set, an INVERTED type-word rule that rejects
 unrecognized arithmetic spellings rather than classifying them
 dtype-free, post-ratchet runtime/stdlib numeric-callable authority
 registration, public-header context invariance, and issue-kind-aware liveness
-are executable tripwires. Its grandfather, permanent-disposition, successor-
-override, and integer-plumbing lists are transitional implementation debt,
-not accepted end states: chelis#1288 removes them and chelis#1293 aligns the
+are executable tripwires. The chelis#1288 foundation adds one shared exact
+classifier across the primary, typed-wire, and registered-PyO3 legs: every
+post-foundation identity must be exactly `Nonnumeric`, `TaggedTransport`, or
+`NumericOperation(atom)`, and no generic issue citation or maintainer override
+can admit a new or changed descriptor. Eighteen exact runtime descriptors now
+classify `Nonnumeric`; `chelis_tensor_shape` and the Count wire field classify
+as exact numeric operations. The immutable foundation-era grandfather,
+permanent-disposition, successor-override, typed-wire, registered-PyO3, and
+integer-plumbing sets remain transitional implementation debt, not accepted
+end states: chelis#1288 still removes the survivors and chelis#1293 aligns the
 recursively discovered stdlib definitions before Phase 4C authority
 population may begin. The
 typed wire-schema and registered-PyO3 legs in this change complete the
@@ -686,17 +693,21 @@ hand-maintained list (hand lists are how `HOST_ONLY_BUILTINS` rotted,
    registered successor; resemblance confers no authority. The final census
    has zero grandfather, permanent-disposition, successor-override, or
    integer-plumbing exception rows. The
-   implementation record is `SemanticRegistration { callable, atom }` in
-   `SEMANTIC_REGISTRATIONS`; `callable` is exactly
-   `[<kind>] <canonical id>`, so family identity is part of the key.
+   implementation record for discovered rows is the shared complete
+   `NumericOperationRegistration { surface, atom, authority_anchor }` shape;
+   `surface` contains the census family, kind, canonical identity, and derived
+   flags. Compiler-owned operations outside every discovered leg remain in the
+   separate `SEMANTIC_REGISTRATIONS` stopgap until chelis#1294 gives them a
+   complete enumerator.
    Atom allocation re-checks the highest existing `[05-OP-N]` on current
    `main`; parallel branches do not reserve numbers. After adding the
    normative atom, the same change runs
    `.venv/bin/python scripts/generate_rejection_registries.py --write` and
    commits `crates/chelis-types/src/rejection_registry_generated.rs`. That
    generated membership artifact keeps rejection-authority validation aware
-   of the new atom; it does not replace the callable's exact
-   `SemanticRegistration` or create semantic authority.
+   of the new atom; it does not replace the callable's exact discovered-family
+   `NumericOperationRegistration` (or the off-leg stopgap registration) or
+   create semantic authority.
    This registration is the callable's semantic authority. Backend delivery
    may separately carry an open issue in the target-disposition registry, but
    that issue never substitutes for semantic registration. An operation
@@ -853,6 +864,15 @@ Deliverables, with phase homes:
    `JsonInt`/`JsonFloat` shape is recognized and its constructors bind to
    [05-OP-2]/[05-OP-34], not because any descriptor predates the ratchet.
    Typed wire and PyO3 rows follow the same structural/registration rule.
+
+   The foundation enforces that landing rule for every new or changed identity
+   while the remaining migration proceeds. The primary baseline currently has
+   180 active legacy rows: 39 grandfather seams, three exact #1149 successors,
+   137 permanent plain rows, and the obsolete prelude `Json` row. Its 18 exact
+   nonnumeric rows and `chelis_tensor_shape` have final authority and no legacy
+   disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
+   cohorts; Count's wire field is separately final-registered. These counts are
+   progress evidence, not the zero-exception completion oracle.
 
    The final C/runtime authority partition is exact:
 
@@ -1161,7 +1181,8 @@ public ABI are executable build failures. Those mechanisms are
 structural guards, not review-only visibility, but they do not make the
 underlying source forms unrepresentable: a contributor can still write
 a C export or stdlib variant, and the tripwire then blocks it until the
-sanctioned disposition is present. The registry can validate an
+exact final authority is present or the descriptor remains an unchanged
+member of the sealed foundation-era legacy universe. The registry can validate an
 `[05-OP-N]` identity and existence, not infer whether a human selected
 the right OP atom. CODEOWNERS routes that judgment but does not enforce
 owner approval.

@@ -11,22 +11,15 @@
 //! Sanctioned actions when this test fails (also printed in the failure
 //! message, which is the contract - a context-poor agent reads only that):
 //!
-//! 1. UNFLAGGED surface addition: regenerate the baseline with
-//!    `CHELIS_CAPACITY_CENSUS_WRITE=1 cargo test -p chelis-cli --test
-//!    capacity_census_tripwire`, then replace the generated
-//!    `"citation": "TODO"` with an OPEN chelis issue reference. The test
-//!    fails while any TODO remains, so regeneration alone can never
-//!    self-bless.
-//! 2. FLAGGED capacity seam: NO citation path exists (PR #950 red team
-//!    P1-1) - the grandfathered 2026-07-30 seam set is frozen by exact
-//!    citation string and complete `(kind, id, flags)` descriptor. Redesign
-//!    onto the tagged carrier, remove the surface, or obtain a
-//!    `maintainer-override(...)` citation, which only a human reviewer adds
-//!    (`AGENTS.md` §Numeric Surface Discipline).
-//! 3. NEW numeric callable: add its exact `SemanticRegistration` to a newly
-//!    authored normative `[05-OP-N]` atom; a maintainer capacity override
-//!    does not waive this independent semantics obligation.
-//! 4. A removed row is an ABI removal and is 0.19 payload by default
+//! 1. Every new or changed descriptor must land in exactly one final class:
+//!    an exact structurally nonnumeric registration, an exact structurally
+//!    recognized tagged transport, or an exact numeric-operation registration
+//!    against its governing normative `[05-OP-N]` atom.
+//! 2. Foundation-era legacy dispositions are an immutable exact universe
+//!    which may only shrink. Grandfathers, permanent dispositions, the one-off
+//!    successor override, generic issue citations, and maintainer overrides
+//!    cannot authorize a new or changed identity.
+//! 3. A removed row is an ABI removal and is 0.19 payload by default
 //!    (`spec/design/remediation_roadmap.md` anti-churn invariant 7).
 //!
 //! This file and the baseline are guard artifacts: editing either to make a
@@ -42,6 +35,13 @@ use chelis_deep::tag::DeepTag;
 use chelis_deep::{Atom, Expr, List};
 use chelis_types::types::Prim;
 use serde::{Deserialize, Serialize};
+
+#[path = "../../../tests/support/capacity_census_authority.rs"]
+mod capacity_census_authority;
+use capacity_census_authority::{
+    AuthorityRegistries, NumericOperationRegistration as FinalNumericOperationRegistration,
+    StaticSurfaceDescriptor, SurfaceDescriptor,
+};
 
 const BASELINE_REL: &str = "spec/design/capacity_census.json";
 const INCLUDE_DIR_REL: &str = "crates/chelis-runtime/include";
@@ -114,10 +114,9 @@ const ALL_PRIMS: &[Prim] = &[
 /// The exact citation carried by the grandfathered 2026-07-30 capacity
 /// seams. A FLAGGED row (float-carrier / raw-dtype-int) has NO
 /// issue-citation path (PR #950 red team P1-1: an open-issue path would
-/// make the known-red set monotonically growable): its citation must be
-/// this string (the frozen pre-ratchet set) or a
-/// `maintainer-override(...)` marker, which only a human reviewer adds -
-/// the baseline file is review-routed.
+/// make the known-red set monotonically growable). Only exact unchanged
+/// members of the sealed foundation-era set may retain this string; no
+/// generic override path remains.
 const GRANDFATHER_SEAM_CITATION: &str = "baseline-2026-07-30 pre-ratchet seam; \
 unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break";
 
@@ -1179,7 +1178,158 @@ struct Row {
     id: String,
     #[serde(default)]
     flags: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     citation: String,
+}
+
+const PRIMARY_CENSUS_FAMILY: &str = "covered-family";
+
+/// Exact structural proofs for rows which carry no numeric capacity. Empty
+/// derived flags are necessary but never sufficient: the complete family,
+/// kind, canonical identity, and flag vector must match one of these rows.
+const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
+        &[],
+    ),
+];
+
+/// No discovered legacy carrier is the final tagged transport yet. #1289
+/// owns populating this exact registry after the tagged representation lands.
+const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[];
+
+const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-7]",
+        authority_anchor: "chelis_tensor_shape",
+    },
+];
+
+fn final_authority_registries() -> AuthorityRegistries<'static> {
+    AuthorityRegistries {
+        nonnumeric: FINAL_NONNUMERIC_ROWS,
+        tagged_transports: FINAL_TAGGED_TRANSPORT_ROWS,
+        numeric_operations: FINAL_NUMERIC_OPERATION_ROWS,
+    }
+}
+
+fn authority_surface(row: &Row) -> SurfaceDescriptor {
+    SurfaceDescriptor {
+        family: PRIMARY_CENSUS_FAMILY.to_string(),
+        kind: row.kind.clone(),
+        id: row.id.clone(),
+        flags: row.flags.clone(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1316,20 +1466,11 @@ struct SemanticRegistration {
     atom: &'static str,
 }
 
-/// Existing initial numeric rows retain their exact permanent capacity
-/// disposition; every future callable requires an exact entry here and the
-/// controlling atom in the same change set. The first registered atom
-/// group is chelis#890/#903's host-lane data I/O family
-/// (spec/05-risc-primitives.md §3.7).
+/// Compiler-owned numeric operations which do not land on a discovered
+/// capacity-census family. These remain separately pinned until #1294 gives
+/// them their own complete enumerator. Discovered rows use the exact shared
+/// final-authority registry above instead.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
-    // The prelude `Json` ADT's numeric capacity (JInt int64 beside JNum
-    // f64): the parse-time int-vs-float split and the exactness contract
-    // are decided by the ingestion atom.
-    SemanticRegistration {
-        callable: "[prelude-adt-numeric] prelude::Json: JNull | JBool(bool) | JInt(int64) | \
-                   JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])",
-        atom: "[05-OP-2]",
-    },
     // chelis#759's float-to-integer ladder rung. `cast_trunc` is a
     // compiler-owned numeric callable, so it lands on no enumerated leg
     // (it is neither a C export, an exported stdlib `def`, nor a prelude
@@ -1367,15 +1508,6 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
         callable: "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) \
                    -> tensor[D\\axes, int64]",
         atom: "[05-OP-29]",
-    },
-    // chelis#1112 narrowed the runtime extent read's axis-domain input to
-    // int32 while preserving its exact int64 extent result. The successor
-    // identity is issue-bound and registered rather than retroactively
-    // entering the permanent initial descriptor cohort.
-    SemanticRegistration {
-        callable: "[header-export] chelis_runtime.h: int64_t chelis_tensor_shape \
-                   ( const chelis_tensor * t , int32_t axis ) ;",
-        atom: "[05-OP-7]",
     },
 ];
 
@@ -2100,16 +2232,6 @@ fn has_recognized_int64_dim_carrier_successor_override(row: &Row) -> bool {
             .any(|successor| matches_frozen_descriptor(row, successor))
 }
 
-/// PR #1149 changed the representation identity of three already-existing
-/// runtime surfaces; it did not add a numeric operation. Their exact one-off
-/// successor set therefore retains the same no-retroactive-registration status
-/// as the retired pre-ratchet descriptors. A generic maintainer override is
-/// deliberately NOT a semantic exemption (see the negative control below).
-fn has_recognized_legacy_semantic_exemption(row: &Row) -> bool {
-    has_recognized_grandfather_disposition(row)
-        || has_recognized_int64_dim_carrier_successor_override(row)
-}
-
 fn has_recognized_permanent_plain_disposition(row: &Row) -> bool {
     row.citation == PERMANENT_PLAIN_DISPOSITION
         && PERMANENT_PLAIN_ROWS
@@ -2123,6 +2245,12 @@ fn has_recognized_permanent_disposition(row: &Row) -> bool {
             && row.kind == "prelude-adt-numeric"
             && row.id == PERMANENT_JSON_ID
             && row.flags == ["float-carrier", "numeric-op"])
+}
+
+fn has_recognized_legacy_disposition(row: &Row) -> bool {
+    has_recognized_grandfather_disposition(row)
+        || has_recognized_int64_dim_carrier_successor_override(row)
+        || has_recognized_permanent_disposition(row)
 }
 
 fn frozen_disposition_for_canonical_key(
@@ -2174,37 +2302,19 @@ fn frozen_disposition_rows() -> Vec<Row> {
     rows
 }
 
-fn check_complete_frozen_disposition_manifest(baseline: &Baseline) -> Result<(), String> {
-    let baseline_rows: BTreeSet<(String, String, Vec<String>, String)> = baseline
+fn check_active_legacy_subset(baseline: &Baseline) -> Result<(), String> {
+    let invalid: Vec<String> = baseline
         .rows
         .iter()
-        .map(|row| {
-            (
-                row.kind.clone(),
-                row.id.clone(),
-                row.flags.clone(),
-                row.citation.clone(),
-            )
-        })
+        .filter(|row| !row.citation.is_empty() && !has_recognized_legacy_disposition(row))
+        .map(|row| format!("[{}] {}", row.kind, row.id))
         .collect();
-    let mut missing = Vec::new();
-    for expected in frozen_disposition_rows() {
-        let descriptor = (
-            expected.kind.clone(),
-            expected.id.clone(),
-            expected.flags.clone(),
-            expected.citation.clone(),
-        );
-        if !baseline_rows.contains(&descriptor) {
-            missing.push(format!("[{}] {}", expected.kind, expected.id));
-        }
-    }
-    if missing.is_empty() {
+    if invalid.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "FROZEN DISPOSITION MANIFEST ROW MISSING OR CHANGED: {}. A reviewed shrink must remove the complete descriptor from the hand-maintained manifest in the same change.",
-            missing.join(", ")
+            "LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE: {}. Transition dispositions may disappear, but no new, renamed, reclassified, or relocated descriptor may acquire one.",
+            invalid.join(", ")
         ))
     }
 }
@@ -2222,63 +2332,15 @@ fn row_from_frozen(frozen: &FrozenDispositionRow, citation: &str) -> Row {
     }
 }
 
-/// True when an issue-bound disposition names at least one chelis issue
-/// (`chelis#N`). Exact permanent dispositions are handled separately; a
-/// `maintainer-override(...)` remains issue-bound per §C6.
-fn cites_a_chelis_issue(citation: &str) -> bool {
-    citation
-        .match_indices("chelis#")
-        .any(|(i, m)| citation[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()))
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum MaintainerOverride {
-    Absent,
-    Malformed(String),
-    WellFormed,
-}
-
-/// A maintainer override is the ONE human path past a capacity seam, so its
-/// shape is validated rather than substring-matched: the
-/// `maintainer-override(` prefix, a BALANCED closing paren, a nonempty
-/// reason, and a `chelis#N` reference INSIDE the parentheses. The previous
-/// `starts_with("maintainer-override(")` test accepted a marker that was
-/// never closed and accepted an issue reference sitting outside the
-/// parentheses, so a self-authored approximation of the marker passed
-/// (round-3 red team P3).
-fn classify_maintainer_override(citation: &str) -> MaintainerOverride {
-    let Some(rest) = citation.strip_prefix("maintainer-override(") else {
-        return MaintainerOverride::Absent;
-    };
-    let mut depth = 1usize;
-    let mut reason = String::new();
-    for c in rest.chars() {
-        if c == '(' {
-            depth += 1;
-        } else if c == ')' {
-            depth -= 1;
-            if depth == 0 {
-                if reason.trim().is_empty() {
-                    return MaintainerOverride::Malformed(
-                        "the reason inside `maintainer-override(...)` is empty".to_string(),
-                    );
-                }
-                if !cites_a_chelis_issue(&reason) {
-                    return MaintainerOverride::Malformed(
-                        "no `chelis#N` reference INSIDE the override parentheses; \
-                         a reference after the closing paren is not the override's \
-                         issue and leaves it unbound by the liveness gate"
-                            .to_string(),
-                    );
-                }
-                return MaintainerOverride::WellFormed;
-            }
-        }
-        reason.push(c);
-    }
-    MaintainerOverride::Malformed(
-        "`maintainer-override(` is never closed by a balanced `)`".to_string(),
-    )
+fn active_legacy_permanent_plain_sample() -> &'static FrozenDispositionRow {
+    PERMANENT_PLAIN_ROWS
+        .iter()
+        .find(|row| {
+            !FINAL_NONNUMERIC_ROWS
+                .iter()
+                .any(|final_row| final_row.kind == row.kind && final_row.id == row.id)
+        })
+        .expect("at least one permanent plain row remains active legacy debt")
 }
 
 /// Fixed-width numeric C value types: a signature mentioning one (after
@@ -3140,28 +3202,23 @@ fn teaching_header() -> String {
 
 fn teaching_footer() -> String {
     "\nSanctioned actions:\n\
-     1. UNFLAGGED addition (no capacity shape): regenerate with \
-     CHELIS_CAPACITY_CENSUS_WRITE=1 cargo test -p chelis-cli --test \
-     capacity_census_tripwire, then replace the generated citation TODO with \
-     an OPEN chelis issue reference. A citation invented to pass this gate \
-     is the defect, not a fix.\n\
-     2. FLAGGED capacity seam (float-carrier / raw-dtype-int): there is NO \
-     citation path - opening a fresh issue is not authorization. Redesign \
-     onto the tagged carrier, remove the surface, or obtain a \
-     maintainer-override(<reason>, chelis#N) citation, which only a human \
-     reviewer adds (the baseline file is review-routed).\n\
-     3. NEW numeric-op callable: cite its chelis#N issue, author one exact \
-     [05-OP-N] atom in spec/05, and add its exact `SemanticRegistration` \
-     mapping in this file. Re-check the highest allocated atom number on current \
+     1. STRUCTURALLY NONNUMERIC: add the exact family/kind/canonical-id/flags \
+     descriptor to the nonnumeric registry only after proving that it carries no \
+     numeric capacity. Empty flags alone are not authority.\n\
+     2. TAGGED TRANSPORT: redesign onto the exact tagged carrier and register the \
+     complete descriptor. Resemblance, names, prefixes, and bare numeric carriers \
+     are not tagged-transport authority.\n\
+     3. NUMERIC OPERATION: author or select the governing exact [05-OP-N] atom in \
+     spec/05 and add the family-qualified complete `NumericOperationRegistration`. \
+     Re-check the highest allocated atom number on current \
      main, run .venv/bin/python scripts/generate_rejection_registries.py --write, \
      and commit crates/chelis-types/src/rejection_registry_generated.rs. The \
      generated registry is required but is not semantic authority; an unrelated or \
      nonexistent atom still fails.\n\
      4. An identity change is removal plus addition: remove the old descriptor and \
-     disposition, then disposition the successor under rules 1-3. A flagged \
-     successor does not inherit grandfathering and therefore uses the named \
-     maintainer-override(<reason>, chelis#N) path unless a separately reviewed \
-     relocation contract says otherwise. A removed ABI row is 0.19 payload by \
+     legacy disposition, then register the successor under exactly one of rules \
+     1-3. No transition exception can be copied or newly authored. A removed ABI \
+     row is 0.19 payload by \
      default per remediation_roadmap.md anti-churn invariant 7.\n\
      This test and spec/design/capacity_census.json are guard artifacts; \
      editing either to make a change pass is never the fix.\n"
@@ -3221,6 +3278,22 @@ fn check_against_baseline_with(
     registrations: &[SemanticRegistration],
     spec: &str,
 ) -> Result<(), String> {
+    check_against_baseline_with_authorities(
+        current,
+        baseline,
+        registrations,
+        spec,
+        final_authority_registries(),
+    )
+}
+
+fn check_against_baseline_with_authorities(
+    current: &[Row],
+    baseline: &Baseline,
+    registrations: &[SemanticRegistration],
+    spec: &str,
+    final_registries: AuthorityRegistries<'_>,
+) -> Result<(), String> {
     let mut problems = Vec::new();
     let mut seen_baseline = BTreeSet::new();
     for row in &baseline.rows {
@@ -3251,7 +3324,7 @@ fn check_against_baseline_with(
         .collect();
 
     let expected_manifest = coverage_manifest();
-    if baseline.version != 2 || baseline.legs != expected_manifest {
+    if baseline.version != 3 || baseline.legs != expected_manifest {
         problems.push(format!(
             "INVALID COVERAGE MANIFEST: baseline version/legs do not equal \
              the fixed executable `coverage_manifest`; a leg cannot become \
@@ -3304,10 +3377,26 @@ fn check_against_baseline_with(
                 row.kind, row.id
             ));
         }
+        let final_authority = capacity_census_authority::classify_final_authority(
+            &authority_surface(row),
+            final_registries,
+            spec,
+        );
+        if final_authority.is_ok() {
+            if !row.citation.trim().is_empty() {
+                problems.push(format!(
+                    "FINAL AUTHORITY ROW CARRIES A TRANSITION DISPOSITION: [{}] {} has `{}`; final rows omit legacy citations/exceptions",
+                    row.kind, row.id, row.citation
+                ));
+            }
+            continue;
+        }
         if row.citation.trim().is_empty() || row.citation.trim() == "TODO" {
             problems.push(format!(
-                "UNCITED census row (citation is TODO/empty): [{}] {}",
-                row.kind, row.id
+                "UNCLASSIFIED census row (no final authority and no sealed legacy disposition): [{}] {} ({})",
+                row.kind,
+                row.id,
+                final_authority.expect_err("checked above")
             ));
             continue;
         }
@@ -3330,25 +3419,6 @@ fn check_against_baseline_with(
         {
             problems.push(format!(
                 "FROZEN DISPOSITION CHANGED for [{}] {}: the Json descriptor must retain its exact permanent disposition and flags",
-                row.kind, row.id
-            ));
-        }
-        let human_override = classify_maintainer_override(&row.citation);
-        if let MaintainerOverride::Malformed(reason) = &human_override {
-            problems.push(format!(
-                "MALFORMED MAINTAINER OVERRIDE: {reason}. The sanctioned form \
-                 is `maintainer-override(<reason>, chelis#N)`: [{}] {}",
-                row.kind, row.id
-            ));
-        }
-        if is_seam(&row.flags)
-            && row.citation != GRANDFATHER_SEAM_CITATION
-            && !has_recognized_permanent_disposition(row)
-            && human_override != MaintainerOverride::WellFormed
-        {
-            problems.push(format!(
-                "NEW capacity seam without a sanctioned disposition (an issue \
-                 citation is NOT a path for flagged rows): [{}] {}",
                 row.kind, row.id
             ));
         }
@@ -3377,10 +3447,10 @@ fn check_against_baseline_with(
         {
             problems.push(format!(
                 "PERMANENT PLAIN disposition on a descriptor outside the frozen \
-                 kind/id/flags set: this is an exact completed capacity adjudication, not a \
-                 string a new row may copy to skip its own disposition. A new row cites its own \
-                 OPEN issue, and a new numeric callable also authors its \
-                 `[05-OP-N]` atom and `SemanticRegistration`: [{}] {}",
+                 kind/id/flags set: this is an exact foundation-era adjudication, not a \
+                 string a new row may copy. A new or changed row must enter exactly one final \
+                 authority class; a numeric callable authors its governing `[05-OP-N]` atom \
+                 and complete family-qualified registration: [{}] {}",
                 row.kind, row.id
             ));
         }
@@ -3393,36 +3463,10 @@ fn check_against_baseline_with(
                 row.kind, row.id
             ));
         }
-        if (row.flags.iter().any(|f| f == "numeric-op") || row.kind == "std-def-numeric")
-            && !has_recognized_permanent_plain_disposition(row)
-            && !has_recognized_legacy_semantic_exemption(row)
-        {
-            let callable = callable_identity(row);
-            match registration_map.get(callable.as_str()) {
-                None => problems.push(format!(
-                    "NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION: \
-                     `{callable}` has no `SemanticRegistration`; citation \
-                     `{}` is not a callable-to-authority mapping",
-                    row.citation
-                )),
-                Some(registration) => {
-                    if let Some(problem) = registration_problem(*registration, spec) {
-                        problems.push(format!(
-                            "NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION: \
-                             `{callable}` maps to `{}` but {problem}",
-                            registration.atom
-                        ));
-                    }
-                }
-            }
-        }
-        if !has_recognized_permanent_disposition(row) && !cites_a_chelis_issue(&row.citation) {
+        if !has_recognized_legacy_disposition(row) {
             problems.push(format!(
-                "CITATION NAMES NO ISSUE (every sanctioned citation carries a \
-                 chelis#N reference so the liveness gate can require OPEN, unless \
-                 it is one of the exact recognized permanent dispositions; prose \
-                 is not a citation): [{}] {}",
-                row.kind, row.id
+                "LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE: [{}] {} carries `{}`. New or changed identities must satisfy exactly one final authority class; no grandfather, permanent-disposition, successor-override, generic issue citation, or maintainer override can be added.",
+                row.kind, row.id, row.citation
             ));
         }
     }
@@ -3458,20 +3502,32 @@ fn regenerate(baseline_path: &Path, current: &[Row], old: Option<&Baseline>) {
                 .collect()
         })
         .unwrap_or_default();
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL))
+        .expect("controlling spec/05 must be readable");
     let rows: Vec<Row> = current
         .iter()
         .map(|r| Row {
             kind: r.kind.clone(),
             id: r.id.clone(),
             flags: r.flags.clone(),
-            citation: old_citations
-                .get(&(r.kind.clone(), r.id.clone()))
-                .cloned()
-                .unwrap_or_else(|| "TODO".to_string()),
+            citation: if capacity_census_authority::classify_final_authority(
+                &authority_surface(r),
+                final_authority_registries(),
+                &spec,
+            )
+            .is_ok()
+            {
+                String::new()
+            } else {
+                old_citations
+                    .get(&(r.kind.clone(), r.id.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| "TODO".to_string())
+            },
         })
         .collect();
     let out = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows,
     };
@@ -3507,8 +3563,8 @@ fn capacity_census_matches_public_surface() {
         serde_json::from_str(&fs::read_to_string(&baseline_path).unwrap_or_else(|e| {
             panic!(
                 "{}missing baseline {}: {e}\nRun once with \
-                 CHELIS_CAPACITY_CENSUS_WRITE=1 to create it, then fill the \
-                 TODO citations.{}",
+                 CHELIS_CAPACITY_CENSUS_WRITE=1 to create it, then classify every \
+                 TODO row through exactly one final authority.{}",
                 teaching_header(),
                 baseline_path.display(),
                 teaching_footer()
@@ -3516,7 +3572,7 @@ fn capacity_census_matches_public_surface() {
         }))
         .expect("parse capacity_census.json");
 
-    if let Err(msg) = check_complete_frozen_disposition_manifest(&baseline) {
+    if let Err(msg) = check_active_legacy_subset(&baseline) {
         panic!("{msg}");
     }
     if let Err(msg) = check_against_baseline(&current, &baseline) {
@@ -3525,12 +3581,153 @@ fn capacity_census_matches_public_surface() {
 }
 
 #[test]
+fn migrated_primary_rows_have_exact_final_authority_and_no_transition_disposition() {
+    let baseline: Baseline = serde_json::from_str(
+        &fs::read_to_string(repo_root().join(BASELINE_REL)).expect("read primary baseline"),
+    )
+    .expect("parse primary baseline");
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+
+    for registered in FINAL_NONNUMERIC_ROWS {
+        let row = baseline
+            .rows
+            .iter()
+            .find(|row| {
+                row.kind == registered.kind
+                    && row.id == registered.id
+                    && row
+                        .flags
+                        .iter()
+                        .map(String::as_str)
+                        .eq(registered.flags.iter().copied())
+            })
+            .unwrap_or_else(|| panic!("missing migrated nonnumeric row: {registered:?}"));
+        assert!(
+            row.citation.is_empty(),
+            "final row retained legacy debt: {row:?}"
+        );
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &authority_surface(row),
+                final_authority_registries(),
+                &spec,
+            ),
+            Ok(capacity_census_authority::FinalAuthority::Nonnumeric)
+        );
+    }
+
+    let tensor_shape = baseline
+        .rows
+        .iter()
+        .find(|row| row.id == FINAL_NUMERIC_OPERATION_ROWS[0].surface.id)
+        .expect("tensor_shape remains discovered");
+    assert!(tensor_shape.citation.is_empty());
+    assert_eq!(
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(tensor_shape),
+            final_authority_registries(),
+            &spec,
+        ),
+        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-7]" })
+    );
+}
+
+#[test]
+fn regeneration_preserves_final_authority_but_cannot_bless_an_unclassified_row() {
+    let final_row = Row {
+        kind: FINAL_NONNUMERIC_ROWS[0].kind.to_string(),
+        id: FINAL_NONNUMERIC_ROWS[0].id.to_string(),
+        flags: Vec::new(),
+        citation: String::new(),
+    };
+    let unclassified = Row {
+        kind: "header-export".to_string(),
+        id: "reviewer.h: void unclassified ( void ) ;".to_string(),
+        flags: Vec::new(),
+        citation: String::new(),
+    };
+    let path = std::env::temp_dir().join(format!(
+        "chelis-capacity-census-regeneration-{}.json",
+        std::process::id()
+    ));
+    regenerate(&path, &[final_row.clone(), unclassified.clone()], None);
+    let baseline: Baseline = serde_json::from_str(
+        &fs::read_to_string(&path).expect("read regenerated synthetic baseline"),
+    )
+    .expect("parse regenerated synthetic baseline");
+    fs::remove_file(&path).ok();
+
+    assert!(baseline.rows[0].citation.is_empty());
+    assert_eq!(baseline.rows[1].citation, "TODO");
+    let error = check_against_baseline(&[final_row, unclassified], &baseline)
+        .expect_err("regeneration must leave the new row visibly unclassified");
+    assert!(error.contains("UNCLASSIFIED census row"), "{error}");
+}
+
+#[test]
+fn changed_identity_can_register_as_final_but_cannot_inherit_transition_debt() {
+    const SUCCESSOR: StaticSurfaceDescriptor = StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-export",
+        "reviewer.h: int64_t changed_signature ( int32_t axis ) ;",
+        &["numeric-op"],
+    );
+    const REGISTRATION: FinalNumericOperationRegistration = FinalNumericOperationRegistration {
+        surface: SUCCESSOR,
+        atom: "[05-OP-7]",
+        authority_anchor: "runtime extent read",
+    };
+    let mut row = Row {
+        kind: SUCCESSOR.kind.to_string(),
+        id: SUCCESSOR.id.to_string(),
+        flags: SUCCESSOR
+            .flags
+            .iter()
+            .map(|flag| (*flag).to_string())
+            .collect(),
+        citation: String::new(),
+    };
+    let baseline = Baseline {
+        version: 3,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
+    let registries = AuthorityRegistries {
+        nonnumeric: &[],
+        tagged_transports: &[],
+        numeric_operations: &[REGISTRATION],
+    };
+    assert!(
+        check_against_baseline_with_authorities(&[row.clone()], &baseline, &[], &spec, registries)
+            .is_ok(),
+        "a changed identity may land only after exact final registration"
+    );
+
+    row.citation = INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE.to_string();
+    let copied_baseline = Baseline {
+        version: 3,
+        legs: coverage_manifest(),
+        rows: vec![row.clone()],
+    };
+    let error =
+        check_against_baseline_with_authorities(&[row], &copied_baseline, &[], &spec, registries)
+            .expect_err("a final successor cannot copy even the one-off successor override");
+    assert!(
+        error.contains("FINAL AUTHORITY ROW CARRIES A TRANSITION DISPOSITION"),
+        "{error}"
+    );
+}
+
+#[test]
 fn sanctioned_actions_name_complete_identity_change_and_new_atom_paths() {
     let guidance = teaching_footer();
     for required in [
         "removal plus addition",
-        "maintainer-override(<reason>, chelis#N)",
-        "`SemanticRegistration`",
+        "STRUCTURALLY NONNUMERIC",
+        "TAGGED TRANSPORT",
+        "`NumericOperationRegistration`",
+        "No transition exception",
         "highest allocated atom number",
         "scripts/generate_rejection_registries.py --write",
         "crates/chelis-types/src/rejection_registry_generated.rs",
@@ -3602,7 +3799,7 @@ fn int64_dim_carrier_successors_use_named_one_off_overrides() {
 
         let exact = row_from_frozen(reviewed, OVERRIDE);
         let exact_baseline = Baseline {
-            version: 2,
+            version: 3,
             legs: coverage_manifest(),
             rows: vec![exact.clone()],
         };
@@ -3614,7 +3811,7 @@ fn int64_dim_carrier_successors_use_named_one_off_overrides() {
         let mut regrandfathered = exact.clone();
         regrandfathered.citation = GRANDFATHER_SEAM_CITATION.to_string();
         let regrandfathered_baseline = Baseline {
-            version: 2,
+            version: 3,
             legs: coverage_manifest(),
             rows: vec![regrandfathered.clone()],
         };
@@ -3635,14 +3832,15 @@ fn int64_dim_carrier_successors_use_named_one_off_overrides() {
             .expect("the closed disposition manifest includes every #1149 successor");
         mutated.kind.push_str("-moved");
         let incomplete = Baseline {
-            version: 2,
+            version: 3,
             legs: coverage_manifest(),
             rows: complete_rows,
         };
-        let err = check_complete_frozen_disposition_manifest(&incomplete)
+        let err = check_active_legacy_subset(&incomplete)
             .expect_err("a #1149 successor cannot change family inside the closed set");
         assert!(
-            err.contains("FROZEN DISPOSITION MANIFEST ROW MISSING OR CHANGED") && err.contains(id),
+            err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE")
+                && err.contains(id),
             "unexpected successor mutation diagnostic: {err}"
         );
     }
@@ -3740,17 +3938,19 @@ fn todo_citation_fails_with_teaching_message() {
         citation: "TODO".to_string(),
     };
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let current = vec![row];
     let err = check_against_baseline(&current, &baseline).unwrap_err();
-    assert!(err.contains("UNCITED"), "{err}");
+    assert!(err.contains("UNCLASSIFIED census row"), "{err}");
     assert!(
         err.contains("spec/design/dtype_semantics.md §C6")
             && err.contains("AGENTS.md §Numeric Surface Discipline")
-            && err.contains("A citation invented to pass this gate is the defect"),
+            && err.contains("STRUCTURALLY NONNUMERIC")
+            && err.contains("TAGGED TRANSPORT")
+            && err.contains("NUMERIC OPERATION"),
         "the failure message must teach the rule and the sanctioned actions: {err}"
     );
 }
@@ -3764,7 +3964,7 @@ fn new_and_removed_rows_fail() {
         citation: "baseline-2026-07-30".to_string(),
     };
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![cited("a.h: void old(void);")],
     };
@@ -3793,18 +3993,14 @@ fn new_flagged_seam_cannot_be_cited_with_an_issue() {
         "chelis#123456",
     );
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("NEW capacity seam") && err.contains("NOT a path for flagged rows"),
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
         "an issue citation must not bless a flagged row: {err}"
-    );
-    assert!(
-        err.contains("opening a fresh issue is not authorization"),
-        "the teaching message must state the P1-1 rule: {err}"
     );
 }
 
@@ -3824,7 +4020,7 @@ fn grandfather_citation_cannot_be_copied_onto_new_rows() {
         GRANDFATHER_SEAM_CITATION,
     ));
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: rows.clone(),
     };
@@ -3835,20 +4031,25 @@ fn grandfather_citation_cannot_be_copied_onto_new_rows() {
     );
 }
 
-/// The one human exception: a maintainer-override citation passes, and
-/// its issue references stay under the liveness gate.
+/// #1288 removes the generic human-override path: even a well-formed marker
+/// cannot authorize a new identity.
 #[test]
-fn maintainer_override_is_the_human_exception() {
+fn maintainer_override_is_not_a_final_authority_class() {
     let row = flagged_row(
         "planted.h: void staged(int out_dtype);",
         "maintainer-override(FFI staging for chelis#893, chelis#893)",
     );
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
-    assert!(check_against_baseline(&[row], &baseline).is_ok());
+    let error = check_against_baseline(&[row], &baseline)
+        .expect_err("generic maintainer overrides are transition debt, not final authority");
+    assert!(
+        error.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -3857,14 +4058,14 @@ fn maintainer_override_does_not_waive_new_numeric_semantic_registration() {
         header_rows_local("planted.h", "double staged(double value, int out_dtype);").remove(0);
     row.citation = "maintainer-override(FFI staging, chelis#893)".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
-        "capacity disposition and callable semantics are independent: {err}"
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        "a generic override is not one of the three final classes: {err}"
     );
 }
 
@@ -3880,12 +4081,15 @@ fn prose_citation_without_issue_ref_fails() {
         citation: "reviewed and fine".to_string(),
     };
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
-    assert!(err.contains("CITATION NAMES NO ISSUE"), "{err}");
+    assert!(
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        "{err}"
+    );
 }
 
 /// A maintainer override must name its issue too (§C6: "naming its
@@ -3897,18 +4101,21 @@ fn maintainer_override_without_issue_ref_fails() {
         "maintainer-override(because I said so)",
     );
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
-    assert!(err.contains("CITATION NAMES NO ISSUE"), "{err}");
+    assert!(
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        "{err}"
+    );
 }
 
-/// Unflagged rows keep the open-issue path (invariant 7's release
-/// policy governs those additions, not the seam freeze).
+/// Empty numeric flags are not proof of structural nonnumericity, and an
+/// issue citation is not a fourth final authority class.
 #[test]
-fn unflagged_row_with_issue_citation_passes() {
+fn unflagged_row_with_issue_citation_still_requires_final_authority() {
     let row = Row {
         kind: "header-export".to_string(),
         id: "planted.h: void plain(chelis_string s);".to_string(),
@@ -3916,11 +4123,16 @@ fn unflagged_row_with_issue_citation_passes() {
         citation: "chelis#123456".to_string(),
     };
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
-    assert!(check_against_baseline(&[row], &baseline).is_ok());
+    let error = check_against_baseline(&[row], &baseline)
+        .expect_err("an issue citation cannot classify an unflagged descriptor");
+    assert!(
+        error.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        "{error}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3989,7 +4201,7 @@ fn reviewer_grandfathered_descriptor_relocation_must_fail() {
         GRANDFATHER_SEAM_CITATION,
     ));
     let regenerated = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: rows.clone(),
     };
@@ -4013,35 +4225,44 @@ fn new_post_ratchet_runtime_numeric_op_requires_semantic_registration() {
         "numeric-op membership is structural: {:?}",
         rows[0]
     );
-    rows[0].citation = "chelis#729".to_string();
     let row = rows.remove(0);
     let regenerated = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(std::slice::from_ref(&row), &regenerated).unwrap_err();
     assert!(
-        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
+        err.contains("UNCLASSIFIED census row"),
         "a new post-ratchet numeric callable needs a semantic decision, not a tracker citation: {err}"
     );
-    let mut registered = row;
-    registered.citation = "chelis#123456".to_string();
+    let registered = row;
     let ok_baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![registered.clone()],
     };
-    let registration = SemanticRegistration {
-        callable: "[header-export] planted.h: int64_t chelis_abs_i64 ( int64_t value ) ;",
+    let registration = FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "planted.h: int64_t chelis_abs_i64 ( int64_t value ) ;",
+            &["numeric-op"],
+        ),
         atom: "[05-OP-1]",
+        authority_anchor: "Integer abs",
     };
     assert!(
-        check_against_baseline_with(
+        check_against_baseline_with_authorities(
             &[registered],
             &ok_baseline,
-            &[registration],
+            &[],
             "Synthetic controlling fixture:\n> **[05-OP-1]** Integer abs.",
+            AuthorityRegistries {
+                nonnumeric: &[],
+                tagged_transports: &[],
+                numeric_operations: &[registration],
+            },
         )
         .is_ok()
     );
@@ -4095,7 +4316,7 @@ fn matched_row_float_carrier_metadata_change_fails() {
     let mut current_row = baseline_row.clone();
     current_row.flags = vec!["float-carrier".to_string(), "numeric-op".to_string()];
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![baseline_row],
     };
@@ -4126,7 +4347,7 @@ fn matched_row_typedef_int64_to_double_metadata_change_fails() {
     let mut current_row = after[0].clone();
     current_row.citation = PERMANENT_PLAIN_DISPOSITION.to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![baseline_row],
     };
@@ -4150,7 +4371,7 @@ fn matched_row_raw_dtype_metadata_change_fails() {
     let mut current_row = baseline_row.clone();
     current_row.flags = vec!["raw-dtype-int".to_string()];
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![baseline_row],
     };
@@ -4167,7 +4388,7 @@ fn unrelated_observation_atom_is_not_a_numeric_registration() {
     let mut row = rows.remove(0);
     row.citation = "chelis#729; spec/05-risc-primitives.md [05-OBS-1]".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4178,7 +4399,7 @@ fn unrelated_observation_atom_is_not_a_numeric_registration() {
     let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap();
     let err = check_against_baseline_with(&[row], &baseline, &[registration], &spec).unwrap_err();
     assert!(
-        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION")
+        err.contains("INVALID SEMANTIC REGISTRATION")
             && err.contains("wrong atom grammar/group")
             && err.contains("05-OBS-1"),
         "an unrelated existing atom must not bless a callable: {err}"
@@ -4187,11 +4408,9 @@ fn unrelated_observation_atom_is_not_a_numeric_registration() {
 
 #[test]
 fn nonexistent_operation_atom_is_not_a_numeric_registration() {
-    let mut row =
-        header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
-    row.citation = "chelis#729".to_string();
+    let row = header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4213,7 +4432,7 @@ fn operation_atom_cross_reference_is_not_a_normative_definition() {
         header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
     row.citation = "chelis#729".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4235,12 +4454,12 @@ fn operation_atom_cross_reference_is_not_a_normative_definition() {
 }
 
 #[test]
-fn registered_numeric_callable_without_a_permanent_disposition_requires_an_issue() {
+fn old_style_semantic_registration_and_issue_prose_are_not_final_authority() {
     let mut row =
         header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
     row.citation = "reviewed semantic registration".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4256,9 +4475,8 @@ fn registered_numeric_callable_without_a_permanent_disposition_requires_an_issue
     )
     .unwrap_err();
     assert!(
-        err.contains("CITATION NAMES NO ISSUE")
-            && !err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
-        "registration and live-issue citation are independent obligations: {err}"
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+        "only a family-qualified complete final registration authorizes a discovered row: {err}"
     );
 }
 
@@ -4421,7 +4639,7 @@ fn coverage_legs_cannot_claim_covered_without_live_oracles() {
         mutations: vec!["invented".to_string()],
     });
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs,
         rows: vec![row.clone()],
     };
@@ -4474,13 +4692,13 @@ fn new_post_ratchet_bare_int_export_is_numeric_op_and_requires_registration() {
     );
     row.citation = "chelis#729".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
         "a new post-ratchet bare-int numeric callable owes exact registration: {err}"
     );
 }
@@ -4618,13 +4836,13 @@ fn std_adt_bare_f64_variant_has_no_issue_citation_path() {
     let mut row = rows.remove(0);
     row.citation = "chelis#891".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(&[row], &baseline).unwrap_err();
     assert!(
-        err.contains("NEW capacity seam") && err.contains("NOT a path for flagged rows"),
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
         "regenerate-and-cite must not land a new f64 ADT channel: {err}"
     );
 }
@@ -4700,13 +4918,13 @@ fn extern_data_declarations_are_inventoried_and_classified() {
     let mut cited = scale.clone();
     cited.citation = "chelis#729".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![cited.clone()],
     };
     let err = check_against_baseline(&[cited], &baseline).unwrap_err();
     assert!(
-        err.contains("NEW capacity seam"),
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
         "data seams take the same no-citation-path rule as callables: {err}"
     );
 }
@@ -4841,49 +5059,28 @@ fn local_include_reads_both_spellings_and_nothing_else() {
     assert_eq!(local_include("void f(void);"), None);
 }
 
-/// The one human path past a seam is validated for shape, not matched as a
-/// prefix: an unterminated marker, an empty reason, and an issue reference
-/// outside the parentheses are all forgeries of it.
+/// The generic override parser is gone. No spelling of the old marker is a
+/// final authority class, including the formerly well-formed shape.
 #[test]
-fn malformed_maintainer_overrides_fail_and_the_exact_form_passes() {
-    for (citation, why) in [
-        ("maintainer-override(FFI staging chelis#893", "unbalanced"),
-        ("maintainer-override() chelis#893", "empty reason"),
-        (
-            "maintainer-override(FFI staging) chelis#893",
-            "issue reference outside the parentheses",
-        ),
+fn no_generic_maintainer_override_spelling_is_authority() {
+    for citation in [
+        "maintainer-override(FFI staging chelis#893",
+        "maintainer-override() chelis#893",
+        "maintainer-override(FFI staging) chelis#893",
+        "maintainer-override(FFI staging (temporary) for chelis#893)",
     ] {
         let row = flagged_row("planted.h: void staged(int out_dtype);", citation);
         let baseline = Baseline {
-            version: 2,
+            version: 3,
             legs: coverage_manifest(),
             rows: vec![row.clone()],
         };
         let err = check_against_baseline(&[row], &baseline).unwrap_err();
         assert!(
-            err.contains("MALFORMED MAINTAINER OVERRIDE"),
-            "{why} must be rejected: {err}"
-        );
-        assert!(
-            err.contains("NEW capacity seam"),
-            "a malformed override is not a disposition ({why}): {err}"
+            err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
+            "generic override must be rejected: {err}"
         );
     }
-
-    let row = flagged_row(
-        "planted.h: void staged(int out_dtype);",
-        "maintainer-override(FFI staging (temporary) for chelis#893)",
-    );
-    let baseline = Baseline {
-        version: 2,
-        legs: coverage_manifest(),
-        rows: vec![row.clone()],
-    };
-    assert!(
-        check_against_baseline(&[row], &baseline).is_ok(),
-        "a balanced override naming its issue inside the parentheses is the human path"
-    );
 }
 
 /// The residual the prior round recorded and this one executed: the original
@@ -4896,7 +5093,7 @@ fn permanent_plain_disposition_cannot_be_copied_onto_a_new_row() {
         header_rows_local("planted.h", "int64_t chelis_abs_i64(int64_t value);").remove(0);
     row.citation = PERMANENT_PLAIN_DISPOSITION.to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4906,9 +5103,12 @@ fn permanent_plain_disposition_cannot_be_copied_onto_a_new_row() {
         "the permanent disposition must not exempt a brand-new numeric callable: {err}"
     );
 
-    let frozen = row_from_frozen(&PERMANENT_PLAIN_ROWS[0], PERMANENT_PLAIN_DISPOSITION);
+    let frozen = row_from_frozen(
+        active_legacy_permanent_plain_sample(),
+        PERMANENT_PLAIN_DISPOSITION,
+    );
     let frozen_baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![frozen.clone()],
     };
@@ -4920,9 +5120,12 @@ fn permanent_plain_disposition_cannot_be_copied_onto_a_new_row() {
 
 #[test]
 fn duplicate_primary_descriptors_are_rejected_before_map_collapse() {
-    let row = row_from_frozen(&PERMANENT_PLAIN_ROWS[0], PERMANENT_PLAIN_DISPOSITION);
+    let row = row_from_frozen(
+        active_legacy_permanent_plain_sample(),
+        PERMANENT_PLAIN_DISPOSITION,
+    );
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone(), row.clone()],
     };
@@ -4931,7 +5134,7 @@ fn duplicate_primary_descriptors_are_rejected_before_map_collapse() {
     assert!(err.contains("DUPLICATE BASELINE DESCRIPTOR"), "{err}");
 
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4942,9 +5145,9 @@ fn duplicate_primary_descriptors_are_rejected_before_map_collapse() {
 
 #[test]
 fn frozen_primary_descriptor_cannot_be_relabelled_as_an_open_issue() {
-    let mut row = row_from_frozen(&PERMANENT_PLAIN_ROWS[0], "chelis#893");
+    let mut row = row_from_frozen(active_legacy_permanent_plain_sample(), "chelis#893");
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4957,7 +5160,7 @@ fn frozen_primary_descriptor_cannot_be_relabelled_as_an_open_issue() {
         "maintainer-override(red-team mutation, chelis#893)",
     );
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -4967,29 +5170,44 @@ fn frozen_primary_descriptor_cannot_be_relabelled_as_an_open_issue() {
 }
 
 #[test]
-fn frozen_primary_manifest_is_bidirectionally_complete() {
+fn active_legacy_rows_may_shrink_but_cannot_leave_the_foundation_universe() {
     let mut rows = frozen_disposition_rows();
     let complete = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: rows.clone(),
     };
     assert!(
-        check_complete_frozen_disposition_manifest(&complete).is_ok(),
+        check_active_legacy_subset(&complete).is_ok(),
         "the complete hand-maintained manifest must describe itself"
     );
 
-    let removed = rows.remove(0);
-    let incomplete = Baseline {
-        version: 2,
+    rows.remove(0);
+    let shrunk = Baseline {
+        version: 3,
         legs: coverage_manifest(),
         rows,
     };
-    let err = check_complete_frozen_disposition_manifest(&incomplete)
-        .expect_err("removing only the baseline half of a frozen row must fail");
     assert!(
-        err.contains("FROZEN DISPOSITION MANIFEST ROW MISSING OR CHANGED")
-            && err.contains(&removed.id),
+        check_active_legacy_subset(&shrunk).is_ok(),
+        "migration to final authority removes active debt without rewriting the immutable universe"
+    );
+
+    let copied = Baseline {
+        version: 3,
+        legs: coverage_manifest(),
+        rows: vec![Row {
+            kind: "header-export".to_string(),
+            id: "reviewer.h: void successor(void);".to_string(),
+            flags: Vec::new(),
+            citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
+        }],
+    };
+    let err = check_active_legacy_subset(&copied)
+        .expect_err("a successor cannot copy a foundation-era disposition");
+    assert!(
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE")
+            && err.contains("successor"),
         "{err}"
     );
 }
@@ -5004,32 +5222,19 @@ fn permanent_json_disposition_is_exact_descriptor_only() {
     };
     let exact_baseline = exact.clone();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![exact_baseline],
     };
-    let err = check_against_baseline_with(std::slice::from_ref(&exact), &baseline, &[], "")
-        .expect_err("the Json permanent capacity disposition is not semantic authority");
     assert!(
-        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION"),
-        "the Json carrier must still map to [05-OP-2]: {err}"
-    );
-    let result = check_against_baseline_with(
-        &[exact],
-        &baseline,
-        &SEMANTIC_REGISTRATIONS[..1],
-        "> **[05-OP-2]** source-faithful JSON numeric split",
-    );
-    assert!(
-        result.is_ok(),
-        "the exact source-faithful Json carrier keeps its reviewed permanent disposition: \
-         {result:?}"
+        check_against_baseline_with(std::slice::from_ref(&exact), &baseline, &[], "").is_ok(),
+        "the obsolete prelude Json identity remains sealed legacy debt until #1293 removes it"
     );
 
     let mut copied = flagged_row("prelude::CopiedJson: JNum(f64)", PERMANENT_JSON_DISPOSITION);
     copied.kind = "prelude-adt-numeric".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![copied.clone()],
     };
@@ -5043,9 +5248,9 @@ fn permanent_json_disposition_is_exact_descriptor_only() {
 
 #[test]
 fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
-    let permanent = PERMANENT_PLAIN_ROWS[0];
+    let permanent = *active_legacy_permanent_plain_sample();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![Row {
             kind: "wrong-family".to_string(),
@@ -5059,7 +5264,7 @@ fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
     assert!(err.contains("PERMANENT PLAIN disposition"), "{err}");
 
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![Row {
             kind: "header-export".to_string(),
@@ -5073,7 +5278,7 @@ fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
     assert!(err.contains("PERMANENT PLAIN disposition"), "{err}");
 
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![Row {
             kind: "prelude-adt-numeric".to_string(),
@@ -5090,7 +5295,7 @@ fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
 #[test]
 fn grandfathered_seams_bind_the_complete_enforcement_descriptor() {
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![Row {
             kind: "wrong-family".to_string(),
@@ -5126,10 +5331,36 @@ fn every_frozen_primary_descriptor_rejects_kind_and_flag_mutations() {
         for frozen in rows {
             let exact = row_from_frozen(frozen, citation);
             let exact_baseline = Baseline {
-                version: 2,
+                version: 3,
                 legs: coverage_manifest(),
                 rows: vec![exact.clone()],
             };
+            if capacity_census_authority::classify_final_authority(
+                &authority_surface(&exact),
+                final_authority_registries(),
+                &fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap(),
+            )
+            .is_ok()
+            {
+                let error = check_against_baseline(std::slice::from_ref(&exact), &exact_baseline)
+                    .expect_err("a migrated final row must drop its transition disposition");
+                assert!(
+                    error.contains("FINAL AUTHORITY ROW CARRIES A TRANSITION DISPOSITION"),
+                    "{frozen:?}: {error}"
+                );
+                let mut final_row = exact;
+                final_row.citation.clear();
+                let final_baseline = Baseline {
+                    version: 3,
+                    legs: coverage_manifest(),
+                    rows: vec![final_row.clone()],
+                };
+                assert!(
+                    check_against_baseline(&[final_row], &final_baseline).is_ok(),
+                    "the migrated descriptor must pass through final authority: {frozen:?}"
+                );
+                continue;
+            }
             assert!(
                 check_against_baseline(std::slice::from_ref(&exact), &exact_baseline).is_ok(),
                 "frozen descriptor must remain accepted: {frozen:?}"
@@ -5138,7 +5369,7 @@ fn every_frozen_primary_descriptor_rejects_kind_and_flag_mutations() {
             let mut wrong_kind = exact.clone();
             wrong_kind.kind.push_str("-moved");
             let baseline = Baseline {
-                version: 2,
+                version: 3,
                 legs: coverage_manifest(),
                 rows: vec![wrong_kind.clone()],
             };
@@ -5153,7 +5384,7 @@ fn every_frozen_primary_descriptor_rejects_kind_and_flag_mutations() {
                 wrong_flags.flags.remove(0);
             }
             let baseline = Baseline {
-                version: 2,
+                version: 3,
                 legs: coverage_manifest(),
                 rows: vec![wrong_flags.clone()],
             };
@@ -5165,7 +5396,7 @@ fn every_frozen_primary_descriptor_rejects_kind_and_flag_mutations() {
                 let mut reordered_flags = exact;
                 reordered_flags.flags.reverse();
                 let baseline = Baseline {
-                    version: 2,
+                    version: 3,
                     legs: coverage_manifest(),
                     rows: vec![reordered_flags.clone()],
                 };
@@ -5186,14 +5417,14 @@ fn invented_permanent_disposition_is_not_a_citation() {
         citation: "permanent-disposition(reviewed and fine)".to_string(),
     };
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline_with(&[row], &baseline, &[], "")
         .expect_err("an invented permanent disposition must fail");
     assert!(
-        err.contains("CITATION NAMES NO ISSUE") && err.contains("recognized permanent disposition"),
+        err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE"),
         "unexpected invented-disposition diagnostic: {err}"
     );
 }
@@ -5635,7 +5866,7 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
          sig planted_scale: int32 -> int32\n\
          def planted_scale(n) = n\n",
     );
-    let mut row = rows
+    let row = rows
         .into_iter()
         .find(|row| row.kind == "std-def-numeric")
         .expect("the exported numeric def enumerates");
@@ -5643,30 +5874,39 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
         !is_seam(&row.flags),
         "an integer carrier is not a seam: {row:?}"
     );
-    row.citation = "chelis#729".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
     let err = check_against_baseline(std::slice::from_ref(&row), &baseline).unwrap_err();
     assert!(
-        err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION")
-            && err.contains("planted::planted_scale"),
+        err.contains("UNCLASSIFIED census row") && err.contains("planted::planted_scale"),
         "an issue citation is not a semantic decision for the new stdlib \
          callable: {err}"
     );
 
-    let registration = SemanticRegistration {
-        callable: Box::leak(callable_identity(&row).into_boxed_str()),
+    let registration = FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "std-def-numeric",
+            "planted::planted_scale: (t-fn {} (t-prim {} int32) (t-prim {} int32))",
+            &["numeric-op"],
+        ),
         atom: "[05-OP-1]",
+        authority_anchor: "Integer scale",
     };
     assert!(
-        check_against_baseline_with(
+        check_against_baseline_with_authorities(
             std::slice::from_ref(&row),
             &baseline,
-            &[registration],
+            &[],
             "Synthetic controlling fixture:\n> **[05-OP-1]** Integer scale.",
+            AuthorityRegistries {
+                nonnumeric: &[],
+                tagged_transports: &[],
+                numeric_operations: &[registration],
+            },
         )
         .is_ok(),
         "an exact registration against a real atom is the sanctioned path"
@@ -5694,16 +5934,16 @@ fn a_new_stdlib_numeric_def_requires_semantic_registration() {
     );
     float_row.citation = "maintainer-override(FFI staging, chelis#893)".to_string();
     let float_baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![float_row.clone()],
     };
     let float_err =
         check_against_baseline(std::slice::from_ref(&float_row), &float_baseline).unwrap_err();
     assert!(
-        float_err.contains("NUMERIC OP WITHOUT EXACT SEMANTIC REGISTRATION")
+        float_err.contains("LEGACY DISPOSITION OUTSIDE THE SEALED FOUNDATION UNIVERSE")
             && float_err.contains("planted::planted_ratio"),
-        "a capacity override is not a semantic decision for the new stdlib \
+        "a capacity override is not final authority for the new stdlib \
          callable: {float_err}"
     );
 }
@@ -5727,7 +5967,7 @@ fn a_stdlib_registration_against_a_nonexistent_atom_fails() {
         .expect("the exported numeric def enumerates");
     row.citation = "chelis#729".to_string();
     let baseline = Baseline {
-        version: 2,
+        version: 3,
         legs: coverage_manifest(),
         rows: vec![row.clone()],
     };
@@ -5902,11 +6142,10 @@ fn count_is_registered_against_its_exact_authority_atom() {
 }
 
 /// prelude-adt-numeric positive control: the real registered prelude
-/// `Json` ADT is enumerated with BOTH classifications -- `float-carrier`
-/// (JNum f64: the seam covered by its permanent reviewed disposition) and
-/// `numeric-op` (JInt int64: bound to the [05-OP-2] semantic registration) --
-/// under a complete `(kind, id, flags)` descriptor, and the non-numeric prelude ADTs
-/// (Option, List, MappedFile) contribute no rows.
+/// `Json` ADT is enumerated with BOTH classifications under a complete
+/// `(kind, id, flags)` descriptor. It deliberately remains in the sealed
+/// legacy universe: #1293 removes this obsolete duplicate before a successor
+/// can receive final authority.
 #[test]
 fn registered_prelude_json_adt_is_enumerated_with_both_flags() {
     let rows = prelude_adt_rows();
@@ -5927,13 +6166,13 @@ fn registered_prelude_json_adt_is_enumerated_with_both_flags() {
         vec!["float-carrier".to_string(), "numeric-op".to_string()]
     );
     assert!(is_seam(&row.flags));
-    // The numeric-op half is registered against its authority atom, and
-    // the registration key matches the row identity exactly.
-    let callable = callable_identity(row);
     assert!(
-        SEMANTIC_REGISTRATIONS
-            .iter()
-            .any(|r| r.callable == callable && r.atom == "[05-OP-2]"),
-        "the Json row must map to [05-OP-2]; key: {callable}"
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(row),
+            final_authority_registries(),
+            &fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap(),
+        )
+        .is_err(),
+        "the obsolete prelude Json identity must not be mistaken for final authority"
     );
 }

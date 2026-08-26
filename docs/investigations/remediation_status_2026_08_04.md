@@ -168,6 +168,13 @@ an unshipped repair release.
   nothing in the tensor struct or header is keyed on it, and
   `chelis_runtime.h` still types storage as `float *data` for every dtype. No
   August activity, and the class is paperless by design.
+- **#1288** (capacity-census final authority): this change lands the shared
+  exact classifier and closes the exception path for every new or changed
+  identity. Eighteen runtime descriptors are now structurally `Nonnumeric`,
+  `chelis_tensor_shape` and Count's wire field are exact registered numeric
+  operations, and the generic maintainer-override parser/path is gone. This is
+  a foundation, not closure: 180 primary, 84 wire, and 17 binding rows remain
+  in sealed foundation-era legacy cohorts for the immediate migration work.
 - **#740** (agent quality architecture; children #803, #808, #823, #824,
   #852, all CI measurement work; #895 sits under #733 with an "Also part of
   #740" comment recording the second home): two of the eight backlog items
@@ -891,8 +898,9 @@ Eight PRs are open besides the specification change carrying this report:
 
 PR #1285 left this table by merging and closing #1088. The dtype prerequisite
 stack is now visibly staffed through #1292, #1293, #1294, and first-class
-`count`; the later zero-exception census and generated-table slices remain to
-be opened in their declared dependency order.
+`count`; the zero-exception census foundation is now this change, while its
+remaining legacy-row migration and the generated-table slices remain to be
+delivered in their declared dependency order.
 
 ## Pending maintainer decisions
 

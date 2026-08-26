@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "4fceb67aa3969cd91f154b54307d9da1097b35af340ebbc46f2e51c88ac7a8b4"
+        "2d2e541162f2458cbc83c78c8951239ea0ee348455020fd982fc439a43f0155e"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -395,7 +395,7 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "135009bfe6e899a8703def7442e03817c3c1091d798ec7fc0c99896d29070ff2",
+        "1b13effce22cc367b9a1e27525e26e049926f2cb9cd6156c4715babc3e3d888f",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",

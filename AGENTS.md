@@ -237,10 +237,15 @@ numeric data, whether or not you have read that document:
   finding. Zero-exception classification is the landing rule: every discovered row
   must end in exactly one final authority class - structurally nonnumeric, a
   structurally recognized exact tagged carrier/transport, or an exact numeric
-  operation registration. The checked-in census still carries the old 39
-  grandfather rows, three successor overrides, and 155 permanent-disposition rows
-  as deletion debt owned by chelis#1288. Those lists confer no authorization for a
-  new, renamed, reclassified, or otherwise changed row, and a change touching one
+  operation registration. The immutable foundation-era universe retains the old 39
+  grandfather rows, three successor overrides, and 155 permanent plain rows as
+  deletion debt owned by chelis#1288. The active primary baseline has already
+  moved 18 exact structurally nonnumeric rows and `chelis_tensor_shape` to final
+  authority; it therefore retains 39 grandfather rows, three successors, 137
+  permanent plain rows, and the obsolete prelude `Json` row as active debt. The
+  84 typed-wire and 17 registered-PyO3 baseline rows remain sealed legacy cohorts,
+  while Count's wire field is final-registered. Those lists confer no authorization
+  for a new, renamed, reclassified, or otherwise changed row, and a change touching one
   must move it to a final authority class rather than copy its disposition. A bare
   numeric carrier has no citation or maintainer-override path:
   redesign it onto the tagged carrier or remove it. Opening a fresh issue does not
