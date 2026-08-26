@@ -9765,8 +9765,9 @@ fn collect_dynamic_to_tensor_def_refs(
 ) -> bool {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
     let mut directly_dynamic = expr_is_runtime_shaped_to_tensor(expr);
-    if let Some((DeepTag::Var, _, kids)) = stamped_parts(expr)
-        && let Some(name) = kids.first().and_then(symbol_name)
+    if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+        && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+        && let Some(name) = callee_kids.first().and_then(symbol_name)
         && def_names.contains(name)
     {
         referenced_defs.insert(name.to_string());
@@ -9789,8 +9790,9 @@ fn analyze_tensor_helper_preflight(
             .is_some_and(|(tag, _, _)| matches!(tag, DeepTag::Grad | DeepTag::Vmap))
             || matches!(expr, Expr::List(list, _) if list.unknown_tag_symbol() == Some("vmap-grad")),
     };
-    if let Some((DeepTag::Var, _, kids)) = stamped_parts(expr)
-        && let Some(name) = kids.first().and_then(symbol_name)
+    if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+        && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+        && let Some(name) = callee_kids.first().and_then(symbol_name)
     {
         facts.reaches_dynamic_to_tensor |= def_summaries.get(name).copied().unwrap_or(false);
     }
@@ -13036,6 +13038,66 @@ def bad[b](box: Box[b]) -> bool =
             "the runtime-shaped preflight must not reject a static literal: {profile:?}"
         );
         assert_eq!(profile.tensor_helper_builtin_load_rejections, 0);
+    }
+
+    #[test]
+    fn issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls() {
+        let typed = surf_check(
+            "module FrontEndPerformance.ShadowedOperand\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def twice(bc: tensor[1, f32]) -> tensor[1, f32] = add(bc, bc)\n\
+             r = index(to_list(twice(to_tensor([cast(1.0, f32)]))), 0i64)\n",
+        );
+        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+        assert_eq!(
+            summaries.get("bc"),
+            Some(&true),
+            "the top-level bc definition must exercise the transitive summary"
+        );
+
+        fn find_named_app<'expr>(expr: &'expr Expr, expected: &str) -> Option<&'expr Expr> {
+            if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+                && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+                && callee_kids.first().and_then(symbol_name) == Some(expected)
+            {
+                return Some(expr);
+            }
+            match expr {
+                Expr::List(list, _) => list
+                    .elements
+                    .iter()
+                    .find_map(|child| find_named_app(child, expected)),
+                Expr::Node(node, _) => node
+                    .children_slice()
+                    .iter()
+                    .find_map(|child| find_named_app(child, expected)),
+                Expr::MetaExpr(meta, _) => find_named_app(&meta.expr, expected),
+                Expr::BareList(elements, _) => elements
+                    .iter()
+                    .find_map(|child| find_named_app(child, expected)),
+                Expr::UnknownForm(data) => data
+                    .children
+                    .iter()
+                    .find_map(|child| find_named_app(child, expected)),
+                Expr::Map(map, _) => map
+                    .entries
+                    .iter()
+                    .find_map(|(_, value)| find_named_app(value, expected)),
+                Expr::Atom(_, _) => None,
+            }
+        }
+
+        let add = typed
+            .exprs()
+            .iter()
+            .find_map(|expr| find_named_app(expr, "add"))
+            .expect("fixture contains the twice body");
+        let mut facts = HashMap::new();
+        let add_facts = analyze_tensor_helper_preflight(add, &summaries, &mut facts);
+        assert!(
+            !add_facts.reaches_dynamic_to_tensor,
+            "a tensor operand named bc is not a call to the top-level bc definition"
+        );
     }
 
     /// harden-bounded-monomorphization D4: the interning identity is the

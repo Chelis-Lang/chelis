@@ -42,7 +42,7 @@ FOCUSED_COMMANDS: tuple[tuple[str, ...], ...] = (
         "-p",
         "chelis-ir",
         "-E",
-        "test(issue_1205_host_lowering_work_is_linear) | test(issue_1205_preflight_preserves_static_to_tensor_literals)",
+        "test(issue_1205_host_lowering_work_is_linear) | test(issue_1205_preflight_preserves_static_to_tensor_literals) | test(issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls)",
         "--no-fail-fast",
     ),
     (
