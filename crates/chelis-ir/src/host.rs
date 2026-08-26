@@ -71,6 +71,7 @@ struct HostWorkProfile {
     tensor_helper_preflight_nodes: usize,
     tensor_helper_preflight_lookup_hits: usize,
     tensor_helper_preflight_lookup_misses: usize,
+    callable_scope_work: usize,
     grad_scan_nodes: usize,
     fail_scan_nodes: usize,
     program_def_collections: usize,
@@ -283,6 +284,47 @@ impl Drop for HostLoweringCacheGuard {
 struct TensorHelperPreflightFacts {
     reaches_dynamic_to_tensor: bool,
     contains_grad_like: bool,
+}
+
+/// The lexical callable bindings visible while precomputing tensor-helper
+/// facts. This type deliberately does not implement `Clone`: nested `fn` and
+/// `let` expressions must update one scope and then restore it, rather than
+/// copying a growing map at every boundary.
+#[derive(Default)]
+struct CallableScope {
+    bindings: HashMap<String, Option<String>>,
+}
+
+struct CallableScopeUndo {
+    name: String,
+    previous: Option<Option<String>>,
+}
+
+impl CallableScope {
+    fn contains_key(&self, name: &str) -> bool {
+        self.bindings.contains_key(name)
+    }
+
+    fn get(&self, name: &str) -> Option<&Option<String>> {
+        self.bindings.get(name)
+    }
+
+    fn bind(&mut self, name: String, target: Option<String>) -> CallableScopeUndo {
+        record_host_work(|profile| profile.callable_scope_work += 1);
+        let previous = self.bindings.insert(name.clone(), target);
+        CallableScopeUndo { name, previous }
+    }
+
+    fn restore(&mut self, undos: impl IntoIterator<Item = CallableScopeUndo>) {
+        for undo in undos.into_iter() {
+            record_host_work(|profile| profile.callable_scope_work += 1);
+            if let Some(previous) = undo.previous {
+                self.bindings.insert(undo.name, previous);
+            } else {
+                self.bindings.remove(&undo.name);
+            }
+        }
+    }
 }
 
 /// Limits pointer-keyed tensor-helper preflight facts to the lifetime of the
@@ -9719,10 +9761,11 @@ fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashM
 
     for (name, body) in defs.iter() {
         let mut referenced_defs = HashSet::new();
+        let mut callable_scope = CallableScope::default();
         let directly_dynamic = collect_dynamic_to_tensor_def_refs(
             body,
             &def_names,
-            &HashMap::new(),
+            &mut callable_scope,
             &mut referenced_defs,
         );
         if directly_dynamic {
@@ -9765,7 +9808,7 @@ fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashM
 fn collect_dynamic_to_tensor_def_refs(
     expr: &Expr,
     def_names: &HashSet<String>,
-    callable_scope: &HashMap<String, Option<String>>,
+    callable_scope: &mut CallableScope,
     referenced_defs: &mut HashSet<String>,
 ) -> bool {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
@@ -9790,14 +9833,6 @@ fn collect_dynamic_to_tensor_def_refs(
     };
     match expr_tag {
         DeepTag::Fn => {
-            let mut body_scope = callable_scope.clone();
-            if let Some(params) = kids.first().and_then(as_list) {
-                for param in children(params) {
-                    if let Some(name) = param_name(param) {
-                        body_scope.insert(name, None);
-                    }
-                }
-            }
             if let Some(params) = kids.first() {
                 directly_dynamic |= collect_dynamic_to_tensor_def_refs(
                     params,
@@ -9806,17 +9841,26 @@ fn collect_dynamic_to_tensor_def_refs(
                     referenced_defs,
                 );
             }
+            let mut undos = Vec::new();
+            if let Some(params) = kids.first().and_then(as_list) {
+                for param in children(params) {
+                    if let Some(name) = param_name(param) {
+                        undos.push(callable_scope.bind(name, None));
+                    }
+                }
+            }
             if let Some(body) = kids.get(1) {
                 directly_dynamic |= collect_dynamic_to_tensor_def_refs(
                     body,
                     def_names,
-                    &body_scope,
+                    callable_scope,
                     referenced_defs,
                 );
             }
+            callable_scope.restore(undos.into_iter().rev());
         }
         DeepTag::Let => {
-            let mut body_scope = callable_scope.clone();
+            let mut undos = Vec::new();
             if let Some(bind_list) = kids.first().and_then(as_list)
                 && tag(bind_list) == Some(DeepTag::Bind)
             {
@@ -9826,19 +9870,19 @@ fn collect_dynamic_to_tensor_def_refs(
                         continue;
                     };
                     let Some(value) = bind_kids.get(index + 1) else {
-                        body_scope.insert(name.to_string(), None);
+                        undos.push(callable_scope.bind(name.to_string(), None));
                         continue;
                     };
                     directly_dynamic |= collect_dynamic_to_tensor_def_refs(
                         value,
                         def_names,
-                        &body_scope,
+                        callable_scope,
                         referenced_defs,
                     );
                     let target = direct_var_name(value).and_then(|target| {
-                        resolve_top_level_callable_from_names(target, &body_scope, def_names)
+                        resolve_top_level_callable_from_names(target, callable_scope, def_names)
                     });
-                    body_scope.insert(name.to_string(), target);
+                    undos.push(callable_scope.bind(name.to_string(), target));
                 }
             } else if let Some(bindings) = kids.first() {
                 directly_dynamic |= collect_dynamic_to_tensor_def_refs(
@@ -9852,10 +9896,11 @@ fn collect_dynamic_to_tensor_def_refs(
                 directly_dynamic |= collect_dynamic_to_tensor_def_refs(
                     body,
                     def_names,
-                    &body_scope,
+                    callable_scope,
                     referenced_defs,
                 );
             }
+            callable_scope.restore(undos.into_iter().rev());
         }
         _ => visit_semantic_expr_children(expr, |child| {
             directly_dynamic |= collect_dynamic_to_tensor_def_refs(
@@ -9874,13 +9919,13 @@ fn analyze_tensor_helper_preflight(
     def_summaries: &HashMap<String, bool>,
     out: &mut HashMap<usize, TensorHelperPreflightFacts>,
 ) -> TensorHelperPreflightFacts {
-    analyze_tensor_helper_preflight_scoped(expr, def_summaries, &HashMap::new(), out)
+    analyze_tensor_helper_preflight_scoped(expr, def_summaries, &mut CallableScope::default(), out)
 }
 
 fn analyze_tensor_helper_preflight_scoped(
     expr: &Expr,
     def_summaries: &HashMap<String, bool>,
-    callable_scope: &HashMap<String, Option<String>>,
+    callable_scope: &mut CallableScope,
     out: &mut HashMap<usize, TensorHelperPreflightFacts>,
 ) -> TensorHelperPreflightFacts {
     record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
@@ -9898,31 +9943,35 @@ fn analyze_tensor_helper_preflight_scoped(
         facts.reaches_dynamic_to_tensor |= def_summaries.get(&target).copied().unwrap_or(false);
     }
 
-    let mut merge_child = |child: &Expr, child_scope: &HashMap<String, Option<String>>| {
+    let merge_child = |facts: &mut TensorHelperPreflightFacts,
+                       child: &Expr,
+                       callable_scope: &mut CallableScope,
+                       out: &mut HashMap<usize, TensorHelperPreflightFacts>| {
         let child_facts =
-            analyze_tensor_helper_preflight_scoped(child, def_summaries, child_scope, out);
+            analyze_tensor_helper_preflight_scoped(child, def_summaries, callable_scope, out);
         facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
         facts.contains_grad_like |= child_facts.contains_grad_like;
     };
     match stamped_parts(expr) {
         Some((DeepTag::Fn, _, kids)) => {
-            let mut body_scope = callable_scope.clone();
+            if let Some(params) = kids.first() {
+                merge_child(&mut facts, params, callable_scope, out);
+            }
+            let mut undos = Vec::new();
             if let Some(params) = kids.first().and_then(as_list) {
                 for param in children(params) {
                     if let Some(name) = param_name(param) {
-                        body_scope.insert(name, None);
+                        undos.push(callable_scope.bind(name, None));
                     }
                 }
             }
-            if let Some(params) = kids.first() {
-                merge_child(params, callable_scope);
-            }
             if let Some(body) = kids.get(1) {
-                merge_child(body, &body_scope);
+                merge_child(&mut facts, body, callable_scope, out);
             }
+            callable_scope.restore(undos.into_iter().rev());
         }
         Some((DeepTag::Let, _, kids)) => {
-            let mut body_scope = callable_scope.clone();
+            let mut undos = Vec::new();
             if let Some(bind_list) = kids.first().and_then(as_list)
                 && tag(bind_list) == Some(DeepTag::Bind)
             {
@@ -9932,28 +9981,29 @@ fn analyze_tensor_helper_preflight_scoped(
                         continue;
                     };
                     let Some(value) = bind_kids.get(index + 1) else {
-                        body_scope.insert(name.to_string(), None);
+                        undos.push(callable_scope.bind(name.to_string(), None));
                         continue;
                     };
-                    merge_child(value, &body_scope);
+                    merge_child(&mut facts, value, callable_scope, out);
                     let target = direct_var_name(value).and_then(|target| {
                         resolve_top_level_callable_from_summaries(
                             target,
-                            &body_scope,
+                            callable_scope,
                             def_summaries,
                         )
                     });
-                    body_scope.insert(name.to_string(), target);
+                    undos.push(callable_scope.bind(name.to_string(), target));
                 }
             } else if let Some(bindings) = kids.first() {
-                merge_child(bindings, callable_scope);
+                merge_child(&mut facts, bindings, callable_scope, out);
             }
             if let Some(body) = kids.get(1) {
-                merge_child(body, &body_scope);
+                merge_child(&mut facts, body, callable_scope, out);
             }
+            callable_scope.restore(undos.into_iter().rev());
         }
         _ => visit_semantic_expr_children(expr, |child| {
-            merge_child(child, callable_scope);
+            merge_child(&mut facts, child, callable_scope, out);
         }),
     }
     out.insert(expr as *const Expr as usize, facts);
@@ -9981,7 +10031,7 @@ fn direct_var_name(expr: &Expr) -> Option<&str> {
 
 fn resolve_top_level_callable_from_names(
     name: &str,
-    callable_scope: &HashMap<String, Option<String>>,
+    callable_scope: &CallableScope,
     def_names: &HashSet<String>,
 ) -> Option<String> {
     match callable_scope.get(name) {
@@ -9992,7 +10042,7 @@ fn resolve_top_level_callable_from_names(
 
 fn resolve_top_level_callable_from_summaries(
     name: &str,
-    callable_scope: &HashMap<String, Option<String>>,
+    callable_scope: &CallableScope,
     def_summaries: &HashMap<String, bool>,
 ) -> Option<String> {
     match callable_scope.get(name) {
@@ -13168,6 +13218,7 @@ def bad[b](box: Box[b]) -> bool =
                     + profile.app_clone_nodes
                     + profile.tensor_helper_input_nodes
                     + profile.tensor_helper_preflight_nodes
+                    + profile.callable_scope_work
                     + profile.grad_scan_nodes
                     + profile.fail_scan_nodes
                     + profile.program_def_clone_nodes
@@ -13213,6 +13264,52 @@ def bad[b](box: Box[b]) -> bool =
                 );
             }
         }
+    }
+
+    #[test]
+    fn issue_1205_callable_scope_work_is_linear() {
+        std::thread::Builder::new()
+            .name("issue-1205-nested-callable-scopes".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let mut rows = Vec::new();
+                for depth in [20, 40, 80, 160] {
+                    let mut body = "bc(c)".to_string();
+                    for index in (0..depth).rev() {
+                        body = format!("(fn (p{index}: f32) -> {body})(c)");
+                    }
+                    let source = format!(
+                        "module FrontEndPerformance.NestedFn{depth}\n\
+                         def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+                         def nested(c: f32) -> tensor[1, f32] = {body}\n\
+                         out = index(to_list(nested(cast(1.0, f32))), 0i64)\n"
+                    );
+                    let typed = surf_check(&source);
+                    reset_host_work_profile();
+                    let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+                    assert_eq!(summaries.get("nested"), Some(&true));
+                    let profile = take_host_work_profile();
+                    let total_work =
+                        profile.tensor_helper_preflight_nodes + profile.callable_scope_work;
+                    eprintln!(
+                        "#1205 callable scopes depth={depth} profile={profile:?} total_work={total_work}"
+                    );
+                    rows.push((depth, total_work));
+                }
+                for pair in rows.windows(2) {
+                    let (previous_depth, previous_work) = pair[0];
+                    let (current_depth, current_work) = pair[1];
+                    assert!(
+                        current_work * 10 <= previous_work * 22,
+                        "#1205 callable-scope work must grow linearly: \
+                         depth {previous_depth}->{current_depth} \
+                         previous={previous_work} current={current_work}"
+                    );
+                }
+            })
+            .expect("#1205 nested callable scope profile thread starts")
+            .join()
+            .expect("#1205 nested callable scope profile thread completes");
     }
 
     #[test]

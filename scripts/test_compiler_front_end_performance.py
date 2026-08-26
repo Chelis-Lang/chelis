@@ -34,6 +34,7 @@ class CompilerFrontEndPerformanceOracleTests(unittest.TestCase):
             "scripts/test_front_end_performance_fixtures.py",
             "issue_1205_effect_clone_work_is_linear",
             "issue_1205_host_lowering_work_is_linear",
+            "issue_1205_callable_scope_work_is_linear",
             "issue_1205_preflight_preserves_static_to_tensor_literals",
             "issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls",
             "issue_1205_preflight_tracks_callable_shadowing_and_aliases",
