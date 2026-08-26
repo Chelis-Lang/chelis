@@ -1,6 +1,6 @@
 ---
 name: redteam-exec
-description: Run a compliant Chelis red-team pass. Requires stale-agent cleanup and a fresh local subagent, which may reuse a clean exact-head worktree and warm build artifacts; anything else is blocked, not a valid red team.
+description: Run a compliant Chelis red-team pass. Requires stale-agent retirement and a fresh local subagent, which may reuse a clean exact-head worktree and warm build artifacts; anything else is blocked, not a valid red team.
 ---
 
 # Red Team Exec
@@ -10,7 +10,9 @@ validation pass.
 
 ## Repository Contract
 
-1. Close any known stale or failed subagents from the current session first.
+1. Inventory known stale or failed subagents from the current session. Stop or interrupt
+   them with the platform's available lifecycle control and retire those handles; the
+   platform does not need to support deleting them from its listing.
 2. Spawn a new local subagent with fresh context for the validation pass.
 3. Give that fresh subagent a reusable exact-head worktree and its warm target cache when
    one is clean, idle, and available. Fresh review context does not require a fresh
@@ -23,15 +25,16 @@ validation pass.
 
 ## Preferred Execution Order
 
-1. `functions.close_agent` on stale or failed agents from the current session.
-2. Fresh local subagent via the platform tool when it is actually local and working.
-   In Codex sessions, that means the built-in subagent tools (`spawn_agent`,
-   `send_input`, `wait_agent`, `close_agent`) rather than shelling out to `claude`,
-   `codex exec`, or other external CLIs.
+1. Use the platform's agent inventory and stop/interrupt controls on stale or failed
+   handles, then treat them as retired and do not reuse them.
+2. Spawn a fresh local subagent via the platform tool when it is actually local and
+   working. In Codex sessions, use `list_agents`, `interrupt_agent`, `spawn_agent`,
+   `send_message` or `followup_task`, and `wait_agent` rather than shelling out to
+   `claude`, `codex exec`, or other external CLIs.
 3. Hand the subagent the selected worktree path, exact commit, baseline status, and
    target path so it can reuse compiled artifacts safely.
-4. If that path is broken, close the failed handle and retry with another fresh local
-   subagent.
+4. If that path is broken, stop or interrupt and retire the failed handle, then retry
+   with another fresh local subagent.
 5. Only count the review as a red team when the fresh-context subagent actually ran the
    commands and reported findings.
 
@@ -49,8 +52,8 @@ validation pass.
 
 - Do not use external agent CLIs as a substitute for the built-in local subagent path
   unless the user explicitly asks for that toolchain.
-- Do not treat a remote 404 / deployment error as a successful spawn. Close that handle
-  and retry or report the red team blocked.
+- Do not treat a remote 404 / deployment error as a successful spawn. Stop or interrupt
+  and retire that handle, then retry or report the red team blocked.
 
 ## Minimum Deliverable
 

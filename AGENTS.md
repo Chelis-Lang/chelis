@@ -63,16 +63,18 @@ not drift.
 
 ### Fresh-Context Enforcement
 
-- When asked to run a red team or "spawn a red team agent", first close any known stale
-  or failed subagents from the current session and then spawn a new local subagent with
-  fresh context.
+- When asked to run a red team or "spawn a red team agent", first inventory known stale
+  or failed subagents, stop or interrupt them with the platform's available lifecycle
+  control, mark those handles retired, and then spawn a new local subagent with fresh
+  context. A platform need not support deleting the retired handle from its listing.
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   fresh subagent an existing worktree and its warm target cache when the worktree is at
   the exact review head, has a known clean baseline, and has no concurrent writer or
   build owner. Create a new worktree or target only when those reuse conditions do not
   hold.
 - If the first spawn attempt routes to remote infrastructure, errors, or comes back in a
-  broken state, close that handle and retry until you have either:
+  broken state, stop or interrupt and retire that handle, then retry until you have
+  either:
   1. a working fresh local subagent, or
   2. an explicit statement that red-team validation is blocked because fresh local
      subagent execution is unavailable.
@@ -608,6 +610,7 @@ python3 scripts/gate.py --list
 # <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
 # <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
 # cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
+# <managed-python> scripts/compiler_front_end_performance.py  # ci-owned
 # <managed-python> scripts/unrepresentable_domain_oracle.py  # local + ci
 # # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
@@ -726,8 +729,11 @@ cover everything a docs-only diff can break.
 
 Default-gate discipline:
 
-- `cargo test --workspace` is the inner development loop and should stay under roughly 60
-  seconds on a machine without GPU/PyTorch
+- Use focused `cargo nextest run -p <crate> --test <file>` commands for the inner
+  development loop. Do not substitute a workspace-wide `cargo test` run for the
+  canonical gate.
+- For non-documentation changes, `python3 scripts/gate.py --local` is the pre-push
+  checkpoint; routine workspace execution is hosted-CI-owned.
 - tests that exceed that budget or require heavyweight local prerequisites should be
   `#[ignore]` by default and invoked through a documented manual gate
 - every ignored test must have a concrete manual command and expected success condition in
@@ -877,8 +883,9 @@ the built-in gate.
 
 When writing new code or fixtures, run `chelis fmt --inplace <file>`
 and `chelis lint --check` before pushing. The gate replaces the older
-manual checklist of "remember to run fmt"; if the gate is green and
-`cargo test --workspace` passes, the change is ready.
+manual checklist of "remember to run fmt". Run `python3 scripts/gate.py --local`
+before pushing a non-documentation change, use focused nextest commands during
+development, and leave routine workspace execution to hosted CI.
 
 ## Surf Style Guide
 
@@ -1064,8 +1071,8 @@ surfaces load the same skill library.
 Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
 should stay behaviorally aligned so slash-command access does not drift between tool
 surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
-stale-agent cleanup plus a fresh local subagent before any validation is counted as a
-red team. Fresh context is an agent property: the wrapper should reuse a clean,
+stale-agent inventory/retirement plus a fresh local subagent before any validation is
+counted as a red team. Fresh context is an agent property: the wrapper should reuse a clean,
 exact-head, idle worktree and its warm target artifacts when available instead of
 forcing a cold checkout and rebuild.
 
