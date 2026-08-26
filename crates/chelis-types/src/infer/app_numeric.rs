@@ -74,9 +74,8 @@ pub(super) fn operand_dtype_rejection(
                  so arithmetic on it has no authored meaning"
             ),
             vec![
-                "chelis#726: count explicitly today with \
-                 `sum(cast(x, int64), 0)`; first-class `count` is the planned \
-                 replacement. Use `and`/`or`/`not` for bool logic."
+                "chelis#726: use first-class `count(x, axes...)` to count true values, \
+                 and `and`/`or`/`not` for bool logic."
                     .to_string(),
             ],
         ));
@@ -319,6 +318,7 @@ pub(super) fn validate_numeric_and_reduction_arguments(
             "softmax"
                 | "mean"
                 | "sum"
+                | "count"
                 | "max_reduce"
                 | "min_reduce"
                 | "prod_reduce"

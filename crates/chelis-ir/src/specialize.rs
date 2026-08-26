@@ -719,7 +719,8 @@ fn node_has_contiguous_matrix_slices(dag: &Dag, id: NodeId, matrix_rank: usize) 
         // A `Shape` read produces a rank-0 integer scalar from metadata,
         // never matrix data, so it is not a contiguous-matrix-slice source
         // (chelis#513/#558).
-        | RiscOp::Shape { .. } => false,
+        | RiscOp::Shape { .. }
+        | RiscOp::Count { .. } => false,
     }
 }
 

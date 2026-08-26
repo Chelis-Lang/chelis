@@ -61,6 +61,14 @@ pub(super) fn infer_reduction_app(
         return err;
     }
 
+    // [05-DIM-3] / [05-OP-29]: this early variadic route bypasses the
+    // generic application's registered axis-dtype gate. Apply the same
+    // registry here so every Count axis is int32, including concrete
+    // multi-axis calls whose constant values are otherwise extractable.
+    if let Err(rejected) = enforce_registered_axis_dtypes(fname, &arg_tys, list, errors) {
+        return rejected;
+    }
+
     let result_ty = Type::Var(vg.fresh_tvar());
     check_reduction_signature(fname, &kids[1..], &arg_tys, &result_ty, subst, errors)
 }

@@ -733,6 +733,12 @@ pub enum RiscOp {
         /// `output_type.precision == accumulator`.
         accumulator: Prim,
     },
+    /// Count true elements across one or more axes. `axes` stores the
+    /// normalized positions in the original input rank exactly once and in
+    /// strictly descending order. The result precision is always int64.
+    Count {
+        axes: Vec<usize>,
+    },
     MaxReduce {
         axis: usize,
     },
@@ -1301,7 +1307,7 @@ impl RiscOp {
 
             // Argmax/argmin return discrete indices, not a numeric
             // envelope over the reals; outside the forward-bound story.
-            RiscOp::Argmax { .. } | RiscOp::Argmin { .. } => false,
+            RiscOp::Argmax { .. } | RiscOp::Argmin { .. } | RiscOp::Count { .. } => false,
 
             // Floor/truncating integer division (chelis#178) are
             // piecewise-constant, non-differentiable rounding ops; like
@@ -2177,6 +2183,13 @@ fn shape_source_for_axis(dag: &Dag, id: NodeId, axis: usize) -> Option<(String, 
         | RiscOp::Argmin { axis: reduce_axis } => {
             let operand = *node.inputs.first()?;
             let input_axis = if axis < *reduce_axis { axis } else { axis + 1 };
+            shape_source_for_axis(dag, operand, input_axis)
+        }
+        RiscOp::Count { axes } => {
+            let operand = *node.inputs.first()?;
+            let input_axis = (0..dag.get(operand)?.output_type.dims.len())
+                .filter(|candidate| !axes.contains(candidate))
+                .nth(axis)?;
             shape_source_for_axis(dag, operand, input_axis)
         }
         RiscOp::Reshape { .. } | RiscOp::Permute { .. } | RiscOp::Store { .. } => {

@@ -53,7 +53,7 @@ fn analysis_rejects_a_top_level_binding_cycle() {
 #[test]
 fn analysis_accepts_finite_recursive_functions() {
     let surf =
-        "module Rec\ndef count(n: int32) -> int32 = if eq(n, 0) then 0 else count(sub(n, 1))\n";
+        "module Rec\ndef descend(n: int32) -> int32 = if eq(n, 0) then 0 else descend(sub(n, 1))\n";
     let decls = chelis_surf::parser::parse_str(surf).expect("Surf fixture must parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
 

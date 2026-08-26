@@ -521,6 +521,20 @@ pub(super) fn check_reduction_signature(
         }
     };
 
+    if name == "count" && !matches!(prec, TensorPrec::Concrete(Prim::Bool)) {
+        return report(
+            errors,
+            CheckError::new(
+                CheckErrorKind::PrecisionMismatch,
+                format!(
+                    "count expects exactly a bool tensor, got tensor precision {}",
+                    prec.render()
+                ),
+                vec!["Use count for bool tensors; numeric reductions use sum/prod_reduce.".into()],
+            ),
+        );
+    }
+
     // Resolve which axis (or axes) the reduction removes. Two modes:
     //
     //  * Positional (legacy): a single compile-time-constant integer axis on a
@@ -544,13 +558,15 @@ pub(super) fn check_reduction_signature(
     // names, ambiguity, and duplicates. Composition
     // (`sum(sum(x, head), seq)`) remains equivalent and order-insensitive.
     let mut remove: Vec<usize> = Vec::new();
-    if axis_exprs.len() == 1
-        && !has_spread
-        && let Some(raw) = extract_int_for_dim(&axis_exprs[0])
+    if !has_spread
+        && (axis_exprs.len() == 1 || name == "count")
+        && axis_exprs
+            .iter()
+            .all(|axis| extract_int_for_dim(axis).is_some())
     {
-        match normalize_static_axis(dims.len(), raw) {
-            Some(axis) => remove.push(axis),
-            None => {
+        for axis_expr in axis_exprs {
+            let raw = extract_int_for_dim(axis_expr).expect("guarded static axis");
+            let Some(axis) = normalize_static_axis(dims.len(), raw) else {
                 return report(
                     errors,
                     CheckError::new(
@@ -562,9 +578,40 @@ pub(super) fn check_reduction_signature(
                         vec![],
                     ),
                 );
+            };
+            if remove.contains(&axis) {
+                return report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::DimensionMismatch,
+                        format!(
+                            "{name}: duplicate reduction axis {raw}; each normalized axis may appear at most once"
+                        ),
+                        vec![],
+                    ),
+                );
             }
+            remove.push(axis);
         }
     } else {
+        let selects_concrete_named_axis = name == "count"
+            && !has_spread
+            && axis_exprs.iter().any(|axis| {
+                symbolic_dim_ref_name(axis).is_some_and(|axis_name| {
+                    dims.iter()
+                        .any(|dim| matches!(dim, Dim::Name(name) if name == axis_name))
+                })
+            });
+        if selects_concrete_named_axis {
+            return report(
+                errors,
+                CheckError::new(
+                    CheckErrorKind::DimensionMismatch,
+                    "count on a concrete-rank operand requires one or more positional int32 axes; named axes are reserved for rank-polymorphic operands".to_string(),
+                    vec!["Use the selected dimensions' positional indices, or make the operand rank-polymorphic and name every selected axis.".to_string()],
+                ),
+            );
+        }
         for ax in axis_exprs {
             // A positional integer that reaches the named path: either the
             // operand is rank-spread (index meaningless at symbolic rank) or it
@@ -575,10 +622,10 @@ pub(super) fn check_reduction_signature(
                     CheckError::new(
                         CheckErrorKind::DimensionMismatch,
                         format!(
-                            "{name}: a positional integer axis is only valid as the single axis of a \
-                         concrete-rank operand; on a rank-spread operand or for multiple axes, \
-                         name each axis (e.g. `{name}(x, seq)` or `{name}(x, seq, head)`) so it \
-                         is located by name (spec/04-type-system.md \u{00a7}4.5.3)"
+                            "{name}: positional and named axes cannot be mixed, and positional axes \
+                         require a concrete-rank operand; name every selected axis on a \
+                         rank-spread operand (e.g. `{name}(x, seq, head)`) \
+                         (spec/04-type-system.md \u{00a7}4.5.3)"
                         ),
                         vec![],
                     ),
@@ -717,7 +764,9 @@ pub(super) fn check_reduction_signature(
     // (TensorPrec::Var), defer the decision until the precision is
     // resolved by unification — return the canonical-but-still-poly
     // result type and let the standard unify path proceed.
-    let result_prec: TensorPrec = if name == "sum" {
+    let result_prec: TensorPrec = if name == "count" {
+        TensorPrec::Concrete(Prim::Int64)
+    } else if name == "sum" {
         match &prec {
             TensorPrec::Concrete(p) => match p.default_reduce_sum_result_precision() {
                 Ok(rp) => TensorPrec::Concrete(rp),

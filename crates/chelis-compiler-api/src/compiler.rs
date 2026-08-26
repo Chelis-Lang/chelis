@@ -2049,6 +2049,7 @@ fn execution_artifact_from_compiled(
                 && let Some(host_program) = host_compiled.host.as_ref()
             {
                 reject_unsupported_effect_ops_in_host_program(host_program, BuildTarget::Hip)?;
+                reject_unsupported_hip_ops_in_host_program(host_program)?;
                 let result = chelis_backend_c::codegen_host_program(host_program, &func_name)
                     .map_err(unsupported_stage_error)?;
                 return Ok(compiled_execution_artifact(
@@ -4153,11 +4154,52 @@ pub fn reject_unsupported_windowed_reductions_in_host_program(
     })
 }
 
+fn guard_count_for_device(
+    dag: &Dag,
+    target: &'static str,
+) -> std::result::Result<(), CompilerError> {
+    for node in dag.nodes() {
+        if matches!(node.op, RiscOp::Count { .. }) {
+            return Err(unsupported_gate_error(
+                format!(
+                    "`chelis build --target {target}` does not support `count`; lowered node {} requires it. chelis#1291 owns the dedicated {target} kernel; use `--target c`.",
+                    node.id.0
+                ),
+                target,
+                chelis_types::unimplemented_rejection!(
+                    1291,
+                    "first-class count ships on eval and C-host/C-DAG in chelis#1287; chelis#1291 owns the dedicated HIP/Metal kernels"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject Count in every tensor-helper DAG emitted with a HIP host program.
+/// Other helper operations retain their C-host fallback semantics; full HIP
+/// capability policy applies only to DAGs emitted as HIP device code.
+pub fn reject_unsupported_hip_ops_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "hip"))
+}
+
+/// Reject Count in every tensor-helper DAG emitted with a Metal host program.
+/// Other helper operations retain their C-host fallback semantics; full Metal
+/// capability policy applies only to DAGs emitted as Metal device code.
+pub fn reject_unsupported_metal_ops_in_host_program(
+    program: &chelis_ir::host::ConcreteHostProgram,
+) -> std::result::Result<(), CompilerError> {
+    for_each_host_helper_dag(program, |dag| guard_count_for_device(dag, "metal"))
+}
+
 /// Metal-specific early capability policy. The IR verifier and backend
 /// emitter independently enforce the same target boundary; this shared gate
 /// provides the typed public diagnostic without allowing CLI/compiler-api
 /// copies to drift.
 pub fn reject_unsupported_metal_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    guard_count_for_device(dag, "metal")?;
     for node in dag.nodes() {
         let node_valued = match &node.op {
             RiscOp::Shrink { bounds } => bounds.iter().any(pair_has_node_bound),
@@ -4313,9 +4355,40 @@ mod metal_runtime_dim_reject_tests {
         );
         reject_unsupported_metal_ops(&dag).expect("literal bounds must pass the Metal seam");
     }
+
+    #[test]
+    fn metal_seam_rejects_count_with_issue_1291_receipt() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            ty(&[2, 3], Prim::Bool),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Count { axes: vec![1] },
+            vec![input],
+            ty(&[2], Prim::Int64),
+            None,
+        );
+
+        let error = reject_unsupported_metal_ops(&dag)
+            .expect_err("Metal must reject Count until its dedicated kernel lands");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
+        assert!(
+            message.contains("count") && message.contains("--target c"),
+            "{message}"
+        );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
+    }
 }
 
 pub fn reject_unsupported_hip_ops(dag: &Dag) -> std::result::Result<(), CompilerError> {
+    guard_count_for_device(dag, "hip")?;
     for node in dag.nodes() {
         match &node.op {
             // `pad` / `shrink` are now implemented on the HIP backend
@@ -4727,11 +4800,18 @@ pub(crate) fn schema_stage_check(
     result: std::result::Result<(), WireDagSchemaError>,
 ) -> Result<()> {
     result.map_err(|err| {
-        let WireDagSchemaError::UnknownSchemaVersion { found, supported } = err;
+        let (found, supported) = match &err {
+            WireDagSchemaError::MissingSchemaVersion { supported } => {
+                ("missing".to_string(), *supported)
+            }
+            WireDagSchemaError::UnsupportedSchemaVersion { found, supported } => {
+                (found.to_string(), *supported)
+            }
+        };
         let mut error = stage_error("schema", err.to_string(), GeneralKind::UnknownSchemaVersion);
         if let Some(diagnostic) = error.errors.first_mut() {
-            diagnostic.expected = Some(format!("schema_version <= {supported}"));
-            diagnostic.got = Some(found.to_string());
+            diagnostic.expected = Some(format!("schema_version = {supported}"));
+            diagnostic.got = Some(found);
         }
         error
     })
@@ -5516,6 +5596,7 @@ fn wire_op(op: &RiscOp) -> WireRiscOp {
             axis: *axis,
             accumulator: accumulator.name().to_string(),
         },
+        RiscOp::Count { axes } => WireRiscOp::Count { axes: axes.clone() },
         RiscOp::MaxReduce { axis } => WireRiscOp::MaxReduce { axis: *axis },
         RiscOp::MinReduce { axis } => WireRiscOp::MinReduce { axis: *axis },
         RiscOp::ProdReduce { axis } => WireRiscOp::ProdReduce { axis: *axis },
@@ -5857,6 +5938,36 @@ mod tests {
         dag.add_root(gather);
 
         reject_unsupported_hip_ops(&dag).expect("HIP should allow sparse gather");
+    }
+
+    #[test]
+    fn hip_rejects_count_with_issue_1291_receipt() {
+        let mut dag = Dag::new();
+        let input = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            tensor_type(vec![2, 3], chelis_types::types::Prim::Bool),
+            None,
+        );
+        dag.add_node(
+            RiscOp::Count { axes: vec![1] },
+            vec![input],
+            tensor_type(vec![2], chelis_types::types::Prim::Int64),
+            None,
+        );
+
+        let error = reject_unsupported_hip_ops(&dag)
+            .expect_err("HIP must reject Count until its dedicated kernel lands");
+        let message = &error.errors[0].message;
+        assert!(message.contains("unimplemented chelis#1291:"), "{message}");
+        assert!(
+            message.contains("count") && message.contains("--target c"),
+            "{message}"
+        );
+        assert_eq!(
+            error.errors[0].kind(),
+            chelis_vocab::DiagnosticKind::UnsupportedFeature
+        );
     }
 
     #[test]
@@ -7676,12 +7787,22 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
     }
 
     #[test]
-    fn schema_stage_check_accepts_legacy_lower_version() {
-        // A strictly-lower (pre-versioning) payload is forward-compatible under
-        // the additive-default guarantee and must not be rejected.
+    fn schema_stage_check_rejects_legacy_lower_version() {
         let legacy = wire_dag_at_version(0);
-        schema_stage_check(legacy.validate_schema_version())
-            .expect("a lower-than-baseline version is accepted");
+        let error = schema_stage_check(legacy.validate_schema_version())
+            .expect_err("a lower-than-current version is rejected");
+        let diagnostic = &error.errors[0];
+        assert_eq!(diagnostic.got.as_deref(), Some("0"));
+        assert_eq!(
+            diagnostic.expected.as_deref(),
+            Some(
+                format!(
+                    "schema_version = {}",
+                    crate::schema::WIRE_DAG_SCHEMA_VERSION
+                )
+                .as_str()
+            )
+        );
     }
 
     #[test]
@@ -7709,7 +7830,7 @@ bad = shape(scalar_to_tensor(cast(3, int64)), axis)
             diagnostic.expected.as_deref(),
             Some(
                 format!(
-                    "schema_version <= {}",
+                    "schema_version = {}",
                     crate::schema::WIRE_DAG_SCHEMA_VERSION
                 )
                 .as_str()

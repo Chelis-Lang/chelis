@@ -206,6 +206,11 @@ fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
         ),
         (
             "compiler.rs".to_string(),
+            "reject_unsupported_hip_ops_in_host_program".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
             "reject_unsupported_effect_ops".to_string(),
             true,
         ),
@@ -217,6 +222,11 @@ fn phase3_reject_function_inventory_matches_the_reviewed_manifest() {
         (
             "compiler.rs".to_string(),
             "reject_unsupported_metal_ops".to_string(),
+            true,
+        ),
+        (
+            "compiler.rs".to_string(),
+            "reject_unsupported_metal_ops_in_host_program".to_string(),
             true,
         ),
         (

@@ -1363,6 +1363,11 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
                    width: int64, pad: T) -> tensor[len(sequences), width, T]",
         atom: "[05-OP-10]",
     },
+    SemanticRegistration {
+        callable: "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) \
+                   -> tensor[D\\axes, int64]",
+        atom: "[05-OP-29]",
+    },
     // chelis#1112 narrowed the runtime extent read's axis-domain input to
     // int32 while preserving its exact int64 extent result. The successor
     // identity is issue-bound and registered rather than retroactively
@@ -5877,6 +5882,23 @@ fn post_1167_compiler_numeric_builtins_have_exact_authority_registrations() {
             "`{callable}` must name an existing normative atom"
         );
     }
+}
+
+#[test]
+fn count_is_registered_against_its_exact_authority_atom() {
+    const COUNT: &str = "[compiler-builtin-numeric] count(input: &tensor[D, bool], axes: int32...) \
+         -> tensor[D\\axes, int64]";
+    let registration = SEMANTIC_REGISTRATIONS
+        .iter()
+        .find(|registration| registration.callable == COUNT)
+        .unwrap_or_else(|| panic!("missing semantic registration for `{COUNT}`"));
+    assert_eq!(registration.atom, "[05-OP-29]");
+    let spec = fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL))
+        .expect("controlling spec/05 must be readable");
+    assert!(
+        registration_problem(*registration, &spec).is_none(),
+        "count must name the existing [05-OP-29] normative atom"
+    );
 }
 
 /// prelude-adt-numeric positive control: the real registered prelude

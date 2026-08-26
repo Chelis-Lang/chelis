@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "9669a8cfb53180d0bd0409a6b5865c3f93fc51817a4b1bf635604bd0948846ee"
+        "4fceb67aa3969cd91f154b54307d9da1097b35af340ebbc46f2e51c88ac7a8b4"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -455,7 +455,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "030724afca5b47a7dfd0b56077732cc2b773177fd90ce07e8ac806e73228838a",
+        "9e3f43c16eaa6194e02cb989f6e38fb698214c3cd49dd30af8836622d5f37044",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -2201,6 +2201,15 @@ def validate_schema_and_consumers(
                 "Phase 4B oracle command",
             ),
             (PASS_LINE, "Phase 4B oracle success line"),
+            (
+                ".venv/bin/python scripts/dtype_count_oracle.py",
+                "Count child oracle command",
+            ),
+            ("DTYPE COUNT ORACLE: PASS", "Count child oracle success line"),
+            (
+                "checker grammar, dedicated non-alias\n`Count` IR",
+                "Count child oracle ownership",
+            ),
             (
                 "(ExternalCallableFamily, CanonicalCallableId, "
                 "ExternalTargetContext)",

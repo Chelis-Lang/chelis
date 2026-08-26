@@ -3870,6 +3870,7 @@ fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
         RiscOp::ScatterAdd { .. } => "scatter_add",
         RiscOp::Scatter { .. } => "scatter_replace",
         RiscOp::Sum { .. } => "sum",
+        RiscOp::Count { .. } => "count",
         RiscOp::Copy => "copy",
         RiscOp::Drop => "drop",
         RiscOp::Realize => "realize",
@@ -9223,6 +9224,19 @@ fn actualize_tensor_helper_types(
                         .collect(),
                     precision: node.output_type.precision,
                 }),
+            crate::dag::RiscOp::Count { axes } => node
+                .inputs
+                .first()
+                .and_then(|id| inferred.get(id))
+                .map(|input| TensorType {
+                    dims: input
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, dim)| (!axes.contains(&index)).then_some(dim.clone()))
+                        .collect(),
+                    precision: Prim::Int64,
+                }),
             crate::dag::RiscOp::Permute { axes } => node
                 .inputs
                 .first()
@@ -9686,6 +9700,37 @@ fn infer_app_expr_host_type(
             })
             .collect::<Option<Vec<_>>>()?;
         return infer_einsum_tensor_type(equation, &tensors).map(HostTypeTerm::Tensor);
+    }
+    if name == "count"
+        && let Some(input) = kids.get(1)
+        && let HostTypeTerm::Tensor(tensor_ty) = expr_host_type(input, program, scope)
+    {
+        let rank = tensor_ty.dims.len();
+        let mut axes = Vec::with_capacity(kids.len().saturating_sub(2));
+        for axis_expr in &kids[2..] {
+            let raw = expr_int_literal(axis_expr)?;
+            let axis = if raw < 0 {
+                rank.checked_sub(raw.unsigned_abs() as usize)?
+            } else {
+                usize::try_from(raw).ok().filter(|&axis| axis < rank)?
+            };
+            if axes.contains(&axis) {
+                return None;
+            }
+            axes.push(axis);
+        }
+        if axes.is_empty() {
+            return None;
+        }
+        return Some(HostTypeTerm::Tensor(TensorType {
+            dims: tensor_ty
+                .dims
+                .into_iter()
+                .enumerate()
+                .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim))
+                .collect(),
+            precision: Prim::Int64,
+        }));
     }
     // chelis#340: the whole named-axis reduction family is type-inferred
     // here (the positional/int-literal axis form), not only `sum`/`mean`.
@@ -10672,9 +10717,9 @@ fn infer_builtin_host_type_from_arg_tys(
     let is_dict = |ty: &HostTypeTerm| matches!(ty, HostTypeTerm::Dict(_, _));
 
     match name {
-        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
-        | "argmin_reduce" | "reshape" | "expand" | "pad" | "shrink" | "stride" | "permute"
-        | "split" | "sort" | "tensor_to_scalar" | "to_list" => {
+        "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" | "count"
+        | "argmax_reduce" | "argmin_reduce" | "reshape" | "expand" | "pad" | "shrink"
+        | "stride" | "permute" | "split" | "sort" | "tensor_to_scalar" | "to_list" => {
             require_first("a tensor", is_tensor)?;
             if name == "to_list"
                 && matches!(
@@ -10817,6 +10862,13 @@ fn infer_builtin_host_type_from_arg_tys_unchecked(
         // tensor.
         "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce" => match arg_tys.first() {
             Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(tensor_ty.clone())),
+            _ => Some(fresh_host_inference()),
+        },
+        "count" => match arg_tys.first() {
+            Some(HostTypeTerm::Tensor(tensor_ty)) => Some(HostTypeTerm::Tensor(TensorType {
+                dims: tensor_ty.dims.clone(),
+                precision: Prim::Int64,
+            })),
             _ => Some(fresh_host_inference()),
         },
         "argmax_reduce" | "argmin_reduce" => match arg_tys.first() {
