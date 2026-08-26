@@ -5996,11 +5996,14 @@ impl LowerCtx {
                 // x |> g` typecheck), but it has no body to recurse into
                 // — the DAG can't represent a call to it (no
                 // `RiscOp::Call`). Surface it as
-                // `CallableExpr::Parameter` so `lower_pipe` can no-op the
-                // stage on an incompletely specialized lowering path;
-                // concrete call-site inlining replaces this with the
-                // resolved callable via `local_callables`, while unresolved
-                // helper forwarding retains the marker. See
+                // `CallableExpr::Parameter` so a direct application or pipe
+                // stage can wrap its provisional result in a fresh `Copy`
+                // marker. Gradient lowering treats the application as
+                // incomplete only when that marker is reverse-reachable from
+                // the scalar output. Concrete call-site inlining replaces
+                // this with the resolved callable via `local_callables`, while
+                // unresolved helper forwarding preserves the parameter until
+                // its eventual application. See
                 // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
                 if let Some(body) = self
                     .local_callables
