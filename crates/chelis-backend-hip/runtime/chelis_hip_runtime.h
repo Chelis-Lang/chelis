@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "chelis_runtime_dtype.h"
 /* WS-A3: route bf16 / f16 matmul through `hipblasGemmEx` per
  * spec/04-type-system.md §5.7.1 (bf16/f16 forward + f32 accumulator).
  * We use the **legacy** hipblasGemmEx signature
@@ -174,10 +175,11 @@ extern hipblasStatus_t hipblasGemmEx(
 } while (0)
 
 /* GPU tensor: device pointer + shape metadata on host. */
+#define CHELIS_GPU_MAX_DIM 8
 typedef struct {
     float *data;                    /* device pointer (hipMalloc) */
-    int shape[CHELIS_MAX_DIM];
-    int strides[CHELIS_MAX_DIM];
+    int shape[CHELIS_GPU_MAX_DIM];
+    int strides[CHELIS_GPU_MAX_DIM];
     int ndim;
     int dtype;
     int size;                       /* total elements */
@@ -187,7 +189,24 @@ typedef struct {
 /* ---- Allocation / deallocation ---- */
 
 static inline size_t chelis_gpu_dtype_size(int dtype) {
-    return chelis_runtime_dtype_size_checked(dtype);
+    switch (dtype) {
+        case CHELIS_DTYPE_F64:
+        case CHELIS_DTYPE_I64:
+            return 8;
+        case CHELIS_DTYPE_F32:
+        case CHELIS_DTYPE_I32:
+            return 4;
+        case CHELIS_DTYPE_BF16:
+        case CHELIS_DTYPE_F16:
+        case CHELIS_DTYPE_I16:
+            return 2;
+        case CHELIS_DTYPE_BOOL:
+        case CHELIS_DTYPE_I8:
+            return 1;
+        default:
+            fprintf(stderr, "invalid Chelis GPU dtype tag: %d\n", dtype);
+            abort();
+    }
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {

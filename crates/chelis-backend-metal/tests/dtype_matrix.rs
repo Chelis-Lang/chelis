@@ -181,13 +181,13 @@ fn assert_real_kernel(src: &str, ctx: &str) {
 #[test]
 fn add_emits_typed_kernel_for_each_active_dtype() {
     let cases: &[(Prim, &str, &str)] = &[
-        (Prim::F32, "float", "CHELIS_F32"),
-        (Prim::F16, "half", "CHELIS_F16"),
-        (Prim::Bf16, "bfloat", "CHELIS_BF16"),
-        (Prim::Int8, "char", "CHELIS_I8"),
-        (Prim::Int16, "short", "CHELIS_I16"),
-        (Prim::Int32, "int", "CHELIS_I32"),
-        (Prim::Int64, "long", "CHELIS_I64"),
+        (Prim::F32, "float", "CHELIS_DTYPE_F32"),
+        (Prim::F16, "half", "CHELIS_DTYPE_F16"),
+        (Prim::Bf16, "bfloat", "CHELIS_DTYPE_BF16"),
+        (Prim::Int8, "char", "CHELIS_DTYPE_I8"),
+        (Prim::Int16, "short", "CHELIS_DTYPE_I16"),
+        (Prim::Int32, "int", "CHELIS_DTYPE_I32"),
+        (Prim::Int64, "long", "CHELIS_DTYPE_I64"),
     ];
     for (prec, msl, runtime_tag) in cases {
         let dag = build_add_dag(*prec);
@@ -266,13 +266,13 @@ fn mul_emits_typed_kernel_for_each_active_dtype() {
 fn reduce_sum_promotes_accumulator_per_spec() {
     // (operand, expected accumulator, expected runtime output tag).
     let cases: &[(Prim, Prim, &str)] = &[
-        (Prim::F32, Prim::F32, "CHELIS_F32"),
-        (Prim::F16, Prim::F32, "CHELIS_F32"),
-        (Prim::Bf16, Prim::F32, "CHELIS_F32"),
-        (Prim::Int8, Prim::Int32, "CHELIS_I32"),
-        (Prim::Int16, Prim::Int32, "CHELIS_I32"),
-        (Prim::Int32, Prim::Int32, "CHELIS_I32"),
-        (Prim::Int64, Prim::Int64, "CHELIS_I64"),
+        (Prim::F32, Prim::F32, "CHELIS_DTYPE_F32"),
+        (Prim::F16, Prim::F32, "CHELIS_DTYPE_F32"),
+        (Prim::Bf16, Prim::F32, "CHELIS_DTYPE_F32"),
+        (Prim::Int8, Prim::Int32, "CHELIS_DTYPE_I32"),
+        (Prim::Int16, Prim::Int32, "CHELIS_DTYPE_I32"),
+        (Prim::Int32, Prim::Int32, "CHELIS_DTYPE_I32"),
+        (Prim::Int64, Prim::Int64, "CHELIS_DTYPE_I64"),
     ];
     for (operand, expected_acc, runtime_tag) in cases {
         let dag = build_reduce_sum_dag(*operand);

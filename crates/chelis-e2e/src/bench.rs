@@ -1539,10 +1539,10 @@ fn build_training_main_c(
     let (param_allocs, param_fills, update_code, free_params) = if uses_accuracy {
         (
             r#"
-    chelis_tensor *w1_tensor = chelis_alloc(2, w1_shape, CHELIS_F32);
-    chelis_tensor *b1_tensor = chelis_alloc(1, b1_shape, CHELIS_F32);
-    chelis_tensor *w2_tensor = chelis_alloc(2, w2_shape, CHELIS_F32);
-    chelis_tensor *b2_tensor = chelis_alloc(1, b2_shape, CHELIS_F32);
+    chelis_tensor *w1_tensor = chelis_alloc(2, w1_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *b1_tensor = chelis_alloc(1, b1_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *w2_tensor = chelis_alloc(2, w2_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *b2_tensor = chelis_alloc(1, b2_shape, CHELIS_DTYPE_F32);
 "#,
             r#"
     memcpy(w1_tensor->data, w1_init, sizeof(float) * 784 * 128);
@@ -1552,10 +1552,10 @@ fn build_training_main_c(
 "#,
             format!(
                 r#"
-            for (int i = 0; i < 784 * 128; i++) w1_tensor->data[i] -= lr * train_outputs[{gw1}]->data[i];
-            for (int i = 0; i < 128; i++) b1_tensor->data[i] -= lr * train_outputs[{gb1}]->data[i];
-            for (int i = 0; i < 128 * 10; i++) w2_tensor->data[i] -= lr * train_outputs[{gw2}]->data[i];
-            for (int i = 0; i < 10; i++) b2_tensor->data[i] -= lr * train_outputs[{gb2}]->data[i];
+            for (int i = 0; i < 784 * 128; i++) ((float *)w1_tensor->data)[i] -= lr * ((float *)train_outputs[{gw1}]->data)[i];
+            for (int i = 0; i < 128; i++) ((float *)b1_tensor->data)[i] -= lr * ((float *)train_outputs[{gb1}]->data)[i];
+            for (int i = 0; i < 128 * 10; i++) ((float *)w2_tensor->data)[i] -= lr * ((float *)train_outputs[{gw2}]->data)[i];
+            for (int i = 0; i < 10; i++) ((float *)b2_tensor->data)[i] -= lr * ((float *)train_outputs[{gb2}]->data)[i];
 "#,
                 gw1 = grad_w1_idx.unwrap(),
                 gb1 = grad_b1_idx.unwrap(),
@@ -1572,8 +1572,8 @@ fn build_training_main_c(
     } else {
         (
             r#"
-    chelis_tensor *w_tensor = chelis_alloc(2, w_shape, CHELIS_F32);
-    chelis_tensor *b_tensor = chelis_alloc(1, b_shape, CHELIS_F32);
+    chelis_tensor *w_tensor = chelis_alloc(2, w_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *b_tensor = chelis_alloc(1, b_shape, CHELIS_DTYPE_F32);
 "#,
             r#"
     memcpy(w_tensor->data, w_init, sizeof(float) * features);
@@ -1581,8 +1581,8 @@ fn build_training_main_c(
 "#,
             format!(
                 r#"
-            for (int i = 0; i < features; i++) w_tensor->data[i] -= lr * train_outputs[{gw}]->data[i];
-            b_tensor->data[0] -= lr * train_outputs[{gb}]->data[0];
+            for (int i = 0; i < features; i++) ((float *)w_tensor->data)[i] -= lr * ((float *)train_outputs[{gw}]->data)[i];
+            ((float *)b_tensor->data)[0] -= lr * ((float *)train_outputs[{gb}]->data)[0];
 "#,
                 gw = grad_w_idx.unwrap(),
                 gb = grad_b_idx.unwrap(),
@@ -1608,12 +1608,12 @@ TRAIN_INPUT_ASSIGNMENTS
         for (int b = 0; b < batch_size; b++) {
             int pred = 0;
             int truth = 0;
-            float pred_best = infer_outputs[EVAL_OUTPUT_INDEX]->data[b * y_dim];
-            float truth_best = y_tensor->data[b * y_dim];
+            float pred_best = ((float *)infer_outputs[EVAL_OUTPUT_INDEX]->data)[b * y_dim];
+            float truth_best = ((float *)y_tensor->data)[b * y_dim];
             for (int cls = 1; cls < y_dim; cls++) {
-                float pred_val = infer_outputs[EVAL_OUTPUT_INDEX]->data[b * y_dim + cls];
+                float pred_val = ((float *)infer_outputs[EVAL_OUTPUT_INDEX]->data)[b * y_dim + cls];
                 if (pred_val > pred_best) { pred_best = pred_val; pred = cls; }
-                float truth_val = y_tensor->data[b * y_dim + cls];
+                float truth_val = ((float *)y_tensor->data)[b * y_dim + cls];
                 if (truth_val > truth_best) { truth_best = truth_val; truth = cls; }
             }
             if (pred == truth) correct++;
@@ -1743,8 +1743,8 @@ int main(void) {{
 {init_allocs}
     fclose(f);
 
-    chelis_tensor *x_tensor = chelis_alloc(2, x_shape, CHELIS_F32);
-    chelis_tensor *y_tensor = chelis_alloc(2, y_shape, CHELIS_F32);
+    chelis_tensor *x_tensor = chelis_alloc(2, x_shape, CHELIS_DTYPE_F32);
+    chelis_tensor *y_tensor = chelis_alloc(2, y_shape, CHELIS_DTYPE_F32);
 {param_allocs}
 {param_fills}
 
@@ -1765,7 +1765,7 @@ int main(void) {{
             chelis_tensor *train_inputs[{train_ins}] = {{0}};
 {train_input_slots}
             chelis_train(train_inputs, {train_ins}, train_outputs, {train_outs});
-            epoch_loss += train_outputs[{loss_idx}]->data[0];
+            epoch_loss += ((float *)train_outputs[{loss_idx}]->data)[0];
 {update_code}
             for (int i = 0; i < {train_outs}; i++) chelis_free(train_outputs[i]);
         }}
@@ -1934,8 +1934,8 @@ static double elapsed_ms(struct timespec start, struct timespec end) {{
            (double)(end.tv_nsec - start.tv_nsec) / 1000000.0;
 }}
 
-static chelis_tensor *alloc_and_fill(FILE *f, int ndim, int *shape, size_t count) {{
-    chelis_tensor *tensor = chelis_alloc(ndim, shape, CHELIS_F32);
+static chelis_tensor *alloc_and_fill(FILE *f, int32_t rank, const int64_t *shape, size_t count) {{
+    chelis_tensor *tensor = chelis_alloc(rank, shape, CHELIS_DTYPE_F32);
     read_f32s(f, tensor->data, count);
     return tensor;
 }}
@@ -1953,12 +1953,12 @@ int main(void) {{
     uint64_t head_dim = read_u64(f);
     uint64_t d_ff = read_u64(f);
     uint64_t iters = read_u64(f);
-    int64_t x_shape[2] = {{ (int)seq_len, (int)d_model }};
-    int head_shape[2] = {{ (int)d_model, (int)head_dim }};
-    int proj_shape[2] = {{ (int)head_dim, (int)d_model }};
-    int ff1_shape[2] = {{ (int)d_model, (int)d_ff }};
-    int ff2_shape[2] = {{ (int)d_ff, (int)d_model }};
-    int norm_shape[1] = {{ (int)d_model }};
+    int64_t x_shape[2] = {{ (int64_t)seq_len, (int64_t)d_model }};
+    int64_t head_shape[2] = {{ (int64_t)d_model, (int64_t)head_dim }};
+    int64_t proj_shape[2] = {{ (int64_t)head_dim, (int64_t)d_model }};
+    int64_t ff1_shape[2] = {{ (int64_t)d_model, (int64_t)d_ff }};
+    int64_t ff2_shape[2] = {{ (int64_t)d_ff, (int64_t)d_model }};
+    int64_t norm_shape[1] = {{ (int64_t)d_model }};
 
     chelis_tensor *x_tensor = alloc_and_fill(f, 2, x_shape, seq_len * d_model);
     chelis_tensor *wq_tensor = alloc_and_fill(f, 2, head_shape, d_model * head_dim);
@@ -1995,7 +1995,7 @@ int main(void) {{
     printf("{{\"run_ms\":%.6f,\"loss_history\":[],\"final_loss\":null,\"final_accuracy\":null,\"output\":[", elapsed_ms(start, end));
     for (int i = 0; i < out_size; i++) {{
         if (i) printf(",");
-        printf("%.8f", out->data[i]);
+        printf("%.8f", ((float *)out->data)[i]);
     }}
     printf("]}}");
 

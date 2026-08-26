@@ -1,5 +1,5 @@
 //! chelis#732 Phase 2: the byte-equality lock between the compiled lane's
-//! `chelis_format_shortest` and the reference renderer
+//! exact scalar-to-string boundary and the reference renderer
 //! `chelis_types::observation::format_element` (faithful_observation.md
 //! section C3.3: "unit-tested against the Rust formatter over the
 //! harness's value table - byte equality is the test").
@@ -15,41 +15,36 @@
 //! * deterministic 65536-pattern bit sweeps for f32 and f64 (stratified:
 //!   the generator visits every exponent byte), NaN classes included.
 //!
-//! The invalid-width rows (integer/bool/unknown ids must abort before any
-//! text is produced) live beside the other FFI abort rows in
-//! `runtime_dtype_invalid_ffi.rs`'s subprocess pattern - see
+//! Malformed scalar-carrier rows live in
 //! `format_shortest_invalid_width.rs`.
 
-use chelis_runtime::{chelis_format_shortest, CHELIS_FORMAT_SHORTEST_BUF};
+use chelis_runtime::{
+    chelis_scalar, chelis_scalar_from_bits, chelis_string_data, chelis_string_from_scalar,
+    chelis_string_release,
+};
 use chelis_types::types::Prim;
 use chelis_types::{format_element, ElementRef};
 use chelis_vocab::RuntimeDType;
-use std::ffi::CStr;
-use std::os::raw::c_char;
+fn scalar_from_f64(value: f64, dtype: RuntimeDType) -> chelis_scalar {
+    let bits = match dtype {
+        RuntimeDType::F64 => value.to_bits(),
+        RuntimeDType::F32 => u64::from((value as f32).to_bits()),
+        RuntimeDType::F16 => u64::from(half::f16::from_f64(value).to_bits()),
+        RuntimeDType::Bf16 => u64::from(half::bf16::from_f64(value).to_bits()),
+        _ => panic!("floating reference helper received {}", dtype.name()),
+    };
+    chelis_scalar_from_bits(dtype.id() as u8, bits)
+}
 
-/// Call the C ABI routine and decode the NUL-terminated rendering. Going
-/// through the real export (buffer and all) keeps the ABI wrapper itself
-/// under test, not just the internal formatter.
+/// Call the exact public C ABI routine and decode its owned string.
 fn c_format(value: f64, width: RuntimeDType) -> String {
-    let mut buf = [0u8; CHELIS_FORMAT_SHORTEST_BUF];
+    let rendered = chelis_string_from_scalar(scalar_from_f64(value, width));
     unsafe {
-        let written = chelis_format_shortest(
-            value,
-            width.id(),
-            buf.as_mut_ptr() as *mut c_char,
-            buf.len(),
-        );
-        let text = CStr::from_ptr(buf.as_ptr() as *const c_char)
+        let text = std::ffi::CStr::from_ptr(chelis_string_data(rendered))
             .to_str()
-            .expect("chelis_format_shortest output is ASCII")
+            .expect("scalar rendering is UTF-8")
             .to_string();
-        // The returned count is the contract's own accounting; every value
-        // in every table below therefore also checks it.
-        assert_eq!(
-            written as usize,
-            text.len(),
-            "the returned byte count must equal the NUL-excluded rendering"
-        );
+        chelis_string_release(rendered);
         text
     }
 }
@@ -248,29 +243,6 @@ fn stratified_f64_bit_patterns_match_reference_bytes() {
             c_format(v, RuntimeDType::F64),
             format_element(Prim::F64, ElementRef::F64(v)),
             "f64 bits {bits:#018x}"
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ABI shape rows.
-// ---------------------------------------------------------------------------
-
-/// The rendering always fits the documented buffer with its NUL: probe the
-/// longest known classes directly.
-#[test]
-fn longest_renderings_fit_the_documented_buffer() {
-    for (v, w) in [
-        (-2.2250738585072014e-308, RuntimeDType::F64),
-        (-0.00012345678901234567, RuntimeDType::F64),
-        (-9999999999999998.0, RuntimeDType::F64),
-        (f64::from(-f32::MIN_POSITIVE), RuntimeDType::F32),
-    ] {
-        let text = c_format(v, w);
-        assert!(
-            text.len() < CHELIS_FORMAT_SHORTEST_BUF,
-            "`{text}` ({} bytes) must leave room for the NUL",
-            text.len()
         );
     }
 }

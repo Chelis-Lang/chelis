@@ -83,55 +83,49 @@
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_adt_tag_equals ( const chelis_adt * adt , chelis_string ctor ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_file_exists ( chelis_string path ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_contains ( chelis_string haystack , chelis_string needle ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_ends_with ( chelis_string value , chelis_string suffix ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_eq ( chelis_string lhs , chelis_string rhs ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Bool chelis_string_starts_with ( chelis_string value , chelis_string prefix ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: _Bool chelis_value_as_bool ( chelis_value value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: _Noreturn void chelis_fail ( chelis_string message ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
@@ -139,67 +133,67 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_adt * chelis_value_as_adt ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * lhs , const chelis_dict * rhs ) ;",
+      "id": "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * left , const chelis_dict * right ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_dict * chelis_value_as_dict ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_entries ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_keys ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_dict_values ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_append ( const chelis_list * list , chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
@@ -207,19 +201,19 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_concat ( const chelis_list * lhs , const chelis_list * rhs ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_dir ( chelis_string path ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
@@ -227,31 +221,25 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_empty ( void ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_flatten ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_list * chelis_list_from_tensor ( const chelis_tensor * tensor ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
@@ -259,7 +247,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
@@ -267,13 +255,13 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_list_zip ( const chelis_list * lhs , const chelis_list * rhs ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
@@ -281,7 +269,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
@@ -289,125 +277,117 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_read_lines ( chelis_string path ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int64_t axis , const chelis_list * sizes ) ;",
+      "id": "chelis_runtime.h: chelis_list * chelis_tensor_elements ( const chelis_tensor * tensor ) ;",
+      "flags": [],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int32_t axis , const chelis_list * sizes ) ;",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_list * chelis_value_as_list ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_mapped_file * chelis_mmap_file ( chelis_string path ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_f64 chelis_dict_get_f64 ( const chelis_dict * dict , chelis_value key ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_option_scalar chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_f64 chelis_parse_f64 ( chelis_string value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_i64 chelis_dict_get_i64 ( const chelis_dict * dict , chelis_value key ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_option_i64 chelis_parse_int64 ( chelis_string value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_option_scalar chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-31])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_tensor_to_scalar ( const chelis_tensor * tensor ) ;",
+      "flags": [],
+      "citation": "Numeric([05-OP-31])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_scalar chelis_value_as_scalar ( chelis_value value ) ;",
+      "flags": [],
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_adt_get_tag ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_read_file ( chelis_string path ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_concat ( chelis_string lhs , chelis_string rhs ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_string chelis_string_from_bool ( _Bool value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_from_cstr ( const char * value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_string chelis_string_from_f32 ( float value ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_string chelis_string_from_f64 ( double value ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_string chelis_string_from_int64 ( int64_t value ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: chelis_string chelis_string_from_scalar ( chelis_scalar value ) ;",
+      "flags": [],
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
@@ -415,183 +395,165 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_string_trim ( chelis_string value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_string chelis_value_as_string ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype ) ;",
       "flags": [
-        "raw-dtype-int"
-      ],
-      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int64_t * shape , int dtype , float * data ) ;",
-      "flags": [
-        "float-carrier",
-        "raw-dtype-int",
         "numeric-op"
       ],
-      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * t ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , void * data , int64_t byte_capacity ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * tensor ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_value pad_value ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_scalar pad_value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_value pad_value ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_scalar pad_value ) ;",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f32 ( float value ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_f64 ( double value ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor_from_i64 ( int64_t value ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lo , const chelis_tensor * hi ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor ( chelis_scalar value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lower , const chelis_tensor * upper ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int64_t axis ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int64_t axis ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * lhs , const chelis_tensor * rhs ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * left , const chelis_tensor * right ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list ( const chelis_list * list ) ;",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * left , const chelis_tensor * right , chelis_dtype accumulator ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_values ( const chelis_list * list , chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_replace ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-33])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * condition , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_from_value_list_typed ( const chelis_list * list , int dst_dtype ) ;",
-      "flags": [
-        "raw-dtype-int"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int64_t axis ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int64_t axis , chelis_string mode ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int64_t axis1 , int64_t axis2 ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * cond , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tensor * chelis_value_as_tensor ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int64_t axis ) ;",
+      "id": "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
@@ -599,13 +561,13 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_tuple * chelis_value_as_tuple ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
@@ -613,7 +575,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
@@ -621,7 +583,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
@@ -629,108 +591,63 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_adt ( chelis_adt * value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_bool ( _Bool value ) ;",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_dict ( chelis_dict * value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_f64 ( double value ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: chelis_value chelis_value_from_int64 ( int64_t value ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_list ( chelis_list * value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: chelis_value chelis_value_from_scalar ( chelis_scalar value ) ;",
+      "flags": [],
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_string ( chelis_string value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_tensor ( chelis_tensor * value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: chelis_value chelis_value_from_tuple ( chelis_tuple * value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: const char * chelis_string_data ( chelis_string value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: double chelis_tensor_to_f64 ( const chelis_tensor * t ) ;",
+      "id": "chelis_runtime.h: int32_t chelis_tensor_rank ( const chelis_tensor * tensor ) ;",
       "flags": [
-        "float-carrier",
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: double chelis_value_as_f64 ( chelis_value value ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: int chelis_dtype_size ( int dtype ) ;",
-      "flags": [
-        "raw-dtype-int"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: int chelis_format_shortest ( double value , int dtype , char * buf , size_t cap ) ;",
-      "flags": [
-        "float-carrier",
-        "raw-dtype-int",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
@@ -738,7 +655,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
@@ -746,7 +663,15 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
+    },
+    {
+      "kind": "header-export",
+      "id": "chelis_runtime.h: int64_t chelis_dtype_size ( chelis_dtype dtype ) ;",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
@@ -754,7 +679,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
@@ -762,7 +687,7 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
@@ -770,31 +695,23 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * t ) ;",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_tensor_rank ( const chelis_tensor * t ) ;",
+      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * tensor , int32_t axis ) ;",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int32_t axis ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "chelis#1112 axis-domain narrowing per [05-DIM-1]; semantic authority [05-OP-7], registered in capacity_census_tripwire.rs"
+      "citation": "Numeric([05-OP-33])"
     },
     {
       "kind": "header-export",
@@ -802,285 +719,191 @@
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: int64_t chelis_value_as_int64 ( chelis_value value ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_adt_release ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_adt_retain ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_bf16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_dict_release ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_dict_retain ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_f16_buffer_to_f32 ( const uint16_t * src , float * dst , int64_t n ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_f32_buffer_to_bf16 ( const float * src , uint16_t * dst , int64_t n ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_f32_buffer_to_f16 ( const float * src , uint16_t * dst , int64_t n ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_bf16 ( chelis_tensor * t , uint16_t bits ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_bool_bits ( chelis_tensor * t , uint32_t bits ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_f16 ( chelis_tensor * t , uint16_t bits ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_f32 ( chelis_tensor * t , float val ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_f32_bits ( chelis_tensor * t , uint32_t bits ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_f64 ( chelis_tensor * t , double val ) ;",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_f64_bits ( chelis_tensor * t , uint64_t bits ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-export",
-      "id": "chelis_runtime.h: void chelis_fill_i64 ( chelis_tensor * t , int64_t val ) ;",
-      "flags": [
-        "numeric-op"
-      ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "id": "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor * tensor , chelis_scalar value ) ;",
+      "flags": [],
+      "citation": "Numeric([05-OP-31])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_free ( chelis_tensor * t ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_list_release ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_list_retain ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Numeric([05-OP-32])"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_release ( chelis_string value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_string_retain ( chelis_string value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_release ( const chelis_tuple * tuple ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_tuple_retain ( const chelis_tuple * tuple ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_value_release ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_value_retain ( chelis_value value ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-export",
       "id": "chelis_runtime.h: void chelis_write_file ( chelis_string path , chelis_string contents ) ;",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef enum { CHELIS_VALUE_INT64 , CHELIS_VALUE_FLOAT64 , CHELIS_VALUE_BOOL , CHELIS_VALUE_STRING , CHELIS_VALUE_TENSOR , CHELIS_VALUE_LIST , CHELIS_VALUE_TUPLE , CHELIS_VALUE_DICT , CHELIS_VALUE_ADT } chelis_value_tag",
+      "id": "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 }",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; chelis_value value ; } chelis_option_value",
-      "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; double value ; } chelis_option_f64",
-      "flags": [
-        "float-carrier",
-        "numeric-op"
-      ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
-    },
-    {
-      "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { _Bool is_some ; int64_t value ; } chelis_option_i64",
+      "id": "chelis_runtime.h: typedef struct { chelis_dtype dtype ; uint8_t reserved [ 7 ] ; uint64_t bits ; } chelis_scalar",
       "flags": [
         "numeric-op"
       ],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { chelis_value_tag tag ; union { int64_t i64 ; double f64 ; _Bool boolean ; chelis_string string ; chelis_tensor * tensor ; chelis_list * list ; chelis_tuple * tuple ; chelis_dict * dict ; chelis_adt * adt ; } as ; } chelis_value",
+      "id": "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
       "flags": [
-        "float-carrier",
         "numeric-op"
       ],
-      "citation": "baseline-2026-07-30 pre-ratchet seam; unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break"
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-struct",
-      "id": "chelis_runtime.h: typedef struct { float * data ; int64_t shape [ 8 ] ; int64_t strides [ 8 ] ; int ndim ; int dtype ; int64_t size ; int owns_data ; } chelis_tensor",
+      "id": "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_scalar value ; } chelis_option_scalar",
       "flags": [
-        "float-carrier",
-        "raw-dtype-int",
         "numeric-op"
       ],
-      "citation": "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)"
+      "citation": "TaggedTransport"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_value value ; } chelis_option_value",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "TaggedTransport"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t size ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t owns_data ; uint8_t reserved [ 2 ] ; } chelis_tensor",
+      "flags": [
+        "numeric-op"
+      ],
+      "citation": "TaggedTransport"
     },
     {
       "kind": "header-struct",
       "id": "chelis_runtime.h: typedef struct { void * handle ; } chelis_string",
       "flags": [],
-      "citation": "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)"
+      "citation": "Nonnumeric"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime.h: typedef union { chelis_scalar scalar ; void * handle ; } chelis_value_payload",
+      "flags": [],
+      "citation": "TaggedTransport"
+    },
+    {
+      "kind": "header-struct",
+      "id": "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
+      "flags": [],
+      "citation": "TaggedTransport"
     },
     {
       "kind": "prelude-adt-numeric",

@@ -501,7 +501,8 @@ fn positional_construction_keeps_the_authored_packages_field_dtype() {
         "the payload dtype must follow the authored declaration, not the collider's"
     );
     assert!(
-        body.contains("chelis_value_from_f32_boxed") && !body.contains("chelis_value_from_f64"),
+        body.contains("chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F32")
+            && !body.contains("CHELIS_DTYPE_F64"),
         "the authored declaration stores f32; emitted body was:\n{body}"
     );
 }

@@ -114,7 +114,7 @@ fn f64_matmul_subgraph_stays_off_blas_path_in_c_backend() {
     // F64 slot allocation should still be present (the data is F64;
     // the generic expand+mul+sum path computes against it).
     assert!(
-        result.c_source.contains("CHELIS_F64"),
+        result.c_source.contains("CHELIS_DTYPE_F64"),
         "F64 slot allocation must be present on the generic path; got source:\n{}",
         result.c_source
     );

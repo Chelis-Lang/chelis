@@ -17,11 +17,11 @@ manually at release cuts and during red-team passes):
 Success is exit 0 with the final line `CAPACITY CENSUS LIVENESS: PASS`.
 Run it at every release cut and in red-team passes over the numeric surface.
 Issue-bound dispositions name at least one chelis#N reference. Exact permanent
-dispositions are closed, family-specific strings backed by non-regenerable
-complete-row manifests in the owning Rust tripwires. The remaining live seam
-rows cite chelis#893. The typed wire and PyO3 baselines carry distinct
-top-level dispositions; their row manifests prevent a new row from inheriting
-either disposition.
+dispositions and the primary census's final authority classes are closed,
+family-specific strings backed by non-regenerable complete-row manifests in
+the owning Rust tripwires. The remaining live seam rows cite chelis#893. The
+typed wire and PyO3 baselines carry distinct top-level dispositions; their row
+manifests prevent a new row from inheriting either disposition.
 """
 
 from __future__ import annotations
@@ -64,6 +64,22 @@ PERMANENT_DISPOSITIONS = frozenset(
     disposition
     for dispositions in PERMANENT_DISPOSITIONS_BY_FAMILY.values()
     for disposition in dispositions
+)
+FINAL_AUTHORITIES_BY_FAMILY = {
+    "primary": frozenset(
+        {
+            "Nonnumeric",
+            "TaggedTransport",
+            "Numeric([05-OP-31])",
+            "Numeric([05-OP-32])",
+            "Numeric([05-OP-33])",
+        }
+    ),
+}
+FINAL_AUTHORITIES = frozenset(
+    authority
+    for authorities in FINAL_AUTHORITIES_BY_FAMILY.values()
+    for authority in authorities
 )
 
 
@@ -153,17 +169,26 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
         family_dispositions = PERMANENT_DISPOSITIONS_BY_FAMILY.get(family, frozenset())
         if citation in family_dispositions:
             continue
+        family_authorities = FINAL_AUTHORITIES_BY_FAMILY.get(family, frozenset())
+        if citation in family_authorities:
+            continue
         if citation in PERMANENT_DISPOSITIONS:
             problems.append(
                 f"WRONG CENSUS FAMILY: permanent disposition does not belong to "
                 f"{family or '<missing>'}: {row_id}"
             )
             continue
+        if citation in FINAL_AUTHORITIES:
+            problems.append(
+                f"WRONG CENSUS FAMILY: final authority does not belong to "
+                f"{family or '<missing>'}: {row_id}"
+            )
+            continue
         issue_numbers = extract_issue_refs(citation)
         if not issue_numbers:
             problems.append(
-                f"UNRECOGNIZED disposition (expected an exact permanent disposition "
-                f"or chelis#N): {row_id}"
+                f"UNRECOGNIZED disposition (expected an exact permanent disposition, "
+                f"final authority, or chelis#N): {row_id}"
             )
             continue
         for number in issue_numbers:

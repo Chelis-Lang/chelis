@@ -247,7 +247,7 @@ const HARNESS: &str = r#"
 
 static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_BF16);
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_BF16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_bf16(src[i]);
     return t;
@@ -255,7 +255,7 @@ static chelis_tensor *bf16_tensor_from_f32(const float *src, int n) {
 
 static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
     int64_t shape[1] = {n};
-    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_F16);
+    chelis_tensor *t = chelis_alloc(1, shape, CHELIS_DTYPE_F16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < n; i++) p[i] = chelis_f32_to_f16(src[i]);
     return t;
@@ -263,7 +263,7 @@ static chelis_tensor *f16_tensor_from_f32(const float *src, int n) {
 
 static chelis_tensor *bf16_matrix_from_f32(const float *src, int rows, int cols) {
     int64_t shape[2] = {rows, cols};
-    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_BF16);
+    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_DTYPE_BF16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < rows * cols; i++) p[i] = chelis_f32_to_bf16(src[i]);
     return t;
@@ -271,7 +271,7 @@ static chelis_tensor *bf16_matrix_from_f32(const float *src, int rows, int cols)
 
 static chelis_tensor *f16_matrix_from_f32(const float *src, int rows, int cols) {
     int64_t shape[2] = {rows, cols};
-    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_F16);
+    chelis_tensor *t = chelis_alloc(2, shape, CHELIS_DTYPE_F16);
     uint16_t *p = (uint16_t*)t->data;
     for (int i = 0; i < rows * cols; i++) p[i] = chelis_f32_to_f16(src[i]);
     return t;
@@ -876,7 +876,7 @@ fn build_f16_matmul_dag() -> Dag {
 }
 
 /// Structural test: the emitted C for a bf16 matmul contains both
-/// `chelis_bf16_buffer_to_f32` (the operand-side conversion call) and
+/// `chelis_bf16_to_f32` (the operand-side conversion call) and
 /// `cblas_sgemm` (the BLAS dispatch). Runs unconditionally; does not
 /// need gcc, libcblas, or any runtime. This is the lock for the
 /// convert-then-sgemm routing decision.
@@ -886,7 +886,7 @@ fn bf16_matmul_routes_through_convert_then_sgemm() {
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "bf16_matmul_routing").unwrap();
     assert!(
-        result.c_source.contains("chelis_bf16_buffer_to_f32"),
+        result.c_source.contains("chelis_bf16_to_f32"),
         "emitted C must convert bf16 operands to f32: {}",
         result.c_source
     );
@@ -896,7 +896,7 @@ fn bf16_matmul_routes_through_convert_then_sgemm() {
         result.c_source
     );
     assert!(
-        result.c_source.contains("chelis_f32_buffer_to_bf16"),
+        result.c_source.contains("chelis_f32_to_bf16"),
         "emitted C must downcast f32 accumulator back to bf16 for the destination: {}",
         result.c_source
     );
@@ -908,7 +908,7 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
     let specialized = chelis_ir::specialize::specialize_for_blas(&dag);
     let result = codegen(&specialized, "f16_matmul_routing").unwrap();
     assert!(
-        result.c_source.contains("chelis_f16_buffer_to_f32"),
+        result.c_source.contains("chelis_f16_to_f32"),
         "emitted C must convert f16 operands to f32: {}",
         result.c_source
     );
@@ -918,7 +918,7 @@ fn f16_matmul_routes_through_convert_then_sgemm() {
         result.c_source
     );
     assert!(
-        result.c_source.contains("chelis_f32_buffer_to_f16"),
+        result.c_source.contains("chelis_f32_to_f16"),
         "emitted C must downcast f32 accumulator back to f16 for the destination: {}",
         result.c_source
     );

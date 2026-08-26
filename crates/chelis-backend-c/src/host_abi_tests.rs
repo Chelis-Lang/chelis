@@ -49,6 +49,35 @@ fn supported_concrete_types_map_to_exact_c_host_abis() {
     assert_eq!(tensor_abi.c_type_name(), Some("chelis_tensor*"));
 }
 
+#[test]
+fn options_of_active_scalars_share_the_exact_tagged_scalar_carrier() {
+    for precision in [
+        Prim::Int8,
+        Prim::Int16,
+        Prim::Int32,
+        Prim::Int64,
+        Prim::F16,
+        Prim::Bf16,
+        Prim::F32,
+        Prim::F64,
+        Prim::Bool,
+    ] {
+        let option = ConcreteHostType::Option(Box::new(ConcreteHostType::Scalar(precision)));
+        let abi = HostAbiType::try_from_concrete(&option)
+            .expect("every active runtime scalar has an exact Option ABI");
+        assert_eq!(
+            abi.c_type_name(),
+            Some("chelis_option_scalar"),
+            "Option<{precision:?}> must not retain a per-dtype compatibility struct"
+        );
+    }
+
+    let string_option = ConcreteHostType::Option(Box::new(ConcreteHostType::Scalar(Prim::String)));
+    let abi = HostAbiType::try_from_concrete(&string_option)
+        .expect("strings use the generic exact value carrier");
+    assert_eq!(abi.c_type_name(), Some("chelis_option_value"));
+}
+
 /// Once Phase 3 supplies exact scalar storage, every container recursively
 /// preserves the same reduced-float ABI; no boxed-only exception remains.
 #[test]

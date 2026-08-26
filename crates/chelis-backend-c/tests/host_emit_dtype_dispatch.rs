@@ -216,7 +216,7 @@ fn generated_dtype_arm<'a>(source: &'a str, dtype_macro: &str) -> &'a str {
 fn compile_generated_i32_binary_assignment(op_name: &str, lhs: i32, rhs: i32) -> i32 {
     let program = make_binary_program(op_name, Prim::Int32);
     let source = emit_host_program(&program, &format!("{op_name}_i32_exact")).unwrap();
-    let arm = generated_dtype_arm(&source, "CHELIS_I32");
+    let arm = generated_dtype_arm(&source, "CHELIS_DTYPE_I32");
     let assignment = arm
         .lines()
         .find(|line| line.contains("__target_data[i] ="))
@@ -339,7 +339,7 @@ fn binary_elementwise_emits_dtype_switch_at_i64() {
 fn binary_elementwise_int32_arm_uses_int32_t_pointers() {
     let program = make_binary_program("add", Prim::Int32);
     let src = emit_host_program(&program, "binop_i32").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_I32");
+    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_I32");
 
     assert!(
         arm.contains("int32_t *__target_data = (int32_t*)"),
@@ -356,7 +356,7 @@ fn binary_elementwise_int32_arm_uses_int32_t_pointers() {
 fn binary_elementwise_int32_arm_contains_no_float_pointer() {
     let program = make_binary_program("add", Prim::Int32);
     let src = emit_host_program(&program, "binop_i32_no_float").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_I32");
+    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_I32");
 
     assert!(
         !arm.contains("float"),
@@ -368,7 +368,7 @@ fn binary_elementwise_int32_arm_contains_no_float_pointer() {
 fn binary_elementwise_f32_arm_keeps_float_pointers() {
     let program = make_binary_program("add", Prim::F32);
     let src = emit_host_program(&program, "binop_f32_control").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_F32");
+    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_F32");
 
     assert!(
         arm.contains("float *__target_data = (float*)")
@@ -405,7 +405,7 @@ fn binary_func_elementwise_emits_typed_pointer_access() {
 fn binary_func_f32_max_keeps_fmaxf() {
     let program = make_binary_program("max_elem", Prim::F32);
     let src = emit_host_program(&program, "binfunc_f32_max").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_F32");
+    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_F32");
 
     assert!(
         arm.contains("fmaxf(__lhs_data[idx_lhs], __rhs_data[idx_rhs])"),
@@ -481,7 +481,7 @@ fn unary_func_elementwise_emits_typed_pointer_access() {
 fn unary_func_int32_arm_aborts_without_binary32_conversion() {
     let program = make_unary_program("exp", Prim::Int32);
     let src = emit_host_program(&program, "unfunc_i32_reject").unwrap();
-    let arm = generated_dtype_arm(&src, "CHELIS_I32");
+    let arm = generated_dtype_arm(&src, "CHELIS_DTYPE_I32");
 
     assert!(
         arm.contains("abort();"),
@@ -535,30 +535,75 @@ fn make_tensor_call_with_scalar_arg(scalar_ty: HostType, scalar_val: HostExpr) -
 }
 
 #[test]
+fn to_tensor_list_ingress_uses_only_the_exact_registered_constructor() {
+    let list_ty = HostType::List(Box::new(HostType::Float64));
+    let tensor_ty = vec_ty(2, Prim::F64);
+    let list = HostExpr::new(HostExprKind::List(
+        vec![
+            HostExpr::new(HostExprKind::Float(1.0)),
+            HostExpr::new(HostExprKind::Float(2.0)),
+        ],
+        list_ty,
+    ));
+    let to_tensor = HostExpr::new(HostExprKind::Builtin {
+        name: "to_tensor".to_string(),
+        args: vec![list],
+        ty: HostType::Tensor(tensor_ty.clone()),
+    });
+    let program = HostProgram {
+        globals: vec![HostBinding {
+            name: "result".to_string(),
+            display_name: None,
+            display_roots: Vec::new(),
+            ty: HostType::Tensor(tensor_ty),
+            value: to_tensor,
+        }],
+        global_tensor_helpers: Vec::new(),
+        functions: Vec::new(),
+        summary_rejections: Vec::new(),
+    };
+
+    let source = emit_host_program(&program, "exact_list_ingress").unwrap();
+    assert!(
+        source.contains("chelis_tensor_from_values(") && source.contains("CHELIS_DTYPE_F64"),
+        "to_tensor must emit the registered exact tagged constructor:\n{source}"
+    );
+    for retired in [
+        "chelis_tensor_from_value_list_typed(",
+        "chelis_tensor_from_value_list(",
+    ] {
+        assert!(
+            !source.contains(retired),
+            "to_tensor restored retired constructor `{retired}`:\n{source}"
+        );
+    }
+}
+
+#[test]
 fn scalar_to_tensor_coercion_bool_uses_typed_pointer() {
     let program =
         make_tensor_call_with_scalar_arg(HostType::Bool, HostExpr::new(HostExprKind::Bool(true)));
     let src = emit_host_program(&program, "scalar_bool").unwrap();
-    // The legacy bool arm writes `tensor_name->data[0] = value ? 1.0f
-    // : 0.0f;` against `float *data`.  The migrated code must cast
-    // `->data` through a typed pointer first.
+    // [05-OP-31] fixes Bool tensor storage at one canonical byte. The host
+    // scalar bridge must therefore write through uint8_t and preserve only
+    // the two valid Bool8 bit patterns.
     assert!(
-        src.contains("(float*)") && src.contains("->data"),
-        "bool scalar-to-tensor coercion must cast `->data` to typed pointer; got:\n{src}"
+        src.contains("((uint8_t*)")
+            && src.contains("->data)[0]")
+            && src.contains("? UINT8_C(1) : UINT8_C(0)"),
+        "bool scalar-to-tensor coercion must write canonical Bool8 bytes; got:\n{src}"
     );
     assert!(
-        !src.lines().any(|l| l.contains("->data[0] = ")
-            && l.contains("? 1.0f : 0.0f")
-            && !l.contains("(float*)")),
-        "bool scalar-to-tensor coercion must not emit bare `->data[0] = value ? 1.0f : 0.0f`; got:\n{src}"
+        !src.lines().any(|line| line.contains("? 1.0f : 0.0f")),
+        "bool scalar-to-tensor coercion must not retain four-byte float storage; got:\n{src}"
     );
 }
 
 #[test]
 fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
     // #381: a captured f64 scalar fed to a tensor helper must pack into a
-    // CHELIS_F64 rank-0 tensor written through a `(double*)`. The pre-fix
-    // code packed an f64 scalar into a CHELIS_F32 tensor via `(float)value`
+    // CHELIS_DTYPE_F64 rank-0 tensor written through a `(double*)`. The pre-fix
+    // code packed an f64 scalar into a CHELIS_DTYPE_F32 tensor via `(float)value`
     // (only 4 bytes), so the f64 kernel read garbage and the value collapsed
     // to ~0. The dtype tag and the typed-pointer width must match the f64
     // operand.
@@ -568,8 +613,8 @@ fn scalar_to_tensor_coercion_f64_uses_f64_typed_pointer() {
     );
     let src = emit_host_program(&program, "scalar_f64").unwrap();
     assert!(
-        src.contains("chelis_alloc(0, NULL, CHELIS_F64)"),
-        "f64 scalar-to-tensor coercion must allocate a CHELIS_F64 rank-0 tensor (#381); got:\n{src}"
+        src.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_F64)"),
+        "f64 scalar-to-tensor coercion must allocate a CHELIS_DTYPE_F64 rank-0 tensor (#381); got:\n{src}"
     );
     assert!(
         src.contains("(double*)") && src.contains("->data"),

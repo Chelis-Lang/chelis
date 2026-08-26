@@ -139,6 +139,30 @@ fn issue522_scatter_negative_axis_matches_positive() {
     );
 }
 
+#[test]
+fn scatter_duplicate_replace_host_eval_is_row_major_last_write_wins() {
+    let result = eval_surf(
+        "base = to_tensor([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]])\n\
+         idx = to_tensor([cast(1, int64), cast(1, int64)])\n\
+         upd = to_tensor([[5.0, 5.0], [6.0, 6.0]])\n\
+         out = scatter(base, idx, upd, 0, \"replace\")\n",
+    );
+    let root = result
+        .roots
+        .iter()
+        .find(|root| root.name.as_deref() == Some("out"))
+        .expect("out root present");
+    let ExecutionValue::Tensor { value } = &root.value else {
+        panic!("scatter result must be a tensor, got {:?}", root.value);
+    };
+    assert_eq!(value.shape, vec![3, 2]);
+    assert_eq!(
+        value.data.to_f64_lossy_vec(),
+        vec![0.0, 0.0, 6.0, 6.0, 0.0, 0.0],
+        "the later update row must win at both duplicate target cells"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Negative parity: an axis still out of range after the from-the-end
 // normalization must reject loud at eval, not silently wrap. `rank` and

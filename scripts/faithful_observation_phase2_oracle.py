@@ -256,9 +256,7 @@ CROSS_LANE_REQUIRED_ASSERTIONS: tuple[str, ...] = (
 RUNTIME_SOURCE = Path("crates/chelis-runtime/src/lib.rs")
 RUNTIME_HEADER = Path("crates/chelis-runtime/include/chelis_runtime.h")
 # The retired-export scan reads the WHOLE crate, not just `lib.rs`: an
-# export re-added in any module is the same public exit returning, and a
-# scan scoped to one file would miss it (`chelis_format_shortest` itself
-# lives in `format_shortest.rs`, which is how this gap surfaced).
+# export re-added in any module is the same public exit returning.
 RUNTIME_SRC_DIR = Path("crates/chelis-runtime/src")
 
 # The observation lane's DECODE table: which pointer view each dtype's
@@ -308,12 +306,9 @@ OBSERVATION_DECODE_TABLE: tuple[tuple[str, str, str], ...] = (
     ("I8", "i8::data_ptr_unchecked", "typed accessor"),
     (
         "Bool",
-        "data_as_f32_const",
-        "DECLARED EXCEPTION: bool storage IS f32-encoded today "
-        "(`read_index_slot` keeps `F32 | Bool` on the same view). "
-        "chelis#894 migrates it to `Repr::Bool8`; this arm moves WITH "
-        "that change - a 1-byte read against 4-byte writers is a "
-        "misdecode in the other direction",
+        "Bool8::data_ptr_unchecked",
+        "canonical Repr::Bool8 storage is decoded through its typed "
+        "one-byte accessor",
     ),
     (
         "Bf16",
@@ -986,6 +981,7 @@ _TYPED_ACCESSORS: tuple[str, ...] = (
     "i16::data_ptr_unchecked",
     "i32::data_ptr_unchecked",
     "i64::data_ptr_unchecked",
+    "Bool8::data_ptr_unchecked",
 )
 
 
@@ -1070,19 +1066,19 @@ def observation_decode_violations(source: str) -> list[str]:
                 "other; a foreign accessor here renders one dtype's bytes as "
                 "another's, which is the whole defect class."
             )
-    # The f32 view is the exact mechanism of the int32 defect class; only
-    # the declared exception may reach for it.
+    # The f32 view is the exact mechanism of the int32 defect class. Every
+    # active dtype now has an exact typed accessor, so no arm may reach it.
     for name, arm in arms.items():
-        if "data_as_f32_const" in strip_comments(arm) and name != "Bool":
+        if "data_as_f32_const" in strip_comments(arm):
             violations.append(
                 f"tensor_elem_to_string: the {name} arm reaches for the "
-                "untyped f32 view. Only the declared Bool exception may, and "
-                "only until chelis#894's `Repr::Bool8` migration."
+                "untyped f32 view. Exact typed access is required for every "
+                "active dtype."
             )
     return violations
 
 
-RETIRED_EXPORTS: tuple[str, ...] = ("chelis_print_f32",)
+RETIRED_EXPORTS: tuple[str, ...] = ("chelis_print_f32", "chelis_format_shortest")
 
 
 def rust_exported_symbols(source: str) -> set[str]:

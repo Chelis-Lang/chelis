@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from capacity_census_liveness import (
+    FINAL_AUTHORITIES,
     PERMANENT_DISPOSITIONS,
     IssueKind,
     IssueRecord,
@@ -75,6 +76,28 @@ class Adjudicate(unittest.TestCase):
         )
         problems = adjudicate([row(disposition)], {})
         self.assertEqual(problems, [])
+
+    def test_exact_final_authorities_pass_without_issue_lookup(self) -> None:
+        for authority in FINAL_AUTHORITIES:
+            with self.subTest(authority=authority):
+                self.assertEqual(adjudicate([row(authority)], {}), [])
+
+    def test_final_authorities_are_exact_and_primary_family_only(self) -> None:
+        for citation in (
+            "Numeric([05-OP-34])",
+            "Numeric([05-OP-31]) copied",
+            "Nonnumeric copied",
+        ):
+            with self.subTest(citation=citation):
+                problems = adjudicate([row(citation)], {})
+                self.assertEqual(len(problems), 1)
+                self.assertIn("UNRECOGNIZED disposition", problems[0])
+
+        problems = adjudicate(
+            [row("TaggedTransport", census_family="wire")], {}
+        )
+        self.assertEqual(len(problems), 1)
+        self.assertIn("WRONG CENSUS FAMILY", problems[0])
 
     def test_invented_refless_disposition_fails_closed(self) -> None:
         problems = adjudicate([row("permanent-disposition(reviewed and fine)")], {})

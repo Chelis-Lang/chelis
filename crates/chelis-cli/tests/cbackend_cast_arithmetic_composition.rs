@@ -216,18 +216,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_alloc_view(
+        1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = composed(t);
+    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     double* d = (double*)out->data;
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
@@ -268,18 +262,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_alloc_view(
+        1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = composed(t);
+    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     double* d = (double*)out->data;
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
@@ -320,18 +308,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     float in_data[3] = {{1.5f, 2.5f, 3.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_alloc_view(
+        1, in_shape, CHELIS_DTYPE_F32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = composed(t);
+    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     double* d = (double*)out->data;
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
@@ -372,28 +354,14 @@ extern chelis_tensor* composed(chelis_tensor* x, chelis_tensor* y);
 int main(void) {{
     float in_x[3] = {{2.0f, 3.0f, 4.0f}};
     double in_y[3] = {{0.5, 0.25, 0.125}};
-    chelis_tensor tx;
-    memset(&tx, 0, sizeof(tx));
-    tx.data = in_x;
-    tx.shape[0] = 3;
-    tx.strides[0] = 1;
-    tx.ndim = 1;
-    tx.dtype = CHELIS_F32;
-    tx.size = 3;
-    tx.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* tx = chelis_alloc_view(
+        1, in_shape, CHELIS_DTYPE_F32, in_x, (int64_t)sizeof(in_x));
+    chelis_tensor* ty = chelis_alloc_view(
+        1, in_shape, CHELIS_DTYPE_F64, in_y, (int64_t)sizeof(in_y));
 
-    chelis_tensor ty;
-    memset(&ty, 0, sizeof(ty));
-    ty.data = (float*)in_y;
-    ty.shape[0] = 3;
-    ty.strides[0] = 1;
-    ty.ndim = 1;
-    ty.dtype = CHELIS_F64;
-    ty.size = 3;
-    ty.owns_data = 0;
-
-    chelis_tensor* out = composed(&tx, &ty);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = composed(tx, ty);
+    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     double* d = (double*)out->data;
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;
@@ -435,18 +403,12 @@ extern chelis_tensor* composed(chelis_tensor* x);
 
 int main(void) {{
     int32_t in_data[3] = {{7, 11, 13}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = (float*)in_data;
-    t.shape[0] = 3;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_I32;
-    t.size = 3;
-    t.owns_data = 0;
+    int64_t in_shape[1] = {{3}};
+    chelis_tensor* t = chelis_alloc_view(
+        1, in_shape, CHELIS_DTYPE_I32, in_data, (int64_t)sizeof(in_data));
 
-    chelis_tensor* out = composed(&t);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = composed(t);
+    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     double* d = (double*)out->data;
     printf("%.17g %.17g %.17g\n", d[0], d[1], d[2]);
     return 0;

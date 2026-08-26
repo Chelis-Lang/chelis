@@ -211,6 +211,14 @@ class ComparatorAdoptionTests(unittest.TestCase):
         violations = oracle.comparator_violations(sources)
         self.assertTrue(any("chelis#897" in item for item in violations), violations)
 
+    def test_restoring_the_retired_formatter_in_the_agreement_harness_is_rejected(self) -> None:
+        sources = oracle.shipped_sources()
+        sources[oracle.EVAL_AGREEMENT_SOURCE] = sources[
+            oracle.EVAL_AGREEMENT_SOURCE
+        ].replace("chelis_string_from_scalar", "chelis_format_shortest")
+        violations = oracle.comparator_violations(sources)
+        self.assertTrue(any("chelis_string_from_scalar" in item for item in violations), violations)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1316,11 +1316,18 @@ struct SemanticRegistration {
     atom: &'static str,
 }
 
-/// Existing initial numeric rows retain their exact permanent capacity
-/// disposition; every future callable requires an exact entry here and the
-/// controlling atom in the same change set. The first registered atom
-/// group is chelis#890/#903's host-lane data I/O family
-/// (spec/05-risc-primitives.md §3.7).
+macro_rules! semantic_registration {
+    ($callable:literal, $atom:literal) => {
+        SemanticRegistration {
+            callable: $callable,
+            atom: $atom,
+        }
+    };
+}
+
+/// Exact semantic authority for numeric callables. A replacement identity
+/// never inherits authority from its predecessor: the canonical callable and
+/// its controlling atom are registered together.
 const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
     // The prelude `Json` ADT's numeric capacity (JInt int64 beside JNum
     // f64): the parse-time int-vs-float split and the exactness contract
@@ -1368,16 +1375,392 @@ const SEMANTIC_REGISTRATIONS: &[SemanticRegistration] = &[
                    -> tensor[D\\axes, int64]",
         atom: "[05-OP-29]",
     },
-    // chelis#1112 narrowed the runtime extent read's axis-domain input to
-    // int32 while preserving its exact int64 extent result. The successor
-    // identity is issue-bound and registered rather than retroactively
-    // entering the permanent initial descriptor cohort.
-    SemanticRegistration {
-        callable: "[header-export] chelis_runtime.h: int64_t chelis_tensor_shape \
-                   ( const chelis_tensor * t , int32_t axis ) ;",
-        atom: "[05-OP-7]",
-    },
+    // Exact normative public-C registries incorporated by [05-OP-31..33].
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_dtype_size ( chelis_dtype dtype ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_value chelis_value_from_scalar ( chelis_scalar value ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_scalar chelis_value_as_scalar ( chelis_value value ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_scalar_tensor ( chelis_scalar value ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_scalar chelis_tensor_to_scalar ( const chelis_tensor * tensor ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor * tensor , chelis_scalar value ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_string chelis_string_from_scalar ( chelis_scalar value ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_option_scalar chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_option_scalar chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
+        "[05-OP-31]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_string_len ( chelis_string value ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_string chelis_string_slice ( chelis_string value , int64_t start , int64_t len ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_list_len ( const chelis_list * list ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_list_from_values ( const chelis_value * items , int64_t len ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_value chelis_list_index ( const chelis_list * list , int64_t index ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_list_take ( const chelis_list * list , int64_t count ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_list_drop ( const chelis_list * list , int64_t count ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_list_chunk ( const chelis_list * list , int64_t size ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_range_i64 ( int64_t start , int64_t end ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_list_enumerate ( const chelis_list * list ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_tuple_len ( const chelis_tuple * tuple ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tuple * chelis_tuple_from_values ( const chelis_value * items , int64_t len ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_value chelis_tuple_get ( const chelis_tuple * tuple , int64_t index ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_adt * chelis_adt_construct ( chelis_string ctor , const chelis_value * fields , int64_t len ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_adt_field_count ( const chelis_adt * adt ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_value chelis_adt_get_field ( const chelis_adt * adt , int64_t index ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_dict_len ( const chelis_dict * dict ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_dict * chelis_dict_from_pairs ( const chelis_list * pairs ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: _Bool chelis_dict_contains ( const chelis_dict * dict , chelis_value key ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_option_value chelis_dict_get ( const chelis_dict * dict , chelis_value key ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_dict * chelis_dict_remove ( const chelis_dict * dict , chelis_value key ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_dict * chelis_dict_insert ( const chelis_dict * dict , chelis_value key , chelis_value value ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * left , const chelis_dict * right ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_read_bytes ( chelis_string path ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_mmap_read ( const chelis_mapped_file * mapped , int64_t offset , int64_t len ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_mmap_len ( const chelis_mapped_file * mapped ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: void chelis_print_list ( const chelis_list * list ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: void chelis_print_tuple ( const chelis_tuple * tuple ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: void chelis_print_dict ( const chelis_dict * dict ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: void chelis_print_adt ( const chelis_adt * adt ) ;",
+        "[05-OP-32]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , void * data , int64_t byte_capacity ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int32_t chelis_tensor_rank ( const chelis_tensor * tensor ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * tensor , int32_t axis ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * tensor ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_from_values ( const chelis_list * list , chelis_dtype dtype ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_tensor_elements ( const chelis_tensor * tensor ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_scalar pad_value ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_scalar pad_value ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int32_t axis ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int32_t axis , const chelis_list * sizes ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int32_t axis ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_replace ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * left , const chelis_tensor * right ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * condition , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int32_t axis ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lower , const chelis_tensor * upper ) ;",
+        "[05-OP-33]"
+    ),
+    semantic_registration!(
+        "[header-export] chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * left , const chelis_tensor * right , chelis_dtype accumulator ) ;",
+        "[05-OP-33]"
+    ),
 ];
+
+const RUNTIME_NONNUMERIC_EXPORTS: &[&str] = &[
+    "chelis_file_exists",
+    "chelis_string_contains",
+    "chelis_string_ends_with",
+    "chelis_string_eq",
+    "chelis_string_starts_with",
+    "chelis_string_concat",
+    "chelis_string_from_cstr",
+    "chelis_string_trim",
+    "chelis_string_data",
+    "chelis_adt_get_tag",
+    "chelis_adt_tag_equals",
+    "chelis_fail",
+    "chelis_read_file",
+    "chelis_write_file",
+    "chelis_read_lines",
+    "chelis_list_dir",
+    "chelis_mmap_file",
+];
+
+const RUNTIME_TAGGED_TRANSPORT_EXPORTS: &[&str] = &[
+    "chelis_free",
+    "chelis_string_retain",
+    "chelis_string_release",
+    "chelis_list_retain",
+    "chelis_list_release",
+    "chelis_tuple_retain",
+    "chelis_tuple_release",
+    "chelis_dict_retain",
+    "chelis_dict_release",
+    "chelis_adt_retain",
+    "chelis_adt_release",
+    "chelis_value_retain",
+    "chelis_value_release",
+    "chelis_value_from_string",
+    "chelis_value_from_tensor",
+    "chelis_value_from_list",
+    "chelis_value_from_tuple",
+    "chelis_value_from_dict",
+    "chelis_value_from_adt",
+    "chelis_value_as_string",
+    "chelis_value_as_tensor",
+    "chelis_value_as_list",
+    "chelis_value_as_tuple",
+    "chelis_value_as_dict",
+    "chelis_value_as_adt",
+    "chelis_list_empty",
+    "chelis_list_append",
+    "chelis_list_concat",
+    "chelis_list_flatten",
+    "chelis_list_zip",
+    "chelis_dict_keys",
+    "chelis_dict_values",
+    "chelis_dict_entries",
+];
+
+const RUNTIME_NONNUMERIC_LAYOUTS: &[&str] =
+    &["[header-struct] chelis_runtime.h: typedef struct { void * handle ; } chelis_string"];
+
+const RUNTIME_TAGGED_TRANSPORT_LAYOUTS: &[&str] = &[
+    "[header-struct] chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
+    "[header-struct] chelis_runtime.h: typedef struct { chelis_dtype dtype ; uint8_t reserved [ 7 ] ; uint64_t bits ; } chelis_scalar",
+    "[header-struct] chelis_runtime.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t size ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t owns_data ; uint8_t reserved [ 2 ] ; } chelis_tensor",
+    "[header-struct] chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 }",
+    "[header-struct] chelis_runtime.h: typedef union { chelis_scalar scalar ; void * handle ; } chelis_value_payload",
+    "[header-struct] chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
+    "[header-struct] chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_scalar value ; } chelis_option_scalar",
+    "[header-struct] chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_value value ; } chelis_option_value",
+    "[header-struct] chelis_runtime.h: typedef struct { chelis_value key ; chelis_value value ; } chelis_dict_entry",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeAuthority {
+    Nonnumeric,
+    TaggedTransport,
+    Numeric(&'static str),
+}
+
+impl RuntimeAuthority {
+    fn citation(self) -> String {
+        match self {
+            Self::Nonnumeric => "Nonnumeric".to_string(),
+            Self::TaggedTransport => "TaggedTransport".to_string(),
+            Self::Numeric(atom) => format!("Numeric({atom})"),
+        }
+    }
+}
+
+fn header_export_name(id: &str) -> Option<&str> {
+    let declaration = id.split_once(": ")?.1;
+    let before_params = declaration.split_once(" ( ")?.0;
+    before_params.split_whitespace().last()
+}
+
+fn runtime_authority(
+    row: &Row,
+    registrations: &[SemanticRegistration],
+) -> Option<RuntimeAuthority> {
+    let callable = callable_identity(row);
+    if let Some(registration) = registrations
+        .iter()
+        .find(|registration| registration.callable == callable)
+        && matches!(
+            registration.atom,
+            "[05-OP-31]" | "[05-OP-32]" | "[05-OP-33]"
+        )
+    {
+        return Some(RuntimeAuthority::Numeric(registration.atom));
+    }
+    if row.kind == "header-export" {
+        let name = header_export_name(&row.id)?;
+        if !row.flags.is_empty() {
+            return None;
+        }
+        if RUNTIME_NONNUMERIC_EXPORTS.contains(&name) {
+            return Some(RuntimeAuthority::Nonnumeric);
+        }
+        if RUNTIME_TAGGED_TRANSPORT_EXPORTS.contains(&name) {
+            return Some(RuntimeAuthority::TaggedTransport);
+        }
+    }
+    if row.kind == "header-struct" {
+        if RUNTIME_NONNUMERIC_LAYOUTS.contains(&callable.as_str()) {
+            return Some(RuntimeAuthority::Nonnumeric);
+        }
+        if RUNTIME_TAGGED_TRANSPORT_LAYOUTS.contains(&callable.as_str()) {
+            return Some(RuntimeAuthority::TaggedTransport);
+        }
+    }
+    None
+}
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2188,7 +2571,10 @@ fn check_complete_frozen_disposition_manifest(baseline: &Baseline) -> Result<(),
         })
         .collect();
     let mut missing = Vec::new();
-    for expected in frozen_disposition_rows() {
+    for expected in frozen_disposition_rows()
+        .into_iter()
+        .filter(|row| !row.kind.starts_with("header-"))
+    {
         let descriptor = (
             expected.kind.clone(),
             expected.id.clone(),
@@ -3311,6 +3697,28 @@ fn check_against_baseline_with(
             ));
             continue;
         }
+        if row.kind.starts_with("header-")
+            && (row.id.starts_with("chelis_runtime.h: ")
+                || row.id.starts_with("chelis_runtime_dtype.h: "))
+        {
+            match runtime_authority(row, registrations) {
+                None => problems.push(format!(
+                    "PUBLIC C ROW HAS NO FINAL AUTHORITY: [{}] {} must be exactly one of Nonnumeric, TaggedTransport, or Numeric([05-OP-31..33])",
+                    row.kind, row.id
+                )),
+                Some(authority) if row.citation != authority.citation() => {
+                    problems.push(format!(
+                        "PUBLIC C AUTHORITY MISMATCH: [{}] {} has citation `{}` but its exact final authority is `{}`",
+                        row.kind,
+                        row.id,
+                        row.citation,
+                        authority.citation()
+                    ));
+                }
+                Some(_) => {}
+            }
+            continue;
+        }
         if let Some((frozen, expected_citation)) = frozen_disposition_for_canonical_key(row)
             && (!matches_frozen_descriptor(row, frozen) || row.citation != expected_citation)
         {
@@ -3464,9 +3872,9 @@ fn regenerate(baseline_path: &Path, current: &[Row], old: Option<&Baseline>) {
             kind: r.kind.clone(),
             id: r.id.clone(),
             flags: r.flags.clone(),
-            citation: old_citations
-                .get(&(r.kind.clone(), r.id.clone()))
-                .cloned()
+            citation: runtime_authority(r, SEMANTIC_REGISTRATIONS)
+                .map(RuntimeAuthority::citation)
+                .or_else(|| old_citations.get(&(r.kind.clone(), r.id.clone())).cloned())
                 .unwrap_or_else(|| "TODO".to_string()),
         })
         .collect();
@@ -3542,110 +3950,134 @@ fn sanctioned_actions_name_complete_identity_change_and_new_atom_paths() {
     }
 }
 
+fn normative_c_registry_callables(path: &str) -> BTreeSet<String> {
+    fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|err| panic!("read normative C registry `{path}`: {err}"))
+        .lines()
+        .filter_map(|line| {
+            let mut cells = line.split('|').map(str::trim);
+            let _leading = cells.next()?;
+            let callable = cells.next()?;
+            let signature = cells.next()?;
+            if callable == "callable" || signature == "exact C signature" {
+                return None;
+            }
+            let signature = signature.strip_prefix('`')?.strip_suffix('`')?;
+            Some(format!(
+                "[header-export] chelis_runtime.h: {}",
+                canonical_c_tokens(&format!("{signature};"))
+            ))
+        })
+        .collect()
+}
+
 #[test]
-fn int64_dim_carrier_successors_use_named_one_off_overrides() {
-    const SUCCESSORS: &[(&str, &str, &[&str])] = &[
-        (
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_alloc ( int ndim , const int64_t * shape , int dtype ) ;",
-            &["raw-dtype-int"],
-        ),
-        (
-            "header-export",
-            "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int ndim , const int64_t * shape , int dtype , float * data ) ;",
-            &["float-carrier", "raw-dtype-int", "numeric-op"],
-        ),
-        (
-            "header-struct",
-            "chelis_runtime.h: typedef struct { float * data ; int64_t shape [ 8 ] ; int64_t strides [ 8 ] ; int ndim ; int dtype ; int64_t size ; int owns_data ; } chelis_tensor",
-            &["float-carrier", "raw-dtype-int", "numeric-op"],
-        ),
+fn normative_c_registries_have_exact_bijective_semantic_registrations() {
+    const GROUPS: &[(&str, &str, usize)] = &[
+        ("spec/registry/c_scalar_carrier.md", "[05-OP-31]", 10),
+        ("spec/registry/c_container_boundary.md", "[05-OP-32]", 30),
+        ("spec/registry/c_tensor_runtime.md", "[05-OP-33]", 23),
     ];
-    const OVERRIDE: &str =
-        "maintainer-override(PR #1149 int64 dimension-carrier successor identities, chelis#1112)";
 
-    assert_eq!(INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE, OVERRIDE);
-    assert_eq!(INT64_DIM_CARRIER_SUCCESSOR_ROWS.len(), SUCCESSORS.len());
-
-    let root = repo_root();
-    let baseline: Baseline = serde_json::from_str(
-        &fs::read_to_string(root.join(BASELINE_REL)).expect("read capacity census baseline"),
-    )
-    .expect("parse capacity census baseline");
-
-    for (kind, id, flags) in SUCCESSORS {
-        assert!(
-            !GRANDFATHER_SEAM_ROWS
-                .iter()
-                .any(|frozen| frozen.kind == *kind && frozen.id == *id),
-            "the #1149 successor `{id}` must not be rewritten into the shrink-only pre-ratchet set"
-        );
-        let reviewed = INT64_DIM_CARRIER_SUCCESSOR_ROWS
-            .iter()
-            .find(|successor| successor.kind == *kind && successor.id == *id)
-            .unwrap_or_else(|| panic!("missing closed #1149 override descriptor `{id}`"));
-        assert_eq!(reviewed.flags, *flags);
-        let row = baseline
-            .rows
-            .iter()
-            .find(|row| row.kind == *kind && row.id == *id)
-            .unwrap_or_else(|| panic!("missing #1149 successor `{id}`"));
+    let current: BTreeSet<String> = current_inventory(&repo_root())
+        .iter()
+        .filter(|row| row.kind == "header-export")
+        .map(callable_identity)
+        .collect();
+    for (path, atom, expected_count) in GROUPS {
+        let expected = normative_c_registry_callables(path);
         assert_eq!(
-            row.flags.iter().map(String::as_str).collect::<Vec<_>>(),
-            *flags,
-            "the #1149 successor must retain its reviewed classification"
+            expected.len(),
+            *expected_count,
+            "wrong registry size for {path}"
         );
+        let actual: BTreeSet<String> = SEMANTIC_REGISTRATIONS
+            .iter()
+            .filter(|registration| registration.atom == *atom)
+            .map(|registration| registration.callable.to_string())
+            .collect();
         assert_eq!(
-            row.citation, OVERRIDE,
-            "the #1149 successor must use the named one-off maintainer path"
+            actual, expected,
+            "the exact callable-to-authority map must equal `{path}`"
         );
-
-        let exact = row_from_frozen(reviewed, OVERRIDE);
-        let exact_baseline = Baseline {
-            version: 2,
-            legs: coverage_manifest(),
-            rows: vec![exact.clone()],
-        };
+        let absent: Vec<_> = expected.difference(&current).cloned().collect();
         assert!(
-            check_against_baseline(std::slice::from_ref(&exact), &exact_baseline).is_ok(),
-            "the exact reviewed successor must pass"
-        );
-
-        let mut regrandfathered = exact.clone();
-        regrandfathered.citation = GRANDFATHER_SEAM_CITATION.to_string();
-        let regrandfathered_baseline = Baseline {
-            version: 2,
-            legs: coverage_manifest(),
-            rows: vec![regrandfathered.clone()],
-        };
-        let err = check_against_baseline(
-            std::slice::from_ref(&regrandfathered),
-            &regrandfathered_baseline,
-        )
-        .expect_err("a #1149 successor cannot regain the pre-ratchet citation");
-        assert!(
-            err.contains("FROZEN DISPOSITION CHANGED") && err.contains("GRANDFATHER citation"),
-            "unexpected re-grandfather diagnostic: {err}"
-        );
-
-        let mut complete_rows = frozen_disposition_rows();
-        let mutated = complete_rows
-            .iter_mut()
-            .find(|candidate| candidate.kind == *kind && candidate.id == *id)
-            .expect("the closed disposition manifest includes every #1149 successor");
-        mutated.kind.push_str("-moved");
-        let incomplete = Baseline {
-            version: 2,
-            legs: coverage_manifest(),
-            rows: complete_rows,
-        };
-        let err = check_complete_frozen_disposition_manifest(&incomplete)
-            .expect_err("a #1149 successor cannot change family inside the closed set");
-        assert!(
-            err.contains("FROZEN DISPOSITION MANIFEST ROW MISSING OR CHANGED") && err.contains(id),
-            "unexpected successor mutation diagnostic: {err}"
+            absent.is_empty(),
+            "the normative registry contains signatures absent from the public header: {absent:?}"
         );
     }
+}
+
+#[test]
+fn public_c_rows_have_one_exact_final_authority() {
+    let rows = current_inventory(&repo_root());
+    let runtime_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind.starts_with("header-"))
+        .collect();
+    assert!(
+        !runtime_rows.is_empty(),
+        "the public C inventory must be live"
+    );
+    for row in runtime_rows {
+        assert!(
+            runtime_authority(row, SEMANTIC_REGISTRATIONS).is_some(),
+            "public C row has no exact final authority: {}",
+            callable_identity(row)
+        );
+    }
+}
+
+#[test]
+fn changed_numeric_identity_and_numeric_transport_evasions_are_rejected() {
+    let changed_numeric = Row {
+        kind: "header-export".to_string(),
+        id: "chelis_runtime.h: int64_t chelis_dtype_size ( chelis_dtype changed ) ;".to_string(),
+        flags: vec!["numeric-op".to_string()],
+        citation: String::new(),
+    };
+    assert_eq!(
+        runtime_authority(&changed_numeric, SEMANTIC_REGISTRATIONS),
+        None,
+        "a signature change must not inherit the old exact registration"
+    );
+
+    let numeric_transport = Row {
+        kind: "header-export".to_string(),
+        id: "chelis_runtime.h: void chelis_value_retain ( chelis_value value ) ;".to_string(),
+        flags: vec!["numeric-op".to_string()],
+        citation: String::new(),
+    };
+    assert_eq!(
+        runtime_authority(&numeric_transport, SEMANTIC_REGISTRATIONS),
+        None,
+        "a transport name cannot hide a structurally numeric callable"
+    );
+}
+
+#[test]
+fn retired_int64_dimension_carriers_are_absent_from_the_final_census() {
+    let baseline: Baseline = serde_json::from_str(
+        &fs::read_to_string(repo_root().join(BASELINE_REL)).expect("read capacity census baseline"),
+    )
+    .expect("parse capacity census baseline");
+    for retired in INT64_DIM_CARRIER_SUCCESSOR_ROWS {
+        assert!(
+            baseline
+                .rows
+                .iter()
+                .all(|row| row.kind != retired.kind || row.id != retired.id),
+            "retired raw/fixed-rank ABI identity remains in the final census: {}",
+            retired.id
+        );
+    }
+    assert!(
+        baseline
+            .rows
+            .iter()
+            .all(|row| row.citation != INT64_DIM_CARRIER_SUCCESSOR_OVERRIDE),
+        "the final C authority partition has no successor-override citation"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4906,7 +5338,11 @@ fn permanent_plain_disposition_cannot_be_copied_onto_a_new_row() {
         "the permanent disposition must not exempt a brand-new numeric callable: {err}"
     );
 
-    let frozen = row_from_frozen(&PERMANENT_PLAIN_ROWS[0], PERMANENT_PLAIN_DISPOSITION);
+    let permanent = PERMANENT_PLAIN_ROWS
+        .iter()
+        .find(|row| !row.kind.starts_with("header-"))
+        .expect("a residual non-C permanent descriptor");
+    let frozen = row_from_frozen(permanent, PERMANENT_PLAIN_DISPOSITION);
     let frozen_baseline = Baseline {
         version: 2,
         legs: coverage_manifest(),
@@ -4942,7 +5378,11 @@ fn duplicate_primary_descriptors_are_rejected_before_map_collapse() {
 
 #[test]
 fn frozen_primary_descriptor_cannot_be_relabelled_as_an_open_issue() {
-    let mut row = row_from_frozen(&PERMANENT_PLAIN_ROWS[0], "chelis#893");
+    let permanent = PERMANENT_PLAIN_ROWS
+        .iter()
+        .find(|row| !row.kind.starts_with("header-"))
+        .expect("a residual non-C permanent descriptor");
+    let mut row = row_from_frozen(permanent, "chelis#893");
     let baseline = Baseline {
         version: 2,
         legs: coverage_manifest(),
@@ -4952,8 +5392,12 @@ fn frozen_primary_descriptor_cannot_be_relabelled_as_an_open_issue() {
         .expect_err("a frozen permanent descriptor must retain its exact disposition");
     assert!(err.contains("FROZEN DISPOSITION CHANGED"), "{err}");
 
+    let grandfather = GRANDFATHER_SEAM_ROWS
+        .iter()
+        .find(|row| !row.kind.starts_with("header-"))
+        .expect("a residual non-C grandfather descriptor");
     row = row_from_frozen(
-        &GRANDFATHER_SEAM_ROWS[0],
+        grandfather,
         "maintainer-override(red-team mutation, chelis#893)",
     );
     let baseline = Baseline {
@@ -4969,6 +5413,7 @@ fn frozen_primary_descriptor_cannot_be_relabelled_as_an_open_issue() {
 #[test]
 fn frozen_primary_manifest_is_bidirectionally_complete() {
     let mut rows = frozen_disposition_rows();
+    rows.retain(|row| !row.kind.starts_with("header-"));
     let complete = Baseline {
         version: 2,
         legs: coverage_manifest(),
@@ -5043,7 +5488,10 @@ fn permanent_json_disposition_is_exact_descriptor_only() {
 
 #[test]
 fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
-    let permanent = PERMANENT_PLAIN_ROWS[0];
+    let permanent = *PERMANENT_PLAIN_ROWS
+        .iter()
+        .find(|row| !row.kind.starts_with("header-"))
+        .expect("a residual non-C permanent descriptor");
     let baseline = Baseline {
         version: 2,
         legs: coverage_manifest(),
@@ -5062,7 +5510,7 @@ fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
         version: 2,
         legs: coverage_manifest(),
         rows: vec![Row {
-            kind: "header-export".to_string(),
+            kind: permanent.kind.to_string(),
             id: permanent.id.to_string(),
             flags: vec!["float-carrier".to_string()],
             citation: PERMANENT_PLAIN_DISPOSITION.to_string(),
@@ -5123,7 +5571,7 @@ fn every_frozen_primary_descriptor_rejects_kind_and_flag_mutations() {
             "PERMANENT PLAIN disposition",
         ),
     ] {
-        for frozen in rows {
+        for frozen in rows.iter().filter(|row| !row.kind.starts_with("header-")) {
             let exact = row_from_frozen(frozen, citation);
             let exact_baseline = Baseline {
                 version: 2,

@@ -401,11 +401,15 @@ fn pad_cast_wrapped_fill_emits_declared_bits_not_silent_zero() {
         .success();
     let src = std::fs::read_to_string(out_dir.join("pad_fill.c")).expect("generated C source");
     assert!(
-        src.contains("0x40e00000u"),
+        src.contains(
+            "chelis_fill_scalar(t1, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT32_C(0x40e00000)))"
+        ),
         "emitted C must carry the declared 7.0f pad fill (0x40e00000):\n{src}"
     );
     assert!(
-        !src.contains("fill_f32_bits(t1, 0x00000000u)"),
+        !src.contains(
+            "chelis_fill_scalar(t1, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT32_C(0x00000000)))"
+        ),
         "emitted C must NOT silently pad with the 0.0f default when a fill was given:\n{src}"
     );
 }

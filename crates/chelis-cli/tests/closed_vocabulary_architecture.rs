@@ -104,7 +104,7 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         source: ConsumerSource::File("crates/chelis-runtime/src/lib.rs"),
         role: "runtime ABI decode and semantic dispatch",
         required: &[
-            "decode_runtime_dtype(dtype: c_int)",
+            "decode_runtime_dtype(dtype: chelis_dtype)",
             "tensor_elem_size(dtype: RuntimeDType)",
             "read_index_slot(",
             "dtype: RuntimeDType",
@@ -119,7 +119,7 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         source: ConsumerSource::File("crates/chelis-backend-c/src/emit.rs"),
         role: "C codegen dtype macro selection",
         required: &[".runtime_dtype()", ".c_macro()"],
-        forbidden: &["Prim::F32 => \"CHELIS_F32\""],
+        forbidden: &["Prim::F32 => \"CHELIS_DTYPE_F32\""],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-c/src/host_emit.rs"),
@@ -131,25 +131,29 @@ const RUNTIME_DTYPE_CONSUMERS: &[Consumer] = &[
         source: ConsumerSource::File("crates/chelis-backend-hip/src/emit.rs"),
         role: "HIP codegen dtype macro selection",
         required: &[".runtime_dtype()", ".c_macro()"],
-        forbidden: &["Prim::F32 => \"CHELIS_F32\""],
+        forbidden: &["Prim::F32 => \"CHELIS_DTYPE_F32\""],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-hip/runtime/chelis_hip_runtime.h"),
         role: "HIP allocation byte width",
-        required: &["chelis_runtime_dtype_size_checked(dtype)"],
+        required: &[
+            "#include \"chelis_runtime_dtype.h\"",
+            "case CHELIS_DTYPE_F64:",
+            "case CHELIS_DTYPE_BOOL:",
+        ],
         forbidden: &["return sizeof(float);"],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-backend-metal/src/dtype.rs"),
         role: "Metal runtime dtype tag selection",
         required: &["prec.runtime_dtype()", ".c_macro()"],
-        forbidden: &["Prim::F32 => \"CHELIS_F32\""],
+        forbidden: &["Prim::F32 => \"CHELIS_DTYPE_F32\""],
     },
     Consumer {
         source: ConsumerSource::File("crates/chelis-python/src/lib.rs"),
         role: "Python FFI dtype constant",
         required: &["RuntimeDType::F32.id()"],
-        forbidden: &["const CHELIS_F32: i32 = 0"],
+        forbidden: &["const CHELIS_DTYPE_F32: i32 = 0"],
     },
 ];
 

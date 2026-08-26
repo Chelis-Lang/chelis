@@ -25,10 +25,18 @@ use std::process::Command;
 
 use chelis_runtime::{
     chelis_list_empty, chelis_list_extend, chelis_list_push, chelis_list_release,
-    chelis_list_retain, chelis_list_with_capacity, chelis_value_from_int64,
+    chelis_list_retain, chelis_list_with_capacity, chelis_scalar_from_bits, chelis_value,
+    chelis_value_from_scalar, CHELIS_DTYPE_I64,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_LIST_EXCLUSIVITY_CHILD_CASE";
+
+unsafe fn int_value(value: i64) -> chelis_value {
+    chelis_value_from_scalar(chelis_scalar_from_bits(
+        CHELIS_DTYPE_I64,
+        u64::from_ne_bytes(value.to_ne_bytes()),
+    ))
+}
 
 fn assert_child_refuses(case: &str, diagnostic: &str) {
     let test_binary = std::env::current_exe().expect("current test binary");
@@ -64,20 +72,20 @@ fn shared_list_mutation_child() {
                 // The second owner. This is the condition the guard exists for:
                 // pushing now would mutate a view someone else still holds.
                 chelis_list_retain(list);
-                chelis_list_push(list, chelis_value_from_int64(1));
+                chelis_list_push(list, int_value(1));
             }
             "extend" => {
                 let list = chelis_list_empty();
                 chelis_list_retain(list);
                 let src = chelis_list_empty();
-                chelis_list_push(src, chelis_value_from_int64(2));
+                chelis_list_push(src, int_value(2));
                 chelis_list_extend(list, src);
             }
             "negative_capacity" => {
                 chelis_list_with_capacity(-1);
             }
             "push_null" => {
-                chelis_list_push(std::ptr::null_mut(), chelis_value_from_int64(1));
+                chelis_list_push(std::ptr::null_mut(), int_value(1));
             }
             "extend_null" => {
                 chelis_list_extend(std::ptr::null_mut(), std::ptr::null());
@@ -149,11 +157,11 @@ fn in_place_list_mutators_refuse_a_shared_list() {
 fn exclusively_owned_lists_accept_in_place_mutation() {
     unsafe {
         let list = chelis_list_empty();
-        chelis_list_push(list, chelis_value_from_int64(1));
-        chelis_list_push(list, chelis_value_from_int64(2));
+        chelis_list_push(list, int_value(1));
+        chelis_list_push(list, int_value(2));
 
         let src = chelis_list_empty();
-        chelis_list_push(src, chelis_value_from_int64(3));
+        chelis_list_push(src, int_value(3));
         chelis_list_extend(list, src);
 
         assert_eq!(

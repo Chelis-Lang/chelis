@@ -509,7 +509,7 @@ int main() {{
     {func_name}(NULL, 0, outputs, 1);
     for (int i = 0; i < outputs[0]->size; i++) {{
         if (i > 0) printf(" ");
-        printf("%.6f", outputs[0]->data[i]);
+        printf("%.6f", ((float *)outputs[0]->data)[i]);
     }}
     printf("\n");
     chelis_free(outputs[0]);

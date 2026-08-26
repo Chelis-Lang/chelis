@@ -1107,10 +1107,10 @@ fn int64_max_elem_tensor_agrees_across_lanes_at_f32_boundary() {
 ///
 /// Source of the claim: `crates/chelis-runtime/src/lib.rs:144-152`, verbatim:
 ///
-/// > `CHELIS_I32` and `CHELIS_BOOL` tensors still store data as 4-byte f32 bit
+/// > `CHELIS_DTYPE_I32` and `CHELIS_DTYPE_BOOL` tensors still store data as 4-byte f32 bit
 /// > patterns [...] the trait impl for `i32` exists but reads i32 bytes, which
 /// > is the wrong decode for the current f32-encoded storage convention [...]
-/// > A future §5 follow-on migrates `CHELIS_I32` and `CHELIS_BOOL`.
+/// > A future §5 follow-on migrates `CHELIS_DTYPE_I32` and `CHELIS_DTYPE_BOOL`.
 ///
 /// That predicts `16777217` (2^24+1) corrupts to `16777216`. It does not:
 /// verified exact in BOTH the eval and compiled-C lanes. Either the comment is
@@ -1620,8 +1620,9 @@ fn f32_tensor_abs_is_correct_and_unaffected_by_the_placeholder() {
 // declines on overflow. The right implementation exists next door.
 // ===========================================================================
 
-/// Verified: the emitted C contains `chelis_fill_f32_bits(t0, 0x435e0000u)`
-/// (= 222.0, the else branch) and `111.0`'s bit pattern `0x42de0000` appears
+/// Verified: the emitted C passes `CHELIS_DTYPE_F32` and `0x435e0000` to
+/// `chelis_fill_scalar` (= 222.0, the else branch), and `111.0`'s bit pattern
+/// `0x42de0000` appears
 /// NOWHERE in the file. `2^53 < 2^53 + 1` is true, so the answer is 111.0.
 #[test]
 fn static_int_condition_does_not_delete_the_correct_branch() {
@@ -1712,6 +1713,19 @@ fn pad_sequences_preserves_int64_ids_above_i32_max() {
         ])
         .assert()
         .success();
+    let generated = std::fs::read_to_string(out_dir.join("pads.c")).expect("generated pads C");
+    let pad_call = generated
+        .lines()
+        .find(|line| line.contains("chelis_pad_sequences("))
+        .unwrap_or_else(|| panic!("generated C has no pad_sequences call:\n{generated}"));
+    assert!(
+        pad_call.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64"),
+        "pad_sequences must receive an exact tagged int64 scalar:\n{pad_call}"
+    );
+    assert!(
+        !pad_call.contains("chelis_value_from_scalar"),
+        "pad_sequences must not receive a boxed generic value:\n{pad_call}"
+    );
     let status = common::link_generated(&out_dir, "pads.c", "pads");
     assert!(status.success(), "link failed: {status}");
     let run = std::process::Command::new(out_dir.join("pads"))
