@@ -722,6 +722,52 @@ fn explicit_bundled_runtime_resolves_without_registry_or_network_access() {
     );
 }
 
+#[test]
+fn cyclic_path_dependencies_fail_before_lock_publication() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("path-cycle-root");
+    let alpha = directory.path().join("alpha");
+    let beta = directory.path().join("beta");
+    for package_root in [&root, &alpha, &beta] {
+        fs::create_dir_all(package_root.join("src")).unwrap();
+        fs::write(package_root.join("src/main.ch"), "module Remote.Main\n").unwrap();
+    }
+    fs::write(
+        root.join("reef.toml"),
+        format!(
+            "schema = \"2\"\n\n[package]\nname = \"path-cycle-root\"\nversion = \"0.1.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Remote\"\nresolver = \"2\"\n\n[dependencies]\nalpha = {{ path = \"../alpha\" }}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        alpha.join("reef.toml"),
+        format!(
+            "schema = \"2\"\n\n[package]\nname = \"alpha\"\nversion = \"1.0.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Remote\"\nresolver = \"2\"\n\n[dependencies]\nbeta = {{ path = \"../beta\" }}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        beta.join("reef.toml"),
+        format!(
+            "schema = \"2\"\n\n[package]\nname = \"beta\"\nversion = \"1.0.0\"\ncompiler = \"{COMPILER_PIN}\"\nmodule_prefix = \"Remote\"\nresolver = \"2\"\n\n[dependencies]\nalpha = {{ path = \"../alpha\" }}\n"
+        ),
+    )
+    .unwrap();
+
+    chelis(&root)
+        .env(
+            "CHELIS_REEF_HOME",
+            directory.path().join("path-cycle-registry"),
+        )
+        .args(["reef", "update", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "path dependency cycle detected: alpha -> beta -> alpha",
+        ));
+    assert!(!root.join("reef.lock").exists());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_candidate_path_dependencies_cannot_escape_temporary_storage() {
     let directory = tempdir().unwrap();

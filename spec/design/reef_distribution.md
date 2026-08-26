@@ -70,6 +70,8 @@ All modes limit candidates and resolved packages to 256. They limit dependencies
 
 One active path source overrides registry candidates for its package name. Reef rejects two active paths or conflicting verified non-path sources.
 
+Discovery traversal rejects a cyclic path dependency graph with an ordered cycle report. A shared path package loads once for each canonical root.
+
 A valid lock is the preferred exact graph. Reef reuses it without release listing after complete identity and integrity checks.
 
 A requirement or source declaration change invalidates the preference. A locked hash failure or unavailable origin remains a hard error.

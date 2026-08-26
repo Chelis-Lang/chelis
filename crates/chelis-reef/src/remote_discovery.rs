@@ -1204,6 +1204,7 @@ struct DiscoverySession {
     root_manifest: crate::ParsedManifest,
     root_requests: Vec<RequestedPackage>,
     candidates: BTreeMap<PackageName, Vec<CandidateMaterial>>,
+    path_stack: Vec<PackageName>,
     pending_local: BTreeSet<PackageName>,
     loaded_local: BTreeSet<PackageName>,
     queried_remote: BTreeSet<PackageName>,
@@ -1290,6 +1291,7 @@ impl DiscoverySession {
             root_manifest,
             root_requests: Vec::new(),
             candidates: BTreeMap::new(),
+            path_stack: Vec::new(),
             pending_local: BTreeSet::new(),
             loaded_local: BTreeSet::new(),
             queried_remote: BTreeSet::new(),
@@ -1340,6 +1342,20 @@ impl DiscoverySession {
                     ));
                 }
                 TypedDependency::Path { path, requirement } => {
+                    if let Some(position) = self.path_stack.iter().position(|entry| entry == name) {
+                        let mut cycle = self.path_stack[position..]
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>();
+                        cycle.push(name.to_string());
+                        return Err(DiscoveryError::CandidateManifest {
+                            package: name.to_string(),
+                            message: format!(
+                                "path dependency cycle detected: {}",
+                                cycle.join(" -> ")
+                            ),
+                        });
+                    }
                     let dependency_root =
                         package_root.join(path).canonicalize().map_err(|error| {
                             DiscoveryError::CandidateManifest {
@@ -1373,8 +1389,16 @@ impl DiscoverySession {
                         .strip_prefix(&self.root)
                         .map(|relative| relative.to_string_lossy().replace('\\', "/"))
                         .unwrap_or_else(|_| path.clone());
+                    if self.candidates.get(name).into_iter().flatten().any(
+                        |material| matches!(material, CandidateMaterial::Path { root, .. } if root == &dependency_root),
+                    ) {
+                        continue;
+                    }
+                    self.path_stack.push(name.clone());
                     let child_requests =
-                        self.requests_for_manifest(name, &dependency_root, &parsed.typed)?;
+                        self.requests_for_manifest(name, &dependency_root, &parsed.typed);
+                    self.path_stack.pop();
+                    let child_requests = child_requests?;
                     self.insert_material(
                         name.clone(),
                         CandidateMaterial::Path {
