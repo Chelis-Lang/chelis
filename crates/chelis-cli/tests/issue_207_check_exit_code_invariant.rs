@@ -240,7 +240,7 @@ fn issue_207_invariant_holds_across_error_categories() {
             });
             assert!(
                 !has_type_mismatch,
-                "DimensionMismatch fixture must not be masked by a trace return TypeMismatch; stdout={stdout}"
+                "DimensionMismatch fixture must not include an unrelated trace return TypeMismatch; stdout={stdout}"
             );
         }
         assert_eq!(

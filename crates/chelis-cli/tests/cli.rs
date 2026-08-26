@@ -1779,7 +1779,7 @@ fn check_rejects_literal_dimension_mismatch() {
             .expect("errors array")
             .iter()
             .any(|error| error["kind"] == "TypeMismatch"),
-        "dimension mismatch fixture must not be masked by a trace return TypeMismatch: {json}"
+        "dimension mismatch fixture must not include an unrelated trace return TypeMismatch: {json}"
     );
     assert_eq!(
         json["unresolved_names"]
@@ -1817,7 +1817,7 @@ fn check_rejects_polymorphic_dims_pinned_by_body() {
             .expect("errors array")
             .iter()
             .any(|error| error["kind"] == "TypeMismatch"),
-        "polymorphic dimension fixture must not be masked by a trace return TypeMismatch: {json}"
+        "polymorphic dimension fixture must not include an unrelated trace return TypeMismatch: {json}"
     );
     assert_eq!(
         json["unresolved_names"]

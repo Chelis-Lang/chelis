@@ -291,7 +291,7 @@ fn ir_literal_dimension_mismatch_surfaces_error() {
             .errors
             .iter()
             .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
-        "dimension mismatch fixture must not be masked by a trace return TypeMismatch: {:?}",
+        "dimension mismatch fixture must not include an unrelated trace return TypeMismatch: {:?}",
         result.errors
     );
 }
@@ -320,7 +320,7 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
             .errors
             .iter()
             .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
-        "polymorphic dimension fixture must not be masked by a trace return TypeMismatch: {:?}",
+        "polymorphic dimension fixture must not include an unrelated trace return TypeMismatch: {:?}",
         result.errors
     );
 }
