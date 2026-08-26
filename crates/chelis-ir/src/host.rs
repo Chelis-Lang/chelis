@@ -1,7 +1,9 @@
 use chelis_deep::DeepTag;
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
@@ -30,6 +32,17 @@ thread_local! {
     static TOP_LEVEL_FN_CALL_GRAPH_CACHE:
         RefCell<HashMap<usize, HashMap<String, HashSet<String>>>> =
         RefCell::new(HashMap::new());
+    static PROGRAM_DEFS_CACHE: RefCell<HashMap<usize, Arc<HashMap<String, Expr>>>> =
+        RefCell::new(HashMap::new());
+    static SUBEXPR_LOWERING_CONTEXT_CACHE:
+        RefCell<HashMap<usize, crate::lower::SubexprLoweringContext>> =
+        RefCell::new(HashMap::new());
+    static HELPER_SUMMARY_REJECTS_CACHE: RefCell<HashMap<(usize, String), bool>> =
+        RefCell::new(HashMap::new());
+    static DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE:
+        RefCell<HashMap<usize, Arc<HashMap<String, bool>>>> = RefCell::new(HashMap::new());
+    static TENSOR_HELPER_PREFLIGHT_STACK:
+        RefCell<Vec<HashMap<usize, TensorHelperPreflightFacts>>> = const { RefCell::new(Vec::new()) };
     static HOST_LOWERING_CACHE_ACTIVE: Cell<bool> = const { Cell::new(false) };
     // chelis#1158: bounded memoized monomorphization of recursive generic
     // host calls. Keyed by the callee's canonical checked type application;
@@ -40,6 +53,132 @@ thread_local! {
     // its exit).
     static MONO_SPECIALIZATIONS: RefCell<MonoSpecializationState> =
         RefCell::new(MonoSpecializationState::default());
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HostWorkProfile {
+    host_expr_visits: usize,
+    max_host_expr_depth: usize,
+    app_clone_nodes: usize,
+    tensor_helper_attempts: usize,
+    tensor_helper_successes: usize,
+    tensor_helper_fallbacks: usize,
+    tensor_helper_input_nodes: usize,
+    tensor_helper_fail_guard_rejections: usize,
+    tensor_helper_dag_rejections: usize,
+    tensor_helper_builtin_load_rejections: usize,
+    tensor_helper_preflight_rejections: usize,
+    tensor_helper_preflight_nodes: usize,
+    tensor_helper_preflight_lookup_hits: usize,
+    tensor_helper_preflight_lookup_misses: usize,
+    callable_scope_work: usize,
+    grad_scan_nodes: usize,
+    fail_scan_nodes: usize,
+    program_def_collections: usize,
+    program_def_clone_nodes: usize,
+    type_env_clone_nodes: usize,
+    helper_summary_builds: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOST_WORK_PROFILE: RefCell<HostWorkProfile> =
+        RefCell::new(HostWorkProfile::default());
+    static HOST_EXPR_PROFILE_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_host_work(update: impl FnOnce(&mut HostWorkProfile)) {
+    HOST_WORK_PROFILE.with(|profile| update(&mut profile.borrow_mut()));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn record_host_work(_update: impl FnOnce(&mut HostWorkProfile)) {}
+
+struct HostExprProfileGuard;
+
+#[cfg(test)]
+fn enter_host_expr_profile() -> HostExprProfileGuard {
+    HOST_EXPR_PROFILE_DEPTH.with(|depth| {
+        let next = depth.get() + 1;
+        depth.set(next);
+        record_host_work(|profile| {
+            profile.host_expr_visits += 1;
+            profile.max_host_expr_depth = profile.max_host_expr_depth.max(next);
+        });
+    });
+    HostExprProfileGuard
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn enter_host_expr_profile() -> HostExprProfileGuard {
+    HostExprProfileGuard
+}
+
+#[cfg(test)]
+impl Drop for HostExprProfileGuard {
+    fn drop(&mut self) {
+        HOST_EXPR_PROFILE_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for HostExprProfileGuard {
+    fn drop(&mut self) {}
+}
+
+#[cfg(test)]
+fn reset_host_work_profile() {
+    HOST_WORK_PROFILE.with(|profile| *profile.borrow_mut() = HostWorkProfile::default());
+    HOST_EXPR_PROFILE_DEPTH.with(|depth| depth.set(0));
+}
+
+#[cfg(test)]
+fn take_host_work_profile() -> HostWorkProfile {
+    HOST_WORK_PROFILE.with(|profile| std::mem::take(&mut *profile.borrow_mut()))
+}
+
+fn deep_expr_nodes(expr: &Expr) -> usize {
+    1 + match expr {
+        Expr::Atom(_, _) => 0,
+        Expr::Map(map, _) => map
+            .entries
+            .iter()
+            .map(|(_, value)| deep_expr_nodes(value))
+            .sum(),
+        Expr::MetaExpr(meta, _) => {
+            deep_expr_nodes(&meta.expr)
+                + meta
+                    .entries
+                    .iter()
+                    .map(|(_, value)| deep_expr_nodes(value))
+                    .sum::<usize>()
+        }
+        Expr::List(list, _) => list.elements.iter().map(deep_expr_nodes).sum(),
+        Expr::Node(node, _) => {
+            node.meta()
+                .entries
+                .iter()
+                .map(|(_, value)| deep_expr_nodes(value))
+                .sum::<usize>()
+                + node
+                    .children_slice()
+                    .iter()
+                    .map(deep_expr_nodes)
+                    .sum::<usize>()
+        }
+        Expr::BareList(elements, _) => elements.iter().map(deep_expr_nodes).sum(),
+        Expr::UnknownForm(data) => {
+            data.meta
+                .entries
+                .iter()
+                .map(|(_, value)| deep_expr_nodes(value))
+                .sum::<usize>()
+                + data.children.iter().map(deep_expr_nodes).sum::<usize>()
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -118,6 +257,11 @@ impl HostLoweringCacheGuard {
     fn begin() -> Self {
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
+        PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
+        SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
+        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
+        DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
+        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().clear());
         HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(true));
         Self
     }
@@ -128,6 +272,97 @@ impl Drop for HostLoweringCacheGuard {
         HOST_LOWERING_CACHE_ACTIVE.with(|active| active.set(false));
         TYPE_POLYMORPHIC_FN_CACHE.with(|cache| cache.borrow_mut().clear());
         TOP_LEVEL_FN_CALL_GRAPH_CACHE.with(|cache| cache.borrow_mut().clear());
+        PROGRAM_DEFS_CACHE.with(|cache| cache.borrow_mut().clear());
+        SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow_mut().clear());
+        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow_mut().clear());
+        DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow_mut().clear());
+        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().clear());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TensorHelperPreflightFacts {
+    reaches_dynamic_to_tensor: bool,
+    contains_grad_like: bool,
+}
+
+/// The lexical callable bindings visible while precomputing tensor-helper
+/// facts. This type deliberately does not implement `Clone`: nested `fn` and
+/// `let` expressions must update one scope and then restore it, rather than
+/// copying a growing map at every boundary.
+#[derive(Default)]
+struct CallableScope {
+    bindings: HashMap<String, Option<String>>,
+}
+
+struct CallableScopeUndo {
+    name: String,
+    previous: Option<Option<String>>,
+}
+
+impl CallableScope {
+    fn contains_key(&self, name: &str) -> bool {
+        self.bindings.contains_key(name)
+    }
+
+    fn get(&self, name: &str) -> Option<&Option<String>> {
+        self.bindings.get(name)
+    }
+
+    fn bind(&mut self, name: String, target: Option<String>) -> CallableScopeUndo {
+        record_host_work(|profile| profile.callable_scope_work += 1);
+        let previous = self.bindings.insert(name.clone(), target);
+        CallableScopeUndo { name, previous }
+    }
+
+    fn restore(&mut self, undos: impl IntoIterator<Item = CallableScopeUndo>) {
+        for undo in undos.into_iter() {
+            record_host_work(|profile| profile.callable_scope_work += 1);
+            if let Some(previous) = undo.previous {
+                self.bindings.insert(undo.name, previous);
+            } else {
+                self.bindings.remove(&undo.name);
+            }
+        }
+    }
+}
+
+/// Limits pointer-keyed tensor-helper preflight facts to the lifetime of the
+/// owned Deep expression they describe. Host lowering creates rewritten body
+/// trees for callable-let substitution; their addresses are stable only while
+/// that body is being lowered and must never escape into a program-wide cache.
+struct TensorHelperPreflightGuard;
+
+impl TensorHelperPreflightGuard {
+    fn begin(expr: &Expr, program: &CheckedProgram) -> Self {
+        let summaries = cached_dynamic_to_tensor_def_summaries(program);
+        let mut facts = HashMap::new();
+        analyze_tensor_helper_preflight(expr, &summaries, &mut facts);
+        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| stack.borrow_mut().push(facts));
+        Self
+    }
+
+    fn begin_if_uncovered(expr: &Expr, program: &CheckedProgram) -> Option<Self> {
+        let key = expr as *const Expr as usize;
+        let covered = TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
+            stack
+                .borrow()
+                .iter()
+                .rev()
+                .any(|facts| facts.contains_key(&key))
+        });
+        (!covered).then(|| Self::begin(expr, program))
+    }
+}
+
+impl Drop for TensorHelperPreflightGuard {
+    fn drop(&mut self) {
+        TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
+            stack
+                .borrow_mut()
+                .pop()
+                .expect("tensor-helper preflight guards must be balanced");
+        });
     }
 }
 
@@ -1493,7 +1728,7 @@ pub fn preferred_tensor_entry_name(program: &ConcreteHostProgram) -> Option<&str
 }
 
 pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Option<crate::Dag> {
-    let defs = collect_program_defs(program.exprs());
+    let defs = cached_program_defs(program);
     let body = lookup_program_def(&defs, name)?.clone();
     let Expr::List(list, _) = &body else {
         return None;
@@ -1528,12 +1763,8 @@ pub fn lower_named_tensor_entry_dag(program: &CheckedProgram, name: &str) -> Opt
     // surfaces it to the user. Silently absorbing it with `.ok()`
     // would let the host fallback emit an undefined-symbol call to
     // the grad function.
-    match crate::lower::try_lower_subexpr_program(
-        body_expr,
-        scope,
-        program.type_env().clone(),
-        defs,
-    ) {
+    let context = crate::lower::prepare_subexpr_lowering_context(program.type_env(), defs.clone());
+    match crate::lower::try_lower_subexpr_program_with_context(body_expr, scope, &context) {
         Ok(dag) => Some(dag),
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
@@ -1575,7 +1806,7 @@ pub fn function_has_tensor_signature(program: &ConcreteHostProgram, name: &str) 
 /// through `lower_named_tensor_entry_dag` (that IS the #818 fix), so it is
 /// NOT excluded here. Only genuinely host-lane-owned forms are.
 pub fn named_entry_uses_grad_like(program: &CheckedProgram, name: &str) -> bool {
-    let defs = collect_program_defs(program.exprs());
+    let defs = cached_program_defs(program);
     match lookup_program_def(&defs, name) {
         Some(body) => expr_contains_grad_like(body),
         None => false,
@@ -2880,6 +3111,7 @@ fn lower_host_function(
     // (`HOST_UNRESOLVED_CALLABLE_MARKER`), which ABI projection rejects
     // pre-emission.
     let body_expr = inline_local_callable_lets(&body_expr);
+    let _preflight_guard = TensorHelperPreflightGuard::begin(&body_expr, program);
     // If the declared return type is a tensor, the body must produce a
     // tensor even when downstream type-metadata annotations are missing
     // from the reef'd deep AST. Force the body through the tensor-helper
@@ -3020,7 +3252,22 @@ fn try_lower_tensor_helper_call(
             HostTypeTerm::Tensor(expected),
         )));
     }
-    let dag = lower_tensor_helper_dag(expr, program, scope, &expected)?;
+    let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
+    if tensor_helper_preflight_rejects(expr) {
+        record_host_work(|profile| {
+            profile.tensor_helper_fallbacks += 1;
+            profile.tensor_helper_preflight_rejections += 1;
+        });
+        return None;
+    }
+    record_host_work(|profile| {
+        profile.tensor_helper_attempts += 1;
+        profile.tensor_helper_input_nodes += deep_expr_nodes(expr);
+    });
+    let Some(dag) = lower_tensor_helper_dag(expr, program, scope, &expected) else {
+        record_host_work(|profile| profile.tensor_helper_fallbacks += 1);
+        return None;
+    };
     // Reject DAGs whose inputs reference known builtin names: a `Load("fold")`
     // (or `einsum`, `map`, etc.) means the lowerer fell back to treating a
     // host-lane builtin as a free variable. Emitting this DAG would generate
@@ -3030,9 +3277,14 @@ fn try_lower_tensor_helper_call(
         if let crate::dag::RiscOp::Load { name } = &node.op
             && BUILTIN_NAMES.contains(&name.as_str())
         {
+            record_host_work(|profile| {
+                profile.tensor_helper_fallbacks += 1;
+                profile.tensor_helper_builtin_load_rejections += 1;
+            });
             return None;
         }
     }
+    record_host_work(|profile| profile.tensor_helper_successes += 1);
     Some(finish_tensor_helper_call(
         dag,
         scope,
@@ -3047,7 +3299,7 @@ fn lower_tensor_helper_dag(
     scope: &HashMap<String, HostTypeTerm>,
     expected: &TensorType,
 ) -> Option<crate::Dag> {
-    let defs = collect_program_defs(program.exprs());
+    let defs = cached_program_defs(program);
     // chelis#631: never swallow a fail-reaching FORWARD body into a
     // tensor helper. The DAG lane lowers `fail` to a mask-selected zero
     // placeholder, so a forward helper would compile into a binary that
@@ -3065,23 +3317,27 @@ fn lower_tensor_helper_dag(
     // precise fix is scoping the exemption to the differentiated
     // sub-expression.
     if !expr_contains_grad_like(expr) && expr_reaches_fail(expr, &defs, &mut HashSet::new()) {
+        record_host_work(|profile| profile.tensor_helper_fail_guard_rejections += 1);
         return None;
     }
     // Issue #197: surface a fatal AD rejection from the tensor-
     // helper sub-lowering instead of swallowing it; the host
     // fallback would otherwise emit an undefined-symbol call to
     // the rejected grad function.
-    let dag = match crate::lower::try_lower_subexpr_program(
+    let context = cached_subexpr_lowering_context(program);
+    let dag = match crate::lower::try_lower_subexpr_program_with_context(
         expr,
         collect_tensor_scope(scope),
-        program.type_env().clone(),
-        defs,
+        &context,
     ) {
         Ok(dag) => dag,
         Err(diagnostic) if diagnostic.fatal => {
             crate::lower::raise_fatal_lowering_diagnostic(diagnostic)
         }
-        Err(_) => return None,
+        Err(_) => {
+            record_host_work(|profile| profile.tensor_helper_dag_rejections += 1);
+            return None;
+        }
     };
     Some(remap_tensor_helper_dim_symbols(&dag, scope, expected))
 }
@@ -3966,6 +4222,8 @@ fn lower_host_expr_with_expected(
     tensor_helpers: &mut Vec<HostTensorHelper>,
     expected_ty: Option<&HostTypeTerm>,
 ) -> Result<HostExpr, crate::lower::LowerDiagnostic> {
+    let _preflight_guard = TensorHelperPreflightGuard::begin_if_uncovered(expr, program);
+    let _profile_guard = enter_host_expr_profile();
     let mut result = lower_host_expr_kind(expr, program, scope, tensor_helpers, expected_ty)?;
     // Per `spec/design/chelis_span_survival.md` §2.3 host-side table,
     // rule "Lowering": every freshly-produced HostExpr inherits the
@@ -4562,7 +4820,7 @@ fn lower_host_expr_kind(
             })
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::App) => {
-            lower_app_host_expr(list, program, scope, tensor_helpers, expected_ty)?
+            lower_app_host_expr(expr, list, program, scope, tensor_helpers, expected_ty)?
         }
         Expr::List(list, _) if tag(list) == Some(DeepTag::Pipe) => {
             // Bucket 4e: a pipe expression that survives to host
@@ -6849,6 +7107,7 @@ fn is_zero_float(expr: &HostExpr) -> bool {
 }
 
 fn lower_app_host_expr(
+    app_expr: &Expr,
     list: &List,
     program: &CheckedProgram,
     scope: &HashMap<String, HostTypeTerm>,
@@ -6866,14 +7125,13 @@ fn lower_app_host_expr(
     if let Some(grad_lowered) = try_lower_scalar_grad_app(list, program, scope, tensor_helpers)? {
         return Ok(grad_lowered);
     }
-    let app_expr = Expr::List(list.clone(), chelis_deep::Span::new(0, 0));
     let kids = children(list);
     // Anonymous functions are represented at a statically-known call site by
     // beta reduction, not by inventing a nullable scalar/function value. This
     // is also the terminal step after a higher-order top-level call is
     // specialized below: substituting an `fn` argument into `f(x)` creates an
     // app whose callee is that inline function.
-    if let Some(specialized) = beta_reduce_inline_host_call(&app_expr) {
+    if let Some(specialized) = beta_reduce_inline_host_call(app_expr) {
         return lower_host_expr_with_expected(
             &specialized,
             program,
@@ -6915,7 +7173,7 @@ fn lower_app_host_expr(
         .and_then(host_fn_signature)
         .or_else(|| lookup_declared_fn_type(program, &name))
         .or_else(|| kids.first().and_then(expr_fn_type));
-    let checked_ty = expr_host_type(&app_expr, program, scope);
+    let checked_ty = expr_host_type(app_expr, program, scope);
     let explicit_ty = expected_ty
         .filter(|_| checked_ty.is_unresolved())
         .cloned()
@@ -6928,7 +7186,7 @@ fn lower_app_host_expr(
         // wrong package's declaration silently rewrote a payload's dtype
         // (chelis#1271), so refuse rather than pick.
         AdtConstructorResolution::Ambiguous(candidates) => {
-            return Err(ambiguous_constructor_error(&app_expr, &name, &candidates));
+            return Err(ambiguous_constructor_error(app_expr, &name, &candidates));
         }
         // Not a constructor: this is the ordinary call path.
         AdtConstructorResolution::Missing => None,
@@ -6962,7 +7220,7 @@ fn lower_app_host_expr(
     // to the same bounded monomorphization the recursive path uses, which
     // keys on the checked type application instead of pasting syntax.
     if callee_is_nullary_generic_constructor_wrapper
-        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+        && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let pushed = push_inlining(&name);
         let definitions = adt_constructor_definitions(program);
@@ -7019,10 +7277,10 @@ fn lower_app_host_expr(
     if name == "map" && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
-                host_expr_lowering_error(&app_expr, "`map` requires a lowerable callback")
+                host_expr_lowering_error(app_expr, "`map` requires a lowerable callback")
             })?;
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(&app_expr, program, scope);
+        let ty = expr_host_type(app_expr, program, scope);
         let ty = if ty.is_unresolved() {
             HostTypeTerm::List(Box::new(callback.ret_ty.clone()))
         } else {
@@ -7037,10 +7295,10 @@ fn lower_app_host_expr(
     if name == "filter" && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
-                host_expr_lowering_error(&app_expr, "`filter` requires a lowerable callback")
+                host_expr_lowering_error(app_expr, "`filter` requires a lowerable callback")
             })?;
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(&app_expr, program, scope);
+        let ty = expr_host_type(app_expr, program, scope);
         let ty = if ty.is_unresolved() {
             host_expr_type(&list_expr)
         } else {
@@ -7055,7 +7313,7 @@ fn lower_app_host_expr(
     if name == "fold" && kids.len() == 4 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
-                host_expr_lowering_error(&app_expr, "`fold` requires a lowerable callback")
+                host_expr_lowering_error(app_expr, "`fold` requires a lowerable callback")
             })?;
         // chelis#939: the checked callback signature owns the accumulator
         // type. Materialize it onto an empty/unresolved initializer rather
@@ -7074,7 +7332,7 @@ fn lower_app_host_expr(
             force_host_expr_type(init_expr, accumulator_ty.clone())
         };
         let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(&app_expr, program, scope);
+        let ty = expr_host_type(app_expr, program, scope);
         let ty = if ty.is_unresolved() {
             accumulator_ty
         } else {
@@ -7090,11 +7348,11 @@ fn lower_app_host_expr(
     if name == "scan" && kids.len() == 4 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
-                host_expr_lowering_error(&app_expr, "`scan` requires a lowerable callback")
+                host_expr_lowering_error(app_expr, "`scan` requires a lowerable callback")
             })?;
         let init_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
         let list_expr = lower_host_expr(&kids[3], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(&app_expr, program, scope);
+        let ty = expr_host_type(app_expr, program, scope);
         let ty = if ty.is_unresolved() {
             HostTypeTerm::List(Box::new(host_expr_type(&init_expr)))
         } else {
@@ -7110,10 +7368,10 @@ fn lower_app_host_expr(
     if name == "partition" && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
-                host_expr_lowering_error(&app_expr, "`partition` requires a lowerable callback")
+                host_expr_lowering_error(app_expr, "`partition` requires a lowerable callback")
             })?;
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(&app_expr, program, scope);
+        let ty = expr_host_type(app_expr, program, scope);
         let ty = if ty.is_unresolved() {
             let list_ty = host_expr_type(&list_expr);
             HostTypeTerm::Tuple(vec![list_ty.clone(), list_ty])
@@ -7129,10 +7387,10 @@ fn lower_app_host_expr(
     if name == "flat_map" && kids.len() == 3 {
         let callback =
             lower_host_callback(&kids[1], program, scope, tensor_helpers)?.ok_or_else(|| {
-                host_expr_lowering_error(&app_expr, "`flat_map` requires a lowerable callback")
+                host_expr_lowering_error(app_expr, "`flat_map` requires a lowerable callback")
             })?;
         let list_expr = lower_host_expr(&kids[2], program, scope, tensor_helpers)?;
-        let ty = expr_host_type(&app_expr, program, scope);
+        let ty = expr_host_type(app_expr, program, scope);
         let ty = if ty.is_unresolved() {
             match callback.ret_ty.clone() {
                 HostTypeTerm::List(inner) => HostTypeTerm::List(inner),
@@ -7147,7 +7405,7 @@ fn lower_app_host_expr(
             ty,
         }));
     }
-    let helper_tensor_ty = expr_tensor_type(&app_expr, program, scope)
+    let helper_tensor_ty = expr_tensor_type(app_expr, program, scope)
         .or_else(|| {
             if let HostTypeTerm::Tensor(tensor_ty) = &inferred_ret_ty {
                 Some(tensor_ty.clone())
@@ -7172,13 +7430,8 @@ fn lower_app_host_expr(
             kids.get(1)
                 .and_then(|first_arg| expr_tensor_type(first_arg, program, scope))
         });
-    let (helper_expr, helper_scope, helper_bindings) = hoist_host_lane_tensor_bindings(
-        &app_expr,
-        program,
-        scope,
-        fn_sig.as_ref(),
-        tensor_helpers,
-    )?;
+    let (helper_expr, helper_scope, helper_bindings) =
+        hoist_host_lane_tensor_bindings(app_expr, program, scope, fn_sig.as_ref(), tensor_helpers)?;
     // Local callable params (e.g. `f` in `def apply(f: fn, x) = f(x)`) are
     // not representable in the tensor-helper DAG — the DAG path would box
     // the fn pointer into `chelis_scalar_tensor_from_f64` and emit C that
@@ -7205,11 +7458,11 @@ fn lower_app_host_expr(
         && !has_callable_params
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
-        && !should_keep_tensor_expr_in_host_lane(&app_expr)
+        && !should_keep_tensor_expr_in_host_lane(app_expr)
         && let Some(tensor_call) = try_lower_tensor_helper_call(
-            &helper_expr,
+            helper_expr.as_ref(),
             program,
-            &helper_scope,
+            helper_scope.as_ref(),
             tensor_helpers,
             tensor_ty.clone(),
         )
@@ -7229,8 +7482,8 @@ fn lower_app_host_expr(
         && !has_callable_params
         && !top_level_fn_needs_host_lane_tensor_lowering(program, &name)
         && !helper_summary_rejects
-        && !should_keep_tensor_expr_in_host_lane(&app_expr)
-        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+        && !should_keep_tensor_expr_in_host_lane(app_expr)
+        && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let pushed = push_inlining(&name);
         let lowered =
@@ -7263,7 +7516,7 @@ fn lower_app_host_expr(
     // below, kept separate so those tensor-specific paths retain their own
     // lowering rules.
     if (callee_is_polymorphic_precision || callee_is_polymorphic_rank)
-        && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+        && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let pushed = push_inlining(&name);
         let definitions = adt_constructor_definitions(program);
@@ -7281,7 +7534,7 @@ fn lower_app_host_expr(
         }
         return lowered;
     }
-    if has_callable_params && let Some(specialized) = inline_top_level_host_call(&app_expr, program)
+    if has_callable_params && let Some(specialized) = inline_top_level_host_call(app_expr, program)
     {
         let pushed = push_inlining(&name);
         // PR #1215 review: thread the call's checked result type through the
@@ -7326,7 +7579,7 @@ fn lower_app_host_expr(
         || top_level_fn_is_nested_rank_polymorphic(program, &name)
     {
         return lower_recursive_generic_call(
-            &app_expr,
+            app_expr,
             &name,
             &kids[1..],
             &explicit_ty,
@@ -7355,7 +7608,7 @@ fn lower_app_host_expr(
         let instantiated = instantiate_adt_constructor(program, &definition, &construct_ty)
             .map_err(|error| {
                 host_expr_lowering_error(
-                    &app_expr,
+                    app_expr,
                     format!("constructor `{name}` is not concretely instantiated: {error}"),
                 )
             })?;
@@ -7472,7 +7725,7 @@ fn inline_top_level_host_call(expr: &Expr, program: &CheckedProgram) -> Option<E
     if is_inlining(callee_name) {
         return None;
     }
-    let defs = collect_program_defs(program.exprs());
+    let defs = cached_program_defs(program);
     let body = lookup_program_def(&defs, callee_name)?;
     let Expr::List(fn_list, _) = body else {
         return None;
@@ -8425,12 +8678,20 @@ fn top_level_fn_helper_summary_rejects(
     if is_inlining(name) {
         return Ok(false);
     }
+    let cache_key = (program as *const CheckedProgram as usize, name.to_string());
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) =
+            HELPER_SUMMARY_REJECTS_CACHE.with(|cache| cache.borrow().get(&cache_key).copied())
+    {
+        return Ok(cached);
+    }
     let Some(body) = find_top_level_def_expr(program.exprs(), name) else {
         return Ok(false);
     };
     if !matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)) {
         return Ok(false);
     }
+    record_host_work(|profile| profile.helper_summary_builds += 1);
     let pushed = push_inlining(name);
     // This lowering is a probe: its result is inspected and discarded, so
     // it must leave no trace on specialization state
@@ -8450,6 +8711,11 @@ fn top_level_fn_helper_summary_rejects(
         collect_function_summary_rejections(&mut function);
         !function.summary_rejections.is_empty()
     });
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        HELPER_SUMMARY_REJECTS_CACHE.with(|cache| {
+            cache.borrow_mut().insert(cache_key, rejects);
+        });
+    }
     Ok(rejects)
 }
 
@@ -8515,7 +8781,7 @@ fn top_level_fn_call_graph(program: &CheckedProgram) -> HashMap<String, HashSet<
     {
         return cached;
     }
-    let defs = collect_program_defs(program.exprs());
+    let defs = cached_program_defs(program);
     let fn_names = defs
         .iter()
         .filter(|(_, body)| matches!(body, Expr::List(list, _) if tag(list) == Some(DeepTag::Fn)))
@@ -8598,25 +8864,36 @@ fn call_graph_reaches_any(
     false
 }
 
-type HoistedHostLaneBindings = (Expr, HashMap<String, HostTypeTerm>, Vec<HostBinding>);
+type HoistedHostLaneBindings<'expr, 'scope> = (
+    Cow<'expr, Expr>,
+    Cow<'scope, HashMap<String, HostTypeTerm>>,
+    Vec<HostBinding>,
+);
 
-fn hoist_host_lane_tensor_bindings(
-    expr: &Expr,
+fn hoist_host_lane_tensor_bindings<'expr, 'scope>(
+    expr: &'expr Expr,
     program: &CheckedProgram,
-    scope: &HashMap<String, HostTypeTerm>,
+    scope: &'scope HashMap<String, HostTypeTerm>,
     fn_sig: Option<&(Vec<HostTypeTerm>, HostTypeTerm)>,
     tensor_helpers: &mut Vec<HostTensorHelper>,
-) -> Result<HoistedHostLaneBindings, crate::lower::LowerDiagnostic> {
+) -> Result<HoistedHostLaneBindings<'expr, 'scope>, crate::lower::LowerDiagnostic> {
     let Expr::List(list, span) = expr else {
-        return Ok((expr.clone(), scope.clone(), Vec::new()));
+        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     };
     if tag(list) != Some(DeepTag::App) {
-        return Ok((expr.clone(), scope.clone(), Vec::new()));
+        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
 
     let kids = children(list);
     if kids.is_empty() {
-        return Ok((expr.clone(), scope.clone(), Vec::new()));
+        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
+    }
+    if !kids
+        .iter()
+        .skip(1)
+        .any(should_keep_tensor_expr_in_host_lane)
+    {
+        return Ok((Cow::Borrowed(expr), Cow::Borrowed(scope), Vec::new()));
     }
 
     let mut new_elements = vec![
@@ -8669,16 +8946,14 @@ fn hoist_host_lane_tensor_bindings(
         }
     }
 
-    Ok((
-        Expr::List(
-            List {
-                elements: new_elements,
-            },
-            *span,
-        ),
-        scoped,
-        bindings,
-    ))
+    let rewritten = Expr::List(
+        List {
+            elements: new_elements,
+        },
+        *span,
+    );
+    record_host_work(|profile| profile.app_clone_nodes += deep_expr_nodes(&rewritten));
+    Ok((Cow::Owned(rewritten), Cow::Owned(scoped), bindings))
 }
 
 fn host_fn_signature(ty: &HostTypeTerm) -> Option<(Vec<HostTypeTerm>, HostTypeTerm)> {
@@ -8898,8 +9173,7 @@ fn lower_host_callback(
                 })
                 .or_else(|| lookup_declared_fn_type(program, name))
                 .or_else(|| {
-                    lookup_program_def(&collect_program_defs(program.exprs()), name)
-                        .and_then(expr_fn_type)
+                    lookup_program_def(&cached_program_defs(program), name).and_then(expr_fn_type)
                 })
             else {
                 return Ok(None);
@@ -9387,6 +9661,7 @@ fn actualize_tensor_helper_types(
 /// cannot resolve them), so the fail-reachability gate must not divert
 /// them.
 fn expr_contains_grad_like(expr: &Expr) -> bool {
+    record_host_work(|profile| profile.grad_scan_nodes += 1);
     match expr {
         Expr::List(list, _) => {
             matches!(tag(list), Some(DeepTag::Grad | DeepTag::Vmap))
@@ -9410,6 +9685,7 @@ fn expr_reaches_fail(
     defs: &HashMap<String, Expr>,
     visiting: &mut HashSet<String>,
 ) -> bool {
+    record_host_work(|profile| profile.fail_scan_nodes += 1);
     match expr {
         Expr::List(list, _) => {
             if tag(list) == Some(DeepTag::Var)
@@ -9434,7 +9710,431 @@ fn expr_reaches_fail(
     }
 }
 
+fn cached_program_defs(program: &CheckedProgram) -> Arc<HashMap<String, Expr>> {
+    let key = program as *const CheckedProgram as usize;
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) = PROGRAM_DEFS_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+    {
+        return cached;
+    }
+    let defs = Arc::new(collect_program_defs(program.exprs()));
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        PROGRAM_DEFS_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, defs.clone());
+        });
+    }
+    defs
+}
+
+fn cached_subexpr_lowering_context(
+    program: &CheckedProgram,
+) -> crate::lower::SubexprLoweringContext {
+    let key = program as *const CheckedProgram as usize;
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) =
+            SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+    {
+        return cached;
+    }
+    record_host_work(|profile| {
+        profile.type_env_clone_nodes += program
+            .type_env()
+            .values()
+            .map(deep_expr_nodes)
+            .sum::<usize>();
+    });
+    let context = crate::lower::prepare_subexpr_lowering_context(
+        program.type_env(),
+        cached_program_defs(program),
+    );
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        SUBEXPR_LOWERING_CONTEXT_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, context.clone());
+        });
+    }
+    context
+}
+
+fn cached_dynamic_to_tensor_def_summaries(program: &CheckedProgram) -> Arc<HashMap<String, bool>> {
+    let key = program as *const CheckedProgram as usize;
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get)
+        && let Some(cached) =
+            DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+    {
+        return cached;
+    }
+
+    let defs = cached_program_defs(program);
+    let def_names = defs.keys().cloned().collect::<HashSet<_>>();
+    let mut summaries = defs
+        .keys()
+        .map(|name| (name.clone(), false))
+        .collect::<HashMap<_, _>>();
+    let mut reverse_edges = HashMap::<String, Vec<String>>::new();
+    let mut queue = VecDeque::new();
+
+    for (name, body) in defs.iter() {
+        let mut referenced_defs = HashSet::new();
+        let mut callable_scope = CallableScope::default();
+        let directly_dynamic = collect_dynamic_to_tensor_def_refs(
+            body,
+            &def_names,
+            &mut callable_scope,
+            &mut referenced_defs,
+        );
+        if directly_dynamic {
+            summaries.insert(name.clone(), true);
+            queue.push_back(name.clone());
+        }
+        for referenced in referenced_defs {
+            reverse_edges
+                .entry(referenced)
+                .or_default()
+                .push(name.clone());
+        }
+    }
+
+    // Propagate the property backwards through the call graph. A worklist is
+    // both cycle-safe and linear in definitions plus reference edges; a DFS
+    // memo can incorrectly seal one member of a cycle before another member's
+    // direct runtime-shaped `to_tensor` is discovered.
+    while let Some(dynamic_name) = queue.pop_front() {
+        for caller in reverse_edges.get(&dynamic_name).into_iter().flatten() {
+            let reaches = summaries
+                .get_mut(caller)
+                .expect("call-graph names originate in program definitions");
+            if !*reaches {
+                *reaches = true;
+                queue.push_back(caller.clone());
+            }
+        }
+    }
+
+    let summaries = Arc::new(summaries);
+    if HOST_LOWERING_CACHE_ACTIVE.with(Cell::get) {
+        DYNAMIC_TO_TENSOR_DEF_SUMMARIES_CACHE.with(|cache| {
+            cache.borrow_mut().insert(key, summaries.clone());
+        });
+    }
+    summaries
+}
+
+fn collect_dynamic_to_tensor_def_refs(
+    expr: &Expr,
+    def_names: &HashSet<String>,
+    callable_scope: &mut CallableScope,
+    referenced_defs: &mut HashSet<String>,
+) -> bool {
+    record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
+    let mut directly_dynamic =
+        !callable_scope.contains_key("to_tensor") && expr_is_runtime_shaped_to_tensor(expr);
+    if let Some(name) = app_callee_name(expr)
+        && let Some(target) = resolve_top_level_callable_from_names(name, callable_scope, def_names)
+    {
+        referenced_defs.insert(target);
+    }
+
+    let Some((expr_tag, _, kids)) = stamped_parts(expr) else {
+        visit_semantic_expr_children(expr, |child| {
+            directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                child,
+                def_names,
+                callable_scope,
+                referenced_defs,
+            );
+        });
+        return directly_dynamic;
+    };
+    match expr_tag {
+        DeepTag::Fn => {
+            if let Some(params) = kids.first() {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    params,
+                    def_names,
+                    callable_scope,
+                    referenced_defs,
+                );
+            }
+            let mut undos = Vec::new();
+            if let Some(params) = kids.first().and_then(as_list) {
+                for param in children(params) {
+                    if let Some(name) = param_name(param) {
+                        undos.push(callable_scope.bind(name, None));
+                    }
+                }
+            }
+            if let Some(body) = kids.get(1) {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    body,
+                    def_names,
+                    callable_scope,
+                    referenced_defs,
+                );
+            }
+            callable_scope.restore(undos.into_iter().rev());
+        }
+        DeepTag::Let => {
+            let mut undos = Vec::new();
+            if let Some(bind_list) = kids.first().and_then(as_list)
+                && tag(bind_list) == Some(DeepTag::Bind)
+            {
+                let bind_kids = children(bind_list);
+                for index in (0..bind_kids.len()).step_by(2) {
+                    let Some(name) = bind_kids.get(index).and_then(symbol_name) else {
+                        continue;
+                    };
+                    let Some(value) = bind_kids.get(index + 1) else {
+                        undos.push(callable_scope.bind(name.to_string(), None));
+                        continue;
+                    };
+                    directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                        value,
+                        def_names,
+                        callable_scope,
+                        referenced_defs,
+                    );
+                    let target = direct_var_name(value).and_then(|target| {
+                        resolve_top_level_callable_from_names(target, callable_scope, def_names)
+                    });
+                    undos.push(callable_scope.bind(name.to_string(), target));
+                }
+            } else if let Some(bindings) = kids.first() {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    bindings,
+                    def_names,
+                    callable_scope,
+                    referenced_defs,
+                );
+            }
+            if let Some(body) = kids.get(1) {
+                directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                    body,
+                    def_names,
+                    callable_scope,
+                    referenced_defs,
+                );
+            }
+            callable_scope.restore(undos.into_iter().rev());
+        }
+        _ => visit_semantic_expr_children(expr, |child| {
+            directly_dynamic |= collect_dynamic_to_tensor_def_refs(
+                child,
+                def_names,
+                callable_scope,
+                referenced_defs,
+            );
+        }),
+    }
+    directly_dynamic
+}
+
+fn analyze_tensor_helper_preflight(
+    expr: &Expr,
+    def_summaries: &HashMap<String, bool>,
+    out: &mut HashMap<usize, TensorHelperPreflightFacts>,
+) -> TensorHelperPreflightFacts {
+    analyze_tensor_helper_preflight_scoped(expr, def_summaries, &mut CallableScope::default(), out)
+}
+
+fn analyze_tensor_helper_preflight_scoped(
+    expr: &Expr,
+    def_summaries: &HashMap<String, bool>,
+    callable_scope: &mut CallableScope,
+    out: &mut HashMap<usize, TensorHelperPreflightFacts>,
+) -> TensorHelperPreflightFacts {
+    record_host_work(|profile| profile.tensor_helper_preflight_nodes += 1);
+    let mut facts = TensorHelperPreflightFacts {
+        reaches_dynamic_to_tensor: !callable_scope.contains_key("to_tensor")
+            && expr_is_runtime_shaped_to_tensor(expr),
+        contains_grad_like: stamped_parts(expr)
+            .is_some_and(|(tag, _, _)| matches!(tag, DeepTag::Grad | DeepTag::Vmap))
+            || matches!(expr, Expr::List(list, _) if list.unknown_tag_symbol() == Some("vmap-grad")),
+    };
+    if let Some(name) = app_callee_name(expr)
+        && let Some(target) =
+            resolve_top_level_callable_from_summaries(name, callable_scope, def_summaries)
+    {
+        facts.reaches_dynamic_to_tensor |= def_summaries.get(&target).copied().unwrap_or(false);
+    }
+
+    let merge_child = |facts: &mut TensorHelperPreflightFacts,
+                       child: &Expr,
+                       callable_scope: &mut CallableScope,
+                       out: &mut HashMap<usize, TensorHelperPreflightFacts>| {
+        let child_facts =
+            analyze_tensor_helper_preflight_scoped(child, def_summaries, callable_scope, out);
+        facts.reaches_dynamic_to_tensor |= child_facts.reaches_dynamic_to_tensor;
+        facts.contains_grad_like |= child_facts.contains_grad_like;
+    };
+    match stamped_parts(expr) {
+        Some((DeepTag::Fn, _, kids)) => {
+            if let Some(params) = kids.first() {
+                merge_child(&mut facts, params, callable_scope, out);
+            }
+            let mut undos = Vec::new();
+            if let Some(params) = kids.first().and_then(as_list) {
+                for param in children(params) {
+                    if let Some(name) = param_name(param) {
+                        undos.push(callable_scope.bind(name, None));
+                    }
+                }
+            }
+            if let Some(body) = kids.get(1) {
+                merge_child(&mut facts, body, callable_scope, out);
+            }
+            callable_scope.restore(undos.into_iter().rev());
+        }
+        Some((DeepTag::Let, _, kids)) => {
+            let mut undos = Vec::new();
+            if let Some(bind_list) = kids.first().and_then(as_list)
+                && tag(bind_list) == Some(DeepTag::Bind)
+            {
+                let bind_kids = children(bind_list);
+                for index in (0..bind_kids.len()).step_by(2) {
+                    let Some(name) = bind_kids.get(index).and_then(symbol_name) else {
+                        continue;
+                    };
+                    let Some(value) = bind_kids.get(index + 1) else {
+                        undos.push(callable_scope.bind(name.to_string(), None));
+                        continue;
+                    };
+                    merge_child(&mut facts, value, callable_scope, out);
+                    let target = direct_var_name(value).and_then(|target| {
+                        resolve_top_level_callable_from_summaries(
+                            target,
+                            callable_scope,
+                            def_summaries,
+                        )
+                    });
+                    undos.push(callable_scope.bind(name.to_string(), target));
+                }
+            } else if let Some(bindings) = kids.first() {
+                merge_child(&mut facts, bindings, callable_scope, out);
+            }
+            if let Some(body) = kids.get(1) {
+                merge_child(&mut facts, body, callable_scope, out);
+            }
+            callable_scope.restore(undos.into_iter().rev());
+        }
+        _ => visit_semantic_expr_children(expr, |child| {
+            merge_child(&mut facts, child, callable_scope, out);
+        }),
+    }
+    out.insert(expr as *const Expr as usize, facts);
+    facts
+}
+
+fn app_callee_name(expr: &Expr) -> Option<&str> {
+    let (DeepTag::App, _, kids) = stamped_parts(expr)? else {
+        return None;
+    };
+    direct_var_name(kids.first()?)
+}
+
+fn direct_var_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::MetaExpr(meta, _) => direct_var_name(&meta.expr),
+        _ => {
+            let (DeepTag::Var, _, kids) = stamped_parts(expr)? else {
+                return None;
+            };
+            kids.first().and_then(symbol_name)
+        }
+    }
+}
+
+fn resolve_top_level_callable_from_names(
+    name: &str,
+    callable_scope: &CallableScope,
+    def_names: &HashSet<String>,
+) -> Option<String> {
+    match callable_scope.get(name) {
+        Some(target) => target.clone(),
+        None => def_names.contains(name).then(|| name.to_string()),
+    }
+}
+
+fn resolve_top_level_callable_from_summaries(
+    name: &str,
+    callable_scope: &CallableScope,
+    def_summaries: &HashMap<String, bool>,
+) -> Option<String> {
+    match callable_scope.get(name) {
+        Some(target) => target.clone(),
+        None => def_summaries.contains_key(name).then(|| name.to_string()),
+    }
+}
+
+fn visit_semantic_expr_children(expr: &Expr, mut visit: impl FnMut(&Expr)) {
+    match expr {
+        Expr::Atom(_, _) => {}
+        Expr::List(list, _) => {
+            if tag(list).is_some() {
+                for child in children(list) {
+                    visit(child);
+                }
+            } else {
+                for child in &list.elements {
+                    visit(child);
+                }
+            }
+        }
+        Expr::Node(node, _) => {
+            for child in node.children_slice() {
+                visit(child);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                visit(value);
+            }
+        }
+        Expr::MetaExpr(meta, _) => visit(&meta.expr),
+        Expr::BareList(elements, _) => {
+            for child in elements {
+                visit(child);
+            }
+        }
+        Expr::UnknownForm(data) => {
+            for child in &data.children {
+                visit(child);
+            }
+        }
+    }
+}
+
+fn expr_is_runtime_shaped_to_tensor(expr: &Expr) -> bool {
+    let Some((DeepTag::App, _, kids)) = stamped_parts(expr) else {
+        return false;
+    };
+    let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts) else {
+        return false;
+    };
+    let is_to_tensor = callee_kids.first().and_then(symbol_name) == Some("to_tensor");
+    is_to_tensor && !crate::lower::is_static_to_tensor_literal(expr)
+}
+
+fn tensor_helper_preflight_rejects(expr: &Expr) -> bool {
+    let key = expr as *const Expr as usize;
+    TENSOR_HELPER_PREFLIGHT_STACK.with(|stack| {
+        let stack = stack.borrow();
+        let facts = stack
+            .iter()
+            .rev()
+            .find_map(|facts| facts.get(&key).copied());
+        record_host_work(|profile| {
+            if facts.is_some() {
+                profile.tensor_helper_preflight_lookup_hits += 1;
+            } else {
+                profile.tensor_helper_preflight_lookup_misses += 1;
+            }
+        });
+        facts.is_some_and(|facts| facts.reaches_dynamic_to_tensor && !facts.contains_grad_like)
+    })
+}
+
 fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
+    record_host_work(|profile| profile.program_def_collections += 1);
     let mut defs = HashMap::new();
     for expr in top_level_items(exprs) {
         let Expr::List(list, _) = expr else {
@@ -9446,6 +10146,9 @@ fn collect_program_defs(exprs: &[Expr]) -> HashMap<String, Expr> {
                 children(list).get(1),
             )
         {
+            record_host_work(|profile| {
+                profile.program_def_clone_nodes += deep_expr_nodes(body);
+            });
             defs.insert(name.to_string(), body.clone());
         }
     }
@@ -12469,6 +13172,457 @@ def bad[b](box: Box[b]) -> bool =
         let deep = chelis_surf::desugar::desugar_program(&decls);
         chelis_types::check_ir_program(&deep)
             .unwrap_or_else(|result| panic!("IR check failed: {:?}", result.errors))
+    }
+
+    fn issue_1205_source(operations: usize, flat: bool) -> String {
+        let module = if flat { "Flat" } else { "Nested" };
+        let mut lines = vec![
+            format!("module FrontEndPerformance.{module}N{operations}"),
+            "def bc(c: f32) -> tensor[8, f32] = \
+             reshape(expand(to_tensor([c]), 0, 8i64), [8i64])"
+                .to_string(),
+        ];
+        if flat {
+            lines.push(
+                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                 if gte(i, 5i64) then s else {"
+                    .to_string(),
+            );
+            let mut previous = "s".to_string();
+            for index in 0..operations {
+                lines.push(format!(
+                    "  t{index} = mul(add({previous}, bc(cast(1.0, f32))), \
+                     bc(cast(0.5, f32)))"
+                ));
+                previous = format!("t{index}");
+            }
+            lines.extend([format!("  st({previous}, add(i, 1i64))"), "}".to_string()]);
+        } else {
+            let mut body = "s".to_string();
+            for _ in 0..operations {
+                body = format!("mul(add({body}, bc(cast(1.0, f32))), bc(cast(0.5, f32)))");
+            }
+            lines.push(format!(
+                "def st(s: tensor[8, f32], i: int64) -> tensor[8, f32] = \
+                 if gte(i, 5i64) then s else st({body}, add(i, 1i64))"
+            ));
+        }
+        lines.push("r = index(to_list(st(bc(cast(1.0, f32)), 0i64)), 0i64)".to_string());
+        lines.join("\n") + "\n"
+    }
+
+    fn issue_1205_host_profile(operations: usize, flat: bool) -> HostWorkProfile {
+        std::thread::Builder::new()
+            .name(format!("issue-1205-host-{operations}"))
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let typed = surf_check(&issue_1205_source(operations, flat));
+                let effected = chelis_effects::check_program(&typed).expect("effect check");
+                let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+                reset_host_work_profile();
+                try_lower_compiled_program(&checked).expect("#1205 fixture lowers");
+                take_host_work_profile()
+            })
+            .expect("#1205 host profile thread starts")
+            .join()
+            .expect("#1205 host profile thread completes")
+    }
+
+    fn issue_1205_find_named_app<'expr>(expr: &'expr Expr, expected: &str) -> Option<&'expr Expr> {
+        if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+            && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+            && callee_kids.first().and_then(symbol_name) == Some(expected)
+        {
+            return Some(expr);
+        }
+        match expr {
+            Expr::List(list, _) => list
+                .elements
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::Node(node, _) => node
+                .children_slice()
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::MetaExpr(meta, _) => issue_1205_find_named_app(&meta.expr, expected),
+            Expr::BareList(elements, _) => elements
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::UnknownForm(data) => data
+                .children
+                .iter()
+                .find_map(|child| issue_1205_find_named_app(child, expected)),
+            Expr::Map(map, _) => map
+                .entries
+                .iter()
+                .find_map(|(_, value)| issue_1205_find_named_app(value, expected)),
+            Expr::Atom(_, _) => None,
+        }
+    }
+
+    #[test]
+    fn issue_1205_host_lowering_work_is_linear() {
+        for flat in [false, true] {
+            let mut rows = Vec::new();
+            for operations in [20, 40, 80, 160] {
+                let profile = issue_1205_host_profile(operations, flat);
+                let total_work = profile.host_expr_visits
+                    + profile.app_clone_nodes
+                    + profile.tensor_helper_input_nodes
+                    + profile.tensor_helper_preflight_nodes
+                    + profile.callable_scope_work
+                    + profile.grad_scan_nodes
+                    + profile.fail_scan_nodes
+                    + profile.program_def_clone_nodes
+                    + profile.type_env_clone_nodes;
+                eprintln!(
+                    "#1205 host shape={} n={operations} profile={profile:?} total_work={total_work}",
+                    if flat { "flat" } else { "nested" }
+                );
+                assert_eq!(
+                    profile.program_def_collections, 1,
+                    "#1205 program definitions must be collected once per compiled program"
+                );
+                assert_eq!(
+                    profile.helper_summary_builds, 2,
+                    "#1205 helper summaries must be cached per definition"
+                );
+                assert_eq!(
+                    profile.tensor_helper_builtin_load_rejections, 0,
+                    "#1205 dynamic to_tensor candidates must be rejected before DAG lowering"
+                );
+                assert_eq!(
+                    profile.tensor_helper_preflight_lookup_misses, 0,
+                    "#1205 every tensor-helper candidate must have precomputed facts"
+                );
+                assert!(
+                    profile.tensor_helper_preflight_rejections > 0,
+                    "#1205 fixture must exercise the dynamic to_tensor preflight"
+                );
+                rows.push((operations, total_work, profile));
+            }
+            for pair in rows.windows(2) {
+                let (previous_n, previous, previous_profile) = pair[0];
+                let (current_n, current, profile) = pair[1];
+                assert_eq!(
+                    profile.app_clone_nodes, previous_profile.app_clone_nodes,
+                    "#1205 descendant app cloning must not grow with expression nesting"
+                );
+                assert!(
+                    current * 10 <= previous * 22,
+                    "#1205 host work must grow linearly: shape={} {previous_n}->{current_n} \
+                     previous={previous} current={current} profile={profile:?}",
+                    if flat { "flat" } else { "nested" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_1205_callable_scope_work_is_linear() {
+        std::thread::Builder::new()
+            .name("issue-1205-nested-callable-scopes".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                for nested_fns in [true, false] {
+                    let mut rows = Vec::new();
+                    for depth in [20, 40, 80, 160] {
+                        let body = if nested_fns {
+                            let mut body = "bc(c)".to_string();
+                            for index in (0..depth).rev() {
+                                body = format!("(fn (p{index}: f32) -> {body})(c)");
+                            }
+                            body
+                        } else {
+                            let mut body = format!("f{}(c)", depth - 1);
+                            for index in (0..depth).rev() {
+                                let target = if index == 0 {
+                                    "bc".to_string()
+                                } else {
+                                    format!("f{}", index - 1)
+                                };
+                                body = format!("{{ f{index} = {target}\n{body}\n}}");
+                            }
+                            body
+                        };
+                        let shape = if nested_fns { "Fn" } else { "Let" };
+                        let source = format!(
+                            "module FrontEndPerformance.Nested{shape}{depth}\n\
+                             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+                             def nested(c: f32) -> tensor[1, f32] = {body}\n\
+                             out = index(to_list(nested(cast(1.0, f32))), 0i64)\n"
+                        );
+                        let typed = surf_check(&source);
+                        let defs = cached_program_defs(&typed);
+                        let nested_body = lookup_program_def(&defs, "nested")
+                            .expect("nested definition is present");
+
+                        reset_host_work_profile();
+                        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+                        assert_eq!(summaries.get("nested"), Some(&true));
+                        let summary_profile = take_host_work_profile();
+                        let summary_work = summary_profile.tensor_helper_preflight_nodes
+                            + summary_profile.callable_scope_work;
+
+                        reset_host_work_profile();
+                        let mut facts = HashMap::new();
+                        let nested_facts =
+                            analyze_tensor_helper_preflight(nested_body, &summaries, &mut facts);
+                        assert!(nested_facts.reaches_dynamic_to_tensor);
+                        let expression_profile = take_host_work_profile();
+                        let expression_work = expression_profile.tensor_helper_preflight_nodes
+                            + expression_profile.callable_scope_work;
+
+                        eprintln!(
+                            "#1205 callable scopes shape={shape} depth={depth} \
+                             summary={summary_profile:?} summary_work={summary_work} \
+                             expression={expression_profile:?} expression_work={expression_work}"
+                        );
+                        rows.push((depth, summary_work, expression_work));
+                    }
+                    for pair in rows.windows(2) {
+                        let (previous_depth, previous_summary, previous_expression) = pair[0];
+                        let (current_depth, current_summary, current_expression) = pair[1];
+                        for (path, previous_work, current_work) in [
+                            ("definition summary", previous_summary, current_summary),
+                            (
+                                "per-expression facts",
+                                previous_expression,
+                                current_expression,
+                            ),
+                        ] {
+                            assert!(
+                                current_work * 10 <= previous_work * 23,
+                                "#1205 callable-scope work must grow linearly: \
+                                 shape={} path={path} depth {previous_depth}->{current_depth} \
+                                 previous={previous_work} current={current_work}",
+                                if nested_fns { "Fn" } else { "Let" }
+                            );
+                        }
+                    }
+                }
+            })
+            .expect("#1205 nested callable scope profile thread starts")
+            .join()
+            .expect("#1205 nested callable scope profile thread completes");
+    }
+
+    #[test]
+    fn issue_1205_callable_scope_restore_semantics() {
+        let mut direct = CallableScope::default();
+        let outer = direct.bind("f".to_string(), Some("bc".to_string()));
+        let duplicate = direct.bind("f".to_string(), Some("other".to_string()));
+        let inner = direct.bind("f".to_string(), None);
+        direct.restore([inner, duplicate, outer]);
+        assert!(
+            !direct.contains_key("f"),
+            "restoring repeated shadow bindings must recover the absent outer scope"
+        );
+
+        let typed = surf_check(
+            "module FrontEndPerformance.ScopeRestore\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def sibling(c: f32) -> tensor[1, f32] = {\n\
+               probe = (fn (bc: f32) -> bc)(c)\n\
+               bc(c)\n\
+             }\n\
+             def nested(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               probe = (fn (f: f32) -> (fn (f: f32) -> f)(f))(c)\n\
+               f(c)\n\
+             }\n\
+             def duplicate(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               f = f\n\
+               f(c)\n\
+             }\n\
+             def sequential(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               g = f\n\
+               h = g\n\
+               h(c)\n\
+             }\n\
+             out = index(to_list(sibling(cast(1.0, f32))), 0i64)\n",
+        );
+        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+        let defs = cached_program_defs(&typed);
+        for (definition, final_callee) in [
+            ("sibling", "bc"),
+            ("nested", "f"),
+            ("duplicate", "f"),
+            ("sequential", "h"),
+        ] {
+            assert_eq!(
+                summaries.get(definition),
+                Some(&true),
+                "lexical shadow restoration must preserve the final dynamic call in {definition}"
+            );
+            let body = lookup_program_def(&defs, definition).expect("fixture definition exists");
+            let final_app = issue_1205_find_named_app(body, final_callee)
+                .expect("fixture contains its final named application");
+            let mut facts = HashMap::new();
+            let body_facts = analyze_tensor_helper_preflight(body, &summaries, &mut facts);
+            assert!(
+                body_facts.reaches_dynamic_to_tensor,
+                "per-expression analysis must preserve the final call in {definition}"
+            );
+            assert!(
+                facts[&(final_app as *const Expr as usize)].reaches_dynamic_to_tensor,
+                "the final {final_callee} application in {definition} must inherit its dynamic summary"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_1205_preflight_preserves_static_to_tensor_literals() {
+        let typed = surf_check(
+            "module FrontEndPerformance.StaticLiteral\n\
+             def lit() -> tensor[2, f32] = \
+               to_tensor([cast(1.0, f32), cast(2.0, f32)])\n\
+             r = index(to_list(lit()), 0i64)\n",
+        );
+        fn find_to_tensor(expr: &Expr) -> Option<&Expr> {
+            if let Some((DeepTag::App, _, kids)) = stamped_parts(expr)
+                && let Some((DeepTag::Var, _, callee_kids)) = kids.first().and_then(stamped_parts)
+                && callee_kids.first().and_then(symbol_name) == Some("to_tensor")
+            {
+                return Some(expr);
+            }
+            match expr {
+                Expr::List(list, _) => list.elements.iter().find_map(find_to_tensor),
+                Expr::Node(node, _) => node.children_slice().iter().find_map(find_to_tensor),
+                Expr::MetaExpr(meta, _) => find_to_tensor(&meta.expr),
+                Expr::BareList(elements, _) => elements.iter().find_map(find_to_tensor),
+                Expr::UnknownForm(data) => data.children.iter().find_map(find_to_tensor),
+                Expr::Map(map, _) => map
+                    .entries
+                    .iter()
+                    .find_map(|(_, value)| find_to_tensor(value)),
+                Expr::Atom(_, _) => None,
+            }
+        }
+        let literal = typed
+            .exprs()
+            .iter()
+            .find_map(find_to_tensor)
+            .expect("fixture contains a to_tensor application");
+        assert!(
+            crate::lower::is_static_to_tensor_literal(literal),
+            "fixture must exercise the lowerer's literal recognizer"
+        );
+        assert!(
+            !expr_is_runtime_shaped_to_tensor(literal),
+            "the preflight must share the lowerer's static-literal exemption"
+        );
+        let effected = chelis_effects::check_program(&typed).expect("effect check");
+        let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+        reset_host_work_profile();
+        try_lower_compiled_program(&checked).expect("static to_tensor fixture lowers");
+        let profile = take_host_work_profile();
+        assert_eq!(
+            profile.tensor_helper_preflight_rejections, 0,
+            "the runtime-shaped preflight must not reject a static literal: {profile:?}"
+        );
+        assert_eq!(profile.tensor_helper_builtin_load_rejections, 0);
+    }
+
+    #[test]
+    fn issue_1205_preflight_does_not_confuse_shadowed_operands_with_calls() {
+        let typed = surf_check(
+            "module FrontEndPerformance.ShadowedOperand\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def twice(bc: tensor[1, f32]) -> tensor[1, f32] = add(bc, bc)\n\
+             r = index(to_list(twice(to_tensor([cast(1.0, f32)]))), 0i64)\n",
+        );
+        let summaries = cached_dynamic_to_tensor_def_summaries(&typed);
+        assert_eq!(
+            summaries.get("bc"),
+            Some(&true),
+            "the top-level bc definition must exercise the transitive summary"
+        );
+
+        let add = typed
+            .exprs()
+            .iter()
+            .find_map(|expr| issue_1205_find_named_app(expr, "add"))
+            .expect("fixture contains the twice body");
+        let mut facts = HashMap::new();
+        let add_facts = analyze_tensor_helper_preflight(add, &summaries, &mut facts);
+        assert!(
+            !add_facts.reaches_dynamic_to_tensor,
+            "a tensor operand named bc is not a call to the top-level bc definition"
+        );
+    }
+
+    #[test]
+    fn issue_1205_preflight_tracks_callable_shadowing_and_aliases() {
+        let shadowed = surf_check(
+            "module FrontEndPerformance.ShadowedCallable\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def local(x: tensor[1, f32]) -> tensor[1, f32] = {\n\
+               bc = fn (y: tensor[1, f32]) -> add(y, y)\n\
+               bc(x)\n\
+             }\n\
+             def wrapper(x: tensor[1, f32]) -> tensor[1, f32] = local(x)\n\
+             out = index(to_list(wrapper(to_tensor([cast(1.0, f32)]))), 0i64)\n",
+        );
+        let shadowed_summaries = cached_dynamic_to_tensor_def_summaries(&shadowed);
+        assert_eq!(shadowed_summaries.get("bc"), Some(&true));
+        for name in ["local", "wrapper", "out"] {
+            assert_eq!(
+                shadowed_summaries.get(name),
+                Some(&false),
+                "a local callable named bc must shadow the top-level helper in {name}"
+            );
+        }
+        let shadowed_defs = cached_program_defs(&shadowed);
+        let local_body = lookup_program_def(&shadowed_defs, "local").expect("local definition");
+        let local_call = issue_1205_find_named_app(local_body, "bc").expect("local bc call");
+        let mut shadowed_facts = HashMap::new();
+        analyze_tensor_helper_preflight(local_body, &shadowed_summaries, &mut shadowed_facts);
+        assert!(
+            !shadowed_facts[&(local_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+            "the local bc call must not inherit the top-level bc summary"
+        );
+
+        let aliased = surf_check(
+            "module FrontEndPerformance.AliasedCallable\n\
+             def bc(c: f32) -> tensor[1, f32] = to_tensor([c])\n\
+             def aliased(c: f32) -> tensor[1, f32] = {\n\
+               f = bc\n\
+               f(c)\n\
+             }\n\
+             def wrapper(c: f32) -> tensor[1, f32] = aliased(c)\n\
+             out = index(to_list(wrapper(cast(1.0, f32))), 0i64)\n",
+        );
+        let aliased_summaries = cached_dynamic_to_tensor_def_summaries(&aliased);
+        for name in ["bc", "aliased", "wrapper", "out"] {
+            assert_eq!(
+                aliased_summaries.get(name),
+                Some(&true),
+                "the alias f = bc must propagate the dynamic helper summary through {name}"
+            );
+        }
+        let aliased_defs = cached_program_defs(&aliased);
+        let aliased_body =
+            lookup_program_def(&aliased_defs, "aliased").expect("aliased definition");
+        let alias_call = issue_1205_find_named_app(aliased_body, "f").expect("local f call");
+        let mut aliased_facts = HashMap::new();
+        analyze_tensor_helper_preflight(aliased_body, &aliased_summaries, &mut aliased_facts);
+        assert!(
+            aliased_facts[&(alias_call as *const Expr as usize)].reaches_dynamic_to_tensor,
+            "the local f call must inherit the aliased top-level bc summary"
+        );
+
+        let effected = chelis_effects::check_program(&aliased).expect("effect check");
+        let checked = chelis_types::check_linearity(&effected).expect("linearity check");
+        reset_host_work_profile();
+        try_lower_compiled_program(&checked).expect("aliased fixture lowers");
+        let profile = take_host_work_profile();
+        assert_eq!(
+            profile.tensor_helper_builtin_load_rejections, 0,
+            "aliased dynamic helpers must be rejected by preflight, not after DAG lowering: {profile:?}"
+        );
     }
 
     /// harden-bounded-monomorphization D4: the interning identity is the

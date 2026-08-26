@@ -6,7 +6,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 thread_local! {
     /// When set, `lower_unrepresentable` panics with a quiet empty payload
@@ -1176,27 +1176,51 @@ pub fn try_lower_subexpr_program(
     program_defs: HashMap<String, Expr>,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    assert_decode_once_in_env("lower_subexpr_program: type_env", &full_type_env);
+    let context = prepare_subexpr_lowering_context(&full_type_env, Arc::new(program_defs));
+    try_lower_subexpr_program_with_context(expr, scoped_tensor_types, &context)
+}
+
+#[derive(Clone)]
+pub(crate) struct SubexprLoweringContext {
+    program_types: Arc<HashMap<String, TensorType>>,
+    program_defs: Arc<HashMap<String, Expr>>,
+}
+
+pub(crate) fn prepare_subexpr_lowering_context(
+    full_type_env: &HashMap<String, Expr>,
+    program_defs: Arc<HashMap<String, Expr>>,
+) -> SubexprLoweringContext {
+    assert_decode_once_in_env("lower_subexpr_program: type_env", full_type_env);
     assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
-    catch_lowering(|| {
-        lower_subexpr_program_inner(expr, scoped_tensor_types, full_type_env, program_defs)
-    })
+    let program_types = full_type_env
+        .iter()
+        .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+        .collect();
+    SubexprLoweringContext {
+        program_types: Arc::new(program_types),
+        program_defs,
+    }
+}
+
+pub(crate) fn try_lower_subexpr_program_with_context(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+) -> Result<Dag, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    catch_lowering(|| lower_subexpr_program_inner(expr, scoped_tensor_types, context))
 }
 
 fn lower_subexpr_program_inner(
     expr: &Expr,
     scoped_tensor_types: HashMap<String, TensorType>,
-    full_type_env: HashMap<String, Expr>,
-    program_defs: HashMap<String, Expr>,
+    context: &SubexprLoweringContext,
 ) -> Dag {
-    let scoped_tensor_types_for_bindings = scoped_tensor_types.clone();
-    let mut merged_types = full_type_env
-        .iter()
-        .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-        .collect::<HashMap<_, _>>();
-    merged_types.extend(scoped_tensor_types);
-
-    let mut ctx = LowerCtx::new(merged_types, program_defs, LinearityInfo::default());
+    let mut ctx = LowerCtx::new(
+        context.program_types.clone(),
+        context.program_defs.clone(),
+        LinearityInfo::default(),
+    );
     // Pre-create a `Load` for every scoped tensor param in a DETERMINISTIC
     // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `HashMap`,
     // whose iteration order is randomized per process; using it directly made
@@ -1210,8 +1234,7 @@ fn lower_subexpr_program_inner(
     // invariant and chelis#469's positive oracle). Sorting by name makes the
     // kernel ABI stable; the host caller maps arguments by `input_label`, so
     // the slot order is internal and any stable order is correct.
-    let mut scoped_bindings: Vec<(String, TensorType)> =
-        scoped_tensor_types_for_bindings.into_iter().collect();
+    let mut scoped_bindings: Vec<(String, TensorType)> = scoped_tensor_types.into_iter().collect();
     scoped_bindings.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (name, tensor_ty) in scoped_bindings {
         let load = ctx.dag.add_node(
@@ -3889,6 +3912,18 @@ fn static_to_tensor_literal(expr: &Expr) -> Option<LiteralToTensor> {
     extract_cons_chain_tensor(arg)
 }
 
+/// Whether `expr` is the statically materializable `to_tensor` form handled
+/// by the tensor DAG lowerer.
+///
+/// The host lowerer's tensor-helper preflight uses this exact recognizer to
+/// distinguish a literal that will lower from a runtime-shaped `to_tensor`
+/// that would become an unresolved builtin `Load` and be rejected after a
+/// full speculative walk. Keeping the classification here prevents the
+/// preflight from drifting from the lowering rule it predicts.
+pub(crate) fn is_static_to_tensor_literal(expr: &Expr) -> bool {
+    static_to_tensor_literal(expr).is_some()
+}
+
 /// Return true iff `expr` is `(var {} <expected_name>)`. Helper for
 /// recognizing builtin-name references in app callee position.
 fn expr_is_var_named(expr: &Expr, expected_name: &str) -> bool {
@@ -4477,8 +4512,8 @@ struct LowerCtx {
     /// `shape_bindings`). Saved/restored across binding scopes.
     static_size_bindings: HashMap<String, i64>,
     local_callables: HashMap<String, Expr>,
-    program_types: HashMap<String, TensorType>,
-    program_defs: HashMap<String, Expr>,
+    program_types: Arc<HashMap<String, TensorType>>,
+    program_defs: Arc<HashMap<String, Expr>>,
     random_seed: Option<u64>,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
@@ -4578,8 +4613,8 @@ struct LowerCtx {
 
 impl LowerCtx {
     fn new(
-        program_types: HashMap<String, TensorType>,
-        program_defs: HashMap<String, Expr>,
+        program_types: impl Into<Arc<HashMap<String, TensorType>>>,
+        program_defs: impl Into<Arc<HashMap<String, Expr>>>,
         linearity: LinearityInfo,
     ) -> Self {
         Self {
@@ -4589,8 +4624,8 @@ impl LowerCtx {
             shape_bindings: HashMap::new(),
             static_size_bindings: HashMap::new(),
             local_callables: HashMap::new(),
-            program_types,
-            program_defs,
+            program_types: program_types.into(),
+            program_defs: program_defs.into(),
             random_seed: None,
             linearity,
             inlining_depths: HashMap::new(),
@@ -13390,7 +13425,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect(),
+                .collect::<HashMap<_, _>>(),
             collect_top_level_defs(checked.exprs()),
             LinearityInfo::default(),
         );
@@ -13495,7 +13530,7 @@ mod tests {
                     .type_env()
                     .iter()
                     .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                    .collect(),
+                    .collect::<HashMap<_, _>>(),
                 program_defs.clone(),
                 LinearityInfo::default(),
             );
@@ -13506,7 +13541,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect(),
+                .collect::<HashMap<_, _>>(),
             program_defs.clone(),
             LinearityInfo::default(),
         );
@@ -13550,7 +13585,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect(),
+                .collect::<HashMap<_, _>>(),
             program_defs,
             LinearityInfo::default(),
         );

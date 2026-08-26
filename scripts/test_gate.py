@@ -647,6 +647,24 @@ class ListOutputTests(unittest.TestCase):
         )
         self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
 
+    def test_front_end_performance_oracle_runs_in_continuous_integration(self):
+        command = "<managed-python> scripts/compiler_front_end_performance.py"
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["integration"]],
+        )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+        self.assertNotIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+            "the focused crate runs are CI-owned; --local already runs each changed crate",
+        )
+        script = REPO_ROOT / "scripts" / "compiler_front_end_performance.py"
+        self.assertTrue(script.is_file())
+        self.assertIn(
+            "compiler front-end performance oracle: PASS", script.read_text()
+        )
+
     def test_the_oracles_stage_is_a_job_that_installs_nextest(self):
         # Both of the oracle's compiled obligations run `cargo nextest`. The
         # lint-and-unit job deliberately does not install it, so placing the
@@ -896,7 +914,7 @@ class ListOutputTests(unittest.TestCase):
         seen, _ = self._recorded_child_environments(
             gate.STAGES["integration"]
         )
-        self.assertEqual(len(seen), 2)
+        self.assertEqual(len(seen), len(gate.STAGES["integration"]))
         for environment in seen:
             self.assertNotIn(gate.ORACLE_BINARY_ENV, environment)
 
