@@ -193,35 +193,71 @@ use std::collections::{HashMap, HashSet};
 /// function not yet in the summary, an unmodeled `HostExprKind`), so the
 /// emit site over-retains rather than risking a use-after-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ReturnsArg {
+enum ParamAlias {
     Indices(HashSet<usize>),
     Any,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReturnsArg {
+    params: ParamAlias,
+    /// chelis#1222: the result may be a value the caller never handed in --
+    /// a top-level binding read as a free variable somewhere in the body
+    /// (issue #352 hoists such a binding to file scope, so the body reads
+    /// it by name). `main` already owns that allocation through the
+    /// binding itself, so a caller that also claimed the call result would
+    /// release one allocation twice. Widened exactly like `params`: any
+    /// arm, any `let` body, or any callee that can hand back an enclosing
+    /// scope's value sets it.
+    outer: bool,
+}
+
 impl ReturnsArg {
     fn empty() -> Self {
-        ReturnsArg::Indices(HashSet::new())
+        ReturnsArg {
+            params: ParamAlias::Indices(HashSet::new()),
+            outer: false,
+        }
+    }
+
+    /// A result that is an enclosing scope's value rather than a fresh
+    /// allocation or one of this function's own parameters (chelis#1222).
+    fn outer() -> Self {
+        ReturnsArg {
+            params: ParamAlias::Indices(HashSet::new()),
+            outer: true,
+        }
     }
 
     /// Join two result-alias summaries (the `if`/`match`-arm union or the
     /// fixpoint widening). `Any` absorbs everything; otherwise the index
-    /// sets are unioned.
+    /// sets are unioned and the outer-alias flags are or-ed.
     fn join(self, other: ReturnsArg) -> ReturnsArg {
-        match (self, other) {
-            (ReturnsArg::Any, _) | (_, ReturnsArg::Any) => ReturnsArg::Any,
-            (ReturnsArg::Indices(mut a), ReturnsArg::Indices(b)) => {
+        let params = match (self.params, other.params) {
+            (ParamAlias::Any, _) | (_, ParamAlias::Any) => ParamAlias::Any,
+            (ParamAlias::Indices(mut a), ParamAlias::Indices(b)) => {
                 a.extend(b);
-                ReturnsArg::Indices(a)
+                ParamAlias::Indices(a)
             }
+        };
+        ReturnsArg {
+            params,
+            outer: self.outer || other.outer,
         }
     }
 
     /// Does the result possibly alias parameter index `i`?
     fn may_return(&self, i: usize) -> bool {
-        match self {
-            ReturnsArg::Any => true,
-            ReturnsArg::Indices(s) => s.contains(&i),
+        match &self.params {
+            ParamAlias::Any => true,
+            ParamAlias::Indices(s) => s.contains(&i),
         }
+    }
+
+    /// Does the result possibly alias a value owned by an enclosing scope
+    /// (chelis#1222)? A caller must not claim ownership of such a result.
+    fn may_return_outer(&self) -> bool {
+        self.outer
     }
 }
 
@@ -259,7 +295,13 @@ fn analyze_returns_arg(program: &HostProgram) -> HashMap<String, ReturnsArg> {
                 .map(|(i, p)| (p.name.as_str(), i))
                 .collect();
             let mut env: HashMap<String, ReturnsArg> = HashMap::new();
-            let computed = result_alias_set(&function.body, &param_index, &summary, &mut env);
+            let computed = result_alias_set(
+                &function.body,
+                &param_index,
+                &summary,
+                &mut env,
+                &function.tensor_helpers,
+            );
             let entry = summary
                 .entry(function.name.clone())
                 .or_insert_with(ReturnsArg::empty);
@@ -292,34 +334,76 @@ fn result_alias_set(
     param_index: &HashMap<&str, usize>,
     summary: &HashMap<String, ReturnsArg>,
     env: &mut HashMap<String, ReturnsArg>,
+    helpers: &[HostTensorHelper],
 ) -> ReturnsArg {
     match &expr.kind {
         HostExprKind::Var(name, _) => {
-            if let Some(&i) = param_index.get(name.as_str()) {
-                ReturnsArg::Indices(HashSet::from([i]))
-            } else if let Some(set) = env.get(name) {
+            // chelis#1222: `env` first, `param_index` second. Parameters are
+            // the function's outermost scope, so any binder currently in
+            // `env` shadows one that reuses its name. Asking `param_index`
+            // first made a `let` binder invisible to the analysis: for
+            // `def f(p) = { p = g  p }` the body reported "returns parameter
+            // 0" instead of `outer`, and the caller then claimed the
+            // captured global `g` and released it a second time. The three
+            // binder arms below already save and restore what they shadow,
+            // so `env` is the authority on what a name means here.
+            if let Some(set) = env.get(name) {
                 set.clone()
-            } else {
-                // An outer-scope / global name: not one of this
-                // function's parameters, so it does not alias any
-                // parameter. (A captured global is owned elsewhere.)
+            } else if let Some(&i) = param_index.get(name.as_str()) {
+                ReturnsArg {
+                    params: ParamAlias::Indices(HashSet::from([i])),
+                    outer: false,
+                }
+            } else if name == "Nil" || name == "None" {
+                // Emitted as a fresh empty list / `None` payload, not as a
+                // read of an enclosing binding.
                 ReturnsArg::empty()
+            } else {
+                // A free variable: a top-level binding this function
+                // captured. The allocation is owned elsewhere (chelis#1222),
+                // so the result is borrowed rather than fresh, and a caller
+                // that released it would release it a second time.
+                ReturnsArg::outer()
             }
         }
         HostExprKind::Let { bindings, body, .. } => {
+            // chelis#1222: save what each binder shadows and put it back at
+            // the end, the way the `MatchOption` and `MatchAdt` arms below
+            // already do. Without this a `let` binder's meaning outlives its
+            // block: a sibling branch reading the same NAME finds the inner
+            // (fresh) set instead of falling through to `outer()`, the
+            // summary reports `may_return_outer() == false` for a function
+            // that does return an outer value, and the caller then claims a
+            // borrowed result and releases it twice.
+            //
+            // The insert stays AFTER the value walk: the initializer is
+            // evaluated in the enclosing scope and may read the outer
+            // meaning of the very name being bound.
+            let mut saved: Vec<(String, Option<ReturnsArg>)> = Vec::new();
             for binding in bindings {
-                let set = result_alias_set(&binding.value, param_index, summary, env);
-                env.insert(binding.name.clone(), set);
+                let set = result_alias_set(&binding.value, param_index, summary, env, helpers);
+                saved.push((binding.name.clone(), env.insert(binding.name.clone(), set)));
             }
-            result_alias_set(body, param_index, summary, env)
+            let result = result_alias_set(body, param_index, summary, env, helpers);
+            for (name, prev) in saved.into_iter().rev() {
+                match prev {
+                    Some(set) => {
+                        env.insert(name, set);
+                    }
+                    None => {
+                        env.remove(&name);
+                    }
+                }
+            }
+            result
         }
         HostExprKind::If {
             then_expr,
             else_expr,
             ..
         } => {
-            let t = result_alias_set(then_expr, param_index, summary, env);
-            let e = result_alias_set(else_expr, param_index, summary, env);
+            let t = result_alias_set(then_expr, param_index, summary, env, helpers);
+            let e = result_alias_set(else_expr, param_index, summary, env, helpers);
             t.join(e)
         }
         HostExprKind::MatchOption {
@@ -332,7 +416,7 @@ fn result_alias_set(
             // fresh scalar/boxed extraction), not a parameter; shadow any
             // outer entry with the empty set for the `some` arm.
             let prev = env.insert(bind_name.clone(), ReturnsArg::empty());
-            let s = result_alias_set(some_expr, param_index, summary, env);
+            let s = result_alias_set(some_expr, param_index, summary, env, helpers);
             match prev {
                 Some(set) => {
                     env.insert(bind_name.clone(), set);
@@ -341,7 +425,7 @@ fn result_alias_set(
                     env.remove(bind_name);
                 }
             }
-            let n = result_alias_set(none_expr, param_index, summary, env);
+            let n = result_alias_set(none_expr, param_index, summary, env, helpers);
             s.join(n)
         }
         HostExprKind::MatchAdt {
@@ -365,7 +449,13 @@ fn result_alias_set(
                         )
                     })
                     .collect();
-                acc = acc.join(result_alias_set(&arm.expr, param_index, summary, env));
+                acc = acc.join(result_alias_set(
+                    &arm.expr,
+                    param_index,
+                    summary,
+                    env,
+                    helpers,
+                ));
                 for (name, prev) in saved {
                     match prev {
                         Some(set) => {
@@ -378,7 +468,13 @@ fn result_alias_set(
                 }
             }
             if let Some(default) = default_expr {
-                acc = acc.join(result_alias_set(default, param_index, summary, env));
+                acc = acc.join(result_alias_set(
+                    default,
+                    param_index,
+                    summary,
+                    env,
+                    helpers,
+                ));
             }
             acc
         }
@@ -389,22 +485,45 @@ fn result_alias_set(
             // its arguments (conservative top): any argument that itself
             // aliases a parameter then propagates.
             let callee = summary.get(function);
-            let mut acc = ReturnsArg::empty();
+            // chelis#1222: an outer-scope value the callee hands back is
+            // still an outer-scope value here. An unsummarized callee is
+            // conservatively assumed to do so.
+            let mut acc = match callee {
+                Some(s) if !s.may_return_outer() => ReturnsArg::empty(),
+                _ => ReturnsArg::outer(),
+            };
             for (i, arg) in args.iter().enumerate() {
                 let returns_this = match callee {
                     Some(s) => s.may_return(i),
                     None => true,
                 };
                 if returns_this {
-                    acc = acc.join(result_alias_set(arg, param_index, summary, env));
+                    acc = acc.join(result_alias_set(arg, param_index, summary, env, helpers));
                 }
             }
             acc
         }
-        HostExprKind::WithSeed { body, .. } => result_alias_set(body, param_index, summary, env),
-        // Constructors, literals, builtins, field access, the iterator
-        // lanes, and tensor calls all build fresh allocations whose
-        // result does not alias an incoming parameter pointer. (A builtin
+        HostExprKind::WithSeed { body, .. } => {
+            result_alias_set(body, param_index, summary, env, helpers)
+        }
+        // chelis#1222: an identity tensor helper's whole body is
+        // `outputs[0] = inputs[0];` (see `identity_helper_input`), so the
+        // call hands back its argument's pointer rather than allocating.
+        // Its provenance is the argument's. Every other helper writes a
+        // freshly allocated `chelis_contiguous` output, which is why the
+        // catch-all below reports a fresh result for the rest.
+        HostExprKind::TensorCall { helper, args, .. } => {
+            match (
+                helpers.get(*helper).and_then(identity_helper_input),
+                args.first(),
+            ) {
+                (Some(_), Some(arg)) => result_alias_set(arg, param_index, summary, env, helpers),
+                _ => ReturnsArg::empty(),
+            }
+        }
+        // Constructors, literals, builtins, field access, and the iterator
+        // lanes all build fresh allocations whose result does not alias an
+        // incoming parameter pointer. (A builtin
         // like `id` is not a user function call; the few identity-shaped
         // builtins still hand back a retained/independent reference, so
         // treating them as fresh here is sound for the block-release
@@ -1779,12 +1898,24 @@ fn emit_main(
     for (index, binding) in program.globals.iter().enumerate() {
         let binding_var = format!("__binding_{index}_value");
         emitter.emit_expr_to_var(&binding.value, &binding_var, &binding.ty)?;
-        // The binding-value local owns its allocation regardless of how
-        // it was produced (tensor kernel output, list/dict builtin,
-        // literal). Track it here; the alias name (`theta`) is never
-        // tracked, and dedup in `emit_scope_releases` collapses the case
-        // where the binding value *is* a literal already tracked above.
-        emitter.track_owned_alloc(&binding_var, &binding.ty);
+        // The binding-value local owns its allocation when the binding
+        // built one (tensor kernel output, list/dict builtin, literal).
+        // Track it here; the alias name (`theta`) is never tracked, and
+        // dedup in `emit_scope_releases` collapses the case where the
+        // binding value *is* a literal already tracked above.
+        //
+        // chelis#1222: a binding can instead be a second *name* for an
+        // allocation an earlier binding already owns -- `rho = rho_base`,
+        // an `if`/`match` whose arms are existing bindings, a call to a
+        // function that returns one of its arguments or a captured
+        // top-level binding, or an identity tensor helper. `main` frees
+        // one pointer per tracked variable, so claiming such a binding
+        // frees one allocation twice: a `chelis_free` double free for a
+        // tensor, an unearned release for a refcounted container. Leave it
+        // untracked; the owning binding's release reclaims it exactly once.
+        if !emitter.scope_already_owns(&binding_var) {
+            emitter.track_owned_alloc(&binding_var, &binding.ty);
+        }
         if hoisted.contains(binding.name.as_str()) {
             // Declared at file scope (issue #352); assign, don't shadow.
             // #379: reference the same mangled name the file-scope `static`
@@ -1798,6 +1929,13 @@ fn emit_main(
                 "    {} = __binding_{index}_value;",
                 c_decl(&binding.ty, &binding.name)?
             ));
+        }
+        // chelis#1222: the user-facing name is a second slot holding the
+        // same pointer as the value temp. Record it so a later binding
+        // that reads the name resolves back to the temp `main` tracks.
+        if release_call(&binding.name, &binding.ty).is_some() {
+            let name = c_ident(&binding.name).into_owned();
+            emitter.record_alias(&name, &binding_var);
         }
     }
     for binding in &program.globals {
@@ -2115,6 +2253,29 @@ fn host_functions_reachable_from_main(program: &HostProgram) -> HashSet<String> 
     reachable
 }
 
+/// chelis#1222: the spelling of a binder's alias-graph key.
+///
+/// A binder key shares one namespace with every other string
+/// [`HostEmitter::alias_source`] is keyed on, and the other inhabitants of
+/// that namespace are C identifiers: emitter temps, and -- through
+/// [`HostEmitter::resolve_alias_key`]'s fallback -- the `c_ident` spelling
+/// of any name no binder scope introduced (a hoisted top-level binding, a
+/// compiled function's parameter).
+///
+/// The key must therefore be a string no source identifier can produce.
+/// `#` is the discriminator: it is not a Chelis identifier character, so
+/// `c_ident` can never return a name containing one, while the key itself
+/// is only ever a `HashMap` key and never reaches emitted C.
+///
+/// The first cut spelled keys `__bind_N`, on `c_ident`'s premise that
+/// "Surf/Deep identifiers cannot start with `__`". The lexer and checker
+/// accept such identifiers, so `__bind_0 = to_tensor([1.0f32, 2.0f32])`
+/// beside any `let` block overwrote the top-level binding's alias edge and
+/// re-armed the chelis#1222 double free -- reachable only by spelling the
+/// binding a particular way, which is exactly the alpha-dependence this
+/// mechanism exists to remove.
+const BINDER_KEY_PREFIX: &str = "#bind#";
+
 struct HostEmitter<'a> {
     lines: Vec<String>,
     indent: String,
@@ -2161,6 +2322,58 @@ struct HostEmitter<'a> {
     /// tracked block (e.g. `emit_main`, whose alias handling is the distinct
     /// global-binding path above).
     let_scopes: Vec<LetReleaseScope>,
+    /// chelis#1222: C variables whose value is a bare pointer copy of
+    /// another C variable's allocation, mapped to that source variable.
+    ///
+    /// A scope may only release what it allocated. Every emitted
+    /// `target = source;` that hands one allocation to a second slot is
+    /// recorded here, so a slot can be traced back to the variable that
+    /// actually owns its pointer before the scope claims it. Chains are
+    /// resolved by [`HostEmitter::alias_root`].
+    ///
+    /// Only heap-owning types are recorded: a scalar copy owns nothing, so
+    /// tracking it would be noise. `let`-binding *names* are deliberately
+    /// not recorded either -- the block-release ledger tracks the name, not
+    /// its `__let_N` value temp, so a chain through the name would report a
+    /// binding this block genuinely owns as borrowed.
+    alias_source: HashMap<String, String>,
+    /// chelis#1222: C variables holding a pointer this scope did not
+    /// allocate and whose owner it cannot name -- the result of a call
+    /// whose callee may hand back a value it read out of an enclosing
+    /// scope (`may_return_outer`). There is no source variable to record,
+    /// only the fact that claiming ownership would be wrong.
+    foreign: HashSet<String>,
+    /// chelis#1222: a stack of binder scopes, mapping a **raw source name**
+    /// to the alias-graph key that currently means it.
+    ///
+    /// A source name is not a usable key on its own. C identifiers are
+    /// scoped and reusable, so one name can have two live meanings, and a
+    /// name-keyed graph silently conflates them: the outer meaning is the
+    /// one a later reference needs, while the inner one is what the map
+    /// holds. Every binder therefore gets its own [`BINDER_KEY_PREFIX`] key,
+    /// and references resolve through this stack before touching the graph,
+    /// so a bound name's *spelling* never reaches `alias_source` at all.
+    ///
+    /// That is what makes the ownership decision alpha-invariant: renaming
+    /// a bound variable cannot change which allocations get released. The
+    /// key spelling is part of that guarantee, not decoration -- a key a
+    /// source identifier could also spell puts the two back in one slot.
+    ///
+    /// `result_alias_set`'s `env` is the analysis-side counterpart and now
+    /// saves and restores shadowed names in all three of its binder arms.
+    /// The `Let` arm did not until chelis#1222, so an earlier version of
+    /// this comment cited a precedent that did not exist.
+    binder_keys: Vec<HashMap<String, String>>,
+    /// chelis#1222: counter for [`HostEmitter::bind_alias_key`].
+    ///
+    /// Deliberately NOT `temp_counter`. A binder key is a key in
+    /// `alias_source` and never appears in emitted C, so drawing from the
+    /// emitted-temp counter would renumber every later temp in the
+    /// translation unit -- a corpus-wide textual diff that says nothing
+    /// about behaviour and hides the diff that would. Measured: sharing
+    /// the counter changed the emitted C of 21 of 76 corpus files with
+    /// identical release counts in all 21.
+    binder_key_counter: usize,
 }
 
 /// One open release-tracking `let` block; see `HostEmitter::let_scopes`.
@@ -2199,7 +2412,149 @@ impl<'a> HostEmitter<'a> {
             temp_counter: 0,
             scope_releases: None,
             let_scopes: Vec::new(),
+            alias_source: HashMap::new(),
+            foreign: HashSet::new(),
+            binder_keys: Vec::new(),
+            binder_key_counter: 0,
         }
+    }
+
+    /// chelis#1222: record that `target` now holds `source`'s pointer.
+    /// Self-aliases are dropped so [`HostEmitter::alias_root`] cannot spin.
+    fn record_alias(&mut self, target: &str, source: &str) {
+        if target == source {
+            return;
+        }
+        self.alias_source
+            .insert(target.to_string(), source.to_string());
+    }
+
+    /// chelis#1222: a builtin whose emitted form is `target = <arg temp>;`
+    /// hands the argument's pointer straight through, so `target` owns
+    /// nothing of its own and the receiving scope must trace it back before
+    /// claiming it.
+    ///
+    /// `source` is an emitter temp, never a source name, so it needs no
+    /// [`HostEmitter::resolve_alias_key`] pass. Only heap-owning types are
+    /// recorded, matching the `Var` arm: a scalar copy owns nothing.
+    ///
+    /// Recording is right whether or not the argument was itself borrowed.
+    /// A fresh argument's temp has no outgoing edge, so the chain ends at a
+    /// variable this scope allocated and never tracked and `target` is still
+    /// claimed; a borrowed one reaches its owner and is not. Without this,
+    /// `b = debug(a)` freed `a`'s tensor twice -- the reported chelis#1222
+    /// shape, through a builtin instead of a bare name.
+    ///
+    /// `arg` is the unlowered argument expression. When it is a bare `Var`,
+    /// this is the same transfer the `Var` arm of [`HostEmitter::assign_expr`]
+    /// performs, so it takes the same issue #406 escape retain: a block
+    /// binding that reaches an owned destination through such a builtin is
+    /// released at the block close like any other, and without the retain
+    /// `b = { c = [1i64]  debug(c) }` released one allocation twice.
+    fn record_pointer_copy(&mut self, target: &str, source: &str, arg: &HostExpr, ty: &HostType) {
+        if let HostExprKind::Var(name, _) = &arg.kind {
+            self.retain_transferred_result(target, name, ty);
+        }
+        if release_call(target, ty).is_some() {
+            self.record_alias(target, source);
+        }
+    }
+
+    /// chelis#1222: record that `target` holds a pointer from an enclosing
+    /// scope that this emitter cannot attribute to a local variable.
+    fn mark_foreign(&mut self, target: &str) {
+        self.foreign.insert(target.to_string());
+    }
+
+    /// chelis#1222: the alias-graph key that currently means `name`.
+    ///
+    /// Walks the binder stack innermost-first, exactly as C name lookup
+    /// does, and falls back to the `c_ident`-mapped name for anything no
+    /// binder scope introduced -- a compiled function's parameter, a
+    /// hoisted top-level binding, or a temp. Those are already unique
+    /// within one emitted C function body, so the fallback needs no key of
+    /// its own.
+    fn resolve_alias_key(&self, name: &str) -> String {
+        self.binder_keys
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).cloned())
+            .unwrap_or_else(|| c_ident(name).into_owned())
+    }
+
+    /// chelis#1222: give `name` its own alias-graph key inside the innermost
+    /// binder scope.
+    ///
+    /// Call this only AFTER the binder's initializer has been emitted. The
+    /// initializer is evaluated in the *enclosing* scope and may read the
+    /// outer meaning of this very name (`a = a`); binding the name first
+    /// would make that read resolve to the binder being defined. The
+    /// analysis side already sequences it this way -- `result_alias_set`
+    /// computes a binding's set before inserting the name -- and getting it
+    /// backwards here is precisely the defect that produced a double free
+    /// for `b = { a = a  a }` while `b = { z = a  z }` was correct.
+    ///
+    /// The key is spelled with [`BINDER_KEY_PREFIX`] so no source identifier
+    /// can name one; see that constant for why a `__`-prefixed key was a
+    /// double free waiting to be spelled.
+    fn bind_alias_key(&mut self, name: &str) -> String {
+        let key = format!("{BINDER_KEY_PREFIX}{}", self.binder_key_counter);
+        self.binder_key_counter += 1;
+        if let Some(frame) = self.binder_keys.last_mut() {
+            frame.insert(name.to_string(), key.clone());
+        }
+        key
+    }
+
+    /// chelis#1222: follow `var` back through the recorded pointer copies,
+    /// returning every variable that holds the same allocation, `var`
+    /// first and the owner last. A single-element chain means nothing
+    /// aliased into `var`, so its value is freshly allocated. The `seen`
+    /// set makes the walk total even if a future emit path records a
+    /// cycle.
+    ///
+    /// The whole chain matters, not just its end: a `let` block's result
+    /// reaches an outer binding through the block's own binding name and
+    /// value temp, and which of those links is a slot somebody already
+    /// releases is exactly the ownership question.
+    fn alias_chain(&self, var: &str) -> Vec<String> {
+        let mut chain = vec![var.to_string()];
+        let mut seen: HashSet<String> = HashSet::from([var.to_string()]);
+        while let Some(next) = self.alias_source.get(chain.last().expect("non-empty")) {
+            if !seen.insert(next.clone()) {
+                break;
+            }
+            chain.push(next.clone());
+        }
+        chain
+    }
+
+    /// chelis#1222: the variable at the end of `var`'s alias chain.
+    fn alias_root(&self, var: &str) -> String {
+        self.alias_chain(var)
+            .pop()
+            .expect("alias chain is never empty")
+    }
+
+    /// chelis#1222: is `var`'s allocation already owned by another slot
+    /// this scope releases, or by a scope outside this one?
+    ///
+    /// `main` frees one allocation per tracked variable, so tracking a
+    /// second variable that holds the same pointer frees it twice -- for a
+    /// tensor that is a hard `chelis_free` double free, and for a
+    /// refcounted container a release the ledger never earned. Both are
+    /// heap corruption; the answer here decides whether the value is
+    /// claimed at all.
+    fn scope_already_owns(&self, var: &str) -> bool {
+        let chain = self.alias_chain(var);
+        if chain.iter().any(|link| self.foreign.contains(link)) {
+            return true;
+        }
+        self.scope_releases.as_ref().is_some_and(|tracked| {
+            chain
+                .iter()
+                .any(|link| tracked.iter().any(|(name, _)| name == link))
+        })
     }
 
     /// Record `var` (of `ty`) as a heap-owning allocation this scope must
@@ -2275,10 +2630,13 @@ impl<'a> HostEmitter<'a> {
             .let_scopes
             .iter()
             .any(|scope| scope.owned_destinations.contains(target));
+        // chelis#1222: `bindings` holds alias keys, not spellings, so the
+        // incoming source name resolves the same way a reference does.
+        let source_key = self.resolve_alias_key(source);
         let source_is_binding = self
             .let_scopes
             .iter()
-            .any(|scope| scope.bindings.contains(source));
+            .any(|scope| scope.bindings.contains(&source_key));
         if !(target_is_owned && source_is_binding) {
             return;
         }
@@ -2393,6 +2751,14 @@ impl<'a> HostEmitter<'a> {
                     self.lines
                         .push(format!("{}{target} = {};", self.indent, c_ident(name)));
                     self.retain_transferred_result(target, name, ty);
+                    // chelis#1222: `target` now holds `name`'s pointer. Only
+                    // a heap-owning type can be released twice, so only
+                    // those are recorded -- and the link is to the key that
+                    // currently means `name`, never to the spelling.
+                    if release_call(target, ty).is_some() {
+                        let source = self.resolve_alias_key(name);
+                        self.record_alias(target, &source);
+                    }
                 }
             }
             HostExprKind::Call {
@@ -2492,7 +2858,17 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 }
+                // chelis#1222: the binder shadows any enclosing name it
+                // reuses. Its key carries no outgoing edge, because the
+                // value is freshly extracted here rather than copied from
+                // something this scope already owns -- which is also what
+                // keeps emitted C unchanged for every program that does not
+                // shadow: a reference to it dead-ends exactly as it does
+                // today.
+                self.binder_keys.push(HashMap::new());
+                self.bind_alias_key(bind_name);
                 self.assign_expr(target, some_expr, ty)?;
+                self.binder_keys.pop();
                 self.indent = previous.clone();
                 self.lines.push(format!("{}}} else {{", self.indent));
                 let nested_indent = format!("{}    ", self.indent);
@@ -2533,6 +2909,12 @@ impl<'a> HostEmitter<'a> {
                     owned_destinations: HashSet::from([target.to_string()]),
                     bindings: HashSet::new(),
                 });
+                // chelis#1222: open a binder scope. It starts EMPTY on
+                // purpose -- each name enters only after its own initializer
+                // has been emitted, because that initializer runs in the
+                // enclosing scope and may read the outer meaning of the very
+                // name being bound.
+                self.binder_keys.push(HashMap::new());
                 let mut heap_bindings: Vec<(String, HostType)> = Vec::new();
                 for binding in bindings {
                     // Compute the value into a temp before declaring the binding name.
@@ -2566,16 +2948,44 @@ impl<'a> HostEmitter<'a> {
                         c_ident(&binding.name),
                         temp
                     ));
+                    // chelis#1222: the binding is a second slot on the same
+                    // pointer, and a block whose body is that name hands the
+                    // allocation to the outer scope through it, so the chain
+                    // has to cross it. Give it a key of its own now that the
+                    // initializer has been emitted -- see `bind_alias_key`
+                    // for why the ordering is the whole fix.
+                    let binder_key = self.bind_alias_key(&binding.name);
+                    if release_call(&binding.name, &binding.ty).is_some() {
+                        self.record_alias(&binder_key, &temp);
+                    }
                     // Track the binding name (not its `__let_N` temp: the
                     // two alias the same allocation, so releasing only the
                     // name frees it exactly once). Add it to the scope's
                     // binding set after its value is computed so a binding
                     // whose value reads an *earlier* binding still retains
                     // on that transfer.
+                    //
+                    // chelis#1222 deliberately does NOT gate this on whether
+                    // the value looks borrowed. `emit_main`'s sibling rule
+                    // ("cannot prove ownership, so do not claim") runs once
+                    // per PROGRAM and its residual is bounded by the number
+                    // of top-level bindings. The same rule here would run
+                    // once per CALL, turning every unprovable case into a
+                    // leak that grows with the call count -- measurably, in
+                    // `Std.Io.Json` and `Std.Decimal`. Releasing a reference
+                    // this block never acquired is still wrong, but the fix
+                    // has to establish ownership positively rather than
+                    // infer a borrow from missing evidence. Tracked as the
+                    // block-scope follow-up in the PR.
                     if binding_release(&binding.name, &binding.ty).is_some() {
                         heap_bindings.push((binding.name.clone(), binding.ty.clone()));
                         if let Some(scope) = self.let_scopes.last_mut() {
-                            scope.bindings.insert(binding.name.clone());
+                            // Keyed, not spelled: `retain_transferred_result`
+                            // and `retain_call_escaped_args` resolve a
+                            // reference before testing membership, so a
+                            // shadowing binder elsewhere cannot match this
+                            // block's binding by name alone (chelis#1222).
+                            scope.bindings.insert(binder_key.clone());
                         }
                     }
                 }
@@ -2590,6 +3000,11 @@ impl<'a> HostEmitter<'a> {
                     }
                 }
                 self.let_scopes.pop();
+                // The frame goes; the edges it recorded stay. A value that
+                // escaped this block still reaches its owner through the
+                // popped binder's key, which is why nothing has to be
+                // collapsed or rewritten on the way out (chelis#1222).
+                self.binder_keys.pop();
                 self.indent = previous;
                 self.lines.push(format!("{}}}", self.indent));
             }
@@ -2962,6 +3377,7 @@ impl<'a> HostEmitter<'a> {
             "copy" => {
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
+                self.record_pointer_copy(target, &arg_vars[0].0, &args[0], ty);
                 return Ok(());
             }
             "tuple-get" => {
@@ -3416,6 +3832,7 @@ impl<'a> HostEmitter<'a> {
                 self.emit_print_value(&arg_vars[0].0, &arg_vars[0].1)?;
                 self.lines
                     .push(format!("{}{target} = {};", self.indent, arg_vars[0].0));
+                self.record_pointer_copy(target, &arg_vars[0].0, &args[0], ty);
                 return Ok(());
             }
             _ => {}
@@ -4465,6 +4882,14 @@ impl<'a> HostEmitter<'a> {
             };
             tensor_args.push(entry);
         }
+        // chelis#1222: an identity helper's whole body is
+        // `outputs[0] = inputs[0];` (see `identity_helper_input`), so its
+        // result is its argument's pointer, not a fresh allocation.
+        let identity_source = self
+            .tensor_helpers
+            .get(helper)
+            .and_then(identity_helper_input)
+            .and(tensor_args.first().map(|(name, _)| name.clone()));
         let outputs_name = self.next_temp("outputs");
         // A constant-only tensor helper (e.g. `expand(scalar_to_tensor(c),
         // 0, n)`) has zero inputs. ISO C forbids a zero-length array
@@ -4553,6 +4978,9 @@ impl<'a> HostEmitter<'a> {
         } else {
             self.lines
                 .push(format!("{}{target} = {}[0];", self.indent, outputs_name));
+            if let Some(source) = identity_source {
+                self.record_alias(target, &source);
+            }
         }
         for (_, boxed) in tensor_args {
             if let Some(boxed) = boxed {
@@ -5315,8 +5743,90 @@ impl<'a> HostEmitter<'a> {
                 .unwrap_or_else(|| c_ident(function)),
             arg_vars.join(", ")
         ));
-        self.retain_call_escaped_args(target, function, args, ty);
+        // chelis#1222: these two are halves of ONE judgement about the call
+        // result and must not be decided independently. When the escape
+        // retain fires, `target` owns a reference of its own and its scope
+        // owes the matching release; recording a borrow provenance on top of
+        // that would suppress the release and strand the retain, leaking one
+        // reference per call. Only an un-retained result needs its
+        // provenance traced.
+        if !self.retain_call_escaped_args(target, function, args, ty) {
+            self.record_call_result_provenance(target, function, &arg_vars, ty);
+        }
         Ok(())
+    }
+
+    /// chelis#1222: record where a call's result pointer came from, so the
+    /// receiving scope can tell an allocation the callee made from one it
+    /// merely handed back.
+    ///
+    /// Two provenances are unsafe to claim. The callee may return one of
+    /// its arguments, in which case the result is whatever that argument
+    /// already aliased; or it may return a value read out of an enclosing
+    /// scope (a captured top-level binding), in which case there is no
+    /// local variable to name and the result is marked foreign outright.
+    ///
+    /// Precision comes from the same [`analyze_returns_arg`] summary the
+    /// call-escape retain uses: a callee that demonstrably builds a fresh
+    /// result records nothing and the caller claims it as usual. When more
+    /// than one argument may be returned and more than one of them is
+    /// itself an alias, the result is marked foreign rather than pinned to
+    /// an arbitrary one of them: over-conservatism leaks at process exit,
+    /// under-conservatism corrupts the heap.
+    fn record_call_result_provenance(
+        &mut self,
+        target: &str,
+        function: &str,
+        arg_vars: &[String],
+        ty: &HostType,
+    ) {
+        if release_call(target, ty).is_none() {
+            return;
+        }
+        let callee = self.returns_arg.get(function).cloned();
+        // An unsummarized callee (not a user function, or not yet in the
+        // fixpoint) is treated as may-return-anything.
+        if callee.as_ref().is_none_or(ReturnsArg::may_return_outer) {
+            self.mark_foreign(target);
+            return;
+        }
+        let mut aliased_roots: Vec<(String, String)> = Vec::new();
+        for (index, arg_var) in arg_vars.iter().enumerate() {
+            let may_return = callee.as_ref().is_none_or(|s| s.may_return(index));
+            if !may_return {
+                continue;
+            }
+            let root = self.alias_root(arg_var);
+            // An argument temp that aliases nothing is left unrecorded, so
+            // a result that is that same pointer is claimed here.
+            //
+            // That is right when the temp is genuinely untracked, and WRONG
+            // when it is not: a fresh list literal built as an argument at
+            // `main` scope IS tracked and does get its own release, so a
+            // callee returning it leaves one allocation with two releases.
+            // Reported as chelis#1356 with a repro; unchanged from the
+            // parent commit, so it is not this change's regression, but do
+            // not read the line above as a proof of anything.
+            if root != *arg_var {
+                // Keyed by root so two arguments that alias the SAME
+                // allocation count once, but recorded as the argument
+                // variable: `record_alias` must add a link to the chain,
+                // never collapse it. The intermediate links are what a
+                // chain walk reads ownership off, and jumping straight to
+                // the root steps over them (chelis#1222).
+                aliased_roots.push((root, arg_var.clone()));
+            }
+        }
+        aliased_roots.sort();
+        aliased_roots.dedup_by(|a, b| a.0 == b.0);
+        match aliased_roots.as_slice() {
+            [] => {}
+            [(_, only)] => {
+                let only = only.clone();
+                self.record_alias(target, &only);
+            }
+            _ => self.mark_foreign(target),
+        }
     }
 
     /// Issue #406 (call-escape): when a block result is produced by a call
@@ -5337,17 +5847,20 @@ impl<'a> HostEmitter<'a> {
     /// then fires, which is use-after-free-safe and at worst leaks one
     /// reference. Tensors and other non-refcounted types have no
     /// `retain_call` and are skipped, keeping them excluded as before.
+    ///
+    /// Returns whether a retain was emitted, so the caller can keep the
+    /// tracking decision consistent with it (chelis#1222).
     fn retain_call_escaped_args(
         &mut self,
         target: &str,
         function: &str,
         args: &[HostExpr],
         ty: &HostType,
-    ) {
+    ) -> bool {
         // Only meaningful for a refcounted result with a retain primitive
         // and at least one open release-tracking `let` block.
         if retain_call(target, ty).is_none() || self.let_scopes.is_empty() {
-            return;
+            return false;
         }
         let callee = self.returns_arg.get(function).cloned();
         let mut retained = false;
@@ -5361,10 +5874,13 @@ impl<'a> HostEmitter<'a> {
             let HostExprKind::Var(name, _) = &arg.kind else {
                 continue;
             };
+            // chelis#1222: resolve the reference before testing membership;
+            // `bindings` holds alias keys, not spellings.
+            let source_key = self.resolve_alias_key(name);
             let source_is_binding = self
                 .let_scopes
                 .iter()
-                .any(|scope| scope.bindings.contains(name));
+                .any(|scope| scope.bindings.contains(&source_key));
             if !source_is_binding {
                 continue;
             }
@@ -5385,7 +5901,9 @@ impl<'a> HostEmitter<'a> {
         // binding exactly once, so a single retain restores the balance.)
         if retained && let Some(call) = retain_call(target, ty) {
             self.lines.push(format!("{}{call}", self.indent));
+            return true;
         }
+        false
     }
 
     fn assign_adt_construct(
@@ -5473,6 +5991,12 @@ impl<'a> HostEmitter<'a> {
             ));
             let nested_indent = format!("{}    ", self.indent);
             let previous = std::mem::replace(&mut self.indent, nested_indent);
+            // chelis#1222: one binder scope per arm. Each arm's pattern
+            // bindings shadow any enclosing name they reuse, and their keys
+            // carry no outgoing edge -- `chelis_adt_field` hands back an
+            // independently retained handle, so the arm binding is not a
+            // copy of anything this scope already owns.
+            self.binder_keys.push(HashMap::new());
             for binding in &arm.bindings {
                 let field_var = self.next_temp(&format!("{}_field", binding.name));
                 self.lines.push(format!(
@@ -5486,8 +6010,10 @@ impl<'a> HostEmitter<'a> {
                     binding.name
                 ));
                 self.assign_unboxed_value(&binding.name, &binding.ty, &field_var)?;
+                self.bind_alias_key(&binding.name);
             }
             self.assign_expr(target, &arm.expr, expr_ty)?;
+            self.binder_keys.pop();
             self.indent = previous;
             self.lines.push(format!("{}}}", self.indent));
         }
@@ -6042,6 +6568,14 @@ impl<'a> HostEmitter<'a> {
                 ));
             }
             HostCallbackKind::Inline { params, body } => {
+                // chelis#1222: a lambda parameter shadows any enclosing name
+                // it reuses. Without a scope here, a parameter that happens
+                // to reuse an outer binding's name made the emitter read the
+                // OUTER binding's ownership facts for it -- which decided
+                // whether a retain was emitted inside the loop, so the same
+                // program leaked or did not depending on the parameter's
+                // spelling. Edge-less, like the other extraction binders.
+                self.binder_keys.push(HashMap::new());
                 for (param, arg_var) in params.iter().zip(arg_vars.iter()) {
                     self.lines.push(format!(
                         "{}{} {} = {};",
@@ -6051,7 +6585,11 @@ impl<'a> HostEmitter<'a> {
                         arg_var
                     ));
                 }
+                for param in params {
+                    self.bind_alias_key(&param.name);
+                }
                 self.assign_expr(target, body, &callback.ret_ty)?;
+                self.binder_keys.pop();
             }
         }
         Ok(())
