@@ -1,6 +1,6 @@
 ---
 name: redteam-exec
-description: Run a compliant Chelis red-team pass. Requires stale-agent retirement and a fresh local subagent, which may reuse a clean exact-head worktree and warm build artifacts; anything else is blocked, not a valid red team.
+description: Run a compliant Chelis red-team pass. Requires retiring stale, no-longer-needed review handles from the current session and using a fresh local subagent, which may reuse a clean exact-head worktree and warm build artifacts; anything else is blocked, not a valid red team.
 ---
 
 # Red Team Exec
@@ -10,9 +10,10 @@ validation pass.
 
 ## Repository Contract
 
-1. Inventory known stale or failed subagents from the current session. Stop or interrupt
-   them with the platform's available lifecycle control and retire those handles; the
-   platform does not need to support deleting them from its listing.
+1. Inventory review and subagent handles created in your own current session. Stop or
+   interrupt and retire only stale or failed handles that will not be used again; do not
+   disturb another developer's handles or a handle reserved for follow-up work. The
+   platform does not need to support deleting a retired handle from its listing.
 2. Spawn a new local subagent with fresh context for the validation pass.
 3. Give that fresh subagent a reusable exact-head worktree and its warm target cache when
    one is clean, idle, and available. Fresh review context does not require a fresh
@@ -25,8 +26,9 @@ validation pass.
 
 ## Preferred Execution Order
 
-1. Use the platform's agent inventory and stop/interrupt controls on stale or failed
-   handles, then treat them as retired and do not reuse them.
+1. Use the platform's agent inventory to find stale or failed handles from your own
+   current session that will not be used again. Stop or interrupt those handles, then
+   treat them as retired and do not reuse them; leave all other handles alone.
 2. Spawn a fresh local subagent via the platform tool when it is actually local and
    working. In Codex sessions, use `list_agents`, `interrupt_agent`, `spawn_agent`,
    `send_message` or `followup_task`, and `wait_agent` rather than shelling out to
