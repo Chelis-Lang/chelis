@@ -720,12 +720,24 @@ from mutating the clone's shared `.git/hooks` while sibling worktrees run.
 These controls isolate writable state; concurrent agents may still contend
 for CPU and make each other slower.
 
-Documentation-only changes (Markdown/prose with no code, fixture, or
-example edits) are exempt from `--local`: skip the local gate, push,
-and require green CI instead. The gate's clippy/build/test stages
-cannot be affected by prose, and CI still runs the lint stage plus the
-Docs job (mdBook build and the `skill_suite` example validator), which
-cover everything a docs-only diff can break.
+Prose-only changes with no code, fixture, example, or structurally consumed Markdown
+are exempt from `--local`: run the focused documentation checks, push, and require green
+CI. Hosted docs-only classification is routing evidence, not proof that every changed
+Markdown control artifact has an owning validator in that workflow.
+
+Markdown parsed, embedded, mirrored, or used as agent instructions is a control artifact,
+not inert prose. Run its focused validators even when CI reports `docs_only=true`. For a
+shared `agent-skills/*/SKILL.md` or red-team command-wrapper change, at minimum:
+
+- run the platform's skill-schema validator against every changed `SKILL.md` (in Codex,
+  use the `skill-creator` `quick_validate.py` helper),
+- run `scripts/regenerate_conformance_assets.py --check` through the uv-managed Python,
+- compare the live and embedded skill bytes and the Claude/Codex wrapper bytes, and
+- run the `chelis-conformance` `asset_drift_tripwire` and `skill_set_uniformity` tests
+  with the worktree's managed Python environment.
+
+The always-run Docs job builds mdBook and validates the package skill/examples; it does
+not replace these shared-agent-skill checks.
 
 Default-gate discipline:
 
