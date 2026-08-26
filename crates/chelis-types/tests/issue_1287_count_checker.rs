@@ -93,6 +93,33 @@ fn axes_are_required_unique_static_int32_and_in_range() {
 }
 
 #[test]
+fn variadic_axes_enforce_int32_in_every_position() {
+    assert_clean(
+        r#"
+def first_cast(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, cast(0, int32), 1)
+def later_cast(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, cast(1, int32))
+"#,
+    );
+
+    assert_rejects(
+        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0i64, 1)",
+        "int32 axis",
+    );
+    assert_rejects(
+        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, 1i64)",
+        "int32 axis",
+    );
+    assert_rejects(
+        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, cast(0, int64), 1)",
+        "int32 axis",
+    );
+    assert_rejects(
+        "def bad(x: tensor[2, 3, bool]) -> tensor[int64] = count(&x, 0, cast(1, int64))",
+        "int32 axis",
+    );
+}
+
+#[test]
 fn rank_polymorphic_count_uses_only_named_axes() {
     assert_clean(
         r#"
