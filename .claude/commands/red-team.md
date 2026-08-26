@@ -4,9 +4,10 @@ Use the shared `redteam-exec` skill.
 
 Repository-specific contract:
 
-1. Inventory known stale or failed subagents, stop or interrupt them with the
-   platform's available lifecycle control, and retire those handles. The platform does
-   not need to support deleting them from its listing.
+1. Inventory review and subagent handles created in your own current session. Stop or
+   interrupt and retire only stale or failed handles that will not be used again; do not
+   disturb another developer's handles or a handle reserved for follow-up work. The
+   platform does not need to support deleting a retired handle from its listing.
 2. Spawn a **new local subagent with fresh context** for the red-team pass.
    In Codex, use `list_agents`, `interrupt_agent`, `spawn_agent`, `send_message` or
    `followup_task`, and `wait_agent` rather than shelling out to `claude`, `codex exec`,

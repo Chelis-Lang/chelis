@@ -63,10 +63,11 @@ not drift.
 
 ### Fresh-Context Enforcement
 
-- When asked to run a red team or "spawn a red team agent", first inventory known stale
-  or failed subagents, stop or interrupt them with the platform's available lifecycle
-  control, mark those handles retired, and then spawn a new local subagent with fresh
-  context. A platform need not support deleting the retired handle from its listing.
+- When asked to run a red team or "spawn a red team agent", first inventory subagent
+  handles created in your own current session. Stop or interrupt and retire only stale
+  or failed handles that will not be used again; do not disturb another developer's
+  handles or a handle reserved for follow-up work. Then spawn a new local subagent with
+  fresh context. A platform need not support deleting a retired handle from its listing.
 - Freshness applies to the subagent's review context, not to the filesystem. Hand the
   fresh subagent an existing worktree and its warm target cache when the worktree is at
   the exact review head, has a known clean baseline, and has no concurrent writer or
@@ -512,9 +513,11 @@ When a public surface has an implicit invariant, make it explicit and test it.
 
 ## Worktree And Branch Discipline
 
-- `/Users/robertronan/chelis` is the user's live primary checkout. Agents may run
-  read-only queries there, but must not switch branches, edit files, build, or create
-  and remove scratch artifacts in it.
+- Treat the primary checkout for the current clone (the main worktree listed by
+  `git worktree list --porcelain`) as live developer state. Its path is specific to
+  the developer and machine and must not be hard-coded in repository policy. Agents
+  may run read-only queries there, but must not switch branches, edit files, build, or
+  create or remove scratch artifacts in it.
 - Create a dedicated worktree before the first write for every task, including small
   documentation edits and throwaway probes. Keep its branch, target, and scratch state
   task-owned. For direct Cargo commands, set
@@ -1083,10 +1086,10 @@ surfaces load the same skill library.
 Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
 should stay behaviorally aligned so slash-command access does not drift between tool
 surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
-stale-agent inventory/retirement plus a fresh local subagent before any validation is
-counted as a red team. Fresh context is an agent property: the wrapper should reuse a clean,
-exact-head, idle worktree and its warm target artifacts when available instead of
-forcing a cold checkout and rebuild.
+retirement of your own current-session stale or failed handles that will not be reused,
+plus a fresh local subagent before any validation is counted as a red team. Fresh context
+is an agent property: the wrapper should reuse a clean, exact-head, idle worktree and its
+warm target artifacts when available instead of forcing a cold checkout and rebuild.
 
 Current shared skill set:
 
