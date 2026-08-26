@@ -91,6 +91,11 @@ not drift.
   exact head.
 - Repeat the fix-and-review cycle until the most recent exact-head red-team review
   reports no P0 or P1 findings. A review of an earlier head does not satisfy this gate.
+- Route confirmed findings back to the original implementation agent when it is still
+  available so the fix retains its build context. Record every round's exact head,
+  verdict, commands, accepted-no-action observations, and residual scope in the PR.
+  File newly discovered pre-existing defects instead of silently absorbing them into
+  an unrelated PR.
 
 ## Documentation And Spec Sync
 
@@ -181,6 +186,32 @@ Two rules follow, and both are cheap:
    licenses "therefore we do X everywhere" in code. If your implementation needs a
    stronger rule than the spec states, amend the spec first and say so in the PR;
    `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
+
+### Challenge Written Designs Before Implementation
+
+- A design doc is not correct merely because it was written down. Before implementing
+  it, test its claims against the controlling normative spec, hardware and ecosystem
+  reality, and Chelis's stated principles.
+- If a design is wrong, over-broad, or drifted, stop and amend the controlling document
+  and tracker before writing code. Do not faithfully compound a bad decision or
+  reconcile a design/spec conflict silently in implementation.
+- Treat permission-to-mandate escalation, compatibility assumptions without a current
+  requirement, and deferred structural fixes as reasons to challenge the design.
+
+### Explicit And Structural Design Bias
+
+- When the controlling normative spec leaves a real design choice, prefer explicit
+  spelling over contextual inference. Chelis is machine-generation-first, so human
+  typing convenience does not outweigh unambiguous types, effects, dtypes, versions,
+  or adaptation rules.
+- Chelis is pre-compatibility unless a controlling contract says otherwise. Prefer the
+  clean comprehensive design that makes a defect class structurally impossible over a
+  smaller-blast-radius patch, a legacy default, a versionless compatibility fallback,
+  or unnecessary phase deferral.
+- If a design doc permits both a structural solution and a permissive stopgap, amend it
+  to select the structural contract before implementation. This bias never overrides a
+  normative semantic rule; amend that rule first when the language decision must
+  change.
 
 **Normative inventory registries.** A file under `spec/registry/` is
 numbered-spec-tier content, not a design doc: each is incorporated by
@@ -477,6 +508,25 @@ When a public surface has an implicit invariant, make it explicit and test it.
   `py/pyproject.toml` pins `requires-python = ">=3.11"`. See
   [`README.md`](README.md) for the full setup.
 
+## Worktree And Branch Discipline
+
+- `/Users/robertronan/chelis` is the user's live primary checkout. Agents may run
+  read-only queries there, but must not switch branches, edit files, build, or create
+  and remove scratch artifacts in it.
+- Create a dedicated worktree before the first write for every task, including small
+  documentation edits and throwaway probes. Keep its branch, target, and scratch state
+  task-owned. For direct Cargo commands, set
+  `PYO3_PYTHON="$(uv python find 3.11)"`; do not copy or symlink the primary `.venv`.
+- Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
+  for the same PR or immediate follow-up work after checking ownership, exact head,
+  status, and active processes.
+- A non-trivial rebase or hand-resolved conflict requires review of the resolution
+  before any history rewrite is published. Run `python3 scripts/gate.py --local` for a
+  non-documentation change or the focused documentation checks for a docs-only change.
+  Never force-push a red gate. Obtain approval, then use an exact-head
+  `--force-with-lease`; clean mechanical rebases do not need the additional resolution
+  review.
+
 ## Build Toolchain
 
 `chelis-python` links against `libpython`. Outside Devenv, `.cargo/config.toml`
@@ -502,6 +552,19 @@ POSIX wrapper, which runs the same Python checker through Devenv, `.venv`, or
 All formatting and lint hooks remain disabled. CI remains the remote
 enforcement boundary.
 
+## Commit And Pull Request Hygiene
+
+- Use plain conventional commit messages with the configured human author. Do not add
+  `Claude-Session`, Codex/Claude attribution, AI co-authorship markers, or AI-session
+  links to commit messages or PR bodies.
+- GitHub squash merges can concatenate every branch commit message into the final
+  commit. A closing keyword in any intermediate message can therefore close an issue
+  even when the PR was only partial work.
+- Use `Part of #N` or `Addresses #N` unless default-branch merge should close the issue.
+  Before squash merge, audit the complete branch message set and proposed squash text
+  for `close`, `fix`, or `resolve` immediately followed by an issue reference. Closing
+  keywords are intentional authority, never descriptive prose.
+
 ## Build And Gate Commands
 
 Agent pre-push gate for non-documentation changes:
@@ -516,6 +579,13 @@ CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>`
 for each split job, and `scripts/test_gate.py` asserts the CI workflow
 hand-inlines no gate command the script does not produce. To see the canonical
 full list and the local/CI ownership annotations:
+
+Before `--local` or another long local validation, fetch `origin/main` so the
+changed-crate selection and inherited-failure comparison use current evidence. If the
+branch is materially behind, reconcile it deliberately before spending hours on a
+stale tree; do not rewrite shared history without the rebase review gate above. When an
+unrelated failure appears, reproduce or compare it on current `origin/main` before
+diagnosing it as branch-owned.
 
 ```sh
 python3 scripts/gate.py --list
@@ -680,6 +750,10 @@ default workspace run.
   one (`nohup cargo build` you are still tailing). Run it from the checkout
   whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
   keep burning CPU and hold the cargo lock across sessions.
+- Before a subagent starts a heavyweight Cargo command, it must report the exact command
+  and expected weight to the orchestrator. The orchestrator checks active processes and
+  load, then runs, staggers, or declines it; isolated targets prevent state corruption
+  but do not eliminate CPU starvation.
 - Contention diagnostic: several unrelated tests FAILing at near-identical
   wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
   starvation, not code breakage. Measured 2026-06-10: the 25-test
@@ -687,6 +761,9 @@ default workspace run.
   machine. Re-run on a quiet machine before treating those as real failures.
 - Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
   only that test target.
+- At session end, verify that task-owned background cargo, rustc, and nextest processes
+  are gone. A stopped wrapper is not proof that its reparented children stopped; use
+  the scoped `reap_orphans.py` dry run and kill only confirmed task-owned stragglers.
 - macOS workstation only: first-exec assessment can degrade under mass
   fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
@@ -704,8 +781,30 @@ default workspace run.
   preserving, and no active process owns its target. Remove only the exact PR-owned
   worktree and regenerable target paths; preserve the primary checkout and unrelated
   worktrees, targets, and user changes.
+- Audit cleanup targets with full branch names and live PR state. Because this repository
+  squash-merges, "commits ahead of `origin/main`" and missing commit subjects in main do
+  not prove that work is unmerged. For an ambiguous old worktree, compare stable patch
+  IDs against the PR commits and confirm the added symbols on current main.
 - Use `git worktree remove <path>` followed by `git worktree prune`. For a separate
   task-owned target, prefer `cargo clean --target-dir <exact-path>` after inspecting it.
+- Remove worktrees with individual explicit commands, never a blanket loop. Worktree
+  removal keeps the branch ref; branch deletion is a separate later decision. If macOS
+  leaves a partially removed target or `.DS_Store`, re-inspect the exact path before an
+  equally narrow cleanup command.
+
+## Subagent Coordination And Delivery
+
+- Every subagent prompt must name the delivery mechanism and the complete expected
+  report. A locally written or plain-text report that is not sent through the platform's
+  parent-message/final-report channel has not been delivered.
+- A subagent must not end its turn merely to wait for a background build, monitor, CI,
+  or notification that cannot wake it. Keep ownership of a long command through the
+  platform's synchronous wait/poll mechanism, or return the honest partial result and
+  unfinished work.
+- If an agent returns "waiting" or goes idle without the deliverable, the orchestrator
+  resumes it immediately with the exact missing items. Prefer a clearly labelled partial
+  report over silence or an overstated completion claim, and deduplicate repeated reports
+  that race with a resume nudge.
 
 ## Local HIP Environment
 
@@ -999,3 +1098,42 @@ as `conform bump` PRs (never direct to `main`). `Chelis-Lang/school` is the
 reference implementation. Changes to the contract land here first (edit the
 doc **and** `MANIFEST`/`REGISTRY` in lockstep, or the tripwire fails) and
 propagate to every shell via `conform sync` per the scaffolding drift rule.
+
+### Conform Bump Wave Checklist
+
+`chelis +<new-version> reef conform bump <new-version>` is a mechanical starter,
+not a green-PR oracle. Run it from a fresh shell worktree with the new toolchain
+selected explicitly, then audit every item below:
+
+- Inspect both its exit status and `git status`. Pre-conformance repos can fail or exit
+  zero after a partial edit and materialize orphaned `.claude/`, `.codex/`, or
+  `agent-skills/` content; remove that half-retrofit and defer full adoption to a
+  separate `conform init` change.
+- Cascade every dependency surface manually: sibling-shell versions in `reef.toml`,
+  sibling tag/version variables in workflows, `[chelis-src]`'s exact
+  `CHELIS_PIN_COMMIT`, and every non-frozen nested project `reef.toml`. The standard pin
+  guard does not prove tag-to-SHA agreement or cover sibling and nested pins.
+- Audit the shell's own package version, CHANGELOG convention, and hard-coded version
+  strings in both CI and release workflows before tagging. A workflow at the tagged
+  commit cannot be repaired by merely rerunning the failed release.
+- Treat `reef.lock` by entry authority. Regenerate `bundled` toolchain entries. Never
+  commit `local_registry` entries without `remote_origin` or hashes produced by a
+  private local registry. Keep published dependency entries at the last published
+  release during a cascade block, and ensure `reef build` precedes any `chelis test` or
+  `chelis prove` step that reads the committed lock.
+- Re-run `conform audit` and repair every live `docs/UPSTREAM_BUGS.md` entry to carry its
+  own `chelis#NNN` or `docs/issue_drafts/<file>` citation. Nested detail bullets must not
+  accidentally parse as uncited independent entries.
+- Verify a claimed acceptance command by opening the workflow and locating the exact
+  step. If the authoritative campaign is expensive, compare a bounded pilot at the old
+  and new pins on identical sources; only the delta supports a "no new regressions"
+  claim.
+- When a skipped version range crosses canonical Surf v0.19, run
+  `chelis migrate surf --from 0.18 --inplace` over maintained `.ch` sources, then handle
+  semantic migrations the tool cannot choose: explicit literal suffixes, int64 extents,
+  and checked `cast` versus truncating `cast_trunc`.
+- `chelis test` deliberately does not run the style gate. A shell that generates Chelis
+  source must run `chelis check` or `chelis fmt --check` over emitted files; do not hide
+  formatter drift behind a measured threshold in the generator.
+- Finish with `reef build`, the shell's real CI-equivalent gates, and exact review of the
+  generated diff. A successful `conform bump` alone is never completion evidence.
