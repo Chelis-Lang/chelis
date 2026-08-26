@@ -82,6 +82,16 @@ not drift.
 - A subagent that reuses a worktree must restore its temporary probes or mutations and
   report the final worktree status, unless the task explicitly asks to retain them.
 
+### Pull Request Review Gate
+
+- Every pull request creation workflow, including documentation-only work, must include
+  at least one compliant red-team review of the exact PR head before merge.
+- A confirmed P0 (critical) or P1 (high/major) finding blocks merge. Fix the finding,
+  push the updated head, and run another fresh-context red-team review against that
+  exact head.
+- Repeat the fix-and-review cycle until the most recent exact-head red-team review
+  reports no P0 or P1 findings. A review of an earlier head does not satisfy this gate.
+
 ## Documentation And Spec Sync
 
 ### Documentation Authority
