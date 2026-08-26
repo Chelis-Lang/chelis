@@ -138,6 +138,10 @@ All initializers carry the `Random` effect.
 `Std.Index`:
 
 - `list_index(values, idx)`, `take_list(values, count)`, `drop_list(values, count)`.
+  Their adjoints preserve the input List's runtime length and positions: index
+  routes the cotangent to the selected element, while take/drop fill excluded
+  positions with zeros. Negative indices/counts fail; take/drop counts beyond
+  the length retain their ordinary truncation behavior.
 
 ### Decimal and time
 
@@ -177,12 +181,14 @@ with `date_lt` and friends; `day_of_week`, `day_of_year`, `is_leap_year`; and
   `Option` twin.
 
 `Std.Io.Json` parses JSON into a `Json` value (`JsonNull`, `JsonBool`, `JsonInt`,
-`JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors are
-exported, so documents can be built directly):
+`JsonBigInt`, `JsonFloat`, `JsonString`, `JsonArray`, `JsonObject`; the constructors
+are exported, so documents can be built directly). Integer-form tokens outside
+int64 retain their exact spelling as `JsonBigInt`; float-form tokens whose f64
+image is non-finite are rejected:
 
 - `load_json(path)`, `parse_json(text)` and their `try_` variants.
-- `json_get`, and the typed accessors `json_string`, `json_int`, `json_float`, `json_bool`,
-  `json_array`, `json_object`, plus `json_is_null`.
+- `json_get`, and the typed accessors `json_string`, `json_int`, `json_bigint`,
+  `json_float`, `json_bool`, `json_array`, `json_object`, plus `json_is_null`.
 - `to_json(value)` renders a `Json` value compactly (object keys in dictionary
   insertion order, f64 via `to_string`'s shortest-round-trip form — a claim
   made for **f64 specifically**, the dtype `JsonFloat` carries — escapes for

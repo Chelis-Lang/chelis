@@ -5,7 +5,7 @@ use chelis_deep::Span;
 use chelis_deep::ast::{Atom, Expr, List, MetaMap};
 use chelis_ir::dag::{DimInfo, TensorType};
 use chelis_ir::eval::TensorValue as IrTensorValue;
-use chelis_ir::lower::try_lower_subexpr_program_with_random_state;
+use chelis_ir::lower::try_lower_subexpr_program_with_random_state_progress;
 use chelis_types::types::Prim;
 
 use super::named_axis::*;
@@ -126,6 +126,28 @@ impl<'a> EvalContext<'a> {
 
         let span = Span::new(0, 0);
         for (index, value) in args.iter().enumerate() {
+            // A grad body may use an integer scalar as a discrete selector
+            // (for example list_index/take_list/drop_list). A synthetic Load
+            // preserves its dtype but erases its exact runtime value before
+            // the staged List spine is selected. Embed that non-differentiable
+            // argument as an exact typed literal instead; float/tensor
+            // arguments still use Loads so the AD roots remain connected.
+            if matches!(kind, TransformKind::Grad)
+                && let RuntimeValue::Scalar(payload) = value
+                && payload.dtype().is_integer()
+            {
+                let precision = fn_expr
+                    .and_then(|expr| param_precision_at(expr, index))
+                    .unwrap_or(payload.dtype());
+                if precision.is_integer() {
+                    arg_exprs.push(make_integer_literal_with_type(
+                        payload.as_i64(),
+                        precision,
+                        span,
+                    ));
+                    continue;
+                }
+            }
             if let (TransformKind::Grad, RuntimeValue::List(_)) = (&kind, value) {
                 let mut leaf_index = 0;
                 let (expr, shape, differentiable) = stage_grad_list_value(
@@ -340,7 +362,7 @@ impl<'a> EvalContext<'a> {
             ));
         }
 
-        let lower_result = try_lower_subexpr_program_with_random_state(
+        let lower_result = try_lower_subexpr_program_with_random_state_progress(
             &app_expr,
             scoped_types,
             self.type_env.clone(),
@@ -348,8 +370,8 @@ impl<'a> EvalContext<'a> {
             self.random_seed,
             self.random_counter,
         );
-        let dag = match lower_result {
-            Ok(dag) => dag,
+        let (dag, next_random_counter) = match lower_result {
+            Ok(result) => result,
             Err(diagnostic) => {
                 let kind_label = match kind {
                     TransformKind::Grad => "grad",
@@ -361,6 +383,10 @@ impl<'a> EvalContext<'a> {
                 ));
             }
         };
+        // Lowering a handled transform consumes the same Random stream as
+        // surrounding host evaluation. Commit its next unused ordinal before
+        // evaluating the DAG so a later expression cannot replay those words.
+        self.random_counter = next_random_counter;
 
         // Forward-evaluate the lowered DAG, satisfying `RiscOp::Load`
         // by looking up placeholder names in our staged inputs (or
@@ -1062,6 +1088,41 @@ pub(super) fn make_var_with_type(name: &str, ty: &TensorType, span: Span) -> Exp
                 Expr::Atom(Atom::Tag(DeepTag::Var), span),
                 Expr::Map(meta, span),
                 Expr::Atom(Atom::Name(name.to_string()), span),
+            ],
+        },
+        span,
+    )
+}
+
+/// Build a `(lit {type: (t-prim {} <integer-dtype>)} value)` expression.
+/// Grad uses this for exact runtime-fed discrete arguments whose value must be
+/// visible while lowering a staged List spine.
+fn make_integer_literal_with_type(value: i64, precision: Prim, span: Span) -> Expr {
+    let prim_name = match precision {
+        Prim::Int8 => "int8",
+        Prim::Int16 => "int16",
+        Prim::Int32 => "int32",
+        Prim::Int64 => "int64",
+        _ => panic!("integer transform argument unexpectedly declared with non-integer dtype"),
+    };
+    let prim_node = Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::TPrim), span),
+                Expr::Map(MetaMap::default(), span),
+                Expr::Atom(Atom::Name(prim_name.to_string()), span),
+            ],
+        },
+        span,
+    );
+    let mut meta = MetaMap::default();
+    meta.entries.push(("type".to_string(), prim_node));
+    Expr::List(
+        List {
+            elements: vec![
+                Expr::Atom(Atom::Tag(DeepTag::Lit), span),
+                Expr::Map(meta, span),
+                Expr::Atom(Atom::Int(value), span),
             ],
         },
         span,

@@ -246,7 +246,7 @@ def parse_number(text: string, idx: int64) -> Option[(Json, int64)] = {
   end = scan_number_end(text, idx)
   raw = string_slice(text, idx, sub(end, idx))
   if or(string_contains(raw, "."), or(string_contains(raw, "e"), string_contains(raw, "E"))) then match to_float(raw) with {
-    | Some(value) => Some((JsonFloat(value), end))
+    | Some(value) => if finite_f64(value) then Some((JsonFloat(value), end)) else None
     | None => None
   } else if not(canonical_integer_text(raw)) then None else match to_int(raw) with {
     | Some(value) => Some((JsonInt(value), end))

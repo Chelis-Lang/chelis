@@ -1193,6 +1193,28 @@ pub fn try_lower_subexpr_program_with_random_state(
     random_seed: Option<u64>,
     random_counter: u64,
 ) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_random_state_progress(
+        expr,
+        scoped_tensor_types,
+        full_type_env,
+        program_defs,
+        random_seed,
+        random_counter,
+    )
+    .map(|(dag, _)| dag)
+}
+
+/// Lower a subexpression while also returning the next unused Random stream
+/// ordinal. Host evaluators use this form when lowering a handled transform so
+/// random draws inside the transform advance the enclosing handler's stream.
+pub fn try_lower_subexpr_program_with_random_state_progress(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    full_type_env: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     let context = prepare_subexpr_lowering_context(&full_type_env, Arc::new(program_defs));
     try_lower_subexpr_program_with_context_and_random_state(
@@ -1239,6 +1261,7 @@ pub(crate) fn try_lower_subexpr_program_with_context(
         None,
         0,
     )
+    .map(|(dag, _)| dag)
 }
 
 fn try_lower_subexpr_program_with_context_and_random_state(
@@ -1247,7 +1270,7 @@ fn try_lower_subexpr_program_with_context_and_random_state(
     context: &SubexprLoweringContext,
     random_seed: Option<u64>,
     random_counter: u64,
-) -> Result<Dag, LowerDiagnostic> {
+) -> Result<(Dag, u64), LowerDiagnostic> {
     catch_lowering(|| {
         lower_subexpr_program_inner(
             expr,
@@ -1265,7 +1288,7 @@ fn lower_subexpr_program_inner(
     context: &SubexprLoweringContext,
     random_seed: Option<u64>,
     random_counter: u64,
-) -> Dag {
+) -> (Dag, u64) {
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
         context.program_defs.clone(),
@@ -1329,9 +1352,13 @@ fn lower_subexpr_program_inner(
         };
         ctx.dag.add_root(root_id);
     }
+    let next_random_counter = ctx.random_counter;
     let dce_dag = crate::optimize::dead_code_eliminate(&ctx.dag);
     let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
-    insert_drop_nodes_for_unconsumed_values(copy_dag)
+    (
+        insert_drop_nodes_for_unconsumed_values(copy_dag),
+        next_random_counter,
+    )
 }
 
 pub fn remap_tensor_dim_symbols(
@@ -6668,6 +6695,15 @@ impl LowerCtx {
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
+                    // [05-OP-35] List selection counts are discrete scalar
+                    // parameters, but the staged List spine still needs their
+                    // exact call-site value while the grad body is lowered.
+                    // Preserve a statically known integer through the fresh
+                    // Load so an imported list_index/take_list/drop_list
+                    // wrapper can select the correct primal positions.
+                    if let Some(value) = self.static_i64_from_node(*actual) {
+                        subctx.static_size_bindings.insert(name.clone(), value);
+                    }
                     let load = subctx.dag.add_node(
                         RiscOp::Load {
                             name: name.as_str().into(),
@@ -6711,6 +6747,11 @@ impl LowerCtx {
         }
         let lowered_output = subctx.lower_expr(body);
         let output = lowered_output.expect_node("grad requires a scalar floating output");
+        // The subcontext starts at the enclosing handler's current ordinal.
+        // Hand the consumed ordinal count back before lowering any following
+        // expression in the same `with seed` region; otherwise that expression
+        // reuses the grad forward pass's random source words.
+        self.random_counter = subctx.random_counter;
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -6983,6 +7024,11 @@ impl LowerCtx {
             .zip(param_types)
             .zip(param_type_exprs.iter())
         {
+            // Preserve a caller-known integer through the inlined parameter
+            // name. This is required by the [05-OP-35] wrappers: their public
+            // count parameter is renamed once more before the builtin
+            // index/take/drop app reaches the staged List rewrite.
+            let static_size = self.fold_static_size(arg_expr);
             // Item 2-extended: shadowing; the inlined fn's param name
             // is bound to a fresh value (either a `local_callable` or a
             // `bindings` entry). Drop any outer-scope
@@ -6999,6 +7045,11 @@ impl LowerCtx {
             // unresolved outer callable.
             let callable = self.resolve_callable_expr(arg_expr);
             self.fn_typed_params.remove(name);
+            if let Some(value) = static_size {
+                self.static_size_bindings.insert(name.clone(), value);
+            } else {
+                self.static_size_bindings.remove(name);
+            }
             if let Some(callable) = callable {
                 match callable {
                     // Preserve structural incompleteness when an unresolved
@@ -7189,6 +7240,14 @@ impl LowerCtx {
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             // Same shadowing rationale as `lower_plain_callable_app`.
             self.fn_typed_params.remove(name);
+            if let Some(value) = arg_id
+                .as_single_node()
+                .and_then(|node| self.static_i64_from_node(node))
+            {
+                self.static_size_bindings.insert(name.clone(), value);
+            } else {
+                self.static_size_bindings.remove(name);
+            }
             self.bindings.insert(name.clone(), arg_id);
         }
         let result = self.lower_expr(body);
@@ -9577,9 +9636,27 @@ impl LowerCtx {
         let list = self.lower_expr(list_arg);
         let items = adt_cons_chain_values(&list)?;
         let raw = self.static_i64_from_expr_or_binding(count_arg)?;
-        let count = usize::try_from(raw).ok()?;
+        if raw < 0 {
+            let argument = if name == "index" { "index" } else { "count" };
+            raise_fatal_lowering_error(
+                format!("{name} requires non-negative {argument}, got {raw}"),
+                Some(count_arg.span()),
+                count_arg.span_id().map(ToOwned::to_owned),
+            );
+        }
+        // On a target where usize is narrower than int64, a positive count
+        // that does not fit is necessarily beyond this finite staged spine.
+        // Saturating it therefore preserves take/drop truncation and makes an
+        // index fail the same bounds check as any other oversized value.
+        let count = usize::try_from(raw).unwrap_or(usize::MAX);
         match name {
-            "index" => items.get(count).cloned(),
+            "index" => Some(items.get(count).cloned().unwrap_or_else(|| {
+                raise_fatal_lowering_error(
+                    format!("index {raw} out of bounds for list of len {}", items.len()),
+                    Some(count_arg.span()),
+                    count_arg.span_id().map(ToOwned::to_owned),
+                )
+            })),
             "take" => Some(rebuild_cons_chain(items.into_iter().take(count).collect())),
             "drop" => Some(rebuild_cons_chain(items.into_iter().skip(count).collect())),
             _ => None,
@@ -9587,7 +9664,7 @@ impl LowerCtx {
     }
 
     fn static_i64_from_expr_or_binding(&mut self, expr: &Expr) -> Option<i64> {
-        if let Some(value) = extract_int_for_dim(expr) {
+        if let Some(value) = self.fold_static_size(expr) {
             return Some(value);
         }
         let node = self.lower_expr(expr).as_single_node()?;
