@@ -57,12 +57,20 @@ not drift.
 - Verify that inputs which should fail do fail, and with the right reason.
 - Verify that inputs which should pass do pass, with exact outputs where applicable.
 - Check docs and phase claims against the shipped behavior, not just intent.
+- Record the exact reviewed commit and the worktree's baseline status. A fresh reviewer
+  may reuse an existing exact-head worktree and its target build artifacts so the pass
+  does not require a cold rebuild; fresh context does not require a fresh checkout.
 
 ### Fresh-Context Enforcement
 
 - When asked to run a red team or "spawn a red team agent", first close any known stale
   or failed subagents from the current session and then spawn a new local subagent with
   fresh context.
+- Freshness applies to the subagent's review context, not to the filesystem. Hand the
+  fresh subagent an existing worktree and its warm target cache when the worktree is at
+  the exact review head, has a known clean baseline, and has no concurrent writer or
+  build owner. Create a new worktree or target only when those reuse conditions do not
+  hold.
 - If the first spawn attempt routes to remote infrastructure, errors, or comes back in a
   broken state, close that handle and retry until you have either:
   1. a working fresh local subagent, or
@@ -71,6 +79,8 @@ not drift.
 - Do not substitute main-thread validation and call it a red team.
 - Do not mark a phase as red-teamed unless the fresh-context subagent actually ran the
   validation work.
+- A subagent that reuses a worktree must restore its temporary probes or mutations and
+  report the final worktree status, unless the task explicitly asks to retain them.
 
 ## Documentation And Spec Sync
 
@@ -484,17 +494,18 @@ enforcement boundary.
 
 ## Build And Gate Commands
 
-Minimum repo gate:
+Agent pre-push gate for non-documentation changes:
 
 ```sh
-python3 scripts/gate.py
+python3 scripts/gate.py --local
 ```
 
 `scripts/gate.py` is the single source of truth for the per-PR
-developer-runnable gate. CI calls `python3 scripts/gate.py <stage>` for
-each split job, and `scripts/test_gate.py` asserts the CI workflow
-hand-inlines no gate command the script does not produce. To see the
-canonical list:
+gate. Agents run only the `--local` subset before pushing; the bare full gate is
+CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>`
+for each split job, and `scripts/test_gate.py` asserts the CI workflow
+hand-inlines no gate command the script does not produce. To see the canonical
+full list and the local/CI ownership annotations:
 
 ```sh
 python3 scripts/gate.py --list
@@ -673,6 +684,18 @@ default workspace run.
   local workspace nextest stage. If the probe reports degradation, use the
   macOS Smoke CI stage per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
+
+### Post-Merge Cleanup
+
+- After a PR merges, remove its associated git worktrees and task-owned target builds
+  unless they are expected to support immediate follow-up work. Retained artifacts are
+  temporary: remove them as soon as that follow-up finishes.
+- Before removal, verify the PR is merged, the worktree has no uncommitted work worth
+  preserving, and no active process owns its target. Remove only the exact PR-owned
+  worktree and regenerable target paths; preserve the primary checkout and unrelated
+  worktrees, targets, and user changes.
+- Use `git worktree remove <path>` followed by `git worktree prune`. For a separate
+  task-owned target, prefer `cargo clean --target-dir <exact-path>` after inspecting it.
 
 ## Local HIP Environment
 
@@ -926,7 +949,9 @@ Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/comma
 should stay behaviorally aligned so slash-command access does not drift between tool
 surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
 stale-agent cleanup plus a fresh local subagent before any validation is counted as a
-red team.
+red team. Fresh context is an agent property: the wrapper should reuse a clean,
+exact-head, idle worktree and its warm target artifacts when available instead of
+forcing a cold checkout and rebuild.
 
 Current shared skill set:
 
