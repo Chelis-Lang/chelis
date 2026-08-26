@@ -641,30 +641,30 @@ fn g12_source_hash_differs_when_package_name_differs_with_same_content() {
     // Build two packages whose root reef.toml differs only in the
     // package name field.
     let dir_a = TempDir::new().expect("tempdir A");
-    let root_a = dir_a.path().join("appA");
+    let root_a = dir_a.path().join("app-a");
     write_pkg(
         &root_a,
-        "appA",
+        "app-a",
         "App",
         &[("src/main.ch", main)],
         &[("mylib", "./mylib")],
     );
     let mylib_a = root_a.join("mylib");
     write_pkg(&mylib_a, "mylib", "Mylib", &[("src/math.ch", library)], &[]);
-    fs::write(root_a.join("reef.lock"), app_reef_lock("appA")).expect("lock A");
+    fs::write(root_a.join("reef.lock"), app_reef_lock("app-a")).expect("lock A");
 
     let dir_b = TempDir::new().expect("tempdir B");
-    let root_b = dir_b.path().join("appB");
+    let root_b = dir_b.path().join("app-b");
     write_pkg(
         &root_b,
-        "appB",
+        "app-b",
         "App",
         &[("src/main.ch", main)],
         &[("mylib", "./mylib")],
     );
     let mylib_b = root_b.join("mylib");
     write_pkg(&mylib_b, "mylib", "Mylib", &[("src/math.ch", library)], &[]);
-    fs::write(root_b.join("reef.lock"), app_reef_lock("appB")).expect("lock B");
+    fs::write(root_b.join("reef.lock"), app_reef_lock("app-b")).expect("lock B");
 
     let ctx_a = compile_reef_context(Path::new("/tmp/x"), &root_a).expect("ctx A");
     let ctx_b = compile_reef_context(Path::new("/tmp/x"), &root_b).expect("ctx B");
