@@ -57,20 +57,47 @@ not drift.
 - Verify that inputs which should fail do fail, and with the right reason.
 - Verify that inputs which should pass do pass, with exact outputs where applicable.
 - Check docs and phase claims against the shipped behavior, not just intent.
+- Record the exact reviewed commit and the worktree's baseline status. A fresh reviewer
+  may reuse an existing exact-head worktree and its target build artifacts so the pass
+  does not require a cold rebuild; fresh context does not require a fresh checkout.
 
 ### Fresh-Context Enforcement
 
-- When asked to run a red team or "spawn a red team agent", first close any known stale
-  or failed subagents from the current session and then spawn a new local subagent with
-  fresh context.
+- When asked to run a red team or "spawn a red team agent", first inventory known stale
+  or failed subagents, stop or interrupt them with the platform's available lifecycle
+  control, mark those handles retired, and then spawn a new local subagent with fresh
+  context. A platform need not support deleting the retired handle from its listing.
+- Freshness applies to the subagent's review context, not to the filesystem. Hand the
+  fresh subagent an existing worktree and its warm target cache when the worktree is at
+  the exact review head, has a known clean baseline, and has no concurrent writer or
+  build owner. Create a new worktree or target only when those reuse conditions do not
+  hold.
 - If the first spawn attempt routes to remote infrastructure, errors, or comes back in a
-  broken state, close that handle and retry until you have either:
+  broken state, stop or interrupt and retire that handle, then retry until you have
+  either:
   1. a working fresh local subagent, or
   2. an explicit statement that red-team validation is blocked because fresh local
      subagent execution is unavailable.
 - Do not substitute main-thread validation and call it a red team.
 - Do not mark a phase as red-teamed unless the fresh-context subagent actually ran the
   validation work.
+- A subagent that reuses a worktree must restore its temporary probes or mutations and
+  report the final worktree status, unless the task explicitly asks to retain them.
+
+### Pull Request Review Gate
+
+- Every pull request creation workflow, including documentation-only work, must include
+  at least one compliant red-team review of the exact PR head before merge.
+- A confirmed P0 (critical) or P1 (high/major) finding blocks merge. Fix the finding,
+  push the updated head, and run another fresh-context red-team review against that
+  exact head.
+- Repeat the fix-and-review cycle until the most recent exact-head red-team review
+  reports no P0 or P1 findings. A review of an earlier head does not satisfy this gate.
+- Route confirmed findings back to the original implementation agent when it is still
+  available so the fix retains its build context. Record every round's exact head,
+  verdict, commands, accepted-no-action observations, and residual scope in the PR.
+  File newly discovered pre-existing defects instead of silently absorbing them into
+  an unrelated PR.
 
 ## Documentation And Spec Sync
 
@@ -161,6 +188,32 @@ Two rules follow, and both are cheap:
    licenses "therefore we do X everywhere" in code. If your implementation needs a
    stronger rule than the spec states, amend the spec first and say so in the PR;
    `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
+
+### Challenge Written Designs Before Implementation
+
+- A design doc is not correct merely because it was written down. Before implementing
+  it, test its claims against the controlling normative spec, hardware and ecosystem
+  reality, and Chelis's stated principles.
+- If a design is wrong, over-broad, or drifted, stop and amend the controlling document
+  and tracker before writing code. Do not faithfully compound a bad decision or
+  reconcile a design/spec conflict silently in implementation.
+- Treat permission-to-mandate escalation, compatibility assumptions without a current
+  requirement, and deferred structural fixes as reasons to challenge the design.
+
+### Explicit And Structural Design Bias
+
+- When the controlling normative spec leaves a real design choice, prefer explicit
+  spelling over contextual inference. Chelis is machine-generation-first, so human
+  typing convenience does not outweigh unambiguous types, effects, dtypes, versions,
+  or adaptation rules.
+- Chelis is pre-compatibility unless a controlling contract says otherwise. Prefer the
+  clean comprehensive design that makes a defect class structurally impossible over a
+  smaller-blast-radius patch, a legacy default, a versionless compatibility fallback,
+  or unnecessary phase deferral.
+- If a design doc permits both a structural solution and a permissive stopgap, amend it
+  to select the structural contract before implementation. This bias never overrides a
+  normative semantic rule; amend that rule first when the language decision must
+  change.
 
 **Normative inventory registries.** A file under `spec/registry/` is
 numbered-spec-tier content, not a design doc: each is incorporated by
@@ -457,6 +510,32 @@ When a public surface has an implicit invariant, make it explicit and test it.
   `py/pyproject.toml` pins `requires-python = ">=3.11"`. See
   [`README.md`](README.md) for the full setup.
 
+## Worktree And Branch Discipline
+
+- `/Users/robertronan/chelis` is the user's live primary checkout. Agents may run
+  read-only queries there, but must not switch branches, edit files, build, or create
+  and remove scratch artifacts in it.
+- Create a dedicated worktree before the first write for every task, including small
+  documentation edits and throwaway probes. Keep its branch, target, and scratch state
+  task-owned. For direct Cargo commands, set
+  `PYO3_PYTHON="$(uv python find 3.11)"`; do not copy or symlink the primary `.venv`.
+- Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
+  for the same PR or immediate follow-up work after checking ownership, exact head,
+  status, and active processes.
+- When a PR is otherwise ready to merge and `origin/main` has advanced, do not rebase
+  merely to refresh its base. Fetch current refs, check GitHub's current mergeability,
+  and inspect the prospective merge result with `git merge-tree` or an equivalent
+  temporary integration. If GitHub's merge produces the intended semantic and
+  structural result without a dangerous conflict, preserve the reviewed head and its CI
+  evidence. Rebase only when that result differs, is unsafe or unclear, or another
+  identified semantic or structural issue requires a changed head.
+- A non-trivial rebase or hand-resolved conflict requires review of the resolution
+  before any history rewrite is published. Run `python3 scripts/gate.py --local` for a
+  non-documentation change or the focused documentation checks for a docs-only change.
+  Never force-push a red gate. Obtain approval, then use an exact-head
+  `--force-with-lease`; clean mechanical rebases do not need the additional resolution
+  review.
+
 ## Build Toolchain
 
 `chelis-python` links against `libpython`. Outside Devenv, `.cargo/config.toml`
@@ -482,19 +561,40 @@ POSIX wrapper, which runs the same Python checker through Devenv, `.venv`, or
 All formatting and lint hooks remain disabled. CI remains the remote
 enforcement boundary.
 
+## Commit And Pull Request Hygiene
+
+- Use plain conventional commit messages with the configured human author. Do not add
+  `Claude-Session`, Codex/Claude attribution, AI co-authorship markers, or AI-session
+  links to commit messages or PR bodies.
+- GitHub squash merges can concatenate every branch commit message into the final
+  commit. A closing keyword in any intermediate message can therefore close an issue
+  even when the PR was only partial work.
+- Use `Part of #N` or `Addresses #N` unless default-branch merge should close the issue.
+  Before squash merge, audit the complete branch message set and proposed squash text
+  for `close`, `fix`, or `resolve` immediately followed by an issue reference. Closing
+  keywords are intentional authority, never descriptive prose.
+
 ## Build And Gate Commands
 
-Minimum repo gate:
+Agent pre-push gate for non-documentation changes:
 
 ```sh
-python3 scripts/gate.py
+python3 scripts/gate.py --local
 ```
 
 `scripts/gate.py` is the single source of truth for the per-PR
-developer-runnable gate. CI calls `python3 scripts/gate.py <stage>` for
-each split job, and `scripts/test_gate.py` asserts the CI workflow
-hand-inlines no gate command the script does not produce. To see the
-canonical list:
+gate. Agents run only the `--local` subset before pushing; the bare full gate is
+CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>`
+for each split job, and `scripts/test_gate.py` asserts the CI workflow
+hand-inlines no gate command the script does not produce. To see the canonical
+full list and the local/CI ownership annotations:
+
+Before `--local` or another long local validation, fetch `origin/main` so the
+changed-crate selection and inherited-failure comparison use current evidence. If the
+branch is materially behind, reconcile it deliberately before spending hours on a
+stale tree; do not rewrite shared history without the rebase review gate above. When an
+unrelated failure appears, reproduce or compare it on current `origin/main` before
+diagnosing it as branch-owned.
 
 ```sh
 python3 scripts/gate.py --list
@@ -510,6 +610,7 @@ python3 scripts/gate.py --list
 # <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
 # <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
 # cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
+# <managed-python> scripts/compiler_front_end_performance.py  # ci-owned
 # <managed-python> scripts/unrepresentable_domain_oracle.py  # local + ci
 # # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
@@ -619,17 +720,32 @@ from mutating the clone's shared `.git/hooks` while sibling worktrees run.
 These controls isolate writable state; concurrent agents may still contend
 for CPU and make each other slower.
 
-Documentation-only changes (Markdown/prose with no code, fixture, or
-example edits) are exempt from `--local`: skip the local gate, push,
-and require green CI instead. The gate's clippy/build/test stages
-cannot be affected by prose, and CI still runs the lint stage plus the
-Docs job (mdBook build and the `skill_suite` example validator), which
-cover everything a docs-only diff can break.
+Prose-only changes with no code, fixture, example, or structurally consumed Markdown
+are exempt from `--local`: run the focused documentation checks, push, and require green
+CI. Hosted docs-only classification is routing evidence, not proof that every changed
+Markdown control artifact has an owning validator in that workflow.
+
+Markdown parsed, embedded, mirrored, or used as agent instructions is a control artifact,
+not inert prose. Run its focused validators even when CI reports `docs_only=true`. For a
+shared `agent-skills/*/SKILL.md` or red-team command-wrapper change, at minimum:
+
+- run the platform's skill-schema validator against every changed `SKILL.md` (in Codex,
+  use the `skill-creator` `quick_validate.py` helper),
+- run `scripts/regenerate_conformance_assets.py --check` through the uv-managed Python,
+- compare the live and embedded skill bytes and the Claude/Codex wrapper bytes, and
+- run the `chelis-conformance` `asset_drift_tripwire` and `skill_set_uniformity` tests
+  with the worktree's managed Python environment.
+
+The always-run Docs job builds mdBook and validates the package skill/examples; it does
+not replace these shared-agent-skill checks.
 
 Default-gate discipline:
 
-- `cargo test --workspace` is the inner development loop and should stay under roughly 60
-  seconds on a machine without GPU/PyTorch
+- Use focused `cargo nextest run -p <crate> --test <file>` commands for the inner
+  development loop. Do not substitute a workspace-wide `cargo test` run for the
+  canonical gate.
+- For non-documentation changes, `python3 scripts/gate.py --local` is the pre-push
+  checkpoint; routine workspace execution is hosted-CI-owned.
 - tests that exceed that budget or require heavyweight local prerequisites should be
   `#[ignore]` by default and invoked through a documented manual gate
 - every ignored test must have a concrete manual command and expected success condition in
@@ -659,6 +775,10 @@ default workspace run.
   one (`nohup cargo build` you are still tailing). Run it from the checkout
   whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
   keep burning CPU and hold the cargo lock across sessions.
+- Before a subagent starts a heavyweight Cargo command, it must report the exact command
+  and expected weight to the orchestrator. The orchestrator checks active processes and
+  load, then runs, staggers, or declines it; isolated targets prevent state corruption
+  but do not eliminate CPU starvation.
 - Contention diagnostic: several unrelated tests FAILing at near-identical
   wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
   starvation, not code breakage. Measured 2026-06-10: the 25-test
@@ -666,6 +786,9 @@ default workspace run.
   machine. Re-run on a quiet machine before treating those as real failures.
 - Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
   only that test target.
+- At session end, verify that task-owned background cargo, rustc, and nextest processes
+  are gone. A stopped wrapper is not proof that its reparented children stopped; use
+  the scoped `reap_orphans.py` dry run and kill only confirmed task-owned stragglers.
 - macOS workstation only: first-exec assessment can degrade under mass
   fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
@@ -673,6 +796,40 @@ default workspace run.
   local workspace nextest stage. If the probe reports degradation, use the
   macOS Smoke CI stage per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
+
+### Post-Merge Cleanup
+
+- After a PR merges, remove its associated git worktrees and task-owned target builds
+  unless they are expected to support immediate follow-up work. Retained artifacts are
+  temporary: remove them as soon as that follow-up finishes.
+- Before removal, verify the PR is merged, the worktree has no uncommitted work worth
+  preserving, and no active process owns its target. Remove only the exact PR-owned
+  worktree and regenerable target paths; preserve the primary checkout and unrelated
+  worktrees, targets, and user changes.
+- Audit cleanup targets with full branch names and live PR state. Because this repository
+  squash-merges, "commits ahead of `origin/main`" and missing commit subjects in main do
+  not prove that work is unmerged. For an ambiguous old worktree, compare stable patch
+  IDs against the PR commits and confirm the added symbols on current main.
+- Use `git worktree remove <path>` followed by `git worktree prune`. For a separate
+  task-owned target, prefer `cargo clean --target-dir <exact-path>` after inspecting it.
+- Remove worktrees with individual explicit commands, never a blanket loop. Worktree
+  removal keeps the branch ref; branch deletion is a separate later decision. If macOS
+  leaves a partially removed target or `.DS_Store`, re-inspect the exact path before an
+  equally narrow cleanup command.
+
+## Subagent Coordination And Delivery
+
+- Every subagent prompt must name the delivery mechanism and the complete expected
+  report. A locally written or plain-text report that is not sent through the platform's
+  parent-message/final-report channel has not been delivered.
+- A subagent must not end its turn merely to wait for a background build, monitor, CI,
+  or notification that cannot wake it. Keep ownership of a long command through the
+  platform's synchronous wait/poll mechanism, or return the honest partial result and
+  unfinished work.
+- If an agent returns "waiting" or goes idle without the deliverable, the orchestrator
+  resumes it immediately with the exact missing items. Prefer a clearly labelled partial
+  report over silence or an overstated completion claim, and deduplicate repeated reports
+  that race with a resume nudge.
 
 ## Local HIP Environment
 
@@ -738,8 +895,9 @@ the built-in gate.
 
 When writing new code or fixtures, run `chelis fmt --inplace <file>`
 and `chelis lint --check` before pushing. The gate replaces the older
-manual checklist of "remember to run fmt"; if the gate is green and
-`cargo test --workspace` passes, the change is ready.
+manual checklist of "remember to run fmt". Run `python3 scripts/gate.py --local`
+before pushing a non-documentation change, use focused nextest commands during
+development, and leave routine workspace execution to hosted CI.
 
 ## Surf Style Guide
 
@@ -925,8 +1083,10 @@ surfaces load the same skill library.
 Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
 should stay behaviorally aligned so slash-command access does not drift between tool
 surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
-stale-agent cleanup plus a fresh local subagent before any validation is counted as a
-red team.
+stale-agent inventory/retirement plus a fresh local subagent before any validation is
+counted as a red team. Fresh context is an agent property: the wrapper should reuse a clean,
+exact-head, idle worktree and its warm target artifacts when available instead of
+forcing a cold checkout and rebuild.
 
 Current shared skill set:
 
@@ -964,3 +1124,42 @@ as `conform bump` PRs (never direct to `main`). `Chelis-Lang/school` is the
 reference implementation. Changes to the contract land here first (edit the
 doc **and** `MANIFEST`/`REGISTRY` in lockstep, or the tripwire fails) and
 propagate to every shell via `conform sync` per the scaffolding drift rule.
+
+### Conform Bump Wave Checklist
+
+`chelis +<new-version> reef conform bump <new-version>` is a mechanical starter,
+not a green-PR oracle. Run it from a fresh shell worktree with the new toolchain
+selected explicitly, then audit every item below:
+
+- Inspect both its exit status and `git status`. Pre-conformance repos can fail or exit
+  zero after a partial edit and materialize orphaned `.claude/`, `.codex/`, or
+  `agent-skills/` content; remove that half-retrofit and defer full adoption to a
+  separate `conform init` change.
+- Cascade every dependency surface manually: sibling-shell versions in `reef.toml`,
+  sibling tag/version variables in workflows, `[chelis-src]`'s exact
+  `CHELIS_PIN_COMMIT`, and every non-frozen nested project `reef.toml`. The standard pin
+  guard does not prove tag-to-SHA agreement or cover sibling and nested pins.
+- Audit the shell's own package version, CHANGELOG convention, and hard-coded version
+  strings in both CI and release workflows before tagging. A workflow at the tagged
+  commit cannot be repaired by merely rerunning the failed release.
+- Treat `reef.lock` by entry authority. Regenerate `bundled` toolchain entries. Never
+  commit `local_registry` entries without `remote_origin` or hashes produced by a
+  private local registry. Keep published dependency entries at the last published
+  release during a cascade block, and ensure `reef build` precedes any `chelis test` or
+  `chelis prove` step that reads the committed lock.
+- Re-run `conform audit` and repair every live `docs/UPSTREAM_BUGS.md` entry to carry its
+  own `chelis#NNN` or `docs/issue_drafts/<file>` citation. Nested detail bullets must not
+  accidentally parse as uncited independent entries.
+- Verify a claimed acceptance command by opening the workflow and locating the exact
+  step. If the authoritative campaign is expensive, compare a bounded pilot at the old
+  and new pins on identical sources; only the delta supports a "no new regressions"
+  claim.
+- When a skipped version range crosses canonical Surf v0.19, run
+  `chelis migrate surf --from 0.18 --inplace` over maintained `.ch` sources, then handle
+  semantic migrations the tool cannot choose: explicit literal suffixes, int64 extents,
+  and checked `cast` versus truncating `cast_trunc`.
+- `chelis test` deliberately does not run the style gate. A shell that generates Chelis
+  source must run `chelis check` or `chelis fmt --check` over emitted files; do not hide
+  formatter drift behind a measured threshold in the generator.
+- Finish with `reef build`, the shell's real CI-equivalent gates, and exact review of the
+  generated diff. A successful `conform bump` alone is never completion evidence.

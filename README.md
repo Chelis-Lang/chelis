@@ -468,9 +468,14 @@ fail-fast, allowing one run to report all failing tests. Parallel worktrees may
 run more slowly from CPU contention, but they do not share writable build
 artifacts.
 
-Documentation-only changes are exempt from the local gate: push and
-require green CI instead (the lint stage and the Docs job cover
-everything a docs-only diff can break).
+Prose-only documentation changes are exempt from the local gate: run their focused
+documentation checks, push, and require green CI. Markdown consumed structurally by
+tools is not inert prose; shared `agent-skills/*/SKILL.md` and command-wrapper changes
+still require skill-schema validation, the conformance-asset regeneration check,
+live/embedded and Claude/Codex byte comparisons, and the focused
+`chelis-conformance` asset/uniformity tests documented in `AGENTS.md`. The hosted
+docs-only classification is routing evidence, not proof that every Markdown control
+artifact has an owning validator in the always-run Docs job.
 
 `chelis build`, `chelis check`, `chelis validate`, and `chelis eval --file`
 each enforce a built-in **style gate** (`chelis fmt --check` plus the
