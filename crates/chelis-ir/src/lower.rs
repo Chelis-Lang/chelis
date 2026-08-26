@@ -6853,7 +6853,7 @@ impl LowerCtx {
                             let element_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
-                            self.zero_tensor_node(&element_ty)
+                            self.zero_tensor_node(&element_ty, actual)
                         });
                         leaves.push(LoweredValue::Node(node));
                     }
