@@ -2922,12 +2922,28 @@ pub(super) fn tensor_einsum_value(
         .iter()
         .map(|label| dims.get(label).copied().unwrap_or(1))
         .collect::<Vec<_>>();
+    // The host lane carries shapes as `usize`, but the language's extent
+    // domain is int64 ([05-DIM-2]) and [05-OP-33] wants an unrepresentable
+    // count to trap `Overflow`. Fold in int64 so this lane agrees with the C
+    // runtime about where the ceiling is instead of inheriting the host's.
     let checked_product = |shape: &[usize], context: &str| {
-        shape.iter().try_fold(1usize, |product, &extent| {
-            product
-                .checked_mul(extent)
-                .ok_or_else(|| format!("Overflow: einsum {context} extent product"))
-        })
+        shape
+            .iter()
+            .try_fold(1_i64, |product, &extent| {
+                let extent = i64::try_from(extent).map_err(|_| {
+                    format!("Overflow: einsum {context} extent {extent} exceeds int64")
+                })?;
+                product
+                    .checked_mul(extent)
+                    .ok_or_else(|| format!("Overflow: einsum {context} extent product exceeds int64"))
+            })
+            .and_then(|product| {
+                usize::try_from(product).map_err(|_| {
+                    format!(
+                        "Overflow: einsum {context} extent product {product} is not representable on this host"
+                    )
+                })
+            })
     };
     let output_total = checked_product(&out_shape, "output")?;
     let reduction_total = checked_product(&reduction_shape, "reduction")?;

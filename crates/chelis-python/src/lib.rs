@@ -1805,8 +1805,12 @@ fn gpu_input_tensor(
             strides: dims_array(&strides)?,
             ndim: shape.len() as i32,
             dtype: CHELIS_DTYPE_F32,
-            size: element_count(&shape)? as i32,
-            storage_size: element_count(&shape)? as i32,
+            // `as i32` truncated silently: a device tensor with more than
+            // `i32::MAX` elements published a wrong (often negative) count to
+            // the GPU carrier. Narrowing to that carrier's declared width is a
+            // decision, so it reports rather than wraps.
+            size: gpu_element_count(&shape)?,
+            storage_size: gpu_element_count(&shape)?,
         },
         device_id,
     })
@@ -1867,6 +1871,20 @@ fn validate_canonical_host_strides(shape: &[usize], strides: &[usize]) -> PyResu
     }
 }
 
+/// Element count narrowed to the GPU carrier's declared `int32_t` width.
+///
+/// The GPU tensor still uses the fixed-rank int32 metadata carrier that the
+/// host ABI replaced with dynamic-rank int64 shape and stride carriers; until
+/// it moves, the narrowing is at least loud. Tracked by chelis#1345.
+fn gpu_element_count(shape: &[usize]) -> PyResult<i32> {
+    let count = element_count(shape)?;
+    i32::try_from(count).map_err(|_| {
+        PyValueError::new_err(format!(
+            "device tensor element count {count} exceeds the GPU carrier's int32 width"
+        ))
+    })
+}
+
 fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
     let mut out = [0; CHELIS_MAX_DIM];
     for (index, dim) in dims.iter().enumerate() {
@@ -1876,11 +1894,25 @@ fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
     Ok(out)
 }
 
+/// Element count for a host input shape, folded in the canonical int64 extent
+/// domain ([05-DIM-2]).
+///
+/// A saturating fold clamped an overflowing product to `usize::MAX` and
+/// returned it as a successful count; the CPU input path only noticed because
+/// the later `checked_mul(itemsize)` / `i64::try_from(size)` happened to
+/// reject the clamped value, and the GPU path did not notice at all. The count
+/// crosses into `ChelisTensor.size`, which is `int64_t`, so int64 is the
+/// domain the check belongs in.
 fn element_count(shape: &[usize]) -> PyResult<usize> {
-    Ok(shape
-        .iter()
-        .copied()
-        .fold(1usize, |acc, dim| acc.saturating_mul(dim)))
+    let count = shape.iter().copied().try_fold(1_i64, |acc, dim| {
+        let dim = i64::try_from(dim)
+            .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
+        acc.checked_mul(dim).ok_or_else(|| {
+            PyValueError::new_err("input element count exceeds the int64 extent domain")
+        })
+    })?;
+    usize::try_from(count)
+        .map_err(|_| PyValueError::new_err("input element count exceeds the host index domain"))
 }
 
 fn numpy_element_strides(array: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
@@ -2247,6 +2279,36 @@ mod tests {
     const LOSS_PROGRAM: &str = r#"x = (x : tensor[4, f32])
 loss = (mean(x, 0) : tensor[f32])
 "#;
+
+    /// The host ABI's element count is an `int64_t`, so its check belongs in
+    /// the int64 extent domain ([05-DIM-2]). These extents assume a 64-bit
+    /// host, which the `ChelisTensor` field-offset assertions below already
+    /// require.
+    #[test]
+    fn element_count_reports_shapes_outside_the_int64_extent_domain() {
+        assert_eq!(element_count(&[]).expect("rank zero"), 1);
+        assert_eq!(element_count(&[3, 4]).expect("legal shape"), 12);
+        assert_eq!(element_count(&[0, 5]).expect("zero extent"), 0);
+        // A single extent past int64.
+        assert!(element_count(&[usize::MAX]).is_err());
+        // 2^32 * 2^32 = 2^64. Every extent is legal on its own; the product is
+        // not. The saturating fold clamped this to `usize::MAX` and returned
+        // it as a successful count.
+        let band = 1_usize << 32;
+        assert!(element_count(&[band, band]).is_err());
+    }
+
+    #[test]
+    fn gpu_element_count_reports_instead_of_truncating_to_the_carrier_width() {
+        assert_eq!(gpu_element_count(&[2, 3]).expect("legal count"), 6);
+        assert_eq!(
+            gpu_element_count(&[i32::MAX as usize]).expect("boundary count"),
+            i32::MAX
+        );
+        // One element past the carrier's declared width. `as i32` published
+        // `i32::MIN` here.
+        assert!(gpu_element_count(&[(i32::MAX as usize) + 1]).is_err());
+    }
 
     struct HostTensorFixture {
         _shape: Box<[i64]>,

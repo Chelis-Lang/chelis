@@ -690,14 +690,43 @@ fn parse_einsum_equation(equation: &str, lhs_rank: usize, rhs_rank: usize) -> Ei
     }
 }
 
-fn checked_einsum_extent_product(shape: &[i64], context: &str) -> usize {
-    shape.iter().copied().fold(1usize, |product, extent| {
-        let extent = usize::try_from(extent).unwrap_or_else(|_| {
-            runtime_fail!("Overflow: einsum {context} extent {extent} is not representable")
-        });
+/// Fold a shape into its element count in the canonical int64 extent domain
+/// ([05-DIM-2]).
+///
+/// The int64 fold is the normative check. [05-OP-33] requires an
+/// unrepresentable count to trap `Overflow`, and "representable" means
+/// representable as an int64 extent, not "happens to fit whatever width this
+/// host spells `usize`". Folding in `usize` accepted the whole
+/// `[i64::MAX + 1, u64::MAX]` band on a 64-bit host and would have rejected
+/// perfectly legal extents on a 32-bit one, making the language's extent
+/// domain a property of the compiling machine.
+fn checked_einsum_extent_product(shape: &[i64], context: &str) -> i64 {
+    shape.iter().copied().fold(1_i64, |product, extent| {
         product.checked_mul(extent).unwrap_or_else(|| {
-            runtime_fail!("Overflow: einsum {context} extent product is not representable")
+            runtime_fail!("Overflow: einsum {context} extent product exceeds int64")
         })
+    })
+}
+
+/// Host length for a buffer of `count` elements at `element`'s width, with the
+/// byte size checked before anything can request it.
+///
+/// [05-OP-33] requires an unrepresentable allocation size to trap `Overflow`
+/// *before* allocation. A count that survives the int64 fold above can still
+/// name a byte size that is not an int64 quantity, and `Vec::with_capacity`
+/// reports that as a bare `capacity overflow` panic across the C boundary
+/// rather than a branded diagnostic.
+fn checked_einsum_buffer_len(count: i64, element: RuntimeDType, context: &str) -> usize {
+    if count
+        .checked_mul(tensor_elem_size(element) as i64)
+        .is_none()
+    {
+        runtime_fail!("Overflow: einsum {context} buffer byte size exceeds int64");
+    }
+    usize::try_from(count).unwrap_or_else(|_| {
+        runtime_fail!(
+            "Overflow: einsum {context} extent product {count} is not representable on this host"
+        )
     })
 }
 
@@ -3041,7 +3070,12 @@ pub unsafe extern "C" fn chelis_tensor_concat(
                 runtime_fail!("Domain: concat expects matching non-concatenated axes");
             }
         }
-        out_shape[axis_i] += (*tensor).shape[axis_i];
+        // [05-OP-33]: output extents use checked arithmetic. Unchecked, this
+        // wrapped negative and surfaced as a `Domain` negative-extent report
+        // from the allocator, where the atom mandates `Overflow`.
+        out_shape[axis_i] = out_shape[axis_i]
+            .checked_add((*tensor).shape[axis_i])
+            .unwrap_or_else(|| runtime_fail!("Overflow: concat output extent exceeds int64"));
     }
     let out = chelis_alloc(
         (*first).rank,
@@ -3071,7 +3105,9 @@ pub unsafe extern "C" fn chelis_tensor_concat(
             ptr::copy_nonoverlapping(src, dst, elem_size);
             indices[axis_i] -= axis_offset;
         }
-        axis_offset += (*tensor).shape[axis_i];
+        axis_offset = axis_offset
+            .checked_add((*tensor).shape[axis_i])
+            .unwrap_or_else(|| runtime_fail!("Overflow: concat axis offset exceeds int64"));
     }
     out
 }
@@ -3084,9 +3120,21 @@ pub unsafe extern "C" fn chelis_tensor_split(
 ) -> *mut chelis_list {
     let dtype = tensor_dtype(tensor, "split input");
     let axis_i = tensor_normalize_axis(tensor, axis, "split");
+    // [05-OP-33]: split takes "nonnegative int64 sizes whose checked sum
+    // equals the selected extent". Both halves matter. An unchecked `+=`
+    // wraps on an i64.MAX-shaped size list, and without the nonnegativity
+    // guard a negative size lets the sum equality hold while an individual
+    // part exceeds the source extent, which walks the copy loop off the end
+    // of the input buffer.
     let mut total = 0i64;
     for i in 0..chelis_list_len(sizes) {
-        total += int_list_value(sizes, i, "split");
+        let size = int_list_value(sizes, i, "split");
+        if size < 0 {
+            runtime_fail!("Domain: split expects nonnegative int64 sizes, got {size}");
+        }
+        total = total
+            .checked_add(size)
+            .unwrap_or_else(|| runtime_fail!("Overflow: split size sum exceeds int64"));
     }
     if total != (*tensor).shape[axis_i] {
         runtime_fail!("split sizes must sum to the selected axis extent");
@@ -3122,7 +3170,9 @@ pub unsafe extern "C" fn chelis_tensor_split(
             ptr::copy_nonoverlapping(src_ptr, dst, elem_size);
             indices[axis_i] -= axis_offset;
         }
-        axis_offset += part_size;
+        axis_offset = axis_offset
+            .checked_add(part_size)
+            .unwrap_or_else(|| runtime_fail!("Overflow: split axis offset exceeds int64"));
         items.push(chelis_value_from_tensor(part));
     }
     Box::into_raw(Box::new(chelis_list { refcount: 1, items }))
@@ -3919,8 +3969,16 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
             reduction_shape.push(label_dims[idx]);
         }
     }
-    let out_size = checked_einsum_extent_product(&out_shape, "output");
-    let reduction_total = checked_einsum_extent_product(&reduction_shape, "reduction");
+    let out_size = checked_einsum_buffer_len(
+        checked_einsum_extent_product(&out_shape, "output"),
+        result_dtype,
+        "output",
+    );
+    let reduction_total = checked_einsum_buffer_len(
+        checked_einsum_extent_product(&reduction_shape, "reduction"),
+        accumulator,
+        "reduction",
+    );
     let out = chelis_alloc(
         out_labels.len() as c_int,
         out_shape.as_ptr(),
