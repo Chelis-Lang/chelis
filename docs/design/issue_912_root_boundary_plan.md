@@ -17,9 +17,12 @@ cargo nextest run -p chelis-cli --test issue_912_root_boundary --run-ignored all
 ```
 
 Its ignore ledger is empty and all seventeen cells pass. This delivery resolves
-#1079, #1082, and #1083. It does not close the #912 parent while the separately
-owned #1102 zero-gradient-value defect and #1148 `trace` result-type decision
-remain open.
+#1079, #1082, and #1083. The #1148 `trace` result-type question was subsequently
+settled by spec/04 section 4.3 and [05-OP-33]. For the f32 case in #1148,
+matrix-trace inference already returns rank-zero `tensor[f32]`; the associated
+change adds explicit positive/negative coverage and corrects fixture signatures.
+That evidence does not establish full per-dtype [05-OP-33] conformance. The #912
+parent remains open for the separately owned #1102 zero-gradient-value defect.
 
 ## Problem Statement
 
