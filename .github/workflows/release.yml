@@ -158,8 +158,8 @@ jobs:
   # Off-Nix consumption proof for Darwin: macos-latest runners carry no
   # Nix, so the stock runner is the clean consumption environment. It runs
   # the exact staged tarball, proves the cvc5 discharge on the shipped
-  # binary, and compiles emitted C against the shipped runtime archive with
-  # the system clang and Accelerate (.github/scripts/smoke_macos_accelerate.py).
+  # binary, and smokes the manifested C callable ABI against the shipped
+  # compiler (.github/scripts/smoke_macos_manifested_callable.py).
   consume-chelis-release-darwin:
     name: Consume chelis release off Nix (darwin-arm64)
     needs: [build-chelis-release]

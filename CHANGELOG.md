@@ -6,20 +6,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.18.5] — 2026-08-22
-
-Three breaking entries, all in the front end: the checker rejects
-polymorphic recursion, the parser rejects an integer literal in a bare
-type position, and `>` evaluates its operands in the order they were
-written. Each one either rejects a program that used to be accepted or
-runs an accepted program differently; each entry names what to change.
-
-**Every on-disk compiler cache is invalidated, twice over.** The
-compiled-context, stdlib, and library cache formats advance (8 → 9,
-4 → 5, 1 → 2), and cache keys now carry a build fingerprint rather than
-the release version. Both are automatic: the first build after
-upgrading is cold, and nothing needs to be deleted by hand.
-
 ### Added
 
 - **The Darwin release toolchain builds from Nix (openspec
@@ -31,7 +17,7 @@ upgrading is cold, and nothing needs to be deleted by hand.
   discharge) on the rewritten binary inside the sandbox. `release.yml`'s
   `build-chelis-release` is now a two-platform matrix, a
   `consume-chelis-release-darwin` job proves the exact staged tarball on
-  a stock macOS runner including the Accelerate smoke, and the Cargo
+  a stock macOS runner including the manifested C callable smoke, and the Cargo
   `build-darwin-arm64` job retired together with the
   `scripts/ci_cvc5_build.py` fetch-retry wrapper and the
   release-workflow pyo3-isolation guard (release.yml runs no host Cargo
@@ -124,6 +110,13 @@ upgrading is cold, and nothing needs to be deleted by hand.
   lane uses the same Devenv and cvc5 supply. Contract suite:
   `scripts/test_smt_lane_workflows.py`.
 
+- Nix consumes shared crate2nix and OpenSpec pins from `Chelis-Lang/ci` through Devenv composition.
+  The repository tracks `Cargo.nix`, so package evaluation does not use import from derivation.
+- Selected Linux CI jobs run in the portable Devenv environment. Devenv supplies Rust, Python, mdBook, cargo-nextest, and common build tools.
+- Hosted macOS jobs run only after manual dispatch. Release publication now requires a manual dispatch at the pushed `v*` tag.
+- Devenv builds portable `chelisup` release files with `outputs.release-chelisup`. The output includes one native executable and its SHA-256 sidecar.
+  Releases support static Linux x86-64 and Apple Silicon macOS. Intel macOS now fails as unsupported instead of requesting an absent asset.
+
 ### Removed
 
 - **The durable prebuilt-cvc5 producer.** `build-cvc5.yml`,
@@ -145,6 +138,22 @@ upgrading is cold, and nothing needs to be deleted by hand.
   if a low floor is ever needed. The runtime static library is
   unaffected: it is a pure-Rust glibc archive whose symbol binding
   happens at the consumer's link.
+
+## [0.18.5] — 2026-08-22
+
+Three breaking entries, all in the front end: the checker rejects
+polymorphic recursion, the parser rejects an integer literal in a bare
+type position, and `>` evaluates its operands in the order they were
+written. Each one either rejects a program that used to be accepted or
+runs an accepted program differently; each entry names what to change.
+
+**Every on-disk compiler cache is invalidated, twice over.** The
+compiled-context, stdlib, and library cache formats advance (8 → 9,
+4 → 5, 1 → 2), and cache keys now carry a build fingerprint rather than
+the release version. Both are automatic: the first build after
+upgrading is cold, and nothing needs to be deleted by hand.
+
+### Added
 
 - **Recursive generic host calls compile via bounded memoized
   monomorphization (chelis#1158, successor to chelis#941).** The C-emitting
@@ -187,12 +196,6 @@ upgrading is cold, and nothing needs to be deleted by hand.
   authored `[a]` binders, so partially annotated recursive defs keep
   checking exactly as before.
 
-- Nix consumes shared crate2nix and OpenSpec pins from `Chelis-Lang/ci` through Devenv composition.
-  The repository tracks `Cargo.nix`, so package evaluation does not use import from derivation.
-- Selected Linux CI jobs run in the portable Devenv environment. Devenv supplies Rust, Python, mdBook, cargo-nextest, and common build tools.
-- Hosted macOS jobs run only after manual dispatch. Release publication now requires a manual dispatch at the pushed `v*` tag.
-- Devenv builds portable `chelisup` release files with `outputs.release-chelisup`. The output includes one native executable and its SHA-256 sidecar.
-  Releases support static Linux x86-64 and Apple Silicon macOS. Intel macOS now fails as unsupported instead of requesting an absent asset.
 - **BREAKING (parser): an integer literal in a bare type position is now
   a parse error (chelis#1179).** The Rust Surf parser shared one integer
   arm between ordinary type atoms and dimension items, so an integer

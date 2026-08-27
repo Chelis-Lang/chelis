@@ -14,7 +14,7 @@
 ## 3. Rewire the release workflow
 
 - [x] 3.1 Convert `build-chelis-release` to a two-platform matrix mirroring `build-chelisup-release`; the Linux leg keeps `chelisup.sh` staging and the tag-parity check runs per leg.
-- [x] 3.2 Add the Darwin consumption job on the stock macOS runner: unpack, `--version`/`--help`, `verify_release_smt.py --tarball`, and `smoke_macos_accelerate.py` against the unpacked binary.
+- [x] 3.2 Add the Darwin consumption job on the stock macOS runner: unpack, `--version`/`--help`, `verify_release_smt.py --tarball`, and `smoke_macos_manifested_callable.py` against the unpacked binary.
 - [x] 3.3 Delete the Cargo `build-darwin-arm64` job; retire `scripts/ci_cvc5_build.py` and `scripts/test_ci_cvc5_build.py` with their last caller. (Also retired `scripts/test_release_workflow_pyo3_isolation.py`: release.yml runs no host Cargo, so its invariant lost its subject.)
 - [x] 3.4 Update `publish-release` dependencies; manual `v*`-tag dispatch and publication conditions unchanged.
 - [x] 3.5 Update the workflow contract tests (`test_release_chelis_output.py`, `test_gate.py` macOS job census) with mutations.

@@ -31,7 +31,7 @@ The pre-rewrite probes (version, help, release fixture, cvc5 discharge) stay com
 
 ### The Darwin consumption job is natively off-Nix
 
-`macos-latest` runners carry no Nix, so the consumption job needs no container: download the staged tarball, unpack, run `bin/chelis --version`, `verify_release_smt.py --tarball`, and `.github/scripts/smoke_macos_accelerate.py` against the unpacked binary (clang + Accelerate come with the image). This also keeps the Accelerate smoke coverage the retiring Cargo job carried.
+`macos-latest` runners carry no Nix, so the consumption job needs no container: download the staged tarball, unpack, run `bin/chelis --version`, `verify_release_smt.py --tarball`, and `.github/scripts/smoke_macos_manifested_callable.py` against the unpacked binary (clang comes with the image). This also keeps the macOS C-callable smoke coverage the retiring Cargo job carried.
 
 ### The Cargo Darwin job retires, and the cold-recipe proof moves
 
