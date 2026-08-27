@@ -381,7 +381,28 @@ fn result_alias_set(
             // meaning of the very name being bound.
             let mut saved: Vec<(String, Option<ReturnsArg>)> = Vec::new();
             for binding in bindings {
-                let set = result_alias_set(&binding.value, param_index, summary, env, helpers);
+                // A refcount-tracked binding OWNS its allocation: the
+                // emitter retains at the value temp on a bare copy
+                // (whatever the source's provenance) and retains again at
+                // a result leaf naming the binding, so a return THROUGH
+                // such a binding hands the caller an owned reference, not
+                // a borrow of the parameter or captured value it started
+                // from. Its result-alias meaning is therefore `empty`.
+                // Propagating the value's alias set here instead made the
+                // caller's call-escape retain compensate an already-owned
+                // return: for `def f(p) = { d = p  d }`, three retains
+                // against two releases, one leaked allocation per call
+                // (PR #1302 round-2 red-team finding). Non-refcounted
+                // carriers (tensors above all) have no retain machinery
+                // and still return true borrows, so they keep the
+                // propagated set -- blanking those would let a caller
+                // claim a borrowed tensor and restore the chelis#1222
+                // double free.
+                let set = if retain_call(&binding.name, &binding.ty).is_some() {
+                    ReturnsArg::empty()
+                } else {
+                    result_alias_set(&binding.value, param_index, summary, env, helpers)
+                };
                 saved.push((binding.name.clone(), env.insert(binding.name.clone(), set)));
             }
             let result = result_alias_set(body, param_index, summary, env, helpers);

@@ -304,3 +304,65 @@ fn fresh_binding_takes_no_alias_retain() {
         "the block releases its fresh binding exactly once:\n{body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 5. Exactly-once composition (round-2 red-team finding on PR #1302): a
+//    binding-mediated parameter return is OWNED - the copy retains at the
+//    value temp and the result leaf retains the escaping binding - so the
+//    caller must claim it rather than compensate it. The first cut left
+//    `analyze_returns_arg` flagging `f` as may-return-its-argument, and
+//    the caller's call-escape retain then triple-counted: three retains
+//    against two releases, one leaked string per call. The counts below
+//    pin each side of the composition.
+// ---------------------------------------------------------------------------
+
+const BINDING_MEDIATED_RETURN: &str = "def f(p: string) -> string = {\n\
+  d = p\n\
+  d\n\
+}\n\
+def g2() -> int64 = {\n\
+  raw = string_concat(\"ab\", \"cd\")\n\
+  out = f(raw)\n\
+  add(string_len(out), string_len(raw))\n\
+}\n\
+n = g2()\n";
+
+#[test]
+fn binding_mediated_parameter_return_composes_exactly_once() {
+    if skip_without_cc() {
+        return;
+    }
+    let (stdout, emitted) = build_run_and_emit(BINDING_MEDIATED_RETURN, "binding_mediated");
+    assert_eq!(
+        shared_line(&stdout, "n"),
+        shared_line(
+            &eval_stdout(BINDING_MEDIATED_RETURN, "binding_mediated"),
+            "n"
+        ),
+    );
+    let f_body = emitted_function(&emitted, "chelis_string f(chelis_string p)");
+    assert_eq!(
+        count_in(f_body, "chelis_string_retain("),
+        2,
+        "`f` owns at both leaves: the value-temp copy retain on `d = p` \
+         and the result-target retain on the escaping binding:\n{f_body}"
+    );
+    assert_eq!(
+        count_in(f_body, "chelis_string_release("),
+        1,
+        "`f` releases its binding exactly once at the block close:\n{f_body}"
+    );
+    let g2_body = emitted_function(&emitted, "int64_t g2()");
+    assert_eq!(
+        count_in(g2_body, "chelis_string_retain("),
+        0,
+        "`f`'s binding-mediated return is owned, so the caller claims it \
+         and must NOT add a call-escape compensation - that third retain \
+         was the round-2 per-call leak:\n{g2_body}"
+    );
+    assert_eq!(
+        count_in(g2_body, "chelis_string_release("),
+        2,
+        "the caller releases `out` and `raw` exactly once each:\n{g2_body}"
+    );
+}
