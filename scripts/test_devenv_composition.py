@@ -71,6 +71,7 @@ class DevenvGeneratedFiles:
 class DevenvCiProfiles:
     names: frozenset[str]
     exposes_cvc5: bool
+    linux_linker_build_id: bool
 
 
 def parse_root_composition(root_text: str, yaml_text: str) -> DevenvComposition:
@@ -186,6 +187,8 @@ def parse_ci_profiles(text: str) -> DevenvCiProfiles:
         "ci.module.env = {",
         'CARGO_PROFILE_DEV_DEBUG = "0";',
         'CARGO_PROFILE_TEST_DEBUG = "0";',
+        "// lib.optionalAttrs pkgs.stdenv.isLinux {",
+        'RUSTFLAGS = "-C link-arg=-Wl,--build-id=sha1";',
         "sanitizers = {",
         'extends = [ "ci" ];',
         'CHELIS_C_TEST_EXTRA_FLAGS = "-O1 -fsanitize=address,undefined -fno-omit-frame-pointer";',
@@ -202,6 +205,7 @@ def parse_ci_profiles(text: str) -> DevenvCiProfiles:
     return DevenvCiProfiles(
         names=frozenset({"ci", "sanitizers", "smt"}),
         exposes_cvc5=True,
+        linux_linker_build_id=True,
     )
 
 
@@ -351,10 +355,17 @@ class DevenvCompositionTests(unittest.TestCase):
         profiles = parse_ci_profiles(text)
         self.assertEqual(profiles.names, frozenset({"ci", "sanitizers", "smt"}))
         self.assertTrue(profiles.exposes_cvc5)
+        self.assertTrue(profiles.linux_linker_build_id)
 
     def test_missing_ci_debug_policy_fails_at_the_parse_boundary(self) -> None:
         text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
         mutated = text.replace('CARGO_PROFILE_DEV_DEBUG = "0";', "")
+        with self.assertRaisesRegex(ValueError, "CI profile contract is incomplete"):
+            parse_ci_profiles(mutated)
+
+    def test_missing_linux_build_id_policy_fails_at_the_parse_boundary(self) -> None:
+        text = (REPO_ROOT / "devenv/toolchains.nix").read_text(encoding="utf-8")
+        mutated = text.replace("--build-id=sha1", "--build-id=none")
         with self.assertRaisesRegex(ValueError, "CI profile contract is incomplete"):
             parse_ci_profiles(mutated)
 

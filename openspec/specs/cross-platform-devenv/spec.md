@@ -259,7 +259,7 @@ The Linux shell MUST also provide GCC, OpenBLAS, and Valgrind. The Linux Clarabe
 ### Requirement: Devenv provides focused CI profiles
 The shell MUST define `ci`, `sanitizers`, and `smt` profiles.
 
-The `ci` profile MUST set development and test Cargo debug information to zero. The `sanitizers` profile MUST extend `ci`.
+The `ci` profile MUST set development and test Cargo debug information to zero. On Linux, it MUST request a GNU linker build ID for Rust binaries. This linker flag MUST NOT apply on macOS. The `sanitizers` profile MUST extend `ci`.
 
 The `sanitizers` profile MUST own the C sanitizer flags and runtime options. The sanitizer flags MUST include optimization for the Nix fortify contract.
 
@@ -270,6 +270,11 @@ The base shell MUST NOT set `CVC5_DIR`. Thus, ordinary shell activation does not
 #### Scenario: A contributor reproduces the CI Cargo environment
 - **WHEN** a contributor activates the `ci` profile
 - **THEN** Cargo development and test builds omit debug information
+
+#### Scenario: Linux CI builds a Rust test binary
+- **WHEN** Cargo links a Rust test binary through the Linux `ci` profile
+- **THEN** the binary contains a GNU linker build ID
+- **AND** image identification uses the linker-ID fast path
 
 #### Scenario: A contributor runs the sanitizer profile
 - **WHEN** a contributor activates the `sanitizers` profile

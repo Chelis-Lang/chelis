@@ -57,6 +57,11 @@ in
     ci.module.env = {
       CARGO_PROFILE_DEV_DEBUG = "0";
       CARGO_PROFILE_TEST_DEBUG = "0";
+    }
+    // lib.optionalAttrs pkgs.stdenv.isLinux {
+      # Nixpkgs GCC does not enable GNU build IDs by default in the Devenv shell.
+      # Chelis cache fingerprints require the fast linker-ID path.
+      RUSTFLAGS = "-C link-arg=-Wl,--build-id=sha1";
     };
 
     sanitizers = {
