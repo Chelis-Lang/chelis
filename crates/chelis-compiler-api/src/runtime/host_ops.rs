@@ -2706,15 +2706,31 @@ pub(super) fn tensor_diagonal_value(
             out_shape.push(*size);
         }
     }
+    // chelis#1349: `out_index` holds one coordinate per retained OUTPUT
+    // axis, so the diagonal's own coordinate lives at `axis1`'s position
+    // after `axis2` is removed, which is one slot earlier whenever
+    // `axis2 < axis1`. Indexing by the source axis number read past the
+    // end for `axis1 == rank - 1` and, together with a reconstruction
+    // walk that never consumed the diagonal's slot, handed later source
+    // axes a coordinate belonging to a different axis (an out-of-bounds
+    // storage pick whenever that coordinate's range exceeds the diagonal
+    // extent).
+    let diag_out_axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
     let out_numel = tensor_numel(&out_shape);
     let mut picks = Vec::with_capacity(out_numel);
     for linear in 0..out_numel {
         let out_index = linear_to_indices(linear, &out_shape);
         let mut src_index = Vec::with_capacity(tensor.value.shape.len());
         let mut out_pos = 0usize;
-        let diag_idx = out_index[axis1];
+        let diag_idx = out_index[diag_out_axis];
         for index in 0..tensor.value.shape.len() {
-            if index == axis1 || index == axis2 {
+            if index == axis1 {
+                // `axis1` keeps an output slot (the diagonal's own), so
+                // the walk must consume it.
+                src_index.push(diag_idx);
+                out_pos += 1;
+            } else if index == axis2 {
+                // `axis2` was removed from the output; nothing to consume.
                 src_index.push(diag_idx);
             } else {
                 src_index.push(out_index[out_pos]);
@@ -2735,9 +2751,20 @@ pub(super) fn tensor_trace_value(
     axis1: i64,
     axis2: i64,
 ) -> Result<RuntimeTensorValue, String> {
-    let diagonal = tensor_diagonal_value(tensor, axis1, axis2)?;
-    let rank = diagonal.value.shape.len();
-    let axis = normalize_axis(rank, axis1.min(axis2), "trace").unwrap_or(rank.saturating_sub(1));
+    // chelis#1349: the diagonal occupies output slot `axis1 - 1` when
+    // `axis2 < axis1`, else `axis1` (see `tensor_diagonal_value`), and
+    // that slot is the axis trace must reduce so both source axes are
+    // removed, matching `infer_trace_result_type`. `min(axis1, axis2)`
+    // named it only for `axis1 < axis2` and for adjacent reversed pairs;
+    // elsewhere it reduced a retained axis and produced a shape the
+    // checker never declared. Normalize against the SOURCE rank with `?`
+    // so an out-of-range axis rejects loud instead of the prior
+    // `unwrap_or` silent fallback to the last axis.
+    let source_rank = tensor.value.shape.len();
+    let axis1 = normalize_axis(source_rank, axis1, "trace")?;
+    let axis2 = normalize_axis(source_rank, axis2, "trace")?;
+    let diagonal = tensor_diagonal_value(tensor, axis1 as i64, axis2 as i64)?;
+    let diag_out_axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
     // #170: trace = sum over the diagonal. Route the diagonal reduction
     // through `tensor_reduce_host`'s `Sum` path so it uses the SAME
     // stride-4 ILP f32 cascade as `RiscOp::Sum` (issue #163, torch
@@ -2745,7 +2772,7 @@ pub(super) fn tensor_trace_value(
     // f64 diverged from `torch.trace` (== `torch.sum(diagonal)`) by ~1 ULP
     // for diagonals longer than 16 f32 elements. Reusing the one verified
     // cascade also prevents the two summation orders from drifting apart.
-    tensor_reduce_host(&diagonal, axis as i64, ReduceOp::Sum)
+    tensor_reduce_host(&diagonal, diag_out_axis as i64, ReduceOp::Sum)
 }
 
 pub(super) fn tensor_clamp_value(
