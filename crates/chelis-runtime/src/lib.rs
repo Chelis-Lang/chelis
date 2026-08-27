@@ -3525,6 +3525,18 @@ pub unsafe extern "C" fn chelis_tensor_cumsum(
         (*tensor).shape.as_ptr(),
         result_dtype.id() as chelis_dtype,
     );
+    // An empty operand has nothing to scan, so the axis decomposition below is
+    // never read. Computing it anyway is not free: `outer` is the product of
+    // the extents BEFORE the axis, and for an empty tensor those extents are
+    // unconstrained, because the zero elsewhere is what makes the element
+    // count representable. That product is exactly what the allocator's fold
+    // no longer walks, so it can overflow `usize` (an unbranded non-unwinding
+    // panic across the C boundary) or, when it merely gets large without
+    // overflowing, spin the empty loop for hours. Neither is the empty result
+    // [05-OP-33] owes.
+    if (*tensor).size == 0 {
+        return out;
+    }
     let axis_size = (*tensor).shape[axis_i] as usize;
     let mut inner = 1usize;
     let mut outer = 1usize;
@@ -3591,6 +3603,22 @@ pub unsafe extern "C" fn chelis_tensor_sort(
     let axis_i = tensor_normalize_axis(tensor, axis, "sort");
     let values = tensor_clone(tensor);
     let indices = chelis_alloc((*tensor).rank, (*tensor).shape.as_ptr(), CHELIS_DTYPE_I64);
+    // An empty operand has nothing to scan, so the axis decomposition below is
+    // never read. Computing it anyway is not free: `outer` is the product of
+    // the extents BEFORE the axis, and for an empty tensor those extents are
+    // unconstrained, because the zero elsewhere is what makes the element
+    // count representable. That product is exactly what the allocator's fold
+    // no longer walks, so it can overflow `usize` (an unbranded non-unwinding
+    // panic across the C boundary) or, when it merely gets large without
+    // overflowing, spin the empty loop for hours. Neither is the empty result
+    // [05-OP-33] owes.
+    if (*tensor).size == 0 {
+        let items = [
+            chelis_value_from_tensor(values),
+            chelis_value_from_tensor(indices),
+        ];
+        return chelis_tuple_from_values(items.as_ptr(), 2);
+    }
     let axis_size = (*tensor).shape[axis_i] as usize;
     let mut inner = 1usize;
     let mut outer = 1usize;
@@ -3754,6 +3782,19 @@ pub unsafe extern "C" fn chelis_tensor_trace(
         out_shape.as_ptr(),
         result_dtype.id() as chelis_dtype,
     );
+    // An empty result has nothing to accumulate into, so the axis decomposition below is
+    // never read. Computing it anyway is not free: `outer` is the product of
+    // the extents BEFORE the axis, and for an empty tensor those extents are
+    // unconstrained, because the zero elsewhere is what makes the element
+    // count representable. That product is exactly what the allocator's fold
+    // no longer walks, so it can overflow `usize` (an unbranded non-unwinding
+    // panic across the C boundary) or, when it merely gets large without
+    // overflowing, spin the empty loop for hours. Neither is the empty result
+    // [05-OP-33] owes.
+    if (*out).size == 0 {
+        chelis_free(diag);
+        return out;
+    }
     let mut inner = 1usize;
     let mut outer = 1usize;
     for i in reduce_axis + 1..(*diag).rank as usize {

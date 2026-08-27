@@ -1004,6 +1004,42 @@ fn host_runtime_einsum_zero_extent_acceptance_does_not_depend_on_axis_order() {
     }
 }
 
+/// An empty operand's axis decomposition is never read, and computing it
+/// anyway overflows `usize` on the prefix product or spins an empty loop. The
+/// C runtime holds the same invariant in
+/// `crates/chelis-runtime/tests/op33_empty_tensor_axis_decomposition.rs`; this
+/// is the host lane's half. The extents are chosen so the prefix product is
+/// `2^64` exactly.
+#[test]
+fn host_runtime_empty_operands_skip_their_axis_decomposition() {
+    const BIG: usize = 1 << 32;
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![BIG, BIG, 0], Vec::new()),
+        precision: Prim::F32,
+    };
+
+    let scanned = tensor_cumsum_value(&operand, 2).expect("empty cumsum must evaluate");
+    assert_eq!(scanned.value.shape, vec![BIG, BIG, 0]);
+    assert_eq!(scanned.value.len(), 0);
+
+    let sorted = tensor_sort_value(&operand, 2).expect("empty sort must evaluate");
+    // Diagnostics name the expectation rather than Debug-printing the value:
+    // this module is an observation exit surface, and
+    // faithful_observation.md B2.4 admits no third formatter.
+    match sorted {
+        RuntimeValue::Tuple(items) => {
+            assert_eq!(items.len(), 2, "sort must return two results");
+            for item in items {
+                match item {
+                    RuntimeValue::Tensor(tensor) => assert_eq!(tensor.value.len(), 0),
+                    _ => panic!("sort must return tensors"),
+                }
+            }
+        }
+        _ => panic!("sort must return a tuple"),
+    }
+}
+
 #[test]
 fn host_runtime_einsum_rejects_non_lowercase_labels() {
     let operand = RuntimeTensorValue {

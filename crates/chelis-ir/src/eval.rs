@@ -179,10 +179,17 @@ fn numel(shape: &[usize]) -> usize {
     if shape.is_empty() {
         // Scalar: no dimensions means a single element.
         1
-    } else {
-        // Non-scalar: honor every dimension, including zero. A tensor[0, f32]
+    } else if shape.contains(&0) {
+        // Non-scalar with a zero extent: honor it. A tensor[0, f32]
         // legitimately holds zero elements; inflating to 1 drops data integrity
         // and panics the from_vec length assertion.
+        //
+        // Short-circuit rather than fold, because the answer does not depend on
+        // the other extents and folding them can overflow a product that is
+        // defined to be zero: `[2^32, 2^32, 0]` reaches `2^64` before it ever
+        // reaches the zero.
+        0
+    } else {
         shape.iter().product()
     }
 }
