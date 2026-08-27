@@ -3039,8 +3039,16 @@ impl CEmitter {
     ) {
         self.emit_slot_wrapper(id, ty);
         if let Some(activation) = inputs.get(1) {
+            // The activation is a rank-0 Bool predicate, and chelis#1308's
+            // tagged-carrier ABI stores Bool tensors as one uint8 per
+            // element. Reading it through `(float*)` was correct only under
+            // the pre-#1308 float-backed Bool storage; against uint8
+            // storage it reads one valid byte plus three out-of-bounds
+            // heap bytes, so an untaken branch's gate could go active on
+            // whatever the allocator left there (Linux CI caught the RNG
+            // parity break; macOS zero-fill masked it).
             self.line(&format!(
-                "int t{id}_active = ((float*)t{}->data)[0] != 0.0f ? 1 : 0;",
+                "int t{id}_active = ((const uint8_t*)t{}->data)[0] != 0 ? 1 : 0;",
                 activation.0
             ));
             self.line(&format!(
@@ -7762,8 +7770,13 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("((float*)t1->data)[0] != 0.0f"));
+        // chelis#1308 stores Bool tensors as one uint8 per element; the
+        // draw gate must read the predicate at that width. A `(float*)`
+        // read of the one-byte allocation is out of bounds and
+        // platform-divergent (the Linux-only RNG parity break on PR #1302).
+        assert!(c.contains("((const uint8_t*)t1->data)[0] != 0"));
         assert!(c.contains("? CHELIS_EFFECTIVE_UNIFORM_SEED(11ULL) : 11ULL"));
+        assert!(!c.contains("((float*)t1->data)[0] != 0.0f"));
         assert!(!c.contains("((bool*)t1->data)"));
     }
 
