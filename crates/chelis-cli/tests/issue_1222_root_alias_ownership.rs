@@ -54,9 +54,10 @@
 //! parameter test below pins that side. The fixed shapes - the
 //! captured-top-level copy, the parameter-aliasing conditional arm, and
 //! the may-return-its-argument call - are pinned in
-//! `issue_1344_block_alias_ownership.rs`. Residual chelis#1344 scope, not
-//! reached by that fix: a callee returning a captured binding it was
-//! never passed, and a transfer through a call-argument temp.
+//! `issue_1344_block_alias_ownership.rs`, along with the owned-return
+//! summary and the outer-returning-call escape retain that keep callers
+//! and callees on one convention. Residual chelis#1344 scope, not
+//! reached: a transfer through a call-argument temp.
 
 use std::fs;
 use std::path::Path;

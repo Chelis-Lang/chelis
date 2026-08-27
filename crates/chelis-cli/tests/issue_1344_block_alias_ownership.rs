@@ -29,11 +29,13 @@
 //! variant of this change (see chelis#1344's measurements).
 //!
 //! Residual chelis#1344 scope, deliberately not covered here because the
-//! fix does not reach it: a callee that returns a *captured* top-level
-//! binding it was never passed (no transfer leaf exists in the caller),
-//! and a transfer that reaches a binding through a call-argument temp
-//! (`__call_argN` is not an owned destination). Both remain recorded on
-//! the issue.
+//! fix does not reach it: a transfer that reaches a binding through a
+//! call-argument temp (`__call_argN` is not an owned destination). The
+//! returns-captured shape's block-caller variant IS closed here (test 6
+//! below: the escape retain fires for a may-return-outer callee into a
+//! value temp); a top-level `b = retg()` stays abstain-borrowed through
+//! `main`'s provenance, by design. The call-arg-temp shape remains
+//! recorded on the issue.
 //!
 //! Oracle: each program is built to C, linked, and RUN, its stdout is
 //! compared against `chelis eval` on the same source, and the emitted-C
@@ -364,5 +366,52 @@ fn binding_mediated_parameter_return_composes_exactly_once() {
         count_in(g2_body, "chelis_string_release("),
         2,
         "the caller releases `out` and `raw` exactly once each:\n{g2_body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. Outer-returning call into a value temp (round-3 red-team finding on
+//    PR #1302): a callee that returns a CAPTURED top-level binding hands
+//    back a borrowed reference through no argument at all, so the
+//    call-escape retain's argument scan never fired and the binding held
+//    a reference it did not own. That falsified the owned-return
+//    summary's precondition, and `main` claiming the result over-released
+//    the captured allocation (abort). The escape retain now also fires
+//    for a may-return-outer callee when the destination is a value temp,
+//    which additionally closes chelis#1344's block-caller variant of the
+//    returns-captured shape.
+// ---------------------------------------------------------------------------
+
+const OUTER_RETURNING_CALL: &str = "gcap = string_concat(\"ab\", \"cd\")\n\
+def retg() -> string = gcap\n\
+def f() -> string = {\n\
+  d = retg()\n\
+  d\n\
+}\n\
+b = f()\n";
+
+#[test]
+fn outer_returning_call_into_a_value_temp_is_retained_and_claimed() {
+    if skip_without_cc() {
+        return;
+    }
+    let (stdout, emitted) = build_run_and_emit(OUTER_RETURNING_CALL, "outer_return_call");
+    assert_eq!(
+        shared_line(&stdout, "b"),
+        shared_line(&eval_stdout(OUTER_RETURNING_CALL, "outer_return_call"), "b"),
+    );
+    let f_body = emitted_function(&emitted, "chelis_string f()");
+    assert_eq!(
+        count_in(f_body, "chelis_string_retain("),
+        2,
+        "`f` owns at both leaves: the outer-return escape retain on \
+         `d = retg()` and the result-target retain on the escaping \
+         binding; without the first, `main` claiming the owned-summarized \
+         result over-releases the captured allocation:\n{f_body}"
+    );
+    assert_eq!(
+        count_in(f_body, "chelis_string_release("),
+        1,
+        "`f` releases its binding exactly once at the block close:\n{f_body}"
     );
 }

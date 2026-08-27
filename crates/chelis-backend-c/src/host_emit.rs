@@ -6171,6 +6171,30 @@ impl<'a> HostEmitter<'a> {
                 retained = true;
             }
         }
+        // A callee that may hand back a CAPTURED top-level binding
+        // returns a borrowed reference through no argument at all
+        // (`def retg() -> string = gcap`). A value temp claiming that
+        // result unretained falsified the owned-binding precondition the
+        // `returns_arg` Let-arm refinement rests on: PR #1302's round-3
+        // red team showed `d = retg()  d` aborting once the owned-return
+        // summary let `main` claim the result of a function whose binding
+        // never owned it. Retain exactly as for an escaping argument; the
+        // block release pairs it. The known cost is chelis#1344's
+        // door-(a) imprecision in retain form: a branch-insensitive outer
+        // verdict over-retains a fresh-branch result into a bounded
+        // per-call leak instead of the borrowed-branch use-after-free.
+        // Non-value-temp targets keep the provenance path: `main` and the
+        // binder ledger abstain from claiming an outer-borrowed result,
+        // so a retain there would strand.
+        if target_is_value_temp {
+            let callee_may_return_outer = match &callee {
+                Some(summary) => summary.may_return_outer(),
+                None => true,
+            };
+            if callee_may_return_outer {
+                retained = true;
+            }
+        }
         // Retain at most once: the result is a single pointer, and one
         // extra reference cancels the one block release that would
         // otherwise drop the escaping allocation. (Even if several
