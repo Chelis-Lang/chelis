@@ -195,12 +195,15 @@ fn tensor_to_scalar_i64_never_round_trips_through_f64() {
     .expect("rank-zero int64 extraction must emit");
 
     assert!(
-        source.contains("chelis_host_tensor_to_i64("),
-        "int64 tensor_to_scalar must use the private exact-width extractor:\n{source}"
+        source.contains("chelis_host_scalar_as_i64("),
+        "int64 tensor_to_scalar must read back through the dtype-checked \
+         exact scalar reader of the tagged-carrier ABI:\n{source}"
     );
     assert!(
-        source.contains("*((const int64_t *)tensor->data)"),
-        "the private extractor must read int64 storage at its declared width:\n{source}"
+        source.contains(
+            "CHELIS_DTYPE_I64: { int64_t out; memcpy(&out, &value.bits, sizeof out); return out; }"
+        ),
+        "the exact reader must recover int64 bits at their declared width:\n{source}"
     );
     assert!(
         !source.contains("__result = chelis_tensor_to_f64("),
@@ -217,8 +220,12 @@ fn tensor_to_scalar_f64_keeps_the_float_extractor() {
     .expect("rank-zero f64 extraction must emit");
 
     assert!(
-        source.contains("__result = chelis_tensor_to_f64("),
-        "f64 tensor_to_scalar must keep the floating extractor:\n{source}"
+        source.contains("chelis_host_scalar_as_float("),
+        "f64 tensor_to_scalar must keep the floating reader:\n{source}"
+    );
+    assert!(
+        source.contains("CHELIS_DTYPE_F64"),
+        "the floating reader must be dtype-checked at F64:\n{source}"
     );
 }
 
@@ -231,16 +238,13 @@ fn scalar_to_tensor_i64_uses_exact_i64_storage() {
     .expect("rank-zero int64 packing must emit");
 
     assert!(
-        source.contains("__result = chelis_host_scalar_tensor_from_i64("),
-        "int64 scalar_to_tensor must use the private exact-width packer:\n{source}"
+        source.contains("chelis_host_scalar_from_i64("),
+        "int64 scalar_to_tensor must pack through the tagged exact-width \
+         scalar of the tagged-carrier ABI:\n{source}"
     );
     assert!(
-        source.contains("chelis_alloc(0, NULL, CHELIS_I64)"),
-        "the private packer must allocate storage tagged CHELIS_I64:\n{source}"
-    );
-    assert!(
-        source.contains("*((int64_t *)tensor->data) = value"),
-        "the private packer must write at the declared int64 width:\n{source}"
+        source.contains("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)value)"),
+        "the packer must tag int64 bits at their declared width:\n{source}"
     );
     assert!(
         !source.contains("__result = chelis_scalar_tensor_from_i64("),

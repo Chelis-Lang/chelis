@@ -1292,10 +1292,67 @@ const FINAL_NONNUMERIC_ROWS: &[StaticSurfaceDescriptor] = &[
     ),
 ];
 
-/// No discovered legacy carrier is the final tagged transport yet. #1289
-/// owns populating this exact registry after the tagged representation lands.
-const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[];
+/// The exact tagged-carrier declarations of the chelis#1289 public C ABI:
+/// the dtype tag enumeration, the canonical `chelis_scalar` image, the
+/// tagged `chelis_value` (tag enum, payload union, carrier struct), both
+/// option carriers, and the dtype-tagged `chelis_tensor`. These rows ARE the
+/// tagged transport; the callables operating on them register as numeric
+/// operations below. [05-OP-31] states each declaration verbatim.
+const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: enum { CHELIS_VALUE_UNIT = 0 , CHELIS_VALUE_SCALAR = 1 , CHELIS_VALUE_STRING = 2 , CHELIS_VALUE_TENSOR = 3 , CHELIS_VALUE_LIST = 4 , CHELIS_VALUE_TUPLE = 5 , CHELIS_VALUE_DICT = 6 , CHELIS_VALUE_ADT = 7 }",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { chelis_dtype dtype ; uint8_t reserved [ 7 ] ; uint64_t bits ; } chelis_scalar",
+        &["numeric-op"],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { chelis_value_tag tag ; uint8_t reserved [ 7 ] ; chelis_value_payload payload ; } chelis_value",
+        &["numeric-op"],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_scalar value ; } chelis_option_scalar",
+        &["numeric-op"],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { uint8_t is_some ; uint8_t reserved [ 7 ] ; chelis_value value ; } chelis_option_value",
+        &["numeric-op"],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef struct { void * data ; const int64_t * shape ; const int64_t * strides ; int64_t size ; int64_t byte_capacity ; int32_t rank ; chelis_dtype dtype ; uint8_t owns_data ; uint8_t reserved [ 2 ] ; } chelis_tensor",
+        &["numeric-op"],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime.h: typedef union { chelis_scalar scalar ; void * handle ; } chelis_value_payload",
+        &[],
+    ),
+    StaticSurfaceDescriptor::new(
+        PRIMARY_CENSUS_FAMILY,
+        "header-struct",
+        "chelis_runtime_dtype.h: enum { CHELIS_DTYPE_F32 = 0 , CHELIS_DTYPE_F64 = 1 , CHELIS_DTYPE_I32 = 2 , CHELIS_DTYPE_BOOL = 3 , CHELIS_DTYPE_I64 = 4 , CHELIS_DTYPE_BF16 = 5 , CHELIS_DTYPE_F16 = 6 , CHELIS_DTYPE_I8 = 7 , CHELIS_DTYPE_I16 = 8 }",
+        &[],
+    ),
+];
 
+/// Exact semantic registrations for every numeric public C callable of the
+/// chelis#1289 tagged-carrier ABI. Each anchor is a literal phrase from the
+/// governing atom's normative block in spec/05-risc-primitives.md; the atoms
+/// incorporate their identity registries under spec/registry/ by reference.
 macro_rules! final_numeric_row {
     ($kind:literal, $id:literal, $flags:expr, $atom:literal, $anchor:literal) => {
         FinalNumericOperationRegistration {
@@ -1934,11 +1991,341 @@ const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
             "header-export",
-            "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * t , int32_t axis ) ;",
+            "chelis_runtime.h: chelis_dict * chelis_dict_merge ( const chelis_dict * left , const chelis_dict * right ) ;",
+            &[],
+        ),
+        atom: "[05-OP-32]",
+        authority_anchor: "`dict_merge` process entries from left to right",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_list * chelis_tensor_elements ( const chelis_tensor * tensor ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`chelis_tensor_elements` boxes every\n> element as its exact scalar in row-major order",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_list * chelis_tensor_split ( const chelis_tensor * tensor , int32_t axis , const chelis_list * sizes ) ;",
             &["numeric-op"],
         ),
-        atom: "[05-OP-7]",
-        authority_anchor: "chelis_tensor_shape",
+        atom: "[05-OP-33]",
+        authority_anchor: "nonnegative int64 sizes whose checked sum equals the selected extent",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_option_scalar chelis_dict_get_scalar ( const chelis_dict * dict , chelis_value key , chelis_dtype dtype ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "Dictionary lookup admits only [05-OP-32]'s key domain",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_option_scalar chelis_parse_scalar ( chelis_string text , chelis_dtype dtype ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "parsing accepts a strict\n> decimal superset",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_scalar chelis_scalar_from_bits ( chelis_dtype dtype , uint64_t bits ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "the exact stored image and all unused high bits are zero",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_scalar chelis_tensor_to_scalar ( const chelis_tensor * tensor ) ;",
+            &[],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "Tensor extraction requires a rank-zero tensor with exactly\n> one element",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_scalar chelis_value_as_scalar ( chelis_value value ) ;",
+            &[],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "Every consumer validates both the foreign dtype value",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_string chelis_string_from_scalar ( chelis_scalar value ) ;",
+            &[],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "Rendering follows [05-OBS-1..2] at the\n> scalar's own dtype",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_alloc ( int32_t rank , const int64_t * shape , chelis_dtype dtype ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "Allocation returns owned, contiguous, row-major, zero-filled storage",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_alloc_view ( int32_t rank , const int64_t * shape , chelis_dtype dtype , void * data , int64_t byte_capacity ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "A view is non-owning contiguous storage whose declared\n> capacity covers its checked byte size",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_contiguous ( const chelis_tensor * tensor ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`contiguous` preserves every element's\n> exact stored bits in row-major order",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_pad_sequences ( const chelis_list * sequences , chelis_scalar pad_value ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "Padding follows [05-OP-9..10] exactly",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_pad_sequences_to ( const chelis_list * sequences , int64_t width , chelis_scalar pad_value ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "Padding follows [05-OP-9..10] exactly",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_scalar_tensor ( chelis_scalar value ) ;",
+            &[],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "rank zero has null `shape` and `strides` pointers",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_clamp ( const chelis_tensor * tensor , const chelis_tensor * lower , const chelis_tensor * upper ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`clamp` admits signed-integer and float tensors. Each bound has the input",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_cmplt ( const chelis_tensor * left , const chelis_tensor * right ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`cmplt` requires identical shapes and identical active signed-integer or\n> float dtypes, compares stored values without conversion",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_concat ( const chelis_list * parts , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`concat` requires a nonempty list of tensors with one common rank and dtype",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_cumsum ( const chelis_tensor * tensor , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`cumsum` admits signed-integer and float tensors and returns\n> `sum_result(p, default(p))` at the input shape",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_diagonal ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`diagonal` admits every active dtype including bool, requires distinct axes",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_einsum ( chelis_string equation , const chelis_tensor * left , const chelis_tensor * right , chelis_dtype accumulator ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`einsum` accepts exactly the grammar `[a-z]*,[a-z]*->[a-z]*`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_from_values ( const chelis_list * list , chelis_dtype dtype ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "nested list whose scalar leaves all have exactly the requested dtype",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_gather ( const chelis_tensor * tensor , const chelis_tensor * indices , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`gather` admits an index tensor of any active signed-integer dtype",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_add ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "Add starts each\n> destination's leaf sequence with the base value",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_scatter_replace ( const chelis_tensor * base , const chelis_tensor * indices , const chelis_tensor * updates , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "§3.5's row-major last-write-wins rule",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_trace ( const chelis_tensor * tensor , int32_t axis1 , int32_t axis2 ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`trace` is that diagonal\n> followed by [05-OP-30]'s canonical balanced tree and default accumulator",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tensor * chelis_tensor_where ( const chelis_tensor * condition , const chelis_tensor * then_tensor , const chelis_tensor * else_tensor ) ;",
+            &[],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "exact public C counterpart `chelis_tensor_where` in that registry",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_tuple * chelis_tensor_sort ( const chelis_tensor * tensor , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "`sort` admits signed-integer and float tensors and returns `(values,\n> indices)`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: chelis_value chelis_value_from_scalar ( chelis_scalar value ) ;",
+            &[],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "Scalar\n> embeds the complete canonical `chelis_scalar`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int32_t chelis_tensor_rank ( const chelis_tensor * tensor ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "need dimensions use `chelis_tensor_rank`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_dtype_size ( chelis_dtype dtype ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "`chelis_dtype_size` returns the exact byte width",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_numel ( const chelis_tensor * tensor ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "element counts are `int64_t`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: int64_t chelis_tensor_shape ( const chelis_tensor * tensor , int32_t axis ) ;",
+            &["numeric-op"],
+        ),
+        atom: "[05-OP-33]",
+        authority_anchor: "use `chelis_tensor_rank` and `chelis_tensor_shape`",
+    },
+    FinalNumericOperationRegistration {
+        surface: StaticSurfaceDescriptor::new(
+            PRIMARY_CENSUS_FAMILY,
+            "header-export",
+            "chelis_runtime.h: void chelis_fill_scalar ( chelis_tensor * tensor , chelis_scalar value ) ;",
+            &[],
+        ),
+        atom: "[05-OP-31]",
+        authority_anchor: "Fill requires the scalar dtype to equal the tensor dtype and\n> writes the exact scalar bits to every element",
     },
 ];
 
@@ -4419,6 +4806,66 @@ fn migrated_primary_rows_have_exact_final_authority_and_no_transition_dispositio
         );
     }
 
+    for registered in FINAL_TAGGED_TRANSPORT_ROWS {
+        let row = baseline
+            .rows
+            .iter()
+            .find(|row| {
+                row.kind == registered.kind
+                    && row.id == registered.id
+                    && row
+                        .flags
+                        .iter()
+                        .map(String::as_str)
+                        .eq(registered.flags.iter().copied())
+            })
+            .unwrap_or_else(|| panic!("missing registered tagged-transport row: {registered:?}"));
+        assert!(
+            row.citation.is_empty(),
+            "final row retained legacy debt: {row:?}"
+        );
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &authority_surface(row),
+                final_authority_registries(),
+                &spec,
+            ),
+            Ok(capacity_census_authority::FinalAuthority::TaggedTransport)
+        );
+    }
+
+    for registration in FINAL_NUMERIC_OPERATION_ROWS {
+        let registered = registration.surface;
+        let row = baseline
+            .rows
+            .iter()
+            .find(|row| {
+                row.kind == registered.kind
+                    && row.id == registered.id
+                    && row
+                        .flags
+                        .iter()
+                        .map(String::as_str)
+                        .eq(registered.flags.iter().copied())
+            })
+            .unwrap_or_else(|| panic!("missing registered numeric-operation row: {registered:?}"));
+        assert!(
+            row.citation.is_empty(),
+            "final row retained legacy debt: {row:?}"
+        );
+        assert_eq!(
+            capacity_census_authority::classify_final_authority(
+                &authority_surface(row),
+                final_authority_registries(),
+                &spec,
+            ),
+            Ok(
+                capacity_census_authority::FinalAuthority::NumericOperation {
+                    atom: registration.atom,
+                }
+            )
+        );
+    }
     let tensor_shape_registration = FINAL_NUMERIC_OPERATION_ROWS
         .iter()
         .find(|registration| registration.surface.id.contains("chelis_tensor_shape"))
@@ -4429,13 +4876,16 @@ fn migrated_primary_rows_have_exact_final_authority_and_no_transition_dispositio
         .find(|row| row.id == tensor_shape_registration.surface.id)
         .expect("tensor_shape remains discovered");
     assert!(tensor_shape.citation.is_empty());
+    // chelis#1308 re-registered the tagged-carrier `chelis_tensor_shape`
+    // successor under [05-OP-33]; the pre-rebase pin of [05-OP-7] named
+    // the pre-tagged-ABI registration this row superseded.
     assert_eq!(
         capacity_census_authority::classify_final_authority(
             &authority_surface(tensor_shape),
             final_authority_registries(),
             &spec,
         ),
-        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-7]" })
+        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" })
     );
 }
 
@@ -4589,19 +5039,20 @@ fn int64_dim_carrier_successors_use_named_one_off_overrides() {
             .find(|successor| successor.kind == *kind && successor.id == *id)
             .unwrap_or_else(|| panic!("missing closed #1149 override descriptor `{id}`"));
         assert_eq!(reviewed.flags, *flags);
-        let row = baseline
-            .rows
-            .iter()
-            .find(|row| row.kind == *kind && row.id == *id)
-            .unwrap_or_else(|| panic!("missing #1149 successor `{id}`"));
-        assert_eq!(
-            row.flags.iter().map(String::as_str).collect::<Vec<_>>(),
-            *flags,
-            "the #1149 successor must retain its reviewed classification"
-        );
-        assert_eq!(
-            row.citation, OVERRIDE,
-            "the #1149 successor must use the named one-off maintainer path"
+        // The chelis#1289 tagged-carrier ABI removed all three #1149
+        // successor identities from the live surface; their replacements
+        // register through the final authority classes. The frozen override
+        // universe below still binds the retired descriptors exactly, so a
+        // reintroduced identity cannot borrow the one-off citation from a
+        // different kind/id/flags triple.
+        assert!(
+            !baseline
+                .rows
+                .iter()
+                .any(|row| row.kind == *kind && row.id == *id),
+            "the retired #1149 successor `{id}` must not re-enter the census; \
+             a successor identity registers through exactly one final \
+             authority class"
         );
 
         let exact = row_from_frozen(reviewed, OVERRIDE);
