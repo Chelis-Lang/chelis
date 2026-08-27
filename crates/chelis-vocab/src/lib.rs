@@ -270,11 +270,8 @@ pub enum Repr {
     TwosComplement16,
     TwosComplement32,
     TwosComplement64,
-    /// A boolean in an IEEE binary32 payload.
-    ///
-    /// The payload uses `0.0` for false and `1.0` for true. This variant names
-    /// the current four-byte ABI debt without approval of that design.
-    BoolInBinary32,
+    /// A canonical boolean in one byte: `0` is false and `1` is true.
+    Bool8,
 }
 
 impl Repr {
@@ -287,14 +284,14 @@ impl Repr {
         Self::TwosComplement16,
         Self::TwosComplement32,
         Self::TwosComplement64,
-        Self::BoolInBinary32,
+        Self::Bool8,
     ];
 
     pub const fn byte_width(self) -> usize {
         match self {
-            Self::TwosComplement8 => 1,
+            Self::TwosComplement8 | Self::Bool8 => 1,
             Self::Ieee754Binary16 | Self::Bfloat16 | Self::TwosComplement16 => 2,
-            Self::Ieee754Binary32 | Self::TwosComplement32 | Self::BoolInBinary32 => 4,
+            Self::Ieee754Binary32 | Self::TwosComplement32 => 4,
             Self::Ieee754Binary64 | Self::TwosComplement64 => 8,
         }
     }
@@ -303,7 +300,6 @@ impl Repr {
     /// representation.
     pub const fn is_payload_encoded(self) -> bool {
         match self {
-            Self::BoolInBinary32 => true,
             Self::Ieee754Binary16
             | Self::Ieee754Binary32
             | Self::Ieee754Binary64
@@ -311,7 +307,8 @@ impl Repr {
             | Self::TwosComplement8
             | Self::TwosComplement16
             | Self::TwosComplement32
-            | Self::TwosComplement64 => false,
+            | Self::TwosComplement64
+            | Self::Bool8 => false,
         }
     }
 }
@@ -364,15 +361,15 @@ impl RuntimeDType {
 
     pub const fn c_macro(self) -> &'static str {
         match self {
-            Self::F32 => "CHELIS_F32",
-            Self::F64 => "CHELIS_F64",
-            Self::I32 => "CHELIS_I32",
-            Self::Bool => "CHELIS_BOOL",
-            Self::I64 => "CHELIS_I64",
-            Self::Bf16 => "CHELIS_BF16",
-            Self::F16 => "CHELIS_F16",
-            Self::I8 => "CHELIS_I8",
-            Self::I16 => "CHELIS_I16",
+            Self::F32 => "CHELIS_DTYPE_F32",
+            Self::F64 => "CHELIS_DTYPE_F64",
+            Self::I32 => "CHELIS_DTYPE_I32",
+            Self::Bool => "CHELIS_DTYPE_BOOL",
+            Self::I64 => "CHELIS_DTYPE_I64",
+            Self::Bf16 => "CHELIS_DTYPE_BF16",
+            Self::F16 => "CHELIS_DTYPE_F16",
+            Self::I8 => "CHELIS_DTYPE_I8",
+            Self::I16 => "CHELIS_DTYPE_I16",
         }
     }
 
@@ -382,7 +379,7 @@ impl RuntimeDType {
             Self::F32 => Repr::Ieee754Binary32,
             Self::F64 => Repr::Ieee754Binary64,
             Self::I32 => Repr::TwosComplement32,
-            Self::Bool => Repr::BoolInBinary32,
+            Self::Bool => Repr::Bool8,
             Self::I64 => Repr::TwosComplement64,
             Self::Bf16 => Repr::Bfloat16,
             Self::F16 => Repr::Ieee754Binary16,

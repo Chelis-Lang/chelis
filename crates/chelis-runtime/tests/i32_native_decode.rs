@@ -1,6 +1,6 @@
 //! Regression tests for native int32 element access.
 //!
-//! Each fixture stores `CHELIS_I32` values through `i32` pointers. The tested
+//! Each fixture stores `CHELIS_DTYPE_I32` values through `i32` pointers. The tested
 //! operations must not reinterpret those bytes as IEEE binary32 values.
 
 use std::ffi::c_int;
@@ -8,9 +8,9 @@ use std::ptr;
 
 use chelis_runtime::{
     chelis_alloc, chelis_free, chelis_string_from_cstr, chelis_tensor, chelis_tensor_clamp,
-    chelis_tensor_cmplt, chelis_tensor_cumsum, chelis_tensor_einsum, chelis_tensor_scatter,
-    chelis_tensor_trace, chelis_tensor_where, data_as_f32, data_as_f32_const, TensorElement,
-    CHELIS_BOOL, CHELIS_F32, CHELIS_I32,
+    chelis_tensor_cmplt, chelis_tensor_cumsum, chelis_tensor_einsum, chelis_tensor_scatter_add,
+    chelis_tensor_trace, chelis_tensor_where, data_as_f32, data_as_f32_const, Bool8, TensorElement,
+    CHELIS_DTYPE_BOOL, CHELIS_DTYPE_F32, CHELIS_DTYPE_I32,
 };
 
 unsafe fn i32_tensor(shape: &[i64], values: &[i32]) -> *mut chelis_tensor {
@@ -20,7 +20,7 @@ unsafe fn i32_tensor(shape: &[i64], values: &[i32]) -> *mut chelis_tensor {
         } else {
             shape.as_ptr()
         };
-        let tensor = chelis_alloc(shape.len() as c_int, shape_ptr, CHELIS_I32);
+        let tensor = chelis_alloc(shape.len() as c_int, shape_ptr, CHELIS_DTYPE_I32);
         assert_eq!((*tensor).size as usize, values.len());
         let data = i32::data_ptr_unchecked(tensor);
         for (index, value) in values.iter().copied().enumerate() {
@@ -41,9 +41,9 @@ unsafe fn read_i32(tensor: *mut chelis_tensor) -> Vec<i32> {
 
 unsafe fn read_bool_payload(tensor: *mut chelis_tensor) -> Vec<bool> {
     unsafe {
-        let data = data_as_f32_const(tensor);
+        let data = Bool8::data_ptr_unchecked(tensor);
         (0..(*tensor).size as usize)
-            .map(|index| *data.add(index) != 0.0)
+            .map(|index| (*data.add(index)).get())
             .collect()
     }
 }
@@ -64,9 +64,13 @@ fn cmplt_orders_negative_and_non_negative_int32_values() {
 }
 
 #[test]
-fn where_treats_int32_minimum_as_nonzero() {
+fn where_selects_int32_branches_with_exact_bool8_condition() {
     unsafe {
-        let cond = i32_tensor(&[2], &[i32::MIN, 0]);
+        let shape = [2_i64];
+        let cond = chelis_alloc(1, shape.as_ptr(), CHELIS_DTYPE_BOOL);
+        let cond_data = Bool8::data_ptr_unchecked(cond);
+        *cond_data = Bool8::new(true);
+        *cond_data.add(1) = Bool8::new(false);
         let then_tensor = i32_tensor(&[2], &[10, 20]);
         let else_tensor = i32_tensor(&[2], &[-10, -20]);
         let out = chelis_tensor_where(cond, then_tensor, else_tensor);
@@ -86,8 +90,7 @@ fn scatter_add_accumulates_native_int32_updates() {
         let base = i32_tensor(&[1], &[0]);
         let indices = i32_tensor(&[2], &[0, 0]);
         let updates = i32_tensor(&[2], &[1_000_000_000, -999_999_999]);
-        let mode = chelis_string_from_cstr(c"add".as_ptr());
-        let out = chelis_tensor_scatter(base, indices, updates, 0, mode);
+        let out = chelis_tensor_scatter_add(base, indices, updates, 0);
 
         assert_eq!(read_i32(out), vec![1]);
 
@@ -147,7 +150,7 @@ fn einsum_multiplies_native_int32_values() {
         let lhs = i32_tensor(&[1], &[2]);
         let rhs = i32_tensor(&[1], &[3]);
         let equation = chelis_string_from_cstr(c"i,i->".as_ptr());
-        let out = chelis_tensor_einsum(equation, lhs, rhs);
+        let out = chelis_tensor_einsum(equation, lhs, rhs, CHELIS_DTYPE_I32);
 
         assert_eq!(read_i32(out), vec![6]);
 
@@ -158,20 +161,19 @@ fn einsum_multiplies_native_int32_values() {
 }
 
 #[test]
-fn f32_boundary_accepts_f32_and_current_bool_payloads() {
+fn typed_boundaries_separate_f32_and_bool8_payloads() {
     unsafe {
-        let f32_tensor = chelis_alloc(0, ptr::null(), CHELIS_F32);
-        let bool_tensor = chelis_alloc(0, ptr::null(), CHELIS_BOOL);
+        let f32_tensor = chelis_alloc(0, ptr::null(), CHELIS_DTYPE_F32);
+        let bool_tensor = chelis_alloc(0, ptr::null(), CHELIS_DTYPE_BOOL);
 
         assert_eq!(data_as_f32(f32_tensor), (*f32_tensor).data.cast::<f32>());
         assert_eq!(
             data_as_f32_const(f32_tensor),
             (*f32_tensor).data.cast::<f32>()
         );
-        assert_eq!(data_as_f32(bool_tensor), (*bool_tensor).data.cast::<f32>());
         assert_eq!(
-            data_as_f32_const(bool_tensor),
-            (*bool_tensor).data.cast::<f32>()
+            Bool8::data_ptr(bool_tensor).expect("bool tensor uses Bool8 storage"),
+            (*bool_tensor).data.cast::<Bool8>()
         );
 
         chelis_free(bool_tensor);
@@ -181,7 +183,7 @@ fn f32_boundary_accepts_f32_and_current_bool_payloads() {
 
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "data_as_f32 requires an IEEE binary32-compatible representation")]
+#[should_panic(expected = "data_as_f32 requires f32 storage")]
 fn mutable_f32_boundary_rejects_int32() {
     unsafe {
         let tensor = i32_tensor(&[], &[1]);
@@ -191,7 +193,7 @@ fn mutable_f32_boundary_rejects_int32() {
 
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "data_as_f32_const requires an IEEE binary32-compatible representation")]
+#[should_panic(expected = "data_as_f32_const requires f32 storage")]
 fn const_f32_boundary_rejects_int32() {
     unsafe {
         let tensor = i32_tensor(&[], &[1]);

@@ -213,7 +213,8 @@ const BUILD_SHAPE_LIST_HELPER: &str = r#"
 static chelis_list* build_shape_list_i64(const int64_t* dims, int64_t len) {
     chelis_value* items = (chelis_value*)malloc(sizeof(chelis_value) * (size_t)len);
     for (int64_t i = 0; i < len; ++i) {
-        items[i] = chelis_value_from_int64(dims[i]);
+        items[i] = chelis_value_from_scalar(
+            chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)dims[i]));
     }
     chelis_list* list = chelis_list_from_values(items, len);
     free(items);
@@ -244,20 +245,14 @@ fn cbackend_reshape_tensor_f64() {
 
 int main(void) {{
     double in_data[4] = {{1.5, 2.5, 3.5, 4.5}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = (float*)in_data;
-    t.shape[0] = 4;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F64;
-    t.size = 4;
-    t.owns_data = 0;
+    int64_t input_shape[1] = {{4}};
+    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_F64,
+                                         in_data, sizeof(in_data));
 
     int64_t dims[2] = {{2, 2}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
-    chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
-    if (out->dtype != CHELIS_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
+    if (out->dtype != CHELIS_DTYPE_F64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
     double* d = (double*)out->data;
     printf("%.17g %.17g %.17g %.17g\n", d[0], d[1], d[2], d[3]);
@@ -310,20 +305,14 @@ int main(void) {{
         0x7FEDCBA987654321LL,
         0x0011223344556677LL
     }};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = (float*)in_data;
-    t.shape[0] = 4;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_I64;
-    t.size = 4;
-    t.owns_data = 0;
+    int64_t input_shape[1] = {{4}};
+    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_I64,
+                                         in_data, sizeof(in_data));
 
     int64_t dims[2] = {{2, 2}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
-    chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
-    if (out->dtype != CHELIS_I64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
+    if (out->dtype != CHELIS_DTYPE_I64) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
     int64_t* d = (int64_t*)out->data;
     printf("%llx %llx %llx %llx\n",
@@ -366,20 +355,14 @@ fn cbackend_reshape_tensor_f32_control() {
 
 int main(void) {{
     float in_data[4] = {{1.5f, 2.5f, 3.5f, 4.5f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 4;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 4;
-    t.owns_data = 0;
+    int64_t input_shape[1] = {{4}};
+    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_F32,
+                                         in_data, sizeof(in_data));
 
     int64_t dims[2] = {{2, 2}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
-    chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
-    if (out->dtype != CHELIS_F32) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
+    chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
+    if (out->dtype != CHELIS_DTYPE_F32) {{ printf("FAIL_DTYPE %d\n", out->dtype); return 1; }}
     if (out->size != 4) {{ printf("FAIL_SIZE %lld\n", (long long)out->size); return 1; }}
     float* d = (float*)out->data;
     printf("%.9g %.9g %.9g %.9g\n", d[0], d[1], d[2], d[3]);
@@ -434,24 +417,17 @@ fn cbackend_reshape_zero_element_tensor_keeps_an_extent_above_int32() {
 {BUILD_SHAPE_LIST_HELPER}
 
 int main(void) {{
-    /* A rank-1 tensor of zero elements. `data` is never dereferenced:
-     * reshape copies `size * elem_bytes` == 0 bytes. */
-    float in_data[1] = {{0.0f}};
-    chelis_tensor t;
-    memset(&t, 0, sizeof(t));
-    t.data = in_data;
-    t.shape[0] = 0;
-    t.strides[0] = 1;
-    t.ndim = 1;
-    t.dtype = CHELIS_F32;
-    t.size = 0;
-    t.owns_data = 0;
+    /* A rank-1 tensor of zero elements. The exact view contract represents
+     * empty storage with a null pointer and zero capacity. */
+    int64_t input_shape[1] = {{0}};
+    chelis_tensor* t = chelis_alloc_view(1, input_shape, CHELIS_DTYPE_F32,
+                                         NULL, 0);
 
     int64_t dims[2] = {{4294967296LL, 0}};
     chelis_list* shape = build_shape_list_i64(dims, 2);
-    chelis_tensor* out = chelis_host_reshape_tensor(&t, shape);
+    chelis_tensor* out = chelis_host_reshape_tensor(t, shape);
     printf("%d %lld %lld %lld\n",
-           out->ndim,
+           out->rank,
            (long long)out->shape[0],
            (long long)out->shape[1],
            (long long)out->size);

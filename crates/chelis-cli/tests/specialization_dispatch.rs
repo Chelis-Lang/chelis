@@ -47,7 +47,7 @@
 //! | matmul      | `cblas_sgemm()` direct call           | **YES**      |
 //! | softmax     | §4.2 lowering: 4 allocs + 3+ scalar parallel-for loops | no |
 //! | layer_norm  | §4.4 lowering: 10+ allocs + many loops              | no |
-//! | scatter     | Generic `chelis_tensor_scatter()` runtime call      | no |
+//! | scatter     | Exact `chelis_tensor_scatter_add()` runtime call    | no |
 //! | gather      | First-class sparse C loop                           | partial |
 //!
 //! **Translation to the user's framing:**
@@ -168,8 +168,9 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
     let allocs = c.matches("chelis_alloc(").count();
     // Only count actual *call sites* (indented, with open paren).
     let sgemm_calls = c.matches("    cblas_sgemm(").count();
-    // Generic gather/scatter etc. emit a single chelis_tensor_<op>(...) call.
-    let runtime_call = c.contains("chelis_tensor_scatter(")
+    // Generic gather/scatter etc. emit a single exact tagged runtime call.
+    let runtime_call = c.contains("chelis_tensor_scatter_replace(")
+        || c.contains("chelis_tensor_scatter_add(")
         || c.contains("chelis_tensor_gather(")
         || c.contains("chelis_tensor_where(")
         || c.contains("chelis_tensor_cumsum(")
@@ -178,7 +179,7 @@ fn build_and_classify(name: &'static str, source: &str) -> Dispatch {
         && c.contains("values_data")
         && c.contains("_out_data")
         && c.contains("_g =")
-        && c.contains("CHELIS_I64");
+        && c.contains("CHELIS_DTYPE_I64");
     let fused_kernels = c.matches("parallel for simd").count();
     // Generic non-SIMD parallel-for loops (used for reductions etc.).
     let generic_loops = c.matches("\n    #pragma omp parallel for\n").count();
@@ -240,7 +241,7 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
     eprintln!("  softmax    -> generic Tier 2 lowering, multiple kernels, no fused softmax");
     eprintln!("  layer_norm -> generic Tier 2 lowering, several backing slots, no fused layernorm");
     eprintln!(
-        "  scatter    -> single chelis_tensor_scatter() runtime call (no parallel-radix-sort)"
+        "  scatter    -> single chelis_tensor_scatter_add() runtime call (no parallel-radix-sort)"
     );
     eprintln!(
         "  gather     -> first-class sparse C loop (no dense one-hot, no warp-aware GPU path)"
@@ -290,7 +291,7 @@ fn specialized_kernel_dispatch_reality_for_common_ops() {
 
     assert!(
         sc.runtime_call,
-        "scatter must lower to a chelis_tensor_scatter() runtime call \
+        "scatter must lower to a chelis_tensor_scatter_add() runtime call \
          (the only generic dispatch path today). If this changes, a \
          specialised scatter pattern matcher shipped. Update the test."
     );

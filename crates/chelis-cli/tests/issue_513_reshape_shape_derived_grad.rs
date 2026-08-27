@@ -276,12 +276,12 @@ out = grad(f)\n";
 extern chelis_tensor* out(chelis_tensor* arg0);
 int main(void) {
     int64_t shape[1] = {4};
-    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32);
+    chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32);
     float xd[4] = {1.0f, 2.0f, 3.0f, 4.0f};
     memcpy(x->data, xd, sizeof(xd));
     chelis_tensor* g = out(x);
     if (g->size != 4) { printf("FAIL_SIZE %lld\n", (long long)g->size); return 1; }
-    for (int i = 0; i < 4; i++) printf("%.6f\n", g->data[i]);
+    for (int i = 0; i < 4; i++) printf("%.6f\n", ((float *)g->data)[i]);
     return 0;
 }
 "#;

@@ -16,8 +16,8 @@
 //!
 //! against `t->data` declared as `float *` in
 //! `crates/chelis-runtime/include/chelis_runtime.h` line 20.  For
-//! every tensor whose dtype has element size > 4 (`CHELIS_F64`,
-//! `CHELIS_I64`), the printer reads 4-byte chunks and widens; an
+//! every tensor whose dtype has element size > 4 (`CHELIS_DTYPE_F64`,
+//! `CHELIS_DTYPE_I64`), the printer reads 4-byte chunks and widens; an
 //! 8-byte element renders as two unrelated 4-byte halves and the
 //! tail of the buffer is dropped entirely.  The two dtype-ignoring
 //! bugs cancelled each other on small hand-authored examples (e.g.

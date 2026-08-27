@@ -46,8 +46,8 @@ void manifested_callable(
 
 int main(void) {
     int64_t shape[2] = {2, 4};
-    chelis_tensor *a = chelis_alloc(2, shape, CHELIS_F32);
-    chelis_tensor *b = chelis_alloc(2, shape, CHELIS_F32);
+    chelis_tensor *a = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
+    chelis_tensor *b = chelis_alloc(2, shape, CHELIS_DTYPE_F32);
     const uint32_t a_bits[8] = {
         0x3f800000u, 0x3f800001u, 0xbf800000u, 0x00000001u,
         0x7f7fffffu, 0x00800000u, 0x80000000u, 0x3eaaaaabu
@@ -71,8 +71,13 @@ int main(void) {
         fprintf(stderr, "manifested callable did not populate outputs[0]\\n");
         return 1;
     }
-    if (outputs[0]->dtype != CHELIS_F32 || outputs[0]->ndim != 2 ||
-        outputs[0]->shape[0] != 2 || outputs[0]->shape[1] != 4) {
+    if (outputs[0]->dtype != CHELIS_DTYPE_F32 || outputs[0]->rank != 2 ||
+        outputs[0]->shape == NULL || outputs[0]->strides == NULL ||
+        outputs[0]->shape[0] != 2 || outputs[0]->shape[1] != 4 ||
+        outputs[0]->strides[0] != 4 || outputs[0]->strides[1] != 1 ||
+        outputs[0]->size != 8 || outputs[0]->byte_capacity < 32 ||
+        outputs[0]->owns_data != 1 || outputs[0]->reserved[0] != 0 ||
+        outputs[0]->reserved[1] != 0) {
         fprintf(stderr, "manifested callable returned the wrong output ABI\\n");
         return 1;
     }

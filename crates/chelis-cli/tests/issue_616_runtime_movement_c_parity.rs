@@ -199,10 +199,10 @@ fn issue_616_runtime_shrink_c_binary_handles_multiple_lengths() {
         .iter()
         .map(|n| {
             format!(
-                "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_F32); \
-                 for (int i = 0; i < {n}; i++) x->data[i] = (float)(i + 1); \
+                "    {{ int64_t shape[1] = {{{n}}}; chelis_tensor* x = chelis_alloc(1, shape, CHELIS_DTYPE_F32); \
+                 for (int i = 0; i < {n}; i++) ((float *)x->data)[i] = (float)(i + 1); \
                  chelis_tensor* w = out(x); \
-                 for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", w->data[i]); \
+                 for (int i = 0; i < w->size; i++) printf(\"%.6f\\n\", ((float *)w->data)[i]); \
                  printf(\"---\\n\"); }}"
             )
         })

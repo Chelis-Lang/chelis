@@ -114,23 +114,23 @@ fn write_harness_main_cpp(harness_path: &Path, hip_entry_symbol: &str, a: &[f32]
     lines.push("int main(void) {".to_string());
     // 8x16 input `a`
     lines.push("    int64_t a_shape[2] = { 8, 16 };".to_string());
-    lines.push("    chelis_tensor *a_t = chelis_alloc(2, a_shape, CHELIS_F32);".to_string());
+    lines.push("    chelis_tensor *a_t = chelis_alloc(2, a_shape, CHELIS_DTYPE_F32);".to_string());
     // Sibling of #250/#251/#252: exact f32 bit pattern via
     // `chelis_f32_from_bits` (from the included `chelis_runtime.h`), not a
     // lossy `{:.8}f` decimal, so the device input is byte-identical to the
     // Rust `reference_matmul_row_major` operand.
     for (idx, value) in a.iter().enumerate() {
         lines.push(format!(
-            "    a_t->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+            "    ((float *)a_t->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
             bits = value.to_bits()
         ));
     }
     // 16x4 input `b`
     lines.push("    int64_t b_shape[2] = { 16, 4 };".to_string());
-    lines.push("    chelis_tensor *b_t = chelis_alloc(2, b_shape, CHELIS_F32);".to_string());
+    lines.push("    chelis_tensor *b_t = chelis_alloc(2, b_shape, CHELIS_DTYPE_F32);".to_string());
     for (idx, value) in b.iter().enumerate() {
         lines.push(format!(
-            "    b_t->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
+            "    ((float *)b_t->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);",
             bits = value.to_bits()
         ));
     }
@@ -139,7 +139,7 @@ fn write_harness_main_cpp(harness_path: &Path, hip_entry_symbol: &str, a: &[f32]
     lines.push(format!("    {hip_entry_symbol}(inputs, 2, outputs, 1);"));
     lines.push("    for (int i = 0; i < outputs[0]->size; i++) {".to_string());
     lines.push("        if (i > 0) printf(\" \");".to_string());
-    lines.push("        printf(\"%.6f\", outputs[0]->data[i]);".to_string());
+    lines.push("        printf(\"%.6f\", ((float *)outputs[0]->data)[i]);".to_string());
     lines.push("    }".to_string());
     lines.push("    printf(\"\\n\");".to_string());
     lines.push("    chelis_free(a_t);".to_string());

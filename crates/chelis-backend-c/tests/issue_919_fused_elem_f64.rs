@@ -165,11 +165,7 @@ fn f64_fused_chain_compiles() {
 }
 
 #[test]
-fn f32_fused_chain_emission_is_unchanged() {
-    // Negative parity for the widening: the f32 lane must keep the
-    // pre-#919 text exactly, cast-free. `fused_in_place_forall_alias`
-    // asserts these literal strings, so a stray unconditional cast
-    // would be a real regression rather than a cosmetic one.
+fn f32_fused_chain_uses_exact_float_pointer_casts() {
     let dag = exp_times_x_dag(Prim::F32);
     let src = codegen(&dag, "f32_fused_chain")
         .expect("f32 fused codegen")
@@ -188,8 +184,8 @@ fn f32_fused_chain_emission_is_unchanged() {
         "the f32 lane must not acquire any double-precision emission; got:\n{src}"
     );
     assert!(
-        !src.contains("(float*)t"),
-        "the f32 lane must keep the cast-free `t{{n}}->data` pointer form; got:\n{src}"
+        src.contains("(float*)t") && src.contains("(const float*)t"),
+        "the f32 lane must cast the exact public void payload before access; got:\n{src}"
     );
 }
 

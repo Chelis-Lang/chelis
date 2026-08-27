@@ -457,7 +457,7 @@ impl CEmitter {
         for input in &node.inputs[1..] {
             let b = input.0;
             self.line(&format!(
-                "if (t{a}->ndim == t{b}->ndim) {{ for (int __d = 0; __d < t{a}->ndim; __d++) {{ \
+                "if (t{a}->rank == t{b}->rank) {{ for (int __d = 0; __d < t{a}->rank; __d++) {{ \
                  if (t{a}->shape[__d] != t{b}->shape[__d]) {{ fprintf(stderr, \"chelis: \
                  elementwise operand shape mismatch at node {id} axis %d\\n\", __d); abort(); \
                  }} }} }}"
@@ -603,7 +603,7 @@ impl CEmitter {
                     "INFINITY",
                     // #172: propagate NaN (torch parity) in the strided
                     // path, matching the contiguous `chelis_min_f32`.
-                    "acc = chelis_fmin_propnan_f32(acc, t{a}->data[src_idx]);",
+                    "acc = chelis_fmin_propnan_f32(acc, ((const float*)t{a}->data)[src_idx]);",
                     Some("chelis_min_f32"),
                 )?;
             }
@@ -615,7 +615,7 @@ impl CEmitter {
                     &node.output_type,
                     dag,
                     "1.0f",
-                    "acc *= t{a}->data[src_idx];",
+                    "acc *= ((const float*)t{a}->data)[src_idx];",
                     None,
                 )?;
             }
@@ -888,8 +888,8 @@ impl CEmitter {
                 // WS-1 (dtype + Metal cleanup cycle): admit Bf16/F16 in
                 // tensor element types. Arithmetic always converts to
                 // f32 via `chelis_bf16_to_f32` / `chelis_f16_to_f32`
-                // (per spec/04-type-system.md §5.7.1); matmul routes
-                // through `chelis_bf16_buffer_to_f32` + `cblas_sgemm`.
+                // (per spec/04-type-system.md §5.7.1); matmul converts
+                // each operand element before dispatching `cblas_sgemm`.
                 Prim::F32
                 | Prim::F64
                 | Prim::Bool
@@ -1187,12 +1187,12 @@ impl CEmitter {
             self.indent -= 1;
             self.line("}");
             self.line(&format!(
-                "if (inputs[{slot}]->ndim != {}) {{",
+                "if (inputs[{slot}]->rank != {}) {{",
                 Self::ndim(ty)
             ));
             self.indent += 1;
             self.line(&format!(
-                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->ndim);",
+                "fprintf(stderr, \"{func_name_fmt}: input `{label_fmt}` expected rank {}, got %d\\n\", inputs[{slot}]->rank);",
                 Self::ndim(ty)
             ));
             self.line("abort();");
@@ -1330,7 +1330,7 @@ impl CEmitter {
     }
 
     /// Returns the C element type for direct element access in generated loops.
-    /// F32 and Bool use `float` (the native data pointer type).
+    /// F32 uses `float`; Bool uses its canonical one-byte `uint8_t` payload.
     /// Int32 uses `int32_t` (reinterpret cast; sizeof matches float).
     /// Int64 uses `int64_t` (reinterpret cast; sizeof is 2x float, alloc adjusts).
     /// F64 uses `double` (reinterpret cast; sizeof is 2x float, alloc adjusts).
@@ -1346,11 +1346,12 @@ impl CEmitter {
     /// quiet wrong answer.
     fn elem_type(ty: &TensorType) -> &'static str {
         match ty.precision {
-            Prim::F32 | Prim::Bool => "float",
+            Prim::F32 => "float",
+            Prim::Bool => "uint8_t",
             Prim::F64 => "double",
             // WS-A4: i8/i16 element access via reinterpret cast on
             // `t->data`; the runtime allocator now sizes the buffer
-            // correctly per `CHELIS_I8` / `CHELIS_I16`.
+            // correctly per `CHELIS_DTYPE_I8` / `CHELIS_DTYPE_I16`.
             Prim::Int8 => "int8_t",
             Prim::Int16 => "int16_t",
             Prim::Int32 => "int32_t",
@@ -1424,36 +1425,6 @@ impl CEmitter {
         }
     }
 
-    /// Bulk buffer-conversion helper name for `bf16` / `f16` ->
-    /// `float`. Used by the matmul wrapper to populate f32 scratch
-    /// buffers before calling `cblas_sgemm`.
-    fn reduced_to_f32_buffer_fn(prim: Prim) -> &'static str {
-        match prim {
-            Prim::Bf16 => "chelis_bf16_buffer_to_f32",
-            Prim::F16 => "chelis_f16_buffer_to_f32",
-            other => panic!(
-                "reduced_to_f32_buffer_fn called on non-reduced precision `{}`; \
-                 this is a backend bug",
-                other.name()
-            ),
-        }
-    }
-
-    /// Bulk buffer-conversion helper name for `float` -> `bf16` /
-    /// `f16`. Used by the matmul wrapper to downcast the `cblas_sgemm`
-    /// result back into the destination tensor.
-    fn f32_to_reduced_buffer_fn(prim: Prim) -> &'static str {
-        match prim {
-            Prim::Bf16 => "chelis_f32_buffer_to_bf16",
-            Prim::F16 => "chelis_f32_buffer_to_f16",
-            other => panic!(
-                "f32_to_reduced_buffer_fn called on non-reduced precision `{}`; \
-                 this is a backend bug",
-                other.name()
-            ),
-        }
-    }
-
     fn elem_size_expr(ty: &TensorType) -> String {
         format!("sizeof({})", Self::elem_type(ty))
     }
@@ -1515,7 +1486,7 @@ impl CEmitter {
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data);"
+            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->byte_capacity);"
         ));
     }
 
@@ -1540,8 +1511,8 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!(
-            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{}->data);",
-            spec.reusable_input.0
+            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{}->data, t{}->byte_capacity);",
+            spec.reusable_input.0, spec.reusable_input.0
         ));
         self.indent -= 1;
         self.line("} else {");
@@ -1552,7 +1523,7 @@ impl CEmitter {
             ));
         }
         self.line(&format!(
-            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data);"
+            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, chelis_slot{slot_id}->data, chelis_slot{slot_id}->byte_capacity);"
         ));
         self.indent -= 1;
         self.line("}");
@@ -1717,25 +1688,25 @@ impl CEmitter {
         match ty.precision {
             Prim::Int64 => {
                 self.line(&format!(
-                    "chelis_fill_i64(t{id}, (int64_t){});",
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){}));",
                     exact_int.unwrap_or(wide as i64)
                 ));
             }
             Prim::Int32 => {
                 self.line(&format!(
-                    "{{ int32_t *__p = (int32_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = (int32_t){}; }}",
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint32_t)(int32_t){}));",
                     exact_int.unwrap_or(wide as i64) as i32
                 ));
             }
             Prim::Int16 => {
                 self.line(&format!(
-                    "{{ int16_t *__p = (int16_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = (int16_t){}; }}",
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint16_t)(int16_t){}));",
                     exact_int.unwrap_or(wide as i64) as i16
                 ));
             }
             Prim::Int8 => {
                 self.line(&format!(
-                    "{{ int8_t *__p = (int8_t*)t{id}->data; for (int64_t __i = 0; __i < t{id}->size; __i++) __p[__i] = (int8_t){}; }}",
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint8_t)(int8_t){}));",
                     exact_int.unwrap_or(wide as i64) as i8
                 ));
             }
@@ -1747,7 +1718,7 @@ impl CEmitter {
                 // `1e-17` collapsed to zero. Bit-pattern emission
                 // round-trips the source f64 verbatim.
                 let bits = wide.to_bits();
-                self.line(&format!("chelis_fill_f64_bits(t{id}, 0x{bits:016x}uLL);"));
+                self.line(&format!("chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_F64, UINT64_C(0x{bits:016x})));"));
             }
             Prim::F32 => {
                 // Issue #189: narrow to f32 (storage width is f32)
@@ -1761,23 +1732,22 @@ impl CEmitter {
                 // avoiding the pre-fix `{:.8}` format-string drift.
                 let v32 = Self::f64_to_f32_truncate(wide);
                 let bits = v32.to_bits();
-                self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
+                self.line(&format!("chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT32_C(0x{bits:08x})));"));
             }
             Prim::Bool => {
                 // Issue #365: a Bool tensor uses the same 4-byte
                 // f32-encoded storage (0.0 / 1.0) as the comparison
-                // kernels write, but its dtype tag is CHELIS_BOOL.
+                // kernels write, but its dtype tag is CHELIS_DTYPE_BOOL.
                 // Filling it through `chelis_fill_f32_bits` trips that
                 // helper's debug-build dtype assertion (it asserts
-                // CHELIS_F32), aborting a debug-runtime reduce/softmax/
+                // CHELIS_DTYPE_F32), aborting a debug-runtime reduce/softmax/
                 // cross-entropy backward that materializes a comparison
                 // mask. Use the dtype-correct `chelis_fill_bool_bits`,
-                // which asserts CHELIS_BOOL and fills the identical
+                // which asserts CHELIS_DTYPE_BOOL and fills the identical
                 // f32-encoded layout. The emitted bit pattern is the
                 // same `f32::to_bits()` value as the F32 arm.
-                let v32 = Self::f64_to_f32_truncate(wide);
-                let bits = v32.to_bits();
-                self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
+                let bits = u8::from(wide != 0.0);
+                self.line(&format!("chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, UINT8_C({bits})));"));
             }
             // WS-1: bf16 / f16 Const fill. The literal's exact 16-bit
             // pattern is computed at codegen time via the dtype-semantic
@@ -1787,11 +1757,11 @@ impl CEmitter {
             // pattern via `chelis_fill_bf16` / `chelis_fill_f16`.
             Prim::Bf16 => {
                 let bits = chelis_types::bf16_from_f64_rne(wide).to_bits();
-                self.line(&format!("chelis_fill_bf16(t{id}, 0x{bits:04X}u);"));
+                self.line(&format!("chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_BF16, UINT16_C(0x{bits:04X})));"));
             }
             Prim::F16 => {
                 let bits = chelis_types::f16_from_f64_rne(wide).to_bits();
-                self.line(&format!("chelis_fill_f16(t{id}, 0x{bits:04X}u);"));
+                self.line(&format!("chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_F16, UINT16_C(0x{bits:04X})));"));
             }
             other => {
                 // chelis#729 rework: a constant the target cannot
@@ -1851,7 +1821,9 @@ impl CEmitter {
         let extent = format!("t{a}->shape[{axis}]");
         match ty.precision {
             Prim::Int64 => {
-                self.line(&format!("chelis_fill_i64(t{id}, (int64_t)({extent}));"));
+                self.line(&format!(
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t)({extent})));"
+                ));
             }
             Prim::Int32 => {
                 self.line(&format!(
@@ -2062,15 +2034,17 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
         self.line(&format!(
-            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {};",
@@ -2151,15 +2125,17 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
         self.line(&format!(
-            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {};",
@@ -2211,15 +2187,17 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
         self.line(&format!(
-            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->rank);"
         ));
         self.line(&format!(
             "float __av = {load}(((uint16_t*)t{a}->data)[idx_a]);"
@@ -2274,15 +2252,17 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
         self.line(&format!(
-            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->rank);"
         ));
         self.line(&format!(
             "float __av = {load}(((uint16_t*)t{a}->data)[idx_a]);"
@@ -2349,15 +2329,17 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
         self.line(&format!(
-            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {};",
@@ -2392,7 +2374,8 @@ impl CEmitter {
 
     /// #517: cmplt reads each operand through its OWN element dtype,
     /// resolved from the input DAG nodes — not through the boolean
-    /// (f32) output type. The result is bool (stored as f32 1.0/0.0),
+    /// output type. The result uses the canonical one-byte Bool8
+    /// representation,
     /// but a runtime-produced int32/int64/f64/bf16/f16 operand read
     /// through a raw `float*` would reinterpret its bit pattern (the
     /// #347/#476 bug class: e.g. a negative int32 reinterpreted as
@@ -2408,7 +2391,9 @@ impl CEmitter {
         let et_a = Self::elem_type(&a_ty);
         let et_b = Self::elem_type(&b_ty);
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("float* restrict __out_{id} = t{id}->data;"));
+        self.line(&format!(
+            "uint8_t* restrict __out_{id} = (uint8_t*)t{id}->data;"
+        ));
         self.line(&format!(
             "const {et_a}* restrict __in_a_{id} = (const {et_a}*)t{a}->data;"
         ));
@@ -2426,7 +2411,7 @@ impl CEmitter {
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "__out_{id}[i] = ({cmp_a} < {cmp_b}) ? 1.0f : 0.0f;"
+            "__out_{id}[i] = ({cmp_a} < {cmp_b}) ? UINT8_C(1) : UINT8_C(0);"
         ));
         self.indent -= 1;
         self.line("}");
@@ -2436,20 +2421,22 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
         self.line(&format!(
-            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->rank);"
         ));
         let cmp_a_strided = Self::cmplt_cmp_value(&a_ty, &format!("__in_a_{id}"), "idx_a");
         let cmp_b_strided = Self::cmplt_cmp_value(&b_ty, &format!("__in_b_{id}"), "idx_b");
         self.line(&format!(
-            "__out_{id}[i] = ({cmp_a_strided} < {cmp_b_strided}) ? 1.0f : 0.0f;"
+            "__out_{id}[i] = ({cmp_a_strided} < {cmp_b_strided}) ? UINT8_C(1) : UINT8_C(0);"
         ));
         self.indent -= 1;
         self.line("}");
@@ -2506,12 +2493,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {};",
@@ -2580,12 +2569,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         let strided = Self::integer_abs_expr(ty.precision, &format!("__in_a_{id}[idx]"));
         self.line(&format!("__out_{id}[i] = {strided};"));
@@ -2629,12 +2620,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!("__out_{id}[i] = {one} / __in_a_{id}[idx];"));
         self.indent -= 1;
@@ -2760,12 +2753,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = {f}((({et}*)t{a}->data)[idx]);"
@@ -2806,12 +2801,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
             "float __av = {load}(((uint16_t*)t{a}->data)[idx]);"
@@ -2852,12 +2849,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!("float __av = {load}(__in_a_{id}[idx]);"));
         self.line(&format!("__out_{id}[i] = {store}(1.0f / __av);"));
@@ -2912,15 +2911,17 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
         self.line(&format!(
-            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->ndim);"
+            "int64_t idx_a = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "int64_t idx_b = chelis_indices_to_flat(indices, t{b}->strides, t{b}->rank);"
         ));
         self.line(&format!(
             "float __av = {load}(((uint16_t*)t{a}->data)[idx_a]);"
@@ -2973,12 +2974,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
             "float __av = {load}(((uint16_t*)t{a}->data)[idx]);"
@@ -3414,20 +3417,10 @@ impl CEmitter {
         // `ty`, so a `double v0` can never be fed by an `expf`.
         let et = Self::elem_type(ty);
         let is_f64 = Self::is_f64(ty);
-        // `chelis_runtime.h` declares the payload as `float *data`, so
-        // f64 access needs an explicit reinterpreting cast. f32 keeps
-        // the bare `t{id}->data` form: it needs no cast, and the
-        // in-place aliasing tests pin that exact text.
-        let out_cast = if is_f64 {
-            format!("({et}*)")
-        } else {
-            String::new()
-        };
-        let in_cast = if is_f64 {
-            format!("(const {et}*)")
-        } else {
-            String::new()
-        };
+        // The exact public carrier exposes an untyped `void *data` payload.
+        // Every generated dereference names the IR-pinned element type.
+        let out_cast = format!("({et}*)");
+        let in_cast = format!("(const {et}*)");
         if let Some(spec) = in_place {
             self.emit_fused_in_place_wrapper(id, ty, spec);
         } else {
@@ -3581,16 +3574,18 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
         ));
 
         // Compute strided index for each external input.
         for (ext_idx, ext_node) in inputs.iter().enumerate() {
             let ext_id = ext_node.0;
             self.line(&format!(
-                "int64_t idx_ext{ext_idx} = chelis_indices_to_flat(indices, t{ext_id}->strides, t{ext_id}->ndim);"
+                "int64_t idx_ext{ext_idx} = chelis_indices_to_flat(indices, t{ext_id}->strides, t{ext_id}->rank);"
             ));
         }
 
@@ -3603,11 +3598,7 @@ impl CEmitter {
             match fi {
                 FusedInput::External(i) => {
                     let ext_id = inputs[*i].0;
-                    if is_f64 {
-                        format!("((const {et}*)t{ext_id}->data)[idx_ext{i}]")
-                    } else {
-                        format!("t{ext_id}->data[idx_ext{i}]")
-                    }
+                    format!("((const {et}*)t{ext_id}->data)[idx_ext{i}]")
                 }
                 FusedInput::PreviousStep(j) => format!("v{j}"),
             }
@@ -3618,12 +3609,9 @@ impl CEmitter {
             self.line(&format!("{et} v{s} = {expr};"));
         }
 
-        // Store last step's result.
-        if is_f64 {
-            self.line(&format!("(({et}*)t{id}->data)[i] = v{last};"));
-        } else {
-            self.line(&format!("t{id}->data[i] = v{last};"));
-        }
+        // Store last step's result through the exact element type selected
+        // above. Both active float widths use the same typed shape here.
+        self.line(&format!("(({et}*)t{id}->data)[i] = v{last};"));
         self.indent -= 1;
         self.line("}");
         self.indent -= 1;
@@ -3676,7 +3664,7 @@ impl CEmitter {
         };
         self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
         self.line(&format!(
-            "if (!(t{id}_a->ndim >= 2 && t{id}_a->strides[t{id}_a->ndim - 1] == 1 && t{id}_a->strides[t{id}_a->ndim - 2] == {k_expr})) {{"
+            "if (!(t{id}_a->rank >= 2 && t{id}_a->strides[t{id}_a->rank - 1] == 1 && t{id}_a->strides[t{id}_a->rank - 2] == {k_expr})) {{"
         ));
         self.indent += 1;
         self.line(&format!("t{id}_a = chelis_contiguous(t{id}_a);"));
@@ -3684,7 +3672,7 @@ impl CEmitter {
         self.line("}");
         self.line(&format!("chelis_tensor *t{id}_b = t{b};"));
         self.line(&format!(
-            "if (!(t{id}_b->ndim >= 2 && t{id}_b->strides[t{id}_b->ndim - 1] == 1 && t{id}_b->strides[t{id}_b->ndim - 2] == {n_expr})) {{"
+            "if (!(t{id}_b->rank >= 2 && t{id}_b->strides[t{id}_b->rank - 1] == 1 && t{id}_b->strides[t{id}_b->rank - 2] == {n_expr})) {{"
         ));
         self.indent += 1;
         self.line(&format!("t{id}_b = chelis_contiguous(t{id}_b);"));
@@ -3757,16 +3745,16 @@ impl CEmitter {
         let m_expr = Self::emit_dim_expr(&spec.m);
         let n_expr = Self::emit_dim_expr(&spec.n);
         let k_expr = Self::emit_dim_expr(&spec.k);
-        let bf16_to_f32 = Self::reduced_to_f32_buffer_fn(spec.operand_precision);
+        let reduced_to_f32 = Self::reduced_to_f32_fn(spec.operand_precision);
         // Two output-precision cases per the matmul-pattern detector +
         // user-constructed matmul shape:
         //   * Output is bf16/f16: convert f32 accumulator buffer back
-        //     into the destination via `chelis_f32_buffer_to_<x>`.
+        //     into the destination element-wise.
         //   * Output is f32: write `cblas_sgemm`'s result directly into
         //     `t{id}->data` with no intermediate scratch buffer.
         let output_is_reduced = Self::is_reduced_float(ty);
         let f32_to_reduced = if output_is_reduced {
-            Some(Self::f32_to_reduced_buffer_fn(ty.precision))
+            Some(Self::f32_to_reduced_fn(ty.precision))
         } else {
             None
         };
@@ -3784,7 +3772,7 @@ impl CEmitter {
         // Same shape as the f32/f64 path.
         self.line(&format!("chelis_tensor *t{id}_a = t{a};"));
         self.line(&format!(
-            "if (!(t{id}_a->ndim >= 2 && t{id}_a->strides[t{id}_a->ndim - 1] == 1 && t{id}_a->strides[t{id}_a->ndim - 2] == {k_expr})) {{"
+            "if (!(t{id}_a->rank >= 2 && t{id}_a->strides[t{id}_a->rank - 1] == 1 && t{id}_a->strides[t{id}_a->rank - 2] == {k_expr})) {{"
         ));
         self.indent += 1;
         self.line(&format!("t{id}_a = chelis_contiguous(t{id}_a);"));
@@ -3792,7 +3780,7 @@ impl CEmitter {
         self.line("}");
         self.line(&format!("chelis_tensor *t{id}_b = t{b};"));
         self.line(&format!(
-            "if (!(t{id}_b->ndim >= 2 && t{id}_b->strides[t{id}_b->ndim - 1] == 1 && t{id}_b->strides[t{id}_b->ndim - 2] == {n_expr})) {{"
+            "if (!(t{id}_b->rank >= 2 && t{id}_b->strides[t{id}_b->rank - 1] == 1 && t{id}_b->strides[t{id}_b->rank - 2] == {n_expr})) {{"
         ));
         self.indent += 1;
         self.line(&format!("t{id}_b = chelis_contiguous(t{id}_b);"));
@@ -3824,10 +3812,10 @@ impl CEmitter {
         }
         if spec.batch_dims.is_empty() {
             self.line(&format!(
-                "{bf16_to_f32}((const uint16_t*)t{id}_a->data, t{id}_af, t{id}_mk);"
+                "for (int64_t i = 0; i < t{id}_mk; i++) t{id}_af[i] = {reduced_to_f32}(((const uint16_t*)t{id}_a->data)[i]);"
             ));
             self.line(&format!(
-                "{bf16_to_f32}((const uint16_t*)t{id}_b->data, t{id}_bf, t{id}_kn);"
+                "for (int64_t i = 0; i < t{id}_kn; i++) t{id}_bf[i] = {reduced_to_f32}(((const uint16_t*)t{id}_b->data)[i]);"
             ));
             let c_arg = if output_is_reduced {
                 format!("t{id}_cf")
@@ -3837,9 +3825,9 @@ impl CEmitter {
             self.line(&format!(
                 "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_af, {k_expr}, t{id}_bf, {n_expr}, 0.0f, {c_arg}, {n_expr});"
             ));
-            if let Some(f32_to_bf16) = f32_to_reduced {
+            if let Some(f32_to_reduced) = f32_to_reduced {
                 self.line(&format!(
-                    "{f32_to_bf16}(t{id}_cf, (uint16_t*)t{id}->data, t{id}_mn);"
+                    "for (int64_t i = 0; i < t{id}_mn; i++) ((uint16_t*)t{id}->data)[i] = {f32_to_reduced}(t{id}_cf[i]);"
                 ));
             }
         } else {
@@ -3875,10 +3863,10 @@ impl CEmitter {
                 ));
             }
             self.line(&format!(
-                "{bf16_to_f32}((const uint16_t*)t{id}_a->data + t{id}_a_offset, t{id}_af, t{id}_mk);"
+                "for (int64_t i = 0; i < t{id}_mk; i++) t{id}_af[i] = {reduced_to_f32}(((const uint16_t*)t{id}_a->data)[t{id}_a_offset + i]);"
             ));
             self.line(&format!(
-                "{bf16_to_f32}((const uint16_t*)t{id}_b->data + t{id}_b_offset, t{id}_bf, t{id}_kn);"
+                "for (int64_t i = 0; i < t{id}_kn; i++) t{id}_bf[i] = {reduced_to_f32}(((const uint16_t*)t{id}_b->data)[t{id}_b_offset + i]);"
             ));
             let c_arg = if output_is_reduced {
                 format!("t{id}_cf")
@@ -3888,9 +3876,9 @@ impl CEmitter {
             self.line(&format!(
                 "cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, {m_expr}, {n_expr}, {k_expr}, 1.0f, t{id}_af, {k_expr}, t{id}_bf, {n_expr}, 0.0f, {c_arg}, {n_expr});"
             ));
-            if let Some(f32_to_bf16) = f32_to_reduced {
+            if let Some(f32_to_reduced) = f32_to_reduced {
                 self.line(&format!(
-                    "{f32_to_bf16}(t{id}_cf, (uint16_t*)t{id}->data + t{id}_out_offset, t{id}_mn);"
+                    "for (int64_t i = 0; i < t{id}_mn; i++) ((uint16_t*)t{id}->data)[t{id}_out_offset + i] = {f32_to_reduced}(t{id}_cf[i]);"
                 ));
             }
             self.indent -= 1;
@@ -3958,7 +3946,7 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!(
-            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
+            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
         ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
@@ -4046,7 +4034,7 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!(
-            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
+            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
         ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
@@ -4152,7 +4140,7 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!(
-            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
+            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)t{id}_indices_data[t{id}_i];"
         ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
@@ -4262,7 +4250,7 @@ impl CEmitter {
         self.indent += 1;
         // #476: int tensors store their values bit-packed into the
         // float-typed `->data`, so reading `(int)t->data[i]` on a
-        // CHELIS_I32 index tensor would `(int)`-truncate the FLOAT
+        // CHELIS_DTYPE_I32 index tensor would `(int)`-truncate the FLOAT
         // reinterpretation of the int32 bits (e.g. index `2` →
         // `(int)2.8e-45f` → `0`), silently gathering the wrong row.
         // The read must go through the dtype-correct pointer cast on
@@ -4272,7 +4260,7 @@ impl CEmitter {
         // pointer; the element-wise emit casts inline here because it
         // has no such pre-declared pointer in scope.
         self.line(&format!(
-            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)((const int32_t*)t{id}_indices->data)[t{id}_i];"
+            "int64_t t{id}_g = (t{id}_indices->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*)t{id}_indices->data)[t{id}_i] : (int64_t)((const int32_t*)t{id}_indices->data)[t{id}_i];"
         ));
         self.line(&format!(
             "if (t{id}_g < 0 || t{id}_g >= t{id}_axis_size) abort();"
@@ -4411,16 +4399,16 @@ impl CEmitter {
         );
 
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!("if (t{a}->dtype != CHELIS_BOOL) {{"));
+        self.line(&format!("if (t{a}->dtype != CHELIS_DTYPE_BOOL) {{"));
         self.indent += 1;
         self.line(&format!(
-            "fprintf(stderr, \"count expected CHELIS_BOOL input at node {id}\\n\");"
+            "fprintf(stderr, \"count expected CHELIS_DTYPE_BOOL input at node {id}\\n\");"
         ));
         self.line("abort();");
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "const float* restrict __count_in_{id} = (const float*)t{a}->data;"
+            "const uint8_t* restrict __count_in_{id} = (const uint8_t*)t{a}->data;"
         ));
         self.line(&format!(
             "int64_t* restrict __count_out_{id} = (int64_t*)t{id}->data;"
@@ -4443,15 +4431,15 @@ impl CEmitter {
         self.line(&format!(
             "if (__count_n_{id} != 0 && __level_{id} == NULL) {{ fprintf(stderr, \"count allocation failed\\n\"); abort(); }}"
         ));
-        self.line("int64_t __out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!("int64_t __out_indices[{}];", ty.dims.len().max(1)));
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, __out_indices);"
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, __out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __r_{id} = 0; __r_{id} < __count_n_{id}; __r_{id}++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t __full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!("int64_t __full_indices[{}];", input_ty.dims.len()));
         self.line("int __out_d = 0;");
         for axis in 0..input_ty.dims.len() {
             if !axes.contains(&axis) {
@@ -4470,14 +4458,16 @@ impl CEmitter {
             }
         }
         self.line(&format!(
-            "int64_t __src_{id} = chelis_indices_to_flat(__full_indices, t{a}->strides, t{a}->ndim);"
-        ));
-        self.line(&format!("float __bit_{id} = __count_in_{id}[__src_{id}];"));
-        self.line(&format!(
-            "if (__bit_{id} != 0.0f && __bit_{id} != 1.0f) {{ fprintf(stderr, \"count input is not an exact bool\\n\"); abort(); }}"
+            "int64_t __src_{id} = chelis_indices_to_flat(__full_indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
-            "__level_{id}[__r_{id}] = (__bit_{id} == 1.0f) ? 1 : 0;"
+            "uint8_t __bit_{id} = __count_in_{id}[__src_{id}];"
+        ));
+        self.line(&format!(
+            "if (__bit_{id} != 0 && __bit_{id} != 1) {{ fprintf(stderr, \"count input is not an exact bool\\n\"); abort(); }}"
+        ));
+        self.line(&format!(
+            "__level_{id}[__r_{id}] = (__bit_{id} == 1) ? 1 : 0;"
         ));
         self.indent -= 1;
         self.line("}");
@@ -4552,7 +4542,7 @@ impl CEmitter {
             self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
             self.indent += 1;
             self.line(&format!(
-                "t{id}->data[0] = chelis_sum_f32(t{a}->data, t{a}->size);"
+                "((float*)t{id}->data)[0] = chelis_sum_f32((const float*)t{a}->data, t{a}->size);"
             ));
             self.indent -= 1;
             self.line("} else {");
@@ -4572,18 +4562,22 @@ impl CEmitter {
         self.line(&format!(
             "{acc_et} acc0 = {acc_zero}, acc1 = {acc_zero}, acc2 = {acc_zero}, acc3 = {acc_zero};"
         ));
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         // Build full indices: insert k at the reduction axis
         self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.line(&format!("for (int d = 0; d < t{a}->rank; d++) {{"));
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
@@ -4598,7 +4592,7 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
         // Read the operand at its native element type and accumulate at
         // the accumulator type; C handles the implicit widening for the
@@ -4692,23 +4686,12 @@ impl CEmitter {
     /// sites that need it, but this helper centralizes the
     /// reduce-sum case where the IR accumulator drives the dispatch.
     fn fill_zero_call(ty: &TensorType, tensor: &str) -> String {
-        match ty.precision {
-            Prim::F32 | Prim::Bool => format!("chelis_fill_f32({tensor}, 0.0f);"),
-            Prim::F64 => format!("chelis_fill_f64({tensor}, 0.0);"),
-            Prim::Int64 => format!("chelis_fill_i64({tensor}, (int64_t)0);"),
-            Prim::Int32 => format!(
-                "{{ int32_t *__zp = (int32_t*){tensor}->data; for (int64_t __i = 0; __i < {tensor}->size; __i++) __zp[__i] = 0; }}"
-            ),
-            // WS-1: bf16(+0) = f16(+0) = 0x0000; the dedicated runtime
-            // helpers `chelis_fill_bf16` / `chelis_fill_f16` stamp the
-            // 16-bit pattern directly.
-            Prim::Bf16 => format!("chelis_fill_bf16({tensor}, (uint16_t)0);"),
-            Prim::F16 => format!("chelis_fill_f16({tensor}, (uint16_t)0);"),
-            other => panic!(
-                "C backend has no zero-fill helper for `{}` (spec/04-type-system.md §1.1)",
-                other.name()
-            ),
-        }
+        let dtype = ty
+            .precision
+            .runtime_dtype()
+            .unwrap_or_else(|error| panic!("C backend cannot zero-fill this tensor: {error}"))
+            .c_macro();
+        format!("chelis_fill_scalar({tensor}, chelis_scalar_from_bits({dtype}, UINT64_C(0)));")
     }
 
     /// WS-A4: integer reduce_sum where the accumulator dtype is wider
@@ -4716,7 +4699,7 @@ impl CEmitter {
     /// §5.7.1). `src_c_ty` and `acc_c_ty` are the C type spellings used
     /// for the reinterpret cast on `t->data` and for the accumulator
     /// variable respectively. Output buffer is sized for `acc_c_ty` by
-    /// `chelis_alloc` honoring the `dtype_macro(ty)` value (CHELIS_I32
+    /// `chelis_alloc` honoring the `dtype_macro(ty)` value (CHELIS_DTYPE_I32
     /// for the i8/i16 → i32 lowering).
     // WS-A4: dtype-parameterized reduction needs both source and
     // accumulator C-type spellings plus the standard set of
@@ -4754,17 +4737,21 @@ impl CEmitter {
         self.line(&format!(
             "{acc_c_ty} acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;"
         ));
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.line(&format!("for (int d = 0; d < t{a}->rank; d++) {{"));
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
@@ -4779,7 +4766,7 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
         // Promote each source element to the (wider) accumulator type
         // before adding so partial sums of 200 i8 ones produce 200, not
@@ -4823,7 +4810,7 @@ impl CEmitter {
     /// reduce_sum, per spec/04-type-system.md §5.7.1. Loads each
     /// reduced-float source element through `chelis_<x>_to_f32`,
     /// accumulates in `f32`, and writes the result into an f32
-    /// destination tensor. The output tensor's dtype IS `CHELIS_F32`
+    /// destination tensor. The output tensor's dtype IS `CHELIS_DTYPE_F32`
     /// (the IR `accumulator` field equals the output precision per
     /// the C3a invariant), so `chelis_fill_f32` zeros the buffer and
     /// the result store is a plain `((float*)t{id}->data)[outer]`
@@ -4842,26 +4829,28 @@ impl CEmitter {
         let axis_size = Self::emit_dim_info(&input_node.output_type.dims[axis]);
         let load = Self::reduced_to_f32_fn(input_prec);
         self.emit_slot_wrapper(id, ty);
-        // Output dtype is CHELIS_F32 (verified by C3a); zero-fill via
-        // the existing f32 runtime helper.
-        self.line(&format!("chelis_fill_f32(t{id}, 0.0f);"));
+        self.line(&Self::fill_zero_call(ty, &format!("t{id}")));
         self.line("#pragma omp parallel for");
         self.line(&format!(
             "for (int64_t outer = 0; outer < t{id}->size; outer++) {{"
         ));
         self.indent += 1;
         self.line("float acc = 0.0f;");
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.line(&format!("for (int d = 0; d < t{a}->rank; d++) {{"));
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
@@ -4876,7 +4865,7 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
         // Load via the conversion helper so the operand bits are
         // interpreted as their declared bf16/f16 value and promoted
@@ -4946,7 +4935,7 @@ impl CEmitter {
             self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
             self.indent += 1;
             self.line(&format!(
-                "t{id}->data[0] = chelis_max_f32(t{a}->data, t{a}->size);"
+                "((float*)t{id}->data)[0] = chelis_max_f32((const float*)t{a}->data, t{a}->size);"
             ));
             self.indent -= 1;
             self.line("} else {");
@@ -4958,17 +4947,21 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line("float acc = -INFINITY;");
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.line(&format!("for (int d = 0; d < t{a}->rank; d++) {{"));
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
@@ -4983,15 +4976,15 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
         // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
         self.line(&format!(
-            "acc = chelis_fmax_propnan_f32(acc, t{a}->data[src_idx]);"
+            "acc = chelis_fmax_propnan_f32(acc, ((const float*)t{a}->data)[src_idx]);"
         ));
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("t{id}->data[outer] = acc;"));
+        self.line(&format!("((float*)t{id}->data)[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
         if output_is_scalar {
@@ -5028,17 +5021,21 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line("float acc = -INFINITY;");
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.line(&format!("for (int d = 0; d < t{a}->rank; d++) {{"));
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
@@ -5053,7 +5050,7 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
         // #172: propagate NaN (torch parity), matching `chelis_max_f32`.
         self.line(&format!(
@@ -5123,7 +5120,7 @@ impl CEmitter {
             self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
             self.indent += 1;
             self.line(&format!(
-                "t{id}->data[0] = {fn_name}(t{a}->data, t{a}->size);"
+                "((float*)t{id}->data)[0] = {fn_name}((const float*)t{a}->data, t{a}->size);"
             ));
             self.indent -= 1;
             self.line("} else {");
@@ -5135,17 +5132,21 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!("float acc = {init};"));
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.line(&format!("for (int d = 0; d < t{a}->rank; d++) {{"));
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
@@ -5160,13 +5161,13 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
         let update = update_tmpl.replace("{a}", &a.to_string());
         self.line(&update);
         self.indent -= 1;
         self.line("}");
-        self.line(&format!("t{id}->data[outer] = acc;"));
+        self.line(&format!("((float*)t{id}->data)[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
         if use_simd {
@@ -5299,10 +5300,16 @@ impl CEmitter {
         // recompute below) would introduce a fwd/bwd inconsistency. Tracked
         // as a follow-up; reduce_window has its own parity gate (spec §2.3).
         let (init_literal, combine_template) = match reducer {
-            ReduceWindowKind::Max => ("-INFINITY", "acc = fmaxf(acc, t{a}->data[src_idx]);"),
-            ReduceWindowKind::Min => ("INFINITY", "acc = fminf(acc, t{a}->data[src_idx]);"),
+            ReduceWindowKind::Max => (
+                "-INFINITY",
+                "acc = fmaxf(acc, ((const float*)t{a}->data)[src_idx]);",
+            ),
+            ReduceWindowKind::Min => (
+                "INFINITY",
+                "acc = fminf(acc, ((const float*)t{a}->data)[src_idx]);",
+            ),
             ReduceWindowKind::Sum | ReduceWindowKind::Mean => {
-                ("0.0f", "acc += t{a}->data[src_idx];")
+                ("0.0f", "acc += ((const float*)t{a}->data)[src_idx];")
             }
         };
 
@@ -5312,9 +5319,11 @@ impl CEmitter {
         ));
         self.indent += 1;
         self.line(&format!("float acc = {init_literal};"));
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         // Generate nested window loops. Each windowed axis gets its
         // own loop variable __w{i}; the leading axes are passed
@@ -5323,7 +5332,9 @@ impl CEmitter {
             self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
             self.indent += 1;
         }
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         for d in 0..leading {
             self.line(&format!("full_indices[{d}] = out_indices[{d}];"));
         }
@@ -5334,7 +5345,7 @@ impl CEmitter {
             ));
         }
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
         let combine = combine_template.replace("{a}", &a.to_string());
         self.line(&combine);
@@ -5345,7 +5356,7 @@ impl CEmitter {
         if matches!(reducer, ReduceWindowKind::Mean) {
             self.line(&format!("acc /= {}.0f;", window_volume));
         }
-        self.line(&format!("t{id}->data[outer] = acc;"));
+        self.line(&format!("((float*)t{id}->data)[outer] = acc;"));
         self.indent -= 1;
         self.line("}");
         Ok(())
@@ -5355,8 +5366,15 @@ impl CEmitter {
     /// `reduce_window` adjoint: leading axes pass through from
     /// `out_indices`, windowed axis `i` is `out_indices[axis]*stride + __w{i}`.
     /// Assumes the `__w{i}` loop variables and `out_indices` are in scope.
-    fn emit_reduce_window_grad_full_indices(&mut self, leading: usize, strides: &[usize]) {
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+    fn emit_reduce_window_grad_full_indices(
+        &mut self,
+        leading: usize,
+        strides: &[usize],
+        input: usize,
+    ) {
+        self.line(&format!(
+            "int64_t full_indices[t{input}->rank > 0 ? t{input}->rank : 1];"
+        ));
         for d in 0..leading {
             self.line(&format!("full_indices[{d}] = out_indices[{d}];"));
         }
@@ -5426,7 +5444,7 @@ impl CEmitter {
 
         // din accumulates with `+=`, so it must start at zero.
         self.line(&format!(
-            "for (int64_t __i = 0; __i < t{id}->size; __i++) {{ t{id}->data[__i] = 0.0f; }}"
+            "for (int64_t __i = 0; __i < t{id}->size; __i++) {{ ((float*)t{id}->data)[__i] = 0.0f; }}"
         ));
 
         // Serial scatter over each cotangent (forward-output) position.
@@ -5434,10 +5452,12 @@ impl CEmitter {
             "for (int64_t outer = 0; outer < t{g}->size; outer++) {{"
         ));
         self.indent += 1;
-        self.line(&format!("float gval = t{g}->data[outer];"));
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
+        self.line(&format!("float gval = ((const float*)t{g}->data)[outer];"));
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{g}->shape, t{g}->ndim, out_indices);"
+            "int64_t out_indices[t{g}->rank > 0 ? t{g}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{g}->shape, t{g}->rank, out_indices);"
         ));
 
         let is_extreme = matches!(reducer, ReduceWindowKind::Max | ReduceWindowKind::Min);
@@ -5453,11 +5473,13 @@ impl CEmitter {
                 self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
                 self.indent += 1;
             }
-            self.emit_reduce_window_grad_full_indices(leading, strides);
+            self.emit_reduce_window_grad_full_indices(leading, strides, x);
             self.line(&format!(
-                "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}->strides, t{x}->ndim);"
+                "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}->strides, t{x}->rank);"
             ));
-            self.line(&format!("ext = {cmp}(ext, t{x}->data[src_idx]);"));
+            self.line(&format!(
+                "ext = {cmp}(ext, ((const float*)t{x}->data)[src_idx]);"
+            ));
             for _ in 0..n {
                 self.indent -= 1;
                 self.line("}");
@@ -5469,25 +5491,25 @@ impl CEmitter {
             self.line(&format!("for (int __w{i} = 0; __w{i} < {w}; __w{i}++) {{"));
             self.indent += 1;
         }
-        self.emit_reduce_window_grad_full_indices(leading, strides);
+        self.emit_reduce_window_grad_full_indices(leading, strides, x);
         self.line(&format!(
-            "int64_t dst_idx = chelis_indices_to_flat(full_indices, t{id}->strides, t{id}->ndim);"
+            "int64_t dst_idx = chelis_indices_to_flat(full_indices, t{id}->strides, t{id}->rank);"
         ));
         match reducer {
             ReduceWindowKind::Sum => {
-                self.line(&format!("t{id}->data[dst_idx] += gval;"));
+                self.line(&format!("((float*)t{id}->data)[dst_idx] += gval;"));
             }
             ReduceWindowKind::Mean => {
                 self.line(&format!(
-                    "t{id}->data[dst_idx] += gval / {window_volume}.0f;"
+                    "((float*)t{id}->data)[dst_idx] += gval / {window_volume}.0f;"
                 ));
             }
             ReduceWindowKind::Max | ReduceWindowKind::Min => {
                 self.line(&format!(
-                    "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}->strides, t{x}->ndim);"
+                    "int64_t src_idx = chelis_indices_to_flat(full_indices, t{x}->strides, t{x}->rank);"
                 ));
                 self.line(&format!(
-                    "if (t{x}->data[src_idx] == ext) {{ t{id}->data[dst_idx] += gval; }}"
+                    "if (((const float*)t{x}->data)[src_idx] == ext) {{ ((float*)t{id}->data)[dst_idx] += gval; }}"
                 ));
             }
         }
@@ -5559,7 +5581,7 @@ impl CEmitter {
         self.emit_slot_wrapper(id, ty);
         // #347: argmax/argmin produce integer INDEX outputs (the result
         // tensor is allocated at the declared integer dtype, e.g.
-        // `CHELIS_I64`). The index must be stored through a pointer of the
+        // `CHELIS_DTYPE_I64`). The index must be stored through a pointer of the
         // output element type, not into the `float* data` field directly:
         // a bare `t->data[outer] = (float)best_idx` writes the f32 bit
         // pattern of the index, which the print path then reads back as the
@@ -5585,17 +5607,21 @@ impl CEmitter {
         self.indent += 1;
         self.line(&format!("float best_val = {init};"));
         self.line("int64_t best_idx = -1;");
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "int64_t full_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         self.line("int out_d = 0;");
-        self.line(&format!("for (int d = 0; d < t{a}->ndim; d++) {{"));
+        self.line(&format!("for (int d = 0; d < t{a}->rank; d++) {{"));
         self.indent += 1;
         self.line(&format!("if (d == {axis}) {{"));
         self.indent += 1;
@@ -5610,9 +5636,9 @@ impl CEmitter {
         self.indent -= 1;
         self.line("}");
         self.line(&format!(
-            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_idx = chelis_indices_to_flat(full_indices, t{a}->strides, t{a}->rank);"
         ));
-        self.line(&format!("float v = t{a}->data[src_idx];"));
+        self.line(&format!("float v = ((const float*)t{a}->data)[src_idx];"));
         self.line(&format!("if (best_idx < 0 || v {cmp} best_val) {{"));
         self.indent += 1;
         self.line("best_val = v;");
@@ -5696,7 +5722,7 @@ impl CEmitter {
 
         self.emit_slot_wrapper(id, out_ty);
         if reduce_kind == "sum" {
-            self.line(&format!("chelis_fill_f32(t{id}, 0.0f);"));
+            self.line(&Self::fill_zero_call(out_ty, &format!("t{id}")));
         }
         self.line("#pragma omp parallel for");
         self.line(&format!(
@@ -5715,15 +5741,17 @@ impl CEmitter {
         } else {
             self.line(&format!("float acc = {init};"));
         }
-        self.line("int64_t out_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->ndim, out_indices);"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(outer, t{id}->shape, t{id}->rank, out_indices);"
         ));
         self.line(&format!(
             "for (int64_t __reduce_i = 0; __reduce_i < {axis_size}; __reduce_i++) {{"
         ));
         self.indent += 1;
-        self.line("int64_t full_indices[CHELIS_MAX_DIM];");
+        self.line(&format!("int64_t full_indices[{}];", fused_ndim.max(1)));
         self.line("int out_d = 0;");
         self.line(&format!("for (int d = 0; d < {fused_ndim}; d++) {{"));
         self.indent += 1;
@@ -5744,7 +5772,7 @@ impl CEmitter {
         for (ext_idx, ext_node) in ext_inputs.iter().enumerate() {
             let ext_id = ext_node.0;
             self.line(&format!(
-                "int64_t idx_ext{ext_idx} = chelis_indices_to_flat(full_indices, t{ext_id}->strides, t{ext_id}->ndim);"
+                "int64_t idx_ext{ext_idx} = chelis_indices_to_flat(full_indices, t{ext_id}->strides, t{ext_id}->rank);"
             ));
         }
 
@@ -5753,7 +5781,7 @@ impl CEmitter {
             match fi {
                 FusedInput::External(i) => {
                     let ext_id = ext_inputs[*i].0;
-                    format!("t{ext_id}->data[idx_ext{i}]")
+                    format!("((const float*)t{ext_id}->data)[idx_ext{i}]")
                 }
                 FusedInput::PreviousStep(j) => format!("v{j}"),
             }
@@ -5873,10 +5901,10 @@ impl CEmitter {
         self.line("}");
         if reduce_kind == "sum" {
             self.line(&format!(
-                "t{id}->data[outer] = (acc0 + acc1) + (acc2 + acc3);"
+                "((float*)t{id}->data)[outer] = (acc0 + acc1) + (acc2 + acc3);"
             ));
         } else {
-            self.line(&format!("t{id}->data[outer] = acc;"));
+            self.line(&format!("((float*)t{id}->data)[outer] = acc;"));
         }
         self.indent -= 1;
         self.line("}");
@@ -5943,26 +5971,16 @@ impl CEmitter {
                  reshape numel mismatch at node {id}\\n\"); abort(); }}"
             ));
         }
-        self.line(&format!("chelis_tensor *t{id};"));
-        self.line(&format!("if (chelis_is_contiguous(t{a})) {{"));
-        self.indent += 1;
         self.line(&format!(
-            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
-        self.indent -= 1;
-        self.line("} else {");
-        self.indent += 1;
         self.line(&format!(
             "chelis_tensor *t{id}_src = chelis_contiguous(t{a});"
         ));
         self.line(&format!(
-            "t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{id}_src->data);"
+            "memcpy(t{id}->data, t{id}_src->data, (size_t)t{id}->byte_capacity);"
         ));
-        self.line(&format!("t{id}->owns_data = 1;"));
-        self.line(&format!("t{id}_src->owns_data = 0;"));
-        self.line(&format!("chelis_free(t{id}_src);"));
-        self.indent -= 1;
-        self.line("}");
+        self.line(&format!("if (t{id}_src != t{a}) chelis_free(t{id}_src);"));
     }
 
     // ---- Permute ----
@@ -5978,15 +5996,32 @@ impl CEmitter {
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
+        let elem_type = Self::elem_type(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
-        // Set permuted strides
+        self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "int64_t in_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, out_indices);"
+        ));
         for (new_d, &old_d) in axes.iter().enumerate() {
-            self.line(&format!(
-                "t{id}->strides[{new_d}] = t{a}->strides[{old_d}];"
-            ));
+            self.line(&format!("in_indices[{old_d}] = out_indices[{new_d}];"));
         }
+        self.line(&format!(
+            "int64_t src = chelis_indices_to_flat(in_indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "(({elem_type}*)t{id}->data)[i] = ((const {elem_type}*)t{a}->data)[src];"
+        ));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Expand ----
@@ -6018,24 +6053,39 @@ impl CEmitter {
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
+        let elem_type = Self::elem_type(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
-        self.line(&format!("if (t{id}->ndim == t{a}->ndim) {{"));
+        self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
         self.line(&format!(
-            "for (int d = 0; d < t{a}->ndim; d++) t{id}->strides[d] = t{a}->strides[d];"
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
-        self.line(&format!("t{id}->strides[{axis}] = 0;"));
+        self.line(&format!(
+            "int64_t in_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, out_indices);"
+        ));
+        self.line(&format!("if (t{id}->rank == t{a}->rank) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "for (int d = 0; d < t{a}->rank; d++) in_indices[d] = d == {axis} ? 0 : out_indices[d];"
+        ));
         self.indent -= 1;
         self.line("} else {");
         self.indent += 1;
-        for d in 0..axis {
-            self.line(&format!("t{id}->strides[{d}] = t{a}->strides[{d}];"));
-        }
-        self.line(&format!("t{id}->strides[{axis}] = 0;"));
         self.line(&format!(
-            "for (int d = {axis}; d < t{a}->ndim; d++) t{id}->strides[d+1] = t{a}->strides[d];"
+            "for (int d = 0; d < t{a}->rank; d++) in_indices[d] = out_indices[d < {axis} ? d : d + 1];"
+        ));
+        self.indent -= 1;
+        self.line("}");
+        self.line(&format!(
+            "int64_t src = chelis_indices_to_flat(in_indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "(({elem_type}*)t{id}->data)[i] = ((const {elem_type}*)t{a}->data)[src];"
         ));
         self.indent -= 1;
         self.line("}");
@@ -6176,17 +6226,21 @@ impl CEmitter {
             }
             ElementRef::I64(value) => {
                 self.line(&format!(
-                    "chelis_fill_i64(t{id}, {});",
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){}));",
                     Self::i64_c_literal(value)
                 ));
             }
             ElementRef::F64(value) => {
                 let bits = value.to_bits();
-                self.line(&format!("chelis_fill_f64_bits(t{id}, 0x{bits:016x}uLL);"));
+                self.line(&format!(
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_F64, UINT64_C(0x{bits:016x})));"
+                ));
             }
             ElementRef::F32(value) => {
                 let bits = value.to_bits();
-                self.line(&format!("chelis_fill_f32_bits(t{id}, 0x{bits:08x}u);"));
+                self.line(&format!(
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT32_C(0x{bits:08x})));"
+                ));
             }
             ElementRef::F16(value) => {
                 let bits = value.to_bits();
@@ -6201,28 +6255,34 @@ impl CEmitter {
                 ));
             }
             ElementRef::Bool(value) => {
-                let bits = (if value { 1.0f32 } else { 0.0f32 }).to_bits();
-                self.line(&format!("chelis_fill_bool_bits(t{id}, 0x{bits:08x}u);"));
+                let bits = u8::from(value);
+                self.line(&format!(
+                    "chelis_fill_scalar(t{id}, chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, UINT8_C({bits})));"
+                ));
             }
         }
         // Copy source data into the padded region
         self.line(&format!("for (int64_t i = 0; i < t{a}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t src_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{a}->shape, t{a}->ndim, src_indices);"
+            "int64_t src_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
         ));
-        self.line("int64_t dst_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{a}->shape, t{a}->rank, src_indices);"
+        ));
+        self.line(&format!(
+            "int64_t dst_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
         for (d, (before_e, _)) in pad_exprs.iter().enumerate() {
             self.line(&format!(
                 "dst_indices[{d}] = src_indices[{d}] + {before_e};"
             ));
         }
         self.line(&format!(
-            "int64_t dst_flat = chelis_indices_to_flat(dst_indices, t{id}->strides, t{id}->ndim);"
+            "int64_t dst_flat = chelis_indices_to_flat(dst_indices, t{id}->strides, t{id}->rank);"
         ));
         self.line(&format!(
-            "int64_t src_flat = chelis_indices_to_flat(src_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_flat = chelis_indices_to_flat(src_indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[dst_flat] = (({et}*)t{a}->data)[src_flat];"
@@ -6305,16 +6365,20 @@ impl CEmitter {
         self.emit_slot_wrapper(id, ty);
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t dst_indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, dst_indices);"
+            "int64_t dst_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
-        self.line("int64_t src_indices[CHELIS_MAX_DIM];");
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, dst_indices);"
+        ));
+        self.line(&format!(
+            "int64_t src_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
         for (d, (start_e, _)) in shrink_exprs.iter().enumerate() {
             self.line(&format!("src_indices[{d}] = dst_indices[{d}] + {start_e};"));
         }
         self.line(&format!(
-            "int64_t src_flat = chelis_indices_to_flat(src_indices, t{a}->strides, t{a}->ndim);"
+            "int64_t src_flat = chelis_indices_to_flat(src_indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = (({et}*)t{a}->data)[src_flat];"
@@ -6367,18 +6431,32 @@ impl CEmitter {
         let ndim = Self::ndim(ty);
         let shape = Self::shape_literal(ty);
         let dtype = Self::dtype_macro(ty);
+        let elem_type = Self::elem_type(ty);
         self.line(&format!(
-            "chelis_tensor *t{id} = chelis_alloc_view({ndim}, {shape}, {dtype}, t{a}->data);"
+            "chelis_tensor *t{id} = chelis_alloc({ndim}, {shape}, {dtype});"
         ));
-        let max_dims = ty.dims.len().max(1);
+        self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
+        self.indent += 1;
+        self.line(&format!(
+            "int64_t out_indices[t{id}->rank > 0 ? t{id}->rank : 1];"
+        ));
+        self.line(&format!(
+            "int64_t in_indices[t{a}->rank > 0 ? t{a}->rank : 1];"
+        ));
+        self.line(&format!(
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, out_indices);"
+        ));
         for (d, step_e) in step_exprs.iter().enumerate() {
-            if d >= max_dims {
-                break;
-            }
-            self.line(&format!(
-                "t{id}->strides[{d}] = t{a}->strides[{d}] * {step_e};"
-            ));
+            self.line(&format!("in_indices[{d}] = out_indices[{d}] * ({step_e});"));
         }
+        self.line(&format!(
+            "int64_t src = chelis_indices_to_flat(in_indices, t{a}->strides, t{a}->rank);"
+        ));
+        self.line(&format!(
+            "(({elem_type}*)t{id}->data)[i] = ((const {elem_type}*)t{a}->data)[src];"
+        ));
+        self.indent -= 1;
+        self.line("}");
     }
 
     // ---- Realize ----
@@ -6389,12 +6467,14 @@ impl CEmitter {
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         self.line(&format!(
             "(({et}*)t{id}->data)[i] = (({et}*)t{a}->data)[idx];"
@@ -6489,12 +6569,14 @@ impl CEmitter {
         }
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
-        self.line("int64_t indices[CHELIS_MAX_DIM];");
         self.line(&format!(
-            "chelis_flat_to_indices(i, t{id}->shape, t{id}->ndim, indices);"
+            "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
         ));
         self.line(&format!(
-            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+            "chelis_flat_to_indices(i, t{id}->shape, t{id}->rank, indices);"
+        ));
+        self.line(&format!(
+            "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
         ));
         let src_elem = format!("(({src_et}*)t{a}->data)[idx]");
         let dst_elem = format!("(({dst_et}*)t{id}->data)[i]");
@@ -6557,12 +6639,14 @@ impl CEmitter {
             let plan = checked_plan.expect("trapping conversion carries a plan");
             self.line(&format!("if ({first_trap_index} != INT64_MAX) {{"));
             self.indent += 1;
-            self.line("int64_t indices[CHELIS_MAX_DIM];");
             self.line(&format!(
-                "chelis_flat_to_indices({first_trap_index}, t{id}->shape, t{id}->ndim, indices);"
+                "int64_t indices[t{id}->rank > 0 ? t{id}->rank : 1];"
             ));
             self.line(&format!(
-                "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->ndim);"
+                "chelis_flat_to_indices({first_trap_index}, t{id}->shape, t{id}->rank, indices);"
+            ));
+            self.line(&format!(
+                "int64_t idx = chelis_indices_to_flat(indices, t{a}->strides, t{a}->rank);"
             ));
             let selected_src = format!("(({src_et}*)t{a}->data)[idx]");
             let selected = crate::host_emit::checked_cast_c_expr(plan, &selected_src);
@@ -6665,9 +6749,9 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_alloc"));
-        // Issue #189: Const emission goes through the bit-pattern
-        // helper. The 3.0f32 bit pattern is `0x40400000`.
-        assert!(c.contains("chelis_fill_f32_bits"));
+        // The exact tagged scalar carries both the f32 dtype and the
+        // source value's bit pattern into the single public fill API.
+        assert!(c.contains("chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"));
         let want_bits = (3.0_f32).to_bits();
         assert!(
             c.contains(&format!("0x{want_bits:08x}")),
@@ -6692,7 +6776,9 @@ mod tests {
         dag.set_roots(vec![padded]);
 
         let c = CEmitter::emit_dag(&dag, "pad_exact_int64").unwrap();
-        assert!(c.contains(&format!("chelis_fill_i64(t1, INT64_C({exact}));")));
+        assert!(c.contains(&format!(
+            "chelis_fill_scalar(t1, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)INT64_C({exact})));"
+        )));
         assert!(
             !c.contains("9007199254740992"),
             "the exact int64 fill must never pass through its rounded f64 image:\n{c}"
@@ -6723,7 +6809,9 @@ mod tests {
             dag.set_roots(vec![padded]);
             let c = CEmitter::emit_dag(&dag, "pad_signed_int64").unwrap();
             assert!(
-                c.contains(&format!("chelis_fill_i64(t1, {spelling});")),
+                c.contains(&format!(
+                    "chelis_fill_scalar(t1, chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t){spelling}));"
+                )),
                 "{c}"
             );
         }
@@ -6823,7 +6911,7 @@ mod tests {
     }
 
     #[test]
-    fn cmplt_emits_ternary_float() {
+    fn cmplt_emits_canonical_bool8() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 1.0),
@@ -6837,9 +6925,19 @@ mod tests {
             scalar_f32(),
             None,
         );
-        dag.add_node(RiscOp::CmpLt, vec![a, b], scalar_f32(), None);
+        dag.add_node(
+            RiscOp::CmpLt,
+            vec![a, b],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("1.0f : 0.0f"));
+        assert!(c.contains("uint8_t* restrict __out_2"));
+        assert!(c.contains("? UINT8_C(1) : UINT8_C(0)"));
+        assert!(!c.contains("? 1.0f : 0.0f"));
     }
 
     #[test]
@@ -7016,7 +7114,7 @@ mod tests {
     }
 
     #[test]
-    fn reshape_emits_contiguous_check() {
+    fn reshape_materializes_contiguous_storage() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(vec_f32(6).precision, 1.0),
@@ -7033,12 +7131,13 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_is_contiguous"));
         assert!(c.contains("chelis_contiguous"));
+        assert!(c.contains("memcpy(t1->data, t1_src->data, (size_t)t1->byte_capacity);"));
+        assert!(!c.contains("t1->owns_data ="));
     }
 
     #[test]
-    fn permute_emits_stride_swap() {
+    fn permute_materializes_the_axis_mapping() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(mat_f32(2, 3).precision, 1.0),
@@ -7053,12 +7152,13 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("strides[0] = t0->strides[1]"));
-        assert!(c.contains("strides[1] = t0->strides[0]"));
+        assert!(c.contains("in_indices[1] = out_indices[0]"));
+        assert!(c.contains("in_indices[0] = out_indices[1]"));
+        assert!(!c.contains("t1->strides[0] ="));
     }
 
     #[test]
-    fn expand_sets_stride_zero() {
+    fn expand_materializes_broadcast_coordinates() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(vec_f32(1).precision, 1.0),
@@ -7076,7 +7176,8 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("strides[0] = 0"));
+        assert!(c.contains("in_indices[d] = d == 0 ? 0 : out_indices[d]"));
+        assert!(!c.contains("t1->strides[0] ="));
     }
 
     #[test]
@@ -7218,7 +7319,7 @@ mod tests {
                 );
                 assert!(
                     c.contains(
-                        "int64_t idx = chelis_indices_to_flat(indices, t0->strides, t0->ndim);"
+                        "int64_t idx = chelis_indices_to_flat(indices, t0->strides, t0->rank);"
                     ),
                     "every checked-cast pair must read source elements in logical order: {} -> {}; generated:\n{c}",
                     source.name(),
@@ -7291,8 +7392,8 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_tensor *chelis_slot0 = chelis_alloc("));
         assert!(c.contains("chelis_tensor *t2 = chelis_alloc_view("));
-        assert!(c.contains("chelis_indices_to_flat(indices, t1->strides, t1->ndim)"));
-        assert!(!c.contains("chelis_alloc_view(1, (int64_t[]){ 3 }, CHELIS_F32, t1->data)"));
+        assert!(c.contains("chelis_indices_to_flat(indices, t1->strides, t1->rank)"));
+        assert!(!c.contains("chelis_alloc_view(1, (int64_t[]){ 3 }, CHELIS_DTYPE_F32, t1->data)"));
     }
 
     #[test]
@@ -7398,7 +7499,7 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_fill_f32"));
+        assert!(c.contains("chelis_fill_scalar(t1, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"));
         assert!(c.contains("dst_indices[0] = src_indices[0] + 1"));
     }
 
@@ -7450,7 +7551,7 @@ mod tests {
     }
 
     #[test]
-    fn stride_emits_stride_multiply() {
+    fn stride_materializes_stepped_coordinates() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(vec_f32(4).precision, 1.0),
@@ -7467,7 +7568,8 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("strides[0] = t0->strides[0] * 2"));
+        assert!(c.contains("in_indices[0] = out_indices[0] * (2)"));
+        assert!(!c.contains("t1->strides[0] ="));
     }
 
     #[test]
@@ -7608,7 +7710,7 @@ mod tests {
             None,
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("chelis_alloc(0, NULL, CHELIS_BOOL);"));
+        assert!(c.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_BOOL);"));
     }
 
     #[test]
@@ -7633,19 +7735,19 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(
-            c.contains("CHELIS_I64"),
-            "generated C must use CHELIS_I64 dtype macro"
+            c.contains("CHELIS_DTYPE_I64"),
+            "generated C must use CHELIS_DTYPE_I64 dtype macro"
         );
         assert!(
-            c.contains("chelis_fill_i64"),
-            "generated C must call chelis_fill_i64 for int64 const"
+            c.contains("chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_I64,"),
+            "generated C must carry the exact int64 tag and bits through chelis_fill_scalar"
         );
     }
 
     #[test]
-    fn f64_const_uses_chelis_fill_f64_and_dtype_macro() {
+    fn f64_const_uses_exact_tagged_fill_and_dtype_macro() {
         // v0.2.3: f64 tensors are a first-class precision. The const path must
-        // emit CHELIS_F64 and chelis_fill_f64 (not chelis_fill_f32, which would
+        // emit CHELIS_DTYPE_F64 and chelis_fill_f64 (not chelis_fill_f32, which would
         // silently downcast).
         let mut dag = Dag::new();
         dag.add_node(
@@ -7666,16 +7768,16 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(
-            c.contains("CHELIS_F64"),
-            "generated C must use CHELIS_F64 dtype macro:\n{c}"
+            c.contains("CHELIS_DTYPE_F64"),
+            "generated C must use CHELIS_DTYPE_F64 dtype macro:\n{c}"
         );
         assert!(
-            c.contains("chelis_fill_f64"),
-            "generated C must call chelis_fill_f64 for f64 const:\n{c}"
+            c.contains("chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"),
+            "generated C must carry the exact f64 tag and bits through chelis_fill_scalar:\n{c}"
         );
         assert!(
-            !c.contains("chelis_fill_f32(t0"),
-            "generated C must not fall back to chelis_fill_f32 on an f64 tensor:\n{c}"
+            !c.contains("chelis_fill_f64(") && !c.contains("chelis_fill_f32("),
+            "generated C must not retain dtype-specific compatibility fills:\n{c}"
         );
     }
 
@@ -7702,7 +7804,10 @@ mod tests {
         );
         dag.add_node(RiscOp::Add, vec![a, b], ty, None);
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("CHELIS_F64"), "generated C must use CHELIS_F64");
+        assert!(
+            c.contains("CHELIS_DTYPE_F64"),
+            "generated C must use CHELIS_DTYPE_F64"
+        );
         assert!(
             c.contains("double"),
             "generated C must use double typed pointer casts:\n{c}"
@@ -7766,7 +7871,10 @@ mod tests {
         );
         dag.add_node(RiscOp::Add, vec![a, b], ty, None);
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
-        assert!(c.contains("CHELIS_I64"), "generated C must use CHELIS_I64");
+        assert!(
+            c.contains("CHELIS_DTYPE_I64"),
+            "generated C must use CHELIS_DTYPE_I64"
+        );
         assert!(
             c.contains("int64_t"),
             "generated C must use int64_t typed pointer casts"
@@ -8096,11 +8204,11 @@ mod tests {
 
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
-        assert!(c.contains("float* restrict __out_2 = t2->data;"));
-        assert!(c.contains("const float* restrict __ext0_2 = t0->data;"));
-        assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
+        assert!(c.contains("float* restrict __out_2 = (float*)t2->data;"));
+        assert!(c.contains("const float* restrict __ext0_2 = (const float*)t0->data;"));
+        assert!(c.contains("const float* restrict __ext1_2 = (const float*)t1->data;"));
         assert!(
-            !c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_F32, t0->data);"),
+            !c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_DTYPE_F32, t0->data);"),
             "C fused codegen must not claim in-place aliasing without reusable_input"
         );
     }
@@ -8134,7 +8242,7 @@ mod tests {
         assert!(c.contains("const double *t2_values_data = (const double*)t2_values->data;"));
         assert!(c.contains("const int32_t *t2_indices_data = (const int32_t*)t2_indices->data;"));
         assert!(c.contains("double *t2_out_data = (double*)t2->data;"));
-        assert!(c.contains("t2_indices->dtype == CHELIS_I64"));
+        assert!(c.contains("t2_indices->dtype == CHELIS_DTYPE_I64"));
         assert!(c.contains("t2_out_data[t2_out] = t2_values_data[t2_src];"));
     }
 
@@ -8166,7 +8274,7 @@ mod tests {
 
         let c = CEmitter::emit_dag(&dag, "embedding_probe").unwrap();
 
-        assert!(c.contains("chelis_alloc(2, (int64_t[]){ 128, 1024 }, CHELIS_F32);"));
+        assert!(c.contains("chelis_alloc(2, (int64_t[]){ 128, 1024 }, CHELIS_DTYPE_F32);"));
         assert!(
             !c.contains("(int64_t[]){ 128, 50000, 1024 }"),
             "sparse gather codegen must not allocate the dense [N,V,D] one-hot/product tensor"
@@ -8175,7 +8283,7 @@ mod tests {
             !c.contains("128 * 50000 * 1024"),
             "sparse gather codegen must not compute dense embedding volume"
         );
-        assert!(c.contains("t2_indices->dtype == CHELIS_I64"));
+        assert!(c.contains("t2_indices->dtype == CHELIS_DTYPE_I64"));
     }
 
     #[test]
@@ -8321,18 +8429,24 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_F32, t1->data);"),
+            c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_DTYPE_F32, t1->data, t1->byte_capacity);"),
             "an owned intermediate must still be reused in place; got:\n{c}"
         );
-        assert!(!c.contains("float* restrict __out_3 = t3->data;"), "{c}");
         assert!(
-            !c.contains("const float* restrict __ext0_3 = t1->data;"),
+            !c.contains("float* restrict __out_3 = (float*)t3->data;"),
             "{c}"
         );
-        assert!(c.contains("float* __out_3 = t3->data;"), "{c}");
-        assert!(c.contains("const float* __ext0_3 = t1->data;"), "{c}");
         assert!(
-            c.contains("const float* restrict __ext1_3 = t2->data;"),
+            !c.contains("const float* restrict __ext0_3 = (const float*)t1->data;"),
+            "{c}"
+        );
+        assert!(c.contains("float* __out_3 = (float*)t3->data;"), "{c}");
+        assert!(
+            c.contains("const float* __ext0_3 = (const float*)t1->data;"),
+            "{c}"
+        );
+        assert!(
+            c.contains("const float* restrict __ext1_3 = (const float*)t2->data;"),
             "{c}"
         );
     }
@@ -8364,14 +8478,17 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !c.contains("CHELIS_F32, t0->data)"),
+            !c.contains("CHELIS_DTYPE_F32, t0->data)"),
             "the fused output must not be a view over the caller's input buffer; got:\n{c}"
         );
         // With no in-place reuse the output takes an ordinary owned
         // slot, so every pointer is `restrict` again.
-        assert!(c.contains("float* restrict __out_2 = t2->data;"), "{c}");
         assert!(
-            c.contains("const float* restrict __ext0_2 = t0->data;"),
+            c.contains("float* restrict __out_2 = (float*)t2->data;"),
+            "{c}"
+        );
+        assert!(
+            c.contains("const float* restrict __ext0_2 = (const float*)t0->data;"),
             "{c}"
         );
     }
@@ -8419,7 +8536,7 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !c.contains("CHELIS_F32, t1->data)"),
+            !c.contains("CHELIS_DTYPE_F32, t1->data)"),
             "the fused output must not be a view over a reshape of the caller's \
              input buffer; got:\n{c}"
         );
@@ -8449,12 +8566,12 @@ mod tests {
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
 
         assert!(
-            !c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_F32, t0->data);"),
+            !c.contains("chelis_alloc_view(1, (int64_t[]){ 4 }, CHELIS_DTYPE_F32, t0->data);"),
             "multi-consumer reusable input must not be aliased in place"
         );
-        assert!(c.contains("float* restrict __out_2 = t2->data;"));
-        assert!(c.contains("const float* restrict __ext0_2 = t0->data;"));
-        assert!(c.contains("const float* restrict __ext1_2 = t1->data;"));
+        assert!(c.contains("float* restrict __out_2 = (float*)t2->data;"));
+        assert!(c.contains("const float* restrict __ext0_2 = (const float*)t0->data;"));
+        assert!(c.contains("const float* restrict __ext1_2 = (const float*)t1->data;"));
     }
 
     // ---- New scalar builtin C emission tests ----

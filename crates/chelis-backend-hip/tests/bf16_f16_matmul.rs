@@ -404,13 +404,13 @@ fn dtype_bytes(p: Prim) -> usize {
 /// C macro name for a dtype, matching `HipEmitter::dtype_macro`.
 fn dtype_macro(p: Prim) -> &'static str {
     match p {
-        Prim::F32 => "CHELIS_F32",
-        Prim::F64 => "CHELIS_F64",
-        Prim::Int32 => "CHELIS_I32",
-        Prim::Int64 => "CHELIS_I64",
-        Prim::Bool => "CHELIS_BOOL",
-        Prim::Bf16 => "CHELIS_BF16",
-        Prim::F16 => "CHELIS_F16",
+        Prim::F32 => "CHELIS_DTYPE_F32",
+        Prim::F64 => "CHELIS_DTYPE_F64",
+        Prim::Int32 => "CHELIS_DTYPE_I32",
+        Prim::Int64 => "CHELIS_DTYPE_I64",
+        Prim::Bool => "CHELIS_DTYPE_BOOL",
+        Prim::Bf16 => "CHELIS_DTYPE_BF16",
+        Prim::F16 => "CHELIS_DTYPE_F16",
         other => panic!("ws_a3 harness has no dtype macro for {}", other.name()),
     }
 }
@@ -438,7 +438,7 @@ fn emit_input_setup(
         .collect::<Vec<_>>()
         .join(", ");
     let mut lines = vec![
-        format!("    int {prefix}_shape_{slot}[{ndim}] = {{ {dim_str} }};"),
+        format!("    int64_t {prefix}_shape_{slot}[{ndim}] = {{ {dim_str} }};"),
         format!(
             "    {prefix}_input_storage[{slot}] = chelis_alloc({ndim}, {prefix}_shape_{slot}, {dtype});",
             dtype = dtype_macro(dtype),
@@ -463,7 +463,7 @@ fn emit_input_setup(
                 // already emit exact `to_bits()` patterns.
                 let bits = value.to_bits();
                 lines.push(format!(
-                    "    {prefix}_input_storage[{slot}]->data[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
+                    "    ((float *){prefix}_input_storage[{slot}]->data)[{idx}] = chelis_f32_from_bits(0x{bits:08x}u);"
                 ));
             }
         }
@@ -530,7 +530,7 @@ fn build_main_cpp(
     lines.push("        for (int i = 0; i < case0_outputs[o]->size; i++) {".to_string());
     lines.push("            if (i > 0) printf(\" \");".to_string());
     let read_expr = match case.output_dtype {
-        Prim::F32 => "case0_outputs[o]->data[i]".to_string(),
+        Prim::F32 => "((float *)case0_outputs[o]->data)[i]".to_string(),
         Prim::Bf16 => {
             // Reinterpret 2-byte slot as bf16 → f32 by left-shifting the
             // bf16 bit pattern into the upper half of a uint32 and

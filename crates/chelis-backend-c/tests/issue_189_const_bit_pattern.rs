@@ -49,13 +49,11 @@ fn issue_189_f32_const_emits_exact_bit_pattern() {
         src.contains(&needle),
         "F32 const must round-trip via exact bit pattern `{needle}`; emitted source:\n{src}"
     );
-    // Pre-fix emission used a lossy decimal format and the
-    // `chelis_fill_f32` symbol. Post-fix uses a dedicated bit-pattern
-    // helper so the lossy format string can never re-emerge through a
-    // future refactor that hand-edits the `%.8` literal back in.
+    // The exact tagged scalar keeps the bit pattern and dtype coupled
+    // through the single public fill entry point.
     assert!(
-        src.contains("chelis_fill_f32_bits"),
-        "F32 const must dispatch through `chelis_fill_f32_bits`; emitted source:\n{src}"
+        src.contains("chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F32,"),
+        "F32 const must dispatch through the exact tagged fill; emitted source:\n{src}"
     );
 }
 
@@ -81,8 +79,8 @@ fn issue_189_f64_const_emits_exact_bit_pattern() {
         "F64 const must round-trip via exact bit pattern `{needle}`; emitted source:\n{src}"
     );
     assert!(
-        src.contains("chelis_fill_f64_bits"),
-        "F64 const must dispatch through `chelis_fill_f64_bits`; emitted source:\n{src}"
+        src.contains("chelis_fill_scalar(t0, chelis_scalar_from_bits(CHELIS_DTYPE_F64,"),
+        "F64 const must dispatch through the exact tagged fill; emitted source:\n{src}"
     );
 }
 

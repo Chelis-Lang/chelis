@@ -111,7 +111,7 @@ fn fan_in_dag(
 /// input's device data + storage_size.
 fn expected_in_place_view_alias(fused_id: usize, reusable_id: usize, shape: &str) -> String {
     format!(
-        "d_t{fused_id} = chelis_gpu_alloc_view(1, (int[]){{ {shape} }}, CHELIS_F32, d_t{reusable_id}->data, d_t{reusable_id}->storage_size);"
+        "d_t{fused_id} = chelis_gpu_alloc_view(1, (int[]){{ {shape} }}, CHELIS_DTYPE_F32, d_t{reusable_id}->data, d_t{reusable_id}->storage_size);"
     )
 }
 
@@ -465,7 +465,7 @@ fn fan_in_different_rank_does_not_alias() {
 
     // Forbidden alias for the rank-2 output shape literal.
     let forbidden_r2 = format!(
-        "d_t{fused_id} = chelis_gpu_alloc_view(2, (int[]){{ 2, 4 }}, CHELIS_F32, d_t{a_id}->data, d_t{a_id}->storage_size);"
+        "d_t{fused_id} = chelis_gpu_alloc_view(2, (int[]){{ 2, 4 }}, CHELIS_DTYPE_F32, d_t{a_id}->data, d_t{a_id}->storage_size);"
     );
     assert!(
         !hip.contains(&forbidden_r2),

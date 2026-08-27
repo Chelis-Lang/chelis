@@ -80,17 +80,24 @@ pub fn measure_alloc_footprint(c_source: &str) -> (usize, usize, Vec<usize>) {
         let after = &c_source[pos..];
         // Find the closing `)` of this alloc call. We use the matching brace
         // approach: locate the comma after rank, then the `(int64_t[]){ ... }`.
-        let dtype_size = if after.contains("CHELIS_F64") && after.find("CHELIS_F64").unwrap() < 200
+        let dtype_size = if after.contains("CHELIS_DTYPE_F64")
+            && after.find("CHELIS_DTYPE_F64").unwrap() < 200
         {
             8
-        } else if after.contains("CHELIS_BOOL") && after.find("CHELIS_BOOL").unwrap() < 200 {
+        } else if after.contains("CHELIS_DTYPE_BOOL")
+            && after.find("CHELIS_DTYPE_BOOL").unwrap() < 200
+        {
             1
-        } else if after.contains("CHELIS_I64") && after.find("CHELIS_I64").unwrap() < 200 {
+        } else if after.contains("CHELIS_DTYPE_I64")
+            && after.find("CHELIS_DTYPE_I64").unwrap() < 200
+        {
             8
-        } else if after.contains("CHELIS_I32") && after.find("CHELIS_I32").unwrap() < 200 {
+        } else if after.contains("CHELIS_DTYPE_I32")
+            && after.find("CHELIS_DTYPE_I32").unwrap() < 200
+        {
             4
         } else {
-            // Default to f32 for CHELIS_F32 (most common) and unknown.
+            // Default to f32 for CHELIS_DTYPE_F32 (most common) and unknown.
             4
         };
 

@@ -326,8 +326,8 @@ fn m7_bool_load_through_where_falls_through_to_stub() {
     let src = &result.mm_source;
     assert_emits_real_kernel(src, "bool Load alone");
     assert!(
-        src.contains("CHELIS_BOOL"),
-        "bool root output must declare CHELIS_BOOL dtype: {src}"
+        src.contains("CHELIS_DTYPE_BOOL"),
+        "bool root output must declare CHELIS_DTYPE_BOOL dtype: {src}"
     );
     assert!(
         src.contains("device const bool* a") || src.contains("sizeof(bool)"),
@@ -367,8 +367,8 @@ fn wsm1_int32_unary_neg_emits_typed_kernel() {
         "int32 unary neg must emit an int-typed output parameter: {src}"
     );
     assert!(
-        src.contains("CHELIS_I32"),
-        "int32 root output should declare CHELIS_I32 dtype: {src}"
+        src.contains("CHELIS_DTYPE_I32"),
+        "int32 root output should declare CHELIS_DTYPE_I32 dtype: {src}"
     );
 }
 

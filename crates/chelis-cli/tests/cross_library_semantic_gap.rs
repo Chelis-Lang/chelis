@@ -52,7 +52,7 @@ struct Counts {
     fused: usize,
     user_helper_defs: usize,
     /// Total bytes summed across every `chelis_alloc(N, (int64_t[]){...},
-    /// CHELIS_F32)` call. This approximates peak working set under the C
+    /// CHELIS_DTYPE_F32)` call. This approximates peak working set under the C
     /// backend's Phase-0 free-all-at-end strategy.
     total_alloc_bytes: usize,
 }
@@ -84,7 +84,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
     let fused = c.matches("parallel for simd").count();
     let user_helper_defs = c.matches("static void my_mm__tensor_").count();
 
-    // Sum bytes across every chelis_alloc(N, (int64_t[]){...}, CHELIS_F32) call.
+    // Sum bytes across every chelis_alloc(N, (int64_t[]){...}, CHELIS_DTYPE_F32) call.
     let mut total_alloc_bytes = 0usize;
     let mut idx = 0;
     while let Some(start) = c[idx..].find("chelis_alloc(") {
@@ -111,7 +111,7 @@ fn build_and_count(source: &str, name: &str) -> Counts {
                     }
                 }
                 if ok {
-                    total_alloc_bytes += const_factor * 4; // CHELIS_F32 only in this test
+                    total_alloc_bytes += const_factor * 4; // CHELIS_DTYPE_F32 only in this test
                 }
             }
         } else if window.starts_with("chelis_alloc(0, NULL,") {

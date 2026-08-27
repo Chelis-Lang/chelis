@@ -553,9 +553,9 @@ pub(crate) fn emit_host_abi_program(
     // no declaration in scope.
     let mut body: Vec<String> = Vec::new();
     let mut helper_requirements = HelperRequirements::default();
-    append_tensor_reshape_helper(&mut body);
-    body.push(String::new());
     append_scalar_conversion_helpers(&mut body);
+    body.push(String::new());
+    append_tensor_reshape_helper(&mut body);
     body.push(String::new());
     append_tensor_print_helper(&mut body);
     body.push(String::new());
@@ -1115,16 +1115,74 @@ fn append_scalar_conversion_helpers(out: &mut Vec<String>) {
     out.push("#define CHELIS_PRIVATE_SCALAR_TENSOR_HELPERS".to_string());
     out.extend(
         [
+            "static uint32_t chelis_host_f32_bits(float value) {",
+            "    uint32_t bits; memcpy(&bits, &value, sizeof bits); return bits;",
+            "}",
+            "",
+            "static uint64_t chelis_host_f64_bits(double value) {",
+            "    uint64_t bits; memcpy(&bits, &value, sizeof bits); return bits;",
+            "}",
+            "",
+            "static chelis_scalar chelis_host_scalar_from_i8(int8_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i16(int16_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i32(int32_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_i64(int64_t value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)value);",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_f64(double value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits(value));",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_f32(float value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits(value));",
+            "}",
+            "static chelis_scalar chelis_host_scalar_from_bool(bool value) {",
+            "    return chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, value ? 1u : 0u);",
+            "}",
+            "",
+            "static int64_t chelis_host_scalar_as_i64(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    switch (expected) {",
+            "        case CHELIS_DTYPE_I8: return (int8_t)(uint8_t)value.bits;",
+            "        case CHELIS_DTYPE_I16: return (int16_t)(uint16_t)value.bits;",
+            "        case CHELIS_DTYPE_I32: return (int32_t)(uint32_t)value.bits;",
+            "        case CHELIS_DTYPE_I64: { int64_t out; memcpy(&out, &value.bits, sizeof out); return out; }",
+            "        default: fprintf(stderr, \"expected signed integer scalar\\n\"); exit(1);",
+            "    }",
+            "}",
+            "",
+            "static uint64_t chelis_host_scalar_bits(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    return value.bits;",
+            "}",
+            "",
+            "static double chelis_host_scalar_as_float(chelis_scalar value, chelis_dtype expected) {",
+            "    if (value.dtype != expected) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    switch (expected) {",
+            "        case CHELIS_DTYPE_F32: return (double)chelis_f32_from_bits((uint32_t)value.bits);",
+            "        case CHELIS_DTYPE_F64: return chelis_f64_from_bits(value.bits);",
+            "        case CHELIS_DTYPE_F16: return (double)chelis_f16_to_f32((uint16_t)value.bits);",
+            "        case CHELIS_DTYPE_BF16: return (double)chelis_bf16_to_f32((uint16_t)value.bits);",
+            "        default: fprintf(stderr, \"expected float scalar\\n\"); exit(1);",
+            "    }",
+            "}",
+            "",
+            "static bool chelis_host_scalar_as_bool(chelis_scalar value) {",
+            "    if (value.dtype != CHELIS_DTYPE_BOOL) { fprintf(stderr, \"scalar dtype mismatch\\n\"); exit(1); }",
+            "    return value.bits == 1;",
+            "}",
+            "",
             "static chelis_tensor *chelis_host_scalar_tensor_from_f16(uint16_t value) {",
-            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_F16);",
-            "    *((uint16_t *)tensor->data) = value;",
-            "    return tensor;",
+            "    return chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)value));",
             "}",
             "",
             "static chelis_tensor *chelis_host_scalar_tensor_from_bf16(uint16_t value) {",
-            "    chelis_tensor *tensor = chelis_alloc(0, NULL, CHELIS_BF16);",
-            "    *((uint16_t *)tensor->data) = value;",
-            "    return tensor;",
+            "    return chelis_scalar_tensor(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)value));",
             "}",
         ]
         .into_iter()
@@ -1365,173 +1423,54 @@ fn cast_prim_c_type(prim: Prim) -> &'static str {
     }
 }
 
-/// One emitted `case` of the per-dtype element printer, or `None` for a
-/// `Prim` that has no runtime tensor storage (`f8e4m3` is rejected at
-/// check time per spec/04 section 1.1.1; `string` payloads are never
-/// tensor elements). Exhaustive over `Prim` with no `_` arm
-/// (`loud_unsupported.md` section C4): adding a primitive is a
-/// compile-error work-list here, never a silent fall-through to the
-/// aborting `default:`. The `CHELIS_*` case labels and format widths come
-/// from the `RuntimeDType` vocabulary declaration, not a local table.
-fn print_helper_elem_case(prim: Prim) -> Option<Vec<String>> {
-    use chelis_vocab::RuntimeDType;
-    let case = |dtype: RuntimeDType, body: Vec<String>| -> Vec<String> {
-        let mut lines = vec![format!("        case {}:", dtype.c_macro())];
-        lines.extend(body.into_iter().map(|line| format!("            {line}")));
-        lines.push("            break;".to_string());
-        lines
-    };
-    // Floats: read at storage width, widen to the exact double image
-    // (lossless for every supported float), format at the value's OWN
-    // width through the runtime's shortest-round-trip routine.
-    let float_case = |dtype: RuntimeDType, image_expr: &str| -> Vec<String> {
-        case(
-            dtype,
-            vec![
-                format!(
-                    "chelis_format_shortest({image_expr}, {}, fmt_buf, sizeof fmt_buf);",
-                    dtype.c_macro()
-                ),
-                "fputs(fmt_buf, stdout);".to_string(),
-            ],
-        )
-    };
-    // Integers: printf at width, all digits exact. int64 goes through
-    // `long long` (>= 64 bits everywhere), NEVER through double
-    // (chelis#723's lie was exactly that funnel).
-    let int_case =
-        |dtype: RuntimeDType, print_expr: String| -> Vec<String> { case(dtype, vec![print_expr]) };
-    match prim {
-        Prim::F64 => Some(float_case(RuntimeDType::F64, "((const double*)t->data)[i]")),
-        Prim::F32 => Some(float_case(
-            RuntimeDType::F32,
-            "(double)((const float*)t->data)[i]",
-        )),
-        // f16/bf16 decode through the same WS-1 conversion helpers the
-        // kernels use; f16 -> f32 -> double widening is exact, so the
-        // routine sees the stored value's true image (chelis#716's fix).
-        Prim::F16 => Some(float_case(
-            RuntimeDType::F16,
-            "(double)chelis_f16_to_f32(((const uint16_t*)t->data)[i])",
-        )),
-        Prim::Bf16 => Some(float_case(
-            RuntimeDType::Bf16,
-            "(double)chelis_bf16_to_f32(((const uint16_t*)t->data)[i])",
-        )),
-        Prim::Int64 => Some(int_case(
-            RuntimeDType::I64,
-            "printf(\"%lld\", (long long)((const int64_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int32 => Some(int_case(
-            RuntimeDType::I32,
-            "printf(\"%d\", (int)((const int32_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int16 => Some(int_case(
-            RuntimeDType::I16,
-            "printf(\"%d\", (int)((const int16_t*)t->data)[i]);".to_string(),
-        )),
-        Prim::Int8 => Some(int_case(
-            RuntimeDType::I8,
-            "printf(\"%d\", (int)((const int8_t*)t->data)[i]);".to_string(),
-        )),
-        // Bool tensor storage is f32-encoded today (the runtime's
-        // convention); the ELEMENT prints `true`/`false` at every exit
-        // (chelis#726's C half, [05-OBS-2]).
-        Prim::Bool => Some(case(
-            RuntimeDType::Bool,
-            vec![
-                "fputs(((const float*)t->data)[i] != 0.0f ? \"true\" : \"false\", stdout);"
-                    .to_string(),
-            ],
-        )),
-        // Not in the active dtype set (spec/04 section 1.1.1); rejected at
-        // check time, so no tensor can carry one. No runtime dtype id
-        // exists to case on.
-        Prim::F8e4m3 => None,
-        // String values render as themselves at their exits and are never
-        // numeric tensor element payloads.
-        Prim::String => None,
-    }
-}
-
-/// chelis#732 Phase 2 (faithful_observation.md section C3.2): the emitted
-/// print helper is GENERATED from [`print_helper_elem_case`]'s exhaustive
-/// `Prim` match. The hand-written `(double)` funnel this replaces rendered
-/// int64 through double (chelis#723), read f16/bf16 buffers as f32 before
-/// the chelis#730 interim abort (chelis#716), printed bool as `1.0`/`0.0`
-/// against to_list's `true`/`false` (chelis#726), and lost whole value
-/// classes to its near-integer/`%g` format split (chelis#748). No
-/// hand-written dtype switch may return (frozen at Phase 2 exit); the
-/// `default:` arm aborts with the raw dtype id so an unknown runtime
-/// dtype stays loud (loud_unsupported.md section C1).
+/// Render a tensor element by first recovering the exact tagged scalar.
+/// The runtime owns the exhaustive dtype dispatch and public text contract.
 fn append_tensor_print_helper(out: &mut Vec<String>) {
-    // chelis#729 Phase 3 / chelis#734: reduced-float scalar `to_string`
-    // uses the same own-width formatter as tensor/scalar print.  Keep these
-    // helpers private to the generated translation unit: the public runtime
-    // ABI remains on tagged numeric carriers rather than gaining uint16
-    // payload callables.
     out.push("static chelis_string chelis_host_string_from_f16(uint16_t value) {".to_string());
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
     out.push(
-        "    chelis_format_shortest((double)chelis_f16_to_f32(value), CHELIS_F16, fmt_buf, sizeof fmt_buf);"
+        "    return chelis_string_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)value));"
             .to_string(),
     );
-    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push("static chelis_string chelis_host_string_from_bf16(uint16_t value) {".to_string());
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
     out.push(
-        "    chelis_format_shortest((double)chelis_bf16_to_f32(value), CHELIS_BF16, fmt_buf, sizeof fmt_buf);"
+        "    return chelis_string_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)value));"
             .to_string(),
     );
-    out.push("    return chelis_string_from_cstr(fmt_buf);".to_string());
+    out.push("}".to_string());
+    out.push(String::new());
+    out.push(
+        "static chelis_scalar chelis_host_tensor_scalar_at(const chelis_tensor* t, int64_t i) {"
+            .to_string(),
+    );
+    out.push("    uint64_t bits = 0;".to_string());
+    out.push("    int64_t width = chelis_dtype_size(t->dtype);".to_string());
+    out.push("    memcpy(&bits, (const uint8_t*)t->data + i * width, (size_t)width);".to_string());
+    out.push("    return chelis_scalar_from_bits(t->dtype, bits);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push(
         "static void chelis_print_tensor_elem_stdout(const chelis_tensor* t, int64_t i) {"
             .to_string(),
     );
-    out.push("    char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF];".to_string());
-    out.push("    (void)fmt_buf;".to_string());
-    out.push("    switch (t->dtype) {".to_string());
-    for prim in [
-        Prim::F32,
-        Prim::F64,
-        Prim::F16,
-        Prim::Bf16,
-        Prim::F8e4m3,
-        Prim::Int8,
-        Prim::Int16,
-        Prim::Int32,
-        Prim::Int64,
-        Prim::Bool,
-        Prim::String,
-    ] {
-        if let Some(case_lines) = print_helper_elem_case(prim) {
-            out.extend(case_lines);
-        }
-    }
-    out.push("        default:".to_string());
     out.push(
-        "            fprintf(stderr, \"unsupported: tensor print of dtype id %d on the \
-         emitted C print helper (runtime); the RuntimeDType vocabulary defines no such \
-         id\\n\", (int)t->dtype);"
+        "    chelis_string text = chelis_string_from_scalar(chelis_host_tensor_scalar_at(t, i));"
             .to_string(),
     );
-    out.push("            exit(1);".to_string());
-    out.push("    }".to_string());
+    out.push("    fputs(chelis_string_data(text), stdout);".to_string());
+    out.push("    chelis_string_release(text);".to_string());
     out.push("}".to_string());
     out.push(String::new());
     out.push("static void chelis_print_tensor_stdout(const chelis_tensor* t) {".to_string());
     // [05-OBS-4]: a rank-0 tensor renders as its single element, bare -
     // the `tensor(shape=[], data=[..])` wrapper is not an exit form.
-    out.push("    if (t->ndim == 0) {".to_string());
+    out.push("    if (t->rank == 0) {".to_string());
     out.push("        chelis_print_tensor_elem_stdout(t, 0);".to_string());
     out.push("        return;".to_string());
     out.push("    }".to_string());
     out.push("    printf(\"tensor(shape=[\");".to_string());
-    out.push("    for (int64_t d = 0; d < t->ndim; ++d) {".to_string());
+    out.push("    for (int64_t d = 0; d < t->rank; ++d) {".to_string());
     out.push("        if (d > 0) { printf(\", \"); }".to_string());
     out.push("        printf(\"%lld\", (long long)t->shape[d]);".to_string());
     out.push("    }".to_string());
@@ -1555,24 +1494,23 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
             .to_string(),
     );
     out.push("    int64_t ndim64 = chelis_list_len(shape_values);".to_string());
-    out.push("    if (ndim64 < 0 || ndim64 > CHELIS_MAX_DIM) {".to_string());
+    out.push("    if (ndim64 < 0 || ndim64 > INT32_MAX) {".to_string());
     out.push(
-        "        fprintf(stderr, \"reshape expects between 0 and %d dims, got %lld\\n\", CHELIS_MAX_DIM, (long long)ndim64);"
+        "        fprintf(stderr, \"reshape rank is outside int32: %lld\\n\", (long long)ndim64);"
             .to_string(),
     );
     out.push("        exit(1);".to_string());
     out.push("    }".to_string());
     out.push("    int ndim = (int)ndim64;".to_string());
-    // chelis#1112: the shape buffer IS the ABI's extent carrier, so the
-    // list value is stored at the width it was read at. The retired 32-bit
-    // buffer needed an `(int)` cast here, and that cast needed a companion
-    // trap above INT_MAX because the only other guard (`dim < 0`) ran
-    // before it; both are gone with the narrowing they existed to catch.
-    out.push("    int64_t shape[CHELIS_MAX_DIM] = {0};".to_string());
+    out.push(
+        "    int64_t *shape = (int64_t*)calloc((size_t)(ndim > 0 ? ndim : 1), sizeof(int64_t));"
+            .to_string(),
+    );
+    out.push("    if (shape == NULL) { fprintf(stderr, \"reshape shape allocation failed\\n\"); exit(1); }".to_string());
     out.push("    int64_t expected = 1;".to_string());
     out.push("    for (int i = 0; i < ndim; ++i) {".to_string());
     out.push(
-        "        int64_t dim = chelis_value_as_int64(chelis_list_index(shape_values, i));"
+        "        int64_t dim = chelis_host_scalar_as_i64(chelis_value_as_scalar(chelis_list_index(shape_values, i)), CHELIS_DTYPE_I64);"
             .to_string(),
     );
     out.push("        if (dim < 0) {".to_string());
@@ -1595,6 +1533,7 @@ fn append_tensor_reshape_helper(out: &mut Vec<String>) {
     out.push(
         "    chelis_tensor* out_tensor = chelis_alloc(ndim, shape, input->dtype);".to_string(),
     );
+    out.push("    free(shape);".to_string());
     // RT-4 F2: size the memcpy by the actual dtype element width via
     // chelis_dtype_size, not by hardcoded sizeof(float). Mirrors
     // `chelis_alloc`'s element sizing (crates/chelis-runtime/src/lib.rs::
@@ -2833,9 +2772,19 @@ impl<'a> HostEmitter<'a> {
                 let previous = std::mem::replace(&mut self.indent, nested_indent);
                 let inner_ty = option_inner_type(&option_ty)?;
                 match option_ty {
-                    HostType::Option(inner)
-                        if !matches!(inner.as_ref(), HostType::Int64 | HostType::Float64) =>
-                    {
+                    HostType::Option(inner) if is_scalar_abi(inner.as_ref()) => {
+                        self.lines.push(format!(
+                            "{}{} {} = {};",
+                            self.indent,
+                            c_type(&inner_ty)?,
+                            bind_name,
+                            scalar_carrier_value_expr(
+                                &format!("{option_var}.value"),
+                                inner.as_ref(),
+                            )?
+                        ));
+                    }
+                    HostType::Option(_) => {
                         self.lines.push(format!(
                             "{}{} {};",
                             self.indent,
@@ -2848,13 +2797,10 @@ impl<'a> HostEmitter<'a> {
                             &format!("{option_var}.value"),
                         )?;
                     }
-                    _ => {
-                        self.lines.push(format!(
-                            "{}{} {} = {}.value;",
-                            self.indent,
-                            c_type(&inner_ty)?,
-                            bind_name,
-                            option_var
+                    other => {
+                        return Err(invalid_abi_shape(
+                            format!("option match scrutinee has non-option ABI type `{other:?}`"),
+                            "option match",
                         ));
                     }
                 }
@@ -3356,7 +3302,7 @@ impl<'a> HostEmitter<'a> {
                         format!(
                             "({})chelis_trunc_float_to_int({}, {}, {domain:?}, {overflow:?})",
                             c_type(target)?,
-                            scalar_float_as_double(&arg_vars[0].0, source),
+                            host_float_as_double(&arg_vars[0].0, source),
                             integer_abi_width(target)?
                         )
                     }
@@ -3437,14 +3383,22 @@ impl<'a> HostEmitter<'a> {
             }
             "scatter" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_scatter({}, {}, {}, {}, {});",
-                    self.indent,
-                    arg_vars[0].0,
-                    arg_vars[1].0,
-                    arg_vars[2].0,
-                    arg_vars[3].0,
-                    arg_vars[4].0
+                    "{}if (strcmp(chelis_string_data({}), \"replace\") == 0) {{",
+                    self.indent, arg_vars[4].0
                 ));
+                self.lines.push(format!(
+                    "{}    {target} = chelis_tensor_scatter_replace({}, {}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0, arg_vars[3].0
+                ));
+                self.lines.push(format!(
+                    "{}}} else if (strcmp(chelis_string_data({}), \"add\") == 0) {{",
+                    self.indent, arg_vars[4].0
+                ));
+                self.lines.push(format!(
+                    "{}    {target} = chelis_tensor_scatter_add({}, {}, {}, {});",
+                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0, arg_vars[3].0
+                ));
+                self.lines.push(format!("{}}} else {{ fprintf(stderr, \"scatter mode must be replace or add\\n\"); exit(1); }}", self.indent));
                 return Ok(());
             }
             "where" => {
@@ -3490,9 +3444,39 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "einsum" => {
+                if arg_vars.len() != 3 {
+                    return Err(invalid_abi_shape(
+                        format!(
+                            "einsum reached C emission with {} arguments; expected equation and two operands",
+                            arg_vars.len()
+                        ),
+                        "einsum accumulator selection",
+                    ));
+                }
+                let Some((_, HostType::Tensor(lhs_ty))) = arg_vars.get(1) else {
+                    return Err(invalid_abi_shape(
+                        "einsum lhs does not carry a resolved tensor ABI".to_string(),
+                        "einsum accumulator selection",
+                    ));
+                };
+                // spec/04-type-system.md section 5.7.1 and [05-OP-33]
+                // define einsum's omitted accumulator with the reduce-sum
+                // default table. Materialize that resolved dtype at the
+                // exact runtime boundary.
+                let accumulator = lhs_ty
+                    .precision
+                    .default_reduce_sum_accumulator()
+                    .and_then(|precision| {
+                        precision.runtime_dtype().map_err(|error| error.to_string())
+                    })
+                    .map_err(|error| invalid_abi_shape(error, "einsum accumulator selection"))?;
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_einsum({}, {}, {});",
-                    self.indent, arg_vars[0].0, arg_vars[1].0, arg_vars[2].0
+                    "{}{target} = chelis_tensor_einsum({}, {}, {}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    arg_vars[1].0,
+                    arg_vars[2].0,
+                    accumulator.c_macro()
                 ));
                 return Ok(());
             }
@@ -3550,22 +3534,27 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "dict_get" => {
-                let getter = match ty {
-                    HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                        "chelis_dict_get_i64"
-                    }
-                    HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                        "chelis_dict_get_f64"
-                    }
-                    _ => "chelis_dict_get",
+                let HostType::Option(inner) = ty else {
+                    return Err(invalid_abi_shape(
+                        format!("dict_get result has non-option ABI type `{ty:?}`"),
+                        "dict_get result",
+                    ));
                 };
-                self.lines.push(format!(
-                    "{}{target} = {}({}, {});",
-                    self.indent,
-                    getter,
-                    arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
-                ));
+                let key = self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?;
+                if is_scalar_abi(inner.as_ref()) {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_dict_get_scalar({}, {}, {});",
+                        self.indent,
+                        arg_vars[0].0,
+                        key,
+                        scalar_dtype_macro(inner.as_ref())?
+                    ));
+                } else {
+                    self.lines.push(format!(
+                        "{}{target} = chelis_dict_get({}, {});",
+                        self.indent, arg_vars[0].0, key
+                    ));
+                }
                 return Ok(());
             }
             "dict_contains" => {
@@ -3625,35 +3614,29 @@ impl<'a> HostEmitter<'a> {
                 return Ok(());
             }
             "to_tensor" => {
-                // RT-4 F1: when the destination tensor's precision is
-                // known at compile time, dispatch through the typed
-                // runtime entry point so the storage width matches
-                // the declared dtype. Without this hint the runtime
-                // would deduce dtype from the value-tag of the first
-                // leaf — but `chelis_value_from_f64` has the same tag
-                // (CHELIS_VALUE_FLOAT64) for both f32 and f64 sources,
-                // so a declared `tensor[3, f64] = [1.0, 2.0, 3.0]`
-                // silently truncated to f32 storage.
-                if let HostType::Tensor(t) = ty
-                    && let Ok(dtype) = t.precision.runtime_dtype()
-                {
-                    self.lines.push(format!(
-                        "{}{target} = chelis_tensor_from_value_list_typed({}, {});",
-                        self.indent,
-                        arg_vars[0].0,
-                        dtype.c_macro()
+                // [05-OP-33]: the checked result dtype selects the exact
+                // tagged list-ingress constructor. A non-tensor or deferred
+                // result is an IR/ABI disagreement, never an untyped fallback.
+                let HostType::Tensor(t) = ty else {
+                    return Err(invalid_abi_shape(
+                        format!("to_tensor result has non-tensor ABI type `{ty:?}`"),
+                        "to_tensor list ingress",
                     ));
-                    return Ok(());
-                }
+                };
+                let dtype = t.precision.runtime_dtype().map_err(|error| {
+                    invalid_abi_shape(error.to_string(), "to_tensor list ingress")
+                })?;
                 self.lines.push(format!(
-                    "{}{target} = chelis_tensor_from_value_list({});",
-                    self.indent, arg_vars[0].0
+                    "{}{target} = chelis_tensor_from_values({}, {});",
+                    self.indent,
+                    arg_vars[0].0,
+                    dtype.c_macro()
                 ));
                 return Ok(());
             }
             "to_list" => {
                 self.lines.push(format!(
-                    "{}{target} = chelis_list_from_tensor({});",
+                    "{}{target} = chelis_tensor_elements({});",
                     self.indent, arg_vars[0].0
                 ));
                 return Ok(());
@@ -3663,7 +3646,7 @@ impl<'a> HostEmitter<'a> {
                     "{}{target} = chelis_pad_sequences({}, {});",
                     self.indent,
                     arg_vars[0].0,
-                    self.box_value_expr(&arg_vars[1].0, &arg_vars[1].1)?
+                    scalar_carrier_expr(&arg_vars[1].0, &arg_vars[1].1)?
                 ));
                 return Ok(());
             }
@@ -3673,7 +3656,7 @@ impl<'a> HostEmitter<'a> {
                     self.indent,
                     arg_vars[0].0,
                     arg_vars[1].0,
-                    self.box_value_expr(&arg_vars[2].0, &arg_vars[2].1)?
+                    scalar_carrier_expr(&arg_vars[2].0, &arg_vars[2].1)?
                 ));
                 return Ok(());
             }
@@ -4044,22 +4027,44 @@ impl<'a> HostEmitter<'a> {
                 }
                 CExpressionBuiltin::StringLen => EmittedExpr::call("chelis_string_len", [arg(0)]),
                 CExpressionBuiltin::ToString => match &arg_vars[0].1 {
-                    HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                        EmittedExpr::call("chelis_string_from_int64", [arg(0)])
-                    }
-                    HostType::Float64 => EmittedExpr::call("chelis_string_from_f64", [arg(0)]),
+                    HostType::Int8 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i8", [arg(0)])],
+                    ),
+                    HostType::Int16 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i16", [arg(0)])],
+                    ),
+                    HostType::Int32 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i32", [arg(0)])],
+                    ),
+                    HostType::Int64 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_i64", [arg(0)])],
+                    ),
+                    HostType::Float64 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_f64", [arg(0)])],
+                    ),
                     // to_string is an observation exit: the f32 scalar
                     // renders at ITS width through the runtime's own-width
                     // formatter ([05-OBS-2]; the former promote-to-double
                     // funnel carried f64-image digits and split this exit
                     // from `print` of the same stored value - PR #863
                     // round-1 F1).
-                    HostType::Float32 => EmittedExpr::call("chelis_string_from_f32", [arg(0)]),
+                    HostType::Float32 => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_f32", [arg(0)])],
+                    ),
                     HostType::Float16 => EmittedExpr::call("chelis_host_string_from_f16", [arg(0)]),
                     HostType::BFloat16 => {
                         EmittedExpr::call("chelis_host_string_from_bf16", [arg(0)])
                     }
-                    HostType::Bool => EmittedExpr::call("chelis_string_from_bool", [arg(0)]),
+                    HostType::Bool => EmittedExpr::call(
+                        "chelis_string_from_scalar",
+                        [EmittedExpr::call("chelis_host_scalar_from_bool", [arg(0)])],
+                    ),
                     HostType::String => arg(0),
                     // chelis#730 Phase 1 (census row 3, chelis#734): to_string
                     // of a tensor/list/other non-scalar has no C rendering yet;
@@ -4082,11 +4087,82 @@ impl<'a> HostEmitter<'a> {
                         ));
                     }
                 },
-                CExpressionBuiltin::ToInt => EmittedExpr::call("chelis_parse_int64", [arg(0)]),
-                CExpressionBuiltin::ToFloat => EmittedExpr::call("chelis_parse_f64", [arg(0)]),
-                CExpressionBuiltin::TensorToScalar => {
-                    EmittedExpr::call("chelis_tensor_to_f64", [arg(0)])
-                }
+                CExpressionBuiltin::ToInt => EmittedExpr::call(
+                    "chelis_parse_scalar",
+                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_I64")],
+                ),
+                CExpressionBuiltin::ToFloat => EmittedExpr::call(
+                    "chelis_parse_scalar",
+                    [arg(0), EmittedExpr::identifier("CHELIS_DTYPE_F64")],
+                ),
+                CExpressionBuiltin::TensorToScalar => match ty {
+                    HostType::Float64 => EmittedExpr::call(
+                        "chelis_host_scalar_as_float",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F64"),
+                        ],
+                    ),
+                    HostType::Float32 => EmittedExpr::call(
+                        "chelis_host_scalar_as_float",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F32"),
+                        ],
+                    ),
+                    HostType::Float16 => EmittedExpr::call(
+                        "chelis_host_scalar_bits",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_F16"),
+                        ],
+                    ),
+                    HostType::BFloat16 => EmittedExpr::call(
+                        "chelis_host_scalar_bits",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_BF16"),
+                        ],
+                    ),
+                    HostType::Int8 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I8"),
+                        ],
+                    ),
+                    HostType::Int16 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I16"),
+                        ],
+                    ),
+                    HostType::Int32 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I32"),
+                        ],
+                    ),
+                    HostType::Int64 => EmittedExpr::call(
+                        "chelis_host_scalar_as_i64",
+                        [
+                            EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)]),
+                            EmittedExpr::identifier("CHELIS_DTYPE_I64"),
+                        ],
+                    ),
+                    HostType::Bool => EmittedExpr::call(
+                        "chelis_host_scalar_as_bool",
+                        [EmittedExpr::call("chelis_tensor_to_scalar", [arg(0)])],
+                    ),
+                    other => {
+                        return Err(invalid_abi_shape(
+                            format!("tensor_to_scalar carries non-scalar result type `{other:?}`"),
+                            "tensor_to_scalar C emission",
+                        ));
+                    }
+                },
                 // Issue #300: dispatch on the *result* tensor precision, not just
                 // the (coarse) argument host type. `scalar_to_tensor(cast(c,
                 // f32))` must materialize an f32-backed rank-0 tensor: the f64
@@ -4098,21 +4174,40 @@ impl<'a> HostEmitter<'a> {
                 // `ty` carries the real precision.
                 CExpressionBuiltin::ScalarToTensor => match ty {
                     HostType::Tensor(tensor_ty) => match tensor_ty.precision {
-                        Prim::Int64 => EmittedExpr::call("chelis_scalar_tensor_from_i64", [arg(0)]),
-                        Prim::F64 => EmittedExpr::call("chelis_scalar_tensor_from_f64", [arg(0)]),
-                        Prim::F32 => EmittedExpr::call("chelis_scalar_tensor_from_f32", [arg(0)]),
+                        Prim::Int8 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i8", [arg(0)])],
+                        ),
+                        Prim::Int16 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i16", [arg(0)])],
+                        ),
+                        Prim::Int32 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i32", [arg(0)])],
+                        ),
+                        Prim::Int64 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_i64", [arg(0)])],
+                        ),
+                        Prim::F64 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_f64", [arg(0)])],
+                        ),
+                        Prim::F32 => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_f32", [arg(0)])],
+                        ),
                         Prim::F16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_f16", [arg(0)])
                         }
                         Prim::Bf16 => {
                             EmittedExpr::call("chelis_host_scalar_tensor_from_bf16", [arg(0)])
                         }
-                        // chelis#714 asked for the f16/bf16 host-scalar
-                        // representation and is repaired: both dtypes have
-                        // their own constructor arm above. What survives here
-                        // is the general dtype-capability gap chelis#729
-                        // owns, for the precisions that still have no
-                        // scalar-tensor constructor at all.
+                        Prim::Bool => EmittedExpr::call(
+                            "chelis_scalar_tensor",
+                            [EmittedExpr::call("chelis_host_scalar_from_bool", [arg(0)])],
+                        ),
                         precision => {
                             return Err(Unsupported::new(
                                 UnsupportedKind::HostType(format!(
@@ -4405,9 +4500,9 @@ impl<'a> HostEmitter<'a> {
     // Per `docs/design/compiler_cleanup_0_7_8_spec_lock.md` Contract
     // 2 the supported precisions are f32, f64, i32, i64, and bool.
     // Each arm selects an element type that matches its representation.
-    // CHELIS_F32 and the current CHELIS_BOOL payload use `(float*)`.
-    // CHELIS_I32 uses `(int32_t*)`, CHELIS_F64 uses `(double*)`, and
-    // CHELIS_I64 uses `(int64_t*)`.
+    // CHELIS_DTYPE_BOOL uses the canonical one-byte `uint8_t` payload.
+    // CHELIS_DTYPE_F32 uses `(float*)`, CHELIS_DTYPE_I32 uses `(int32_t*)`,
+    // CHELIS_DTYPE_F64 uses `(double*)`, and CHELIS_DTYPE_I64 uses `(int64_t*)`.
     //
     // The four helpers split into two pairs:
     //
@@ -4418,13 +4513,13 @@ impl<'a> HostEmitter<'a> {
     //     well-defined for the supported operators.
     //
     //   * `assign_tensor_binary_func_elementwise` emits f32 libm calls
-    //     for F32 and the current Bool payload. Its I32 arm emits an exact
-    //     integer comparison for max and min. F64 and I64 abort.
+    //     for F32. Its I32 arm emits an exact integer comparison for max
+    //     and min. F64, I64, and Bool abort.
     //
     //   * `assign_tensor_unary_func_elementwise` takes an f32-only helper
-    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32 and
-    //     the current Bool payload. I32, F64, and I64 abort rather than
-    //     convert through binary32 and lose precision.
+    //     name (`expf`, `chelis_host_relu_f32`, ...). It accepts F32.
+    //     I32, F64, I64, and Bool abort rather than convert through
+    //     binary32 or treat bool storage as a float payload.
     fn assign_checked_tensor_cast(&mut self, target: &str, input: &str, plan: CheckedCastPlan) {
         if plan.kind() == CheckedCastKind::Identity {
             self.lines
@@ -4446,7 +4541,7 @@ impl<'a> HostEmitter<'a> {
         let indices = format!("{target}_cast_indices");
         let source_index = format!("{target}_cast_source_i");
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {});",
+            "{}{target} = chelis_alloc({input}->rank, {input}->shape, {});",
             self.indent,
             sparse_dtype_macro(target_prim)
         ));
@@ -4474,15 +4569,15 @@ impl<'a> HostEmitter<'a> {
             self.indent,
         ));
         self.lines.push(format!(
-            "{}    int64_t {indices}[CHELIS_MAX_DIM];",
+            "{}    int64_t {indices}[{target}->rank > 0 ? {target}->rank : 1];",
+            self.indent
+        ));
+        self.lines.push(format!(
+            "{}    chelis_flat_to_indices({flat_index}, {target}->shape, {target}->rank, {indices});",
             self.indent,
         ));
         self.lines.push(format!(
-            "{}    chelis_flat_to_indices({flat_index}, {target}->shape, {target}->ndim, {indices});",
-            self.indent,
-        ));
-        self.lines.push(format!(
-            "{}    int64_t {source_index} = chelis_indices_to_flat({indices}, {input}->strides, {input}->ndim);",
+            "{}    int64_t {source_index} = chelis_indices_to_flat({indices}, {input}->strides, {input}->rank);",
             self.indent,
         ));
         let source_value = format!("{source_data}[{source_index}]");
@@ -4496,7 +4591,7 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_tensor_binary_elementwise(&mut self, target: &str, lhs: &str, rhs: &str, op: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            "{}{target} = chelis_alloc({lhs}->rank, {lhs}->shape, {lhs}->dtype);",
             self.indent
         ));
         self.lines
@@ -4516,7 +4611,7 @@ impl<'a> HostEmitter<'a> {
         func: BinaryElementwiseFunc,
     ) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({lhs}->ndim, {lhs}->shape, {lhs}->dtype);",
+            "{}{target} = chelis_alloc({lhs}->rank, {lhs}->shape, {lhs}->dtype);",
             self.indent
         ));
         self.lines
@@ -4526,7 +4621,7 @@ impl<'a> HostEmitter<'a> {
         }
         self.emit_binary_func_elementwise_arm(target, lhs, rhs, func, DtypeArm::I32);
         self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I64],
+            &[DtypeArm::F64, DtypeArm::I64, DtypeArm::Bool],
             &format!("binary func elementwise ({})", func.f32_name()),
         );
         self.emit_default_runtime_fail_arm_for(
@@ -4538,7 +4633,7 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_tensor_unary_elementwise(&mut self, target: &str, input: &str, op: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            "{}{target} = chelis_alloc({input}->rank, {input}->shape, {input}->dtype);",
             self.indent
         ));
         self.lines
@@ -4552,7 +4647,7 @@ impl<'a> HostEmitter<'a> {
 
     fn assign_tensor_unary_func_elementwise(&mut self, target: &str, input: &str, func: &str) {
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({input}->ndim, {input}->shape, {input}->dtype);",
+            "{}{target} = chelis_alloc({input}->rank, {input}->shape, {input}->dtype);",
             self.indent
         ));
         self.lines
@@ -4561,7 +4656,7 @@ impl<'a> HostEmitter<'a> {
             self.emit_unary_func_elementwise_arm(target, input, func, *arm);
         }
         self.emit_dtype_fail_arms(
-            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64],
+            &[DtypeArm::F64, DtypeArm::I32, DtypeArm::I64, DtypeArm::Bool],
             &format!("unary func elementwise ({func})"),
         );
         self.emit_default_runtime_fail_arm_for(target, &format!("unary func elementwise ({func})"));
@@ -4593,16 +4688,17 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->rank);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->rank);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = __lhs_data[idx_lhs] {op} __rhs_data[idx_rhs];"
@@ -4637,19 +4733,20 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->ndim);"
+            "{ind}            int64_t idx_lhs = chelis_indices_to_flat(indices, {lhs}->strides, {lhs}->rank);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx_rhs = chelis_indices_to_flat(indices, {rhs}->strides, {rhs}->rank);"
         ));
         let expression = match arm {
-            DtypeArm::F32 | DtypeArm::Bool => format!(
+            DtypeArm::F32 => format!(
                 "{}(__lhs_data[idx_lhs], __rhs_data[idx_rhs])",
                 func.f32_name()
             ),
@@ -4657,8 +4754,8 @@ impl<'a> HostEmitter<'a> {
                 "__lhs_data[idx_lhs] {} __rhs_data[idx_rhs] ? __lhs_data[idx_lhs] : __rhs_data[idx_rhs]",
                 func.i32_comparison()
             ),
-            DtypeArm::F64 | DtypeArm::I64 => {
-                unreachable!("binary func arm must reject F64 and I64 before emission")
+            DtypeArm::F64 | DtypeArm::I64 | DtypeArm::Bool => {
+                unreachable!("binary func arm must reject non-f32-function dtypes before emission")
             }
         };
         self.lines
@@ -4683,13 +4780,14 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->rank);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {op}__input_data[idx];"
@@ -4720,13 +4818,14 @@ impl<'a> HostEmitter<'a> {
         self.lines.push(format!(
             "{ind}        for (int64_t i = 0; i < {target}->size; i++) {{"
         ));
-        self.lines
-            .push(format!("{ind}            int64_t indices[CHELIS_MAX_DIM];"));
         self.lines.push(format!(
-            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->ndim, indices);"
+            "{ind}            int64_t indices[{target}->rank > 0 ? {target}->rank : 1];"
         ));
         self.lines.push(format!(
-            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->ndim);"
+            "{ind}            chelis_flat_to_indices(i, {target}->shape, {target}->rank, indices);"
+        ));
+        self.lines.push(format!(
+            "{ind}            int64_t idx = chelis_indices_to_flat(indices, {input}->strides, {input}->rank);"
         ));
         self.lines.push(format!(
             "{ind}            __target_data[i] = {func}(__input_data[idx]);"
@@ -4826,50 +4925,42 @@ impl<'a> HostEmitter<'a> {
                 self.lines
                     .push(format!("{}chelis_tensor* {};", self.indent, tensor_name));
                 // Scalar inputs to tensor helpers use true rank-0 tensors so
-                // tensor[f32] keeps shape=[] across generated host/DAG calls.
-                //
-                // W2 PR 3 (CRuntime-F32Coupling): every arm casts
-                // `->data` through a typed pointer before writing
-                // the scalar.  The legacy bool / f32 arms wrote
-                // through the public `float *data` declaration in
-                // the C runtime header; mirror the int64 arm's
-                // typed-cast pattern for the bool and f32 cases
-                // so the bug class closes uniformly.  Bool
-                // storage today is 4-byte f32-encoded (per
-                // `docs/investigations/c_runtime_dtype_accessors_diagnosis.md`),
-                // so the bool arm casts to `(float*)` and writes
-                // the 1.0f / 0.0f bit pattern.
+                // the declared dtype keeps shape=[] across generated host/DAG
+                // calls. Every arm writes through its exact storage type;
+                // Bool is the canonical one-byte Bool8 carrier.
                 let (dtype, store) = match inferred_ty {
                     HostType::Int8 => (
-                        "CHELIS_I8",
+                        "CHELIS_DTYPE_I8",
                         format!("((int8_t*){tensor_name}->data)[0] = {value_name};"),
                     ),
                     HostType::Int16 => (
-                        "CHELIS_I16",
+                        "CHELIS_DTYPE_I16",
                         format!("((int16_t*){tensor_name}->data)[0] = {value_name};"),
                     ),
                     HostType::Int64 => (
-                        "CHELIS_I64",
+                        "CHELIS_DTYPE_I64",
                         format!("((int64_t*){tensor_name}->data)[0] = {value_name};"),
                     ),
                     HostType::Bool => (
-                        "CHELIS_BOOL",
-                        format!("((float*){tensor_name}->data)[0] = {value_name} ? 1.0f : 0.0f;"),
+                        "CHELIS_DTYPE_BOOL",
+                        format!(
+                            "((uint8_t*){tensor_name}->data)[0] = {value_name} ? UINT8_C(1) : UINT8_C(0);"
+                        ),
                     ),
                     // #381: an f64 captured scalar (e.g. `cast(1.1, f64)`)
                     // fed to a tensor helper via `scalar_to_tensor` must be
-                    // packed into a `CHELIS_F64` rank-0 tensor and written
+                    // packed into a `CHELIS_DTYPE_F64` rank-0 tensor and written
                     // through a `double*`. The pre-fix catch-all packed it
-                    // as `CHELIS_F32` and stored only the low 4 bytes; the
+                    // as `CHELIS_DTYPE_F32` and stored only the low 4 bytes; the
                     // f64 kernel then read 8 bytes (the high 4 garbage),
                     // collapsing the value to ~0 and silently disagreeing
                     // with the evaluator. Float32 still uses the f32 arm.
                     HostType::Float64 => (
-                        "CHELIS_F64",
+                        "CHELIS_DTYPE_F64",
                         format!("((double*){tensor_name}->data)[0] = (double)({value_name});"),
                     ),
                     _ => (
-                        "CHELIS_F32",
+                        "CHELIS_DTYPE_F32",
                         format!("((float*){tensor_name}->data)[0] = (float)({value_name});"),
                     ),
                 };
@@ -5041,7 +5132,7 @@ impl<'a> HostEmitter<'a> {
             output_dims.join(", ")
         ));
         self.lines.push(format!(
-            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_F32);",
+            "{}{target} = chelis_alloc({}, {shape_name}, CHELIS_DTYPE_F32);",
             self.indent,
             output_dims.len()
         ));
@@ -5053,7 +5144,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}if (!({lhs_contig}->ndim >= 2 && {lhs_contig}->strides[{lhs_contig}->ndim - 1] == 1 && {lhs_contig}->strides[{lhs_contig}->ndim - 2] == {k_expr})) {{",
+            "{}if (!({lhs_contig}->rank >= 2 && {lhs_contig}->strides[{lhs_contig}->rank - 1] == 1 && {lhs_contig}->strides[{lhs_contig}->rank - 2] == {k_expr})) {{",
             self.indent
         ));
         self.lines.push(format!(
@@ -5066,7 +5157,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}if (!({rhs_contig}->ndim >= 2 && {rhs_contig}->strides[{rhs_contig}->ndim - 1] == 1 && {rhs_contig}->strides[{rhs_contig}->ndim - 2] == {n_expr})) {{",
+            "{}if (!({rhs_contig}->rank >= 2 && {rhs_contig}->strides[{rhs_contig}->rank - 1] == 1 && {rhs_contig}->strides[{rhs_contig}->rank - 2] == {n_expr})) {{",
             self.indent
         ));
         self.lines.push(format!(
@@ -5160,8 +5251,10 @@ impl<'a> HostEmitter<'a> {
             ));
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
-            self.lines
-                .push(format!("{}if ({arg}->dtype != CHELIS_F32) {{", self.indent));
+            self.lines.push(format!(
+                "{}if ({arg}->dtype != CHELIS_DTYPE_F32) {{",
+                self.indent
+            ));
             self.lines.push(format!(
                 "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected f32 tensor\\n\");",
                 self.indent
@@ -5169,12 +5262,12 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
             self.lines.push(format!(
-                "{}if ({arg}->ndim != {}) {{",
+                "{}if ({arg}->rank != {}) {{",
                 self.indent,
                 ty.dims.len()
             ));
             self.lines.push(format!(
-                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                "{}    fprintf(stderr, \"specialized BLAS call input {input_index} expected rank {}, got %d\\n\", {arg}->rank);",
                 self.indent,
                 ty.dims.len()
             ));
@@ -5382,12 +5475,12 @@ impl<'a> HostEmitter<'a> {
             self.lines.push(format!("{}    abort();", self.indent));
             self.lines.push(format!("{}}}", self.indent));
             self.lines.push(format!(
-                "{}if ({arg}->ndim != {}) {{",
+                "{}if ({arg}->rank != {}) {{",
                 self.indent,
                 ty.dims.len()
             ));
             self.lines.push(format!(
-                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected rank {}, got %d\\n\", {arg}->ndim);",
+                "{}    fprintf(stderr, \"specialized sparse call input {input_index} expected rank {}, got %d\\n\", {arg}->rank);",
                 self.indent,
                 ty.dims.len()
             ));
@@ -5497,7 +5590,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -5615,7 +5708,7 @@ impl<'a> HostEmitter<'a> {
             self.indent
         ));
         self.lines.push(format!(
-            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
+            "{}        int64_t {target}_g = ({indices_ct}->dtype == CHELIS_DTYPE_I64) ? (int64_t)((const int64_t*){indices_ct}->data)[{target}_i] : (int64_t)({indices_ct}_data)[{target}_i];",
             self.indent
         ));
         self.lines.push(format!(
@@ -6597,14 +6690,33 @@ impl<'a> HostEmitter<'a> {
 
     fn box_value_expr(&self, value: &str, ty: &HostType) -> Result<String, Unsupported> {
         Ok(match ty {
-            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                format!("chelis_value_from_int64((int64_t){value})")
-            }
-            HostType::Float64 => format!("chelis_value_from_f64({value})"),
-            HostType::Float32 => format!("chelis_value_from_f32_boxed({value})"),
-            HostType::Float16 => format!("chelis_value_from_f16_bits_boxed({value})"),
-            HostType::BFloat16 => format!("chelis_value_from_bf16_bits_boxed({value})"),
-            HostType::Bool => format!("chelis_value_from_bool({value})"),
+            HostType::Int8 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)(int8_t){value}))"
+            ),
+            HostType::Int16 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)(int16_t){value}))"
+            ),
+            HostType::Int32 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)(int32_t){value}))"
+            ),
+            HostType::Int64 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){value}))"
+            ),
+            HostType::Float64 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits({value})))"
+            ),
+            HostType::Float32 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits({value})))"
+            ),
+            HostType::Float16 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)(uint16_t){value}))"
+            ),
+            HostType::BFloat16 => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)(uint16_t){value}))"
+            ),
+            HostType::Bool => format!(
+                "chelis_value_from_scalar(chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0)))"
+            ),
             HostType::String => format!("chelis_value_from_string({value})"),
             HostType::Adt(_, _) => format!("chelis_value_from_adt({value})"),
             HostType::Tensor(_) => format!("chelis_value_from_tensor({value})"),
@@ -6627,18 +6739,33 @@ impl<'a> HostEmitter<'a> {
         value_expr: &str,
     ) -> Result<(), Unsupported> {
         let expr = match ty {
-            HostType::Int8 | HostType::Int16 | HostType::Int32 | HostType::Int64 => {
-                format!("({})chelis_value_as_int64({value_expr})", c_type(ty)?)
+            HostType::Int8 => format!(
+                "(int8_t)chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I8)"
+            ),
+            HostType::Int16 => format!(
+                "(int16_t)chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I16)"
+            ),
+            HostType::Int32 => format!(
+                "(int32_t)chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I32)"
+            ),
+            HostType::Int64 => format!(
+                "chelis_host_scalar_as_i64(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_I64)"
+            ),
+            HostType::Float64 => format!(
+                "chelis_host_scalar_as_float(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_F64)"
+            ),
+            HostType::Float32 => format!(
+                "(float)chelis_host_scalar_as_float(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_F32)"
+            ),
+            HostType::Float16 => format!(
+                "(uint16_t)chelis_host_scalar_bits(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_F16)"
+            ),
+            HostType::BFloat16 => format!(
+                "(uint16_t)chelis_host_scalar_bits(chelis_value_as_scalar({value_expr}), CHELIS_DTYPE_BF16)"
+            ),
+            HostType::Bool => {
+                format!("chelis_host_scalar_as_bool(chelis_value_as_scalar({value_expr}))")
             }
-            HostType::Float64 => format!("chelis_value_as_f64({value_expr})"),
-            HostType::Float32 => format!("(float)chelis_value_as_f64({value_expr})"),
-            HostType::Float16 => {
-                format!("chelis_f32_to_f16((float)chelis_value_as_f64({value_expr}))")
-            }
-            HostType::BFloat16 => {
-                format!("chelis_f32_to_bf16((float)chelis_value_as_f64({value_expr}))")
-            }
-            HostType::Bool => format!("chelis_value_as_bool({value_expr})"),
             HostType::String => format!("chelis_value_as_string({value_expr})"),
             HostType::Adt(_, _) => format!("chelis_value_as_adt({value_expr})"),
             HostType::Tensor(_) => format!("chelis_value_as_tensor({value_expr})"),
@@ -6677,12 +6804,12 @@ impl<'a> HostEmitter<'a> {
             // (the f32 C value widens to its exact double image), never
             // through a fixed-precision printf (chelis#748).
             HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
-                let dtype = scalar_float_dtype_macro(ty);
-                let value = scalar_float_as_double(value, ty);
+                let boxed = self.box_value_expr(value, ty)?;
                 self.lines.push(format!(
-                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
-                     printf(\"%s\\n\", fmt_buf); }}",
+                    "{}{{ chelis_value boxed = {boxed}; \
+                     chelis_string text = chelis_string_from_scalar(chelis_value_as_scalar(boxed)); \
+                     printf(\"%s\\n\", chelis_string_data(text)); \
+                     chelis_string_release(text); }}",
                     self.indent
                 ));
             }
@@ -6795,15 +6922,14 @@ impl<'a> HostEmitter<'a> {
                     self.indent, value
                 ))
             }
-            // chelis#732 Phase 2: same own-width routine as
-            // `emit_print_value` (intra-lane exit agreement, [05-OBS-1]).
+            // Same exact tagged-scalar path as `emit_print_value`.
             HostType::Float64 | HostType::Float32 | HostType::Float16 | HostType::BFloat16 => {
-                let dtype = scalar_float_dtype_macro(ty);
-                let value = scalar_float_as_double(value, ty);
+                let boxed = self.box_value_expr(value, ty)?;
                 self.lines.push(format!(
-                    "{}{{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-                     chelis_format_shortest({value}, {dtype}, fmt_buf, sizeof fmt_buf); \
-                     printf(\"%s\", fmt_buf); }}",
+                    "{}{{ chelis_value boxed = {boxed}; \
+                     chelis_string text = chelis_string_from_scalar(chelis_value_as_scalar(boxed)); \
+                     printf(\"%s\", chelis_string_data(text)); \
+                     chelis_string_release(text); }}",
                     self.indent
                 ));
             }
@@ -6915,35 +7041,39 @@ impl<'a> HostEmitter<'a> {
         self.lines
             .push(format!("{}switch ({value}.tag) {{", self.indent));
         self.lines.push(format!(
-            "{}case CHELIS_VALUE_INT64: printf(\"%lld\", (long long){value}.as.i64); break;",
+            "{}case CHELIS_VALUE_SCALAR: {{ chelis_string text = \
+             chelis_string_from_scalar(chelis_value_as_scalar({value})); \
+             fputs(chelis_string_data(text), stdout); chelis_string_release(text); break; }}",
             self.indent
         ));
         self.lines.push(format!(
-            "{}case CHELIS_VALUE_FLOAT64: {{ char fmt_buf[CHELIS_FORMAT_SHORTEST_BUF]; \
-             chelis_format_shortest({value}.as.f64, CHELIS_F64, fmt_buf, sizeof fmt_buf); \
-             printf(\"%s\", fmt_buf); break; }}",
+            "{}case CHELIS_VALUE_UNIT: printf(\"()\"); break;",
             self.indent
         ));
         self.lines.push(format!(
-            "{}case CHELIS_VALUE_BOOL: printf(\"%s\", {value}.as.boolean ? \"true\" : \"false\"); break;",
+            "{}case CHELIS_VALUE_STRING: printf(\"%s\", chelis_string_data(chelis_value_as_string({value}))); break;",
             self.indent
         ));
-        self.lines.push(format!(
-            "{}case CHELIS_VALUE_STRING: printf(\"%s\", chelis_string_data({value}.as.string)); break;",
-            self.indent
-        ));
-        for (tag, printer, field) in [
-            ("TENSOR", "chelis_print_tensor_stdout", "tensor"),
-            ("LIST", "chelis_print_list", "list"),
-            ("TUPLE", "chelis_print_tuple", "tuple"),
-            ("DICT", "chelis_print_dict", "dict"),
-            ("ADT", "chelis_print_adt", "adt"),
+        for (tag, printer, accessor) in [
+            (
+                "TENSOR",
+                "chelis_print_tensor_stdout",
+                "chelis_value_as_tensor",
+            ),
+            ("LIST", "chelis_print_list", "chelis_value_as_list"),
+            ("TUPLE", "chelis_print_tuple", "chelis_value_as_tuple"),
+            ("DICT", "chelis_print_dict", "chelis_value_as_dict"),
+            ("ADT", "chelis_print_adt", "chelis_value_as_adt"),
         ] {
             self.lines.push(format!(
-                "{}case CHELIS_VALUE_{tag}: {printer}({value}.as.{field}); break;",
+                "{}case CHELIS_VALUE_{tag}: {printer}({accessor}({value})); break;",
                 self.indent
             ));
         }
+        self.lines.push(format!(
+            "{}default: fprintf(stderr, \"invalid chelis_value tag in manifested root\\n\"); abort();",
+            self.indent
+        ));
         self.lines.push(format!("{}}}", self.indent));
         self.lines.push(format!("{}printf(\"\\n\");", self.indent));
     }
@@ -6961,66 +7091,46 @@ impl<'a> HostEmitter<'a> {
         value_var: &str,
         value_ty: &HostType,
     ) -> Result<(), Unsupported> {
-        match ty {
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = {value_var};", self.indent));
-            }
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = {value_var};", self.indent));
-            }
-            HostType::Option(_) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = true;", self.indent));
-                self.lines.push(format!(
-                    "{}{target}.value = {};",
-                    self.indent,
-                    self.box_value_expr(value_var, value_ty)?
-                ));
-            }
-            other => {
-                return Err(invalid_abi_shape(
-                    format!("Some constructor carries non-option ABI type `{other:?}`"),
-                    "Some constructor",
-                ));
-            }
+        let HostType::Option(inner) = ty else {
+            return Err(invalid_abi_shape(
+                format!("Some constructor carries non-option ABI type `{ty:?}`"),
+                "Some constructor",
+            ));
+        };
+        require_same_abi_type(inner.as_ref(), value_ty, "Some constructor payload")?;
+        if is_scalar_abi(inner.as_ref()) {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_scalar){{ .is_some = 1, .reserved = {{0}}, .value = {} }};",
+                self.indent,
+                scalar_carrier_expr(value_var, value_ty)?
+            ));
+        } else {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_value){{ .is_some = 1, .reserved = {{0}}, .value = {} }};",
+                self.indent,
+                self.box_value_expr(value_var, value_ty)?
+            ));
         }
         Ok(())
     }
 
     fn assign_option_none(&mut self, target: &str, ty: &HostType) -> Result<(), Unsupported> {
-        match ty {
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Int64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = 0;", self.indent));
-            }
-            HostType::Option(inner) if matches!(inner.as_ref(), HostType::Float64) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines
-                    .push(format!("{}{target}.value = 0.0;", self.indent));
-            }
-            HostType::Option(_) => {
-                self.lines
-                    .push(format!("{}{target}.is_some = false;", self.indent));
-                self.lines.push(format!(
-                    "{}{target}.value = chelis_value_from_int64(0);",
-                    self.indent
-                ));
-            }
-            other => {
-                return Err(invalid_abi_shape(
-                    format!("None constructor carries non-option ABI type `{other:?}`"),
-                    "None constructor",
-                ));
-            }
+        let HostType::Option(inner) = ty else {
+            return Err(invalid_abi_shape(
+                format!("None constructor carries non-option ABI type `{ty:?}`"),
+                "None constructor",
+            ));
+        };
+        if is_scalar_abi(inner.as_ref()) {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_scalar){{ .is_some = 0, .reserved = {{0}}, .value = chelis_scalar_from_bits(CHELIS_DTYPE_F32, UINT64_C(0)) }};",
+                self.indent
+            ));
+        } else {
+            self.lines.push(format!(
+                "{}{target} = (chelis_option_value){{ .is_some = 0, .reserved = {{0}}, .value = (chelis_value){{ .tag = CHELIS_VALUE_UNIT, .reserved = {{0}}, .payload.handle = NULL }} }};",
+                self.indent
+            ));
         }
         Ok(())
     }
@@ -7118,6 +7228,21 @@ fn is_float_abi(ty: &HostAbiType) -> bool {
     matches!(
         ty,
         HostAbiType::Float16 | HostAbiType::BFloat16 | HostAbiType::Float32 | HostAbiType::Float64
+    )
+}
+
+fn is_scalar_abi(ty: &HostAbiType) -> bool {
+    matches!(
+        ty,
+        HostAbiType::Int8
+            | HostAbiType::Int16
+            | HostAbiType::Int32
+            | HostAbiType::Int64
+            | HostAbiType::Float16
+            | HostAbiType::BFloat16
+            | HostAbiType::Float32
+            | HostAbiType::Float64
+            | HostAbiType::Bool
     )
 }
 
@@ -7597,7 +7722,8 @@ fn callback_param(callback: &HostCallback, index: usize) -> &HostParam {
 /// fall through to a quiet wrong-width read.
 fn sparse_elem_type(prim: Prim) -> &'static str {
     match prim {
-        Prim::F32 | Prim::Bool => "float",
+        Prim::F32 => "float",
+        Prim::Bool => "uint8_t",
         Prim::F64 => "double",
         Prim::Int8 => "int8_t",
         Prim::Int16 => "int16_t",
@@ -7616,29 +7742,113 @@ fn sparse_elem_type(prim: Prim) -> &'static str {
     }
 }
 
-/// Width id macro for a scalar float `HostType` handed to
-/// `chelis_format_shortest` (chelis#732 Phase 2).
-/// `CHELIS_<DTYPE>` macro selector for a scalar float print, matching
-/// the sibling `sparse_dtype_macro` naming. It selects a DTYPE, not a
-/// width: spec/04 [04-NUM-8] gives storage and arithmetic width separate
-/// meanings, so a name spelled after "width" would be ambiguous at the
-/// one call site that feeds `chelis_format_shortest`.
-fn scalar_float_dtype_macro(ty: &HostType) -> &'static str {
-    match ty {
-        HostType::Float16 => chelis_vocab::RuntimeDType::F16.c_macro(),
-        HostType::BFloat16 => chelis_vocab::RuntimeDType::Bf16.c_macro(),
-        HostType::Float32 => chelis_vocab::RuntimeDType::F32.c_macro(),
-        HostType::Float64 => chelis_vocab::RuntimeDType::F64.c_macro(),
-        other => unreachable!("scalar float print of non-float host type {other:?}"),
-    }
+/// Project a resolved host scalar to the exact tagged C carrier expected by
+/// scalar-taking runtime calls. Generic `chelis_value` boxing is a distinct
+/// container boundary and must not be used as a compatibility conversion.
+fn scalar_carrier_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
+    let expr = match ty {
+        HostType::Int8 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_I8, (uint64_t)(uint8_t)(int8_t){value})")
+        }
+        HostType::Int16 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_I16, (uint64_t)(uint16_t)(int16_t){value})"
+        ),
+        HostType::Int32 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_I32, (uint64_t)(uint32_t)(int32_t){value})"
+        ),
+        HostType::Int64 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_I64, (uint64_t)(int64_t){value})")
+        }
+        HostType::Float64 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_F64, chelis_host_f64_bits({value}))")
+        }
+        HostType::Float32 => format!(
+            "chelis_scalar_from_bits(CHELIS_DTYPE_F32, (uint64_t)chelis_host_f32_bits({value}))"
+        ),
+        HostType::Float16 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_F16, (uint64_t)(uint16_t){value})")
+        }
+        HostType::BFloat16 => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_BF16, (uint64_t)(uint16_t){value})")
+        }
+        HostType::Bool => {
+            format!("chelis_scalar_from_bits(CHELIS_DTYPE_BOOL, (uint64_t)({value} ? 1 : 0))")
+        }
+        other => {
+            return Err(invalid_abi_shape(
+                format!("scalar runtime argument has non-scalar ABI type `{other:?}`"),
+                "exact scalar runtime argument",
+            ));
+        }
+    };
+    Ok(expr)
 }
 
-fn scalar_float_as_double(value: &str, ty: &HostType) -> String {
+/// Project the exact tagged runtime scalar back to the resolved host scalar
+/// type. The expected dtype is always checked before reading the payload.
+fn scalar_carrier_value_expr(value: &str, ty: &HostType) -> Result<String, Unsupported> {
+    let expr = match ty {
+        HostType::Int8 => {
+            format!("(int8_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I8)")
+        }
+        HostType::Int16 => {
+            format!("(int16_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I16)")
+        }
+        HostType::Int32 => {
+            format!("(int32_t)chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I32)")
+        }
+        HostType::Int64 => {
+            format!("chelis_host_scalar_as_i64({value}, CHELIS_DTYPE_I64)")
+        }
+        HostType::Float16 => {
+            format!("(uint16_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_F16)")
+        }
+        HostType::BFloat16 => {
+            format!("(uint16_t)chelis_host_scalar_bits({value}, CHELIS_DTYPE_BF16)")
+        }
+        HostType::Float32 => {
+            format!("(float)chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F32)")
+        }
+        HostType::Float64 => {
+            format!("chelis_host_scalar_as_float({value}, CHELIS_DTYPE_F64)")
+        }
+        HostType::Bool => format!("chelis_host_scalar_as_bool({value})"),
+        other => {
+            return Err(invalid_abi_shape(
+                format!("scalar runtime result has non-scalar ABI type `{other:?}`"),
+                "exact scalar runtime result",
+            ));
+        }
+    };
+    Ok(expr)
+}
+
+fn scalar_dtype_macro(ty: &HostType) -> Result<&'static str, Unsupported> {
+    Ok(match ty {
+        HostType::Int8 => "CHELIS_DTYPE_I8",
+        HostType::Int16 => "CHELIS_DTYPE_I16",
+        HostType::Int32 => "CHELIS_DTYPE_I32",
+        HostType::Int64 => "CHELIS_DTYPE_I64",
+        HostType::Float16 => "CHELIS_DTYPE_F16",
+        HostType::BFloat16 => "CHELIS_DTYPE_BF16",
+        HostType::Float32 => "CHELIS_DTYPE_F32",
+        HostType::Float64 => "CHELIS_DTYPE_F64",
+        HostType::Bool => "CHELIS_DTYPE_BOOL",
+        other => {
+            return Err(invalid_abi_shape(
+                format!("dtype selection has non-scalar ABI type `{other:?}`"),
+                "exact scalar dtype selection",
+            ));
+        }
+    })
+}
+
+fn host_float_as_double(value: &str, ty: &HostType) -> String {
     match ty {
         HostType::Float16 => format!("(double)chelis_f16_to_f32({value})"),
         HostType::BFloat16 => format!("(double)chelis_bf16_to_f32({value})"),
         HostType::Float32 | HostType::Float64 => format!("(double)({value})"),
-        other => unreachable!("scalar float conversion of non-float host type {other:?}"),
+        other => unreachable!("float conversion of non-float host type {other:?}"),
     }
 }
 
@@ -7721,8 +7931,8 @@ impl BinaryElementwiseFunc {
 /// host-emit helpers (`assign_tensor_*_elementwise`). Each arm names a
 /// `CHELIS_*` constant and the C element type for tensor buffer access.
 ///
-/// Equal byte widths do not permit a shared element type. Native int32
-/// storage uses `int32_t`. F32 and the current Bool payload use `float`.
+/// Equal byte widths do not permit a shared element type. Bool uses its
+/// canonical one-byte payload and never shares the f32 representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DtypeArm {
     F32,
@@ -7749,10 +7959,11 @@ impl DtypeArm {
 
     fn elem_t(self) -> &'static str {
         match self {
-            DtypeArm::F32 | DtypeArm::Bool => "float",
+            DtypeArm::F32 => "float",
             DtypeArm::F64 => "double",
             DtypeArm::I32 => "int32_t",
             DtypeArm::I64 => "int64_t",
+            DtypeArm::Bool => "uint8_t",
         }
     }
 
@@ -7772,7 +7983,7 @@ impl DtypeArm {
     /// Representations that can use f32-only helper functions directly.
     /// I32 is excluded because conversion to binary32 loses integer precision.
     fn f32_payload_func_arms() -> &'static [DtypeArm] {
-        &[DtypeArm::F32, DtypeArm::Bool]
+        &[DtypeArm::F32]
     }
 }
 
@@ -7827,6 +8038,102 @@ mod expression_dispatch_tests {
     use super::*;
 
     #[test]
+    fn exact_scalar_argument_projection_never_boxes_through_chelis_value() {
+        for (ty, dtype) in [
+            (HostType::Int8, "CHELIS_DTYPE_I8"),
+            (HostType::Int16, "CHELIS_DTYPE_I16"),
+            (HostType::Int32, "CHELIS_DTYPE_I32"),
+            (HostType::Int64, "CHELIS_DTYPE_I64"),
+            (HostType::Float16, "CHELIS_DTYPE_F16"),
+            (HostType::BFloat16, "CHELIS_DTYPE_BF16"),
+            (HostType::Float32, "CHELIS_DTYPE_F32"),
+            (HostType::Float64, "CHELIS_DTYPE_F64"),
+            (HostType::Bool, "CHELIS_DTYPE_BOOL"),
+        ] {
+            let emitted = scalar_carrier_expr("value", &ty).unwrap();
+            assert!(
+                emitted.contains("chelis_scalar_from_bits") && emitted.contains(dtype),
+                "{ty:?} did not project to its exact tagged scalar: {emitted}"
+            );
+            assert!(
+                !emitted.contains("chelis_value_from_scalar"),
+                "exact scalar argument was unnecessarily boxed: {emitted}"
+            );
+        }
+        assert!(
+            scalar_carrier_expr("value", &HostType::String).is_err(),
+            "a non-scalar host value must not acquire a scalar ABI fallback"
+        );
+    }
+
+    #[test]
+    fn exact_scalar_result_projection_checks_every_active_dtype() {
+        for (ty, dtype) in [
+            (HostType::Int8, "CHELIS_DTYPE_I8"),
+            (HostType::Int16, "CHELIS_DTYPE_I16"),
+            (HostType::Int32, "CHELIS_DTYPE_I32"),
+            (HostType::Int64, "CHELIS_DTYPE_I64"),
+            (HostType::Float16, "CHELIS_DTYPE_F16"),
+            (HostType::BFloat16, "CHELIS_DTYPE_BF16"),
+            (HostType::Float32, "CHELIS_DTYPE_F32"),
+            (HostType::Float64, "CHELIS_DTYPE_F64"),
+            (HostType::Bool, "CHELIS_DTYPE_BOOL"),
+        ] {
+            let emitted = scalar_carrier_value_expr("value", &ty).unwrap();
+            assert!(
+                emitted.contains(dtype) || matches!(ty, HostType::Bool),
+                "{ty:?} did not validate its exact tagged scalar dtype: {emitted}"
+            );
+            assert_eq!(scalar_dtype_macro(&ty).unwrap(), dtype);
+            assert!(
+                !emitted.contains("chelis_value_as_scalar"),
+                "exact scalar result crossed the generic value carrier: {emitted}"
+            );
+        }
+        assert!(scalar_carrier_value_expr("value", &HostType::String).is_err());
+        assert!(scalar_dtype_macro(&HostType::String).is_err());
+    }
+
+    #[test]
+    fn manifested_boxed_roots_use_only_the_exact_value_carrier() {
+        let mut emitter = HostEmitter::new(
+            "    ".to_string(),
+            "manifest",
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            &[],
+        );
+        emitter.emit_labeled_boxed_root("root", "boxed");
+        let emitted = emitter.lines.join("\n");
+
+        for required in [
+            "case CHELIS_VALUE_SCALAR:",
+            "chelis_value_as_scalar(boxed)",
+            "chelis_value_as_string(boxed)",
+            "chelis_value_as_tensor(boxed)",
+            "default:",
+            "abort();",
+        ] {
+            assert!(
+                emitted.contains(required),
+                "boxed-root observation is missing `{required}`:\n{emitted}"
+            );
+        }
+        for retired in [
+            "CHELIS_VALUE_INT64",
+            "CHELIS_VALUE_FLOAT64",
+            "CHELIS_VALUE_BOOL",
+            ".as.",
+        ] {
+            assert!(
+                !emitted.contains(retired),
+                "boxed-root observation restored retired value ABI `{retired}`:\n{emitted}"
+            );
+        }
+    }
+
+    #[test]
     fn open_builtin_name_must_decode_before_expression_construction() {
         assert_eq!(
             CExpressionBuiltin::decode("add"),
@@ -7867,10 +8174,8 @@ mod expression_dispatch_tests {
         assert!(emitted.contains("chelis_host_finalize_bf16"));
     }
 
-    /// chelis#1112: the emitted reshape helper stores the extent it read,
-    /// at the width it read it. `chelis_value_as_int64` returns int64 and
-    /// the shape buffer is the ABI's int64 extent carrier, so no cast sits
-    /// between them.
+    /// chelis#1112: the emitted reshape helper stores the exact tagged
+    /// int64 extent into a dynamically sized int64 shape buffer.
     ///
     /// This replaces `reshape_helper_traps_extent_above_int32_before_the_store`,
     /// which pinned the ordering of a trap against the `(int)` store it
@@ -7885,12 +8190,12 @@ mod expression_dispatch_tests {
         append_tensor_reshape_helper(&mut out);
         let text = out.join("\n");
         assert!(
-            text.contains("int64_t shape[CHELIS_MAX_DIM] = {0};"),
-            "the shape buffer must be the int64 extent carrier:\n{text}"
+            text.contains("int64_t *shape = (int64_t*)calloc("),
+            "the shape buffer must be dynamically sized for the requested rank:\n{text}"
         );
         let read = text
-            .find("int64_t dim = chelis_value_as_int64(")
-            .expect("the extent is read at int64");
+            .find("int64_t dim = chelis_host_scalar_as_i64(chelis_value_as_scalar(")
+            .expect("the extent is read from an exact tagged int64 scalar");
         let store = text
             .find("shape[i] = dim;")
             .expect("the extent is stored without a cast");
@@ -7905,6 +8210,10 @@ mod expression_dispatch_tests {
         assert!(
             !text.contains("2147483647LL"),
             "the int32 extent trap is dead with the cast it guarded:\n{text}"
+        );
+        assert!(
+            !text.contains("CHELIS_MAX_DIM"),
+            "reshape rank must not be capped by a fixed compatibility constant:\n{text}"
         );
         // The negative-extent guard is NOT dead: a negative dim is invalid
         // at every carrier width, so the widening must not have taken it

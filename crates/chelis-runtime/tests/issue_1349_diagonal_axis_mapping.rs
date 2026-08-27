@@ -21,7 +21,7 @@ use std::process::Command;
 
 use chelis_runtime::{
     chelis_alloc, chelis_free, chelis_tensor, chelis_tensor_diagonal, chelis_tensor_trace,
-    TensorElement, CHELIS_F32,
+    TensorElement, CHELIS_DTYPE_F32,
 };
 
 const CHILD_CASE_ENV: &str = "CHELIS_ISSUE_1349_CHILD_CASE";
@@ -31,7 +31,7 @@ const CHILD_CASE_ENV: &str = "CHELIS_ISSUE_1349_CHILD_CASE";
 /// small integer in f32.
 unsafe fn ramp_tensor_f32(shape: &[i64]) -> *mut chelis_tensor {
     unsafe {
-        let tensor = chelis_alloc(shape.len() as c_int, shape.as_ptr(), CHELIS_F32);
+        let tensor = chelis_alloc(shape.len() as c_int, shape.as_ptr(), CHELIS_DTYPE_F32);
         let data = f32::data_ptr_unchecked(tensor);
         let numel: i64 = shape.iter().product();
         for flat in 0..numel {
@@ -112,7 +112,13 @@ fn reference_trace(shape: &[i64], axis1: usize, axis2: usize) -> (Vec<i64>, Vec<
 }
 
 unsafe fn observed_shape(tensor: *const chelis_tensor) -> Vec<i64> {
-    unsafe { (&(*tensor).shape)[..(*tensor).ndim as usize].to_vec() }
+    // [05-OP-31]: rank zero has a null shape pointer, so read extents
+    // through the pointer only for the declared rank.
+    unsafe {
+        (0..(*tensor).rank as usize)
+            .map(|axis| *(*tensor).shape.as_ptr().add(axis))
+            .collect()
+    }
 }
 
 unsafe fn observed_values(tensor: *mut chelis_tensor) -> Vec<f32> {
@@ -150,9 +156,9 @@ fn sweep(shape: &[i64], trace: bool) {
         unsafe {
             let input = ramp_tensor_f32(shape);
             let out = if trace {
-                chelis_tensor_trace(input, axis1 as i64, axis2 as i64)
+                chelis_tensor_trace(input, axis1 as i32, axis2 as i32)
             } else {
-                chelis_tensor_diagonal(input, axis1 as i64, axis2 as i64)
+                chelis_tensor_diagonal(input, axis1 as i32, axis2 as i32)
             };
             let got_shape = observed_shape(out);
             let got_values = observed_values(out);

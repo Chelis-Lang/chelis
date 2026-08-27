@@ -804,100 +804,42 @@ y = sum(seq, cast(0, int32))
     );
 }
 
-/// #170: `trace` (= sum over the diagonal) must use the SAME stride-4 ILP
-/// f32 cascade as `RiscOp::Sum`, so `chelis trace` is bit-exact with
-/// `torch.trace` (== `torch.sum(diagonal)`). The 20-element diagonal below
-/// (torch.rand, manual_seed(7)) is longer than 16, so the cascade and the
-/// prior f32 left-fold differ by 1 ULP: torch trace = `0x4125e023`
-/// (10.367220878601074), the old left-fold = `0x4125e024`. Pinning the
-/// torch bit pattern catches a regression back to a left-fold (or to f64
-/// accumulation, which would also miss torch's f32 rounding).
+/// Trace is diagonal followed by [05-OP-30]'s canonical adjacent-pair tree.
+/// This cancellation sequence distinguishes it from both retired orders.
 #[test]
-fn host_runtime_trace_f32_matches_torch_stride4_cascade() {
-    // Diagonal values as f64 literals that round-trip to the same f32.
-    let diag: [f64; 20] = [
-        0.5349225401878357,
-        0.41317272186279297,
-        0.23315048217773438,
-        0.10808825492858887,
-        0.2942635416984558,
-        0.18491309881210327,
-        0.06628626585006714,
-        0.47317826747894287,
-        0.8760198354721069,
-        0.6712021827697754,
-        0.4092898368835449,
-        0.6157153248786926,
-        0.35706937313079834,
-        0.7855499386787415,
-        0.5738610625267029,
-        0.9782199859619141,
-        0.11917394399642944,
-        0.8441763520240784,
-        0.9919543266296387,
-        0.8370135426521301,
-    ];
-    // Build a 20x20 matrix whose diagonal is `diag` and off-diagonals are 0,
-    // so `trace` sums exactly `diag` in the same order torch does.
-    let mut m = vec![0.0_f64; 20 * 20];
+fn host_runtime_trace_f32_uses_canonical_balanced_tree() {
+    let diag = [1e20_f64, 1.0, -1e20_f64, 1.0, 1.0];
+    let mut m = vec![0.0_f64; 5 * 5];
     for (i, &v) in diag.iter().enumerate() {
-        m[i * 20 + i] = v;
+        m[i * 5 + i] = v;
     }
     let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![20, 20], m),
+        value: IrTensorValue::from_vec(vec![5, 5], m),
         precision: Prim::F32,
     };
     let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
     assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
-    // torch.trace bit pattern (stride-4 cascade in f32).
-    let torch_bits = 0x4125e023_u32;
-    let left_fold_bits = 0x4125e024_u32;
     assert_eq!(
         (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-        torch_bits,
-        "trace must be bit-exact with torch.trace (stride-4 cascade, #170); got {} (bits {:#x})",
-        out.value.to_f64_lossy_vec()[0],
-        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-    );
-    assert_ne!(
-        (out.value.to_f64_lossy_vec()[0] as f32).to_bits(),
-        left_fold_bits,
-        "regression: trace matches the old f32 left-fold value the cascade replaced (#170)",
+        1.0_f32.to_bits()
     );
 }
 
-/// #170 eval-vs-compiled parity (eval lane): the f64 `trace` eval reference
-/// sums the diagonal in the stride-4 cascade (it delegates to
-/// `tensor_reduce_host`, whose f64 `Sum` path is a cascade). The catastrophic
-/// diagonal `[2^53.., 1.0x18, -2^53..]` makes the cascade and a strict
-/// left-fold disagree dramatically: the cascade keeps the eighteen `1.0`s
-/// (`-> 12.0`, matching torch and the emitted f64 `sum`), the left-fold gives
-/// `0.0`. The matching compiled-lane assertion lives in `chelis-runtime`
-/// (`chelis_tensor_trace_f64_cascade_matches_eval_not_left_fold`); both lanes
-/// pin `12.0`, so `chelis eval` and the compiled binary agree.
+/// The f64 host lane uses the same canonical tree at f64 arithmetic width.
 #[test]
-fn host_runtime_trace_f64_matches_eval_cascade() {
-    let mut diag = vec![1e16_f64];
-    diag.extend(std::iter::repeat_n(1.0_f64, 18));
-    diag.push(-1e16_f64);
-    let k = diag.len(); // 20
-    let mut m = vec![0.0_f64; k * k];
+fn host_runtime_trace_f64_uses_canonical_balanced_tree() {
+    let diag = [1e300_f64, 1.0, -1e300_f64, 1.0, 1.0];
+    let mut m = vec![0.0_f64; 5 * 5];
     for (i, &v) in diag.iter().enumerate() {
-        m[i * k + i] = v;
+        m[i * 5 + i] = v;
     }
     let tensor = RuntimeTensorValue {
-        value: IrTensorValue::from_vec(vec![k, k], m),
+        value: IrTensorValue::from_vec(vec![5, 5], m),
         precision: Prim::F64,
     };
     let out = tensor_trace_value(&tensor, 0, 1).expect("trace must evaluate");
     assert_eq!(out.value.shape, Vec::<usize>::new(), "trace is a scalar");
-    assert_eq!(
-        out.value.to_f64_lossy_vec()[0],
-        12.0,
-        "f64 trace eval must use the stride-4 cascade (== compiled, == torch); \
-         got {}. A left-fold gives 0.0.",
-        out.value.to_f64_lossy_vec()[0],
-    );
+    assert_eq!(out.value.to_f64_lossy_vec()[0].to_bits(), 1.0_f64.to_bits());
 }
 
 /// #172 sibling (eval lane): windowed Max/Min DROP NaN — Rust `f64::max`/`min`
@@ -1013,6 +955,432 @@ fn host_runtime_einsum_f32_keeps_f64_accumulator_not_strict_f32() {
         vec![40.0_f64],
         "f32 einsum keeps the f64 eval accumulator (#170 decision); got {:?}",
         out.value.to_f64_lossy_vec()
+    );
+}
+
+#[test]
+fn host_runtime_einsum_accepts_the_legal_rank_zero_grammar() {
+    let lhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![], vec![2.0]),
+        precision: Prim::F32,
+    };
+    let rhs = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![], vec![3.0]),
+        precision: Prim::F32,
+    };
+    let output = tensor_einsum_value(",->", &lhs, &rhs).expect("rank-zero einsum is legal");
+    assert_eq!(output.value.shape, Vec::<usize>::new());
+    assert_eq!(output.value.to_f64_lossy_vec(), vec![6.0]);
+}
+
+/// A zero extent means zero elements wherever the zero sits, so both shapes
+/// below describe the same empty operand and the derived reduction count is
+/// zero for both. A left-to-right checked fold reaches `BIG * BIG` first,
+/// which is not an int64, and so accepted one permutation while rejecting the
+/// other. The C runtime holds the same invariant in
+/// `crates/chelis-runtime/tests/op33_int64_extent_domain.rs`.
+#[test]
+fn host_runtime_einsum_zero_extent_acceptance_does_not_depend_on_axis_order() {
+    const BIG: usize = 4_000_000_000;
+    // The zero's axis is the only difference between the two cases, and the
+    // equation names it, so diagnostics identify the case by equation rather
+    // than by Debug-printing the extents (faithful_observation.md B2.4: no
+    // third formatter in an observation exit surface).
+    for (shape, equation) in [
+        (vec![BIG, 0, BIG], "abc,def->b"),
+        (vec![BIG, BIG, 0], "abc,def->c"),
+    ] {
+        let operand = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(shape, Vec::new()),
+            precision: Prim::F32,
+        };
+        let output = tensor_einsum_value(equation, &operand, &operand)
+            .unwrap_or_else(|error| panic!("host einsum `{equation}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape,
+            vec![0],
+            "host einsum `{equation}` must produce an empty result"
+        );
+    }
+}
+
+/// [05-OP-33]: `diagonal` "keeps source axis order with the second axis
+/// removed", so its output holds one coordinate per RETAINED source axis and
+/// the diagonal's own coordinate sits at axis1's position AFTER that removal.
+/// Reading that vector at the SOURCE axis number picked up a neighbouring
+/// axis's coordinate and panicked when axis1 was the last source axis, and the
+/// remaining coordinates were not shifted past the slot the diagonal occupies.
+/// `trace` then has to reduce the axis the diagonal was written into, which
+/// `min(axis1, axis2)` names only for an adjacent pair.
+///
+/// Every expectation is the closed form of the ramp `in[i][j][k] = 4i + 2j + k`
+/// evaluated at the coordinates the atom names. The C runtime holds the same
+/// invariants in `crates/chelis-runtime/tests/op33_diagonal_axis_mapping.rs`;
+/// this is the host lane's half, and the two lanes agreeing is the point:
+/// before this repair they were bug-compatible, so eval-vs-C parity was green
+/// on a wrong answer.
+#[test]
+fn host_runtime_diagonal_and_trace_map_every_axis_pair_to_source_coordinates() {
+    let ramp = |shape: Vec<usize>| {
+        let count: usize = shape.iter().product();
+        RuntimeTensorValue {
+            value: IrTensorValue::from_vec(
+                shape,
+                (0..count).map(|index| index as f64).collect::<Vec<_>>(),
+            ),
+            precision: Prim::F32,
+        }
+    };
+
+    /// One axis-pair case: source shape, the two axes, and the output shape
+    /// and elements [05-OP-33] requires.
+    struct AxisPairCase {
+        label: &'static str,
+        shape: Vec<usize>,
+        axis1: i64,
+        axis2: i64,
+        out_shape: Vec<usize>,
+        elements: Vec<f64>,
+    }
+    let case =
+        |label, shape: Vec<usize>, axis1, axis2, out_shape: Vec<usize>, elements| AxisPairCase {
+            label,
+            shape,
+            axis1,
+            axis2,
+            out_shape,
+            elements,
+        };
+
+    let diagonal_cases = vec![
+        case("rank2-forward", vec![2, 2], 0, 1, vec![2], vec![0.0, 3.0]),
+        case("rank2-reversed", vec![2, 2], 1, 0, vec![2], vec![0.0, 3.0]),
+        case(
+            "rank2-negative-axes-reversed",
+            vec![2, 2],
+            -1,
+            -2,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        case(
+            "rank3-leading-pair",
+            vec![2, 2, 2],
+            0,
+            1,
+            vec![2, 2],
+            vec![0.0, 1.0, 6.0, 7.0],
+        ),
+        case(
+            "rank3-trailing-pair",
+            vec![2, 2, 2],
+            1,
+            2,
+            vec![2, 2],
+            vec![0.0, 3.0, 4.0, 7.0],
+        ),
+        case(
+            "rank3-straddling-forward",
+            vec![2, 2, 2],
+            0,
+            2,
+            vec![2, 2],
+            vec![0.0, 2.0, 5.0, 7.0],
+        ),
+        case(
+            "rank3-straddling-reversed",
+            vec![2, 2, 2],
+            2,
+            0,
+            vec![2, 2],
+            vec![0.0, 5.0, 2.0, 7.0],
+        ),
+        case(
+            "rank4-straddling-reversed",
+            vec![2, 2, 2, 2],
+            2,
+            0,
+            vec![2, 2, 2],
+            vec![0.0, 1.0, 10.0, 11.0, 4.0, 5.0, 14.0, 15.0],
+        ),
+        // Distinct extents everywhere, so a misrouted coordinate changes the
+        // OUTPUT SHAPE and not merely the values. `infer_diagonal_result_type`
+        // derives the declared type the same way, so a disagreement here is a
+        // checked type the interpreter does not honor.
+        case(
+            "rank4-distinct-extents-reversed",
+            vec![2, 3, 2, 5],
+            2,
+            0,
+            vec![3, 2, 5],
+            vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, 35.0, 36.0, 37.0, 38.0, 39.0, 10.0, 11.0, 12.0, 13.0,
+                14.0, 45.0, 46.0, 47.0, 48.0, 49.0, 20.0, 21.0, 22.0, 23.0, 24.0, 55.0, 56.0, 57.0,
+                58.0, 59.0,
+            ],
+        ),
+        case(
+            "non-square-forward",
+            vec![3, 2],
+            0,
+            1,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        case(
+            "non-square-reversed",
+            vec![3, 2],
+            1,
+            0,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        // A zero selected extent is deliberately absent here and present in
+        // the C runtime's sibling file, because the two lanes disagree on it
+        // and the host half is chelis#1347, not this repair. `tensor_numel`
+        // reports one element for a zero-extent shape, so `linear_to_indices`
+        // divides by that zero: `tensor_diagonal_value(shape [0, 3], 0, 1)`
+        // panics "attempt to calculate the remainder with a divisor of zero"
+        // at host_ops.rs, where `chelis_tensor_diagonal` returns the empty
+        // result [05-OP-33] owes. Nothing in this test's own repair touches
+        // that path.
+    ];
+    for probe in diagonal_cases {
+        let label = probe.label;
+        let output = tensor_diagonal_value(&ramp(probe.shape), probe.axis1, probe.axis2)
+            .unwrap_or_else(|error| panic!("host diagonal `{label}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape, probe.out_shape,
+            "host diagonal `{label}` output shape"
+        );
+        assert_eq!(
+            output.value.to_f64_lossy_vec(),
+            probe.elements,
+            "host diagonal `{label}` elements"
+        );
+    }
+
+    let trace_cases = vec![
+        case("rank2-forward", vec![2, 2], 0, 1, Vec::new(), vec![3.0]),
+        case("rank2-reversed", vec![2, 2], 1, 0, Vec::new(), vec![3.0]),
+        case(
+            "rank3-leading-pair",
+            vec![2, 2, 2],
+            0,
+            1,
+            vec![2],
+            vec![6.0, 8.0],
+        ),
+        case(
+            "rank3-leading-pair-reversed",
+            vec![2, 2, 2],
+            1,
+            0,
+            vec![2],
+            vec![6.0, 8.0],
+        ),
+        case(
+            "rank3-trailing-pair",
+            vec![2, 2, 2],
+            1,
+            2,
+            vec![2],
+            vec![3.0, 11.0],
+        ),
+        case(
+            "rank3-straddling-forward",
+            vec![2, 2, 2],
+            0,
+            2,
+            vec![2],
+            vec![5.0, 9.0],
+        ),
+        case(
+            "rank3-straddling-reversed",
+            vec![2, 2, 2],
+            2,
+            0,
+            vec![2],
+            vec![5.0, 9.0],
+        ),
+        case(
+            "rank4-straddling-reversed",
+            vec![2, 2, 2, 2],
+            2,
+            0,
+            vec![2, 2],
+            vec![10.0, 12.0, 18.0, 20.0],
+        ),
+        // `infer_trace_result_type` removes both source axes and declares
+        // [3, 5]; reducing the diagonal's axis 0 instead would yield [2, 5].
+        case(
+            "rank4-distinct-extents-reversed",
+            vec![2, 3, 2, 5],
+            2,
+            0,
+            vec![3, 5],
+            vec![
+                35.0, 37.0, 39.0, 41.0, 43.0, 55.0, 57.0, 59.0, 61.0, 63.0, 75.0, 77.0, 79.0, 81.0,
+                83.0,
+            ],
+        ),
+    ];
+    for probe in trace_cases {
+        let label = probe.label;
+        let output = tensor_trace_value(&ramp(probe.shape), probe.axis1, probe.axis2)
+            .unwrap_or_else(|error| panic!("host trace `{label}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape, probe.out_shape,
+            "host trace `{label}` output shape"
+        );
+        assert_eq!(
+            output.value.to_f64_lossy_vec(),
+            probe.elements,
+            "host trace `{label}` elements"
+        );
+    }
+}
+
+/// Negative parity for the case above: the axis domain still fails closed, and
+/// an equal pair is rejected whichever spelling produces it.
+#[test]
+fn host_runtime_diagonal_and_trace_reject_equal_and_out_of_range_axes() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![2, 2, 2], (0..8).map(|i| i as f64).collect()),
+        precision: Prim::F32,
+    };
+    for (label, axis1, axis2) in [
+        ("equal-axes", 1_i64, 1_i64),
+        ("equal-axes-normalized", 2, -1),
+        ("axis-out-of-range", 0, 3),
+        ("negative-axis-out-of-range", 0, -4),
+    ] {
+        assert!(
+            tensor_diagonal_value(&operand, axis1, axis2).is_err(),
+            "host diagonal `{label}` must be rejected"
+        );
+        assert!(
+            tensor_trace_value(&operand, axis1, axis2).is_err(),
+            "host trace `{label}` must be rejected"
+        );
+    }
+}
+
+/// An empty operand's axis decomposition is never read, and computing it
+/// anyway overflows `usize` on the prefix product or spins an empty loop. The
+/// C runtime holds the same invariant in
+/// `crates/chelis-runtime/tests/op33_empty_tensor_axis_decomposition.rs`; this
+/// is the host lane's half. The extents are chosen so the prefix product is
+/// `2^64` exactly.
+#[test]
+fn host_runtime_empty_operands_skip_their_axis_decomposition() {
+    const BIG: usize = 1 << 32;
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![BIG, BIG, 0], Vec::new()),
+        precision: Prim::F32,
+    };
+
+    let scanned = tensor_cumsum_value(&operand, 2).expect("empty cumsum must evaluate");
+    assert_eq!(scanned.value.shape, vec![BIG, BIG, 0]);
+    assert_eq!(scanned.value.len(), 0);
+
+    let sorted = tensor_sort_value(&operand, 2).expect("empty sort must evaluate");
+    // Diagnostics name the expectation rather than Debug-printing the value:
+    // this module is an observation exit surface, and
+    // faithful_observation.md B2.4 admits no third formatter.
+    match sorted {
+        RuntimeValue::Tuple(items) => {
+            assert_eq!(items.len(), 2, "sort must return two results");
+            for item in items {
+                match item {
+                    RuntimeValue::Tensor(tensor) => assert_eq!(tensor.value.len(), 0),
+                    _ => panic!("sort must return tensors"),
+                }
+            }
+        }
+        _ => panic!("sort must return a tuple"),
+    }
+}
+
+/// A zero extent means zero elements, so a host operation over one owes an
+/// empty result rather than a panic. `tensor_numel` used to clamp the count to
+/// one, which handed every caller a phantom element: `linear_to_indices` then
+/// divided by the zero extent, and the shorter paths built a `picks` vector one
+/// longer than the storage its own shape declares.
+///
+/// The C runtime returned the empty result correctly throughout, so each case
+/// below was also a lane divergence on a legal program (chelis#1347).
+#[test]
+fn host_runtime_zero_extent_operands_return_empty_results_rather_than_panicking() {
+    fn empty(shape: Vec<usize>) -> RuntimeTensorValue {
+        RuntimeTensorValue {
+            value: IrTensorValue::from_vec(shape, Vec::new()),
+            precision: Prim::F32,
+        }
+    }
+
+    // diagonal: the case that surfaced this, at both zero positions.
+    for (shape, axis1, axis2, expected) in [
+        (vec![0_usize, 3], 0_i64, 1_i64, vec![0_usize]),
+        (vec![3, 0], 0, 1, vec![0]),
+        (vec![2, 0, 3], 0, 2, vec![2, 0]),
+    ] {
+        let out = tensor_diagonal_value(&empty(shape.clone()), axis1, axis2)
+            .unwrap_or_else(|error| panic!("diagonal over a zero extent must evaluate: {error}"));
+        assert_eq!(out.value.shape, expected);
+        assert_eq!(out.value.len(), 0);
+    }
+
+    // trace reduces the diagonal, so it inherits the same path.
+    let traced = tensor_trace_value(&empty(vec![2, 0, 3]), 0, 2)
+        .unwrap_or_else(|error| panic!("trace over a zero extent must evaluate: {error}"));
+    assert_eq!(traced.value.shape, vec![0_usize]);
+    assert_eq!(traced.value.len(), 0);
+
+    // The count short-circuits a zero rather than folding past it, so the
+    // other extents never multiply. Exercised through the operation rather
+    // than the private helper: `diagonal` over axes (0, 1) of these shapes
+    // asks for the count of an output whose remaining extents would reach
+    // 2^64 before reaching the trailing zero.
+    const BIG: usize = 1 << 32;
+    for shape in [
+        vec![BIG, BIG, BIG, 0],
+        vec![BIG, BIG, 0, BIG],
+        vec![0, BIG, BIG, BIG],
+    ] {
+        let out = tensor_diagonal_value(&empty(shape.clone()), 0, 1)
+            .unwrap_or_else(|error| panic!("diagonal over a huge empty shape: {error}"));
+        assert_eq!(out.value.len(), 0);
+        assert!(
+            out.value.shape.contains(&0),
+            "an empty operand owes an empty result"
+        );
+    }
+}
+
+#[test]
+fn host_runtime_einsum_rejects_non_lowercase_labels() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1], vec![1.0]),
+        precision: Prim::F32,
+    };
+    for equation in ["I,I->", "_,i->"] {
+        assert!(
+            tensor_einsum_value(equation, &operand, &operand).is_err(),
+            "host einsum accepted non-lowercase equation `{equation}`"
+        );
+    }
+}
+
+#[test]
+fn host_runtime_einsum_rejects_duplicate_output_labels() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![1], vec![1.0]),
+        precision: Prim::F32,
+    };
+    assert!(
+        tensor_einsum_value("i,i->ii", &operand, &operand).is_err(),
+        "host einsum accepted a duplicate output label"
     );
 }
 

@@ -162,16 +162,16 @@ impl HostAbiType {
             Self::Tensor(_) => Some("chelis_tensor*"),
             Self::MappedFile => Some("chelis_mapped_file*"),
             Self::Option(inner) => match inner.as_ref() {
-                Self::Int64 => Some("chelis_option_i64"),
-                Self::Float64 => Some("chelis_option_f64"),
                 Self::Int8
                 | Self::Int16
                 | Self::Int32
+                | Self::Int64
                 | Self::Float16
                 | Self::BFloat16
                 | Self::Float32
-                | Self::Bool
-                | Self::String
+                | Self::Float64
+                | Self::Bool => Some("chelis_option_scalar"),
+                Self::String
                 | Self::Callback(_, _)
                 | Self::Adt(_, _)
                 | Self::List(_)

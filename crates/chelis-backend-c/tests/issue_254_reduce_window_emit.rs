@@ -85,7 +85,7 @@ fn issue254_emit_reduce_window_sum_uses_plus_equals() {
     let dag = build_dag(ReduceWindowKind::Sum);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += t"),
+        src.contains("acc += ((const float*)t"),
         "Sum emit must use `acc += ...`, got:\n{src}"
     );
     assert!(
@@ -105,7 +105,7 @@ fn issue254_emit_reduce_window_mean_divides_by_window_volume() {
     let dag = build_dag(ReduceWindowKind::Mean);
     let src = codegen(&dag, "kernel").unwrap().c_source;
     assert!(
-        src.contains("acc += t"),
+        src.contains("acc += ((const float*)t"),
         "Mean emit must combine with sum, got:\n{src}"
     );
     // Window volume = 2 * 2 = 4.
