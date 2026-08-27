@@ -1302,6 +1302,62 @@ fn host_runtime_empty_operands_skip_their_axis_decomposition() {
     }
 }
 
+/// A zero extent means zero elements, so a host operation over one owes an
+/// empty result rather than a panic. `tensor_numel` used to clamp the count to
+/// one, which handed every caller a phantom element: `linear_to_indices` then
+/// divided by the zero extent, and the shorter paths built a `picks` vector one
+/// longer than the storage its own shape declares.
+///
+/// The C runtime returned the empty result correctly throughout, so each case
+/// below was also a lane divergence on a legal program (chelis#1347).
+#[test]
+fn host_runtime_zero_extent_operands_return_empty_results_rather_than_panicking() {
+    fn empty(shape: Vec<usize>) -> RuntimeTensorValue {
+        RuntimeTensorValue {
+            value: IrTensorValue::from_vec(shape, Vec::new()),
+            precision: Prim::F32,
+        }
+    }
+
+    // diagonal: the case that surfaced this, at both zero positions.
+    for (shape, axis1, axis2, expected) in [
+        (vec![0_usize, 3], 0_i64, 1_i64, vec![0_usize]),
+        (vec![3, 0], 0, 1, vec![0]),
+        (vec![2, 0, 3], 0, 2, vec![2, 0]),
+    ] {
+        let out = tensor_diagonal_value(&empty(shape.clone()), axis1, axis2)
+            .unwrap_or_else(|error| panic!("diagonal over a zero extent must evaluate: {error}"));
+        assert_eq!(out.value.shape, expected);
+        assert_eq!(out.value.len(), 0);
+    }
+
+    // trace reduces the diagonal, so it inherits the same path.
+    let traced = tensor_trace_value(&empty(vec![2, 0, 3]), 0, 2)
+        .unwrap_or_else(|error| panic!("trace over a zero extent must evaluate: {error}"));
+    assert_eq!(traced.value.shape, vec![0_usize]);
+    assert_eq!(traced.value.len(), 0);
+
+    // The count short-circuits a zero rather than folding past it, so the
+    // other extents never multiply. Exercised through the operation rather
+    // than the private helper: `diagonal` over axes (0, 1) of these shapes
+    // asks for the count of an output whose remaining extents would reach
+    // 2^64 before reaching the trailing zero.
+    const BIG: usize = 1 << 32;
+    for shape in [
+        vec![BIG, BIG, BIG, 0],
+        vec![BIG, BIG, 0, BIG],
+        vec![0, BIG, BIG, BIG],
+    ] {
+        let out = tensor_diagonal_value(&empty(shape.clone()), 0, 1)
+            .unwrap_or_else(|error| panic!("diagonal over a huge empty shape: {error}"));
+        assert_eq!(out.value.len(), 0);
+        assert!(
+            out.value.shape.contains(&0),
+            "an empty operand owes an empty result"
+        );
+    }
+}
+
 #[test]
 fn host_runtime_einsum_rejects_non_lowercase_labels() {
     let operand = RuntimeTensorValue {

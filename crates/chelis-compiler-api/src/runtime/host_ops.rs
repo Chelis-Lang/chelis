@@ -1356,8 +1356,24 @@ fn pad_rows(
     }
 }
 
+/// Element count for a host shape.
+///
+/// A zero extent means zero elements ([05-OP-33]), and the answer does not
+/// depend on where the zero sits, so it short-circuits rather than folding
+/// past it: `[2^32, 2^32, 0]` reaches `2^64` before it reaches the zero.
+/// `chelis-ir`'s `numel` holds the same contract.
+///
+/// The `.max(1)` this replaces read as the rank-zero convention, but
+/// `[].iter().product()` is already one, so the clamp only ever fired on a
+/// zero-containing shape, where it fabricated an element that does not exist.
+/// Callers use the count as a `0..n` bound over an output buffer, so that
+/// phantom element drove `linear_to_indices` into `linear % 0`, or produced a
+/// `picks` vector one longer than the storage its shape declares.
 fn tensor_numel(shape: &[usize]) -> usize {
-    shape.iter().product::<usize>().max(1)
+    if shape.contains(&0) {
+        return 0;
+    }
+    shape.iter().product()
 }
 
 fn linear_to_indices(mut linear: usize, shape: &[usize]) -> Vec<usize> {
