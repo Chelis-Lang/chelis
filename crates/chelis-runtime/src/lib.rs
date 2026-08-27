@@ -3326,6 +3326,20 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
     }
     let out = chelis_alloc((*tensor).ndim - 1, out_shape.as_ptr(), dtype.id());
     let elem_size = tensor_elem_size(dtype);
+    // chelis#1349: `out_index` holds one coordinate per retained OUTPUT
+    // axis, so the diagonal's own coordinate lives at `axis1_i`'s position
+    // after `axis2_i` is removed, which is one slot earlier whenever
+    // `axis2_i < axis1_i`. Indexing by the source axis number read a stale
+    // slot for `axis1_i == rank - 1` and, together with a reconstruction
+    // walk that never consumed the diagonal's slot, handed later source
+    // axes a coordinate belonging to a different axis (an out-of-bounds
+    // heap read whenever that coordinate's range exceeds the diagonal
+    // extent).
+    let diag_out_axis = if axis2_i < axis1_i {
+        axis1_i - 1
+    } else {
+        axis1_i
+    };
     let mut out_index = [0; CHELIS_MAX_DIM];
     let mut src_index = [0; CHELIS_MAX_DIM];
     for linear in 0..(*out).size {
@@ -3335,14 +3349,20 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
             (*out).ndim,
             out_index.as_mut_ptr(),
         );
-        let diag_idx = out_index[axis1_i];
+        let diag_idx = out_index[diag_out_axis];
         let mut out_pos = 0usize;
         for (i, src_slot) in src_index
             .iter_mut()
             .enumerate()
             .take((*tensor).ndim as usize)
         {
-            if i == axis1_i || i == axis2_i {
+            if i == axis1_i {
+                // `axis1_i` keeps an output slot (the diagonal's own), so
+                // the walk must consume it.
+                *src_slot = diag_idx;
+                out_pos += 1;
+            } else if i == axis2_i {
+                // `axis2_i` was removed from the output; nothing to consume.
                 *src_slot = diag_idx;
             } else {
                 *src_slot = out_index[out_pos];
@@ -3369,9 +3389,21 @@ pub unsafe extern "C" fn chelis_tensor_trace(
     axis1: i64,
     axis2: i64,
 ) -> *mut chelis_tensor {
-    let diag = chelis_tensor_diagonal(tensor, axis1, axis2);
+    let axis1_i = tensor_normalize_axis(tensor, axis1, "trace");
+    let axis2_i = tensor_normalize_axis(tensor, axis2, "trace");
+    let diag = chelis_tensor_diagonal(tensor, axis1_i as i64, axis2_i as i64);
     let dtype = tensor_dtype(diag, "trace diagonal");
-    let reduce_axis = axis1.min(axis2) as usize;
+    // chelis#1349: the diagonal occupies output slot `axis1_i - 1` when
+    // `axis2_i < axis1_i`, else `axis1_i` (see `chelis_tensor_diagonal`),
+    // and that slot is the axis trace must reduce so both source axes are
+    // removed. `min(axis1, axis2)` named it only for `axis1 < axis2` and
+    // for adjacent reversed pairs; elsewhere it reduced a retained axis
+    // and produced a shape the checker never declared.
+    let reduce_axis = if axis2_i < axis1_i {
+        axis1_i - 1
+    } else {
+        axis1_i
+    };
     let axis_size = (*diag).shape[reduce_axis] as usize;
     let mut out_shape = [0; CHELIS_MAX_DIM];
     let mut pos = 0usize;
