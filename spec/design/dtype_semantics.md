@@ -867,10 +867,10 @@ Deliverables, with phase homes:
 
    The foundation enforces that landing rule for every new or changed identity
    while the remaining migration proceeds. The primary baseline currently has
-   180 active legacy rows: 39 grandfather seams, three exact #1149 successors,
-   137 permanent plain rows, and the obsolete prelude `Json` row. Its 18 exact
-   nonnumeric rows and `chelis_tensor_shape` have final authority and no legacy
-   disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
+   119 active legacy rows: 21 grandfather seams, 97 permanent plain rows, and
+   the obsolete prelude `Json` row. Its 18 exact nonnumeric rows, its eight
+   tagged-carrier declarations, and its 34 registered numeric operations have
+   final authority and no legacy disposition. The 84 wire and 17 binding baseline rows remain sealed legacy
    cohorts; Count's wire field is separately final-registered. These counts are
    progress evidence, not the zero-exception completion oracle.
 

@@ -56,7 +56,7 @@ FROZEN_FILE_DIGESTS = {
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "fbdbca01e5bd5c4df4ad3b8d8f54ae13b7fb52009635a3c4ec80beec98a191d5"
+        "ea9ad8f67f645ff5b835a83c0a18290a4bc7336c9022af2386ebcbee75a5fb78"
     ),
     "spec/06-transformations.md": (
         "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "2d2e541162f2458cbc83c78c8951239ea0ee348455020fd982fc439a43f0155e"
+        "7384f828ce1564c6a1280d95ce1d8fcfc9ab0a6b053a886fac5f922aa3a3b4d4"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -373,7 +373,7 @@ FROZEN_ATOM_DIGESTS = {
     "05-OP-30": "30c8c04f547161b7c40cbe5659a0c5fee34102f34a6fc605bcde8740221b461b",
     "05-OP-31": "31e1d9d5be4b12496c6a5f9d3ee3cd8f134d9868e2c0e526bb36dea97b813538",
     "05-OP-32": "e8102df69288ef68e023b236ef6e74bd82b327b50fd94f9aa9880cc6c8dfdeeb",
-    "05-OP-33": "fc529223469d814e4b9964bd95e721cd1ceabdd2033e8cbddb9e36151eb72ee1",
+    "05-OP-33": "b0c9cf420f89f9c4c74219a41e55fd2bd36619bba25989a3d06a302424764fca",
     "05-OP-34": "0d2c7d4a051a43dc6b0c93b241434ff1d66bbd7a3e6d47e5c74b669d2fd687bf",
     "05-OP-35": "6eb9a0e1023aeed6dcf43abe8623a9b94dcb38db15224f38915320108c276ef7",
     "05-OP-36": "aeaaf9888f922b31159b8b7536444603897d649c8fb477e77bda659346177ab4",
@@ -395,7 +395,7 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "1b13effce22cc367b9a1e27525e26e049926f2cb9cd6156c4715babc3e3d888f",
+        "38d25ae7156389328f184eff98065d6cec7fbe9203d4a85d65f234b11caf22fe",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
