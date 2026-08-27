@@ -747,7 +747,27 @@ pub struct VarGen {
     next_rvar: u32,
 }
 
+/// The next fresh identifier in each solver-variable class.
+///
+/// Level transitions record these watermarks instead of attaching a level to
+/// every variable. A variable's mint level is therefore the final transition
+/// whose corresponding watermark is no greater than its identifier.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VarWatermarks {
+    pub(crate) next_tvar: u32,
+    pub(crate) next_dvar: u32,
+    pub(crate) next_rvar: u32,
+}
+
 impl VarGen {
+    pub(crate) fn watermarks(&self) -> VarWatermarks {
+        VarWatermarks {
+            next_tvar: self.next_tvar,
+            next_dvar: self.next_dvar,
+            next_rvar: self.next_rvar,
+        }
+    }
+
     pub fn fresh_tvar(&mut self) -> TypeVar {
         let v = TypeVar(self.next_tvar);
         self.next_tvar += 1;

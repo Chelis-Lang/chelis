@@ -428,14 +428,71 @@ context once, groups batch-eligible test files into a suite batch, compiles that
 once, and evaluates every selected test root from the shared handle. Files with top-level
 module-init bindings or top-level name collisions use the per-file worker path instead.
 
-If the batch worker crashes, times out, or cannot produce complete ordered rows, the
-parent falls back to the existing per-file subprocess workers for that batch. Plain text
-and NDJSON output remain deterministic in discovery order. Use `--batch-mode file` to
-force per-file workers while debugging. `--jobs auto` still caps worker concurrency on
-paths that use file workers.
-
 If the shared package context fails to compile, `chelis test` fails fast and does not fan
 out identical per-worker errors.
+
+#### What counts as a top-level name collision
+
+The batch merges every batched file's flattened declarations into one compilation unit,
+so the batch has a single top-level scope. A collision is therefore any way two batched
+files can disagree about what one name means, not only two declarations of it:
+
+- two files declare the same name (including ADT variant constructors, which share one
+  namespace in the merged unit);
+- one file declares a name that another file explicitly imported, in either order. This
+  is the same defect either way round: the merged unit resolves the import to the
+  sibling's declaration, so a file is recompiled against a binding it never asked for
+  (chelis#1261);
+- two files import the same name from different modules;
+- a file carries a wildcard import, whose name set the runner cannot enumerate without
+  resolving the package graph, so it cannot prove no sibling declaration captures one of
+  those names.
+
+Importing the same name from the same module is agreement, not collision, and must not
+demote either file: nearly every suite shares one assertion helper import, and demoting
+on that would delete the batch path entirely. A file that repeats a name internally
+(a `sig` beside its `def`) is likewise not colliding with itself.
+
+The parent's eligibility classifier and the batch worker's own duplicate guard admit
+files through one shared rule. A worker guard stricter than the classifier rejects
+manifests the parent already built, which surfaces only as an unexplained fallback.
+
+Demotion is the sanctioned per-file path, not a degradation, and is not reported by
+default: `--batch-mode file` produces the same rows and the same exit code. The reason is
+computed anyway, so it is available on demand. Setting `CHELIS_TEST_EXPLAIN_BATCHING=1`
+prints one stderr line per demoted file naming the collision (or the read, parse,
+enumeration, or module-init reason). Without it, a maintainer whose suite quietly lost the
+batch path has to bisect the colliding names by hand.
+
+#### Reporting an abandoned batch
+
+If the batch worker cannot be run, crashes, times out, or exits without a usable row set,
+the parent falls back to the existing per-file subprocess workers for that batch. The
+runner is also total against a worker that returns rows it cannot attribute, though no
+current worker path reaches that state; the `status` table below marks which triggers are
+reachable. Plain text and NDJSON output remain deterministic in discovery order. Use
+`--batch-mode file` to force per-file workers while debugging. `--jobs auto` still caps
+worker concurrency on paths that use file workers.
+
+An abandoned batch is a degraded execution mode and must be reported on every channel a
+reader might be capturing, naming the reason and every file the batch had claimed. The
+batch worker's stderr is inherited rather than captured, so any diagnostic it emitted is
+already on the terminal; without an attributed note from the parent it is an orphan line
+that no reader can tie to a file, to the batch, or to the fact that batching was dropped
+at all (chelis#1261). Three channels carry it:
+
+- **stderr**, in every mode: the attributed note with the reason and the file list.
+- **plain stdout**, on the summary line: ` (batch abandoned: ran per-file)`. A CI job
+  that captures only stdout is the common shape, and without this it reads a degraded run
+  as identical to a clean one. A clean run's summary line is unchanged, and the
+  supervisor's summary parser sees through the marker.
+- **`--json` stdout**: the record and summary flag described below.
+
+The exit code stays keyed to test outcomes: every selected test still ran, and a
+fallback is not a test failure. The report is what carries the degradation, which is why
+the summary gains a marker rather than the exit code gaining a state. A consumer that
+reads only the summary can still tell a clean batched run from a fallback run, so
+"perfect success" remains distinguishable from "perfect results, degraded path".
 
 ### Machine-readable output with `--json`
 
@@ -451,6 +508,43 @@ $ chelis test tests/ --json
 
 Failing rows carry an additional `"message"` field with the assertion's label and
 expected/got values (e.g. `"assert failed: assert_close (double(1.5) ~ 3.0): expected 3.01, got 3, tol 0.000001"`).
+
+An abandoned suite batch adds one `batch_fallback` record ahead of the rows, and one
+`batch_fallback` flag on the summary. Both additions are additive: the record is a new
+top-level record kind beside the existing `suite` record, and the summary field is absent
+unless a batch was abandoned, so the bytes a consumer parses today are unchanged.
+
+```text
+$ chelis test tests/ --json
+{"batch_fallback":{"files":["tests/a.ch","tests/b.ch"],"message":"batch worker exited with status 2","status":"worker-failed"}}
+{"file":"tests/a.ch","test":"test_one","status":"pass"}
+{"file":"tests/b.ch","test":"test_two","status":"pass"}
+{"summary":{"passed":2,"failed":0,"batch_fallback":true}}
+```
+
+`message` is the human sentence and `files` lists the batch's files in discovery order.
+The record appears once per run, because the runner attempts at most one batch. The
+incomplete-suite renderer emits only rows, verdicts, and its own `suite` record, so a run
+that also hit the suite deadline reports the deadline rather than the fallback, and drops
+the plain-summary marker with it. The human note still reaches the operator there,
+because leader stderr is forwarded verbatim.
+
+`status` is one of five values, three of which a user can currently reach:
+
+| `status` | reachable | trigger |
+|---|---|---|
+| `worker-unavailable` | yes | the runner could not spawn or drive the batch worker process |
+| `timeout` | yes | the worker outlived the derived batch window and was terminated |
+| `worker-failed` | yes | the worker exited nonzero without a usable row set, or died on a signal |
+| `malformed-output` | defensive | a worker stdout line that is not a well-formed row record |
+| `incomplete-rows` | defensive | a complete-looking row set that does not match the batch manifest |
+
+The two defensive branches have no reachable trigger today: the worker's only stdout
+writer emits well-formed rows, and every row-losing path kills the worker first, so
+`worker-failed` wins the race. They stay because the parser and the row-attribution step
+must still be total, and a future worker change could reach either. `status` is a closed
+vocabulary regardless of reachability, pinned by an exhaustive unit test rather than by a
+CLI test that cannot construct the unreachable cases.
 
 ### Expected-failure files
 

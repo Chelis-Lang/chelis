@@ -3,7 +3,7 @@
 Status: SIGNED OFF by the Beacon shell agent (`Chelis-Lang/beacon`,
 `~/Documents/scratch/beacon-bakeoff`) with one correction to ① (recorded
 below). Surfaces 1, 3, 4 confirmed usable as shipped; surface 2 (`IrHandle`)
-is now frozen at the hash-addressed `WireDag` v1 shape the correction
+is now frozen at the hash-addressed exact-version `WireDag` v6 shape the correction
 specified, and WI-3 populates against it.
 
 The verification-stack dispatch layer (WI-3 graph-extraction producer, WI-9
@@ -39,7 +39,7 @@ impl Goal {
 
 ```rust
 pub struct IrHandle {                  // private fields
-    dag_hash: Option<String>,          // lowercase-hex sha256 of the serialized WireDag v1 bytes
+    dag_hash: Option<String>,          // lowercase-hex sha256 of the serialized WireDag v6 bytes
     root_index: Option<u64>,           // which WireDag.roots entry the goal's output selects
 }
 
@@ -54,24 +54,22 @@ impl IrHandle {
 
 **① RESOLVED.** Beacon's sign-off corrected the default assumption: Beacon does
 not consume a `node: u64` index, nor a borrow of an in-memory `chelis_ir::Dag`.
-It consumes the SERIALIZED `WireDag` v1 JSON bytes out of process: it parses the
-slice, asserts `schema_version == 1`, computes a sha256 over those bytes, and
+It consumes the SERIALIZED exact-version `WireDag` v6 JSON bytes out of process:
+it parses the slice, asserts `schema_version == 6`, validates the complete
+cross-node wire contract, computes a sha256 over those bytes, and
 selects the output by `root_index`. So `IrHandle` addresses that artifact by its
 content hash (lowercase hex) plus a root index, NOT by a node id.
 
-**① SUPERSEDED IN PART (schema version only).** The `schema_version == 1`
-equality above is sign-off-era history: it recorded the contract when
-`WIRE_DAG_SCHEMA_VERSION` was `1`. The wire schema is now `3` (`Reshape` carries
-`WireRtDim` extents, chelis#616), and Beacon does not assert equality with any
-single version: it accepts the supported set `[1, 2, 3]`, forward-compatible
-downward via additive defaults and fail-closed above the constant (beacon#54).
-The fail-closed posture ① froze is unchanged and `IrHandle`'s shape is
-untouched; only the accepted set widened.
+The version requirement is exact. Missing, older, and future schema versions
+are rejected before any `WireRiscOp` is decoded; there is no compatibility
+reader. `IrHandle`'s hash-plus-index shape remains independent of the schema
+payload it addresses.
 
 `IrHandle` still holds only a hash + index: it does NOT carry a `chelis_ir::Dag`
 or a `WireDag` value, so populating it pulls no live IR dependency into
 `chelis-prove`'s public API. The WI-3 producer (which DOES have the IR in scope)
-serializes the `WireDag` v1, validates its `schema_version` at the producer
+serializes the exact-version `WireDag` v6, validates its version and complete
+cross-node contract at the producer
 boundary, hashes the bytes, and hands the digest + root index here via
 `from_wire_dag`. A bare `from_node(u64)` is removed: it addressed nothing a
 cross-process consumer could resolve.

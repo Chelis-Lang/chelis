@@ -7,10 +7,12 @@
     { "number": 759, "kind": "issue", "state": "open" },
     { "number": 829, "kind": "issue", "state": "open" },
     { "number": 879, "kind": "issue", "state": "open" },
+    { "number": 912, "kind": "issue", "state": "open" },
     { "number": 951, "kind": "issue", "state": "open" },
     { "number": 1058, "kind": "issue", "state": "open" },
     { "number": 1059, "kind": "issue", "state": "open" },
     { "number": 1138, "kind": "issue", "state": "open" },
-    { "number": 1192, "kind": "issue", "state": "open" }
+    { "number": 1192, "kind": "issue", "state": "open" },
+    { "number": 1291, "kind": "issue", "state": "open" }
   ]
 }

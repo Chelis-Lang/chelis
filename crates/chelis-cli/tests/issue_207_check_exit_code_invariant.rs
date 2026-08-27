@@ -195,8 +195,8 @@ fn issue_207_invariant_holds_across_error_categories() {
         ),
         (
             "dm",
-            "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-             def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+            "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+             def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
             "DimensionMismatch",
         ),
         (
@@ -229,6 +229,18 @@ fn issue_207_invariant_holds_across_error_categories() {
             assert!(
                 has_kind,
                 "category {tag} expected kind {expected_kind}; stdout={stdout}"
+            );
+        }
+        if *tag == "dm" {
+            let has_type_mismatch = errors.iter().any(|error| {
+                error
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind == "TypeMismatch")
+            });
+            assert!(
+                !has_type_mismatch,
+                "DimensionMismatch fixture must not include an unrelated trace return TypeMismatch; stdout={stdout}"
             );
         }
         assert_eq!(

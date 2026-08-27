@@ -276,7 +276,7 @@ fn positional_reduce_on_sole_spread_rejected() {
         check_json("def bad(x: &tensor[..r, f32]) -> tensor[..r, f32] = sum(x, cast(0, int32))\n");
     assert_rejected_with(
         &json,
-        "positional integer axis",
+        "positional axes require a concrete-rank operand",
         "positional sum on a sole ..r spread",
     );
 }

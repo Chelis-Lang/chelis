@@ -109,6 +109,7 @@ fn unresolved_callee_markers_are_rejected_at_projection_in_both_positions() {
         program.globals.push(HostBinding {
             name: "probe".into(),
             display_name: None,
+            display_roots: Vec::new(),
             ty: ConcreteHostType::Scalar(Prim::Int32),
             value: HostExpr::new(kind),
         });

@@ -24,9 +24,10 @@ use crate::dag::{
 use chelis_types::dtype_semantics::{
     ArgReduceOp, CheckedCastPlan, CompareOp, FloatBinOp, FloatUnOp, IndexedTrapCandidate, IntBinOp,
     IntUnOp, RawTensor, ReduceWindowGradOp, TensorReduceOp, TensorStorage,
-    arg_reduce_tensor_groups, compare_tensors, finalize_tensor, float_tensor_binop,
-    float_tensor_unop, int_tensor_binop, int_tensor_unop, integer_is_exactly_representable,
-    reduce_tensor_groups, reduce_window_grad_tensor_groups, tensor_from_scalars, uniform_sample,
+    arg_reduce_tensor_groups, compare_tensors, count_tensor_groups, finalize_tensor,
+    float_tensor_binop, float_tensor_unop, int_tensor_binop, int_tensor_unop,
+    integer_is_exactly_representable, reduce_tensor_groups, reduce_window_grad_tensor_groups,
+    tensor_from_scalars, uniform_sample,
 };
 use chelis_types::types::Prim;
 
@@ -1103,6 +1104,43 @@ fn reduce_argcmp(input: &TensorValue, axis: usize, op: ArgReduceOp) -> Result<Te
     Ok(TensorValue::from_storage(out_shape, storage))
 }
 
+/// [05-OP-29] multi-axis bool count. Source elements are partitioned into
+/// result groups by removing the selected coordinates. Each group is filled
+/// by scanning the input in its original row-major order. Arithmetic and the
+/// canonical adjacent-pair checked-int64 tree live only in the typed kernel.
+pub fn count_tensor(input: &TensorValue, axes: &[usize]) -> Result<TensorValue, String> {
+    if axes.is_empty()
+        || axes.iter().any(|&axis| axis >= input.shape.len())
+        || axes.windows(2).any(|pair| pair[0] <= pair[1])
+    {
+        return Err(format!(
+            "count axes must be non-empty, unique, in range, and strictly descending; got {axes:?}"
+        ));
+    }
+
+    let selected: HashSet<usize> = axes.iter().copied().collect();
+    let out_shape: Vec<usize> = input
+        .shape
+        .iter()
+        .enumerate()
+        .filter_map(|(axis, &extent)| (!selected.contains(&axis)).then_some(extent))
+        .collect();
+    let mut groups = vec![Vec::<usize>::new(); numel(&out_shape)];
+    for flat in 0..input.len() {
+        let input_coord = linear_to_index(flat, &input.shape);
+        let output_coord: Vec<usize> = input_coord
+            .iter()
+            .enumerate()
+            .filter_map(|(axis, &coord)| (!selected.contains(&axis)).then_some(coord))
+            .collect();
+        let group = index_to_linear(&output_coord, &out_shape);
+        groups[group].push(flat);
+    }
+    let storage =
+        count_tensor_groups(input.storage(), &groups).map_err(|error| error.to_string())?;
+    Ok(TensorValue::from_storage(out_shape, storage))
+}
+
 fn reshape(input: &TensorValue, shape: Vec<usize>) -> TensorValue {
     assert_eq!(input.len(), numel(&shape));
     // reuse_* contract: reshape is element-preserving (section C3); the
@@ -2047,6 +2085,7 @@ where
                     result: out_prim,
                 },
             )?,
+            RiscOp::Count { axes } => count_tensor(&values[&node.inputs[0]], axes)?,
             RiscOp::MaxReduce { axis } => {
                 reduce(&values[&node.inputs[0]], *axis, TensorReduceOp::MaxReduce)?
             }

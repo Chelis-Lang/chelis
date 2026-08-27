@@ -23,7 +23,7 @@ The plan set: [`dtype_semantics.md`](dtype_semantics.md) ([#729]), [`loud_unsupp
 | [#727] no dtype's semantics enforced at any single point ([#695] = its integer instance) | [`dtype_semantics.md`](dtype_semantics.md) - per-dtype finalizer behind private constructors, int/float kernel split, one storage decision, generated backend dispatch | [#729] |
 | [#703] unsupported cases substitute values instead of failing | [`loud_unsupported.md`](loud_unsupported.md) - Result-typed failure channels, the census sweep, dependency-bottom closed identities, fail-closed HostType/ABI states, structured emission, gates demoted to UX, and (2026-07-30) §C7 ratchet totality: derived-universe guards including Python/C consumers, typed/live exclusion authority with review-owned relevance, the typed kind/authority channel, and a non-shippable mutation-based panic-surfacing oracle | [#730] |
 | [#709] unrecognized constructs silently exempt from checking (+[#710]'s silent half) | [`checker_totality.md`](checker_totality.md) - loud wildcard + handle-effect case, ErrorWitness token (silent Type::Error unconstructible), totality invariant, DeepTag exhaustiveness | [#731] |
-| [#728] the observation channel is not dtype-faithful | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] |
+| [#728] the observation channel is not dtype-faithful (**CLOSED 2026-08-21**) | [`faithful_observation.md`](faithful_observation.md) - one Rust formatter, generated C print helper, round-trip invariant, tolerance table; landable before [#729]; unblocks [#687] | [#732] (**CLOSED 2026-08-21**, on its own stated condition; [#728] closed with it) |
 | spec silence + stale claims ([#694]; the unauthored cells) | [`spec_provenance.md`](spec_provenance.md) - OpenSpec plans changes after Phase 0 activation, while a pinned Buoy shell and one-way Chelis adapter provide repository-independent authority, freshness, coverage, and impact enforcement; design/fixtures may proceed now, advisory execution waits for Buoy's final oracle, and blocking waits for the adapter and Chelis configuration oracles | [#733] |
 
 This map is scoped to the 2026-07 numeric audit's plan set and stays that way.
@@ -42,7 +42,7 @@ issue that took it:
 | [#730] makes callable rejections loud and explicitly non-goals making them WORK ("that is [#729]'s or an op-owner's work"), so a C-host function-value ABI has no owner anywhere in the five | [#909] ([#866], [#867], [#879]). [#868] sits in [#883]'s subtree with the rest of the span work; section C2 remains [#730]'s contract, and the parent link records where the fix lands |
 | [#729] seals numeric construction behind private Rust constructors. It has no reach into the C runtime, where `chelis_tensor.data` is a `pub` untyped `*mut u8`; Phases 0-4 never touch it | [#893] ([#899], [#889]). [#892]'s bool storage still rides [#729]'s v0.19 cut |
 | [#730] section C2 declares the diagnostic span normative and [#731] owns checker diagnostics, but neither has a phase that threads one: `Unsupported::with_span` has zero call sites and `CheckError::with_span_id` has none outside its own builder test | [#883] ([#868], [#886], [#916], [#1172]). [#730] section C2 keeps the span *contract*; the sub-issue links say where the *fix* lands |
-| [05-OBS-1..5] were each conditioned on a stored numeric value reaching an exit, so root existence, naming, order, and the `build` artifact obligation were outside [#732]. [05-OBS-6] now authors the always-labelled manifest-order envelope and the unavailable-root [05-UNS-1] requirement; complete manifested observation/build consumption is still not delivered by the formatter plan | [#912] ([#820], [#862]), with the post-[#1003] integration/acceptance residue tracked at [#1023]. [#775]'s shape half remains [05-OBS-4] under [#732] |
+| [05-OBS-1..5] were each conditioned on a stored numeric value reaching an exit, so root existence, naming, order, and the `build` artifact obligation were outside [#732]. [05-OBS-6] authored the always-labelled envelope; [05-OBS-7..11] and the integrated #1079/#1082/#1083 delivery now define and consume the target-carrying manifested root boundary for eval, C, and HIP. This remains independent of the formatter plan | [#912] ([#820], [#862]), with the post-[#1003] integration/acceptance surface tracked at [#1023]. [#775]'s shape half was authored as [05-OBS-4] under [#732] |
 | no numeric plan touches `chelis reef conform`'s audit surface, which the four bump waves below keep regenerating gaps in | [#788] ([#814], [#825], [#845]) |
 
 None carries a wave assignment; they are not sequenced against the waves.
@@ -162,12 +162,20 @@ tripwire compiling until the new dtype is classified.
 **Wave 4 - the permanent guards.** [#729] Phase 4 delivers the capability
 table per [`capability_table.md`](capability_table.md); [#733]
 Phase 3 (the first blocking provenance ratchet) ships with it only after
-the advisory Buoy pilot and change-impact phases are green. [#732] Phase 3
-(the tolerance table + the [#687] handshake) already shipped in v0.18.3
+the advisory Buoy pilot and change-impact phases are green. **[#732] is
+CLOSED as of 2026-08-21, and it is the first plan in this set to close.**
+Phase 3 (the tolerance table + the [#687] handshake) shipped in v0.18.3
 through PRs #1099/#1115/#1118 and is not v0.20 payload; [#754] remains its
-external shell consumer. The [#732] tracker stays open for [#997]'s direct
-diagnostic-rendering contract debt. [#1059] is separate support capability
-work, not unfinished Phase 3 delivery.
+external shell consumer. [#997]'s direct diagnostic-rendering contract debt,
+the tracker's own stated closing condition, was retired on 2026-08-21 by the
+`FO-DIAG` migration (PR #1250), and the tracker closed the same evening with
+zero open children, an evidence record on the thread, and both owning
+documents audited by full read. Its META [#728] closed with it. [#1059] was
+re-homed from [#732] to [#1170] on 2026-08-21 before the close: its
+acceptance is a compiled-lane capability event, which is [#1170]'s subject,
+and an `Also part of #732` comment records the provenance. It stays open and
+CI-pinned; the class closure loosened nothing. Wave 4 therefore has three
+live slots, not four.
 [#730] Phase 3 (gates become UX; amended 2026-07-30 to also deliver the
 typed diagnostic-kind and rejection-authority work) keeps Wave 4 as its
 recommended slot but is NOT gated on the capability table or the Buoy
@@ -191,8 +199,12 @@ scopes pure-DAG effect rejection to the entry actually emitted. It closes the
 former host-helper `dropout` emitter panic, cites the compiled-kernel owner
 [#1192], removes the no-op CLI reject hook, and corrects stale closed-#616
 Metal/HIP diagnostic prose to [05-MOV-1]. The single Phase 3 runner is
-`scripts/loud_unsupported_phase3_oracle.py`; it remains red only at the
-independently owned [#912] root-realizability leg, so Phase 3 is not complete.
+`scripts/loud_unsupported_phase3_oracle.py`; the integrated [#912]
+root-realizability delivery removes its final ignored-cell blocker. The full
+six-leg runner passes at this revision, including its exact
+`issue_912_root_boundary --run-ignored all` acceptance leg, so Phase 3 is
+executable-oracle green. The completion claim remains pending the delivering
+change's fresh exact-head red-team pass.
 [#730] Phase 4 (ratchet totality, added
 2026-07-30: product-source-manifest ratchets with non-Cargo language
 adapters, typed/live exclusion references, the non-product
@@ -278,12 +290,12 @@ flowchart TB
     n731p0 --> n731p1 --> n731p2 --> n731p3
   end
 
-  subgraph S732["#732 faithful observation"]
+  subgraph S732["#732 faithful observation (CLOSED 2026-08-21)"]
     direction TB
     n732p0["P0 · round-trip harness + exit census (LANDED)"]:::w0
     n732p1["P1 · format_element + eval adoption<br/>+ eval-side migration (LANDED)"]:::w2
     n732p2["P2 · generated C helper + to_list arms<br/>+ C-side migration (LANDED)"]:::w2
-    n732p3["P3 · tolerance table + #687 handshake<br/>(DELIVERED in this revision)"]:::w4
+    n732p3["P3 · tolerance table + #687 handshake<br/>(LANDED, v0.18.3)"]:::w4
     n732p0 --> n732p1 --> n732p2 --> n732p3
   end
 
@@ -291,18 +303,23 @@ flowchart TB
     direction TB
     n729p0["P0 · domain checker + #687 oracle lanes (LANDED)"]:::w0
     n729c6["C6 · covered-family capacity tripwire<br/>(PR #956)"]:::w3
-    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
-    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle (THIS CHANGE)"]:::w3
-    n729p1["P1 · semantics module + storage decision<br/>+ eval adoption"]:::w3
-    n729p2["P2 · kernel split + traps + prove"]:::w3
-    n729p3["P3 · C backend adoption<br/>+ generated observation"]:::w3
-    n729p4["P4 · capability table"]:::w4
+    n729c6wire["C6 · wire-schema enumerator<br/>+ mutation oracle (LANDED)"]:::w3
+    n729c6binding["C6 · PyO3 enumerator<br/>+ mutation oracle (LANDED)"]:::w3
+    n729p1["P1 · semantics module + storage decision<br/>+ eval adoption (LANDED)"]:::w3
+    n729p2["P2 · kernel split + traps + prove<br/>(LANDED)"]:::w3
+    n729p3["P3 · C backend adoption<br/>+ generated observation (LANDED)"]:::w3
+    n729p4a["P4A · capacity ratchet<br/>(LANDED)"]:::w4
+    n729p4b["P4B · decided contracts + schema freeze<br/>(THIS CHANGE)"]:::w4
+    n729p4atoms["pre-4C · atom closure + composite gate<br/>(#1294/#1296)"]:::w4
+    n729p4c["P4C · populate typed tables"]:::w4
+    n729p4d["P4D · generated consumers"]:::w4
+    n729p4e["P4E · generated conformance"]:::w4
     n729p0 --> n729c6
     n729c6 ==>|"HARD: covered-family oracle"| n729c6wire
     n729c6 ==>|"HARD: covered-family oracle"| n729c6binding
     n729c6wire ==>|"HARD: wire leg green"| n729p1
     n729c6binding ==>|"HARD: binding leg green"| n729p1
-    n729p1 --> n729p2 --> n729p3 --> n729p4
+    n729p1 --> n729p2 --> n729p3 --> n729p4a --> n729p4b --> n729p4atoms --> n729p4c --> n729p4d --> n729p4e
   end
 
   n719["#719 sqrt fix (FIXED: PR #760)"]:::ext
@@ -317,7 +334,7 @@ flowchart TB
   n732p1 -.->|"format_element Rust side<br/>(I1: either order pinned)"| n729p1
   n732p2 -.->|"generated print helper<br/>(I1: either order pinned)"| n729p3
   n729p3 -.->|"value divergences shrink<br/>before the oracle turns on"| n732p3
-  n729p4 -.->|"Rejected(reason) cells<br/>feed gate derivation"| n730p3
+  n729p4d -.->|"typed rejection cells<br/>feed gate derivation"| n730p3
   n719 ==>|"HARD: precedes the<br/>sqrt = 0 tolerance row"| n732p3
   n683 -.->|"natural moment"| n729p2
   n713 -.->|"natural moment"| n729p3
@@ -478,12 +495,14 @@ decisions 0.19 already made, so it is behavior-preserving by construction.
 | **v0.18.1 - always-labelled root prefix** (SHIPPED) | [05-OBS-6]'s `name = value` prefix from #994, with the stale repo expectations synchronized in #1011 | **exact-output migration** | shipped the prefix once without changing payload digits or value shape; it did not prove manifest completeness, dotted expansion/order, unavailable-root diagnostics, or artifact routing |
 | **v0.18.3 - extent/cast migration + faithful-observation guards** (SHIPPED) | [05-DIM-1/2] extent migration + `round` parity + `cast_trunc` + [#732] P3 (PRs #1099/#1115/#1118) | **source + exact-output migration** for the extent/round/cast changes; [#732] P3 itself is behavior-preserving | Phase 3's tolerance table and shared comparator shipped here and must not be scheduled again in v0.20 |
 | **v0.18.4 - canonical Surf + int64 C ABI + declaration contracts + WireDag 5** (SHIPPED) | PR #1031's canonical Surf v0.19 grammar and total Deep resugaring ([#1024]) + chelis#1149's int64 extent ABI (part of [#1112]) + PR #1178's [04-INF-1] declaration contracts + PR #1181's WireDag schema 5, with PR #1189's exhaustive checked cast ([#1150], [#1152]) and PR #1176's dependency typecheck cache riding along | **source migration + ABI break + wire break** | four boundaries in one patch cut. Migration: `chelis migrate surf --from 0.18 --inplace`, rebuild against the new `chelis_runtime.h`, author annotations for orphan `defsig` and unresolved deferred inference; WireDag payloads migrate on read one way only. The ABI widening overrode invariant 7's default and the schema step raises a scope question invariant 1 does not answer, so the "bindings adapt once" promise needs re-adjudicating before v0.19 |
-| **v0.19.0 - grounded dtype storage break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every capability decision that changes behavior** - integer-overflow traps and each supported-vs-`Unimplemented` disposition (int `mean` [#724], bool arithmetic [#726], the [#715] rows, the HIP/Metal/C reject cells, and the cells seeded 2026-08-04: [#704]'s scalar activation c-host B-cell, the scalar `tan`/`atan`/`recip` row, [#937]'s per-dtype `uniform_like` emission, and [#722]'s integer-unary B-cells) - plus the prelude JSON/CSV integer-capacity decision (a `JInt`-shaped variant and integer accessors) for any prelude numeric channel this cut admits - invariant 7 HOLDS such channels out of every earlier release unless they land integer-capable from the start ([#729] §C3's amended census) - any published-ABI signature change deferred here by anti-churn invariant 7, and [#912]/[#1023]'s complete manifested root boundary | **source migration** (wave 2) | the storage break and the root-topology expectation migration are coordinated here; class E resolves here, not at the 0.20 table. Canonical Surf and the int64 ABI already shipped at 0.18.4, so this cut no longer carries them. Bindings adapt to the per-dtype payload once *from here*; capability behavior and root topology are final; the v0.18.1 prefix does not move again |
-| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4 (the capability *table*, mechanizing 0.19's decisions) + [#730] P3 (gates -> UX) + [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: no decision, rejection, or rendered byte changes here - 0.19 shipped them all. [#732] P3 already shipped in v0.18.3. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
+| **v0.18.5 - scalar capability and release consolidation** (SHIPPED) | PR #1256, including the post-v0.18.4 scalar activation and scalar `tan`/`atan`/`recip` work from PR #1188 | **mechanical** for shells beyond the already documented 0.18.4 changes | Released 2026-08-23. The scalar rows are no longer v0.19 work and must not be scheduled again |
+| **v0.19.0 - grounded dtype storage break + every behavior-changing capability decision + manifested root completion** | [#729] P1-P3 landed atomic per §C3, **plus every remaining behavior-changing capability implementation or stable loud rejection**: integer-overflow traps, [#722]'s remaining integer-unary backend cells, the exact reduction/NaN/infinity/tie rules [05-OP-11..16] ([#1290] replaces noncanonical product/sum trees and is also part of [#170]; [#1281] owns the remaining reduction rows), modular arithmetic [05-OP-17..19], float classification [05-OP-20..22], named lossy casts [05-OP-23..24], canonical scalar/tensor/recursive-List `to_string` and compiled C-host Tensor/List rendering ([#1282]/[#1059]), bool-only logical contracts [05-OP-26..28], first-class `count` [05-OP-29] plus exact-only WireDag v6 Count/Pad ([#1287]/[#1291]), complete `sum` [05-OP-30], exact scalar/container/tensor-runtime/stdlib authority families [05-OP-31..35], full comparison/equality [05-OP-36] and typed logical/`where` lowering ([#1284]), exact `uniform_like`/dropout [05-OP-37], generic host numeric identities [05-OP-38], target-independent window reductions [05-OP-39], and direct stored-bit extrema plus direct checked subtraction [05-OP-40..41] ([#1306]). [#1292] owns own-width tensor close; [#1293] owns the exact 83-definition stdlib, sole public JSON surface, recursive/List and pathwise Random adjoints, and stub removal; [#1295] owns all-active-float rounding/random parameter contracts and all-dtype padding; [#1297] owns legal compiled host-effect execution; [#1298] owns runtime-axis shape and complete window cells. The 2026-08-25 amendment set rides the same cut: the [05-OP-42] `stop_gradient` barrier ([#1312]), the [05-OP-43] relu adjoint (gradient zero at zero, [#1313]), the `JsonBigInt(string)` source-faithful ingestion that makes the [05-OP-35] manifest eighty-four definitions ([#1314], with [#1293]), and [#1311]'s pinned reference graphs for the embedded transcendentals plus the f64 `normal_cdf` re-pin, which must land before this cut ships those graphs' consumers. Before Phase 4C it also lands the typed runtime seal and exact tagged C carrier ([#893]/[#1289]), the zero-exception census ([#1288]), [#1294]'s exact IR/RISC+builtin atom closure, [#1306]'s direct arithmetic/extrema oracle, and [#1296]'s normal-gate composite over every prerequisite oracle; no machine key/cell type, macro, partial row, legacy ABI/wire/API, capacity disposition, or unnumbered operation authority survives that gate. It also carries [#912]/[#1023]'s complete manifested root boundary | **source + ABI + wire + exact-value migration** (wave 2) | the storage/carrier break, WireDag v6 exact-only break, new `count` surface, balanced-tree and direct-subtraction results, stored-bit extrema selection and gradient convention, scalar/tensor/recursive-List `to_string`, recursive equality/AD carriers, sole JSON surface, host-effect legality, and root-topology expectation migration are coordinated here. Each legal-but-unbuilt backend cell ships as a stable typed rejection rather than silent behavior. No compatibility wrapper or reader is shipped |
+| **v0.20.0 - behavior-preserving permanent guards** | [#729] P4C typed authority population (numeric/sibling/host/external-target/effect dispositions) + P4D generated consumers (including exported-stdlib dependency closure) + P4E generated conformance, plus [#730] P3 (gates -> UX) and [#733] P3 (first blocking provenance ratchet) | **mechanical** for shells | guaranteed behavior-preserving: Phase 4B froze semantics and 0.19 shipped every behavior/rejection; 0.20 only makes those decisions unavoidable. [#732] P3 already shipped in v0.18.3. [#733] P0 lands independently before this cut, while its P1-P2 advisory integration is a prerequisite rather than v0.20 release payload. `tests_blocked/` probes are re-adjudicated against the now-standing table |
 
 Net downstream shape: the original four-cut `conform` model assumed one bump,
 probe re-run, and inventory refresh per minor cut. Actual history inserted
-three additional shipped contract patches: **v0.18.1** changed exact
+three additional shipped contract patches plus one consolidation release:
+**v0.18.1** changed exact
 root-output expectations by adding the [05-OBS-6] prefix, **v0.18.3** changed
 both source (int64 extents) and exact output (compiled `round` half-ties), and
 **v0.18.4** changed source (canonical Surf, `defsig`/deferred-inference
@@ -492,7 +511,8 @@ source-visible waves are now shipped **v0.17** (seed suffix + fixing
 loud-rejected code), shipped **v0.18.1** (root label prefix), shipped
 **v0.18.3** (int64 extents, `round` half-ties, the `cast_trunc` reserved word),
 shipped **v0.18.4** (canonical Surf v0.19, the int64 C ABI, the declaration
-contracts, WireDag 5), and planned **v0.19** (the remaining
+contracts, WireDag 5), shipped **v0.18.5** (scalar capability consolidation),
+and planned **v0.19** (the remaining
 capability behavior + [#729] §C3 storage + manifested root topology). v0.20
 remains mechanical. No later wave may undo or restyle an earlier one - and a
 patch-level version number is not by itself evidence that a cut is mechanical,
@@ -524,9 +544,9 @@ patch.
    `1.2247449159622192` becomes `1.2247449`). No later [#729] phase may change
    those digits or shapes. [05-OBS-6] later authored a separate envelope around those frozen
    payloads; its `name = ` prefix shipped once in both lanes at v0.18.1. The
-   remaining manifested root set/order, unavailable-root, and artifact cut
-   rides v0.19 once. Neither later step may reopen [#732]'s formatter decisions
-   or restyle the shipped prefix.
+   manifested root set/order, unavailable-root, and C/HIP artifact cut is
+   implemented for v0.19 as one coordinated change. Neither this nor a later
+   step may reopen [#732]'s formatter decisions or restyle the shipped prefix.
 3. **Frozen seed form.** [#731] P1's `i64` suffix is the final syntax; [#735]
    authors only meaning. Safe to ship to shells at 0.17.
 4. **Decisions before tables.** Every behavior-changing capability decision
@@ -654,8 +674,20 @@ Migration-note stubs (the breaking delta per cut):
   capability decision is now fixed (supported, or a cited stable rejection).
   Checked casts now trap instead of choosing an implicit conversion for
   fractional float-to-integer values (`cast(3.5, int32)`) and non-member bool
-  values (`cast(2, bool)`); apply `floor` or `round` before the integer cast,
-  and produce exactly 0 or 1 before a bool cast. Python `np.uint64` ingress now
+  values (`cast(2, bool)`); use the separately named `cast_trunc`,
+  `cast_saturate`, or `cast_wrap` when that lossy rule is intended, and compose
+  `round` with checked `cast` rather than expecting a `cast_round` mode.
+  `wrap_add`/`wrap_sub`/`wrap_mul` provide explicit modular integer arithmetic;
+  `is_nan`/`is_finite`/`is_infinite` classify every active float dtype without
+  conversion. New reduction entries pin empty-axis, arithmetic-order, NaN, and
+  result-dtype behavior; extrema gradients split finite ties equally and route
+  a NaN cotangent to the first selected NaN. `relu`'s gradient at exactly zero
+  is now zero ([05-OP-43], the ecosystem convention) rather than `max_elem`'s
+  first-operand tie value; `stop_gradient` ([05-OP-42]) is the named
+  differentiation barrier for gradient surgery such as straight-through
+  estimators; and a JSON integer-form token outside int64 now parses to
+  `JsonBigInt` carrying its exact digits instead of failing, with `json_bigint`
+  as its exact accessor. Python `np.uint64` ingress now
   raises `ChelisError` instead of silently producing an f64 payload; choose an
   explicit int64 or f64 conversion.
   The v0.18.1 root prefix is unchanged; the complete manifested root set now
@@ -727,7 +759,7 @@ a judgement may not.
 | [#693] | Metal int64 `abs` zero emission | root cause is [#699] (confirmed by emission); Metal B-cell `Unimplemented { issue: #693 }` until the MSL integer path is wired post-[#699]-fix |
 | [#704] | nine builtins compiled to the literal `0` on a SCALAR operand while the tensor forms were correct: `relu`/`sigmoid`/`silu`/`gelu` errored in eval (hard error became a wrong number), and `tan`/`atan`/`floor`/`ceil`/`round` were CORRECT in eval (the lanes disagreed silently, which was worse) | Repaired by the 2026-08-05 pre-table scalar numeric slice under [#729]: the checker applies explicit numeric-domain policy, eval admits the decided scalar activation family, and C host emission dispatches every named operation without a silent-zero fallback at every admitted width. The same slice completes [#712]/[#715]'s scalar integer identity and min/max rows, authors the timeless scalar rules in spec/05, and makes the hand-curated cross-lane matrix unconditional with negative parity. This was a MISSED MIGRATION onto already-decided semantics, not a new local rule. [#729] Phase 4 still owns the permanent generated A/B projections and conformance product; it cannot omit the scalar cells the interim matrix missed here and at [#937] |
 | [#713] | `pad_sequences` allocates int32 output for int64 input | repaired in [#729] Phase 3 at the typed runtime allocation/copy boundary; the int64 row is in the authoritative Phase 3 oracle |
-| [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3; the substitution died at [#730] Phase 1 and is unwritable after Phase 2. CLOSED 2026-08-04: the compiled catch-all is now a §C2 `Unsupported`, so the placeholder is gone; the remaining support half - actually rendering tensors and lists via [#732]'s formatter in the C host lane - is tracked at the open [#1059] |
+| [#734] | `to_string` on tensors/lists compiles to the literal `<value>` | [#730] census row 3; the substitution died at [#730] Phase 1 and is unwritable after Phase 2. CLOSED 2026-08-04: the compiled catch-all is now a §C2 `Unsupported`, so the placeholder is gone; the remaining support half - actually rendering tensors and lists via [#732]'s formatter in the C host lane - is tracked at the open [#1059], re-homed from [#732] to [#1170] on 2026-08-21 when that tracker closed |
 | [#751] | generated C emits uncompilable / sign-losing float constants (f64::MAX as integer literal; -0.0 as `-0`) | repaired in [#729] Phase 3 by exact-bit C literal emission; all four former `C_LANE_EXCLUDED` rows returned to the always-run corpus and the exclusion ledger is empty |
 | [#754] | shell-invokable cross-lane agreement gate (owner: brittonr) | downstream consumer, not plan-set work: hard-gated on [#732] Phase 2; consumes Phase 3's tolerance artifact and [#729] Phase 4's capability table (cell skipping); GPU lanes join after [#736]/[#737]; [#738] is its consumer; the one-comparator rule is pinned in [#732]'s §C4.3. Scope boundary (2026-07): a verdict proves lane agreement for its RECORDED (target triple, C toolchain + flags incl. -ffp-contract, libm identity) only - never cross-platform determinism by itself; the platform axis compares verdicts across CI matrix entries under the same tolerance table. Platform priority (Jeff, 2026-07-20): server-side Linux x86-64 is the primary verdict platform before any wider matrix. The -ffp-contract entry in the provenance flag set now has a measured in-house exemplar: the pre-[#770]-fix `uniform_like` affine was contraction-dependent (PR #779 removed the sensitivity at the source) |
 | [#763] | `chelis lane-check` - the exact-only, Nix-hermetic first slice of [#754] (owner: brittonr) | child of the [#754] row: same one-comparator rule and proof-scope boundary; for its exact-safe corpus, byte-identity holds TODAY. [#732] Phase 2 unlocked corpus expansion, and [#729] Phase 3 returned the former [#751]/[#761] curated gaps as ordinary regression rows |
@@ -737,7 +769,7 @@ a judgement may not.
 | [#783] | annotation writeback degrades an unresolved Var to a rank-0 default and clobbers a concrete annotation (a silent [#703]-class substitution; the enabler of the transient [#773]-fix conv2d ICE, hotfixed same day) | ADDRESSED inside [#731] PP1. One writeback information-ordering gate now prevents every Var-, Error-, or partial-dimension-derived candidate from replacing a more informative existing type expression. Symbolic metadata is still legal when no richer annotation exists, preserving generic checked programs. The byte-preservation regression and the pre-existing eleven shape-override guards cover both channel layers; this is no longer an inventory of point checks |
 | [#794] | `.dp`-reachable lowering-side value substitutions the PR #793 red team confirmed: `extract_f64_value`'s catch-all folds a `(par ...)` bound's FIRST child (spec/03 says last), and `extract_usize_value` silently maps a negative `.dp` int64 seed to 0 | [#730] census extension rows. The checker side is already closed (PR #793 narrowed its accept-set to `lit` and rejects negative literal seeds), so both are checker-unreachable today - the lowering fix is defense-in-depth per §C1.4 |
 | [#795] | conv2d's present-but-non-literal stride/padding fall to `unwrap_or(1)`/`unwrap_or(0)` in lower.rs (the [#776] value-default shape; census row 23, discovered in [#730] Phase 1's sweep) | TRUE MISSED MIGRATION under [#730], not a standalone rule. `loud_unsupported.md` census row 23 requires one optional-static-argument resolver that distinguishes absent, resolved, and present-but-unresolvable; defaults apply only to absence, and unresolved present arguments raise through the frozen typed channel. The same change audits every optional compile-time argument in `lower.rs`, lands absent/present negative parity, and shrinks the numeric-unwrap tripwire. A conv2d-only branch leaves the class open |
-| [#796] | compiled-lane `test_*` assertion builtins: pre-[#730]-P1 binaries compiled assertions to inert `0` stubs (could never fail); now loudly rejected | RESOLVED BY DECISION 2026-08-04: the row's own second option ("an authored eval-only contract") is already authored, in `spec/05-risc-primitives.md` §3.6.1 - the `test_*` family is host-only, has no compiled-lane emission arm, and its rejection is deliberately liveness-scoped through the C host emitter's catch-all rather than the whole-program host-only gate. So the DEFECT this issue filed is dead: PR #791 removed the inert stub, and a compiled program that calls an assertion on a reachable path is rejected loudly. What survives is a FEATURE request - a compiled binary that can fail its own assertions - which §3.6.1's closing sentence already specifies (real C assertion helpers). CLOSED 2026-08-04 citing §3.6.1; leaving it open under a class tracker would have made the class read incomplete when its actual defect is fixed, which is the inverse of the honesty this plan set exists for. The compiled-assertion FEATURE and the broader finding it surfaced - that nothing tells a user what the C lane cannot do, because the answer lives in four hand-maintained lists plus an emitter catch-all that have already drifted - are carried by [#1170] |
+| [#796] | compiled-lane `test_*` assertions formerly became inert `0` stubs | CLOSED because the silent substitution was removed, not because rejection became language semantics. [05-HOST-3]/[05-OP-38] define generic assertions as legal host operations in every execution mode. [#1297] owns compiled-host execution and removal of whole-module/evaluator-only rejection; until then its exact Table-B cells are `Unimplemented`, never inert/default helpers |
 | [#840] | `chelis build` reports success but emits non-compiling C for defs named after C keywords (`double`, `long`, ...) - the identifier cousin of [#751] | standalone `chelis-backend-c` emission fix at the `CIdentifier`/`EmittedExpr` chokepoint (mangle or reject loudly, never uncompilable C from exit 0); joins [#751]/[#761] in [#763]'s corpus curation; found by the PR [#799] red team (F2), likely pre-existing |
 | [#847] | `grad` over a function-valued model parameter unifies independently declared rigid dim params `n` and `m` at check time (the generic Jacobian-row wrapper is rejected; the concrete-dim variant checks) | VERIFIED STALE/MISSED MIGRATION at the PP1 baseline: the exact `jacobian_row` reproducer already checked clean on current `origin/main`, before PP1 changed code. No `grad` exception or rigid-unification patch was added. [04-INF-1] records the channel rule, the exact program is now a permanent positive regression, and a body that genuinely requires `n = m` remains the negative control. Close the instance as non-reproducing without pretending it supplied a second mechanism |
 | [#850] | a call to a `sig`-declared export with no `def` body passes `chelis check` at score 1.0 with an EMPTY error list, and `chelis build` lowers it to an undeclared C function that fails only at the native toolchain (surfaced via Std.Io.Parquet) | CHECK HALF ADDRESSED under [#731]: `spec/03` §2.2 now makes `defsig` a same-unit annotation for a same-name `def`, and declaration collection rejects the general orphan class independently of persistent context. The §C4.4 corpus has the orphan negative and paired positive. A full stdlib sweep found and backed all three signature-only regions (Parquet, SafeTensors, Xavier) with explicit fail-loud Chelis bodies. The BUILD half remains [#730]/[#763] work; this change does not claim that half or close [#850] as a whole |
@@ -745,10 +777,10 @@ a judgement may not.
 | [#888] | `DimExpr::normalized_key` folds concrete dimension factors with `saturating_mul`, so two different tensor sizes get the same key and C/HIP memory planning reuses a slot at the wrong capacity (VERIFIED by execution, Surf-reachable) | standalone. Kept here because it is the compiler-internal face of this plan set's own trap contract: [04-NUM-3] makes USER integer overflow trap in every lane while the compiler's size arithmetic saturates here and wraps in [#889]. That is an accident, not an exemption, and should not be read as one. [#889] rides [#893]'s runtime hardening |
 | [#870] | `chelis-prove` aborts (SIGABRT, via the wait-timeout SIGCHLD self-pipe) when the environment denies `sendto`, instead of degrading | [#730] LU1, one supervised external-process degradation path. Both current Beacon subprocess launch/wait paths route through a single closed `Completed | TimedOut | Degraded(Unsupported)` supervisor; direct `wait-timeout` use elsewhere is forbidden. The oracle denies each supervisor mechanism in turn and requires a branded nonzero result with no abort, plus normal-completion and real-timeout controls. Catching `sendto` at the reported site is not the fix |
 | [#872] | `chelis-prove`'s `type_from_deep_depth` depth-32 fuse projects to `Type::Unit`, so an opaque-type producer nested deeper than 32 drops out of the obligation set | [#730] LU2, total proof-type traversal. The same region also has `type_contains_depth`'s depth-16 `false` fuse, so a one-site raise would leave the same defect class alive. Both fuses are replaced by one iterative, cycle-aware worklist: cycles converge by visited identity, resource exhaustion is a typed error, and neither condition fabricates a type or boolean. The oracle crosses both former limits, exercises a cycle, and plants a low budget |
-| [#878] | `RiscOp::Pad { fill: f64 }` carries the fill through f64, so an int64 fill above 2^53 collapses | repaired on the [#729] sealed-carrier path: IR and Wire Pad fills are `ScalarValue`, lowering finalizes at the padded tensor dtype, WireDag v5 rejects a raw-number spelling, and the legacy migration obtains dtype only from the owning node's output type. Exact >2^53 tests cover lowering, eval, wire round-trip, and C emission; wrong-dtype IR is rejected. Both capacity censuses SHRINK rather than cite an exemption. Context/stdlib caches move to V7/4 with the serialized shape. Beacon remains an explicit downstream consumer mismatch under [#708]: its advertised 1-3 set does not accept v5, so negotiation must reject before dispatch |
+| [#878] | `RiscOp::Pad { fill: f64 }` carried the fill through f64 | CLOSED after the internal IR Pad fill became typed `ScalarValue` and exact >2^53 lowering/eval/C paths were repaired. It did not deliver the final exact-only WireDag v6 contract. [#1287] owns the coordinated v6 break: Count plus typed Pad payload, versionless/v1-v5/future/raw-number/wrong-dtype rejection before IR construction, and downstream negotiation updates |
 | [#901] | `TensorValue`'s mixed integer/float equality arm computes `i.abs()` ad hoc for its exact-representability test and panics on `i64::MIN` (`chelis-ir/src/eval.rs:164`) | repaired as the intended MISSED MIGRATION: `integer_is_exactly_representable` lives in the sealed semantics module, is total over `i64::MIN`, and derives significand width from the actual float dtype (bf16/f16/f32/f64). `TensorValue::PartialEq` consumes that predicate in both operand orders. The boundary locks deliberately distinguish exact powers of two (`i64::MIN` at f64) from inexact neighbours (`i64::MAX`, `2^24+1` at f32), so a lossy fixture cannot hide an exact stored value |
 | [#906] | eval aborts with a stack overflow on flat list literals of roughly 2-4k elements, killing the literal-baking data path | [#730] LU3, canonical iterative compiler list spines. Literal baking and every equivalent compiler-authored `Cons`/`Nil` traversal share one iterative spine iterator/folder with a typed improper-tail result. The oracle crosses the reported 2k-5k range and structurally forbids a second recursive canonical-spine walker. This does not absorb user-authored recursion [#257] or general lowering/cost-model recursion [#409], whose oracles are different. Raising the stack only moves the cliff |
-| [#937] | `emit_uniform_like` writes f32 samples through `float *data` with no dtype dispatch, so f64 `uniform_like` returns near-zero garbage in compiled C while eval is correct | repaired under [05-OP-8]'s all-active-float decision. The shared sampler computes f64 output with one f64 FMA from exactly widened f32 bounds, f32 with one f32 FMA, and f16/bf16 with that f32 result rounded once. Eval consumes it directly; C emits all four active float widths, and HIP emits matching typed f32/f64 samplers while its reduced-float cells remain explicit unsupported cells under [#174]. IR verification rejects a non-float template. Structural tests forbid f32 stores into f64 output, the Linux C gate compares raw f64 bits, and the HIP manual gate does the same on-device. The permanent recurrence guard remains Phase 4's generated cell product; this repair supplies the concrete cell it will consume |
+| [#937] | `emit_uniform_like` wrote f32 samples through `float *data`, corrupting f64 output | CLOSED after the f64 template/output-width bug was repaired. That repair does not decide or implement the final same-dtype public bounds, reduced-float arithmetic, validation/ordinal order, pathwise bound adjoints, or complete target product. [05-OP-8] decides those rules and [#1295] owns every final cell; no closed-issue or existing-lane disposition is inherited |
 | [#942] | `cast` rejects any tensor whose element type came from inference (`expand`, `uniform_like` results) - a `_ =>` wildcard turning an unresolved-but-legal type-state into a false rejection | repaired structurally: the cast result-state match is exhaustive, and positional `expand` records a monomorphic two-shape obligation on its unresolved result. Declared results and later tensor consumers may select same-rank replacement or rank-plus-one insertion; unification validates the selected shape, while a shape-neutral `cast` materializes the spec/04 default (same-rank on an existing axis, insertion when `axis == rank`). Before a final checked program is annotated, every still-unselected result materializes that same default and the checker refreshes earlier owner stamps. A reusable library context instead serializes the obligation so downstream code retains the first shape-bearing choice after a cache round trip. Locks cover both shapes, later-consumer insertion, scalar/trailing insertion, otherwise-unconsumed results, serialized-context selection, cast after `expand` and `uniform_like`, rejection of an unrelated result rank, rejection of an axis beyond the trailing position, and rejection when two uses try to choose different shapes for one binding; genuinely unconstrained and function-valued cast operands remain negative controls. Hull's `RExpand` rows remain the acceptance oracle. A future type-state addition is now a compile error at the cast match rather than another false rejection hidden by `_ =>` |
 | [#955] | backend-c host lane cannot lower nested `Option`/`List` composites ([05-UNS-1]); separately, nothing in CI builds a std-importing program, so eval-only std code ships green | Two structural [#730] items, not two patches. LU4 derives nested host ABI support recursively from the closed constructor table in [`capability_table.md`](capability_table.md); a represented `List`, `Option`, and inner type imply both nesting orders, while an unimplemented constructor returns its exact authority. LU5 derives a build/link/run-or-reject cell for every exported stdlib module from the export manifest. The issue closes only when both oracles are green; a special nested-shape arm or one hand-picked std importing test satisfies neither class |
 | [#980] | integer overflow semantics differ by op, build profile, and lane | VERIFIED and repaired against [04-NUM-3]. The reproducer confirmed scatter add wrapped explicitly while cumsum/trace/einsum depended on debug-overflow settings. Their shared runtime arithmetic trait now uses checked add/multiply for int32/int64 and native IEEE arithmetic for floats, emitting `numeric trap: overflow in <op> at <prim>` at the FFI boundary. Subprocess controls exercise all four ops at both widths; the recurrence commands are `cargo nextest run -p chelis-runtime --test issue_980_integer_overflow --no-fail-fast` and the same command with `--release`, so profile-dependent behavior cannot return |
@@ -960,6 +992,7 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#909]: https://github.com/Chelis-Lang/chelis/issues/909
 [#894]: https://github.com/Chelis-Lang/chelis/pull/894
+[#170]: https://github.com/Chelis-Lang/chelis/issues/170
 [#174]: https://github.com/Chelis-Lang/chelis/issues/174
 [#717]: https://github.com/Chelis-Lang/chelis/issues/717
 [#856]: https://github.com/Chelis-Lang/chelis/issues/856
@@ -990,3 +1023,16 @@ formal target, per its §C1.5) and [#730] makes unknown KINDS loud;
 [#1024]: https://github.com/Chelis-Lang/chelis/issues/1024
 [#1112]: https://github.com/Chelis-Lang/chelis/issues/1112
 [#1172]: https://github.com/Chelis-Lang/chelis/issues/1172
+[#1281]: https://github.com/Chelis-Lang/chelis/issues/1281
+[#1282]: https://github.com/Chelis-Lang/chelis/issues/1282
+[#1284]: https://github.com/Chelis-Lang/chelis/issues/1284
+[#1294]: https://github.com/Chelis-Lang/chelis/issues/1294
+[#1295]: https://github.com/Chelis-Lang/chelis/issues/1295
+[#1296]: https://github.com/Chelis-Lang/chelis/issues/1296
+[#1297]: https://github.com/Chelis-Lang/chelis/issues/1297
+[#1298]: https://github.com/Chelis-Lang/chelis/issues/1298
+[#1306]: https://github.com/Chelis-Lang/chelis/issues/1306
+[#1311]: https://github.com/Chelis-Lang/chelis/issues/1311
+[#1312]: https://github.com/Chelis-Lang/chelis/issues/1312
+[#1313]: https://github.com/Chelis-Lang/chelis/issues/1313
+[#1314]: https://github.com/Chelis-Lang/chelis/issues/1314

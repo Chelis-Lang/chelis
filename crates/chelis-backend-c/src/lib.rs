@@ -237,10 +237,23 @@ mod tests {
 
     fn runtime_library_path() -> PathBuf {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidates = [
-            manifest_dir.join("../../target/debug/deps"),
-            manifest_dir.join("../../target/release/deps"),
-        ];
+        let workspace_root = manifest_dir.join("../..");
+        let configured_target = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    workspace_root.join(path)
+                }
+            });
+        let mut candidates = Vec::new();
+        if let Some(target) = configured_target {
+            candidates.push(target.join("debug/deps"));
+            candidates.push(target.join("release/deps"));
+        }
+        candidates.push(workspace_root.join("target/debug/deps"));
+        candidates.push(workspace_root.join("target/release/deps"));
         // `cargo test` leaves many libchelis_runtime-<hash>.a artifacts from
         // historical builds in target/{debug,release}/deps. Using `find` on
         // that directory is nondeterministic and easily lands on a stale
@@ -273,8 +286,8 @@ mod tests {
         {
             return path;
         }
-        for dir in candidates {
-            if let Some(path) = newest_runtime_archive(&dir) {
+        for dir in &candidates {
+            if let Some(path) = newest_runtime_archive(dir) {
                 return path;
             }
         }
@@ -3465,12 +3478,11 @@ int main(void) {{
 
     // ---- ADVERSARIAL TESTS: static linkage, C compilation, and scalar builtin coverage ----
 
-    /// E: When globals are present (internal_linkage=true), user functions become
-    /// `static inline`. The tensor helper must remain `static void` (not `static inline`).
-    /// This case is NOT tested by `host_program_tensor_helpers_are_static_entry_not_exported`
-    /// which only tests the no-globals case.
+    /// E: Published authored functions retain external linkage when globals
+    /// cause `main` emission. Compiler-owned tensor helpers remain `static
+    /// void`, and monomorphized specializations remain translation-unit local.
     #[test]
-    fn adv_host_program_with_globals_fns_are_static_inline_helpers_remain_static_void() {
+    fn adv_host_program_with_globals_keeps_authored_exports_external() {
         use chelis_ir::ConcreteHostType as HostType;
         use chelis_ir::host::{
             ConcreteHostBinding as HostBinding, ConcreteHostExpr as HostExpr,
@@ -3509,11 +3521,12 @@ int main(void) {{
             summary_rejections: Vec::new(),
         };
 
-        // Adding a global binding triggers internal_linkage=true.
+        // Adding a global binding triggers `main` emission.
         let program = HostProgram {
             globals: vec![HostBinding {
                 name: "__g".to_string(),
                 display_name: None,
+                display_roots: Vec::new(),
                 ty: HostType::Int64,
                 value: HostExpr::new(HostExprKind::Int(1)),
             }],
@@ -3530,15 +3543,16 @@ int main(void) {{
             src.contains("static void my_func__tensor_0("),
             "tensor helper must be `static void` even in globals mode;\ngenerated source:\n{src}"
         );
-        // User function in globals mode must be `static inline` (not plain void, not static void)
+        // The published header declares this authored function external, so
+        // the definition must have matching external linkage even with main.
         assert!(
-            src.contains("static inline"),
-            "user function in globals mode must carry `static inline` linkage;\ngenerated source:\n{src}"
+            src.contains("double my_func(double x)"),
+            "authored export must keep an external definition;\ngenerated source:\n{src}"
         );
-        // The exported entry must NOT be plain `static void` (it's `static inline`, not `static void`)
         assert!(
-            !src.contains("static void my_func("),
-            "user function must not be `static void`; must be `static inline`;\ngenerated source:\n{src}"
+            !src.contains("static inline double my_func(")
+                && !src.contains("static double my_func("),
+            "authored export must not become translation-unit local;\ngenerated source:\n{src}"
         );
     }
 

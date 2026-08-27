@@ -6,7 +6,7 @@ use std::any::Any;
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 thread_local! {
     /// When set, `lower_unrepresentable` panics with a quiet empty payload
@@ -1176,27 +1176,51 @@ pub fn try_lower_subexpr_program(
     program_defs: HashMap<String, Expr>,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    assert_decode_once_in_env("lower_subexpr_program: type_env", &full_type_env);
+    let context = prepare_subexpr_lowering_context(&full_type_env, Arc::new(program_defs));
+    try_lower_subexpr_program_with_context(expr, scoped_tensor_types, &context)
+}
+
+#[derive(Clone)]
+pub(crate) struct SubexprLoweringContext {
+    program_types: Arc<HashMap<String, TensorType>>,
+    program_defs: Arc<HashMap<String, Expr>>,
+}
+
+pub(crate) fn prepare_subexpr_lowering_context(
+    full_type_env: &HashMap<String, Expr>,
+    program_defs: Arc<HashMap<String, Expr>>,
+) -> SubexprLoweringContext {
+    assert_decode_once_in_env("lower_subexpr_program: type_env", full_type_env);
     assert_decode_once_in_env("lower_subexpr_program: program_defs", &program_defs);
-    catch_lowering(|| {
-        lower_subexpr_program_inner(expr, scoped_tensor_types, full_type_env, program_defs)
-    })
+    let program_types = full_type_env
+        .iter()
+        .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
+        .collect();
+    SubexprLoweringContext {
+        program_types: Arc::new(program_types),
+        program_defs,
+    }
+}
+
+pub(crate) fn try_lower_subexpr_program_with_context(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+) -> Result<Dag, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    catch_lowering(|| lower_subexpr_program_inner(expr, scoped_tensor_types, context))
 }
 
 fn lower_subexpr_program_inner(
     expr: &Expr,
     scoped_tensor_types: HashMap<String, TensorType>,
-    full_type_env: HashMap<String, Expr>,
-    program_defs: HashMap<String, Expr>,
+    context: &SubexprLoweringContext,
 ) -> Dag {
-    let scoped_tensor_types_for_bindings = scoped_tensor_types.clone();
-    let mut merged_types = full_type_env
-        .iter()
-        .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-        .collect::<HashMap<_, _>>();
-    merged_types.extend(scoped_tensor_types);
-
-    let mut ctx = LowerCtx::new(merged_types, program_defs, LinearityInfo::default());
+    let mut ctx = LowerCtx::new(
+        context.program_types.clone(),
+        context.program_defs.clone(),
+        LinearityInfo::default(),
+    );
     // Pre-create a `Load` for every scoped tensor param in a DETERMINISTIC
     // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `HashMap`,
     // whose iteration order is randomized per process; using it directly made
@@ -1210,8 +1234,7 @@ fn lower_subexpr_program_inner(
     // invariant and chelis#469's positive oracle). Sorting by name makes the
     // kernel ABI stable; the host caller maps arguments by `input_label`, so
     // the slot order is internal and any stable order is correct.
-    let mut scoped_bindings: Vec<(String, TensorType)> =
-        scoped_tensor_types_for_bindings.into_iter().collect();
+    let mut scoped_bindings: Vec<(String, TensorType)> = scoped_tensor_types.into_iter().collect();
     scoped_bindings.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (name, tensor_ty) in scoped_bindings {
         let load = ctx.dag.add_node(
@@ -2513,6 +2536,28 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                 return true;
             }
             if let Some(name) = builtin_name(list) {
+                // [05-OP-29]: Count axes are checked compile-time selectors,
+                // not scalar runtime computations. In particular Surf spells
+                // `-1` as an integer `neg` application, which the generic
+                // scalar rule below would otherwise route to the host lane
+                // before the dedicated Count lowerer could normalize it.
+                // The type checker has already proved that every selector is
+                // either a static int32 axis or a named operand dimension, so
+                // only the tensor operand contributes runtime requirements.
+                if name == "count" {
+                    let app_children = children(list);
+                    if let (Some(input), Some(axes)) = (app_children.get(1), app_children.get(2..))
+                        && !axes.is_empty()
+                        && axes.iter().all(|axis| {
+                            extract_int_axis(axis).is_some() || callable_ref_name(axis).is_some()
+                        })
+                    {
+                        return expr_requires_host_runtime_with_ctx(
+                            input,
+                            exempt_to_tensor_literal,
+                        );
+                    }
+                }
                 if matches!(
                     name,
                     "print"
@@ -3189,7 +3234,20 @@ fn collect_param_bound_names(param: &Expr, out: &mut HashSet<String>) {
                 out.insert(name.to_string());
             }
         }
-        Expr::UnknownForm(_) => {}
+        Expr::UnknownForm(_) => {
+            // Unreachable by role construction (chelis#1087): a param slot
+            // is a Binder position, where the stamp pass produces atoms,
+            // Nodes, or BareLists and never an UnknownForm
+            // (`chelis_deep::role`'s Binder disposition, spec/03
+            // [03-ROLE-3]); the `.ch` path delivers `Expr::List`. Release
+            // builds keep the skip; debug builds fail loudly so a new
+            // producer cannot silently drop parameter names.
+            debug_assert!(
+                false,
+                "collect_param_bound_names reached an UnknownForm at a param \
+                 slot; unreachable by role construction (chelis#1087)"
+            );
+        }
     }
 }
 
@@ -3399,6 +3457,7 @@ fn is_shape_sensitive_builtin_app(expr: &Expr) -> bool {
                 | "layer_norm"
                 | "conv2d"
                 | "sum"
+                | "count"
                 | "max_reduce"
                 | "min_reduce"
                 | "prod_reduce"
@@ -3853,6 +3912,18 @@ fn static_to_tensor_literal(expr: &Expr) -> Option<LiteralToTensor> {
     extract_cons_chain_tensor(arg)
 }
 
+/// Whether `expr` is the statically materializable `to_tensor` form handled
+/// by the tensor DAG lowerer.
+///
+/// The host lowerer's tensor-helper preflight uses this exact recognizer to
+/// distinguish a literal that will lower from a runtime-shaped `to_tensor`
+/// that would become an unresolved builtin `Load` and be rejected after a
+/// full speculative walk. Keeping the classification here prevents the
+/// preflight from drifting from the lowering rule it predicts.
+pub(crate) fn is_static_to_tensor_literal(expr: &Expr) -> bool {
+    static_to_tensor_literal(expr).is_some()
+}
+
 /// Return true iff `expr` is `(var {} <expected_name>)`. Helper for
 /// recognizing builtin-name references in app callee position.
 fn expr_is_var_named(expr: &Expr, expected_name: &str) -> bool {
@@ -4135,12 +4206,10 @@ enum CallableExpr {
     /// represent a call to it because there is no `RiscOp::Call`. Call
     /// sites that pass a concrete function for this parameter (via
     /// `lower_plain_callable_app`) insert the resolved callable into
-    /// `local_callables` *before* lowering the inlined body, so the
-    /// resolver never produces this variant on the inlined-body path.
-    /// `Parameter` therefore appears only on the standalone-def lowering
-    /// path, where the right thing to do is no-op (see `lower_pipe`'s
-    /// arm) — the standalone DAG entry is never user-visible because
-    /// every caller re-inlines.
+    /// `local_callables` before lowering the inlined body. An unresolved
+    /// parameter forwarded through a helper remains this variant under the
+    /// helper's formal name, so its eventual application records a provisional
+    /// result marker instead of fabricating a zero.
     Parameter {
         #[allow(dead_code)]
         name: String,
@@ -4172,10 +4241,10 @@ impl LoweredValue {
     /// Whether `add_named_roots` would contribute zero roots for this
     /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
     ///
-    /// The empty aggregate is reachable: the single-target arm of the
-    /// `grad` result packing drops an absent adjoint instead of
-    /// materializing a zero, so a `grad` over a body that resolves to
-    /// [`CallableExpr::Parameter`] leaves `packed` empty. This is
+    /// The empty aggregate is reachable: a `grad` body that actually calls
+    /// an unresolved [`CallableExpr::Parameter`] has no sound standalone
+    /// value until call-site specialization supplies the callable, so its
+    /// lowering returns an empty placeholder. This is
     /// deliberately not "added no NEW root": `Dag::add_root` also
     /// deduplicates, so two defs sharing one node would answer yes to
     /// that question while genuinely owning a root.
@@ -4252,6 +4321,45 @@ impl LoweredValue {
                     .collect(),
             },
         }
+    }
+}
+
+/// Provisional DAG results whose values stand in for unresolved callable
+/// applications.
+///
+/// A missing adjoint is exact zero only when no unresolved result can reach
+/// the differentiated output. Each application gets a fresh identity marker,
+/// so a dead call does not taint the argument node that the legacy fallback
+/// used as its placeholder. Ordinary call-site specialization produces no
+/// marker because the concrete callable is inlined (chelis#1095/#1102).
+#[derive(Clone, Debug, Default)]
+struct CallableDependencyState {
+    unresolved_results: HashSet<NodeId>,
+}
+
+impl CallableDependencyState {
+    fn record_unresolved_result(&mut self, result: NodeId) {
+        self.unresolved_results.insert(result);
+    }
+
+    fn output_depends_on_unresolved(&self, dag: &Dag, output: NodeId) -> bool {
+        let mut pending = vec![output];
+        let mut visited = HashSet::new();
+        while let Some(node_id) = pending.pop() {
+            if !visited.insert(node_id) {
+                continue;
+            }
+            if self.unresolved_results.contains(&node_id) {
+                return true;
+            }
+            if let Some(node) = dag.get(node_id) {
+                // Only value inputs participate. `shape_deps` retain runtime
+                // extent sources for codegen but are not numeric contributions
+                // to the output's reverse dataflow.
+                pending.extend(node.inputs.iter().copied());
+            }
+        }
+        false
     }
 }
 
@@ -4404,8 +4512,8 @@ struct LowerCtx {
     /// `shape_bindings`). Saved/restored across binding scopes.
     static_size_bindings: HashMap<String, i64>,
     local_callables: HashMap<String, Expr>,
-    program_types: HashMap<String, TensorType>,
-    program_defs: HashMap<String, Expr>,
+    program_types: Arc<HashMap<String, TensorType>>,
+    program_defs: Arc<HashMap<String, Expr>>,
     random_seed: Option<u64>,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
@@ -4430,6 +4538,11 @@ struct LowerCtx {
     /// alongside `bindings` and `local_callables`. See
     /// `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
     fn_typed_params: HashSet<String>,
+    /// Dataflow-local completeness evidence for unresolved callable
+    /// applications. Grad subcontexts record a fresh result marker for each
+    /// unresolved application, then reject only when one is reverse-reachable
+    /// from the differentiated output.
+    callable_dependency_state: CallableDependencyState,
     /// chelis#1095: top-level def names whose lowered value held no tensor
     /// node, so they contributed no DAG root. `chelis-pipeline-core`
     /// subtracts these from the declared root names before aligning them
@@ -4500,8 +4613,8 @@ struct LowerCtx {
 
 impl LowerCtx {
     fn new(
-        program_types: HashMap<String, TensorType>,
-        program_defs: HashMap<String, Expr>,
+        program_types: impl Into<Arc<HashMap<String, TensorType>>>,
+        program_defs: impl Into<Arc<HashMap<String, Expr>>>,
         linearity: LinearityInfo,
     ) -> Self {
         Self {
@@ -4511,13 +4624,14 @@ impl LowerCtx {
             shape_bindings: HashMap::new(),
             static_size_bindings: HashMap::new(),
             local_callables: HashMap::new(),
-            program_types,
-            program_defs,
+            program_types: program_types.into(),
+            program_defs: program_defs.into(),
             random_seed: None,
             linearity,
             inlining_depths: HashMap::new(),
             inlining_active: 0,
             fn_typed_params: HashSet::new(),
+            callable_dependency_state: CallableDependencyState::default(),
             rootless_defs: BTreeSet::new(),
             dim_substitutions: HashMap::new(),
             prec_substitutions: HashMap::new(),
@@ -4719,6 +4833,12 @@ impl LowerCtx {
                 .iter()
                 .filter(|(name, _)| !shadowed.contains(*name))
                 .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        subctx.fn_typed_params.extend(
+            self.fn_typed_params
+                .iter()
+                .filter(|name| !shadowed.contains(*name))
+                .cloned(),
         );
         captures
     }
@@ -5736,6 +5856,7 @@ impl LowerCtx {
             && let Some(Expr::Atom(Atom::Name(func_name), _)) = func_kids.first()
             && !self.program_defs.contains_key(func_name)
             && !self.local_callables.contains_key(func_name)
+            && !self.fn_typed_params.contains(func_name)
         {
             // chelis#520: a positional ADT constructor application
             // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
@@ -5826,16 +5947,55 @@ impl LowerCtx {
             CallableExpr::Grad { fn_expr, wrt } => {
                 Some(self.lower_grad_callable_app(&fn_expr, wrt.as_deref(), args, app_span))
             }
-            // `Parameter` carries no body the IR can inline. Fall back to
-            // `lower_app`'s existing "lower func and args, return last"
-            // path (`lower.rs:2644`–`2649`), which is the same broken-but-
-            // silent shape `lower_app` already produces for fn-typed-
-            // parameter calls today. Real semantics come from call-site
-            // inlining (`lower_plain_callable_app` substitutes the
-            // concrete callable into `local_callables` before lowering
-            // the inlined body, so the resolver sees a `Plain` not a
-            // `Parameter`).
-            CallableExpr::Parameter { .. } => None,
+            // `Parameter` carries no body the IR can inline. Preserve the
+            // legacy provisional value shape (lower func and args, take the
+            // last) but wrap its leaves in fresh marker nodes. The marker is
+            // what lets `grad` distinguish a dead unresolved application from
+            // one whose value reaches the output; marking the argument itself
+            // would taint independent live uses of that argument.
+            CallableExpr::Parameter { .. } => {
+                let mut provisional = self.lower_expr(func);
+                for arg in args {
+                    provisional = self.lower_expr(arg);
+                }
+                Some(self.mark_unresolved_callable_value(provisional))
+            }
+        }
+    }
+
+    fn mark_unresolved_callable_value(&mut self, value: LoweredValue) -> LoweredValue {
+        match value {
+            LoweredValue::Node(input) => {
+                let ty = self
+                    .dag
+                    .get(input)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                let marker =
+                    self.dag
+                        .add_node(RiscOp::Copy, vec![input], ty, self.current_span_id.clone());
+                self.callable_dependency_state
+                    .record_unresolved_result(marker);
+                LoweredValue::Node(marker)
+            }
+            LoweredValue::Tuple(items) => LoweredValue::Tuple(
+                items
+                    .into_iter()
+                    .map(|item| self.mark_unresolved_callable_value(item))
+                    .collect(),
+            ),
+            LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields,
+            } => LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields: fields
+                    .into_iter()
+                    .map(|field| self.mark_unresolved_callable_value(field))
+                    .collect(),
+            },
         }
     }
 
@@ -5871,11 +6031,14 @@ impl LowerCtx {
                 // x |> g` typecheck), but it has no body to recurse into
                 // — the DAG can't represent a call to it (no
                 // `RiscOp::Call`). Surface it as
-                // `CallableExpr::Parameter` so `lower_pipe` can no-op the
-                // stage on the standalone-def lowering path; call-site
-                // inlining replaces this with the resolved callable via
-                // `local_callables`, so this variant only appears when
-                // the def is lowered in isolation. See
+                // `CallableExpr::Parameter` so a direct application or pipe
+                // stage can wrap its provisional result in a fresh `Copy`
+                // marker. Gradient lowering treats the application as
+                // incomplete only when that marker is reverse-reachable from
+                // the scalar output. Concrete call-site inlining replaces
+                // this with the resolved callable via `local_callables`, while
+                // unresolved helper forwarding preserves the parameter until
+                // its eventual application. See
                 // `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
                 if let Some(body) = self
                     .local_callables
@@ -6336,9 +6499,19 @@ impl LowerCtx {
                 }
             }
         }
-        let output = subctx
-            .lower_expr(body)
-            .expect_node("grad requires a scalar floating output");
+        let lowered_output = subctx.lower_expr(body);
+        let output = lowered_output.expect_node("grad requires a scalar floating output");
+        if subctx
+            .callable_dependency_state
+            .output_depends_on_unresolved(&subctx.dag, output)
+        {
+            // The standalone higher-order definition cannot know the
+            // contribution from an unresolved callable result that reaches
+            // the output. Preserve chelis#1095's rootless placeholder; when a
+            // concrete callable is supplied, ordinary call-site inlining
+            // re-lowers this body without markers and computes the real value.
+            return LoweredValue::Tuple(Vec::new());
+        }
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
         // non-differentiable op in the gradient body (argmax/argmin,
@@ -6372,11 +6545,10 @@ impl LowerCtx {
             &remap_actual_types,
         );
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
-        // Per-wrt gradient node (post-splice). A `None` entry means the
-        // wrt input has no adjoint because it does not influence the
-        // output; the tensor lane preserves the pre-#520 behavior of
-        // dropping it from the result, and the ADT lane packs an explicit
-        // zero tensor so the gradient struct keeps its field structure.
+        // Per-wrt gradient node (post-splice). Any output-reachable unresolved
+        // callable result returned above, so a `None` entry here is proven to
+        // mean that the wrt input does not influence the known output
+        // dataflow. Its cotangent is therefore an exact shape-preserving zero.
         let grad_per_wrt: Vec<Option<NodeId>> = wrt
             .iter()
             .map(|wrt_node| {
@@ -6396,11 +6568,6 @@ impl LowerCtx {
         let mut grad_iter = grad_per_wrt.iter().copied();
         let mut wrt_actual_iter = wrt_actuals.iter().copied();
         let mut packed: Vec<LoweredValue> = Vec::with_capacity(result_plans.len());
-        // A multi-target result is displayed as a tuple keyed by fixed,
-        // type-derived slot names (`out.0..out.N`, chelis#614): slot position
-        // is significant. A single-target result is a bare value with no
-        // sibling slots to shift.
-        let multi_target = result_plans.len() > 1;
         for plan in &result_plans {
             match plan {
                 GradResultPlan::Tensor => {
@@ -6408,25 +6575,19 @@ impl LowerCtx {
                     let actual = wrt_actual_iter.next();
                     match grad_node {
                         Some(node) => packed.push(LoweredValue::Node(node)),
-                        // The differentiated tensor argument does not
-                        // influence the output: its gradient is exactly zero.
-                        // In a multi-target result, dropping the slot would
-                        // shift every later gradient into the wrong tuple
-                        // position and mislabel it, so materialize the shaped
-                        // zero, the same way the ADT field zero-fill below
-                        // does (chelis#520 D2 / chelis#614).
-                        None if multi_target => {
+                        // The known output dataflow does not depend on this
+                        // argument, so its gradient is exactly zero.
+                        // Materialize it for single- and multi-target results;
+                        // dropping a single target loses the root (chelis#1102),
+                        // while dropping a multi-target slot mislabels every
+                        // later value (chelis#520 D2 / chelis#614).
+                        None => {
                             let field_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
-                            let zero = self.zero_tensor_node(&field_ty);
+                            let zero = self.zero_tensor_node(&field_ty, actual);
                             packed.push(LoweredValue::Node(zero));
                         }
-                        // Single-target result: preserve the pre-#520
-                        // bare-tensor drop and its reuse-hint path (the
-                        // `[LoweredValue::Node(single)]` arm below). A lone
-                        // target has no sibling slot to mislabel.
-                        None => {}
                     }
                 }
                 GradResultPlan::Adt {
@@ -6446,7 +6607,7 @@ impl LowerCtx {
                             let field_ty = actual
                                 .map(|id| node_type(self, id))
                                 .unwrap_or_else(Self::default_type);
-                            self.zero_tensor_node(&field_ty)
+                            self.zero_tensor_node(&field_ty, actual)
                         });
                         fields.push(LoweredValue::Node(node));
                     }
@@ -6486,9 +6647,12 @@ impl LowerCtx {
 
     /// A zero-valued tensor of the given type: `Const 0.0`, cast to the
     /// target precision, expanded axis-by-axis to the target dims
-    /// (mirrors the `lower_if_mask` expansion pattern). Used by the ADT
-    /// gradient packing (chelis#520 D2) for fields with no adjoint.
-    fn zero_tensor_node(&mut self, ty: &TensorType) -> NodeId {
+    /// (mirrors the `lower_if_mask` expansion pattern). A symbolic expansion
+    /// retains a shape-only dependency on the differentiated primal so codegen
+    /// can bind the runtime extent without introducing a value dependency.
+    /// Used by gradient packing for every proven-zero tensor slot
+    /// (chelis#520 D2/#1102).
+    fn zero_tensor_node(&mut self, ty: &TensorType, primal: Option<NodeId>) -> NodeId {
         let mut node = self.dag.add_node(
             RiscOp::synth_const(Self::default_type().precision, 0.0),
             vec![],
@@ -6511,11 +6675,10 @@ impl LowerCtx {
         let mut dims = Vec::new();
         for (axis, dim) in ty.dims.iter().enumerate() {
             dims.push(dim.clone());
+            let size = DimExpr::from(dim);
+            let symbolic = size.as_concrete().is_none();
             node = self.dag.add_node(
-                RiscOp::Expand {
-                    axis,
-                    size: DimExpr::from(dim),
-                },
+                RiscOp::Expand { axis, size },
                 vec![node],
                 TensorType {
                     dims: dims.clone(),
@@ -6523,6 +6686,9 @@ impl LowerCtx {
                 },
                 self.current_span_id.clone(),
             );
+            if symbolic && let Some(primal) = primal {
+                self.dag.add_shape_dep(node, primal);
+            }
         }
         node
     }
@@ -6597,9 +6763,28 @@ impl LowerCtx {
             // resolver anyway, but bindings-only shadowing (non-callable
             // arg for a non-callable param) would otherwise leak the
             // outer `fn_typed_params` entry.
+            // Resolve the actual in the caller's scope before the callee's
+            // same-named formal shadows it. Removing the marker first would
+            // erase the only evidence that `model` in `apply(model, x)` is an
+            // unresolved outer callable.
+            let callable = self.resolve_callable_expr(arg_expr);
             self.fn_typed_params.remove(name);
-            if let Some(callable) = self.callable_binding_expr(arg_expr) {
-                self.local_callables.insert(name.clone(), callable);
+            if let Some(callable) = callable {
+                match callable {
+                    // Preserve structural incompleteness when an unresolved
+                    // outer function parameter is forwarded through a helper.
+                    // Installing the raw argument as a local alias here would
+                    // create a self-cycle whenever the formal and actual share
+                    // a name, causing resolution to return `None` and laundering
+                    // the missing callable dependency into a proven zero.
+                    CallableExpr::Parameter { .. } => {
+                        self.local_callables.remove(name);
+                        self.fn_typed_params.insert(name.clone());
+                    }
+                    _ => {
+                        self.local_callables.insert(name.clone(), arg_expr.clone());
+                    }
+                }
             } else {
                 let arg_id = self.lower_expr(arg_expr);
                 if let LoweredValue::Node(node_id) = &arg_id
@@ -7916,6 +8101,46 @@ impl LowerCtx {
             // Only bare-name axes reach this arm (the checker rejects
             // positional integers in the variadic form); anything else falls
             // through to the 2-arg arms or the generic fallback.
+            "count" if args.len() >= 2 => {
+                let x = self.lower_expr_node(&args[0], "count input");
+                let x_ty = self
+                    .dag
+                    .get(x)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(|| ty.clone());
+                let mut axes: Vec<usize> = args[1..]
+                    .iter()
+                    .map(|axis| self.resolve_reduce_axis(axis, x, x_ty.dims.len(), "count"))
+                    .collect();
+                axes.sort_unstable_by(|a, b| b.cmp(a));
+                if axes.is_empty()
+                    || axes.windows(2).any(|pair| pair[0] <= pair[1])
+                    || axes.iter().any(|&axis| axis >= x_ty.dims.len())
+                {
+                    raise_fatal_lowering_error(
+                        format!(
+                            "count axes must resolve exactly once, in range, against the original input rank; got {axes:?}"
+                        ),
+                        Some(app_span),
+                        self.current_span_id.clone(),
+                    );
+                }
+                let dims = x_ty
+                    .dims
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(axis, dim)| (!axes.contains(&axis)).then_some(dim.clone()))
+                    .collect();
+                self.dag.add_node(
+                    RiscOp::Count { axes },
+                    vec![x],
+                    TensorType {
+                        dims,
+                        precision: Prim::Int64,
+                    },
+                    self.current_span_id.clone(),
+                )
+            }
             "sum" | "mean" | "max_reduce" | "min_reduce" | "prod_reduce"
                 if args.len() >= 3 && args[1..].iter().all(|a| bare_var_name(a).is_some()) =>
             {
@@ -11143,19 +11368,14 @@ impl LowerCtx {
                             func_expr.span(),
                         )
                     }
-                    // Item 2-extended G10: `x |> f` where `f` is a fn-
-                    // typed parameter. The DAG has no `RiscOp::Call`, so
-                    // the standalone-def lowering can't actually apply
-                    // `f` — leave `current` unchanged. This is correct on
-                    // every reachable path: standalone-def lowering only
-                    // builds a DAG entry that `try_lower_program`
-                    // produces eagerly but no caller ever references (every
-                    // caller re-inlines through `lower_plain_callable_app`,
-                    // which substitutes the concrete callable into
-                    // `local_callables` so the resolver returns
-                    // `Plain`/`Vmap`/`Grad`/`VmapGrad`, not `Parameter`).
+                    // Item 2-extended G10: `x |> f` where `f` is a fn-typed
+                    // parameter. The DAG has no `RiscOp::Call`, so mark the
+                    // provisional result as unresolved. A surrounding `grad`
+                    // rejects it only when that fresh marker reaches the
+                    // differentiated output; a dead pure pipe stage cannot
+                    // erase an otherwise-proven zero cotangent (chelis#1102).
                     // See `docs/investigations/pipe_fn_param_stage_diagnosis.md`.
-                    CallableExpr::Parameter { .. } => current,
+                    CallableExpr::Parameter { .. } => self.mark_unresolved_callable_value(current),
                 };
                 continue;
             }
@@ -11951,6 +12171,26 @@ impl LowerCtx {
 mod tests {
     use super::*;
     use crate::verify;
+
+    /// chelis#1087: the param-slot UnknownForm arm is unreachable by role
+    /// construction (a Binder slot stamps to atoms, Nodes, or BareLists,
+    /// never an UnknownForm), so it is a debug-unreachable rather than a
+    /// silent skip. The guard must actually fire; an assertion nothing
+    /// triggers is the "belief without a test" shape the boundary-guard
+    /// test below also pins.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "unreachable by role construction")]
+    fn collect_param_bound_names_unknown_form_guard_fires() {
+        let mut out = std::collections::HashSet::new();
+        let unknown = Expr::UnknownForm(Box::new(chelis_deep::ast::UnknownFormData {
+            head: "mystery".to_string(),
+            meta: chelis_deep::ast::MetaMap::default(),
+            children: vec![],
+            span: chelis_deep::Span::new(0, 0),
+        }));
+        collect_param_bound_names(&unknown, &mut out);
+    }
 
     fn parse_and_check(src: &str) -> chelis_types::CheckedProgram {
         let exprs = chelis_deep::parser::parse_str(src).expect("parse failed");
@@ -13185,7 +13425,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect(),
+                .collect::<HashMap<_, _>>(),
             collect_top_level_defs(checked.exprs()),
             LinearityInfo::default(),
         );
@@ -13290,7 +13530,7 @@ mod tests {
                     .type_env()
                     .iter()
                     .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                    .collect(),
+                    .collect::<HashMap<_, _>>(),
                 program_defs.clone(),
                 LinearityInfo::default(),
             );
@@ -13301,7 +13541,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect(),
+                .collect::<HashMap<_, _>>(),
             program_defs.clone(),
             LinearityInfo::default(),
         );
@@ -13345,7 +13585,7 @@ mod tests {
                 .type_env()
                 .iter()
                 .map(|(name, ty_expr)| (name.clone(), LowerCtx::type_from_type_expr(ty_expr)))
-                .collect(),
+                .collect::<HashMap<_, _>>(),
             program_defs,
             LinearityInfo::default(),
         );

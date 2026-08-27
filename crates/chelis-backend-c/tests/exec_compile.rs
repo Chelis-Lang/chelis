@@ -471,6 +471,138 @@ int main() {{
     assert!(output.contains("PASS"), "ReduceSum wrong output:\n{output}");
 }
 
+#[test]
+fn exec_count_multi_axis_matches_exact_int64_result() {
+    let tensor_ty = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    let mut dag = Dag::new();
+    let input = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        tensor_ty(&[2, 3, 2], Prim::Bool),
+        None,
+    );
+    let output = dag.add_node(
+        RiscOp::Count { axes: vec![2, 0] },
+        vec![input],
+        tensor_ty(&[3], Prim::Int64),
+        None,
+    );
+    dag.add_root(output);
+    let generated = codegen_with_options(
+        &dag,
+        "test_count_multi",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    )
+    .expect("Count C generation");
+    assert!(generated.c_source.contains("chelis_int_checked_add"));
+    assert!(generated.c_source.contains("CHELIS_BOOL"));
+    for balanced_tree_fragment in [
+        "while (__level_n_1 > 1)",
+        "int64_t __left_1 = 2 * __j_1",
+        "int64_t __right_1 = __left_1 + 1",
+        "chelis_int_checked_add(__level_1[__left_1], __level_1[__right_1]",
+    ] {
+        assert!(
+            generated.c_source.contains(balanced_tree_fragment),
+            "Count C must emit the canonical adjacent-pair balanced tree; missing {balanced_tree_fragment:?}"
+        );
+    }
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_count_multi(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float bits[12] = {{1,0,1,1,0,0,1,1,0,1,1,1}};
+    chelis_tensor x;
+    memset(&x, 0, sizeof(x));
+    x.data = bits;
+    x.shape[0] = 2; x.shape[1] = 3; x.shape[2] = 2;
+    x.strides[0] = 6; x.strides[1] = 2; x.strides[2] = 1;
+    x.ndim = 3; x.dtype = CHELIS_BOOL; x.size = 12; x.owns_data = 0;
+    chelis_tensor* inputs[1] = {{&x}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_count_multi(inputs, 1, outputs, 1);
+    int64_t expected[3] = {{3, 3, 2}};
+    int64_t* got = (int64_t*)outputs[0]->data;
+    int ok = outputs[0]->dtype == CHELIS_I64 && outputs[0]->size == 3;
+    for (int i = 0; i < 3; i++) if (got[i] != expected[i]) ok = 0;
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let output = compile_and_run_kernel("count_multi", &generated.c_source, &harness)
+        .expect("Count C kernel compiles and runs");
+    assert!(output.contains("PASS"), "wrong Count output: {output}");
+}
+
+#[test]
+fn exec_count_selected_zero_extent_returns_zero() {
+    let tensor_ty = |dims: &[usize], precision| TensorType {
+        dims: dims.iter().copied().map(DimInfo::Lit).collect(),
+        precision,
+    };
+    let mut dag = Dag::new();
+    let input = dag.add_node(
+        RiscOp::Load { name: "x".into() },
+        vec![],
+        tensor_ty(&[2, 0, 3], Prim::Bool),
+        None,
+    );
+    let output = dag.add_node(
+        RiscOp::Count { axes: vec![1] },
+        vec![input],
+        tensor_ty(&[2, 3], Prim::Int64),
+        None,
+    );
+    dag.add_root(output);
+    let generated = codegen_with_options(
+        &dag,
+        "test_count_empty",
+        CodegenOptions {
+            math_lib_override: Some(MathLib::None),
+            ..Default::default()
+        },
+    )
+    .expect("empty Count C generation");
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+extern void test_count_empty(chelis_tensor** inputs, int n_in, chelis_tensor** outputs, int n_out);
+
+int main() {{
+    float placeholder = 0.0f;
+    chelis_tensor x;
+    memset(&x, 0, sizeof(x));
+    x.data = &placeholder;
+    x.shape[0] = 2; x.shape[1] = 0; x.shape[2] = 3;
+    x.strides[0] = 0; x.strides[1] = 3; x.strides[2] = 1;
+    x.ndim = 3; x.dtype = CHELIS_BOOL; x.size = 0; x.owns_data = 0;
+    chelis_tensor* inputs[1] = {{&x}};
+    chelis_tensor* outputs[1] = {{NULL}};
+    test_count_empty(inputs, 1, outputs, 1);
+    int64_t* got = (int64_t*)outputs[0]->data;
+    int ok = outputs[0]->dtype == CHELIS_I64 && outputs[0]->size == 6;
+    for (int i = 0; i < 6; i++) if (got[i] != 0) ok = 0;
+    printf("%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}}
+"#
+    );
+    let output = compile_and_run_kernel("count_empty", &generated.c_source, &harness)
+        .expect("empty Count C kernel compiles and runs");
+    assert!(
+        output.contains("PASS"),
+        "wrong empty Count output: {output}"
+    );
+}
+
 // ---- Issue #254: reduce_window_* C-backend numerical parity ----
 //
 // The `issue_254_reduce_window_emit` tests pin only the *structural*

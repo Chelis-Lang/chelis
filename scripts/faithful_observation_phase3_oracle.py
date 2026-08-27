@@ -58,6 +58,7 @@ ALLOWED_IGNORES = {
 REQUIRED_TESTS = {
     PARITY_SOURCE: {
         "parity_dict_foundation",
+        "parity_count_bool_axes",
         "parity_constraint_directed_risk_guards_library_only",
         "parity_iter_foundation",
         "parity_list_foundation",
@@ -133,10 +134,11 @@ REQUIRED_EVAL_RECEIPTS = {
 # A digest changes only when the owning design's corpus is intentionally revised
 # and the replacement behavior has independent review evidence. Editing this map
 # merely to accept a changed test is not a repair.
-# chelis#1158 adds parity_recursive_generic to the frozen corpus. The 22-case
-# recursive_generic_monomorphization suite supplies independent evidence.
-# Fresh-context hardening red-team round 3 also accepted the implementation.
-# The corpus guard changes only to list recursive_generic.ch.
+# chelis#1158 added parity_recursive_generic to the frozen corpus. The 22-case
+# recursive_generic_monomorphization suite supplies its independent evidence.
+# chelis#1287 adds parity_count_bool_axes and count_bool_axes.ch together; the
+# executable parity row itself plus the dedicated Count oracle are the
+# independent evidence for extending this guard.
 REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
     PARITY_SOURCE: {
         "parity_comparator_accepts_byte_identical_tensor_lines": "9224411d844dc758300d5880b424edd89deea5eb9dfa9d12a34ba7257a58e38f",
@@ -145,16 +147,23 @@ REQUIRED_TEST_DEFINITION_SHA256: dict[Path, dict[str, str]] = {
         "parity_comparator_rejects_value_divergence": "06b51ffeb117c26b55c7901d64d3525a22855bec70f20246d263d9b5fc041f89",
         "parity_comparator_reports_sub_tolerance_float_drift": "40d029638fe1b70c1611adab72eeb31c1befed97d74c5400f5aae82f8c86aafe",
         "parity_constraint_directed_risk_guards_library_only": "ac6933d790a89ff00d7658e1260d61614ccc2547d9a91a67a0aa98918e33ca32",
-        "parity_corpus_is_complete": "1fb228c8e6a4ca0042702cefb875a8a504c0f42a1484330e9ca5fe5c6d0bb9a5",
+        "parity_count_bool_axes": "66e82bb4aeedafabc5d77eefeec25cb2728085becf2fdf44c335631fde750ba9",
+        "parity_corpus_is_complete": "b6f6656ee9c69f86386ed4f71f0ed7bd195a864295cfda8e1204628937005f2a",
         "parity_dict_foundation": "1bfd21bf0d78c9f36869908852a963037e0f13e36d5f9bc73b77131ff9d2970f",
-        "parity_hello_tensor_library_only": "c3291d95cd21db6230fdc7ec47627d294b95a47e51efe4b97d4cf5f1080bd86b",
+        # chelis#912 applies [05-OBS-7] uniformly: hello_tensor's pure
+        # nullary `main` and opaque_invariants_simplex's top-level `eps`
+        # are now owed manifest roots. Their definitions changed only from
+        # object-only parity to executable stdout parity; the dedicated
+        # root-boundary suite independently locks both the root selection
+        # rule and ordered C realization.
+        "parity_hello_tensor_library_only": "4a872b0b09a5f589ab8c31e80f9815f2da83b9093f870b9899a186396349f10f",
         "parity_induction_bond_library_only": "3e83f0cf929583a8df5a8fa05c62e9a712826fbe899b244766fdcad47b741389",
         "parity_iter_foundation": "c99d74a439e006c29748429c3877941460cd3ed18a0a98fd16caf81fb510c84f",
         "parity_linreg_library_only": "041271517605b7fa97a616c9fbe37d97d30bf0a6740c419e7dd91182736d97e4",
         "parity_list_foundation": "5400fe48566a947d9970a2231ea00b2d573abe32fcf3576b3ef7c8dfece02f14",
         "parity_mnist_library_only": "f46a10e016c52751f1072770cce71c39e8322d5ce8b19f1c81879d53fbc833f4",
         "parity_opaque_invariants_library_only": "f2a0340b7b1d509b2d06ad84eb11ff7f237015ee90555ea9c1c7609c1b3d25f5",
-        "parity_opaque_invariants_simplex_library_only": "1a3bcf81033223eeca2cb93b272540965be43941ebc79e915664314f5f22b3cb",
+        "parity_opaque_invariants_simplex_library_only": "92ed0ac36b8cfedfad49a86707e83f230c7edcf0484e29951c0a16c1d9c2e865",
         "parity_rank_poly_borrow_library_only": "4325ec047118bf72a0a4518d371dbaaa7597b861946a13aac1bd4e2c155f642c",
         "parity_recursive_generic": "9bdd2c3be82db69c4fd11d54f6a301e17655f397b6fad90bbdf923a373e198d6",
         "parity_scalar_string_foundation": "30ec444cbbea6be840b3c603121b3d4d35b1c8eec7311c6808377cf4b6883372",

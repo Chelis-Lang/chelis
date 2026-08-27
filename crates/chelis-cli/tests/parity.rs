@@ -375,6 +375,11 @@ fn parity_dict_foundation() {
 }
 
 #[test]
+fn parity_count_bool_axes() {
+    drive_parity(&examples_root().join("count_bool_axes.ch"), true);
+}
+
+#[test]
 fn parity_constraint_directed_risk_guards_library_only() {
     drive_parity(
         &examples_root().join("constraint_directed_risk_guards.ch"),
@@ -409,13 +414,15 @@ fn parity_tensor_structural_ops() {
     drive_parity(&examples_root().join("tensor_structural_ops.ch"), true);
 }
 
-// Library-only programs (no `main` / no top-level work). Both lanes emit
-// nothing; we still build the C source as an object to prove the backend is
-// happy.
+// Programs with no owed [05-OBS-7] roots remain library-only: both lanes emit
+// nothing and we build the C source as an object. Historical `_library_only`
+// test names are frozen by the Phase 3 corpus oracle even where a newly owed
+// pure-nullary or value root now makes the program executable.
 
 #[test]
 fn parity_hello_tensor_library_only() {
-    drive_parity(&examples_root().join("hello_tensor.ch"), false);
+    // `main()` is a pure nullary declaration and therefore an owed root.
+    drive_parity(&examples_root().join("hello_tensor.ch"), true);
 }
 
 #[test]
@@ -458,17 +465,15 @@ fn parity_opaque_invariants_library_only() {
     drive_parity(&examples_root().join("opaque_invariants.ch"), false);
 }
 
-// The `Simplex` tolerance-band variant: a tensor-field `sum(p.weights)`
-// invariant. Like `Probability` it is library-only (only `@opaque`/
-// `@invariant` declarations plus exported producers and a `@property`, so
-// both lanes emit nothing). The invariant predicate is declaration metadata
-// consumed only by `chelis prove`; it is never lowered to runtime IR, so the
-// runtime IR audit now skips it and the example lowers cleanly through the C
-// backend. Promoted from `examples/illustrative/` once that audit stopped
-// rejecting the declaration metadata.
+// The `Simplex` tolerance-band variant has an owed top-level `eps` value root.
+// Its invariant predicate is declaration metadata consumed only by `chelis
+// prove`; it is never lowered to runtime IR, so the runtime IR audit skips it
+// and the example lowers cleanly through the C backend. Promoted from
+// `examples/illustrative/` once that audit stopped rejecting the declaration
+// metadata.
 #[test]
 fn parity_opaque_invariants_simplex_library_only() {
-    drive_parity(&examples_root().join("opaque_invariants_simplex.ch"), false);
+    drive_parity(&examples_root().join("opaque_invariants_simplex.ch"), true);
 }
 
 #[test]
@@ -487,6 +492,7 @@ fn parity_rank_poly_borrow_library_only() {
 fn parity_corpus_is_complete() {
     let known: &[&str] = &[
         "constraint_directed_risk_guards.ch",
+        "count_bool_axes.ch",
         "dict_foundation.ch",
         "hello_tensor.ch",
         "induction_bond.ch",

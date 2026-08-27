@@ -1504,6 +1504,13 @@ pub(super) fn tensor_reduce_host(
     )))
 }
 
+pub(super) fn tensor_count_host(
+    tensor: &RuntimeTensorValue,
+    axes: &[usize],
+) -> Result<RuntimeTensorValue, String> {
+    chelis_ir::eval::count_tensor(&tensor.value, axes).map(RuntimeTensorValue::new)
+}
+
 /// Permute axes of a tensor, given an `axes` permutation. `axes[i]` is the
 /// source axis for output axis `i`.
 pub(super) fn tensor_permute_host(
@@ -2995,6 +3002,102 @@ pub(crate) fn render_value(value: &RuntimeValue) -> String {
         },
         RuntimeValue::Unit => "()".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The diagnostic-rendering boundary (chelis#997 / faithful_observation.md
+// FO-DIAG). It sits here, beside `render_value`, because the two are one
+// policy: `render_value` is the [05-OBS-1] exit renderer, and everything
+// below frames its output for an error message. §C1.6 forbids a diagnostic
+// laundering what it reports, so no caller picks its own numeric grammar,
+// container shape, or truncation - a call site names WHAT it is reporting
+// (a value, an argument slot, an ADT field list) and this boundary decides
+// how it renders.
+// ---------------------------------------------------------------------------
+
+/// Byte cap on one diagnostic rendering. A malformed payload can be a whole
+/// parsed document; past this many bytes the text is cut on a char boundary
+/// and the elision is stated rather than silently dropped (chelis#903
+/// review). Renderings that fit are byte-identical to the untruncated form.
+const DIAGNOSTIC_RENDER_LIMIT: usize = 160;
+
+/// Truncate one already-rendered diagnostic string at
+/// [`DIAGNOSTIC_RENDER_LIMIT`]. Private to this boundary: truncation is a
+/// property of the diagnostic channel, not a knob a call site turns.
+fn truncate_for_diagnostic(full: String) -> String {
+    if full.len() <= DIAGNOSTIC_RENDER_LIMIT {
+        return full;
+    }
+    let mut cut = DIAGNOSTIC_RENDER_LIMIT;
+    while !full.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}... ({} more bytes elided)",
+        &full[..cut],
+        full.len() - cut
+    )
+}
+
+/// The untruncated body of [`describe_value`].
+///
+/// Every numeric payload reaches text through [`render_value`], hence
+/// through `format_element` - the §C1.6 requirement. The only thing added
+/// on top is a KIND TAG on the outermost value, because a mismatch
+/// diagnostic ("expected an f64 value, got ...") has to name what arrived,
+/// and the canonical exit form deliberately does not: `5` alone cannot
+/// distinguish an int32 from an f64 whose shortest form has no fraction.
+/// Nested structure is *not* re-tagged - it is `render_value`'s output
+/// verbatim, so the diagnostic and the exit channel agree byte-for-byte on
+/// every payload they both render.
+fn describe_value_untruncated(value: &RuntimeValue) -> String {
+    match value {
+        // The dtype tag comes from the sealed storage variant, so it is the
+        // width the digits were rendered at, not a guess.
+        RuntimeValue::Scalar(payload) => {
+            format!("{} {}", payload.dtype().name(), render_value(value))
+        }
+        RuntimeValue::Bool(_) => format!("bool {}", render_value(value)),
+        // Quoted so an empty, blank, or control-carrying string is visible;
+        // `escape_debug` is string escaping, not a numeric grammar, and a
+        // string payload carries no digits for it to launder.
+        RuntimeValue::String(text) => format!("string \"{}\"", text.escape_debug()),
+        RuntimeValue::List(_) => format!("list {}", render_value(value)),
+        RuntimeValue::Tuple(_) => format!("tuple {}", render_value(value)),
+        // Tensors, dicts, ADTs, mapped files, closures, transforms, and unit
+        // already name their own shape in the canonical form
+        // (`tensor(shape=..)`, `dict(..)`, `JInt(..)`, `<closure>`, `()`).
+        _ => render_value(value),
+    }
+}
+
+/// Render one runtime value for a diagnostic message.
+pub(crate) fn describe_value(value: &RuntimeValue) -> String {
+    truncate_for_diagnostic(describe_value_untruncated(value))
+}
+
+/// Render an argument slot that may be absent (`args.first()` and friends),
+/// so a missing argument reads as a missing argument instead of as a Rust
+/// `Option` spelling.
+pub(crate) fn describe_argument(slot: Option<&RuntimeValue>) -> String {
+    match slot {
+        Some(value) => describe_value(value),
+        None => "nothing".to_string(),
+    }
+}
+
+/// Render an ADT constructor's field list for a malformed-shape diagnostic.
+/// Fields ARE tagged individually: `malformed JNum fields [int32 5]` names
+/// the reason the shape was rejected, which an untagged `[5]` does not.
+pub(crate) fn describe_fields(fields: &[RuntimeValue]) -> String {
+    truncate_for_diagnostic(format!(
+        "[{}]",
+        fields
+            .iter()
+            .map(describe_value_untruncated)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 pub(super) fn builtin_name(expr: &Expr) -> Option<&str> {

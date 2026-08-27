@@ -104,7 +104,7 @@ cast  cast_trunc  par  do  quote  unquote  splice  true  false
 `property`, `forall`, `where`, `opaque`, `invariant`, `wrt`, `axis`,
 `seed`, `device`, and the property-option names are contextual words only in
 the productions that name them. `effect`, `handler`, `perform`, `resume`, and
-`borrow` are reserved for future grammar and cannot be used as identifiers.
+`borrow` are reserved words and cannot be used as identifiers.
 The read-only borrow expression is spelled `&expr`.
 
 ---
@@ -119,7 +119,7 @@ Final. Binding power from lowest to highest:
 | 2 | `\|\|` | left | `(app {} (var {} or) ...)` |
 | 3 | `&&` | left | `(app {} (var {} and) ...)` |
 | 4 | `==` `!=` | none | `eq` / `neq` |
-| 5 | `<` `>` `<=` `>=` | none | `cmplt` / swapped `cmplt` / `lte` / `gte` |
+| 5 | `<` `>` `<=` `>=` | none | `cmplt` / `gt` / `lte` / `gte` |
 | 6 | `+` `-` | left | `add` / `sub` |
 | 7 | `*` `/` `%` | left | `mul` / `div` / `mod` |
 | 8 | unary `-` `!` | prefix | `neg` / `not` |
@@ -128,18 +128,30 @@ Final. Binding power from lowest to highest:
 
 Non-associative operators (BP 4, 5) produce a parse error on chaining: `a == b == c` is rejected.
 
+Every operator row desugars with the authored operand order preserved: an
+application row `a OP b` becomes `(app {} (var {} op) a' b')` with `a'`
+first, no row swaps its operands, and `|>` keeps its stage order in the
+`pipe` node. `a > b` therefore desugars to the `gt` built-in, whose result
+is defined as `cmplt(b, a)` over the already-evaluated operand values
+(`spec/05-risc-primitives.md` §3.2), not to an operand-swapped `cmplt`
+application. Combined with Deep's left-to-right application-argument
+evaluation (`spec/03-deep-syntax.md` §4.4), the effects and traps of
+operand expressions are observed in authored order. (`&&` and `||` are
+eager like every other application; there is no short-circuit special
+case.)
+
 No operator overloading. No infix bitwise operators. Host-side integer bitwise work uses
 named built-ins such as `bitand`, `bitor`, `bitxor`, `shl`, and `shr`. No exponentiation
 operator — use `pow(x, n)` from `Std.Math`.
 
-The `/` operator desugars to `div`, which since chelis#178 is **float-only**:
+The `/` operator desugars to `div`, which is **float-only**:
 applying `/` (or `div`) to integer operands is a type error. Integer division
 uses the named built-ins `floor_div(a, b)` (round toward −∞, matching Python `//`
 / torch / JAX / numpy `floor_divide`) and `trunc_div(a, b)` (round toward zero,
 the C `/` quotient; integer-only). There is intentionally no infix operator for
 either — integer division is explicit at the call site. See
-`spec/05-risc-primitives.md` §2.1 for the full semantics and the migration
-rationale. `%` continues to map to `mod` (integer remainder).
+`spec/05-risc-primitives.md` §2.1 for the full semantics. `%` continues to map
+to `mod` (integer remainder).
 
 ---
 
@@ -212,14 +224,14 @@ but whose trailing name that module does not export is rejected with a
 **Constructor scope (unqualified references).** A bare (unqualified)
 constructor reference — at a construction site (`Alpha`, `Alpha(x)`,
 `Alpha { ... }`) or in a `match` **pattern** (`| Alpha => ...`) — is in scope
-only when the constructor is declared in the current module **or** named in an
+only when the constructor is declared in the enclosing module **or** named in an
 `import` that brings it into unqualified scope. Importing only the enclosing
 **type** is not sufficient: the constructor itself must be named in the import
 list (e.g. `import Pkg.Adt (Mode, Alpha, Beta, Gamma)`). A constructor that is
 not in scope is an `unknown constructor \`X\`` error at `chelis check` that
 names the constructor — the same way an unbound value is an `unbound variable`
-(type-checker diagnostics name the offending identifier; they do not yet carry
-a source span) — and must never silently bind to a same-named constructor
+(type-checker diagnostics name the offending identifier) — and must never
+silently bind to a same-named constructor
 declared in another module (which would defer the failure to a runtime
 non-exhaustive match). This applies to record-shaped constructors
 (`Alpha { ... }`) at both construction and match-pattern sites, and to the
@@ -242,7 +254,7 @@ export (forward, Linear)
 
 **⟹** `(export {} forward Linear)`
 
-No re-exports in v1.
+Surf has no re-export form.
 
 ### P3: Dimension Declaration
 
@@ -300,8 +312,11 @@ def reduce_seq(x: &tensor[..pre, seq, ..post, f32]) -> tensor[..pre, ..post, f32
 `..r` is introduced contextually (like a sig dim variable — no `[..r]`
 quantifier needed). A spread name may not repeat within one tensor shape (a
 **parse error**). A reduction names the axis it removes by the anchor's name
-(`sum(x, seq)`); multiple axes are reduced by composing single-axis reductions
-(`sum(sum(x, head), seq)`). The reduced axis must be a **named** anchor present
+(`sum(x, seq)`). Multiple named axes use the variadic form
+(`sum(x, head, seq)` or `count(mask, head, seq)`). Value reductions
+lower to the canonical single-axis composition in spec/04 §4.5.3; `count`
+lowers once with its complete named-axis vector because its result is `int64`,
+not `bool`. The reduced axis must be a **named** anchor present
 exactly once in the operand — a fully-literal or differently-named operand is
 rejected (the Name↔Lit boundary, §4.5.3). A `def` whose signature mentions `..r`
 is restricted by the §4.2 Body-Discipline check to *name-trackable* operations:
@@ -336,25 +351,19 @@ def multi_head_attn(q, k, v, mask) = ...
 
 `sig` must precede its corresponding `def`. Arrow chain reads as: arg₁ -> arg₂ -> ... -> return. Always flat in Deep (`t-fn` with last child as return type). The arrow is right-associative, so `a -> b -> c` is the curried 3-ary `a -> (b -> c)`. A function-typed argument must be parenthesized: `(a -> b) -> c` is a distinct, 1-ary type whose single argument is itself a function, and the formatter and decompiler preserve those grouping parentheses (a bare arrow in return position keeps no redundant parens).
 
-Phase 2a effect annotations are optional suffixes on either `sig` or `def`:
+Effect annotations are optional suffixes on either `sig` or `def`:
 
 ```text
 sig predict: tensor[n, f32] -> tensor[n, f32] ! { Random }
 def train(x: tensor[n, f32]) -> tensor[n, f32] ! { Random, Resource("gpu:0") } = ...
 ```
 
-Surf accepts the built-in names `Diff`, `Random`, `Accum`, `IO`, and
-`Resource("device")`.
-The current shipped boundary-checking surface is narrower than the syntax:
-
-- `Random` is the active user-facing boundary effect in Phase 2a
-- `Resource("...")` is the active build-boundary placement annotation in Phase 2a
-- `IO` is the shipped Phase 3 debugging/logging effect inferred from `print` and
-  `debug`; it is allowed at the program boundary
-- `Diff` is accepted as documentation / forward-compatible syntax, but `grad` remains a
-  compiler capability rather than a user-handled boundary effect
-- `Accum` is accepted as forward-compatible syntax but remains internal-only in the
-  shipped Phase 2a subset
+Surf accepts the built-in names `Diff`, `Random`, `Accum`, `IO`, `Test`, and
+`Resource("device")`. `Random` and `Resource("...")` are the user-handler
+boundaries. `IO` covers host interaction and may remain unhandled at the
+program boundary. `Test` is handled by `chelis test`. `Diff` denotes a
+compiler capability rather than a user-handled effect, and `Accum` is
+internal-only.
 
 Omitting all types is valid: `def f(x, y) = add(x, y)`. The compiler emits a note recommending a `sig` for module-level definitions.
 
@@ -416,8 +425,8 @@ def apply_resid[n, P](
 ) -> tensor[n, f32] = add(x, f(x, inner_p))
 ```
 
-must therefore type-check both in isolation and at every call site
-(chelis#293). Outside an `[..]` clause the case-split still applies:
+must therefore type-check both in isolation and at every call site.
+Outside an `[..]` clause the case-split still applies:
 an unquantified PascalCase name is an ADT.
 
 The case-split has a value-position mirror of this type-position
@@ -425,7 +434,7 @@ override. A **single-letter** uppercase name (`S`, `K`, `T`, `N`, `P`)
 in a value-binding position — a top-level value-binding LHS, a function
 or lambda parameter, or a block binder — is a value identifier, not a
 constructor, because the explicit value binding makes it one
-(chelis#437; `spec/01-nomenclature.md` §1.1, §3.2). The two overrides
+(`spec/01-nomenclature.md` §1.1, §3.2). The two overrides
 are symmetric: a quantified single-letter uppercase name in a `[..]`
 clause is a type variable, and a bound single-letter uppercase name in
 a value position is a value. The override is single-letter only;
@@ -477,20 +486,13 @@ Style rules for human-facing Surf:
 - omit intermediate type ascriptions when inference already determines the type
 - combine short tensor operations when that improves readability
 
-Planned Phase 3 public-style target:
+Additional canonical style rules:
 
 - use block bindings exclusively: `x = expr` inside `{ ... }` and bare top-level
   bindings such as `result = expr`
 - prefer pipe-first composition for eligible linear flows
 - break long or many-stage pipes after `=` and before every `|>` using the same
   flat-first, width-threshold approach as the Deep pretty printer
-
-Planned remaining Phase 3 language-completeness additions:
-
-- practical scalar/string programming beyond tensor-only code
-- collection literals and iteration idioms
-- data-loading and tokenization helpers that remove the mandatory Python preprocessing
-  step
 
 ### P5: Blocks and Sequencing
 
@@ -544,7 +546,7 @@ No `where` clauses. Use blocks.
 
 ### P5a: Effect Handlers
 
-Phase 2a adds two `with` block forms:
+Surf defines two `with` block forms:
 
 ```text
 with seed(42i64) {
@@ -559,17 +561,17 @@ with device("gpu:0") {
 `with` handlers are expressions. They take exactly one argument in parentheses and a
 brace-delimited block body.
 
-Current shipped constraints:
+The handler argument rules are:
 
 - `with seed(...)` requires an explicit integer literal seed carrying the `i64`
   suffix (`with seed(42i64) { ... }`); the seed is semantically int64 and an
-  unsuffixed literal is a type error naming the suffix (§P10a; chelis#731 Phase 1)
-- `with device(...)` currently requires an explicit string literal device name
-- only `seed` and `device` are valid handler names in the Phase 2a Surf parser
+  unsuffixed literal is a type error naming the suffix (§P10a)
+- `with device(...)` requires an explicit string literal device name
+- only `seed` and `device` are valid handler names
 
 ### P5b: Macros
 
-Phase 2c adds top-level macro definitions:
+Surf has top-level macro definitions:
 
 ```text
 macro linear_layer(x, w, b) = add(matmul(x, w), expand(b, 0, batch))
@@ -578,7 +580,7 @@ macro relu_ref(x) = max_elem(x, 0.0)
 
 Macro invocations use the ordinary call surface: `linear_layer(x, w, b)`.
 
-Current shipped macro rules:
+Macro rules:
 
 - resolution order is lexical blockers first, then user-defined top-level macros, then
   the standard macro prelude, then ordinary function call resolution
@@ -590,12 +592,12 @@ Current shipped macro rules:
 - macro expansion runs before type checking, effect inference, linearity checking, and
   lowering
 
-Current shipped prelude macros:
+Standard prelude macros:
 
 - `linear_layer(x, w, b)` -> `add(matmul(x, w), expand(b, 0, batch))`
 - `residual(x, f)` -> `add(x, f(x))`
 - `cross_entropy(logits, labels)` -> the standard `softmax` / `log` / `sum` / `mean`
-  composition used by the current executable corpus
+  composition
 
 ### P6: Records
 
@@ -658,7 +660,7 @@ match n with {
 
 Record patterns allow punning and ignore unmentioned fields. Field order doesn't matter.
 
-No or-patterns in v1. Write separate arms.
+Surf has no or-patterns; write separate arms.
 
 Exhaustiveness required. Every variant of the scrutinee's ADT must be covered. Non-exhaustive match is a compile error.
 
@@ -789,9 +791,8 @@ narrowing. The closed suffix set is:
 Default-type suffixes are semantic commitments, not syntax-safe aliases. In
 particular, `cast(1.1f32, f64)` widens a value first bound at `f32`, whereas
 `cast(1.1, f64)` contextually binds the literal at `f64` under P10b. Both are
-therefore canonical. A float suffix attached to integer-looking digits is
-accepted by the v0.18 migration lexer, but canonical validation requires the
-printed float body: `42.0f32`, not `42f32`. Integer-typed suffixes attach to
+therefore canonical. A float suffix requires the canonical printed float body:
+`42.0f32`, not `42f32`. Integer-typed suffixes attach to
 integer literal tokens only;
 `1.0i8` is a parse error.
 
@@ -807,11 +808,11 @@ is printed as a canonical decimal token. A radix integer may not carry a float
 suffix. Canonical decimal float literals carry float suffixes without ambiguity
 (`1.0f32`).
 
-**Deferred and out-of-scope suffixes.**
+**Rejected suffixes.**
 
-- `f8e4m3` is deferred per `spec/04-type-system.md` §1.1.1; the suffix
+- `f8e4m3` is reserved and rejected per `spec/04-type-system.md` §1.1.1; the suffix
   `f8e4m3` is rejected at lex time with a diagnostic pointing at §1.1.1.
-- Unsigned suffixes (`u8`, `u16`, `u32`, `u64`) are out of scope per
+- Unsigned suffixes (`u8`, `u16`, `u32`, `u64`) are rejected per
   `spec/04-type-system.md` §1.1.2; they are rejected at lex time with a
   diagnostic pointing at §1.1.2.
 - An unrecognized identifier sequence directly adjacent to a numeric literal
@@ -823,9 +824,8 @@ The suffix grammar is identical in Deep canonical form (`spec/03-deep-syntax.md`
 §6.4); the Surf and Deep lexers parse the same token shape.
 
 Suffixes are expression-literal syntax. A Deep `pat-lit` contains only its raw
-value and has no precision slot, so canonical Surf literal patterns are
-unsuffixed. The v0.18 migration parser accepts a suffixed pattern only to emit
-the one unsuffixed pattern spelling.
+value and has no precision slot, so Surf literal patterns are unsuffixed and a
+suffixed literal pattern is rejected.
 
 ### P10b: Contextual Tensor-Literal Inference
 
@@ -845,7 +845,7 @@ positions is exactly:
    literals bind at `p`
 
 Position 4 applies to a bare scalar numeric literal as well as to a
-tensor-literal body (issue #308): `cast(1.1, f64)` binds the decimal at
+tensor-literal body: `cast(1.1, f64)` binds the decimal at
 `f64` directly (the desugarer emits `(lit {type: (t-prim {} f64)} 1.1)`),
 not "narrow to the f32 default, then widen". Suffixed literals keep their
 suffix binding (§P10a; `cast(1.1f32, f64)` widens the f32 value), and a
@@ -893,7 +893,7 @@ x
   |> transform_b
 ```
 
-The one qualification is at separator boundaries in a sequencing context (block bindings, block tail, declaration bodies): there, a top-level newline acts as a `Sep` and ends the current expression unless the next line begins `|>` or the break is inside `()`/`[]`/`{}`. This is the same boundary rule that binding values and declaration bodies already follow (see P5 and `BlockBody`); it is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application (chelis#706). The leading-`|>` continuation above is exactly the escape hatch that keeps a multi-line pipeline as one expression.
+The one qualification is at separator boundaries in a sequencing context (block bindings, block tail, declaration bodies): there, a top-level newline acts as a `Sep` and ends the expression being parsed unless the next line begins `|>` or the break is inside `()`/`[]`/`{}`. This is the same boundary rule that binding values and declaration bodies already follow (see P5 and `BlockBody`); it is what makes a bare non-tail statement a rejected juxtaposition rather than a silent application. The leading-`|>` continuation above is exactly the escape hatch that keeps a multi-line pipeline as one expression.
 
 The parser accepts one trailing comma or semicolon in a nonempty delimited
 family, and the formatter removes it. This includes arguments, parameters,
@@ -908,7 +908,8 @@ canonical output. Ordinary binding blocks still reject semicolon separators.
 
 ### P14: Where Clauses
 
-Not in v1.
+Surf has no general `where` clause. The `where` keyword appears only in the
+property-declaration production in §5.1.
 
 ### P15: Type Aliases
 
@@ -933,7 +934,7 @@ separate implicit-quantification rule from P4/§5.8.
 
 Parser disambiguation: after `type Name =`, if next non-whitespace is `|`, it's an ADT. Otherwise alias.
 
-Aliases are transparent — expanded during desugaring. No opaque aliases in v1.
+Aliases are transparent and expand during desugaring; aliases cannot be opaque.
 
 ### P16: Opaque Types
 
@@ -1069,10 +1070,9 @@ formatter rewrites it to this one order.
 
 The comma and colon delimiters bound each property precondition. A binary
 precondition therefore omits the redundant outer grouping pair used by the
-general expression printer: `where x <= 1:` is canonical. The canonical parser
-rejects `where (x <= 1):`; the v0.18 migration parser accepts that former alias
-and rewrites it to the canonical form. Parentheses that group an operand remain
-meaningful and accepted, as in `where (x + 1) <= y:`.
+general expression printer: `where x <= 1:` is canonical. The parser rejects
+`where (x <= 1):`. Parentheses that group an operand remain meaningful and
+accepted, as in `where (x + 1) <= y:`.
 
 Property contract options are proof dependencies, not labels. Before using a
 contract, the prover must bind every abstracted call to a linker-produced
@@ -1082,7 +1082,7 @@ internal spelling.
 
 `std.quantile.monotonicity` is the source-visible contract for
 `Nautilus.Stats.quantile_vec`. Its Tier-B lane accepts exactly the linker's
-`pkg__nautilus__Nautilus__Stats__quantile_vec` declaration with the released
+`pkg__nautilus__Nautilus__Stats__quantile_vec` declaration with the declared
 `(&tensor[n, f32], f32) -> f32` surface. The tensor argument remains a compiler
 AST identity and is never reconstructed from source or lowered as a scalar.
 For two calls over the same compiler-bound dataset, the prover may introduce
@@ -1128,7 +1128,14 @@ TypeAtom      <- 'tensor' '[' S DimList S ',' S PrecType (S ',')? S ']'
                / '(' S TypeExpr S ')'
                / TypeName TypeArgs?
 
-TypeArgs      <- '[' S TypeExpr (S ',' S TypeExpr)* (S ',')? S ']'
+TypeArgs      <- '[' S TypeArg (S ',' S TypeArg)* (S ',')? S ']'
+
+# An IntLit type-application argument is the concrete dimension
+# instantiation of a dimension-parameterized ADT (`Frame[2]` whose
+# parameter reaches a tensor dimension slot). Bare type positions
+# have no integer production. The checker rejects an argument whose
+# kind or extent does not match the corresponding type parameter.
+TypeArg       <- TypeExpr / IntLit
 
 # Bare or module-qualified type name (`Mode`, `Demo.Dropout.Mode`).
 TypeName      <- TypeIdent ('.' TypeIdent)*
@@ -1136,8 +1143,8 @@ TypeName      <- TypeIdent ('.' TypeIdent)*
 PrecType      <- 'f32' / 'f64' / 'bf16' / 'f16'
                / 'int8' / 'int16' / 'int32' / 'int64'
                / 'bool' / 'string'
-               # The deferred names of spec/04-type-system.md §1.1.1 are
-               # reserved but not active and are rejected at check time:
+               # The reserved names of spec/04-type-system.md §1.1.1 are
+               # rejected at check time:
                # f8e4m3, f8e5m2, uint8/uint16/uint32/uint64, int4/uint4,
                # complex64/complex128, decimal128/decimal256. The short
                # unsigned spellings u8/u16/u32/u64 are not reserved at all.
@@ -1214,7 +1221,7 @@ HandlerBlock  <- '{' S (Expr / BlockBody) S '}'
 # newline ends it unless the next line begins '|>' or the break is
 # inside ()/[]/{}. There is exactly one tail (no `Expr (Sep Expr)*`), so a
 # second top-level expression is a bare non-tail statement and is rejected
-# — bind it with `_ = <expr>` or move it to tail position (chelis#706).
+# — bind it with `_ = <expr>` or move it to tail position.
 
 TransformExpr <- TransformKw S '(' S Expr
                   (S ',' S TransformArg)? (S ',')? S ')'
@@ -1423,7 +1430,7 @@ a % b                             ⟹  (app {} (var {} mod) a' b')
 a == b                            ⟹  (app {} (var {} eq) a' b')
 a != b                            ⟹  (app {} (var {} neq) a' b')
 a < b                             ⟹  (app {} (var {} cmplt) a' b')
-a > b                             ⟹  (app {} (var {} cmplt) b' a')
+a > b                             ⟹  (app {} (var {} gt) a' b')
 a <= b                            ⟹  (app {} (var {} lte) a' b')
 a >= b                            ⟹  (app {} (var {} gte) a' b')
 
@@ -1510,7 +1517,7 @@ x @ Some(_)                       ⟹  (pat-as {} x (pat-ctor {} Some (pat-wild 
 
 ---
 
-## 6. Parser Implementation Notes
+## 6. Parsing and Disambiguation Rules
 
 ### 6.1 Flat application
 

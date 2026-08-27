@@ -134,6 +134,46 @@ fn fix2_unsound_generalization_rejected() {
     );
 }
 
+#[test]
+fn level_generalization_quantifies_only_the_ignored_inner_argument() {
+    // [04-INF-1] positive twin for `fix2_unsound_generalization_rejected`:
+    // `x` belongs to the enclosing lambda and must remain monomorphic, while
+    // the ignored `z` is created by the let RHS and may be generalized.
+    check_ok(
+        "(def {} test \
+           (fn {} (params {} x) \
+             (let {} (bind {} y (fn {} (params {} z) (var {} x))) \
+               (tuple {} \
+                 (app {} (var {} y) (lit {type: (t-prim {} int32)} 1)) \
+                 (app {} (var {} y) (lit {type: (t-prim {} bool)} true))))))",
+    );
+}
+
+#[cfg(feature = "generalize-sweep-oracle")]
+#[test]
+fn independent_binding_generalization_visits_zero_environment_bindings() {
+    let mut source = String::new();
+    for index in 0..128 {
+        source.push_str(&format!(
+            "(def {{}} independent_{index} \
+               (fn {{}} (params {{}} value_{index}) (var {{}} value_{index})))\n"
+        ));
+    }
+
+    crate::env::reset_generalize_sweep_env_visits();
+    let result = crate::env::without_generalize_sweep_oracle(|| check(&source));
+    assert!(
+        result.errors.is_empty(),
+        "generated independent-binding fixture must check: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        crate::env::generalize_sweep_env_visits(),
+        0,
+        "the production level path must not enumerate environment bindings"
+    );
+}
+
 // Fix 3: defsig not enforced — body must match declared signature
 #[test]
 fn fix3_defsig_enforced() {
@@ -231,8 +271,8 @@ fn fix7b_suggestions_for_unbound() {
 #[test]
 fn ir_literal_dimension_mismatch_surfaces_error() {
     let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def main(a: tensor[3, 3, f32]) -> f32 = want_2x2(a)\n",
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def main(a: tensor[3, 3, f32]) -> tensor[f32] = want_2x2(a)\n",
     )
     .expect("surf parse");
     let exprs = chelis_surf::desugar::desugar_program(&decls);
@@ -246,13 +286,21 @@ fn ir_literal_dimension_mismatch_surfaces_error() {
         "expected ir inference to preserve literal dimension mismatches, got {:?}",
         result.errors
     );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "dimension mismatch fixture must not include an unrelated trace return TypeMismatch: {:?}",
+        result.errors
+    );
 }
 
 #[test]
 fn ir_rejects_polymorphic_dims_pinned_by_body() {
     let decls = chelis_surf::parser::parse_str(
-        "def want_2x2(a: tensor[2, 2, f32]) -> f32 = trace(a, 0, 1)\n\
-         def bad_consumer[m, n](a: tensor[m, n, f32]) -> f32 = want_2x2(a)\n\
+        "def want_2x2(a: tensor[2, 2, f32]) -> tensor[f32] = trace(a, 0, 1)\n\
+         def bad_consumer[m, n](a: tensor[m, n, f32]) -> tensor[f32] = want_2x2(a)\n\
          def main() -> f32 = cast(0.0, f32)\n",
     )
     .expect("surf parse");
@@ -265,6 +313,14 @@ fn ir_rejects_polymorphic_dims_pinned_by_body() {
             .iter()
             .any(|error| matches!(error.kind, CheckErrorKind::DimensionMismatch)),
         "expected ir inference to reject polymorphic dims forced to literals by the body, got {:?}",
+        result.errors
+    );
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|error| matches!(error.kind, CheckErrorKind::TypeMismatch)),
+        "polymorphic dimension fixture must not include an unrelated trace return TypeMismatch: {:?}",
         result.errors
     );
 }

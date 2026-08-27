@@ -5,10 +5,10 @@
 Define the DAG-to-DAG transformations and optimization passes: reverse-mode automatic
 differentiation (`grad`) including its algorithm, `wrt` selection, gradient payloads,
 non-differentiable handling, symbolic-dimension adjoint construction, higher-order
-derivatives, static `match`/`if` and field-wise ADT gradients; vectorization (`vmap`);
+derivatives, executed-branch `match`/`if` and recursive List/ADT gradients; vectorization (`vmap`);
 just-in-time compilation (`jit`); the semantics-preserving DAG optimization passes; the
 transformation composition, commutativity, and ordering rules; and the transform error
-contract. This is the current truth of how Chelis transforms and optimizes RISC DAGs.
+contract.
 
 **Source:** captured from [`spec/06-transformations.md`](../../../spec/06-transformations.md).
 
@@ -34,8 +34,9 @@ primitives with all transform constructs rewritten away.
 
 `grad(f)` SHALL require a scalar floating output and SHALL return gradients only (not
 `(value, grad)`). The gradient type SHALL mirror the argument structure: a single tensor yields
-the same tensor type, a tuple yields a tuple of gradients, and a differentiable ADT yields the
-same constructor shape with a gradient per field. A multi-parameter function's payload SHALL be
+the same tensor type, a List preserves its runtime length/order, a tuple yields a tuple of
+gradients, and an ADT yields the executed constructor shape with a gradient per differentiable
+field and `unit` per discrete field. A multi-parameter function's payload SHALL be
 a flat tuple in parameter order.
 
 #### Scenario: Multi-parameter gradient is a flat tuple
@@ -67,15 +68,23 @@ rest as constants. The gradient result SHALL contain entries only for the listed
 
 ### Requirement: Reverse-mode AD algorithm and accumulation
 
-`grad` SHALL construct the backward DAG by initializing adjoints to zero, seeding the scalar
-output adjoint to `Const(1.0)`, traversing nodes in reverse topological order applying each
-op's adjoint rule, and accumulating multi-consumer contributions by summation (the multivariate
-chain rule). The combined forward+backward DAG SHALL remain acyclic.
+`grad` SHALL construct the backward DAG by initializing each value's recursive shape-preserving
+cotangent to zero, seeding the scalar float output to exact one, traversing values in reverse
+topological order under each op's exact adjoint/zero/rejection contract, and accumulating each
+float leaf by the canonical adjacent-pair balanced tree over consumer-edge order. Consumer edges
+SHALL be ordered lexicographically by the consumer's canonical forward node ordinal and then its
+input-slot index, independently of a topological-sort implementation's tie order. The combined
+forward+backward DAG SHALL remain acyclic.
 
 #### Scenario: Multi-use node sums contributions
 
 - **WHEN** a node is consumed by multiple downstream nodes
 - **THEN** its adjoint is the sum of all consumer contributions
+
+#### Scenario: Independent topological schedules preserve gradient bits
+
+- **WHEN** two valid backward work lists choose different ties among unrelated forward nodes
+- **THEN** both build the same canonical consumer-edge tree and produce identical gradient bits
 
 #### Scenario: Backward DAG is acyclic
 
@@ -84,39 +93,57 @@ chain rule). The combined forward+backward DAG SHALL remain acyclic.
 
 ### Requirement: Non-differentiable operation handling
 
-`grad` SHALL error only when a `wrt` parameter's type is non-differentiable (bool, integer,
-ADT with a non-tensor field), not on non-differentiable operations in the forward pass. `CmpLt`
-and `Cast` to an integer type SHALL contribute zero gradient with a warning; `Cast` to a float
-type SHALL be differentiable.
+Every numeric callable SHALL have exactly one exact adjoint, zero-cotangent,
+or structural `grad` rejection contract. Comparisons and `shape` contribute
+zero without blocking the graph. Piecewise-constant rounding and
+float-to-integer/bool casts structurally reject with
+`AdRejectionReason::PiecewiseConstant`; they never silently return zero.
+Float-to-float casts use `cast(g, source_dtype)`. [05-OP-42]
+`stop_gradient` SHALL be the differentiation barrier: its argument's
+subgraph is outside adjoint construction and structural rejection analysis,
+and the argument receives the shape-preserving exact zero cotangent. An
+explicit `wrt` target
+must contain a differentiable float leaf; mixed List/tuple/ADT targets are
+legal and preserve discrete fields as `unit`.
 
-#### Scenario: grad through an internal comparison is valid
+#### Scenario: grad through internal extrema and comparison is valid
 
-- **WHEN** `grad` is applied to a function using `Max`/`CmpLt` internally with float tensor parameters
-- **THEN** it is valid (zero gradient at the non-differentiable point) rather than an error
+- **WHEN** `grad` is applied to a function using `MaxElem`/`MinElem`/`CmpLt`
+  internally with float tensor parameters
+- **THEN** it is valid: the selected operand receives the whole cotangent,
+  including the first operand on equality, while the comparison contributes zero
 
 #### Scenario: grad over a bool parameter is a type error
 
 - **WHEN** `grad` is applied to a function whose `wrt` parameter is `bool`
 - **THEN** it is a `non_differentiable` type error naming the parameter
 
+#### Scenario: A structural rejection inside the barrier does not reject
+
+- **WHEN** `grad` is applied to `add(x, stop_gradient(sub(round(x), x)))`
+- **THEN** construction succeeds and the cotangent of `x` is exactly the
+  identity path's, while bare `round` under `grad` still rejects with
+  `AdRejectionReason::PiecewiseConstant`
+
 ### Requirement: Symbolic-dim adjoint construction
 
-Adjoint construction SHALL run before symbolic dimensions are bound and SHALL classify each
-case: structural adjoints carry the symbolic dim as a `DimExpr` or full-axis sentinel; runtime
-node-valued extents build the extent as a rank-0 integer scalar node; and value-dependent
-constructions (a `ProdReduce` reduced axis, a runtime stride step) SHALL fail loudly at
-construction naming the op, axis, and symbolic dim. A scalar `shape()` read SHALL be
-AD-transparent with a zero cotangent.
+Adjoint construction SHALL preserve proven symbolic identities and otherwise
+carry exact runtime int64 extent nodes. `ProdReduce` SHALL reverse its executed
+balanced tree, runtime stride SHALL use its exact inverse sampling map, and
+runtime-window reductions SHALL reverse the executed window graph. No runtime
+axis, step, window, loop extent, or target shape is rejected merely because it
+is unavailable at transform time. A scalar `shape()` read is AD-transparent
+with a zero cotangent.
 
 #### Scenario: Structural adjoint carries the symbolic dim
 
 - **WHEN** a `Sum`/`Expand` adjoint is built over a symbolic axis
 - **THEN** it carries the extent as a `DimExpr` without reading its runtime value
 
-#### Scenario: Value-dependent symbolic adjoint fails loudly
+#### Scenario: Value-dependent symbolic adjoint executes exactly
 
 - **WHEN** a `ProdReduce` adjoint or a runtime stride-step adjoint needs a value-dependent structure over a symbolic axis
-- **THEN** it fails at construction naming the op, axis, and symbolic dim rather than guessing a size
+- **THEN** it constructs the exact runtime reverse graph without guessing or target-specific rejection
 
 ### Requirement: Higher-order derivatives
 
@@ -134,39 +161,42 @@ reused in its own adjoint) SHALL be preserved as graph references, not duplicate
 - **WHEN** the second `grad` encounters a node shared by the forward and backward DAG
 - **THEN** it handles the shared reference correctly rather than treating the DAG as a tree
 
-### Requirement: Static match and if differentiation
+### Requirement: Executed match and if differentiation
 
-Inside a differentiated body, a `match` whose scrutinee is a compile-time-known constructor and
-an `if` whose condition const-folds SHALL lower only the taken arm/branch, giving the exact
-gradient. A runtime scrutinee, an arm guard, nested destructuring beyond field bindings, or a
-runtime-condition `if` over an ADT/tuple branch SHALL be rejected loudly.
+Inside a differentiated body, `match` and scalar `if` SHALL differentiate the
+arm or branch executed by the forward program. Tags, pattern tests, guards,
+and conditions carry zero cotangent; untaken code is not evaluated. Runtime
+scrutinees, guarded arms, nested patterns, recursive calls, and List/tuple/ADT
+branch values follow the same target-independent rule.
 
 #### Scenario: Static arm selection lowers the taken arm
 
 - **WHEN** a differentiated body matches on an ADT-typed parameter fixed at the `grad` boundary
 - **THEN** only the taken arm is lowered and differentiated as the exact gradient
 
-#### Scenario: Runtime-scrutinee match differentiation is rejected
+#### Scenario: Runtime-scrutinee match differentiates the executed arm
 
 - **WHEN** a differentiated `match` has a scrutinee that lowers to a tensor node
-- **THEN** it is rejected loudly rather than differentiated
+- **THEN** only its executed arm is differentiated and the untaken arms contribute nothing
 
 ### Requirement: Field-wise ADT gradients
 
-`grad(f)(Ctor { .. })` over an ADT argument whose fields are all float tensors/scalars SHALL
-return the same constructor shape with one gradient per field, zero-filling non-influencing
-fields. An ADT with a non-float field in any variant, or a pure enum with no fields, SHALL be
-rejected loudly; the compiled C lane SHALL reject `grad` exports over ADT-typed parameters.
+`grad(f)(Ctor { .. })` over an ADT argument containing a differentiable float
+leaf SHALL return the executed constructor shape, exact field cotangents for
+differentiable fields, explicit zero for uninfluential float fields, and
+`unit` for discrete fields. Pure enums and recursively all-unit ADTs have no
+differentiable leaf and are invalid only as explicit `wrt` targets. The rule
+is identical in every execution mode.
 
 #### Scenario: Field-wise gradient matches the argument structure
 
 - **WHEN** `grad(f)` differentiates an all-float-field ADT argument
 - **THEN** it returns the same constructor shape with a gradient per field, zeros for non-influencing fields
 
-#### Scenario: Mixed-type ADT field is rejected
+#### Scenario: Mixed-type ADT preserves discrete fields
 
 - **WHEN** the ADT argument's type has a non-float-tensor field in any variant
-- **THEN** it is rejected loudly naming the field, even if the constructed variant is float-clean
+- **THEN** differentiable fields receive cotangents and each discrete field remains as `unit` in position
 
 ### Requirement: vmap vectorization
 
@@ -205,15 +235,21 @@ SHALL equal `jit(f)`.
 
 ### Requirement: Optimization passes preserve semantics
 
-Constant folding, DCE, CSE, algebraic simplification, fusion, and memory planning SHALL be
-semantics-preserving DAG rewrites: for all inputs, `eval(optimize(G), x) = eval(G, x)`. The
-algebraic-simplification loop SHALL iterate to a fixpoint with a bounded iteration limit;
-fusion SHALL NOT cross reduction, load/store, or multi-consumer barriers.
+Constant folding, DCE, CSE, algebraic simplification, fusion, and memory
+planning SHALL preserve stored result bits, dtype, shape, effects, trap kind,
+operation attribution, and trap occurrence for every input. Potentially
+effectful or trapping nodes are DCE roots and never CSE candidates. Algebraic
+identities require a proof under the owning numbered operation atoms; IEEE-like
+spellings do not authorize zero/one, inverse-function, nested-cast, or
+expand/reduction rewrites. Fusion SHALL preserve every primitive finalization
+boundary and SHALL NOT cross reduction, load/store, or multi-consumer barriers.
+The simplifier SHALL terminate at a fixpoint; an iteration limit is not a
+semantic proof.
 
 #### Scenario: DCE removes unconsumed nodes
 
-- **WHEN** a node's output is not consumed by any live node
-- **THEN** DCE removes it while preserving the evaluated result of the DAG
+- **WHEN** a total pure node's output is not consumed by any observable root
+- **THEN** DCE removes it without deleting or reordering any effect or trap
 
 #### Scenario: Fusion respects reduction barriers
 

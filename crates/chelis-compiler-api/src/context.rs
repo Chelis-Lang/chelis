@@ -75,9 +75,14 @@ pub struct CacheIdentity {
     /// Stored as a string (lossy) so the identity round-trips through
     /// bincode on every platform.
     pub package_root: String,
-    /// The compiler crate version (`COMPILER_VERSION`). A binary built
-    /// from different compiler source must not read an older binary's
-    /// cached context.
+    /// The compiler BUILD fingerprint (`build_fingerprint()`), not the
+    /// bare crate version. A binary built from different compiler source
+    /// must not read an older binary's cached context — and
+    /// `COMPILER_VERSION` alone does not enforce that, because two builds
+    /// from different commits share one `workspace.package.version` until
+    /// the next release bump. Two such binaries can disagree about type
+    /// semantics, so sharing a cache entry lets one check a program under
+    /// the other's rules (chelis#1156).
     pub compiler_version: String,
 }
 
@@ -94,7 +99,7 @@ impl CacheIdentity {
             .into_owned();
         CacheIdentity {
             package_root: canonical,
-            compiler_version: crate::COMPILER_VERSION.to_string(),
+            compiler_version: crate::build_fingerprint().to_string(),
         }
     }
 
@@ -766,7 +771,12 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// Magic header bytes for the Phase I disk-cache file format.
 /// Trailing newline guards against accidental concatenation with another
 /// file (e.g., a misuse that piped two cache files together).
-/// V9: two independent V8 formats are unified here. The pipeline-core
+/// V10: `TypeEnv` now serializes transactional generalization levels,
+/// transition watermarks, lowering overrides, and persisted-context resume
+/// floors. Bincode is positional, so every V9 payload has the old checker
+/// state shape and must be rejected before decode.
+///
+/// V9 unified two independent V8 formats. The pipeline-core
 /// extraction sealed the lowered-library proof identity into the cached
 /// context (branch V8). On main (main V8), chelis#878 (`RiscOp::Pad::fill`
 /// sealed dtype-tagged scalar), chelis#942 (deferred positional-expand
@@ -778,13 +788,13 @@ fn is_local_registry_hash_gap(err: &CompilerError) -> bool {
 /// bincode is positional and a V8 file of either lineage would decode to a
 /// wrong shape; the magic check rejects it before any decode. A V6, V7, or
 /// either V8 file is stale.
-const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V9\n";
+const CACHE_MAGIC: &[u8] = b"CHELIS_CTX_V10\n";
 
 /// On-disk format version for the cache envelope. Bumping this tells
 /// `load_if_fresh` to reject older cache files with
 /// [`CacheError::UnsupportedVersion`] rather than risk a "successful but
 /// wrong" decode.
-const CACHE_FORMAT_VERSION: u32 = 9;
+const CACHE_FORMAT_VERSION: u32 = 10;
 
 /// On-disk envelope for the Phase I cache. The full file layout is:
 ///
@@ -1299,9 +1309,56 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn cache_format_version_tracks_deferred_reshape_relations() {
-        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V9\n");
-        assert_eq!(CACHE_FORMAT_VERSION, 9);
+    fn cache_format_version_tracks_typecheck_generalization_levels() {
+        assert_eq!(CACHE_MAGIC, b"CHELIS_CTX_V10\n");
+        assert_eq!(CACHE_FORMAT_VERSION, 10);
+    }
+
+    /// chelis#1156: the cache identity must distinguish two BUILDS, not
+    /// just two releases. Before the fix this field held
+    /// `COMPILER_VERSION`, so a released `X.Y.Z` binary and a `main`
+    /// binary still reporting `X.Y.Z` shared one identity and read each
+    /// other's cached contexts — checking programs under the other
+    /// build's type semantics. Observed both directions on 0.18.2 vs a
+    /// post-`#1130` `main`: a spurious `precision mismatch: expected
+    /// int32, got int64` on valid code, and (unsound) silent acceptance
+    /// of code the running binary would reject on a cold cache.
+    #[test]
+    fn cache_identity_uses_the_build_fingerprint_not_the_bare_version() {
+        let dir = TempDir::new().expect("tempdir");
+        let identity = CacheIdentity::for_package_root(dir.path());
+        assert_eq!(
+            identity.compiler_version,
+            crate::build_fingerprint(),
+            "identity must carry the build fingerprint"
+        );
+        // The fingerprint is strictly finer than the release string on
+        // every path, degraded included: both arms of `fingerprint_string`
+        // extend `COMPILER_VERSION` with a discriminator, so this can
+        // never be a conditional check.
+        assert_ne!(
+            identity.compiler_version,
+            crate::COMPILER_VERSION,
+            "a build-identity cache key must not collapse to the release version"
+        );
+    }
+
+    /// A differing build fingerprint must change the on-disk cache file
+    /// name, so two builds cannot even reach each other's entries.
+    #[test]
+    fn cache_file_name_separates_distinct_build_fingerprints() {
+        let dir = TempDir::new().expect("tempdir");
+        let mine = CacheIdentity::for_package_root(dir.path());
+        let other = CacheIdentity {
+            package_root: mine.package_root.clone(),
+            compiler_version: format!("{}+other-build", mine.compiler_version),
+        };
+        let hash = ContextHash([7u8; 32]);
+        assert_ne!(
+            CompiledContext::cache_file_name(("pkg", "0.1.0"), hash, &mine),
+            CompiledContext::cache_file_name(("pkg", "0.1.0"), hash, &other),
+            "distinct build fingerprints must not share a cache file"
+        );
     }
 
     /// Mirrors the chelis-reef `shared_graph_fixture` shape: a root

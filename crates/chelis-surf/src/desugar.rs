@@ -129,6 +129,22 @@ struct DesugarCtx {
     /// (chelis#285). Stored even for an empty `! {}` (which declares "no
     /// effects" and is distinct from no annotation at all).
     def_effects: HashMap<String, Vec<EffectExpr>>,
+    /// Monotonic counter behind every `__chelis_tmpN` this context
+    /// synthesizes for destructuring `let` patterns (chelis#1200).
+    ///
+    /// It lives on the context, not on `desugar_let_bindings`, because a
+    /// per-call counter restarts at 0 for every nested block. Two
+    /// destructures in nested blocks then both mint `__chelis_tmp0..2`,
+    /// and the inner names SHADOW the outer ones in the linearity
+    /// checker's scope. Since a component is an alias of its temp, an
+    /// outer component's consume resolved to the inner block's temp
+    /// entry: it either blamed the wrong binding or, when the inner temp
+    /// was still `Live`, left the outer carrier unconsumed so a genuine
+    /// double consume was silently accepted. The names are internal, so
+    /// the fix is simply to never reuse one within a context.
+    ///
+    /// A `Cell` because the desugar walk takes `&self` throughout.
+    next_destructure_temp: std::cell::Cell<usize>,
 }
 
 impl DesugarCtx {
@@ -150,6 +166,7 @@ impl DesugarCtx {
             top_level_fn_tensor_param_prec,
             explicit_sig_names,
             def_effects,
+            next_destructure_temp: std::cell::Cell::new(0),
         }
     }
 }
@@ -1563,26 +1580,19 @@ impl DesugarCtx {
             Expr::Apply(func, args, _) => self.desugar_apply(func, args, local_fn_params),
 
             Expr::Binary(op, lhs, rhs, _) => {
+                // Every operator keeps its authored operand order
+                // (spec/02-surf-syntax.md section 2): Deep application
+                // evaluates arguments left to right, so a swap here would
+                // reorder operand effects and traps (chelis#1180).
                 let op_name = binop_name(*op);
-                // a > b -> (app {} (var {} cmplt) b' a') -- swap operands
-                match op {
-                    BinOp::Gt => node(
-                        DeepTag::App,
-                        vec![
-                            dvar(op_name),
-                            self.desugar_expr_with_scope(rhs, local_fn_params),
-                            self.desugar_expr_with_scope(lhs, local_fn_params),
-                        ],
-                    ),
-                    _ => node(
-                        DeepTag::App,
-                        vec![
-                            dvar(op_name),
-                            self.desugar_expr_with_scope(lhs, local_fn_params),
-                            self.desugar_expr_with_scope(rhs, local_fn_params),
-                        ],
-                    ),
-                }
+                node(
+                    DeepTag::App,
+                    vec![
+                        dvar(op_name),
+                        self.desugar_expr_with_scope(lhs, local_fn_params),
+                        self.desugar_expr_with_scope(rhs, local_fn_params),
+                    ],
+                )
             }
 
             // P10 parses every negative spelling as unary minus. The one
@@ -1868,12 +1878,15 @@ fn bind_name_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Exp
 
 /// Synthesized destructure bind (Linearity-F2).  Marks the `bind`
 /// node with `destructure: true` in its meta-map so the linearity
-/// checker can distinguish synthesized-tmp scopes from regular
-/// `let` scopes.  Linearity-F2 W2 cascade (this PR) treats
-/// use-after-consume inside a destructure-marked scope as an
-/// error: implicit Copy insertion does not apply to destructured
-/// components because tuple-get produces a fresh owned value, not
-/// an aliased borrow.
+/// checker can distinguish destructure components (and the
+/// synthesized `__chelis_tmpN` intermediates that carry them) from
+/// regular `let` bindings.  Each such bind introduces exactly one
+/// name, and the checker marks that name as a destructured component
+/// (`LinearScope::mark_destructured`): use-after-consume on a
+/// component is an error because implicit Copy insertion does not
+/// apply to it — tuple-get produces a fresh owned value, not an
+/// aliased borrow.  Per chelis#1200 the marker scopes to the names
+/// it introduces, never to the enclosing block.
 fn bind_destructure_value(name: &str, value: deep::Expr, body: deep::Expr) -> deep::Expr {
     let bind_node = node_meta(
         DeepTag::Bind,
@@ -1890,7 +1903,7 @@ fn destructure_pattern(
     pattern: &LetPattern,
     source_name: &str,
     body: deep::Expr,
-    next_tmp: &mut usize,
+    next_tmp: &std::cell::Cell<usize>,
     bindings: &[LetBinding],
     authored_body: &Expr,
 ) -> deep::Expr {
@@ -1910,10 +1923,22 @@ fn destructure_pattern(
     }
 }
 
-fn fresh_destructure_temp(bindings: &[LetBinding], body: &Expr, next_tmp: &mut usize) -> String {
+/// Mint a `__chelis_tmpN` that has not been minted before by this
+/// `DesugarCtx` and that the authored source does not already mention.
+///
+/// `next_tmp` is the context-wide counter, read and written on every
+/// mint rather than snapshotted, because `desugar_let_bindings` recurses
+/// into nested blocks mid-loop: a snapshot would let the inner block
+/// re-mint names the outer block had already taken. See
+/// `DesugarCtx::next_destructure_temp` for what the collision cost.
+fn fresh_destructure_temp(
+    bindings: &[LetBinding],
+    body: &Expr,
+    next_tmp: &std::cell::Cell<usize>,
+) -> String {
     loop {
-        let candidate = format!("__chelis_tmp{}", *next_tmp);
-        *next_tmp += 1;
+        let candidate = format!("__chelis_tmp{}", next_tmp.get());
+        next_tmp.set(next_tmp.get() + 1);
         let mentioned = bindings.iter().any(|binding| {
             let_pattern_mentions_name(&binding.pattern, &candidate)
                 || binding
@@ -1936,7 +1961,7 @@ impl DesugarCtx {
         body: deep::Expr,
     ) -> deep::Expr {
         let mut out = body;
-        let mut next_tmp = 0usize;
+        let next_tmp = &self.next_destructure_temp;
         for binding in bindings.iter().rev() {
             match &binding.pattern {
                 LetPattern::Var(name, _) => {
@@ -1970,13 +1995,13 @@ impl DesugarCtx {
                     }
                 }
                 pattern => {
-                    let temp_name = fresh_destructure_temp(bindings, authored_body, &mut next_tmp);
+                    let temp_name = fresh_destructure_temp(bindings, authored_body, next_tmp);
                     let value = self.desugar_expr(&binding.value);
                     out = destructure_pattern(
                         pattern,
                         &temp_name,
                         out,
-                        &mut next_tmp,
+                        next_tmp,
                         bindings,
                         authored_body,
                     );
@@ -2329,7 +2354,7 @@ fn binop_name(op: BinOp) -> &'static str {
         BinOp::Eq => "eq",
         BinOp::Ne => "neq",
         BinOp::Lt => "cmplt",
-        BinOp::Gt => "cmplt", // handled specially with swap
+        BinOp::Gt => "gt",
         BinOp::Le => "lte",
         BinOp::Ge => "gte",
         BinOp::And => "and",
@@ -2815,11 +2840,14 @@ mod tests {
     }
 
     #[test]
-    fn test_gt_swaps_operands() {
+    fn test_gt_keeps_authored_operand_order() {
+        // chelis#1180: `a > b` desugars to the `gt` builtin with the
+        // authored operand order. The old operand-swapped `cmplt(b, a)`
+        // form evaluated the right operand's effects and traps first.
         let expr = Expr::Binary(BinOp::Gt, Box::new(tvar("a")), Box::new(tvar("b")), s());
         assert_eq!(
             print_expr(&desugar_expr(&expr)),
-            "(app {} (var {} cmplt) (var {} b) (var {} a))"
+            "(app {} (var {} gt) (var {} a) (var {} b))"
         );
     }
 
@@ -3296,6 +3324,7 @@ mod tests {
             top_level_fn_tensor_param_prec: HashMap::new(),
             explicit_sig_names: HashSet::new(),
             def_effects: HashMap::new(),
+            next_destructure_temp: std::cell::Cell::new(0),
         };
         let actual = print_expr(&ctx.desugar_expr(&expr))
             .split_whitespace()

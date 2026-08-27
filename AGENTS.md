@@ -57,20 +57,48 @@ not drift.
 - Verify that inputs which should fail do fail, and with the right reason.
 - Verify that inputs which should pass do pass, with exact outputs where applicable.
 - Check docs and phase claims against the shipped behavior, not just intent.
+- Record the exact reviewed commit and the worktree's baseline status. A fresh reviewer
+  may reuse an existing exact-head worktree and its target build artifacts so the pass
+  does not require a cold rebuild; fresh context does not require a fresh checkout.
 
 ### Fresh-Context Enforcement
 
-- When asked to run a red team or "spawn a red team agent", first close any known stale
-  or failed subagents from the current session and then spawn a new local subagent with
-  fresh context.
+- When asked to run a red team or "spawn a red team agent", first inventory subagent
+  handles created in your own current session. Stop or interrupt and retire only stale
+  or failed handles that will not be used again; do not disturb another developer's
+  handles or a handle reserved for follow-up work. Then spawn a new local subagent with
+  fresh context. A platform need not support deleting a retired handle from its listing.
+- Freshness applies to the subagent's review context, not to the filesystem. Hand the
+  fresh subagent an existing worktree and its warm target cache when the worktree is at
+  the exact review head, has a known clean baseline, and has no concurrent writer or
+  build owner. Create a new worktree or target only when those reuse conditions do not
+  hold.
 - If the first spawn attempt routes to remote infrastructure, errors, or comes back in a
-  broken state, close that handle and retry until you have either:
+  broken state, stop or interrupt and retire that handle, then retry until you have
+  either:
   1. a working fresh local subagent, or
   2. an explicit statement that red-team validation is blocked because fresh local
      subagent execution is unavailable.
 - Do not substitute main-thread validation and call it a red team.
 - Do not mark a phase as red-teamed unless the fresh-context subagent actually ran the
   validation work.
+- A subagent that reuses a worktree must restore its temporary probes or mutations and
+  report the final worktree status, unless the task explicitly asks to retain them.
+
+### Pull Request Review Gate
+
+- Every pull request creation workflow, including documentation-only work, must include
+  at least one compliant red-team review of the exact PR head before merge.
+- A confirmed P0 (critical) or P1 (high/major) finding blocks merge. Fix the finding,
+  push the updated head, and run another fresh-context red-team review against that
+  exact head.
+- Repeat the fix-and-review cycle until the most recent exact-head red-team review
+  reports no P0 or P1 findings. A review of an earlier head does not satisfy this gate.
+- Route confirmed findings back to the original implementation agent when it is still
+  available so the fix retains its build context. Record every round's exact head,
+  verdict, commands, accepted-no-action observations, and residual scope in the PR.
+  File newly discovered pre-existing defects instead of silently absorbing them into
+  an unrelated PR.
 
 ## Documentation And Spec Sync
 
@@ -162,54 +190,103 @@ Two rules follow, and both are cheap:
    stronger rule than the spec states, amend the spec first and say so in the PR;
    `spec/design/dtype_semantics.md` §B1 calls that "the protocol, not a failure."
 
+### Challenge Written Designs Before Implementation
+
+- A design doc is not correct merely because it was written down. Before implementing
+  it, test its claims against the controlling normative spec, hardware and ecosystem
+  reality, and Chelis's stated principles.
+- If a design is wrong, over-broad, or drifted, stop and amend the controlling document
+  and tracker before writing code. Do not faithfully compound a bad decision or
+  reconcile a design/spec conflict silently in implementation.
+- Treat permission-to-mandate escalation, compatibility assumptions without a current
+  requirement, and deferred structural fixes as reasons to challenge the design.
+
+### Explicit And Structural Design Bias
+
+- When the controlling normative spec leaves a real design choice, prefer explicit
+  spelling over contextual inference. Chelis is machine-generation-first, so human
+  typing convenience does not outweigh unambiguous types, effects, dtypes, versions,
+  or adaptation rules.
+- Chelis is pre-compatibility unless a controlling contract says otherwise. Prefer the
+  clean comprehensive design that makes a defect class structurally impossible over a
+  smaller-blast-radius patch, a legacy default, a versionless compatibility fallback,
+  or unnecessary phase deferral.
+- If a design doc permits both a structural solution and a permissive stopgap, amend it
+  to select the structural contract before implementation. This bias never overrides a
+  normative semantic rule; amend that rule first when the language decision must
+  change.
+
+**Normative inventory registries.** A file under `spec/registry/` is
+numbered-spec-tier content, not a design doc: each is incorporated by
+reference into its owning `[05-OP-N]` atom, carries identity-keyed rows with
+no semantic ordinals, and is amended only as a numbered-spec change under the
+same review discipline and guard oracles as the chapter that owns it. The
+atom keeps the semantic rules; the registry holds the enumerable identities,
+and neither may duplicate the other's content.
+
 ### Numeric Surface Discipline
 
 The numeric remediation's covered-family surface ratchet and typed entry
 edges (`spec/design/dtype_semantics.md` §C6) bind every change that touches
 numeric data, whether or not you have read that document:
 
-- **No new numeric channel outside the tagged carrier.** A public ADT variant, wire
+- **No numeric channel outside the tagged carrier.** A public ADT variant, wire
   field, exported C signature, exported C data declaration, or binding parameter that
   carries numeric values as
   bare `f64`/`double`, or that takes a raw integer dtype id, is a review-blocking
-  finding. On every covered family the capacity census freezes both the canonical
-  surface identity and its enforcement-relevant derived classification: an UNFLAGGED
-  addition cites an OPEN issue; a FLAGGED capacity seam has NO citation path at all -
-  redesign onto the tagged carrier, remove it, or obtain a maintainer override in
-  review. Opening a fresh issue to cite is not authorization; new capacity debt does
-  not land. This applies to the stdlib ADT family on the same terms as the C ones: a
-  variant or field carrying a bare float primitive is a seam, while an INTEGER
-  primitive is classified `numeric-op` rather than being a seam. On a new,
-  post-ratchet row, that classification owes the semantic registration below;
-  the frozen initial descriptors retain their capacity dispositions without
-  retroactive registrations. This is why source-faithful ingestion variants
-  (`JsonInt(int64)`) are the wanted shape and a float funnel is not. The
-  grandfathered seam citation and the initial non-seam permanent disposition are
-  frozen to exact `(kind, canonical id, flags)` complete-descriptor lists, so neither
-  can be copied onto a new row to skip its own disposition. A rename, signature
-  change, or reclassification is a removal of the old descriptor plus an addition of
-  the successor descriptor; the successor follows the ordinary addition rules and
-  never inherits a frozen disposition by resemblance. In particular, a flagged
-  successor requires the named maintainer-override path until chelis#1160's separately
-  reviewed, tamper-evident relocation mechanism lands. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
+  finding. Zero-exception classification is the landing rule: every discovered row
+  must end in exactly one final authority class - structurally nonnumeric, a
+  structurally recognized exact tagged carrier/transport, or an exact numeric
+  operation registration. The immutable foundation-era universe retains the old 39
+  grandfather rows, three successor overrides, and 155 permanent plain rows as
+  deletion debt owned by chelis#1288. The active primary baseline has already
+  moved 18 exact structurally nonnumeric rows and `chelis_tensor_shape` to final
+  authority; it therefore retains 39 grandfather rows, three successors, 137
+  permanent plain rows, and the obsolete prelude `Json` row as active debt. The
+  84 typed-wire and 17 registered-PyO3 baseline rows remain sealed legacy cohorts,
+  while Count's wire field is final-registered. Those lists confer no authorization
+  for a new, renamed, reclassified, or otherwise changed row, and a change touching one
+  must move it to a final authority class rather than copy its disposition. A bare
+  numeric carrier has no citation or maintainer-override path:
+  redesign it onto the tagged carrier or remove it. Opening a fresh issue does not
+  authorize capacity debt. No grandfather, permanent-disposition,
+  successor-override, or integer-plumbing path is part of the final contract. A language-level stdlib ADT
+  field such as `t-prim f64` remains type-tagged by its declared Chelis type; the ADT
+  constructor is therefore a `numeric-op` requiring exact semantic registration,
+  not a C-style untagged carrier seam. Integer fields follow the same rule. Every
+  such constructor, irrespective of age, owes the semantic registration below.
+  Source-faithful ingestion still preserves distinct variants such as
+  `JsonInt(int64)` and `JsonFloat(f64)`; one float funnel is not an equivalent
+  tagged source model. The
+  complete inventory is exact and bijective with its authority map; regeneration
+  cannot bless an unclassified row. A rename, signature change, or reclassification
+  removes the old identity and adds a successor that independently satisfies the
+  final rule. The pre-Phase-1 baseline is deliberately partial: wire-schema and PyO3
   coverage become mandatory only through their named executable entry gates in §C6,
   and Phase 1 may not start before both are green. Coverage state comes from the
   test's typed `coverage_manifest()` (artifact, enumerator, command, expected
   success, and mutations), never an editable field in the baseline JSON.
-- **A new numeric op requires an exact semantic registration in the same change
-  set.** The owning family registry binds the callable's exact canonical identity to
+- **Every new or changed numeric op requires an exact semantic registration in the
+  same change set.** The owning family
+  registry binds the callable's exact canonical identity to
   one verbatim, existing `[05-OP-N]` authority in
-  `spec/05-risc-primitives.md`. A new callable authors that atom and its mapping
-  together. A chapter substring, `[05-OBS-1]`, an absent atom, or a Rust doc comment
+  `spec/05-risc-primitives.md`. A callable without an existing governing atom authors
+  that atom and its mapping together. A chapter substring, `[05-OBS-1]`, an absent
+  atom, or a Rust doc comment
   is not authority; existence means a normative definition line beginning
   `> **[05-OP-N]**`, not a cross-reference elsewhere. The atom states the signature,
   per-dtype semantics at [04-NUM-8]'s declared widths, adjoint or
-  non-differentiability rule, and accumulator rule where applicable. Tooling validates
+  non-differentiability rule, and accumulator rule where applicable; it may
+  hold its enumerable identity table in the normative `spec/registry/` file
+  it incorporates by reference, and rows there are part of the atom's
+  normative content. Tooling validates
   the atom group and existence; reviewers validate that the selected atom's normative
   text actually governs the callable. Review does not confer semantic authority: if
   no existing atom governs it, amend the numbered spec first and register that new
   atom. Before allocating its number, re-check the highest existing `[05-OP-N]` on
-  current `main`. Authoring the atom also requires running
+  current `main`. The chelis#1288/#1293 prerequisites apply the same requirement to
+  every surviving legacy row; age and an old census disposition are not authority.
+  Authoring the atom also requires running
   `.venv/bin/python scripts/generate_rejection_registries.py --write` and committing
   the resulting `crates/chelis-types/src/rejection_registry_generated.rs`; that
   generated membership artifact is required in addition to, and is not a substitute
@@ -237,16 +314,17 @@ numeric data, whether or not you have read that document:
   non-character built-in arithmetic value type - including bare `int`, `short`,
   `long`, signed/unsigned forms, pointer-sized integers, and the exact-width integer
   types - makes a callable `numeric-op`. Names and parameter-name heuristics never
-  turn a future callable into plumbing. The only exception is the closed set of
-  exactly three reviewed canonical declarations in
-  `NON_NUMERIC_INTEGER_PLUMBING_EXPORTS`; each must also remain in an exact reviewed
-  seam-disposition set. Two remain in the shrink-only pre-ratchet set; PR #1149's
-  `chelis_alloc` successor remains in its closed one-off maintainer-override set.
-  Neither set is a route for a future declaration. Conditional macro definitions
+  turn a callable into plumbing. The executable census still contains three exact
+  integer-plumbing exceptions as chelis#1288 deletion debt; they cannot be copied,
+  widened, renamed, or used to authorize any changed declaration. The final rule
+  registers extents, allocation sizes, indices, and dtype selectors as numeric
+  operations; raw dtype selectors are forbidden.
+  Conditional macro definitions
   likewise taint their whole connected local-include component, by either include
   spelling: a public declaration consuming a tainted token is rejected even when the
-  definition lives in another header. These two rules are locked by PR #956 commit
-  `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; widening either exception requires
+  definition lives in another header. These conservative classification and
+  context rules are locked by PR #956 commit
+  `6ddf1a72d6dea6770a330d5c2ef3b8fa7d023c43`; weakening either rule requires
   changing this contract and the negative controls together.
 - **An arithmetic spelling the census does not recognize is a BUILD FAILURE, not an
   unflagged row.** The closed list is the non-numeric one
@@ -416,8 +494,20 @@ When a public surface has an implicit invariant, make it explicit and test it.
   `uv python install 3.11`. Inside Devenv, use the activated environment at
   `.devenv/state/venv`. Outside Devenv, use `.venv/bin/python` or
   `uv run --managed-python --python 3.11 --no-project python`.
-  `scripts/gate.py` is the one allowed `python3` bootstrap: it automatically
-  re-executes through that uv command before running gate logic.
+  `scripts/gate.py` is the one `python3` entry point that self-heals: it
+  re-executes through that uv command before running gate logic, so a bare
+  `python3 scripts/gate.py` is always safe.
+- **Two diagnostics are deliberately bootstrap-free.**
+  `scripts/reap_orphans.py` and `scripts/preflight_exec_probe.py` are invoked
+  as bare `python3` on purpose: they run *before* and independently of a
+  working project environment, which is exactly when a uv re-exec would be
+  the thing that is broken. They therefore MUST stay standard-library only
+  and MUST keep parsing on the oldest system Python a supported workstation
+  ships (macOS still ships 3.9), which is what the
+  `from __future__ import annotations` header in each buys. Neither
+  exemption extends to any other script: everything else, and all ad-hoc
+  scripting, uses a uv-managed interpreter.
+  `scripts/test_bootstrapless_scripts.py` locks both properties.
 - Create a primary checkout's manual environment once with
   `uv venv --python 3.11`. A dedicated git worktree does not need to copy or
   symlink another checkout's `.venv`; for direct Cargo commands there, export
@@ -425,6 +515,34 @@ When a public surface has an implicit invariant, make it explicit and test it.
   authoritative and an invalid path must fail rather than fall back.
   `py/pyproject.toml` pins `requires-python = ">=3.11"`. See
   [`README.md`](README.md) for the full setup.
+
+## Worktree And Branch Discipline
+
+- Treat the primary checkout for the current clone (the main worktree listed by
+  `git worktree list --porcelain`) as live developer state. Its path is specific to
+  the developer and machine and must not be hard-coded in repository policy. Agents
+  may run read-only queries there, but must not switch branches, edit files, build, or
+  create or remove scratch artifacts in it.
+- Create a dedicated worktree before the first write for every task, including small
+  documentation edits and throwaway probes. Keep its branch, target, and scratch state
+  task-owned. For direct Cargo commands, set
+  `PYO3_PYTHON="$(uv python find 3.11)"`; do not copy or symlink the primary `.venv`.
+- Do not repurpose an unrelated worktree because it appears idle. Reuse is allowed only
+  for the same PR or immediate follow-up work after checking ownership, exact head,
+  status, and active processes.
+- When a PR is otherwise ready to merge and `origin/main` has advanced, do not rebase
+  merely to refresh its base. Fetch current refs, check GitHub's current mergeability,
+  and inspect the prospective merge result with `git merge-tree` or an equivalent
+  temporary integration. If GitHub's merge produces the intended semantic and
+  structural result without a dangerous conflict, preserve the reviewed head and its CI
+  evidence. Rebase only when that result differs, is unsafe or unclear, or another
+  identified semantic or structural issue requires a changed head.
+- A non-trivial rebase or hand-resolved conflict requires review of the resolution
+  before any history rewrite is published. Run `python3 scripts/gate.py --local` for a
+  non-documentation change or the focused documentation checks for a docs-only change.
+  Never force-push a red gate. Obtain approval, then use an exact-head
+  `--force-with-lease`; clean mechanical rebases do not need the additional resolution
+  review.
 
 ## Build Toolchain
 
@@ -451,19 +569,40 @@ POSIX wrapper, which runs the same Python checker through Devenv, `.venv`, or
 All formatting and lint hooks remain disabled. CI remains the remote
 enforcement boundary.
 
+## Commit And Pull Request Hygiene
+
+- Use plain conventional commit messages with the configured human author. Do not add
+  `Claude-Session`, Codex/Claude attribution, AI co-authorship markers, or AI-session
+  links to commit messages or PR bodies.
+- GitHub squash merges can concatenate every branch commit message into the final
+  commit. A closing keyword in any intermediate message can therefore close an issue
+  even when the PR was only partial work.
+- Use `Part of #N` or `Addresses #N` unless default-branch merge should close the issue.
+  Before squash merge, audit the complete branch message set and proposed squash text
+  for `close`, `fix`, or `resolve` immediately followed by an issue reference. Closing
+  keywords are intentional authority, never descriptive prose.
+
 ## Build And Gate Commands
 
-Minimum repo gate:
+Agent pre-push gate for non-documentation changes:
 
 ```sh
-python3 scripts/gate.py
+python3 scripts/gate.py --local
 ```
 
 `scripts/gate.py` is the single source of truth for the per-PR
-developer-runnable gate. CI calls `python3 scripts/gate.py <stage>` for
-each split job, and `scripts/test_gate.py` asserts the CI workflow
-hand-inlines no gate command the script does not produce. To see the
-canonical list:
+gate. Agents run only the `--local` subset before pushing; the bare full gate is
+CI-owned for routine PR validation. CI calls `python3 scripts/gate.py <stage>`
+for each split job, and `scripts/test_gate.py` asserts the CI workflow
+hand-inlines no gate command the script does not produce. To see the canonical
+full list and the local/CI ownership annotations:
+
+Before `--local` or another long local validation, fetch `origin/main` so the
+changed-crate selection and inherited-failure comparison use current evidence. If the
+branch is materially behind, reconcile it deliberately before spending hours on a
+stale tree; do not rewrite shared history without the rebase review gate above. When an
+unrelated failure appears, reproduce or compare it on current `origin/main` before
+diagnosing it as branch-owned.
 
 ```sh
 python3 scripts/gate.py --list
@@ -479,6 +618,8 @@ python3 scripts/gate.py --list
 # <managed-python> scripts/pipeline_core_documentation_guard.py  # local + ci
 # <managed-python> scripts/check_pipeline_core_compile_fail.py  # ci-owned
 # cargo nextest run --workspace --no-fail-fast  # full gate; CI coverage split
+# <managed-python> scripts/compiler_front_end_performance.py  # ci-owned
+# <managed-python> scripts/unrepresentable_domain_oracle.py  # local + ci
 # # --local also runs: cargo nextest run -p <crate> --no-fail-fast for each crate changed vs origin/main
 ```
 
@@ -512,6 +653,46 @@ The checkpoint script checks the raw-offset fixture against exact Rust
 diagnostics. Its Python unit tests use fake runners and do not execute
 the fixture.
 
+`scripts/unrepresentable_domain_oracle.py` is chelis#908's authoritative
+completion oracle, and the tracker requires every fix in that class to run
+it in a continuous job. Acceptance is exit 0 with a final `ORACLE: PASS`
+line. Every obligation drives compiled artifacts: the built `chelis`
+binary over `.dp` fixtures, and compiled test binaries through `cargo
+nextest`. Its Python unit tests patch the command runners, so they are
+evidence about the script's decision logic and never a substitute for
+running it. It runs in the `integration` stage, which hosted CI executes
+in the `workspace-tests` job (`Workspace Tests (Linux)`) on every
+non-docs-only pull request, and in the `--local` pre-push subset. That
+stage, not `lint-and-unit`, because two of its obligations run `cargo
+nextest`, which the lint-and-unit job deliberately does not install.
+`scripts/test_gate.py` locks both memberships and the pairing between the
+oracle's stage and a nextest-installing job.
+
+The oracle builds its own `chelis` before its first `.dp` fixture. Inside a
+gate run that binary already exists, so `gate.py` hands the built path over
+in `CHELIS_ORACLE_BINARY` and the oracle skips the build (chelis#1322). The
+gate sets it only for a command list whose earlier commands provably build
+that bin target (`cargo build --workspace --all-targets` and `cargo run -p
+chelis-cli --bin chelis`); `gate.py integration` on its own, which is how
+hosted CI reaches the oracle, sets nothing and keeps the original
+build-it-yourself behavior. The variable is an explicit override and is
+therefore authoritative: a path that is not an executable file is a loud
+failure, never a silent fall back to a build, and an explicit setting from
+the caller is never replaced. That is the same discipline the gate applies
+to an explicit `PYO3_PYTHON`, timing included: the gate validates an
+explicit handoff in `gate_environment`, so a bad one aborts before the
+first command rather than after the whole pre-push subset has run.
+
+Present-but-empty is a failure on both sides, not an off switch. Reading
+`export CHELIS_ORACLE_BINARY=` as "unset" would disable the handoff with no
+notice anywhere, so unset it entirely instead. The spelling itself lives in
+exactly one place: the oracle declares it and `gate.py` imports it, because
+two independent literals would let a rename keep every test green while the
+handoff was dead.
+
+`scripts/test_gate.py` locks the build-before-oracle ordering the handoff
+rests on, so a reorder cannot quietly turn the oracle cold again.
+
 Local pre-push gate (chelis#360):
 
 ```sh
@@ -520,7 +701,8 @@ python3 scripts/gate.py --local
 
 `--local` runs the developer pre-push subset: workspace clippy
 (`-D warnings`, compile-only), `cargo fmt --check`, `chelis lint
---check .`, all three explicit rustdoc commands, the checkpoint fixture, and
+--check .`, all three explicit rustdoc commands, the checkpoint fixture,
+the chelis#908 unrepresentable-domain oracle, and
 `cargo nextest run -p <crate> --no-fail-fast` for each
 crate changed vs `origin/main` (committed diff plus uncommitted work;
 owning packages are resolved from each member's `Cargo.toml`, not the
@@ -546,17 +728,32 @@ from mutating the clone's shared `.git/hooks` while sibling worktrees run.
 These controls isolate writable state; concurrent agents may still contend
 for CPU and make each other slower.
 
-Documentation-only changes (Markdown/prose with no code, fixture, or
-example edits) are exempt from `--local`: skip the local gate, push,
-and require green CI instead. The gate's clippy/build/test stages
-cannot be affected by prose, and CI still runs the lint stage plus the
-Docs job (mdBook build and the `skill_suite` example validator), which
-cover everything a docs-only diff can break.
+Prose-only changes with no code, fixture, example, or structurally consumed Markdown
+are exempt from `--local`: run the focused documentation checks, push, and require green
+CI. Hosted docs-only classification is routing evidence, not proof that every changed
+Markdown control artifact has an owning validator in that workflow.
+
+Markdown parsed, embedded, mirrored, or used as agent instructions is a control artifact,
+not inert prose. Run its focused validators even when CI reports `docs_only=true`. For a
+shared `agent-skills/*/SKILL.md` or red-team command-wrapper change, at minimum:
+
+- run the platform's skill-schema validator against every changed `SKILL.md` (in Codex,
+  use the `skill-creator` `quick_validate.py` helper),
+- run `scripts/regenerate_conformance_assets.py --check` through the uv-managed Python,
+- compare the live and embedded skill bytes and the Claude/Codex wrapper bytes, and
+- run the `chelis-conformance` `asset_drift_tripwire` and `skill_set_uniformity` tests
+  with the worktree's managed Python environment.
+
+The always-run Docs job builds mdBook and validates the package skill/examples; it does
+not replace these shared-agent-skill checks.
 
 Default-gate discipline:
 
-- `cargo test --workspace` is the inner development loop and should stay under roughly 60
-  seconds on a machine without GPU/PyTorch
+- Use focused `cargo nextest run -p <crate> --test <file>` commands for the inner
+  development loop. Do not substitute a workspace-wide `cargo test` run for the
+  canonical gate.
+- For non-documentation changes, `python3 scripts/gate.py --local` is the pre-push
+  checkpoint; routine workspace execution is hosted-CI-owned.
 - tests that exceed that budget or require heavyweight local prerequisites should be
   `#[ignore]` by default and invoked through a documented manual gate
 - every ignored test must have a concrete manual command and expected success condition in
@@ -586,6 +783,10 @@ default workspace run.
   one (`nohup cargo build` you are still tailing). Run it from the checkout
   whose `target/` you are about to use; scoping is per-checkout. Orphaned runs
   keep burning CPU and hold the cargo lock across sessions.
+- Before a subagent starts a heavyweight Cargo command, it must report the exact command
+  and expected weight to the orchestrator. The orchestrator checks active processes and
+  load, then runs, staggers, or declines it; isolated targets prevent state corruption
+  but do not eliminate CPU starvation.
 - Contention diagnostic: several unrelated tests FAILing at near-identical
   wall-clock times (for example all ~217s, nextest's slow-kill) means CPU
   starvation, not code breakage. Measured 2026-06-10: the 25-test
@@ -593,6 +794,9 @@ default workspace run.
   machine. Re-run on a quiet machine before treating those as real failures.
 - Recommended inner loop: `cargo nextest run -p <crate> --test <file>` compiles
   only that test target.
+- At session end, verify that task-owned background cargo, rustc, and nextest processes
+  are gone. A stopped wrapper is not proof that its reparented children stopped; use
+  the scoped `reap_orphans.py` dry run and kill only confirmed task-owned stragglers.
 - macOS workstation only: first-exec assessment can degrade under mass
   fresh-binary bursts and stall multi-binary test runs at ~0 CPU (chelis#356).
   Probe with `python3 scripts/preflight_exec_probe.py` (exit 1 wedged, exit 3
@@ -600,6 +804,40 @@ default workspace run.
   local workspace nextest stage. If the probe reports degradation, dispatch the
   macOS Smoke CI stage manually per
   [`docs/local_macos_environment.md`](docs/local_macos_environment.md).
+
+### Post-Merge Cleanup
+
+- After a PR merges, remove its associated git worktrees and task-owned target builds
+  unless they are expected to support immediate follow-up work. Retained artifacts are
+  temporary: remove them as soon as that follow-up finishes.
+- Before removal, verify the PR is merged, the worktree has no uncommitted work worth
+  preserving, and no active process owns its target. Remove only the exact PR-owned
+  worktree and regenerable target paths; preserve the primary checkout and unrelated
+  worktrees, targets, and user changes.
+- Audit cleanup targets with full branch names and live PR state. Because this repository
+  squash-merges, "commits ahead of `origin/main`" and missing commit subjects in main do
+  not prove that work is unmerged. For an ambiguous old worktree, compare stable patch
+  IDs against the PR commits and confirm the added symbols on current main.
+- Use `git worktree remove <path>` followed by `git worktree prune`. For a separate
+  task-owned target, prefer `cargo clean --target-dir <exact-path>` after inspecting it.
+- Remove worktrees with individual explicit commands, never a blanket loop. Worktree
+  removal keeps the branch ref; branch deletion is a separate later decision. If macOS
+  leaves a partially removed target or `.DS_Store`, re-inspect the exact path before an
+  equally narrow cleanup command.
+
+## Subagent Coordination And Delivery
+
+- Every subagent prompt must name the delivery mechanism and the complete expected
+  report. A locally written or plain-text report that is not sent through the platform's
+  parent-message/final-report channel has not been delivered.
+- A subagent must not end its turn merely to wait for a background build, monitor, CI,
+  or notification that cannot wake it. Keep ownership of a long command through the
+  platform's synchronous wait/poll mechanism, or return the honest partial result and
+  unfinished work.
+- If an agent returns "waiting" or goes idle without the deliverable, the orchestrator
+  resumes it immediately with the exact missing items. Prefer a clearly labelled partial
+  report over silence or an overstated completion claim, and deduplicate repeated reports
+  that race with a resume nudge.
 
 ## Local HIP Environment
 
@@ -665,8 +903,9 @@ the built-in gate.
 
 When writing new code or fixtures, run `chelis fmt --inplace <file>`
 and `chelis lint --check` before pushing. The gate replaces the older
-manual checklist of "remember to run fmt"; if the gate is green and
-`cargo test --workspace` passes, the change is ready.
+manual checklist of "remember to run fmt". Run `python3 scripts/gate.py --local`
+before pushing a non-documentation change, use focused nextest commands during
+development, and leave routine workspace execution to hosted CI.
 
 ## Surf Style Guide
 
@@ -852,8 +1091,10 @@ surfaces load the same skill library.
 Command wrappers should stay mirrored too: `.claude/commands/` and `.codex/commands/`
 should stay behaviorally aligned so slash-command access does not drift between tool
 surfaces. Keep a `red-team` alias wired to `redteam-exec`, and make that wrapper enforce
-stale-agent cleanup plus a fresh local subagent before any validation is counted as a
-red team.
+retirement of your own current-session stale or failed handles that will not be reused,
+plus a fresh local subagent before any validation is counted as a red team. Fresh context
+is an agent property: the wrapper should reuse a clean, exact-head, idle worktree and its
+warm target artifacts when available instead of forcing a cold checkout and rebuild.
 
 Current shared skill set:
 
@@ -891,3 +1132,42 @@ as `conform bump` PRs (never direct to `main`). `Chelis-Lang/school` is the
 reference implementation. Changes to the contract land here first (edit the
 doc **and** `MANIFEST`/`REGISTRY` in lockstep, or the tripwire fails) and
 propagate to every shell via `conform sync` per the scaffolding drift rule.
+
+### Conform Bump Wave Checklist
+
+`chelis +<new-version> reef conform bump <new-version>` is a mechanical starter,
+not a green-PR oracle. Run it from a fresh shell worktree with the new toolchain
+selected explicitly, then audit every item below:
+
+- Inspect both its exit status and `git status`. Pre-conformance repos can fail or exit
+  zero after a partial edit and materialize orphaned `.claude/`, `.codex/`, or
+  `agent-skills/` content; remove that half-retrofit and defer full adoption to a
+  separate `conform init` change.
+- Cascade every dependency surface manually: sibling-shell versions in `reef.toml`,
+  sibling tag/version variables in workflows, `[chelis-src]`'s exact
+  `CHELIS_PIN_COMMIT`, and every non-frozen nested project `reef.toml`. The standard pin
+  guard does not prove tag-to-SHA agreement or cover sibling and nested pins.
+- Audit the shell's own package version, CHANGELOG convention, and hard-coded version
+  strings in both CI and release workflows before tagging. A workflow at the tagged
+  commit cannot be repaired by merely rerunning the failed release.
+- Treat `reef.lock` by entry authority. Regenerate `bundled` toolchain entries. Never
+  commit `local_registry` entries without `remote_origin` or hashes produced by a
+  private local registry. Keep published dependency entries at the last published
+  release during a cascade block, and ensure `reef build` precedes any `chelis test` or
+  `chelis prove` step that reads the committed lock.
+- Re-run `conform audit` and repair every live `docs/UPSTREAM_BUGS.md` entry to carry its
+  own `chelis#NNN` or `docs/issue_drafts/<file>` citation. Nested detail bullets must not
+  accidentally parse as uncited independent entries.
+- Verify a claimed acceptance command by opening the workflow and locating the exact
+  step. If the authoritative campaign is expensive, compare a bounded pilot at the old
+  and new pins on identical sources; only the delta supports a "no new regressions"
+  claim.
+- When a skipped version range crosses canonical Surf v0.19, run
+  `chelis migrate surf --from 0.18 --inplace` over maintained `.ch` sources, then handle
+  semantic migrations the tool cannot choose: explicit literal suffixes, int64 extents,
+  and checked `cast` versus truncating `cast_trunc`.
+- `chelis test` deliberately does not run the style gate. A shell that generates Chelis
+  source must run `chelis check` or `chelis fmt --check` over emitted files; do not hide
+  formatter drift behind a measured threshold in the generator.
+- Finish with `reef build`, the shell's real CI-equivalent gates, and exact review of the
+  generated diff. A successful `conform bump` alone is never completion evidence.

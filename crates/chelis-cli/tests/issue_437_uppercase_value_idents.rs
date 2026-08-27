@@ -145,15 +145,8 @@ fn uppercase_reference_resolves_to_value_not_constructor() {
     let datum = t
         .get("value")
         .and_then(|v| v.get("value"))
-        .and_then(|v| v.get("data"))
-        // Execution wire v2 (chelis#729): tagged per-dtype payload.
-        .and_then(|d| d.get("values"))
-        .and_then(Value::as_array)
-        .and_then(|d| d.first())
         .and_then(Value::as_f64)
-        .unwrap_or_else(|| {
-            panic!("T must be a scalar tensor (S's value), not an ADT; json={json}")
-        });
+        .unwrap_or_else(|| panic!("T must be S's bare scalar value, not an ADT; json={json}"));
     assert_eq!(
         datum, 2.0,
         "T = S must evaluate to S's value 2.0; json={json}"

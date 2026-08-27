@@ -519,7 +519,46 @@ jobs:
       - name: Faithful observation Phase 2 oracle
         run: devenv-retry --profile ci shell --no-tui -- python scripts/faithful_observation_phase2_oracle.py
 
-  # Keep the existing required status context while making the three expensive
+  # chelis#1207's authoritative parity corpus compares every production
+  # level-based generalization with the retained reference sweep and bypasses
+  # nextest's default filter so no discovered non-ignored test is omitted.
+  generalize-sweep-oracle:
+    name: Typecheck Level Generalization Oracle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: devenv-ci bash --noprofile --norc -e -o pipefail {0}
+    permissions:
+      contents: read
+    needs: [changes]
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (Ubuntu)
+        uses: Chelis-Lang/ci/actions/reclaim-ubuntu-runner-disk@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
+
+      - name: Set up portable Devenv
+        uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
+
+      - name: Authenticate the private ci input
+        uses: Chelis-Lang/ci/actions/authenticate-private-ci-input@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#50 shared composition
+        with:
+          app-client-id: ${{ vars.CI_APP_ID }}
+          app-private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-workspace
+          save-if: false
+
+      - name: Typecheck level generalization oracle
+        run: devenv-retry --profile ci shell --no-tui -- cargo nextest run --workspace --ignore-default-filter --features chelis-types/generalize-sweep-oracle --no-fail-fast
+
+  # Keep the existing required status context while making the expensive
   # legs parallel. `!cancelled()` lets this job inspect dependency failures
   # while still suppressing work after cancellation.
   integration:
@@ -527,7 +566,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle]
+    needs: [changes, workspace-tests, dtype-phase3-oracle, faithful-observation-phase2-oracle, generalize-sweep-oracle]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docs_only != 'true') }}
     defaults:
       run:
@@ -539,7 +578,7 @@ jobs:
         uses: Chelis-Lang/ci/actions/setup-devenv@a3b3e8ee939270649370826d62085c04342fd9e9 # ci#54 colored selective retry
 
       - name: Require all integration legs
-        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}
+        run: python3 scripts/ci_require_success.py workspace-tests=${{ needs.workspace-tests.result }} dtype-phase3-oracle=${{ needs.dtype-phase3-oracle.result }} faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }} generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}
 
   # NOTE: the LOC report moved to its own weekly workflow
   # (.github/workflows/loc-report.yml) so it no longer commits a bot
@@ -605,8 +644,8 @@ jobs:
           set -euo pipefail
           file target/debug/chelis | grep -E 'arm64|aarch64'
 
-      - name: Smoke test generated C with Accelerate
-        run: devenv-retry --profile ci shell --no-tui -- python .github/scripts/smoke_macos_accelerate.py ./target/debug/chelis
+      - name: Smoke test manifested C callable ABI
+        run: devenv-retry --profile ci shell --no-tui -- python .github/scripts/smoke_macos_manifested_callable.py ./target/debug/chelis
 
       # Phase M smoke: emit `.mm` from the Metal backend and link it
       # against the Metal/Foundation frameworks. Compile-and-link only

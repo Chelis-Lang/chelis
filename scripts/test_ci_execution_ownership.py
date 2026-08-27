@@ -61,6 +61,7 @@ JOB_DISPOSITIONS: dict[str, dict[str, JobDisposition]] = {
         "workspace-tests": JobDisposition.PROJECT_DEVENV,
         "dtype-phase3-oracle": JobDisposition.PROJECT_DEVENV,
         "faithful-observation-phase2-oracle": JobDisposition.PROJECT_DEVENV,
+        "generalize-sweep-oracle": JobDisposition.PROJECT_DEVENV,
         "integration": JobDisposition.PORTABLE_DEVENV,
         "macos-smoke": JobDisposition.PROJECT_DEVENV,
         "backend-sanitizers": JobDisposition.PROJECT_DEVENV,

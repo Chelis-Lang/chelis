@@ -199,8 +199,8 @@ jobs:
           tarball="$(find release-download -name 'chelis-v*-darwin-arm64.tar.gz' -print -quit)"
           python3 .github/scripts/verify_release_smt.py --tarball "$tarball"
 
-      - name: Compile and run emitted C against the shipped runtime
-        run: python3 .github/scripts/smoke_macos_accelerate.py "$unpacked/bin/chelis"
+      - name: Smoke test manifested C callable ABI
+        run: python3 .github/scripts/smoke_macos_manifested_callable.py "$unpacked/bin/chelis"
 
   build-chelisup-release:
     name: Build portable chelisup (${{ matrix.slug }})

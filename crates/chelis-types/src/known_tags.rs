@@ -1,13 +1,15 @@
-//! Known Deep AST expression tags and their lane contribution for
-//! realizability inference (issue #912, Task 5).
+//! Typed Deep AST lane contributions for realizability inference
+//! (issue #912, Task 5; issue #1080).
 //!
-//! Both the realizability walker and the lowering walker look up from
-//! this table. Unknown tags default to Host + diagnostic (fail-closed
-//! for realizability, fail-loud for observation).
+//! Every [`DeepTag`] receives an explicit disposition. The exhaustive match
+//! is the drift guard: extending the closed vocabulary without deciding its
+//! lane contribution stops compilation.
 //!
-//! Lives in `chelis-types` (the shared floor) so both `chelis-effects`
-//! (realizability inference) and `chelis-ir` (lowering) can consult it
-//! without cross-dependencies.
+//! Serialized strings are decoded at the Deep ingress boundary. A raw or
+//! otherwise untyped form is not a `DeepTag`; the realizability walker owns
+//! its fail-closed Host diagnostic.
+
+use chelis_deep::DeepTag;
 
 /// How a structural expression form contributes to lane assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,313 +20,121 @@ pub enum LaneContribution {
     Propagates,
 }
 
-/// A structural form's realizability declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TagDecl {
-    pub tag: &'static str,
-    pub lane_contribution: LaneContribution,
-}
-
-/// The complete known-tag table. Every tag the lowering and realizability
-/// walkers handle must appear here. Unknown tags → Host + diagnostic.
+/// Return the realizability contribution for a decoded Deep tag.
 ///
-/// Adding a tag to the lowering walker without adding it here will cause
-/// the drift test to fail.
-pub const KNOWN_TAGS: &[TagDecl] = &[
-    // ─── Host-forcing structural forms ───────────────────────────────
-    TagDecl {
-        tag: "match",
-        lane_contribution: LaneContribution::ForcesHost,
-    },
-    TagDecl {
-        tag: "record",
-        lane_contribution: LaneContribution::ForcesHost,
-    },
-    TagDecl {
-        tag: "access",
-        lane_contribution: LaneContribution::ForcesHost,
-    },
-    TagDecl {
-        tag: "tuple-get",
-        lane_contribution: LaneContribution::ForcesHost,
-    },
-    // ─── Propagating forms (walk children) ───────────────────────────
-    TagDecl {
-        tag: "app",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "var",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "lit",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "fn",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "let",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "if",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "def",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "tuple",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "pipe",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "par",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "cast",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "copy",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "drop",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "realize",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "jit",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "grad",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "vmap",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "handle-effect",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "module",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "import",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "type-decl",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "adt-decl",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    // ─── Type expression tags (never force host) ─────────────────────
-    TagDecl {
-        tag: "t-prim",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "t-fn",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "t-tensor",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "t-ref",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "t-adt",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "t-var",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "t-unit",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "t-tuple",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    // ─── Dimension tags ──────────────────────────────────────────────
-    TagDecl {
-        tag: "d-name",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "d-var",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "d-lit",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "d-rank",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    // ─── Other structural tags ───────────────────────────────────────
-    TagDecl {
-        tag: "defsig",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "params",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "arm",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "bind",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "effects",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "quote",
-        lane_contribution: LaneContribution::Propagates,
-    },
-    TagDecl {
-        tag: "borrow",
-        lane_contribution: LaneContribution::Propagates,
-    },
-];
-
-/// Look up a tag's lane contribution. Returns `None` for unknown tags
-/// (caller should treat as Host + emit diagnostic).
-pub fn tag_lane_contribution(tag: &str) -> Option<LaneContribution> {
-    KNOWN_TAGS
-        .iter()
-        .find(|t| t.tag == tag)
-        .map(|t| t.lane_contribution)
+/// Keep this match wildcard-free. The four Host-forcing forms mirror the
+/// target-independent lowering classifier; every other recognized form walks
+/// its children. Raw strings have no entry here by construction.
+pub const fn deep_tag_lane_contribution(tag: DeepTag) -> LaneContribution {
+    match tag {
+        DeepTag::Match | DeepTag::Record | DeepTag::Access | DeepTag::TupleGet => {
+            LaneContribution::ForcesHost
+        }
+        DeepTag::Module
+        | DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Def
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::Fn
+        | DeepTag::App
+        | DeepTag::Let
+        | DeepTag::Arm
+        | DeepTag::If
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::Pipe
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::RecordUpdate
+        | DeepTag::Par
+        | DeepTag::HandleEffect
+        | DeepTag::Borrow
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatCtor
+        | DeepTag::PatTuple
+        | DeepTag::PatRecord
+        | DeepTag::PatWild
+        | DeepTag::PatAs
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Bind
+        | DeepTag::Kv
+        | DeepTag::Effects
+        | DeepTag::Resource => LaneContribution::Propagates,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chelis_deep::DeepTag;
 
     #[test]
-    fn known_tags_no_duplicates() {
-        let mut seen = std::collections::HashSet::new();
-        for decl in KNOWN_TAGS {
-            assert!(
-                seen.insert(decl.tag),
-                "duplicate tag in KNOWN_TAGS: `{}`",
-                decl.tag
-            );
+    fn every_deep_tag_has_a_typed_lane_disposition() {
+        for tag in DeepTag::ALL {
+            let _ = deep_tag_lane_contribution(tag);
         }
     }
 
     #[test]
-    fn host_forcing_tags_are_classified() {
+    fn host_forcing_tag_set_is_exact() {
+        let host_forcing: Vec<DeepTag> = DeepTag::ALL
+            .into_iter()
+            .filter(|tag| deep_tag_lane_contribution(*tag) == LaneContribution::ForcesHost)
+            .collect();
+
         assert_eq!(
-            tag_lane_contribution("match"),
-            Some(LaneContribution::ForcesHost)
-        );
-        assert_eq!(
-            tag_lane_contribution("record"),
-            Some(LaneContribution::ForcesHost)
-        );
-        assert_eq!(
-            tag_lane_contribution("access"),
-            Some(LaneContribution::ForcesHost)
-        );
-        assert_eq!(
-            tag_lane_contribution("tuple-get"),
-            Some(LaneContribution::ForcesHost)
+            host_forcing,
+            [
+                DeepTag::Match,
+                DeepTag::Record,
+                DeepTag::Access,
+                DeepTag::TupleGet,
+            ]
         );
     }
 
     #[test]
-    fn propagating_tags_are_classified() {
-        assert_eq!(
-            tag_lane_contribution("app"),
-            Some(LaneContribution::Propagates)
-        );
-        assert_eq!(
-            tag_lane_contribution("if"),
-            Some(LaneContribution::Propagates)
-        );
-        assert_eq!(
-            tag_lane_contribution("fn"),
-            Some(LaneContribution::Propagates)
-        );
-    }
-
-    #[test]
-    fn unknown_tag_returns_none() {
-        assert_eq!(tag_lane_contribution("nonexistent_tag_xyz"), None);
-    }
-
-    /// Drift test: every expression-level DeepTag that can appear in a def body
-    /// must be declared in KNOWN_TAGS. Type tags, pattern tags, and declaration-
-    /// only tags are excluded (they don't participate in realizability).
-    #[test]
-    fn known_tags_covers_expression_level_deeptags() {
-        use chelis_deep::DeepTag;
-
-        let expression_tags: &[DeepTag] = &[
-            DeepTag::App,
-            DeepTag::Var,
-            DeepTag::Lit,
-            DeepTag::Fn,
-            DeepTag::Let,
-            DeepTag::Match,
-            DeepTag::If,
-            DeepTag::Record,
-            DeepTag::Access,
-            DeepTag::Pipe,
-            DeepTag::Tuple,
-            DeepTag::TupleGet,
-            DeepTag::Par,
-            DeepTag::HandleEffect,
-            DeepTag::Grad,
-            DeepTag::Vmap,
-            DeepTag::Jit,
-            DeepTag::Realize,
-            DeepTag::Cast,
-            DeepTag::Copy,
-            DeepTag::Def,
-            DeepTag::Module,
-            DeepTag::Import,
-        ];
-
-        for tag in expression_tags {
-            assert!(
-                tag_lane_contribution(tag.as_str()).is_some(),
-                "DeepTag::{:?} (as_str={:?}) is an expression-level tag \
-                 but is NOT in KNOWN_TAGS. Add it with the appropriate \
-                 LaneContribution.",
-                tag,
-                tag.as_str()
+    fn tags_omitted_by_the_old_partial_table_propagate() {
+        for tag in [
+            DeepTag::ImportAll,
+            DeepTag::Block,
+            DeepTag::RecordUpdate,
+            DeepTag::PatCtor,
+            DeepTag::Unquote,
+            DeepTag::Resource,
+        ] {
+            assert_eq!(
+                deep_tag_lane_contribution(tag),
+                LaneContribution::Propagates,
+                "DeepTag::{tag:?} must not false-route Host"
             );
         }
     }

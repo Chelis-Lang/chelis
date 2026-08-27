@@ -762,12 +762,48 @@ each direction, with a positive control that an unshadowed reference is
 still found and a tripwire that the read-only paths call no normalization
 helper.
 
-The *ingress* half is NOT discharged. The generic compiler API Deep path
-still uses `parse_str_strict`, not `parse_and_stamp_file` ([#1088] owns
-that migration); mutating authoring normalization remains active; and the
-legacy `List` variant and consumer bridge remain active. Phase 3 MUST NOT
-be called successor-accepted until those remaining §C4.2 ingress and
-deletion clauses are executable and green.
+**Ingress (2026-08-24, [#1088]).** The *ingress* half is discharged for
+the compiler API. Every public Deep text boundary in `chelis-compiler-api`
+consumes the role-stamped carrier, and each boundary names the role its
+field actually occupies: `parse_and_stamp_file` for a `.dp` program (the
+generic `parse`/`check`/`decompile`/pipeline door and every authoring
+`module` field), `parse_and_stamp` for a declaration bundle,
+`parse_and_stamp_runtime_exprs` for a replacement body, and
+`parse_and_stamp_tagged` for a field whose contract names one tag. The
+weaker `parse_str`/`parse_str_strict` doors, which stamped every top-level
+form as a bare/syntax position with no declaration requirement, are gone
+from the crate, and the named non-compiler-API stragglers
+(`chelis-validate::validate_deep`, the `opaque-domain-construction` lint
+rule, `chelis-e2e`'s snippet checker, and the `chelis-cli` style-gate
+fallback) moved with them. Two consequences are worth recording. A stamp
+rejection now carries the offending form's span instead of the
+whole-input offset a re-wrapped parse error reported. And
+`validate --deep` and `check` accept one Deep language: the AST leg of
+`validate_deep` used to skip its module-identity forgery checks silently
+whenever its own parse failed.
+
+The top-level rule this enforces is decided by the numbered spec:
+`spec/03-deep-syntax.md` §7.1 [03-PROG-1] enumerates the admissible
+top-level forms and [03-PROG-2] states the rejection contract.
+
+The authoritative oracle is [#908]'s
+`scripts/unrepresentable_domain_oracle.py`, run by `scripts/gate.py`'s
+`integration` stage (hosted CI's `workspace-tests` job, on every
+non-docs-only pull request) and by its `--local` pre-push subset. It executes
+`crates/chelis-compiler-api/tests/phase3_stamped_ingress.rs` as one of its
+obligations; that suite is evidence, not a second oracle. The suite's
+parity table drives every module-text door over one shared accept/reject
+corpus, so the two strengths cannot silently reappear, and a structural
+guard over the workspace's production sources fails the build if any of
+them reaches a weaker Deep ingress again. The guard resolves `use`
+imports, renames, module aliases, and glob imports rather than matching
+source lines, because a line-substring guard is blind to exactly the
+alias a regression would introduce.
+
+Still open at §C4.2: mutating authoring normalization remains active, and
+the legacy `List` variant and consumer bridge remain active ([#1029], in
+turn blocked on [#1082]). Phase 3 MUST NOT be called successor-accepted
+until those remaining deletion clauses are executable and green.
 
 **Frozen at your exit:** the variant set = the vocabulary, changing only
 per B1's one-change-set rule.
@@ -1016,6 +1052,88 @@ the §C4.4 fitness-honesty corpus; a well-typed `scatter_elements` call is the
 positive control. The synthetic `probe_unarmed_op` unit control pins the
 fail-loud observation diagnostic independently of the two route manifests.
 
+### PP3. The name-keyed binding-identity channel ([#1209], [#1211], with [#1212])
+
+**Opened 2026-08-21; decided below.** PR [#1208]'s adversarial review filed
+three issues that read as separate defects and are one question: what is the
+identity of a binding? The linearity checker kept every fact it knows —
+alias links, consumption marks, destructured-component identity — in maps
+keyed by the variable's name string, and `resolve_alias_chain` walked names
+through whatever binding currently owned each one. [#1209] is the direct
+consequence (an alias crossing a binding generation misroutes in both
+directions: a component double-consume escapes with blame on an unrelated
+fresh binding, and an ordinary alias inherits a later destructure's
+component mark); [#1212] is the same defect entering through a synthesized
+name (an authored `__chelis_tmp0` in an enclosing block shares a spelling
+with a desugarer-minted carrier, and the name-keyed checker cannot tell them
+apart, so a genuine use-after-consume vanishes); [#1211] is the review
+bucket whose still-open remainder is re-verified against this delivery.
+Three local patches would have encoded three ad-hoc answers to the identity
+question, each free to drift back into the others' failure. §C1's intent
+read at the linearity stage — the checker must not return a verdict a
+different binding earned — needs the decided rule, with the fixes derived
+from it.
+
+**Decision (2026-08-21).** `spec/04-type-system.md` §8.3 [04-LIN-1] is the
+controlling rule: every binding introduction creates a distinct binding,
+a name at a use site denotes the innermost enclosing one, and every
+ownership fact attaches to the binding it was resolved against — never to
+the name. [04-LIN-2] pins the capture verdict that rides along: a closure
+capture consumes the binding it names, distinct user-visible bindings of
+one value are distinct for capture (the nautilus `lu_solve` spelling), and
+only a destructured component or an alias of one forwards to its carrier.
+The two-closure tightening [#1209] flagged is decided as **preserved** —
+recorded normatively rather than left as an implementation accident. The
+implementation ledger owner is `spec/design/implicit_linearity.md`
+§"Aliases".
+
+**You deliver:**
+
+1. **The identity mechanism, not instance patches.** `LinearScope` keys
+   all checker state on per-binding generation ids (`BindingId`, minted at
+   `declare`); `BindingOrigin.alias` stores the id resolved when the alias
+   bind is recorded and never re-resolves. Both [#1209] misroute
+   directions and [#1212]'s collision must become unrepresentable through
+   the one mechanism.
+2. **The authority for it.** [04-LIN-1] and [04-LIN-2] amend
+   `spec/04-type-system.md` §8.3 in the same change set (Numbered Specs
+   Decide); `implicit_linearity.md` §"Aliases" carries the mechanism
+   description and the reasoning.
+3. **An explicit in-or-out record for [#1211].** Each of its four items is
+   re-verified by execution against merged main and dispositioned on its
+   thread: items 1 and 3 landed inside [#1208]'s final review rounds, item
+   2's verdict is recorded (ordinary-alias join behavior stays, per
+   [04-LIN-2]'s companion text in `implicit_linearity.md`), item 4 is
+   [#1212] and closes here.
+4. **Verdict neutrality outside the class.** The only verdict changes are
+   the three acceptance cells and the recorded `x = x` component
+   self-rebind delta; every other cell in the #1200/#1208 contract suites,
+   the lane-parity suite, and coral's vendored corpus keeps its verdict.
+
+**Oracle:** the three formerly-`#[ignore]`d cells in
+`crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`
+(`pass_b_alias_survives_shadowing_of_its_source`,
+`pass_b_alias_is_not_captured_by_a_later_destructure_of_its_source_name`,
+`authored_destructure_temp_name_does_not_hide_an_outer_double_consume`) run
+un-ignored and green; every sibling cell in that file is a negative
+control proving the fix is an identity rule and not a loosened or
+disabled check, with
+`two_closures_capturing_one_value_through_an_alias_still_compile` pinning
+[04-LIN-2]'s preserved verdict and the chelis-cli
+`issue_1200_destructure_scope_lane_parity` determinism cell pinning the
+sorted-capture rejection. Executed mutation receipt, 2026-08-21: making
+`resolve_alias_chain`'s hop re-resolve each source through its *name*
+(`.and_then(|source| self.record(source)).and_then(|source_record|
+self.top_id(&source_record.name))` in place of following the recorded id)
+and running `cargo nextest run -p chelis-types --test
+issue_1200_destructure_component_scope` failed exactly the three
+acceptance cells and no sibling (at the file's then-27-cell state: 24
+passed, 3 failed); reverting made all 27 green. Cells added afterwards
+that also ride generation identity (the component self-rebind pin) would
+join the failing set under the same mutation. The delivery remains one
+class change: a shadowing special-case in the chain walk or a
+reserved-name screen in the desugarer does not satisfy it.
+
 ### Adjacent ledger rows delivered with the class change
 
 - **[#850], checker half.** `defsig` is now a same-unit annotation for a
@@ -1089,6 +1207,7 @@ fail-loud observation diagnostic independently of the two route manifests.
 | 3 | whether printers/desugar also migrate to `DeepTag` (nice-to-have; they are not chokepoints) | DECIDED 2026-07-23: deferred; REVERSED 2026-07-24 by the decode-once rework directive - printers, desugar, and every other producer/consumer migrated; no string-keyed tag idiom survives outside the parse/serialize boundary | this doc |
 | 4 | score semantics for `UnknownForm`/`MalformedForm` | DECIDED 2026-07-17: severity parity with `TypeMismatch` (the existing 0.5-class precedent), no new weight class. The invariant that matters - any pushed error forces score < 1.0 - is locked by §C4.4's corpus independently of the weights, so calibration can move later without touching it | scoring code + this doc |
 | 5 | how a lambda-bound or function-valued parameter's type binds, and which checks re-run once it is bound | DECIDED 2026-08-04: shape-constrained lambdas with an unknown outer parameter constructor are monomorphic bind-on-first-use within their enclosing declaration, replay the ordinary semantic rule, and reject unresolved at that declaration's own boundary; a result annotation or later top-level caller does not bind them; symbolic declared tensors remain polymorphic and rigid dimensions remain distinct absent a real equality constraint | [04-INF-1] + PP1 |
+| 6 | whether two closures may each consume one underlying value through two user-visible names (`y = x`, one capture per name), or capture forwards through the alias chain generally | DECIDED 2026-08-21: preserved and made normative. A capture consumes the binding it names; distinct user-visible bindings of one value are distinct for capture; only a destructured component (or an alias of one) forwards to its carrier. Nautilus `lu_solve` and coral depend on the spelling; the reviewer guidance on [#1209] was to specify the choice explicitly and keep any tightening separate | [04-LIN-2] + PP3 |
 
 ## Contract summary
 
@@ -1123,6 +1242,12 @@ continuous-oracle guarantees.
 [#874]: https://github.com/Chelis-Lang/chelis/issues/874
 [#908]: https://github.com/Chelis-Lang/chelis/issues/908
 [#1023]: https://github.com/Chelis-Lang/chelis/issues/1023
+[#1029]: https://github.com/Chelis-Lang/chelis/issues/1029
+[#1082]: https://github.com/Chelis-Lang/chelis/issues/1082
 [#1088]: https://github.com/Chelis-Lang/chelis/issues/1088
 [#1131]: https://github.com/Chelis-Lang/chelis/issues/1131
 [#1147]: https://github.com/Chelis-Lang/chelis/issues/1147
+[#1208]: https://github.com/Chelis-Lang/chelis/pull/1208
+[#1209]: https://github.com/Chelis-Lang/chelis/issues/1209
+[#1211]: https://github.com/Chelis-Lang/chelis/issues/1211
+[#1212]: https://github.com/Chelis-Lang/chelis/issues/1212

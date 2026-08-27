@@ -56,27 +56,67 @@ pub fn is_bump_owned(key: &str) -> bool {
     )
 }
 
+/// A pin rewrite that failed partway, carrying the files it had **already
+/// written** (chelis#1263).
+///
+/// The pin rewrite is the one write step the preflight cannot make
+/// all-or-nothing: it edits several files in sequence, and an I/O failure on the
+/// second leaves the first rewritten. A bare `String` error made that invisible
+/// (the reviewer's read-only-file case exited 1 with `reef.toml` already
+/// repinned and nothing but an os error to show for it), so the error type
+/// carries the list and the caller enumerates it.
+#[derive(Debug, Clone)]
+pub struct RewritePinsError {
+    pub message: String,
+    pub written: Vec<PathBuf>,
+}
+
+impl RewritePinsError {
+    fn new(message: impl Into<String>, written: Vec<PathBuf>) -> Self {
+        RewritePinsError {
+            message: message.into(),
+            written,
+        }
+    }
+}
+
+impl std::fmt::Display for RewritePinsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Rewrite every pin location under `root` to `new_version`, in lockstep:
 /// `reef.toml`'s `compiler = "=X.Y.Z"` and every workflow's
 /// `CHELIS_TAG`/`CHELIS_VERSION` env plus `chelisup install` line. Returns the
-/// files changed (empty if already at `new_version`).
-pub fn rewrite_pins(root: &Path, new_version: &str) -> Result<Vec<PathBuf>, String> {
+/// files changed (empty if already at `new_version`); on failure, returns the
+/// files it had already written alongside the message.
+pub fn rewrite_pins(root: &Path, new_version: &str) -> Result<Vec<PathBuf>, RewritePinsError> {
     // Validate up front so a bump can only ever write a pin the chelisup shim
     // can actually install — otherwise `conform bump garbage` would leave a
     // `compiler = "=garbage"` that audits green but the toolchain cannot resolve.
     if !is_installable_version(new_version) {
-        return Err(format!(
-            "{new_version:?} is not an installable X.Y.Z version (no `v`, no pre-release)"
+        return Err(RewritePinsError::new(
+            format!("{new_version:?} is not an installable X.Y.Z version (no `v`, no pre-release)"),
+            Vec::new(),
         ));
     }
 
+    // Report paths relative to the shell root: every path a `conform` verb
+    // prints is repo-relative, so a reader can act on it without first
+    // stripping whatever `--path` happened to be.
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
     let mut changed = Vec::new();
 
     let reef_path = root.join("reef.toml");
-    let reef =
-        fs::read_to_string(&reef_path).map_err(|e| format!("read {}: {e}", reef_path.display()))?;
-    let old_pin = parse_compiler_pin(&reef)
-        .ok_or_else(|| "reef.toml has no `compiler = \"=X.Y.Z\"` pin to bump".to_string())?;
+    let reef = fs::read_to_string(&reef_path)
+        .map_err(|e| RewritePinsError::new(format!("read {}: {e}", rel(&reef_path)), Vec::new()))?;
+    let old_pin = parse_compiler_pin(&reef).ok_or_else(|| {
+        RewritePinsError::new(
+            "reef.toml has no `compiler = \"=X.Y.Z\"` pin to bump",
+            Vec::new(),
+        )
+    })?;
     let old = old_pin.trim_start_matches('=').to_string();
 
     if old != new_version {
@@ -85,8 +125,9 @@ pub fn rewrite_pins(root: &Path, new_version: &str) -> Result<Vec<PathBuf>, Stri
         // `chelis-std = "=X.Y.Z"` dependency pinned to the same version).
         let new_reef = rewrite_compiler_pin(&reef, &old, new_version);
         if new_reef != reef {
-            fs::write(&reef_path, new_reef)
-                .map_err(|e| format!("write {}: {e}", reef_path.display()))?;
+            fs::write(&reef_path, new_reef).map_err(|e| {
+                RewritePinsError::new(format!("write {}: {e}", rel(&reef_path)), Vec::new())
+            })?;
             changed.push(reef_path);
         }
     }
@@ -107,7 +148,12 @@ pub fn rewrite_pins(root: &Path, new_version: &str) -> Result<Vec<PathBuf>, Stri
             };
             let updated = rewrite_workflow_pins(&body, &old, new_version);
             if updated != body {
-                fs::write(&p, updated).map_err(|e| format!("write {}: {e}", p.display()))?;
+                if let Err(e) = fs::write(&p, updated) {
+                    return Err(RewritePinsError::new(
+                        format!("write {}: {e}", rel(&p)),
+                        changed,
+                    ));
+                }
                 changed.push(p);
             }
         }

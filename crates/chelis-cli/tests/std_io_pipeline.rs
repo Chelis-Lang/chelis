@@ -531,6 +531,223 @@ x = nonexistent_parquet_fn("foo")
         .stderr(predicate::str::contains("does not export"));
 }
 
+/// PR #1213 review finding: the malformed-CSV None contract was only
+/// exercised on the eval lane (`chelis test` / `chelis eval`), so a
+/// C-only defect in the compiled `try_read_csv` path (sentinel handling,
+/// fold validation, the None branch) could pass every existing test.
+/// This builds, links, and RUNS the generated C against a valid control
+/// file plus the three malformed shapes (short row, wide row,
+/// unterminated quote) and asserts the compiled verdicts byte-match the
+/// eval lane's.
+#[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+fn reef_std_csv_compiled_lane_matches_eval_on_malformed_rows() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("csv-compiled-verdicts");
+    let out_dir = dir.path().join("out");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    let valid_csv = dir.path().join("valid.csv");
+    let short_csv = dir.path().join("short.csv");
+    let wide_csv = dir.path().join("wide.csv");
+    let quote_csv = dir.path().join("quote.csv");
+    write_file(&valid_csv, "a,b\n1,2\n3,4\n");
+    write_file(&short_csv, "a,b\n1\n2,3\n");
+    write_file(&wide_csv, "a,b\n1,2\n3,4,5\n");
+    write_file(&quote_csv, "k\nok\n\"dangling\n");
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        &app_reef_toml("csv-compiled-verdicts"),
+    );
+    let valid = surf_string_literal(valid_csv.to_str().unwrap());
+    let short = surf_string_literal(short_csv.to_str().unwrap());
+    let wide = surf_string_literal(wide_csv.to_str().unwrap());
+    let quote = surf_string_literal(quote_csv.to_str().unwrap());
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        &format!(
+            r#"module Demo.Main
+
+import Std.Io.Csv (try_read_csv)
+
+ok_valid = match try_read_csv({valid}) with {{
+  | Some(rows) => string_concat("valid:SOME:", to_string(len(rows)))
+  | None => "valid:NONE"
+}}
+ok_short = match try_read_csv({short}) with {{
+  | Some(_) => "short:SOME"
+  | None => "short:NONE"
+}}
+ok_wide = match try_read_csv({wide}) with {{
+  | Some(_) => "wide:SOME"
+  | None => "wide:NONE"
+}}
+ok_quote = match try_read_csv({quote}) with {{
+  | Some(_) => "quote:SOME"
+  | None => "quote:NONE"
+}}
+v1 = print(ok_valid)
+v2 = print(ok_short)
+v3 = print(ok_wide)
+v4 = print(ok_quote)
+"#
+        ),
+    );
+
+    let eval_stdout = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let status = gcc_link_generated(&out_dir, "main.c", "main");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("main"))
+        .current_dir(&app_pkg)
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary failed with status {}",
+        run_output.status
+    );
+    assert_eq!(run_output.stdout, eval_stdout);
+    let text = String::from_utf8_lossy(&run_output.stdout);
+    assert!(text.contains("valid:SOME:2"), "valid control: {text}");
+    assert!(text.contains("short:NONE"), "short row: {text}");
+    assert!(text.contains("wide:NONE"), "wide row: {text}");
+    assert!(text.contains("quote:NONE"), "unterminated quote: {text}");
+}
+
+/// PR #1213 review finding: a malformed FIRST data row followed by a
+/// line long enough to be expensive must return None WITHOUT parsing
+/// the later line (the recursive pre-#1213 parse_rows short-circuited;
+/// a shape that parses every line before judging validity does not).
+/// `parse_line_chars` recurses per character on every lane (chelis#1225),
+/// so an unfixed parse of the 4 MiB line overflows the C stack here,
+/// while the corpus twin of this test
+/// (`test_short_first_row_before_long_line_returns_none`) covers the
+/// same shape at 4 KiB on the eval lane, whose per-character evaluator
+/// frames are ~3 orders of magnitude larger. A 4 MiB line in a VALID
+/// row position would still crash the compiled lane — that is
+/// chelis#1225's parser wall, not a row-control-flow defect.
+#[test]
+#[ignore = "manual gate: Phase 3g std IO package acceptance suite exceeds the default inner-loop budget"]
+fn reef_std_csv_compiled_lane_short_circuits_before_long_line() {
+    let dir = tempdir().expect("tempdir");
+    let reef_home = dir.path().join("reef-home");
+    let std_pkg = dir.path().join("chelis-std");
+    let app_pkg = dir.path().join("csv-compiled-longline");
+    let out_dir = dir.path().join("out");
+    copy_dir_recursive(&package_std(), &std_pkg);
+    fs::create_dir_all(app_pkg.join("src")).expect("mkdir app src");
+
+    let long_csv = dir.path().join("short_then_long.csv");
+    let mut contents = String::from("a,b\n1\n");
+    contents.push_str(&"x".repeat(4 * 1024 * 1024));
+    contents.push('\n');
+    write_file(&long_csv, &contents);
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .args(["reef", "publish", std_pkg.to_str().unwrap()])
+        .assert()
+        .success();
+
+    write_file(
+        &app_pkg.join("reef.toml"),
+        &app_reef_toml("csv-compiled-longline"),
+    );
+    let long = surf_string_literal(long_csv.to_str().unwrap());
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        &format!(
+            r#"module Demo.Main
+
+import Std.Io.Csv (try_read_csv)
+
+ok_longline = match try_read_csv({long}) with {{
+  | Some(_) => "longline:SOME"
+  | None => "longline:NONE"
+}}
+v1 = print(ok_longline)
+"#
+        ),
+    );
+
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", &reef_home)
+        .current_dir(&app_pkg)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let status = gcc_link_generated(&out_dir, "main.c", "main");
+    assert!(status.success(), "gcc failed with status {status}");
+
+    let run_output = StdCommand::new(out_dir.join("main"))
+        .current_dir(&app_pkg)
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        run_output.status.success(),
+        "compiled binary must not crash on the short-row + 4 MiB-line file, got status {}",
+        run_output.status
+    );
+    let text = String::from_utf8_lossy(&run_output.stdout);
+    assert!(text.contains("longline:NONE"), "long-line verdict: {text}");
+}
+
 /// End-to-end Parquet IO package acceptance: imports both
 /// `read_parquet` and `write_parquet`, type-checks a `def` for each
 /// (so `chelis check` clean-with-score-1 pins the type-check path for

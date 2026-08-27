@@ -52,6 +52,7 @@ fn ir_reductions_can_only_plan_groups_and_call_typed_kernels() {
         "reduce_tensor_groups",
         "reduce_window_grad_tensor_groups",
         "arg_reduce_tensor_groups",
+        "count_tensor_groups",
     ] {
         assert!(
             reduction_boundary.contains(required),

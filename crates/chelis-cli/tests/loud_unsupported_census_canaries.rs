@@ -250,7 +250,11 @@ fn c_f16_floor_computes_not_value_placeholder() {
         "f16_floor_value",
     )
     .expect("census row 4: f16 floor must build and run through the exact ABI");
-    assert_eq!(stdout.trim(), "out = 1.0", "stderr: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "run = 1.0\nout = 1.0",
+        "the pure nullary root and explicit value root are both owed in source order; stderr: {stderr}"
+    );
 }
 
 // ===========================================================================

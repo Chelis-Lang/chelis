@@ -15,6 +15,9 @@ pub fn vectorize_axis0(dag: &Dag, batch_dim: DimInfo) -> Result<Dag, String> {
                 axis: axis + 1,
                 accumulator: *accumulator,
             },
+            RiscOp::Count { axes } => RiscOp::Count {
+                axes: axes.iter().map(|axis| axis + 1).collect(),
+            },
             RiscOp::MaxReduce { axis } => RiscOp::MaxReduce { axis: axis + 1 },
             RiscOp::MinReduce { axis } => RiscOp::MinReduce { axis: axis + 1 },
             RiscOp::ProdReduce { axis } => RiscOp::ProdReduce { axis: axis + 1 },

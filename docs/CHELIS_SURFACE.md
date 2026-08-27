@@ -117,6 +117,7 @@ float upcast (their default `divide`); use a `cast` first for that.
 | Name | Signature | AD adjoint |
 |---|---|---|
 | `sum` | `(&tensor[..,p], axis: int32, accumulator: prec = default(p)) -> tensor[..,acc]` | `expand(g, axis)` |
+| `count` | `(&tensor[..,bool], axes: int32...) -> tensor[..,int64]` | **non-differentiable** (`IntegerReductionOutput`) |
 | `max_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmax)` |
 | `min_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | `g * one_hot(argmin)` |
 | `prod_reduce` | `(&tensor[..,p], axis: int32) -> tensor[..,p]` | per-slice product/quotient |
@@ -126,6 +127,10 @@ float upcast (their default `divide`); use a `cast` first for that.
 - **Axis must be a compile-time constant** (literal, or `cast(N,int32)` of a literal).
   A runtime-axis reduction is a check-time error (chelis#259). Negative axes index
   from the end (`-1` = last).
+- `count` requires one or more unique axes. Concrete-rank calls may use several
+  positional axes in any order; rank-polymorphic calls use named axes only. It lowers
+  to one dedicated `Count` node whose normalized original positions are stored in
+  descending order. Eval and C implement it; HIP/Metal reject pending chelis#1291.
 - **`accumulator` (sum only)** controls running-sum precision and result dtype.
   Defaults (no implicit promotion): bf16/f16→f32, f32→f32, f64→f64, int8/int16→int32,
   int32→int32, int64→int64. Full table: `spec/04` §5.7.1.
@@ -201,12 +206,12 @@ all backends and differentiate via their decomposition. `spec/05` §3–4.
 |---|---|---|
 | `sub` | `add(a, neg(b))` | differentiable |
 | `eq`,`neq`,`gt`,`gte`,`lte`,`lt` | `cmplt` compositions (`spec/05` §3.2) | zero-grad (bool out) |
-| `and`,`or`,`not` | `mul` / `max_elem` / `neg` on bools | zero-grad (bool) |
+| `and`,`or`,`not` | Spec: bool-only truth tables ([05-OP-26..28]); the pre-v0.19 IR still uses numeric aliases, tracked by #1284 | `grad` rejects |
 | `relu` | `max_elem(x, 0)` | differentiable (subgradient) |
 | `sigmoid` | `recip(add(1, exp(neg(x))))` | differentiable |
 | `tanh`,`silu`,`gelu` | `tier2.rs` decompositions | differentiable |
 | `matmul` | `expand`+`mul`+`sum`, pattern-matched to BLAS (`spec/05` §4.1); optional `accumulator` | differentiable |
-| `mean` | `div(sum(x,axis), count)` | differentiable |
+| `mean` | `div(sum(x,axis), axis extent)` | differentiable |
 | `softmax` | max-shift + `exp` + `sum` + `div` (`spec/05` §4.2) | differentiable |
 | `min_elem` | `neg(max_elem(neg(a), neg(b)))` | differentiable |
 | `layer_norm` | mean/var normalize + affine (`spec/05` §4.4) | differentiable |
@@ -244,7 +249,7 @@ capability.
 | `einsum` | `(equation: string, &lhs, &rhs) -> tensor` | 2-operand only today; no ellipsis; static-extent errors rejected at check |
 | `diagonal` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | diagonal extraction |
 | `trace` | `(&tensor, axis1: int32, axis2: int32) -> tensor` | matrix trace |
-| `where` | `(&cond, &a, &b) -> tensor` | `DAG+Host`: also has the `add(mul(cond,a),mul(neg(cond),b))` DAG form (`spec/05` §3.5) |
+| `where` | `(&cond, &a, &b) -> tensor` | Spec: element-wise selection without converting the boolean condition to a numeric dtype; the pre-v0.19 numeric-mask DAG form is tracked by #1284 (`spec/05` §3.5) |
 | `clamp` | `(&tensor, lo, hi) -> tensor` | elementwise clip |
 | `concat` | `(tensors: List[tensor], axis: int32) -> tensor` | join tensors along axis; ordinary two-list concatenation has no axis slot |
 | `split` | `(&tensor, axis: int32, sizes: List[int]) -> list` | partition along axis |
@@ -280,7 +285,7 @@ The host lane is eager (no lazy list fusion).
   selected runtime extent as `int64`; reductions/expands still need
   compile-time-constant axes regardless.
 
-### 3.5 I/O and process — introduces `Io`
+### 3.5 I/O and process — introduces `IO`
 
 `read_file`, `write_file`, `read_lines`, `read_bytes`, `file_exists`, `list_dir`,
 `mmap_file`, `mmap_read`, `mmap_len`, `process_run`.
@@ -406,7 +411,7 @@ undefined).
 
 ```
 Tier-1 DAG:   add mul div floor_div trunc_div max_elem cmplt neg recip exp log sin cos tan atan sqrt
-              abs floor ceil round sum max_reduce min_reduce prod_reduce argmax_reduce
+              abs floor ceil round sum count max_reduce min_reduce prod_reduce argmax_reduce
               argmin_reduce reduce_window_max reduce_window_min reduce_window_sum
               reduce_window_mean reshape permute expand pad shrink stride
               uniform_like gather scatter_replace scatter_elements
@@ -532,7 +537,7 @@ build also rejects runtime-symbolic windowed axes and bf16/f16 (cast to f32 firs
 | Effect | Introduced by | Handled by |
 |---|---|---|
 | `Random` | `dropout`, `uniform_like` | `with seed(Ni64) { ... }` |
-| `Io` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
+| `IO` | file ops, `mmap_*`, `process_run`, `print` | root / runtime |
 | `Test` | `test_assert*` | pinned at root, no handler |
 | `Accum` | accumulation contexts | — |
 | `Resource(String)` | device/resource pinning | `with device("gpu:0"|"cpu") { ... }` |

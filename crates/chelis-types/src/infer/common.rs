@@ -587,49 +587,126 @@ pub(super) fn macro_source(expr: &deep::Expr) -> Option<String> {
     Some(rendered.replace('\n', " ").trim().to_string())
 }
 
-pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry) -> Type {
-    let mut seen = HashSet::new();
-    resolve_type_aliases_inner(ty, adt_reg, &mut seen)
+pub(super) struct AliasExpansionSession<'a> {
+    adt_reg: &'a AdtRegistry,
+    vg: &'a mut VarGen,
+    cache: Vec<(String, Vec<Type>, Type)>,
 }
 
-pub(super) fn resolve_type_aliases_inner(
-    ty: &Type,
-    adt_reg: &AdtRegistry,
-    seen: &mut HashSet<String>,
-) -> Type {
-    match ty {
-        Type::Adt(name, args) => {
-            let resolved_args: Vec<Type> = args
-                .iter()
-                .map(|arg| resolve_type_aliases_inner(arg, adt_reg, seen))
-                .collect();
+impl<'a> AliasExpansionSession<'a> {
+    pub(super) fn new(adt_reg: &'a AdtRegistry, vg: &'a mut VarGen) -> Self {
+        Self {
+            adt_reg,
+            vg,
+            cache: Vec::new(),
+        }
+    }
 
-            if seen.contains(name) {
-                return Type::Adt(name.clone(), resolved_args);
-            }
+    pub(super) fn resolve(&mut self, ty: &Type) -> Type {
+        let mut seen = HashSet::new();
+        self.resolve_inner(ty, &mut seen)
+    }
 
-            if let Some(expanded) = adt_reg.instantiate_alias(name, &resolved_args) {
+    fn resolve_inner(&mut self, ty: &Type, seen: &mut HashSet<String>) -> Type {
+        match ty {
+            Type::Adt(name, args) => {
+                let resolved_args: Vec<Type> = args
+                    .iter()
+                    .map(|arg| self.resolve_inner(arg, seen))
+                    .collect();
+
+                if seen.contains(name) {
+                    return Type::Adt(name.clone(), resolved_args);
+                }
+                if let Some((_, _, cached)) =
+                    self.cache.iter().find(|(cached_name, cached_args, _)| {
+                        cached_name == name && cached_args == &resolved_args
+                    })
+                {
+                    return cached.clone();
+                }
+
+                let Some(alias) = self.adt_reg.resolve_alias(name) else {
+                    return Type::Adt(name.clone(), resolved_args);
+                };
+                if alias.param_vars.len() != resolved_args.len() {
+                    return Type::Adt(name.clone(), resolved_args);
+                }
+
+                let parameter_subst: HashMap<TypeVar, Type> = alias
+                    .param_vars
+                    .iter()
+                    .copied()
+                    .zip(resolved_args.iter().cloned())
+                    .collect();
+                let substituted = crate::adt::substitute_alias_type(&alias.body, &parameter_subst);
+
+                // Alias-body variables that did not come from a supplied type
+                // argument are quantified by the alias declaration. Freshen
+                // them at each distinct alias application. The cache shares
+                // one expansion for repeated occurrences with identical
+                // arguments inside a signature, preserving named-parameter
+                // equality without leaking registration-time IDs across
+                // signatures or inference levels.
+                let protected_tvars: HashSet<_> = resolved_args
+                    .iter()
+                    .flat_map(crate::env::free_tvars)
+                    .collect();
+                let protected_dvars: HashSet<_> = resolved_args
+                    .iter()
+                    .flat_map(crate::env::free_dvars)
+                    .collect();
+                let protected_rvars: HashSet<_> = resolved_args
+                    .iter()
+                    .flat_map(crate::env::free_rvars)
+                    .collect();
+                let mut renaming = Subst::new();
+                for var in crate::env::free_tvars(&substituted) {
+                    if !protected_tvars.contains(&var) {
+                        renaming.insert_type(var, self.vg.fresh_type());
+                    }
+                }
+                for var in crate::env::free_dvars(&substituted) {
+                    if !protected_dvars.contains(&var) {
+                        renaming.insert_dim(var, self.vg.fresh_dim());
+                    }
+                }
+                for var in crate::env::free_rvars(&substituted) {
+                    if !protected_rvars.contains(&var) {
+                        renaming.insert_rank(var, vec![Dim::Rank(self.vg.fresh_rvar())]);
+                    }
+                }
+
+                let expanded = renaming.apply(&substituted);
                 seen.insert(name.clone());
-                let resolved = resolve_type_aliases_inner(&expanded, adt_reg, seen);
+                let resolved = self.resolve_inner(&expanded, seen);
                 seen.remove(name);
+                self.cache
+                    .push((name.clone(), resolved_args, resolved.clone()));
                 resolved
-            } else {
-                Type::Adt(name.clone(), resolved_args)
+            }
+            Type::Fn(args, ret) => Type::Fn(
+                args.iter()
+                    .map(|arg| self.resolve_inner(arg, seen))
+                    .collect(),
+                Box::new(self.resolve_inner(ret, seen)),
+            ),
+            Type::Ref(inner) => Type::Ref(Box::new(self.resolve_inner(inner, seen))),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.resolve_inner(item, seen))
+                    .collect(),
+            ),
+            Type::Tensor(_, _) | Type::Prim(_) | Type::Var(_) | Type::Unit | Type::Error(_) => {
+                ty.clone()
             }
         }
-        Type::Fn(args, ret) => Type::Fn(
-            args.iter()
-                .map(|a| resolve_type_aliases_inner(a, adt_reg, seen))
-                .collect(),
-            Box::new(resolve_type_aliases_inner(ret, adt_reg, seen)),
-        ),
-        Type::Tuple(ts) => Type::Tuple(
-            ts.iter()
-                .map(|t| resolve_type_aliases_inner(t, adt_reg, seen))
-                .collect(),
-        ),
-        _ => ty.clone(),
     }
+}
+
+pub(super) fn resolve_type_aliases(ty: &Type, adt_reg: &AdtRegistry, vg: &mut VarGen) -> Type {
+    AliasExpansionSession::new(adt_reg, vg).resolve(ty)
 }
 
 pub(super) fn resolve_deep_type(
@@ -640,10 +717,12 @@ pub(super) fn resolve_deep_type(
     binder_mode: BinderMode<'_>,
     errors: &mut DiagnosticSink<'_>,
 ) -> Result<Type, ErrorWitness> {
-    let mut resolver =
-        DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors);
-    let ty = resolver.resolve(expr)?.into_type();
-    Ok(resolve_type_aliases(&ty, adt_reg))
+    let ty = {
+        let mut resolver =
+            DeepTypeResolver::new(use_site, binder_mode, adt_reg.resolution_env(), vg, errors);
+        resolver.resolve(expr)?.into_type()
+    };
+    Ok(resolve_type_aliases(&ty, adt_reg, vg))
 }
 
 // ── Declaration collection (first pass) ──────────────────────────
@@ -1322,15 +1401,17 @@ pub(super) fn collect_declarations(
             if kids.len() >= 2
                 && let Some(name) = symbol_name(&kids[0])
             {
-                let mut resolver = DeepTypeResolver::new(
+                let signature_level = subst.enter_level(vg);
+                let resolved = resolve_deep_type(
+                    &kids[1],
+                    vg,
+                    adt_reg,
                     TypeUseSite::Defsig,
                     BinderMode::ImplicitGeneric,
-                    headers,
-                    vg,
                     errors,
                 );
-                if let Ok(ty) = resolver.resolve(&kids[1]) {
-                    let ty = resolve_type_aliases(&ty.into_type(), adt_reg);
+                subst.leave_level(signature_level, vg);
+                if let Ok(ty) = resolved {
                     let scheme = env.generalize(&ty, subst);
                     env.bind(name.to_string(), scheme);
                 }
@@ -1619,6 +1700,10 @@ pub(super) fn infer_top_level(
 
     if tag == DeepTag::Def && kids.len() >= 2 {
         let name = symbol_name(&kids[0])?.to_string();
+        // Recursive SCCs own one surrounding level in their driver. An
+        // ordinary declaration owns this per-definition level and closes it
+        // before its inferred scheme is generalized.
+        let ordinary_level = (!defer_recursive_binding).then(|| subst.enter_level(vg));
 
         // Save declared type from defsig BEFORE inferring (it may get overwritten)
         // spec/04 §3.1.1: when this def is a member of the active recursive
@@ -1899,6 +1984,10 @@ pub(super) fn infer_top_level(
         } else {
             body_ty
         };
+
+        if let Some(level) = ordinary_level {
+            subst.leave_level(level, vg);
+        }
 
         product.record_bypass(expr, scheme_body.clone(), "top-level declaration inference");
 

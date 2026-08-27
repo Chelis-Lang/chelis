@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use chelis_types::types::Prim;
 use chelis_types::unsupported::Unsupported;
-use chelis_types::{ScalarValue, scalar_from_f64};
+use chelis_types::{
+    ScalarValue,
+    types::{Lane, Prim, Target},
+};
 use chelis_vocab::DiagnosticKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1067,6 +1069,34 @@ pub struct GeneratedFile {
     pub contents: String,
 }
 
+/// Stable machine-facing projection of one checked root-manifest entry.
+/// Internal type expressions and routing evidence stay on `RootEntry`; the
+/// public wire carries only the facts consumers need to route observations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootManifestEntryResult {
+    pub name: String,
+    pub lane: Lane,
+    pub required_inputs: Vec<String>,
+}
+
+/// Target-carrying root contract returned by production eval/build APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootManifestResult {
+    pub target: Target,
+    pub entries: Vec<RootManifestEntryResult>,
+    pub requires_main: bool,
+}
+
+impl Default for RootManifestResult {
+    fn default() -> Self {
+        Self {
+            target: Target::Eval,
+            entries: Vec::new(),
+            requires_main: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompileResult {
     pub target: CompileTarget,
@@ -1076,6 +1106,7 @@ pub struct CompileResult {
     pub link_flags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peak_device_bytes_estimate: Option<usize>,
+    pub manifest: RootManifestResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1113,6 +1144,8 @@ pub struct EvalResult {
     #[serde(deserialize_with = "require_execution_value_schema_version")]
     pub schema_version: u32,
     pub roots: Vec<EvaluatedRoot>,
+    #[serde(default)]
+    pub manifest: RootManifestResult,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<String>,
 }
@@ -1741,27 +1774,11 @@ pub struct WireRecordPatternField {
 ///   decode error).
 /// - `5`: chelis#878 — `WireRiscOp::Pad::fill` changed from a bare f64
 ///   capacity seam to the sealed dtype-tagged scalar payload.
-pub const WIRE_DAG_SCHEMA_VERSION: u32 = 5;
-
-/// Backwards-compat default for [`WireDag::schema_version`]. KEPT at
-/// the chelis#729 rework (which deleted the sibling default on
-/// `EvalResult`) because the `WireDag` surface has a genuinely external
-/// consumer: Chelis-Lang/beacon ships its own parser with
-/// `SUPPORTED_SCHEMA_VERSIONS` covering 1-3 and content-addressed
-/// stored artifacts, so removing version-less acceptance here is a
-/// cross-repo decision, flagged on PR #857 rather than taken
-/// unilaterally. A wire payload predating WI-2 carries no
-/// `schema_version`; it is the
-/// pre-versioning surface, which is version `1`, so a missing field
-/// deserializes to the current baseline. This keeps deserialize additive
-/// (same rationale as [`default_sum_accumulator_name`]). The default is
-/// applied by serde at deserialize time; the *validation* of the value
-/// is a separate explicit step ([`WireDag::validate_schema_version`]),
-/// not a `Deserialize` side effect, so a mismatch surfaces as a typed
-/// [`WireDagSchemaError`] rather than a raw serde error.
-fn default_wire_dag_schema_version() -> u32 {
-    WIRE_DAG_SCHEMA_VERSION
-}
+/// - `6`: chelis#1287 — added the dedicated multi-axis
+///   `WireRiscOp::Count` form and made the complete WireDag encoding exact:
+///   the version stamp and all fields are explicit, with no legacy migration
+///   or default-on-read spellings.
+pub const WIRE_DAG_SCHEMA_VERSION: u32 = 6;
 
 /// A typed failure from validating a serialized [`WireDag`] against the
 /// supported schema version (WI-2). This is deliberately its own error
@@ -1769,24 +1786,21 @@ fn default_wire_dag_schema_version() -> u32 {
 /// invariant decoding) or [`crate::cache_envelope::CacheError`]: the
 /// concern is IR-DAG wire-surface compatibility, a distinct domain.
 ///
-/// Policy: an unknown or mismatched schema version is **rejected**, never
-/// silently accepted and never a panic. A consumer pinned to
-/// [`WIRE_DAG_SCHEMA_VERSION`] that is handed a payload stamped with a
-/// version it does not recognize (in practice, a *newer* version it
-/// cannot interpret) must fail closed — interpreting an unknown surface
-/// would risk reading a renamed or re-shaped field as if it were the old
-/// one. A strictly-lower version is forward-compatible only up to the
-/// additive-default guarantee; this check rejects anything greater than
-/// the version this build supports.
+/// Policy: the version stamp is mandatory and must equal
+/// [`WIRE_DAG_SCHEMA_VERSION`] exactly. Missing, older, and future versions
+/// are all rejected before a `WireRiscOp` is decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireDagSchemaError {
-    /// The payload's `schema_version` is greater than the version this
-    /// build supports, so its wire shape cannot be safely interpreted.
-    UnknownSchemaVersion {
+    /// The payload omitted the mandatory version stamp.
+    MissingSchemaVersion {
+        /// The one version this build accepts.
+        supported: u32,
+    },
+    /// The payload carries an older or newer version than this build accepts.
+    UnsupportedSchemaVersion {
         /// The version stamped on the payload.
         found: u32,
-        /// The newest version this build understands
-        /// ([`WIRE_DAG_SCHEMA_VERSION`]).
+        /// The one version this build accepts.
         supported: u32,
     },
 }
@@ -1794,11 +1808,13 @@ pub enum WireDagSchemaError {
 impl std::fmt::Display for WireDagSchemaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WireDagSchemaError::UnknownSchemaVersion { found, supported } => write!(
+            WireDagSchemaError::MissingSchemaVersion { supported } => write!(
                 f,
-                "WireDag schema version {found} is newer than the supported \
-                 version {supported}; this build cannot interpret it. Rebuild \
-                 against a chelis that emits version {found} or lower."
+                "WireDag schema version is missing; this build requires explicit version {supported}"
+            ),
+            WireDagSchemaError::UnsupportedSchemaVersion { found, supported } => write!(
+                f,
+                "WireDag schema version {found} is unsupported; this build requires exactly version {supported}"
             ),
         }
     }
@@ -1806,38 +1822,225 @@ impl std::fmt::Display for WireDagSchemaError {
 
 impl std::error::Error for WireDagSchemaError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A structurally invalid exact-version WireDag encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireDagContractError {
+    message: String,
+}
+
+impl WireDagContractError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for WireDagContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WireDagContractError {}
+
+#[derive(Debug, Clone)]
 pub struct WireDag {
-    /// Monotonic schema version of this serialized DAG surface (WI-2).
-    /// Emitted as [`WIRE_DAG_SCHEMA_VERSION`] by the producer; defaults to
-    /// the current baseline when absent (pre-versioning payloads), and is
-    /// validated explicitly on consume via
-    /// [`WireDag::validate_schema_version`].
-    #[serde(default = "default_wire_dag_schema_version")]
+    /// Exact schema version of this serialized DAG surface.
     pub schema_version: u32,
     pub nodes: Vec<WireDagNode>,
     pub roots: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireDagFields {
+    schema_version: u32,
+    nodes: Vec<WireDagNode>,
+    roots: Vec<usize>,
+}
+
+#[derive(Serialize)]
+struct WireDagFieldsRef<'a> {
+    schema_version: u32,
+    nodes: &'a [WireDagNode],
+    roots: &'a [usize],
+}
+
+impl Serialize for WireDag {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.validate_schema_version()
+            .map_err(<S::Error as serde::ser::Error>::custom)?;
+        self.validate_wire_contract()
+            .map_err(<S::Error as serde::ser::Error>::custom)?;
+        WireDagFieldsRef {
+            schema_version: self.schema_version,
+            nodes: &self.nodes,
+            roots: &self.roots,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WireDag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if !value.is_object() {
+            return Err(<D::Error as serde::de::Error>::custom(
+                "WireDag root must be a JSON object",
+            ));
+        }
+        let found = explicit_wire_dag_schema_version(&value)
+            .map_err(<D::Error as serde::de::Error>::custom)?;
+        validate_explicit_wire_dag_schema_version(found)
+            .map_err(<D::Error as serde::de::Error>::custom)?;
+
+        // The version gate above intentionally runs while nodes are still
+        // untyped JSON. Only an exact v6 payload may construct WireRiscOp.
+        let fields: WireDagFields =
+            serde_json::from_value(value).map_err(<D::Error as serde::de::Error>::custom)?;
+        let dag = Self {
+            schema_version: fields.schema_version,
+            nodes: fields.nodes,
+            roots: fields.roots,
+        };
+        dag.validate_wire_contract()
+            .map_err(<D::Error as serde::de::Error>::custom)?;
+        Ok(dag)
+    }
+}
+
+fn explicit_wire_dag_schema_version(
+    value: &serde_json::Value,
+) -> Result<Option<u32>, serde_json::Error> {
+    value
+        .get("schema_version")
+        .cloned()
+        .map(serde_json::from_value::<u32>)
+        .transpose()
+}
+
+fn validate_explicit_wire_dag_schema_version(found: Option<u32>) -> Result<(), WireDagSchemaError> {
+    let Some(found) = found else {
+        return Err(WireDagSchemaError::MissingSchemaVersion {
+            supported: WIRE_DAG_SCHEMA_VERSION,
+        });
+    };
+    if found != WIRE_DAG_SCHEMA_VERSION {
+        return Err(WireDagSchemaError::UnsupportedSchemaVersion {
+            found,
+            supported: WIRE_DAG_SCHEMA_VERSION,
+        });
+    }
+    Ok(())
 }
 
 impl WireDag {
     /// Validate this DAG's [`schema_version`](Self::schema_version)
     /// against the version this build supports (WI-2).
     ///
-    /// Returns `Ok(())` for any version less than or equal to
-    /// [`WIRE_DAG_SCHEMA_VERSION`] (a lower version is accepted under the
-    /// additive-default guarantee), and a typed
-    /// [`WireDagSchemaError::UnknownSchemaVersion`] for any greater
-    /// version. Callers consuming a serialized `WireDag` from an
-    /// untrusted or cross-version producer MUST call this before relying
-    /// on the DAG's shape; deserialize alone does not validate the
-    /// version (the field has a serde default), so skipping this check
-    /// would silently accept an unknown surface.
+    /// Returns `Ok(())` only for [`WIRE_DAG_SCHEMA_VERSION`]. Older and
+    /// future versions both fail closed.
     pub fn validate_schema_version(&self) -> Result<(), WireDagSchemaError> {
-        if self.schema_version > WIRE_DAG_SCHEMA_VERSION {
-            return Err(WireDagSchemaError::UnknownSchemaVersion {
-                found: self.schema_version,
-                supported: WIRE_DAG_SCHEMA_VERSION,
-            });
+        validate_explicit_wire_dag_schema_version(Some(self.schema_version))
+    }
+
+    /// Validate fields whose exact encoding depends on surrounding DAG shape.
+    pub fn validate_wire_contract(&self) -> Result<(), WireDagContractError> {
+        for (index, node) in self.nodes.iter().enumerate() {
+            if let WireRiscOp::Pad { fill, .. } = &node.op {
+                let output_prim =
+                    Prim::parse_name(&node.output_type.precision).ok_or_else(|| {
+                        WireDagContractError::new(format!(
+                            "WireDag Pad node {} has unknown output dtype {}",
+                            node.id, node.output_type.precision
+                        ))
+                    })?;
+                if fill.prim() != output_prim {
+                    return Err(WireDagContractError::new(format!(
+                        "WireDag Pad fill dtype {} does not match node {} output dtype {}",
+                        fill.prim().name(),
+                        node.id,
+                        output_prim.name()
+                    )));
+                }
+            }
+
+            let WireRiscOp::Count { axes } = &node.op else {
+                continue;
+            };
+            if node.inputs.len() != 1 {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} requires exactly one input, found {}",
+                    node.id,
+                    node.inputs.len()
+                )));
+            }
+            let input_id = node.inputs[0];
+            let input = self.nodes[..index]
+                .iter()
+                .find(|candidate| candidate.id == input_id)
+                .ok_or_else(|| {
+                    WireDagContractError::new(format!(
+                        "WireDag Count node {} input {input_id} does not resolve to an earlier node",
+                        node.id
+                    ))
+                })?;
+            if axes.is_empty() {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} axes must be non-empty",
+                    node.id
+                )));
+            }
+            if axes.windows(2).any(|pair| pair[0] <= pair[1]) {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} axes must be unique and strictly descending, found {axes:?}",
+                    node.id
+                )));
+            }
+            let input_rank = input.output_type.dims.len();
+            if let Some(axis) = axes.iter().copied().find(|axis| *axis >= input_rank) {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} axis {axis} is out of range for input rank {input_rank}",
+                    node.id
+                )));
+            }
+            if input.output_type.precision != Prim::Bool.name() {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} input dtype must be bool, found {}",
+                    node.id, input.output_type.precision
+                )));
+            }
+            if node.output_type.precision != Prim::Int64.name() {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} output dtype must be int64, found {}",
+                    node.id, node.output_type.precision
+                )));
+            }
+            let expected_output_dims = input
+                .output_type
+                .dims
+                .iter()
+                .enumerate()
+                .filter(|(axis, _)| !axes.contains(axis))
+                .map(|(_, dim)| dim)
+                .collect::<Vec<_>>();
+            if expected_output_dims.len() != node.output_type.dims.len()
+                || expected_output_dims
+                    .iter()
+                    .zip(&node.output_type.dims)
+                    .any(|(expected, actual)| !wire_dim_info_equal(expected, actual))
+            {
+                return Err(WireDagContractError::new(format!(
+                    "WireDag Count node {} output dimensions must equal input dimensions with axes removed",
+                    node.id
+                )));
+            }
         }
         Ok(())
     }
@@ -1845,115 +2048,69 @@ impl WireDag {
     /// Deserialize a `WireDag` from JSON and validate its schema version
     /// in one step (WI-2). This is the recommended consume path for a
     /// payload from another build or process: it fails closed on an
-    /// unknown version with a typed [`WireDagSchemaError`] rather than
+    /// missing or mismatched version with a typed [`WireDagSchemaError`] rather than
     /// returning a `WireDag` whose shape this build cannot trust.
     ///
     /// A serde parse failure surfaces as [`serde_json::Error`]; a
     /// version mismatch on an otherwise-parseable payload surfaces as
-    /// [`WireDagSchemaError`]. The two failure classes are distinct so a
-    /// caller can tell a malformed payload from a version-incompatible
-    /// one.
+    /// [`WireDagSchemaError`], and an invalid exact-version cross-node shape
+    /// surfaces as [`WireDagContractError`].
     pub fn from_validated_json(json: &str) -> Result<Self, WireDagDecodeError> {
-        let mut value: serde_json::Value =
+        let value: serde_json::Value =
             serde_json::from_str(json).map_err(WireDagDecodeError::Parse)?;
         if !value.is_object() {
-            return serde_json::from_value(value).map_err(WireDagDecodeError::Parse);
+            return serde_json::from_value::<WireDagFields>(value)
+                .map(|fields| Self {
+                    schema_version: fields.schema_version,
+                    nodes: fields.nodes,
+                    roots: fields.roots,
+                })
+                .map_err(WireDagDecodeError::Parse);
         }
-        let found_version = match value.get("schema_version") {
-            Some(version) => {
-                serde_json::from_value::<u32>(version.clone()).map_err(WireDagDecodeError::Parse)?
-            }
-            None => 1,
+        let found = explicit_wire_dag_schema_version(&value).map_err(WireDagDecodeError::Parse)?;
+        validate_explicit_wire_dag_schema_version(found).map_err(WireDagDecodeError::Schema)?;
+
+        // Keep node JSON untyped until the exact schema stamp above succeeds.
+        let fields: WireDagFields =
+            serde_json::from_value(value).map_err(WireDagDecodeError::Parse)?;
+        let dag = Self {
+            schema_version: fields.schema_version,
+            nodes: fields.nodes,
+            roots: fields.roots,
         };
-        if found_version > WIRE_DAG_SCHEMA_VERSION {
-            return Err(WireDagDecodeError::Schema(
-                WireDagSchemaError::UnknownSchemaVersion {
-                    found: found_version,
-                    supported: WIRE_DAG_SCHEMA_VERSION,
-                },
-            ));
-        }
-        if found_version < 5 {
-            migrate_legacy_pad_fills(&mut value)?;
-            value
-                .as_object_mut()
-                .expect("WireDag root was checked above")
-                .insert(
-                    "schema_version".to_string(),
-                    serde_json::Value::from(WIRE_DAG_SCHEMA_VERSION),
-                );
-        }
-        let dag: WireDag = serde_json::from_value(value).map_err(WireDagDecodeError::Parse)?;
-        dag.validate_schema_version()
-            .map_err(WireDagDecodeError::Schema)?;
+        dag.validate_wire_contract()
+            .map_err(WireDagDecodeError::Contract)?;
         Ok(dag)
     }
 }
 
-/// v1-v4 encoded `Pad.fill` as an untyped JSON number. Recover the only
-/// sound tag available on that surface: the owning node output precision.
-/// v5 never takes this path, so a raw number in a current payload remains a
-/// loud serde error rather than an alternate spelling of the new contract.
-fn migrate_legacy_pad_fills(value: &mut serde_json::Value) -> Result<(), WireDagDecodeError> {
-    let Some(nodes) = value
-        .get_mut("nodes")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return Ok(());
-    };
-    for node in nodes {
-        let is_pad = node.pointer("/op/kind").and_then(serde_json::Value::as_str) == Some("pad");
-        if !is_pad {
-            continue;
-        }
-        let Some(fill) = node.pointer("/op/fill") else {
-            continue;
-        };
-        let image = fill.as_f64().ok_or_else(|| {
-            WireDagDecodeError::Migration(
-                "legacy Pad.fill must use the v1-v4 numeric spelling".to_string(),
-            )
-        })?;
-        let precision = node
-            .pointer("/output_type/precision")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                WireDagDecodeError::Migration(
-                    "legacy Pad.fill migration requires output_type.precision".to_string(),
-                )
-            })?;
-        let prim = Prim::parse_name(precision).ok_or_else(|| {
-            WireDagDecodeError::Migration(format!(
-                "legacy Pad.fill migration cannot resolve output precision `{precision}`"
-            ))
-        })?;
-        let fill = scalar_from_f64("wire_pad_v4_migration", prim, image).map_err(|error| {
-            WireDagDecodeError::Migration(format!(
-                "legacy Pad.fill {image} is invalid for output precision `{precision}`: {error}"
-            ))
-        })?;
-        node["op"]["fill"] = serde_json::to_value(fill).map_err(|error| {
-            WireDagDecodeError::Migration(format!(
-                "legacy Pad.fill migration could not encode typed fill: {error}"
-            ))
-        })?;
+fn wire_dim_info_equal(left: &WireDimInfo, right: &WireDimInfo) -> bool {
+    match (left, right) {
+        (WireDimInfo::Lit { size: left }, WireDimInfo::Lit { size: right }) => left == right,
+        (
+            WireDimInfo::Named {
+                name: left_name,
+                size: left_size,
+            },
+            WireDimInfo::Named {
+                name: right_name,
+                size: right_size,
+            },
+        ) => left_name == right_name && left_size == right_size,
+        _ => false,
     }
-    Ok(())
 }
 
-/// Combined failure type for [`WireDag::from_validated_json`]: either the
-/// JSON did not parse, or it parsed but carries an unsupported schema
-/// version. Kept distinct so a caller can branch on malformed-vs-
-/// incompatible.
+/// Combined failure type for [`WireDag::from_validated_json`]. Parse,
+/// exact-version, and cross-node contract failures remain distinct.
 #[derive(Debug)]
 pub enum WireDagDecodeError {
     /// The payload is not valid `WireDag` JSON.
     Parse(serde_json::Error),
     /// The payload parsed but its schema version is unsupported.
     Schema(WireDagSchemaError),
-    /// A recognized older payload could not be upgraded without inventing
-    /// dtype semantics.
-    Migration(String),
+    /// The exact-version payload violates a cross-node wire invariant.
+    Contract(WireDagContractError),
 }
 
 impl std::fmt::Display for WireDagDecodeError {
@@ -1961,7 +2118,7 @@ impl std::fmt::Display for WireDagDecodeError {
         match self {
             WireDagDecodeError::Parse(e) => write!(f, "WireDag JSON parse error: {e}"),
             WireDagDecodeError::Schema(e) => write!(f, "{e}"),
-            WireDagDecodeError::Migration(e) => write!(f, "WireDag migration error: {e}"),
+            WireDagDecodeError::Contract(e) => write!(f, "WireDag contract error: {e}"),
         }
     }
 }
@@ -1971,7 +2128,7 @@ impl std::error::Error for WireDagDecodeError {
         match self {
             WireDagDecodeError::Parse(e) => Some(e),
             WireDagDecodeError::Schema(e) => Some(e),
-            WireDagDecodeError::Migration(_) => None,
+            WireDagDecodeError::Contract(e) => Some(e),
         }
     }
 }
@@ -2104,8 +2261,16 @@ pub enum WireRiscOp {
         /// Accumulator precision, populated per spec/04-type-system.md
         /// §5.7.1. Defaults are resolved before lowering, so this is
         /// always concrete in the wire schema.
-        #[serde(default = "default_sum_accumulator_name")]
         accumulator: String,
+    },
+    /// Dedicated exact multi-axis boolean cardinality reduction.
+    ///
+    /// `axes` is a complete, non-empty set of normalized original input
+    /// positions in strictly descending order. [`WireDag`] validates the
+    /// order and range against the referenced input before encoding or after
+    /// exact-version decoding.
+    Count {
+        axes: Vec<usize>,
     },
     MaxReduce {
         axis: usize,
@@ -2198,7 +2363,6 @@ pub enum WireRiscOp {
         /// Accumulator precision per spec/04-type-system.md §5.7.1.
         /// Result precision matches operand precision; the wider
         /// accumulator is consumed inside the op.
-        #[serde(default = "default_matmul_accumulator_name")]
         accumulator: String,
     },
     Gather {
@@ -2215,21 +2379,6 @@ pub enum WireRiscOp {
     },
 }
 
-/// Backwards-compat default for the `accumulator` field on
-/// [`WireRiscOp::Sum`]. Old wire payloads predate the WS-A0 spec lock
-/// (cc47e6d) and don't carry the field; default to `f32`, the
-/// pre-WS-A0 implicit accumulator.
-fn default_sum_accumulator_name() -> String {
-    "f32".to_string()
-}
-
-/// Backwards-compat default for the `accumulator` field on
-/// [`WireRiscOp::BlasMatmul`]. Same rationale as
-/// [`default_sum_accumulator_name`].
-fn default_matmul_accumulator_name() -> String {
-    "f32".to_string()
-}
-
 fn default_true() -> bool {
     true
 }
@@ -2237,7 +2386,7 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use chelis_types::types::Prim;
     #[test]
     fn general_kind_projection_excludes_exactly_unsupported_feature() {
         for kind in DiagnosticKind::ALL {
@@ -2287,52 +2436,45 @@ mod tests {
         assert_eq!(validated.schema_version, WIRE_DAG_SCHEMA_VERSION);
     }
 
-    // WI-2 additive-default: a pre-versioning payload (no schema_version
-    // field) deserializes to the current baseline rather than failing,
-    // keeping the wire surface additive.
     #[test]
-    fn wire_dag_missing_schema_version_defaults_to_baseline() {
-        let legacy = r#"{"nodes":[],"roots":[]}"#;
-        let dag: WireDag = serde_json::from_str(legacy).expect("legacy payload deserializes");
-        assert_eq!(
-            dag.schema_version, WIRE_DAG_SCHEMA_VERSION,
-            "missing schema_version defaults to the current baseline"
-        );
-        dag.validate_schema_version()
-            .expect("defaulted version validates");
+    fn wire_dag_missing_schema_version_is_rejected() {
+        let versionless = r#"{"nodes":[],"roots":[]}"#;
+        assert!(serde_json::from_str::<WireDag>(versionless).is_err());
+        assert!(matches!(
+            WireDag::from_validated_json(versionless),
+            Err(WireDagDecodeError::Schema(
+                WireDagSchemaError::MissingSchemaVersion {
+                    supported: WIRE_DAG_SCHEMA_VERSION
+                }
+            ))
+        ));
     }
 
-    // WI-2 negative twin: a payload stamped with a version NEWER than this
-    // build supports is REJECTED with the typed
-    // `WireDagSchemaError::UnknownSchemaVersion` — not silently accepted,
-    // not a panic, and not a bare serde error (the field parses fine; the
-    // version value is what is rejected).
     #[test]
     fn wire_dag_rejects_unknown_schema_version() {
         let future = WIRE_DAG_SCHEMA_VERSION + 1;
         let json = format!(r#"{{"schema_version":{future},"nodes":[],"roots":[]}}"#);
 
-        // It still PARSES (additive serde) ...
-        let dag: WireDag = serde_json::from_str(&json).expect("future payload parses");
-        assert_eq!(dag.schema_version, future);
-
-        // ... but explicit validation REJECTS it with the typed error.
+        assert!(serde_json::from_str::<WireDag>(&json).is_err());
+        let dag = WireDag {
+            schema_version: future,
+            nodes: vec![],
+            roots: vec![],
+        };
         let err = dag
             .validate_schema_version()
             .expect_err("future schema version must be rejected");
         assert_eq!(
             err,
-            WireDagSchemaError::UnknownSchemaVersion {
+            WireDagSchemaError::UnsupportedSchemaVersion {
                 found: future,
                 supported: WIRE_DAG_SCHEMA_VERSION,
             },
-            "rejection must be the typed UnknownSchemaVersion error"
+            "rejection must be the typed UnsupportedSchemaVersion error"
         );
 
-        // The combined consume path surfaces it as the Schema arm, not a
-        // parse error and not a silent accept.
         match WireDag::from_validated_json(&json) {
-            Err(WireDagDecodeError::Schema(WireDagSchemaError::UnknownSchemaVersion {
+            Err(WireDagDecodeError::Schema(WireDagSchemaError::UnsupportedSchemaVersion {
                 found,
                 supported,
             })) => {
@@ -2347,7 +2489,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_dag_v4_pad_fill_migrates_from_output_precision() {
+    fn wire_dag_v4_pad_fill_is_rejected_without_migration() {
         let legacy = r#"{
             "schema_version": 4,
             "nodes": [{
@@ -2358,21 +2500,21 @@ mod tests {
             }],
             "roots": [0]
         }"#;
-        let dag = WireDag::from_validated_json(legacy).expect("v4 Pad migrates");
-        assert_eq!(dag.schema_version, WIRE_DAG_SCHEMA_VERSION);
-        match &dag.nodes[0].op {
-            WireRiscOp::Pad { fill, .. } => {
-                assert_eq!(fill.prim(), Prim::F32);
-                assert_eq!(fill.as_f64_lossy(), 1.5);
-            }
-            other => panic!("expected migrated Pad, got {other:?}"),
-        }
+        assert!(matches!(
+            WireDag::from_validated_json(legacy),
+            Err(WireDagDecodeError::Schema(
+                WireDagSchemaError::UnsupportedSchemaVersion {
+                    found: 4,
+                    supported: WIRE_DAG_SCHEMA_VERSION
+                }
+            ))
+        ));
     }
 
     #[test]
-    fn wire_dag_v5_rejects_raw_pad_fill() {
+    fn wire_dag_v6_rejects_raw_pad_fill() {
         let current_with_legacy_fill = r#"{
-            "schema_version": 5,
+            "schema_version": 6,
             "nodes": [{
                 "id": 0,
                 "op": {"kind": "pad", "padding": [], "fill": 1.5},
@@ -2386,7 +2528,7 @@ mod tests {
                 WireDag::from_validated_json(current_with_legacy_fill),
                 Err(WireDagDecodeError::Parse(_))
             ),
-            "v5 must not retain a raw-number alternate Pad.fill spelling"
+            "v6 must not retain a raw-number alternate Pad.fill spelling"
         );
     }
 
@@ -2409,8 +2551,12 @@ mod tests {
         });
         assert!(matches!(
             WireDag::from_validated_json(&legacy.to_string()),
-            Err(WireDagDecodeError::Migration(message))
-                if message.contains("v1-v4 numeric spelling")
+            Err(WireDagDecodeError::Schema(
+                WireDagSchemaError::UnsupportedSchemaVersion {
+                    found: 4,
+                    supported: WIRE_DAG_SCHEMA_VERSION
+                }
+            ))
         ));
     }
 
@@ -2428,7 +2574,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_dag_rejects_malformed_schema_versions_before_migration() {
+    fn wire_dag_rejects_malformed_schema_versions_before_op_decode() {
         for version in [r#""4""#, "-1", "4294967296"] {
             let json = format!(
                 r#"{{
@@ -2448,7 +2594,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_dag_v5_pad_fill_round_trips_exact_int64() {
+    fn wire_dag_v6_pad_fill_round_trips_exact_int64() {
         let exact = 9_007_199_254_740_993i64;
         let dag = WireDag {
             schema_version: WIRE_DAG_SCHEMA_VERSION,
@@ -2479,7 +2625,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_dag_v4_pad_migration_rejects_missing_precision() {
+    fn wire_dag_v4_pad_rejects_before_inspecting_missing_precision() {
         let legacy = r#"{
             "schema_version": 4,
             "nodes": [{
@@ -2493,10 +2639,14 @@ mod tests {
         assert!(
             matches!(
                 WireDag::from_validated_json(legacy),
-                Err(WireDagDecodeError::Migration(message))
-                    if message.contains("output_type.precision")
+                Err(WireDagDecodeError::Schema(
+                    WireDagSchemaError::UnsupportedSchemaVersion {
+                        found: 4,
+                        supported: WIRE_DAG_SCHEMA_VERSION
+                    }
+                ))
             ),
-            "legacy migration must fail rather than invent a fill dtype"
+            "legacy schema rejection must precede node-field decoding"
         );
     }
 

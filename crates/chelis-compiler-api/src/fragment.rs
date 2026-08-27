@@ -455,7 +455,7 @@ mod tests {
         // `chelis check` re-infers `f`'s signature from the rewritten body, and
         // a well-typed identity body checks clean. No special rejection is
         // needed; the tool's verdict equals full check by construction.
-        let module = chelis_deep::parser::parse_str(
+        let module = chelis_deep::parse_and_stamp_file(
             "(module {} m \
                (def {} f (fn {} (params {} (x {type: (t-prim {} f32)})) (var {} x))))",
         )

@@ -452,6 +452,126 @@ fn ordered_list_uncited_entry_fails() {
     assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Fail);
 }
 
+// ------------------------------------------------------------------ chelis#1270
+//
+// The §4 grammar accepts a registry sibling's `<repo>#NNN`. Before this, the
+// literal blocking artifact of the 0.18.5 cascade (`nautilus#43`) failed row 8
+// as a prose-name citation, and the shell that hit it had to manufacture a
+// `docs/issue_drafts/` file whose only content was a pointer at that PR: a
+// citation handle wearing a draft's costume, which satisfies the grammar while
+// defeating its purpose. What the rule is actually buying is a live, checkable,
+// dedupable reference, and registry membership supplies exactly that.
+
+#[test]
+fn sibling_repo_citation_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "sibling");
+    let report = audit_with_bugs(
+        &root,
+        &doc(
+            "- blocked on the sibling release: nautilus#43",
+            "(none yet)",
+            "(none yet)",
+            "(none yet)",
+        ),
+    );
+    assert_eq!(
+        verdict_of(&report, "upstream-bugs"),
+        Verdict::Pass,
+        "a registry sibling's issue is a citation"
+    );
+    assert!(report.ok());
+}
+
+#[test]
+fn every_registry_shell_is_an_accepted_citation() {
+    // Locks the coupling rather than spot-checking: a shell added to REGISTRY
+    // becomes citable by that fact alone.
+    for shell in chelis_conformance::registry::REGISTRY {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "regshell");
+        let entry = format!("- blocked on {}#7", shell.name);
+        let report = audit_with_bugs(
+            &root,
+            &doc(&entry, "(none yet)", "(none yet)", "(none yet)"),
+        );
+        assert_eq!(
+            verdict_of(&report, "upstream-bugs"),
+            Verdict::Pass,
+            "{}#7 must be an accepted citation",
+            shell.name
+        );
+    }
+}
+
+#[test]
+fn org_qualified_sibling_citation_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "orgqual");
+    let report = audit_with_bugs(
+        &root,
+        &doc(
+            "- blocked on Chelis-Lang/coral#27",
+            "(none yet)",
+            "(none yet)",
+            "(none yet)",
+        ),
+    );
+    assert_eq!(verdict_of(&report, "upstream-bugs"), Verdict::Pass);
+}
+
+#[test]
+fn an_arbitrary_repo_reference_is_still_rejected() {
+    // The negative control the widening owes. Registry membership is the whole
+    // property; a grammar that took any `word#NNN` would check nothing.
+    for entry in [
+        "- blocked on torch#43",
+        "- blocked on numpy #7",
+        "- blocked on chelis-std#12",
+        "- blocked on Chelis-Lang#5",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = stamp(tmp.path(), "arbitrary");
+        let report = audit_with_bugs(&root, &doc(entry, "(none yet)", "(none yet)", "(none yet)"));
+        let r = row_of(&report, "upstream-bugs");
+        assert_eq!(
+            r.verdict,
+            Verdict::Fail,
+            "{entry:?} names no repo the audit can resolve"
+        );
+        assert!(!report.ok());
+    }
+}
+
+#[test]
+fn the_uncited_diagnostic_names_the_sibling_form() {
+    // A shell hitting this failure should learn the accepted forms from the
+    // message, not from the source.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = stamp(tmp.path(), "teach");
+    let report = audit_with_bugs(
+        &root,
+        &doc(
+            "- blocked on the nautilus release, no number",
+            "(none yet)",
+            "(none yet)",
+            "(none yet)",
+        ),
+    );
+    let r = row_of(&report, "upstream-bugs");
+    assert_eq!(r.verdict, Verdict::Fail);
+    assert!(
+        r.diagnostic.contains("1 entry with a prose-name"),
+        "diag: {}",
+        r.diagnostic
+    );
+    assert!(
+        r.fix.contains("nautilus#43") || r.fix.contains("<repo>#NNN"),
+        "the fix must name the sibling form: {}",
+        r.fix
+    );
+}
+
 // A fresh scaffold's `(none yet)` placeholder body is end-to-end green.
 #[test]
 fn fresh_scaffold_row8_pass_and_ok() {

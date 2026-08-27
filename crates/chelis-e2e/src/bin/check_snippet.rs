@@ -113,7 +113,10 @@ fn check_surf(source: &str) {
 }
 
 fn check_deep(source: &str) {
-    let strict = chelis_deep::parser::parse_str_strict(source);
+    // chelis#1088: the snippet checker feeds `prepare_deep`, so it must use
+    // the same stamped `.dp` ingress the compiler does. A weaker parse here
+    // would report a fitness score for a tree the compiler never accepts.
+    let strict = chelis_deep::parse_and_stamp_file(source);
     let mut json = String::new();
     match strict {
         Ok(exprs) => {

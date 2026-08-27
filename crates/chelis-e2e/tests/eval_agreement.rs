@@ -330,6 +330,7 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         | RiscOp::UniformLike { .. }
         | RiscOp::Dropout { .. }
         | RiscOp::Sum { .. }
+        | RiscOp::Count { .. }
         | RiscOp::MaxReduce { .. }
         | RiscOp::MinReduce { .. }
         | RiscOp::ProdReduce { .. }

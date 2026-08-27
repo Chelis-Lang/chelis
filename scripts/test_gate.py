@@ -24,18 +24,41 @@ Four things are locked here:
 
 import importlib.util
 import io
+import os
 import re
+from collections import deque
 import shlex
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 def _load_module():
     here = Path(__file__).resolve().parent
     spec = importlib.util.spec_from_file_location("gate", here / "gate.py")
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_oracle_module():
+    """Load the chelis#908 oracle the same way `_load_module` loads gate.py.
+
+    By path, so this does not depend on `sys.path` happening to carry the
+    scripts directory, and under its real module name so it is the same
+    object `gate.py`'s own import produced.
+    """
+    here = Path(__file__).resolve().parent
+    name = "unrepresentable_domain_oracle"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, here / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name] = mod
@@ -83,6 +106,7 @@ PROJECT_DEVENV_WORKFLOW_JOBS = {
         "workspace-tests",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
+        "generalize-sweep-oracle",
         "macos-smoke",
         "backend-sanitizers",
         "docs",
@@ -520,6 +544,10 @@ NON_GATE_JOBS = {
     # the workspace and dtype legs and is aggregated under the stable
     # branch-protection context.
     "faithful-observation-phase2-oracle",
+    # Rule-id: GATE-SCOPE-GENERALIZE-SWEEP-ORACLE -- chelis#1207's exact
+    # sweep-versus-level parity corpus intentionally bypasses nextest's
+    # default filter and is owned by its dedicated blocking CI leg.
+    "generalize-sweep-oracle",
     "integration",
     # Rule-id: GATE-SCOPE-SMT -- the smt-build job is the required fast
     # cvc5-backed `smt` feature smoke. It is out of gate.py scope by
@@ -616,7 +644,7 @@ NON_GATE_WORKFLOWS = {
 
 class StageUnionTests(unittest.TestCase):
     def test_full_gate_keeps_censuses_while_ci_uses_the_split_profile(self):
-        self.assertEqual(gate.STAGES["integration"], [gate.NEXTEST_WORKSPACE_CI])
+        self.assertIn(gate.NEXTEST_WORKSPACE_CI, gate.STAGES["integration"])
         self.assertIn(gate.NEXTEST_WORKSPACE, gate.full_command_list())
         self.assertNotIn(gate.NEXTEST_WORKSPACE_CI, gate.full_command_list())
         self.assertNotIn("--profile", gate.NEXTEST_WORKSPACE)
@@ -726,6 +754,441 @@ class ListOutputTests(unittest.TestCase):
             "<managed-python> scripts/check_pipeline_core_compile_fail.py",
         ):
             self.assertIn(command, rendered)
+
+    def test_unrepresentable_domain_oracle_runs_in_the_per_pr_gate(self):
+        # chelis#908's "Constraint on every fix in this class": the oracle
+        # must run in a continuous job. It was referenced by no workflow and
+        # no gate stage, so the only thing exercising it was its own unit
+        # tests, which patch the command runners; the behavioral oracle never
+        # reached a compiled binary. Hosted CI runs one `gate.py <stage>` per
+        # job, so membership in a stage is what makes it continuous, and
+        # membership in the local subset is what makes it pre-push. Removing
+        # either turns the oracle dark silently, which is the exact failure
+        # mode #1089 inventories -- hence an explicit lock.
+        command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["integration"]],
+        )
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+        )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+
+    def test_front_end_performance_oracle_runs_in_continuous_integration(self):
+        command = "<managed-python> scripts/compiler_front_end_performance.py"
+        self.assertIn(
+            command,
+            [gate.render(entry) for entry in gate.STAGES["integration"]],
+        )
+        self.assertIn(command, [gate.render(entry) for entry in gate.full_command_list()])
+        self.assertNotIn(
+            command,
+            [gate.render(entry) for entry in gate.LOCAL_STATIC_COMMANDS],
+            "the focused crate runs are CI-owned; --local already runs each changed crate",
+        )
+        script = REPO_ROOT / "scripts" / "compiler_front_end_performance.py"
+        self.assertTrue(script.is_file())
+        self.assertIn(
+            "compiler front-end performance oracle: PASS", script.read_text()
+        )
+
+    def test_the_oracles_stage_uses_devenv_nextest(self):
+        # Both compiled obligations run `cargo nextest`. The Devenv toolchain
+        # owns cargo-nextest, so each job that runs the stage must use that
+        # toolchain instead of a host-level installer.
+        command = "<managed-python> scripts/unrepresentable_domain_oracle.py"
+        owning_stages = [
+            stage
+            for stage, entries in gate.STAGES.items()
+            if command in [gate.render(entry) for entry in entries]
+        ]
+        self.assertEqual(
+            owning_stages,
+            ["integration"],
+            "the oracle must live in exactly one Devenv-backed stage",
+        )
+        self.assertIn("cargo-nextest", DEVENV_TOOLCHAINS_NIX.read_text())
+        workflow = CI_YML.read_text()
+        blocks = _workflow_job_blocks(workflow)
+        owning_jobs = [
+            name
+            for name, block in blocks.items()
+            if "gate.py integration" in block
+        ]
+        self.assertTrue(owning_jobs, "some job must run `gate.py integration`")
+        for name in owning_jobs:
+            self.assertIn(
+                f"{DEVENV_COMMAND_PREFIX}python scripts/gate.py integration",
+                blocks[name],
+                f"job `{name}` runs the oracle's stage outside Devenv",
+            )
+
+    def test_a_chelis_build_precedes_the_oracle_in_every_list_that_runs_it(self):
+        # chelis#1322. The oracle drives a built `chelis` over its .dp
+        # fixtures. It gets one inside the gate because a command that
+        # builds that exact bin target sits earlier in the list -- a
+        # property nothing stated until this lock. Two things ride on it:
+        # the oracle is warm rather than cold at the point it runs, and
+        # `oracle_binary_handoff` may name the built path only because the
+        # list guarantees it exists. A reorder that puts the oracle first
+        # would silently undo both, so assert the ordering directly rather
+        # than trusting the current arrangement to stay put.
+        producers = {gate.render(list(c)) for c in gate.CHELIS_BINARY_PRODUCERS}
+        oracle = gate.render(gate.UNREPRESENTABLE_DOMAIN_ORACLE)
+        lists = {
+            "full_command_list()": gate.full_command_list(),
+            "local_command_list([])": gate.local_command_list([]),
+            "local_command_list(['chelis-deep'])": gate.local_command_list(
+                ["chelis-deep"]
+            ),
+        }
+        for label, commands in lists.items():
+            rendered = [gate.render(command) for command in commands]
+            self.assertIn(oracle, rendered, f"{label} must run the oracle")
+            oracle_index = rendered.index(oracle)
+            earlier = set(rendered[:oracle_index])
+            self.assertTrue(
+                earlier & producers,
+                f"{label} runs the oracle at index {oracle_index} with no "
+                f"command that builds `chelis` before it; one of {sorted(producers)} "
+                "must precede it",
+            )
+
+    def test_the_handoff_variable_has_exactly_one_spelling(self):
+        # chelis#1322. Two independent string literals were the most likely
+        # rot channel in this whole change: rename either side and every
+        # test on both sides stays green while the handoff is dead, because
+        # each test refers to its own module's symbol. The oracle then sees
+        # no variable, rebuilds its own binary, and still prints
+        # `ORACLE: PASS` -- verbatim the silent degradation the fail-closed
+        # design exists to prevent. With one constant the rename is
+        # harmless, so what this asserts is that there is only one: the
+        # objects are identical, and gate.py quotes no spelling of its own.
+        oracle = _load_oracle_module()
+        self.assertIs(gate.ORACLE_BINARY_ENV, oracle.ORACLE_BINARY_ENV)
+        source = (REPO_ROOT / "scripts" / "gate.py").read_text()
+        for literal in (
+            f'"{oracle.ORACLE_BINARY_ENV}"',
+            f"'{oracle.ORACLE_BINARY_ENV}'",
+        ):
+            self.assertNotIn(
+                literal,
+                source,
+                "gate.py must import the handoff variable's spelling from "
+                "the oracle, not declare a second copy of it",
+            )
+
+    def test_the_handoff_is_reported_when_a_gate_command_fails(self):
+        # A failed oracle stage is debugged from the gate's diagnostic dump
+        # and its printed rerun line. Both must name the handoff: without
+        # it the suggested rerun builds its own binary and so does not
+        # reproduce what failed.
+        self.assertIn(gate.ORACLE_BINARY_ENV, gate.DIAGNOSTIC_ENVIRONMENT)
+        rerun = gate._rerun_command(
+            ["true"],
+            {
+                "PYO3_PYTHON": "/uv/python3.11",
+                "CARGO_TARGET_DIR": "/w/target",
+                gate.ORACLE_BINARY_ENV: "/w/target/debug/chelis",
+            },
+            Path("/w"),
+        )
+        self.assertIn(
+            f"{gate.ORACLE_BINARY_ENV}=/w/target/debug/chelis", rerun
+        )
+
+    def test_the_oracle_binary_handoff_names_the_normalized_target(self):
+        # The handoff must point into the same worktree-local target dir
+        # `gate_environment` normalizes to, not a raw relative `target`:
+        # a sibling agent's run uses target/agents/<name>, and naming the
+        # wrong one would hand the oracle a stale or absent binary.
+        commands = gate.local_command_list([])
+        handoff = gate.oracle_binary_handoff(commands, "/w/target/agents/x")
+        self.assertEqual(handoff, str(Path("/w/target/agents/x/debug/chelis")))
+
+    def test_a_list_without_a_chelis_build_hands_over_nothing(self):
+        # chelis#1322's fail-closed half. The oracle treats the variable as
+        # authoritative and errors on a path that is not there, so the gate
+        # may only set it where the list itself builds the binary. The
+        # `integration` stage run on its own is exactly that case: hosted
+        # CI's `Workspace Tests (Linux)` job reaches the oracle through
+        # `cargo nextest run --workspace`, which builds the bin only as an
+        # implicit consequence of chelis-cli having integration tests.
+        # That is not a guarantee this list states, so CI keeps the
+        # oracle's original build-it-yourself behavior.
+        self.assertIsNone(
+            gate.oracle_binary_handoff(gate.STAGES["integration"], "/w/target")
+        )
+        self.assertNotIn(
+            gate.NEXTEST_WORKSPACE_CI,
+            [list(c) for c in gate.CHELIS_BINARY_PRODUCERS],
+        )
+        self.assertNotIn(
+            gate.NEXTEST_WORKSPACE,
+            [list(c) for c in gate.CHELIS_BINARY_PRODUCERS],
+        )
+
+    def test_a_list_without_the_oracle_hands_over_nothing(self):
+        # `gate.py lint-and-unit` builds `chelis` but never runs the
+        # oracle; it has no reason to export the variable.
+        self.assertIsNone(
+            gate.oracle_binary_handoff(
+                gate.STAGES["lint-and-unit"], "/w/target"
+            )
+        )
+
+    def test_a_producer_after_the_oracle_hands_over_nothing(self):
+        # The predicate itself, not the shipped lists. `oracle_binary_handoff`
+        # slices `commands[:oracle_index]`; relaxing that to a membership
+        # test over the whole list would name a binary that does not exist
+        # yet when the oracle runs. The ordering lock above covers the three
+        # lists gate.py ships, which is a different property: it would stay
+        # green while the predicate degraded, because those lists happen to
+        # be correctly ordered.
+        self.assertIsNone(
+            gate.oracle_binary_handoff(
+                [gate.UNREPRESENTABLE_DOMAIN_ORACLE, gate.CHELIS_LINT_CHECK],
+                "/w/target",
+            )
+        )
+        self.assertIsNone(
+            gate.oracle_binary_handoff(
+                [gate.UNREPRESENTABLE_DOMAIN_ORACLE, gate.BUILD_WORKSPACE],
+                "/w/target",
+            )
+        )
+        # Positive control, so the two assertions above cannot pass merely
+        # because the handoff stopped working altogether.
+        self.assertIsNotNone(
+            gate.oracle_binary_handoff(
+                [gate.CHELIS_LINT_CHECK, gate.UNREPRESENTABLE_DOMAIN_ORACLE],
+                "/w/target",
+            )
+        )
+
+    def test_the_chelis_producer_set_is_exactly_the_two_unconditional_builds(
+        self,
+    ):
+        # An exact set, not a membership check: dropping either entry leaves
+        # every shipped list still handing over (the other one covers them
+        # all), so nothing else would notice. Adding a command here is a
+        # claim that it unconditionally leaves <target>/debug/chelis, which
+        # is the assumption the fail-closed handoff rests on, so it should
+        # cost a deliberate edit to this lock.
+        self.assertEqual(
+            gate.CHELIS_BINARY_PRODUCERS,
+            (tuple(gate.BUILD_WORKSPACE), tuple(gate.CHELIS_LINT_CHECK)),
+        )
+
+    def _recorded_child_environments(self, commands, environ=None):
+        """Run `commands` through `run_commands` with cargo stubbed out,
+        returning the environment each child would have been given."""
+        seen: list[dict[str, str]] = []
+
+        class _Stub:
+            def __init__(self) -> None:
+                self.stdout = io.StringIO("")
+
+            def wait(self) -> int:
+                return 0
+
+        # `gate_environment` probes the interpreter through subprocess.run,
+        # which also reaches Popen; only the gate's own child commands
+        # carry an explicit `env`, so let everything else through.
+        real_popen = gate.subprocess.Popen
+
+        def fake_popen(command, *args, **kwargs):
+            if "env" not in kwargs:
+                return real_popen(command, *args, **kwargs)
+            seen.append(dict(kwargs["env"]))
+            return _Stub()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(
+                gate.subprocess, "Popen", side_effect=fake_popen
+            ):
+                result = gate.run_commands(
+                    commands,
+                    stage_label="handoff-test",
+                    repo_root=root,
+                    failure_root=root / "target/gate-failures",
+                    environ=environ
+                    if environ is not None
+                    else {"PATH": os.environ.get("PATH", "")},
+                    executable=Path(sys.executable),
+                    output_stream=io.StringIO(),
+                    error_stream=io.StringIO(),
+                )
+            self.assertEqual(result, 0)
+            return seen, str((root / "target").resolve())
+
+    def test_run_commands_exports_the_handoff_to_child_commands(self):
+        # End-to-end: the computed path actually reaches the child
+        # environment, which is the only place the oracle can read it.
+        seen, target = self._recorded_child_environments(
+            [gate.CHELIS_LINT_CHECK, gate.UNREPRESENTABLE_DOMAIN_ORACLE]
+        )
+        expected = str(Path(target) / "debug" / "chelis")
+        self.assertEqual(len(seen), 2)
+        for environment in seen:
+            self.assertEqual(environment[gate.ORACLE_BINARY_ENV], expected)
+
+    def test_run_commands_exports_no_handoff_without_a_preceding_build(self):
+        seen, _ = self._recorded_child_environments(
+            gate.STAGES["integration"]
+        )
+        self.assertEqual(len(seen), len(gate.STAGES["integration"]))
+        for environment in seen:
+            self.assertNotIn(gate.ORACLE_BINARY_ENV, environment)
+
+    def test_a_bogus_explicit_handoff_aborts_before_the_first_command(self):
+        # The compared discipline is PYO3_PYTHON's, and PYO3_PYTHON is
+        # diagnosed at command 0 of 10. Learning about a typo only when the
+        # oracle reaches it costs a whole workspace clippy, fmt, the lint
+        # pass, three rustdoc stages and two guards first.
+        launched: list[list[str]] = []
+        # Only the gate's own child commands carry an explicit `env`;
+        # `gate_environment`'s interpreter probe must still run.
+        real_popen = gate.subprocess.Popen
+
+        def record(command, *args, **kwargs):
+            if "env" not in kwargs:
+                return real_popen(command, *args, **kwargs)
+            launched.append(list(command))
+            raise AssertionError("no command may launch")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            error = io.StringIO()
+            with mock.patch.object(
+                gate.subprocess, "Popen", side_effect=record
+            ):
+                result = gate.run_commands(
+                    gate.local_command_list([]),
+                    stage_label="bogus-handoff",
+                    repo_root=Path(tmp),
+                    failure_root=Path(tmp) / "target/gate-failures",
+                    environ={
+                        "PATH": os.environ.get("PATH", ""),
+                        gate.ORACLE_BINARY_ENV: "/nope/chelis",
+                    },
+                    executable=Path(sys.executable),
+                    output_stream=io.StringIO(),
+                    error_stream=error,
+                )
+        self.assertEqual(result, 2)
+        self.assertEqual(launched, [])
+        diagnostic = error.getvalue()
+        self.assertIn(gate.ORACLE_BINARY_ENV, diagnostic)
+        self.assertIn("/nope/chelis", diagnostic)
+
+    def test_the_gate_and_the_oracle_agree_that_empty_is_not_unset(self):
+        # If one side read an empty value as absent and the other as a
+        # handoff, an ambient `export CHELIS_ORACLE_BINARY=` would disable
+        # the handoff with no notice on either side. Both reject it.
+        oracle = _load_oracle_module()
+        for value in ("", "   "):
+            with self.subTest(value=value):
+                self.assertIsNotNone(
+                    gate._oracle_binary_validation_error(value, Path("/w"))
+                )
+                with mock.patch.dict(
+                    os.environ,
+                    {gate.ORACLE_BINARY_ENV: value},
+                    clear=False,
+                ):
+                    with self.assertRaises(oracle.OracleBinaryError):
+                        oracle.handed_over_binary()
+
+    def test_a_directory_is_described_as_a_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            error = gate._oracle_binary_validation_error(tmp, Path("/w"))
+            self.assertIsNotNone(error)
+            self.assertIn("is a directory", error)
+
+    def test_the_rerun_note_warns_that_the_pinned_binary_is_stale(self):
+        # The rerun line pins the handoff so it reproduces the failure.
+        # Pasted again after a Rust fix, that pin retests the old binary,
+        # which in one direction reports a false pass. The diagnostic has
+        # to say so, and only for the oracle's own command.
+        environment = {
+            "PYO3_PYTHON": sys.executable,
+            "CARGO_TARGET_DIR": "/w/target",
+            gate.ORACLE_BINARY_ENV: "/w/target/debug/chelis",
+        }
+
+        def diagnose(command):
+            stream = io.StringIO()
+            gate._print_failure_diagnostics(
+                command=command,
+                returncode=1,
+                launch_error=None,
+                duration=0.5,
+                stage_label="local",
+                index=10,
+                total=10,
+                repo_root=Path("/w"),
+                failure_log=Path("/w/log"),
+                environment=environment,
+                tail=deque(),
+                line_count=0,
+                error_stream=stream,
+            )
+            return stream.getvalue()
+
+        oracle_output = diagnose(
+            ["/uv/python", gate.UNREPRESENTABLE_DOMAIN_ORACLE[-1]]
+        )
+        self.assertIn("drop that assignment", oracle_output)
+        self.assertIn("retesting the old binary", oracle_output)
+        # Not on an unrelated failing command in the same run.
+        self.assertNotIn("drop that assignment", diagnose(gate.FMT_CHECK))
+
+    def test_an_explicit_handoff_from_the_caller_is_not_replaced(self):
+        # Same discipline `gate_environment` applies to PYO3_PYTHON: an
+        # explicit setting is authoritative, so the gate does not overwrite
+        # it with the binary its own commands build. It must be a usable
+        # path, because the gate now validates it up front.
+        chosen = sys.executable
+        seen, target = self._recorded_child_environments(
+            [gate.CHELIS_LINT_CHECK, gate.UNREPRESENTABLE_DOMAIN_ORACLE],
+            environ={
+                "PATH": os.environ.get("PATH", ""),
+                gate.ORACLE_BINARY_ENV: chosen,
+            },
+        )
+        computed = str(Path(target) / "debug" / "chelis")
+        for environment in seen:
+            self.assertEqual(environment[gate.ORACLE_BINARY_ENV], chosen)
+            self.assertNotEqual(
+                environment[gate.ORACLE_BINARY_ENV], computed
+            )
+
+    def test_unrepresentable_domain_oracle_script_exists_and_documents_acceptance(self):
+        # The wiring above is worthless if the script it names is gone or
+        # stops declaring its acceptance condition. #908 and the repository's
+        # one-oracle rule both key on the `ORACLE: PASS` line.
+        script = REPO_ROOT / "scripts" / "unrepresentable_domain_oracle.py"
+        self.assertTrue(script.is_file(), f"{script} must exist")
+        text = script.read_text()
+        self.assertIn(
+            "ORACLE: PASS",
+            text,
+            "the oracle must emit its documented acceptance line",
+        )
+        self.assertIn(
+            "phase3_stamped_ingress",
+            text,
+            "the oracle's obligations must cover the compiler-API ingress "
+            "(chelis#1088)",
+        )
+        self.assertIn(
+            "[03-PROG-1]",
+            text,
+            "the oracle must check the spec/03 top-level form rule",
+        )
 
     def test_cheap_pipeline_core_guards_are_in_the_local_subset(self):
         # The two cheap guards (cargo metadata + pure Python) run pre-push; the
@@ -1079,7 +1542,7 @@ class CiParityTests(unittest.TestCase):
         self.assertIn("name: Integration Tests (Linux)", aggregate_block)
         self.assertIn(
             "needs: [changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle]",
+            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
             aggregate_block,
         )
         self.assertNotIn("always()", aggregate_block)
@@ -1112,6 +1575,34 @@ class CiParityTests(unittest.TestCase):
         self.assertNotIn(command, dtype_block)
         self.assertIn(
             "faithful-observation-phase2-oracle=${{ needs.faithful-observation-phase2-oracle.result }}",
+            aggregate_block,
+        )
+
+    def test_generalize_sweep_oracle_is_a_dedicated_blocking_job(self):
+        oracle_block = _ci_job_block("generalize-sweep-oracle")
+        aggregate_block = _ci_job_block("integration")
+        command = (
+            "cargo nextest run --workspace --ignore-default-filter "
+            "--features chelis-types/generalize-sweep-oracle --no-fail-fast"
+        )
+
+        self.assertIn("name: Typecheck Level Generalization Oracle", oracle_block)
+        self.assertIn("needs: [changes]", oracle_block)
+        self.assertIn("contents: read", oracle_block)
+        self.assertIn(f"uses: {DEVENV_SETUP_ACTION}", oracle_block)
+        self.assertNotIn("dtolnay/rust-toolchain@stable", oracle_block)
+        self.assertNotIn("scripts/ci_setup_uv_python.py", oracle_block)
+        self.assertNotIn("taiki-e/install-action@nextest", oracle_block)
+        cache_inputs = _rust_cache_inputs(oracle_block)
+        self.assertEqual(cache_inputs.get("shared-key"), "linux-workspace")
+        self.assertEqual(cache_inputs.get("save-if"), "false")
+        self.assertIn(
+            "CARGO_TARGET_DIR: ${{ github.workspace }}/target",
+            oracle_block,
+        )
+        _assert_executable_run_once(oracle_block, command)
+        self.assertIn(
+            "generalize-sweep-oracle=${{ needs.generalize-sweep-oracle.result }}",
             aggregate_block,
         )
 
@@ -1817,12 +2308,13 @@ class DocsOnlySkipTests(unittest.TestCase):
         "workspace-tests",
         "dtype-phase3-oracle",
         "faithful-observation-phase2-oracle",
+        "generalize-sweep-oracle",
         "backend-sanitizers",
         "smt-build",
     }
     MANUAL_ONLY_JOBS = {"macos-smoke", "smt-build-darwin-arm64"}
-    # The stable required context aggregates the two parallel integration
-    # legs, so it needs their results as well as the docs-only classification.
+    # The stable required context aggregates the parallel integration legs,
+    # so it needs their results as well as the docs-only classification.
     HEAVY_AGGREGATOR_JOBS = {"integration"}
     # Jobs that use the same always-present `changes` job but key on a
     # narrower contract input rather than on the docs-only classification.
@@ -1927,7 +2419,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertEqual(
             integration.get("needs"),
             "[changes, workspace-tests, dtype-phase3-oracle, "
-            "faithful-observation-phase2-oracle]",
+            "faithful-observation-phase2-oracle, generalize-sweep-oracle]",
         )
         cond = integration.get("if", "")
         self.assertNotIn("always()", cond)
@@ -1938,6 +2430,7 @@ class DocsOnlySkipTests(unittest.TestCase):
         self.assertIn("needs.workspace-tests.result", block)
         self.assertIn("needs.dtype-phase3-oracle.result", block)
         self.assertIn("needs.faithful-observation-phase2-oracle.result", block)
+        self.assertIn("needs.generalize-sweep-oracle.result", block)
         self.assertIn("scripts/ci_require_success.py", block)
 
     def test_always_run_jobs_are_not_gated(self):

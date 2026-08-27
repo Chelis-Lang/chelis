@@ -468,6 +468,7 @@ pub(super) fn pack_dag_roots(
 /// always a named axis, never a runtime value reference.
 pub(super) const REDUCTION_BUILTIN_NAMES: &[&str] = &[
     "sum",
+    "count",
     "mean",
     "max_reduce",
     "min_reduce",

@@ -205,7 +205,7 @@ pub(super) fn extract_params(
                         .iter()
                         .find(|(key, _)| key == "type")
                         .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Ok(ty) => ty.into_type(),
                             Err(witness) => propagate(&witness),
                         });
                 params.push((name.to_string(), annotation));
@@ -222,7 +222,7 @@ pub(super) fn extract_params(
                         .iter()
                         .find(|(key, _)| key == "type")
                         .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Ok(ty) => ty.into_type(),
                             Err(witness) => propagate(&witness),
                         }),
                     _ => None,
@@ -239,7 +239,7 @@ pub(super) fn extract_params(
                         .iter()
                         .find(|(key, _)| key == "type")
                         .map(|(_, value)| match resolver.resolve(value) {
-                            Ok(ty) => resolve_type_aliases(&ty.into_type(), adt_reg),
+                            Ok(ty) => ty.into_type(),
                             Err(witness) => propagate(&witness),
                         }),
                     _ => None,
@@ -247,6 +247,13 @@ pub(super) fn extract_params(
                 params.push((name.to_string(), annotation));
             }
             _ => {}
+        }
+    }
+    drop(resolver);
+    let mut aliases = AliasExpansionSession::new(adt_reg, vg);
+    for (_, annotation) in &mut params {
+        if let Some(ty) = annotation {
+            *ty = aliases.resolve(ty);
         }
     }
     params
@@ -277,6 +284,7 @@ pub(super) fn infer_let(
         while i + 1 < bind_children.len() {
             if let Some(name) = symbol_name(&bind_children[i]) {
                 let rhs_expr = &bind_children[i + 1];
+                let rhs_level = subst.enter_level(vg);
                 let shape_checkpoint = product.deferred_shape_checkpoint();
                 let mut rhs_type_metadata_resolution = None;
                 let expr_ty = infer_expr_with_type_metadata_ownership(
@@ -359,10 +367,13 @@ pub(super) fn infer_let(
                     expr_ty
                 };
 
+                subst.leave_level(rhs_level, vg);
+
                 let scheme = if product.has_pending_shape_check_since(shape_checkpoint) {
                     // Bind-on-first-use (PP1): semantic shape obligations
                     // retain the exact inference variables captured by this
                     // lambda until its first application supplies types.
+                    subst.lower_type_to_current(&final_ty);
                     Scheme::mono(subst.apply(&final_ty))
                 } else {
                     let_env.generalize(&final_ty, subst)

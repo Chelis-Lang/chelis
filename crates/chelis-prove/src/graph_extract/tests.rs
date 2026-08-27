@@ -10,7 +10,7 @@
 //!   and whose serialized bytes hash to exactly the handle's hash;
 //! - a multi-output case fans out into N goals with DISTINCT root indices
 //!   sharing one DAG hash;
-//! - a non-v1 `WireDag` is REJECTED at the producer boundary, not silently
+//! - a non-current `WireDag` is REJECTED at the producer boundary, not silently
 //!   hashed (the negative twin for the cross-process consume gate).
 
 use std::collections::BTreeMap;
@@ -101,7 +101,7 @@ fn real_source_yields_box_range_goal_with_populated_handle() {
         "the handle's hash must be the sha256 of the serialized WireDag bytes"
     );
 
-    // The serialized artifact is a v1 WireDag that round-trips.
+    // The serialized artifact is an exact-version v6 WireDag that round-trips.
     let parsed: WireDag = serde_json::from_slice(&extracted.wire_dag_bytes)
         .expect("the serialized bytes parse back as a WireDag");
     assert_eq!(parsed.schema_version, WIRE_DAG_SCHEMA_VERSION);
@@ -262,7 +262,7 @@ fn future_version_wire_dag() -> WireDag {
 }
 
 #[test]
-fn non_v1_wire_dag_is_rejected_at_the_producer_boundary() {
+fn non_current_wire_dag_is_rejected_at_the_producer_boundary() {
     let mut named_roots = BTreeMap::new();
     named_roots.insert("out".to_string(), 0usize);
     let err = box_range_goal_from_wire_dag(
@@ -279,7 +279,7 @@ fn non_v1_wire_dag_is_rejected_at_the_producer_boundary() {
 }
 
 #[test]
-fn v1_wire_dag_passes_the_boundary_and_hashes() {
+fn exact_v6_wire_dag_passes_the_boundary_and_hashes() {
     // The positive twin of the boundary check: a supported-version DAG is
     // hashed and produces a populated goal.
     let mut named_roots = BTreeMap::new();
@@ -308,6 +308,49 @@ fn v1_wire_dag_passes_the_boundary_and_hashes() {
     .expect("a supported-version DAG passes the boundary");
     assert!(extracted.goal.ir.is_populated());
     assert_eq!(extracted.goal.ir.root_index(), Some(0));
+}
+
+#[test]
+fn invalid_exact_v6_count_is_rejected_without_panicking() {
+    let mut named_roots = BTreeMap::new();
+    named_roots.insert("out".to_string(), 1usize);
+    let dag = WireDag {
+        schema_version: WIRE_DAG_SCHEMA_VERSION,
+        nodes: vec![
+            WireDagNode {
+                id: 0,
+                op: WireRiscOp::Load {
+                    name: "x".to_string(),
+                },
+                inputs: vec![],
+                output_type: WireTensorType {
+                    dims: vec![WireDimInfo::Lit { size: 4 }],
+                    precision: "f32".to_string(),
+                },
+            },
+            WireDagNode {
+                id: 1,
+                op: WireRiscOp::Count { axes: vec![0] },
+                inputs: vec![0],
+                output_type: WireTensorType {
+                    dims: vec![],
+                    precision: "int64".to_string(),
+                },
+            },
+        ],
+        roots: vec![1],
+    };
+    let err = box_range_goal_from_wire_dag(
+        &dag,
+        &named_roots,
+        input_box(&[("x", -1.0, 1.0)]),
+        output_range("out", 0.0, 4.0),
+    )
+    .expect_err("Count over a non-bool input must return a typed wire-contract rejection");
+    assert!(
+        matches!(err, GraphExtractError::WireContractRejected(_)),
+        "expected a typed wire-contract rejection, got {err:?}"
+    );
 }
 
 #[test]
@@ -380,7 +423,7 @@ fn unlowerable_source_surfaces_a_lower_failure() {
 // hash. The producer must REJECT such a DAG at the boundary, before hashing.
 // ===========================================================================
 
-/// A single-node `WireDag` v1 carrying `op`, rooted at node 0, output `out`.
+/// A single-node exact-version `WireDag` v6 carrying `op`, rooted at node 0, output `out`.
 fn single_op_dag(op: WireRiscOp) -> WireDag {
     WireDag {
         schema_version: WIRE_DAG_SCHEMA_VERSION,
@@ -525,10 +568,10 @@ fn every_f64_bearing_op_field_is_guarded() {
                 padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
                 fill: chelis_types::scalar_from_f64(
                     "test",
-                    chelis_types::types::Prim::F64,
+                    chelis_types::types::Prim::F32,
                     f64::NAN,
                 )
-                .expect("f64 accepts NaN"),
+                .expect("f32 accepts NaN"),
             },
             "fill",
         ),
@@ -583,8 +626,8 @@ fn finite_f64_bearing_ops_pass_the_finite_guard() {
         WireRiscOp::Dropout { rate: 0.5, seed: 0 },
         WireRiscOp::Pad {
             padding: vec![(WireRtDim::Lit { value: 0 }, WireRtDim::Lit { value: 0 })],
-            fill: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 0.0)
-                .expect("finite f64"),
+            fill: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F32, 0.0)
+                .expect("finite f32"),
         },
         WireRiscOp::Const {
             value: chelis_types::scalar_from_f64("test", chelis_types::types::Prim::F64, 3.5)
@@ -700,7 +743,7 @@ fn entry_scoped_extraction_prunes_the_unrelated_fn_and_yields_a_populated_goal()
         "the handle's hash must be the sha256 of the serialized WireDag bytes"
     );
 
-    // The serialized artifact is a v1 WireDag that round-trips, and the
+    // The serialized artifact is an exact-version v6 WireDag that round-trips, and the
     // name-resolved `priced` root indexes a real root of it.
     let parsed: WireDag = serde_json::from_slice(&extracted.wire_dag_bytes)
         .expect("the serialized bytes parse back as a WireDag");

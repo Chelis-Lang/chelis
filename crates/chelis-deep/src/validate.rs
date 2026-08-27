@@ -132,6 +132,13 @@ pub fn validate(exprs: &[Expr]) -> Vec<ValidationWarning> {
                         .to_string(),
                 });
             }
+            // [03-ROLE-3] keeps a tag-word head without a metadata map a
+            // structural BareList — an import name list `(copy fill)` is a
+            // real program, so the stamp pass may not reinterpret the list
+            // by its head alone. This warning is the recorded lint
+            // mitigation for the other producer intent behind the same byte
+            // shape: a node whose author forgot the `{}` at element 1. It
+            // stays advisory precisely because the spelling is ambiguous.
             Expr::BareList(elems, span)
                 if matches!(
                     elems.first(),

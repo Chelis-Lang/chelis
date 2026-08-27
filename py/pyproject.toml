@@ -9,7 +9,6 @@ summarize-pdf = "chelis_tools.summarize_pdf:main"
 batch-summarize = "chelis_tools.batch_summarize:main"
 loc-report = "chelis_tools.loc_report:main"
 skill-eval = "chelis_tools.skill_eval:main"
-stamp-shell = "chelis_tools.stamp_shell:main"
 
 [project.optional-dependencies]
 test = ["pytest"]

@@ -41,8 +41,8 @@
 //!   rounding), applied to the exact binary value of the input -- matching
 //!   Python's built-in `round(x, places)`. See [`round_to_f64_impl`] / [`round_to_f32_impl`].
 
-use super::host_ops::{OrderedStringDictBuilder, dict_lookup};
-use super::{RuntimeValue, truncate_rendered, truncated_debug};
+use super::RuntimeValue;
+use super::host_ops::{OrderedStringDictBuilder, describe_fields, describe_value, dict_lookup};
 
 /// Nesting depth cap for the recursive-descent parser and serializer.
 /// Deeply nested inputs fail loudly instead of overflowing the stack.
@@ -135,7 +135,7 @@ fn json_kind(value: &RuntimeValue) -> Result<&'static str, String> {
         },
         other => Err(format!(
             "expected a Json value, got {}",
-            truncated_debug(other)
+            describe_value(other)
         )),
     }
 }
@@ -156,7 +156,7 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
         return Err(format!(
             "expected a Json value, got {}",
-            truncated_debug(value)
+            describe_value(value)
         ));
     };
     match (ctor.as_str(), fields.as_slice()) {
@@ -176,7 +176,7 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
                 let RuntimeValue::String(_) = key else {
                     return Err(format!(
                         "JDict keys must be strings, got {}",
-                        truncated_debug(key)
+                        describe_value(key)
                     ));
                 };
                 ensure_json_value_depth(item, depth + 1)?;
@@ -185,7 +185,7 @@ fn ensure_json_value_depth(value: &RuntimeValue, depth: usize) -> Result<(), Str
         }
         ("JNull" | "JBool" | "JInt" | "JNum" | "JStr" | "JList" | "JDict", _) => Err(format!(
             "malformed Json value: constructor `{ctor}` has unexpected fields {}",
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
         (other, _) => Err(format!(
             "expected a Json value (JNull/JBool/JInt/JNum/JStr/JList/JDict), got constructor `{other}`"
@@ -643,7 +643,7 @@ fn write_json_value(out: &mut String, value: &RuntimeValue, depth: usize) -> Res
     let RuntimeValue::Adt { ctor, fields, .. } = value else {
         return Err(format!(
             "to_json: expected a Json value, got {}",
-            truncated_debug(value)
+            describe_value(value)
         ));
     };
     match (ctor.as_str(), fields.as_slice()) {
@@ -689,7 +689,7 @@ fn write_json_value(out: &mut String, value: &RuntimeValue, depth: usize) -> Res
                 let RuntimeValue::String(key) = key else {
                     return Err(format!(
                         "to_json: JDict keys must be strings, got {}",
-                        truncated_debug(key)
+                        describe_value(key)
                     ));
                 };
                 escape_json_string(out, key);
@@ -701,7 +701,7 @@ fn write_json_value(out: &mut String, value: &RuntimeValue, depth: usize) -> Res
         }
         _ => Err(format!(
             "to_json: malformed Json value (constructor `{ctor}` with fields {})",
-            truncate_rendered(format!("{fields:?}"))
+            describe_fields(fields)
         )),
     }
 }
@@ -769,7 +769,7 @@ fn get_path<'v>(
         let RuntimeValue::Adt { ctor, fields, .. } = current else {
             return Err(format!(
                 "{builtin}: path `{path}`: expected a Json value, got {}",
-                truncated_debug(current)
+                describe_value(current)
             ));
         };
         match (ctor.as_str(), fields.as_slice()) {
@@ -830,7 +830,8 @@ pub(super) fn json_f64_at(value: &RuntimeValue, path: &str) -> Result<f64, Strin
                 Ok(payload.as_f64_lossy())
             }
             _ => Err(format!(
-                "json_f64: path `{path}`: malformed JNum fields {fields:?}"
+                "json_f64: path `{path}`: malformed JNum fields {}",
+                describe_fields(fields)
             )),
         },
         // chelis#729: `JInt` widens transparently, mirroring
@@ -843,7 +844,8 @@ pub(super) fn json_f64_at(value: &RuntimeValue, path: &str) -> Result<f64, Strin
                 Ok(payload.as_f64_lossy())
             }
             _ => Err(format!(
-                "json_f64: path `{path}`: malformed JInt fields {fields:?}"
+                "json_f64: path `{path}`: malformed JInt fields {}",
+                describe_fields(fields)
             )),
         },
         other => Err(format!(
@@ -866,7 +868,8 @@ pub(super) fn json_int_at(value: &RuntimeValue, path: &str) -> Result<i64, Strin
         RuntimeValue::Adt { ctor, fields, .. } if ctor == "JInt" => match fields.as_slice() {
             [RuntimeValue::Scalar(payload)] if payload.dtype().is_integer() => Ok(payload.as_i64()),
             _ => Err(format!(
-                "json_int: path `{path}`: malformed JInt fields {fields:?}"
+                "json_int: path `{path}`: malformed JInt fields {}",
+                describe_fields(fields)
             )),
         },
         RuntimeValue::Adt { ctor, .. } if ctor == "JNum" => Err(format!(
@@ -886,7 +889,8 @@ pub(super) fn json_str_at(value: &RuntimeValue, path: &str) -> Result<String, St
         RuntimeValue::Adt { ctor, fields, .. } if ctor == "JStr" => match fields.as_slice() {
             [RuntimeValue::String(s)] => Ok(s.clone()),
             _ => Err(format!(
-                "json_str: path `{path}`: malformed JStr fields {fields:?}"
+                "json_str: path `{path}`: malformed JStr fields {}",
+                describe_fields(fields)
             )),
         },
         other => Err(format!(
@@ -902,7 +906,8 @@ pub(super) fn json_list_at(value: &RuntimeValue, path: &str) -> Result<Vec<Runti
         RuntimeValue::Adt { ctor, fields, .. } if ctor == "JList" => match fields.as_slice() {
             [RuntimeValue::List(items)] => Ok(items.clone()),
             _ => Err(format!(
-                "json_list: path `{path}`: malformed JList fields {fields:?}"
+                "json_list: path `{path}`: malformed JList fields {}",
+                describe_fields(fields)
             )),
         },
         other => Err(format!(
@@ -919,7 +924,8 @@ pub(super) fn json_f64s_at(value: &RuntimeValue, path: &str) -> Result<Vec<f64>,
             [RuntimeValue::List(items)] => items,
             _ => {
                 return Err(format!(
-                    "json_f64s: path `{path}`: malformed JList fields {fields:?}"
+                    "json_f64s: path `{path}`: malformed JList fields {}",
+                    describe_fields(fields)
                 ));
             }
         },
@@ -979,7 +985,8 @@ pub(super) fn json_ints_at(value: &RuntimeValue, path: &str) -> Result<Vec<i64>,
             [RuntimeValue::List(items)] => items,
             _ => {
                 return Err(format!(
-                    "json_ints: path `{path}`: malformed JList fields {fields:?}"
+                    "json_ints: path `{path}`: malformed JList fields {}",
+                    describe_fields(fields)
                 ));
             }
         },
@@ -1103,7 +1110,7 @@ fn set_path_iterative(
         let RuntimeValue::Adt { ctor, fields, .. } = node else {
             return Err(format!(
                 "json_set: path `{full_path}`: expected a Json value, got {}",
-                truncated_debug(node)
+                describe_value(node)
             ));
         };
         match (ctor.as_str(), fields.as_slice()) {
@@ -1296,9 +1303,9 @@ mod tests {
                 RuntimeValue::String(s) => {
                     assert_eq!(s, "a\"b\\c/d\u{8}\u{c}\n\r\t\u{e9}\u{1F600}");
                 }
-                other => panic!("expected string, got {other:?}"),
+                other => panic!("expected string, got {}", describe_value(other)),
             },
-            other => panic!("expected JStr, got {other:?}"),
+            other => panic!("expected JStr, got {}", describe_value(other)),
         }
     }
 
@@ -1401,7 +1408,11 @@ mod tests {
             assert_eq!(
                 parsed.to_bits(),
                 x.to_bits(),
-                "value {x:?} formatted as `{text}` did not round-trip"
+                "value {} formatted as `{text}` did not round-trip",
+                chelis_types::format_element(
+                    chelis_types::types::Prim::F64,
+                    chelis_types::ElementRef::F64(x)
+                )
             );
         }
     }
@@ -1435,9 +1446,9 @@ mod tests {
         match &reparsed {
             RuntimeValue::Adt { fields, .. } => match &fields[0] {
                 RuntimeValue::String(s) => assert_eq!(s, original),
-                other => panic!("expected string, got {other:?}"),
+                other => panic!("expected string, got {}", describe_value(other)),
             },
-            other => panic!("expected JStr, got {other:?}"),
+            other => panic!("expected JStr, got {}", describe_value(other)),
         }
     }
 
@@ -1668,9 +1679,9 @@ mod tests {
         match parse_json_text("\"\\u00e9\"").expect("valid escape") {
             RuntimeValue::Adt { fields, .. } => match fields.as_slice() {
                 [RuntimeValue::String(s)] => assert_eq!(s, "\u{e9}"),
-                other => panic!("expected one string field, got {other:?}"),
+                other => panic!("expected one string field, got {}", describe_fields(other)),
             },
-            other => panic!("expected JStr, got {other:?}"),
+            other => panic!("expected JStr, got {}", describe_value(&other)),
         }
     }
 

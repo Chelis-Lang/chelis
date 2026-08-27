@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Capacity census liveness gate (chelis#729, dtype_semantics.md section C6).
 
-The CI tripwire (crates/chelis-cli/tests/capacity_census_tripwire.rs) proves
-the census matches the enumerated surface and that no row is uncited. This
-script checks the leg CI cannot: that every cited issue is still OPEN. A row
-citing a closed issue has lost its justification - the seam it excused was
-supposedly unwound - and must be re-adjudicated (un-censused, or re-cited to
-live work) rather than grandfathered forever. This is the known-red-ledger
-pattern of the chelis#732 Phase 2 oracle, applied to the census.
+The Rust tripwires prove that every discovered row either has exactly one
+final authority or belongs to the exact sealed foundation-era legacy set.
+This script checks the leg CI cannot: that every issue cited by an active
+legacy disposition is still OPEN. Rows with final authority omit a citation
+and are deliberately outside this liveness ledger.
 
 Network gate (run by the change-gated and nightly liveness jobs; it also runs
 manually at release cuts and during red-team passes):
@@ -16,12 +14,11 @@ manually at release cuts and during red-team passes):
 
 Success is exit 0 with the final line `CAPACITY CENSUS LIVENESS: PASS`.
 Run it at every release cut and in red-team passes over the numeric surface.
-Issue-bound dispositions name at least one chelis#N reference. Exact permanent
-dispositions are closed, family-specific strings backed by non-regenerable
-complete-row manifests in the owning Rust tripwires. The remaining live seam
-rows cite chelis#893. The typed wire and PyO3 baselines carry distinct
-top-level dispositions; their row manifests prevent a new row from inheriting
-either disposition.
+Issue-bound legacy dispositions name at least one chelis#N reference. Exact
+foundation-era dispositions are closed, family-specific strings backed by
+immutable complete-row universes in the owning Rust tripwires. Active legacy
+sets may shrink as rows acquire final authority, but no new or changed identity
+may inherit one of these dispositions.
 """
 
 from __future__ import annotations
@@ -42,7 +39,7 @@ CENSUS_RELS = (
     Path("spec/design/capacity_census_bindings.json"),
 )
 ISSUE_REF = re.compile(r"chelis#(\d+)")
-PERMANENT_DISPOSITIONS_BY_FAMILY = {
+LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY = {
     "primary": frozenset(
         {
             "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)",
@@ -60,9 +57,9 @@ PERMANENT_DISPOSITIONS_BY_FAMILY = {
         }
     ),
 }
-PERMANENT_DISPOSITIONS = frozenset(
+LEGACY_TRANSITION_DISPOSITIONS = frozenset(
     disposition
-    for dispositions in PERMANENT_DISPOSITIONS_BY_FAMILY.values()
+    for dispositions in LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY.values()
     for disposition in dispositions
 )
 
@@ -146,14 +143,18 @@ def adjudicate(rows: list[dict], issues: dict[int, IssueRecord]) -> list[str]:
     for row in rows:
         citation = str(row.get("citation", "")).strip()
         row_id = f"[{row.get('kind', '?')}] {row.get('id', '?')}"
-        if not citation or citation == "TODO":
-            problems.append(f"UNCITED row (CI tripwire should have caught this): {row_id}")
+        if not citation:
+            continue
+        if citation == "TODO":
+            problems.append(f"TODO legacy disposition (Rust tripwire should have caught this): {row_id}")
             continue
         family = str(row.get("_census_family", "")).strip()
-        family_dispositions = PERMANENT_DISPOSITIONS_BY_FAMILY.get(family, frozenset())
+        family_dispositions = LEGACY_TRANSITION_DISPOSITIONS_BY_FAMILY.get(
+            family, frozenset()
+        )
         if citation in family_dispositions:
             continue
-        if citation in PERMANENT_DISPOSITIONS:
+        if citation in LEGACY_TRANSITION_DISPOSITIONS:
             problems.append(
                 f"WRONG CENSUS FAMILY: permanent disposition does not belong to "
                 f"{family or '<missing>'}: {row_id}"
@@ -219,8 +220,17 @@ def fetch_issue(
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     rows = load_census_rows(root)
+    legacy_rows = [
+        row for row in rows if str(row.get("citation", "")).strip()
+    ]
 
-    numbers = sorted({n for row in rows for n in extract_issue_refs(str(row.get("citation", "")))})
+    numbers = sorted(
+        {
+            number
+            for row in legacy_rows
+            for number in extract_issue_refs(str(row.get("citation", "")))
+        }
+    )
     resolved = {n: fetch_issue(n) for n in numbers}
     issues = {n: issue for n, issue in resolved.items() if issue is not None}
     problems = adjudicate(rows, issues)
@@ -234,7 +244,7 @@ def main() -> int:
             print(f"  {problem}")
         print("CAPACITY CENSUS LIVENESS: FAIL")
         return 1
-    print(f"checked {len(rows)} rows, {len(numbers)} cited issues, all OPEN")
+    print(f"checked {len(legacy_rows)} active legacy rows, {len(numbers)} cited issues, all OPEN")
     print("CAPACITY CENSUS LIVENESS: PASS")
     return 0
 

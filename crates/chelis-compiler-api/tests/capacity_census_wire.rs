@@ -10,8 +10,13 @@ use std::process::{Command, Output};
 
 use serde::Deserialize;
 
+#[path = "../../../tests/support/capacity_census_authority.rs"]
+mod capacity_census_authority;
 #[path = "../../../tests/support/managed_python.rs"]
 mod managed_python;
+use capacity_census_authority::{
+    AuthorityRegistries, NumericOperationRegistration, StaticSurfaceDescriptor, SurfaceDescriptor,
+};
 
 const PERMANENT_WIRE_DISPOSITION: &str = "permanent-disposition(C6 dtype-tagged wire schema complete descriptor set ratified 2026-08-04)";
 
@@ -445,7 +450,27 @@ const FROZEN_WIRE_ROWS: &[FrozenSurfaceRow] = &[
     },
 ];
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+/// Post-ratchet wire fields whose numeric capacity is part of an exact
+/// registered operation rather than the frozen 2026-08-04 carrier cohort.
+///
+/// This is deliberately separate from `FROZEN_WIRE_ROWS` and the JSON
+/// baseline: a new field cannot copy the old permanent disposition. The
+/// Count is the first real wire descriptor routed through #1288's shared
+/// exact final-authority classifier.
+const WIRE_CENSUS_FAMILY: &str = "wire-schema";
+const COUNT_WIRE_SURFACE: StaticSurfaceDescriptor = StaticSurfaceDescriptor::new(
+    WIRE_CENSUS_FAMILY,
+    "wire-schema-numeric-field",
+    "chelis_compiler_api::schema::WireRiscOp::Count.axes: Vec<usize>",
+    &["numeric-field"],
+);
+const REGISTERED_WIRE_ROWS: &[NumericOperationRegistration] = &[NumericOperationRegistration {
+    surface: COUNT_WIRE_SURFACE,
+    atom: "[05-OP-29]",
+    authority_anchor: "count(x, axes...)",
+}];
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 struct SurfaceRow {
     kind: String,
     id: String,
@@ -499,6 +524,79 @@ fn frozen_surface_rows() -> Vec<SurfaceRow> {
         .collect()
 }
 
+fn registered_surface_rows() -> Vec<SurfaceRow> {
+    REGISTERED_WIRE_ROWS
+        .iter()
+        .map(|registration| SurfaceRow {
+            kind: registration.surface.kind.to_string(),
+            id: registration.surface.id.to_string(),
+            flags: registration
+                .surface
+                .flags
+                .iter()
+                .map(|flag| (*flag).to_string())
+                .collect(),
+        })
+        .collect()
+}
+
+fn expected_current_surface_rows() -> Vec<SurfaceRow> {
+    let mut rows = frozen_surface_rows();
+    rows.extend(registered_surface_rows());
+    rows.sort();
+    rows
+}
+
+fn registered_wire_problem(
+    registrations: &[NumericOperationRegistration],
+    spec: &str,
+) -> Option<String> {
+    let surface = SurfaceDescriptor::new(
+        COUNT_WIRE_SURFACE.family,
+        COUNT_WIRE_SURFACE.kind,
+        COUNT_WIRE_SURFACE.id,
+        COUNT_WIRE_SURFACE.flags,
+    );
+    capacity_census_authority::classify_final_authority(
+        &surface,
+        AuthorityRegistries {
+            nonnumeric: &[],
+            tagged_transports: &[],
+            numeric_operations: registrations,
+        },
+        spec,
+    )
+    .map(|_| ())
+    .err()
+}
+
+fn current_authority_problem(current: &[SurfaceRow], spec: &str) -> Option<String> {
+    let legacy = frozen_surface_rows();
+    for row in current {
+        if legacy.contains(row) {
+            continue;
+        }
+        let surface = SurfaceDescriptor {
+            family: WIRE_CENSUS_FAMILY.to_string(),
+            kind: row.kind.clone(),
+            id: row.id.clone(),
+            flags: row.flags.clone(),
+        };
+        if let Err(problem) = capacity_census_authority::classify_final_authority(
+            &surface,
+            AuthorityRegistries {
+                nonnumeric: &[],
+                tagged_transports: &[],
+                numeric_operations: REGISTERED_WIRE_ROWS,
+            },
+            spec,
+        ) {
+            return Some(problem);
+        }
+    }
+    None
+}
+
 fn permanent_baseline_problem(bytes: &[u8]) -> Option<String> {
     let baseline: Baseline = match serde_json::from_slice(bytes) {
         Ok(baseline) => baseline,
@@ -538,6 +636,13 @@ fn wire_schema_numeric_fields_match_the_reviewed_baseline() {
     let baseline: Baseline = serde_json::from_slice(&baseline_bytes).expect("wire baseline JSON");
     assert_eq!(baseline.version, 1, "unknown wire census baseline version");
     assert_eq!(baseline.citation, PERMANENT_WIRE_DISPOSITION);
+    let spec = std::fs::read_to_string(workspace_root().join("spec/05-risc-primitives.md"))
+        .expect("read controlling numbered spec");
+    assert_eq!(
+        registered_wire_problem(REGISTERED_WIRE_ROWS, &spec),
+        None,
+        "post-ratchet wire numeric fields require exact semantic registration"
+    );
 
     let output = run_typed_enumerator();
     assert!(
@@ -549,12 +654,50 @@ fn wire_schema_numeric_fields_match_the_reviewed_baseline() {
     let current: Vec<SurfaceRow> =
         serde_json::from_slice(&output.stdout).expect("typed wire census JSON");
     assert_eq!(
-        current, baseline.rows,
+        current_authority_problem(&current, &spec),
+        None,
+        "every non-legacy wire row requires exactly one final authority"
+    );
+    assert_eq!(
+        current,
+        expected_current_surface_rows(),
         "public serialized numeric wire carrier shape changed. Do not decide root/manifest \
          semantics here. For the carrier itself, use the tagged payload, remove the new \
-         numeric channel, or obtain the explicit C6 review disposition; then update the \
-         reviewed baseline and frozen descriptor manifest together"
+         numeric channel, or register its exact successor descriptor and governing \
+         numbered atom without changing the frozen permanent cohort"
     );
+}
+
+#[test]
+fn count_wire_axes_are_registered_without_inheriting_the_permanent_disposition() {
+    let baseline_bytes = baseline_bytes();
+    let mut baseline: serde_json::Value =
+        serde_json::from_slice(&baseline_bytes).expect("wire baseline JSON");
+    baseline["rows"]
+        .as_array_mut()
+        .expect("wire rows")
+        .push(serde_json::json!({
+            "kind": REGISTERED_WIRE_ROWS[0].surface.kind,
+            "id": REGISTERED_WIRE_ROWS[0].surface.id,
+            "flags": REGISTERED_WIRE_ROWS[0].surface.flags,
+        }));
+    let copied = serde_json::to_vec(&baseline).expect("serialize copied disposition");
+    let problem = permanent_baseline_problem(&copied)
+        .expect("Count axes cannot inherit the permanent baseline disposition");
+    assert!(
+        problem.contains("permanent kind/id/flags manifest"),
+        "{problem}"
+    );
+
+    let spec = std::fs::read_to_string(workspace_root().join("spec/05-risc-primitives.md"))
+        .expect("read controlling numbered spec");
+    assert_eq!(registered_wire_problem(REGISTERED_WIRE_ROWS, &spec), None);
+
+    let mut wrong_atom = REGISTERED_WIRE_ROWS.to_vec();
+    wrong_atom[0].atom = "[05-OP-28]";
+    let problem = registered_wire_problem(&wrong_atom, &spec)
+        .expect("a semantically adjacent atom cannot authorize Count axes");
+    assert!(problem.contains("unrelated"), "{problem}");
 }
 
 #[test]

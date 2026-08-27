@@ -96,6 +96,30 @@ fn flagship_guarded_option_proves_at_smt_tier() {
     assert_eq!(summary(&records)["obligations"], 1);
 }
 
+/// chelis#1180: `>` desugars to `gt` with authored operand order, so the
+/// Tier B lowering must discharge a strict-greater invariant exactly like
+/// the operand-swapped `cmplt` spelling it replaced.
+#[test]
+fn strict_greater_invariant_proves_at_smt_tier() {
+    let source = "module Stats.Pos
+export (positive)
+@opaque
+@invariant(p) p.value > 0.0
+type Positive =
+  | Positive { value: f32 }
+def positive(x: f32) -> Option[Positive] =
+  if x > 0.0 then Some(Positive { value: x }) else None
+";
+    let (code, records) = prove_json(source, &[]);
+    assert_eq!(code, 0, "strict-greater obligation passes");
+    let obs = obligations(&records);
+    assert_eq!(obs.len(), 1);
+    let ob = obs[0];
+    assert_eq!(ob["name"], "invariant:Positive:positive");
+    assert_eq!(ob["status"], "passed");
+    assert_eq!(ob["proof_tier"], "smt");
+}
+
 #[test]
 fn c1_all_smt_discharges_disclose_real_arithmetic() {
     let (code, records) = prove_json(FLAGSHIP, &[]);

@@ -290,6 +290,66 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                 // data.dims; shared rank), so it verifies separately.
                 verify_scatter_elements(node, dag, *axis, &mut errors);
             }
+            RiscOp::Count { axes } => {
+                if arity != 1 {
+                    errors.push(format!(
+                        "count at node {} has {} inputs (expected 1)",
+                        node.id.0, arity
+                    ));
+                }
+                if axes.is_empty() {
+                    errors.push(format!(
+                        "count at node {} requires a non-empty axis list",
+                        node.id.0
+                    ));
+                }
+                if axes.windows(2).any(|pair| pair[0] <= pair[1]) {
+                    errors.push(format!(
+                        "count at node {} axes must be unique and strictly descending",
+                        node.id.0
+                    ));
+                }
+                if arity == 1
+                    && let Some(input) = dag.get(node.inputs[0])
+                {
+                    let rank = input.output_type.dims.len();
+                    if axes.iter().any(|&axis| axis >= rank) {
+                        errors.push(format!(
+                            "count at node {} has an axis out of range for rank {}",
+                            node.id.0, rank
+                        ));
+                    }
+                    if input.output_type.precision != Prim::Bool {
+                        errors.push(format!(
+                            "count at node {} requires bool input, got {:?}",
+                            node.id.0, input.output_type.precision
+                        ));
+                    }
+                    if node.output_type.precision != Prim::Int64 {
+                        errors.push(format!(
+                            "count at node {} requires int64 output, got {:?}",
+                            node.id.0, node.output_type.precision
+                        ));
+                    }
+                    if axes.iter().all(|&axis| axis < rank) {
+                        let expected: Vec<_> = input
+                            .output_type
+                            .dims
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(axis, dim)| {
+                                (!axes.contains(&axis)).then_some(dim.clone())
+                            })
+                            .collect();
+                        if node.output_type.dims != expected {
+                            errors.push(format!(
+                                "count at node {} has output shape {:?}, expected {:?}",
+                                node.id.0, node.output_type.dims, expected
+                            ));
+                        }
+                    }
+                }
+            }
             RiscOp::Neg
             | RiscOp::Recip
             | RiscOp::Exp

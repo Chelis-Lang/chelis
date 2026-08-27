@@ -21,6 +21,7 @@
 pub mod audit;
 pub mod bump;
 pub mod canonical;
+pub mod conform;
 pub mod expect;
 pub mod managed_block;
 pub mod manifest;

@@ -60,7 +60,7 @@ portable across Surf and Reef boundaries.
 The `surf_*` namespace is closed. A public Deep parser or programmatic
 validator MUST reject an unknown `surf_*` key. Resugaring MUST also reject a
 known key with any value or placement outside the table above; a standalone
-metadata map or legacy metadata-expression wrapper is not a permitted
+metadata map or metadata-expression wrapper is not a permitted
 placement. These five keys preserve only surface distinctions that canonical
 Deep otherwise erases; they do not change evaluation. Producers MUST NOT use
 the namespace for arbitrary provenance.
@@ -337,9 +337,9 @@ An opaque `deftype` may additionally carry a **declared invariant**
 
 | Tag | Form | Semantics |
 |---|---|---|
-| `fn` | `(fn {} (params ...) body)` | Anonymous function |
+| `fn` | `(fn {} (params {} ...) body)` | Anonymous function |
 | `app` | `(app {} func arg...)` | Function application |
-| `let` | `(let {} (bind name₁ expr₁ ...) body)` | Sequential let binding |
+| `let` | `(let {} (bind {} name₁ expr₁ ...) body)` | Sequential let binding |
 | `match` | `(match {} scrutinee arm...)` | Pattern match |
 | `arm` | `(arm {} pattern guard body)` | Match arm; guard is `()` if absent |
 | `if` | `(if {} cond then else)` | Conditional |
@@ -454,7 +454,7 @@ wildcard spelling); it does not allocate an inference variable.
 | `vmap` | `(vmap {} expr dim)` | Vectorization |
 | `jit` | `(jit {} expr)` | Compilation trigger |
 | `realize` | `(realize {} expr)` | Force DAG evaluation |
-| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional mode selector names a chelis#759 ladder rung (`trunc` = [05-OP-6]) |
+| `cast` | `(cast {} expr target-type)` or `(cast {} expr target-type mode)` | Precision cast; the optional `trunc` mode selects [05-OP-6] |
 | `copy` | `(copy {} expr)` | Explicit tensor duplication |
 | `borrow` | `(borrow {} expr)` | Temporary read-only tensor view for a single call site |
 
@@ -511,15 +511,19 @@ These names are available without import. They are NOT tags — they are functio
 The irreducible computational basis. All tensor computation decomposes to these during IR lowering.
 
 **Elementwise:** `add`, `mul`, `exp`, `log`, `sin`, `sqrt`, `cmplt`, `max_elem`
-**Reduce:** `sum`, `max_reduce` (over axis)
+**Reduce:** `sum`, `count`, `max_reduce` (over one-or-more positional or
+one-or-more named axes, never a mixture)
 **Movement:** `reshape`, `permute`, `expand`, `pad`, `shrink`, `stride`
 **Memory:** `const`, `load`
 
 ### 3.2 Derived Functions
 
-Convenience functions that the compiler lowers to RISC primitive compositions during IR construction. The desugarer emits these; the IR pass decomposes them.
+Convenience functions with ordinary call syntax and operation-specific lowering
+points. The desugarer emits their typed identities. An identity remains intact
+through every semantic transform its governing atom names, including AD, and
+only then may the IR passes decompose it to RISC primitives.
 
-`sub`, `div`, `neg`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`
+`sub`, `div`, `neg`, `lt`, `eq`, `neq`, `gt`, `gte`, `lte`, `and`, `or`, `not`, `relu`, `sigmoid`, `softmax`, `matmul`, `linear`, `mean`, `dropout`, `stop_gradient`
 
 ### 3.3 Standard Library (imported)
 
@@ -555,7 +559,7 @@ Explicit closure construction:
 
 ```scheme
 ;; f(x, _, z) where _ is the partial hole
-(fn {} (params y) (app {} (var {} f) (var {} x) (var {} y) (var {} z)))
+(fn {} (params {} y) (app {} (var {} f) (var {} x) (var {} y) (var {} z)))
 ```
 
 ### 4.3 Operators
@@ -569,6 +573,30 @@ All operators desugar to `(app {} (var {} op) ...)`. No infix operators in Deep.
 ;; a - b (sub is a derived built-in, lowered to add(a, neg(b)) at IR level)
 (app {} (var {} sub) (var {} a) (var {} b))
 ```
+
+### 4.4 Evaluation Order
+
+In `(app {} f a₁ ... aₙ)`, the argument expressions `a₁ ... aₙ` evaluate in
+written order, left to right, each to completion before the next begins, and
+all before the application itself. Observable effects occur in that order,
+and the first argument whose evaluation traps determines the trap the
+application raises; later arguments are not evaluated after a trap.
+
+This order is a semantic contract in every executable lane, not an
+implementation convenience. Value-level rewrites — a derived built-in's
+lowering to RISC primitives (`spec/05-risc-primitives.md` §3), constant
+folding, or backend scheduling of the already-evaluated dataflow — operate
+on argument *values* and never reorder or skip the evaluation of argument
+*expressions* whose effects or traps are observable. Surf operator
+expressions inherit this order through their desugaring, which preserves
+the authored operand order for every operator (`spec/02-surf-syntax.md`
+§2). Multi-value constructors follow the same written-order rule: tuple,
+list, record, and record-update children evaluate left to right (§6.2's
+`kv` ordering restates this for records).
+
+Within a single primitive, elementwise and reduction evaluation order is
+owned by `spec/04-type-system.md` [04-NUM-12] and [04-NUM-15]; this section
+orders the argument expressions that produce a primitive's operands.
 
 ---
 
@@ -588,7 +616,7 @@ Each element after the first must be a function (or lambda). Pipes with multi-ar
 
 ```scheme
 (pipe {} (var {} x)
-  (fn {} (params v) (app {} (var {} f) (var {} v) (var {} a)))
+  (fn {} (params {} v) (app {} (var {} f) (var {} v) (var {} a)))
   (var {} g))
 ```
 
@@ -629,8 +657,6 @@ Resolved ordinary calls to the fixed operator builtins use Surf infix/prefix
 notation, while the same builtin name remains a value or pipe stage. A finite
 `Cons`/`Nil` chain uses bracket-list syntax; an open-tail `Cons` remains an
 explicit call. Explicit `borrow` and `copy` nodes remain explicit.
-
-(The typed `app`-to-pipe promotion is not fully implemented; see chelis#1171.)
 
 Deep `block` uses `do { e1; e2; ... }`, `record-update` uses
 `base with { field: value, ... }`, and `quote`, `unquote`, and `splice` use
@@ -816,7 +842,11 @@ than quoting it, rewriting it, or emitting text with changed meaning.
 ## 7. Grammar (PEG)
 
 ```peg
-Program     ← Spacing Node+ EOF
+Program     ← Spacing TopLevelForm+ EOF
+TopLevelForm ← &('(' Spacing TopLevelTag) Node        # §7.1
+TopLevelTag ← ('module' / 'import-all' / 'import' / 'export'
+            / 'defsig' / 'deftype' / 'defdim' / 'def'
+            / 'typealias') ![a-z0-9-]                 # longest-first; tag must end here
 Node        ← '(' Spacing Tag Spacing Meta Spacing Children ')' Spacing
 Tag         ← [a-z] [a-z0-9-]*                    # lowercase, hyphens allowed (pat-var, t-fn, etc.)
 Meta        ← '{' Spacing (MetaPair (',' Spacing MetaPair)*)? '}'
@@ -824,8 +854,9 @@ MetaPair    ← MetaKey ':' Spacing MetaValue
 MetaKey     ← [a-z]+
 MetaValue   ← Node / Literal / Identifier / TypeName
 Children    ← (Child Spacing)*
-Child       ← Node / BareName / Literal
-BareName    ← Identifier / TypeName                # bare names only in params, bind, field contexts
+Child       ← Node / BareList / Meta / BareName / Literal
+BareList    ← '(' Spacing (Child Spacing)* ')' Spacing
+BareName    ← Identifier / TypeName                # admissibility is per child role; see §7.2
 Identifier  ← [a-z_] [a-zA-Z0-9_]*
 TypeName    ← [A-Z] [a-zA-Z0-9]*
 Literal     ← FloatLit / IntLit / BoolLit / StringLit
@@ -847,6 +878,135 @@ Comment     ← ';' (![\n] .)*
 EOF         ← !.
 ```
 
+### 7.1 Top-Level Form
+
+A Deep program is a namespace, not an expression. Deep has no top-level
+evaluation position: a form at top level either introduces a name into the
+program's namespace or declares module structure, and there is no other
+position for it to occupy. A value produced at top level could not be named,
+given a signature, exported, selected as a root, lowered, or observed, so a
+program whose top level is an expression carries no content a consumer can
+act on.
+
+> **[03-PROG-1]** A Deep program SHALL consist of one or more top-level
+> forms. Each top-level form SHALL be a `module` node (§2.1) or a declaration
+> node whose tag is one of `def`, `defsig`, `deftype`, `typealias`, `defdim`,
+> `import`, `import-all`, or `export`. Every other top-level form SHALL be
+> rejected: an expression node, a pattern node, a type-expression or
+> dimension-expression node, a transform node, a helper node, a bare
+> identifier, a bare literal, an untagged list, and a node whose head is
+> outside the closed vocabulary (§2). `variant` and `field` are structural
+> children of `deftype` and `variant`; they bind nothing on their own and are
+> not top-level forms.
+
+The declarations a program contains are the children of its `module`
+wrappers together with its bare top-level declarations; a program MAY mix
+both spellings and MAY contain more than one `module` wrapper, subject to the
+one-wrapper-per-module-name rule in §2.1.
+
+Most of what [03-PROG-1] rejects is a list headed by a tag symbol, which the
+rejection can name. Some of it has no head at all: a bare identifier, a bare
+literal, an empty list, and a list whose first element is not a symbol are all
+[03-PROG-1] rejections with nothing to quote. Those forms are identified by
+syntactic class instead, from a closed set, so that a reader of the diagnostic
+always learns which form was rejected.
+
+> **[03-PROG-2]** A rejection under [03-PROG-1] SHALL identify the offending
+> form and SHALL carry that form's source location. A form headed by a symbol
+> SHALL be identified by that symbol. A form with no head SHALL be identified
+> by its syntactic class, which SHALL be exactly one of: a bare identifier, a
+> bare integer literal, a bare float literal, a bare string literal, a bare
+> boolean literal, an empty list, a list without a tag symbol, a metadata map,
+> or a metadata-annotated form. An implementation SHALL NOT substitute a
+> placeholder for either identification. The rejection SHALL be reported at
+> the ingress boundary that reads the program text, before name resolution,
+> type checking, evaluation, lowering, or resugaring observes the program. An
+> implementation SHALL NOT skip, ignore, or silently reinterpret a top-level
+> form that [03-PROG-1] rejects.
+
+[03-PROG-1] requires at least one top-level form, so text that yields none is
+rejected too. That rejection is the one case with no offending form to
+identify and no form location to carry, so the contract states its own shape
+rather than leaving an implementation to invent a placeholder.
+
+> **[03-PROG-3]** Program text that yields no top-level form SHALL be rejected
+> under [03-PROG-1]. Text yields no top-level form when it is empty, when it
+> is entirely whitespace, when it is entirely comments, or when it is any
+> combination of those. That rejection SHALL identify itself as an empty
+> program and SHALL carry the source position at which a top-level form was
+> required, which is the end of the input. It is otherwise subject to
+> [03-PROG-2]'s reporting rules.
+
+The class set is closed because it partitions what the grammar can produce in
+top-level position: `Child`'s five alternatives (`Node`, `BareList`, `Meta`,
+`BareName`, `Literal`) plus the metadata-annotated form a producer may emit. A
+bare identifier is the `BareName` production, admissible at the structural
+child positions §7.2 assigns and never at top level; the empty-list and
+list-without-a-tag-symbol classes are the `BareList` production's headless
+shapes; a metadata map is the `Meta` production; the four literal classes are
+`Literal`'s alternatives, with `IntLit` and `FloatLit` distinguished because a
+producer's mistake is usually specific to one.
+
+### 7.2 Child Roles
+
+A tagged node's children are not interchangeable. Each per-tag form in §2
+gives its children fixed meanings — `(def {} name body)` puts a declaration
+name at index 0 and a runtime expression at index 1 — and those meanings
+partition every child position into a small set of roles: an **expression**
+position carries runtime computation; a **structural** position carries a
+name, preserved syntax, or a field/axis/index selector; a **type** position
+carries type or dimension syntax; an **effect-handler** position carries the
+handler payload whose contract chapter 06 owns; and a few positions delegate
+to a per-tag expectation (a `match` child must be an `arm`, a `let` child
+must be a `bind`, a `module` child must be a declaration). The role is a
+property of the vocabulary, decided by the tag and the child index alone, so
+a reader never inspects a child's content to learn what kind of thing its
+position holds.
+
+> **[03-ROLE-1]** For every tag in the closed vocabulary (§2) and every
+> child index its form admits, an implementation SHALL classify the position
+> into exactly one role, per that tag's form in §2. The classification SHALL
+> be total over the vocabulary and SHALL depend only on the tag and the
+> child position, never on the child's content. A bare identifier at a
+> structural, type, or effect-handler position is a name, even when its
+> spelling coincides with a vocabulary tag or another reserved word.
+
+The identifier rule has a sharp edge at expression positions. A name is not
+an expression: Deep spells a variable reference `(var {} x)`, so a bare
+identifier where an expression is required is always a producer error, and
+accepting one would oblige every downstream consumer to invent a meaning
+for it.
+
+> **[03-ROLE-2]** A bare identifier at an expression position SHALL be
+> rejected at the ingress boundary that reads the program text, before name
+> resolution, type checking, evaluation, lowering, or resugaring observes
+> the program. The rejection SHALL identify the offending identifier and
+> SHALL carry its source location, under [03-PROG-2]'s reporting
+> discipline, and SHOULD name the `(var {} ...)` spelling that expresses a
+> variable reference.
+
+Lists at structural positions serve two purposes that share one byte shape.
+A vocabulary node may legitimately stand there — `(params {} w b x)` at a
+`fn`'s binder position — but so may a plain structural list: an import name
+list `(copy fill)` whose elements happen to spell vocabulary tags, or an
+annotated parameter `(x {type: (t-prim {} f32)})` whose second element is a
+metadata map. Neither the head alone nor the metadata map alone
+distinguishes the two. The disambiguator is their conjunction: every
+vocabulary node carries a metadata map at element 1 (§1), and a structural
+list whose head is not a vocabulary tag cannot be a node no matter what
+follows it.
+
+> **[03-ROLE-3]** A parenthesized list at a structural position SHALL be
+> read as a vocabulary node exactly when its first element is a tag of the
+> closed vocabulary (§2) AND its second element is a metadata map (§1.1);
+> otherwise it SHALL be read as a structural list whose elements are names,
+> literals, and nested forms under this section's rules. An implementation
+> SHALL NOT reinterpret a structural list by inspecting its head alone: an
+> import name list such as `(copy fill)` (a vocabulary-tag spelling at the
+> head, no metadata map) and an annotated parameter such as
+> `(x {type: (t-prim {} f32)})` (a metadata map at element 1, an ordinary
+> name at the head) both remain structural lists.
+
 ---
 
 ## 8. Validation Rules
@@ -854,10 +1014,16 @@ EOF         ← !.
 ### 8.1 Structural Validation (Parser)
 - Every node is a 3-tuple: `(tag meta children...)`.
 - Tag is from the closed vocabulary (§2).
+- Every top-level form satisfies [03-PROG-1]; a violation is rejected per
+  [03-PROG-2].
 - Meta is a valid `{}` map (may be empty).
 - A colon-prefixed keyword token such as `:type` is metadata-key syntax, not
   an expression atom or node child. Outside metadata-key position, the parser
-  MUST reject it before checker or evaluator processing.
+  MUST reject it before checker or evaluator processing — the same ingress
+  discipline [03-ROLE-2] (§7.2) applies to a bare identifier at an
+  expression position.
+- Child positions carry the roles §7.2 assigns; a list at a structural
+  position is read per [03-ROLE-3].
 
 ### 8.2 Arity Validation (Post-Parse)
 - `(if {} cond then else)` — exactly 3 children.
@@ -870,7 +1036,7 @@ EOF         ← !.
   headers and binder context are not available to the syntax parser.
 
 ### 8.3 Unknown Tags
-Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score.
+Unknown tags are parse errors in strict mode (canonical validation). In fitness-scoring mode, unknown tags are parsed as generic nodes and penalized in the fitness score. This distinction applies below the top level; an unknown tag in top-level position is a [03-PROG-1] rejection in every mode, because no unknown head is one of the top-level forms that rule enumerates.
 
 ---
 
@@ -888,7 +1054,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (app {} (var {} const) (lit {type: (t-prim {} f32)} 1.0) (d-lit {} 2) (d-lit {} 3))))
 
   (def {} main
-    (fn {} (params)
+    (fn {} (params {})
       (app {} (var {} println) (realize {} (var {} twos))))))
 ```
 
@@ -907,14 +1073,14 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (t-tensor {} (d-name {} samples) (t-prim {} f32))))
 
   (def {} predict
-    (fn {} (params w b x)
+    (fn {} (params {} w b x)
       (app {} (var {} add)
         (app {} (var {} matmul) (var {} x) (var {} w))
         (var {} b))))
 
   (def {} mse_loss
-    (fn {} (params y_pred y_true)
-      (let {} (bind
+    (fn {} (params {} y_pred y_true)
+      (let {} (bind {}
         diff (app {} (var {} sub) (var {} y_pred) (var {} y_true))
         sq   (app {} (var {} mul) (var {} diff) (var {} diff)))
         (app {} (var {} mean) (var {} sq))))))
@@ -934,7 +1100,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
     (variant {} Sigmoid))
 
   (def {} activate
-    (fn {} (params act x)
+    (fn {} (params {} act x)
       (match {} (var {} act)
         (arm {} (pat-ctor {} ReLU) ()
           (app {} (var {} relu) (var {} x)))
@@ -942,11 +1108,11 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
           (app {} (var {} sigmoid) (var {} x))))))
 
   (def {} forward
-    (fn {} (params w1 b1 w2 b2 act x)
+    (fn {} (params {} w1 b1 w2 b2 act x)
       (pipe {} (var {} x)
-        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
-        (fn {} (params v) (app {} (var {} activate) (var {} act) (var {} v)))
-        (fn {} (params v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
+        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w1)) (var {} b1)))
+        (fn {} (params {} v) (app {} (var {} activate) (var {} act) (var {} v)))
+        (fn {} (params {} v) (app {} (var {} add) (app {} (var {} matmul) (var {} v) (var {} w2)) (var {} b2)))))))
 ```
 
 ### 9.4 ADT with Record Variants
@@ -962,7 +1128,7 @@ Unknown tags are parse errors in strict mode (canonical validation). In fitness-
       (field {} height (t-prim {} f32))))
 
   (def {} area
-    (fn {} (params s)
+    (fn {} (params {} s)
       (match {} (var {} s)
         (arm {} (pat-ctor {} Circle (pat-var {} r)) ()
           (app {} (var {} mul)

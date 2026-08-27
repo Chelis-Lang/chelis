@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.5] — 2026-08-22
+
+Three breaking entries, all in the front end: the checker rejects
+polymorphic recursion, the parser rejects an integer literal in a bare
+type position, and `>` evaluates its operands in the order they were
+written. Each one either rejects a program that used to be accepted or
+runs an accepted program differently; each entry names what to change.
+
+**Every on-disk compiler cache is invalidated, twice over.** The
+compiled-context, stdlib, and library cache formats advance (8 → 9,
+4 → 5, 1 → 2), and cache keys now carry a build fingerprint rather than
+the release version. Both are automatic: the first build after
+upgrading is cold, and nothing needs to be deleted by hand.
+
 ### Added
 
 - **The Darwin release toolchain builds from Nix (openspec
@@ -149,22 +163,6 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Monomorphized specializations are compiler-internal symbols
-  (chelis#1158 hardening; findings credited to the PR #1202 adversarial
-  review).** Each host function now carries explicit authored or
-  monomorphized provenance through C-ABI projection. The published `.h` and
-  tensor-entry selection use that provenance, so a valid authored name that
-  matches `<def>__mono_<hash>` remains public. Specializations stay out of the
-  header and use translation-unit-local C linkage in binary and object mode.
-  Thus, two generated objects with one specialization name link without a
-  duplicate symbol. Speculative summary probes are state-isolated and use a
-  sorted order. Repeated builds emit byte-identical C, probe-only definitions
-  do not escape, and a failed probe does not fail the build. Specializations
-  intern by exact package definition identity under a canonical signature key.
-  Exact identity lookup precedes unique terminal-name fallback, so separate
-  package definitions named `depth` remain separate. A hash collision between
-  two canonical signatures fails loudly.
-
 - **BREAKING (checker): polymorphic recursion is now a check-time type
   error ([04-INF-2]/[04-INF-3], spec/04-type-system.md §3.1.1).** Every
   recursive call inside a recursive binding group must be typed at the
@@ -195,6 +193,405 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 - Hosted macOS jobs run only after manual dispatch. Release publication now requires a manual dispatch at the pushed `v*` tag.
 - Devenv builds portable `chelisup` release files with `outputs.release-chelisup`. The output includes one native executable and its SHA-256 sidecar.
   Releases support static Linux x86-64 and Apple Silicon macOS. Intel macOS now fails as unsupported instead of requesting an absent asset.
+- **BREAKING (parser): an integer literal in a bare type position is now
+  a parse error (chelis#1179).** The Rust Surf parser shared one integer
+  arm between ordinary type atoms and dimension items, so an integer
+  parsed as a type anywhere a type was expected and desugared to a fresh
+  type variable — `def g(a: 732) -> f32 = a` produced `(t-var {} 732)`
+  and `chelis check` scored it 1.0. The Tree-sitter grammar already
+  rejected the spelling, so the two parsers disagreed. Both now agree: a
+  bare type position rejects with "expected a type; integer literals are
+  only dimensions inside `tensor[...]`" naming the byte offset, in the
+  canonical and legacy v0.18 parse modes alike. The two dimension
+  positions keep accepting integers: tensor shape items
+  (`tensor[3, 4, f32]`) and type-application arguments, whose intended
+  meaning is the concrete dimension instantiation of a
+  dimension-parameterized ADT (`Frame[2]`, chelis#940). The spec grammar
+  gains the previously missing `TypeArg <- TypeExpr / IntLit`
+  production, and the Tree-sitter `applied_type` rule matches it, so
+  Rust/Tree-sitter parity holds on both sides of the split. This is the
+  parser half only: the checker does not yet enforce an integer
+  argument's kind or extent (`Option[732]` still checks, and a
+  `Column[3]` return holding a 2-element column still scores 1.0);
+  chelis#1247 tracks that surviving mechanism.
+
+- **BREAKING (eval/build): `>` evaluates its operands in authored order
+  (chelis#1180).** Surf desugared `a > b` as the operand-swapped
+  `cmplt(b, a)`, and Deep application evaluates its arguments left to
+  right, so the right operand's effects and traps ran before the left
+  operand's in every executable lane:
+
+  ```text
+  verdict = lhs() > rhs()   -- printed RHS then LHS, in eval and compiled C
+  ```
+
+  `>` now desugars to the existing `gt` built-in with the authored
+  operand order. Comparison results are unchanged, including `false` on
+  either NaN operand, because `gt`'s value is defined as `cmplt(b, a)`
+  over the already-evaluated operand values
+  (`spec/05-risc-primitives.md` §3.2). Effectful operands now run left
+  to right in both lanes with byte-identical stdout, and when both
+  operands trap, the left operand's trap surfaces; a program that
+  observed the reversed order changes behavior. One further consequence
+  of the retarget: `gt` borrows both arguments where `cmplt` consumed
+  its second, so `>`'s operands stay usable afterward
+  (`mask = a > b` then `where(mask, a, b)` now checks) while the
+  equivalent `b < a` spelling still consumes — a strictly monotone
+  loosening; the family-wide inconsistency is tracked at chelis#1248.
+  The general operand evaluation-order rule is now normative at
+  `spec/03-deep-syntax.md` §4.4, and the Deep consumers that matched the
+  closed comparison-name set (the D-WF invariant grammar, its
+  boolean-shape check, constant folding, and the Tier B / opaque SMT
+  lowerings) admit the `gt` spelling, so `@invariant(p) p.value > 0.0`
+  keeps working end to end.
+
+- **Compiled-context caches are keyed on the build, not the release
+  string (chelis#1156).** `CacheIdentity` and `stdlib_cache_key` folded in
+  `COMPILER_VERSION`, which names a *release*: every binary built from any
+  commit carrying the same `workspace.package.version` reports it, so two
+  binaries that disagree about type semantics shared cache entries and
+  checked programs under each other's rules. Measured on a released
+  `v0.18.2` binary and a post-chelis#1130 `main` binary — both reporting
+  `0.18.2` — sharing one cache dir: the release binary accepted and
+  evaluated a program it correctly rejects cold, and the `main` binary
+  raised a spurious `precision mismatch: expected int32, got int64` on a
+  program it correctly accepts cold. Both keys now extend the release
+  string with a build fingerprint taken from the running object image
+  (Mach-O `LC_UUID` / ELF `NT_GNU_BUILD_ID`, or a whole-image SHA-256 when
+  the image carries neither), derived by the new leaf crate
+  `chelis-image-id`. A same-content copy at a different path still shares
+  the cache; a different build takes a clean miss rather than a stale hit;
+  a version bump alone still flips the key. If the running image cannot be
+  identified at all, the fingerprint falls back to a per-process
+  discriminator and warns once, so a degraded process shares with nothing.
+  This mostly bites people who build from source — worktree binaries, CI
+  matrices, and images that vendor a pinned commit and label it with the
+  workspace version.
+
+- **Runtime diagnostics name a value by its dtype and canonical digits
+  (chelis#997).** The JSON, CSV, and eval runtime diagnostics rendered
+  numeric payloads through derived `Debug`, which `spec/05-risc-primitives.md`
+  [05-OBS-1] already forbids: a diagnostic is one of the exits that must
+  "emit text that parses back to exactly the stored bits at the value's own
+  dtype width". Reported text changes shape — `got f32 0.1` and
+  `got int64 9007199254740993` in place of the Rust representation, a
+  malformed ADT field list as `malformed JNum fields [int32 5]`, an absent
+  argument as `got nothing` — and below the top-level dtype tag the
+  diagnostic channel now agrees byte for byte with the exit channel. **The
+  half widths were misreported outright before this:** `half::f16`'s `Debug`
+  forwards to `to_f32()`, so a stored f16 that every exit renders as `0.1`
+  appeared in a diagnostic as `0.099975586`. Anything that scrapes runtime
+  diagnostic text needs updating; nothing about the values themselves
+  changed.
+
+- **Compiled-lane CSV ingestion is linear (part of chelis#943).** Reading a
+  9588-row by 8-column, 420 KB CSV in the compiled lane allocated 3055.6 MB
+  and held 2189.9 MB live; it now allocates 121.0 MB and holds 91.4 MB, a
+  25x reduction in allocated bytes. `Std.Io.Csv.parse_rows` moves off
+  recursion onto `map`/`fold` (one line carried two independent O(n²) costs:
+  `append` deep-cloned the accumulated rows per row, and `drop(lines, 1)`
+  cloned the remaining tail per row), `chelis_string_slice` locates byte
+  offsets with `char_indices()` and takes an O(1) all-ASCII fast path
+  instead of materializing a `Vec<char>` per call, `chelis_string_len`
+  returns a cached count instead of recounting, and `chelis_list_append`
+  reserves `len()+1` so the following push does not realloc. Character
+  indexing and multi-byte behavior are unchanged, and `try_read_csv` still
+  returns `None` on a ragged row or an unterminated quoted field. **Honest
+  cost:** each `RuntimeString` grows by exactly 8 bytes for the cached
+  count, so a workload that builds many strings and never slices them or
+  takes their length is a net allocation regression. Not fixed here: JSON's
+  `parse_array_rest`/`parse_object_rest` are still quadratic, and a
+  user-written recursive `append` accumulator is still quadratic —
+  chelis#943 remains open for both.
+
+- **The Rust toolchain is pinned to 1.98.0 (PR #1236; chelis#1237 for the
+  Nix half).** `rust-toolchain.toml` tracked the `stable` channel, so a Rust
+  release reached every branch at once with no staging; 1.98.0 (released
+  2026-08-20) tightened two lints and turned the whole repo red under
+  `-D warnings` on branches whose own diffs contained no Rust. Building
+  chelis from source now resolves the pinned toolchain through rustup's
+  directory override, and the Nix flake's `rust-overlay` input moves forward
+  far enough to resolve it. Raising the pin is a deliberate, scheduled change
+  in its own PR.
+
+- **Monomorphized specializations are compiler-internal symbols
+  (chelis#1158 hardening; findings credited to the PR #1202 adversarial
+  review).** Each host function now carries explicit authored or
+  monomorphized provenance through C-ABI projection. The published `.h` and
+  tensor-entry selection use that provenance, so a valid authored name that
+  matches `<def>__mono_<hash>` remains public. Specializations stay out of the
+  header and use translation-unit-local C linkage in binary and object mode.
+  Thus, two generated objects with one specialization name link without a
+  duplicate symbol. Speculative summary probes are state-isolated and use a
+  sorted order. Repeated builds emit byte-identical C, probe-only definitions
+  do not escape, and a failed probe does not fail the build. Specializations
+  intern by exact package definition identity under a canonical signature key.
+  Exact identity lookup precedes unique terminal-name fallback, so separate
+  package definitions named `depth` remain separate. A hash collision between
+  two canonical signatures fails loudly.
+
+### Fixed
+
+- **chelis#1128 / chelis#1234: a version bump no longer leaves the
+  compile-fail fixtures' `Cargo.lock` files stale.** Each out-of-workspace
+  compile-fail fixture is its own one-crate workspace depending on the
+  real crates by path, so its committed lock records them at
+  `workspace.package.version`, and each fixture's `gate.py` step compiles
+  it with `cargo check --locked` — which refuses to update a stale lock
+  and then reports the fixture's *diagnostics* as missing. The failure
+  therefore reads as a compile-fail regression rather than as the
+  unrelated lockfile it is, and it fires under release pressure (hit
+  cutting 0.18.2). `scripts/bump_compiler_pins.py` now re-resolves both
+  locks with `cargo update --workspace` after the version rewrite, which
+  rewrites only the local path-package versions and leaves every registry
+  pin and checksum alone. This is category 7 in that script's docstring,
+  alongside the 0.9.0 embedded-bundle and 0.15.0 Hull-manifest failures
+  the earlier categories record.
+
+  Two fixtures are covered:
+  `crates/chelis-types/tests/compile_fail/checkpoint_raw_offset/` (4 path
+  packages, chelis#1128) and
+  `crates/chelis-compiler-api/tests/compile_fail/pipeline_artifacts/` (16
+  path packages, chelis#1234). Contrary to chelis#1128's step-4
+  prediction, the sibling is not silent: its gate step is CI-owned, so a
+  stale lock turns CI red with a message naming six phantom diagnostic
+  regressions and nothing pointing at the lockfile. The root `Cargo.lock`
+  is not affected — nothing runs `--locked` at the workspace root, so it
+  re-resolves on the next build. Those three are the only committed
+  lockfiles in the repo.
+
+  Acceptance oracle: `.venv/bin/python -m unittest
+  scripts.test_bump_compiler_pins`, whose
+  `test_each_lock_pins_every_path_package_to_the_workspace_version` is the
+  standing tripwire — it names the stale packages and the fix instead of a
+  phantom diagnostic regression. It parses each lock and checks every path
+  package individually rather than asking whether the workspace version
+  appears anywhere in the file; the substring form passed a partially
+  stale lock as soon as any one package happened to be current.
+- **Scalar activations and rounding no longer compile to `0` while the
+  evaluator answers correctly (chelis#704, chelis#712, chelis#715).** Scalar
+  `relu`, `sigmoid`, `silu`, `gelu`, `tan`, `atan`, `floor`, `ceil`, `round`,
+  `recip`, `max_elem`, and `min_elem` reached the C backend's
+  `/* unsupported builtin */ 0` stub, so a compiled `floor(1.5f32)` returned
+  `0` while `chelis eval` returned `1.0` — three lanes disagreeing silently,
+  with `tanh` additionally accepted by the checker and rejected by the
+  evaluator. Scalar `relu`, `sigmoid`, `tanh`, `silu`, and `gelu` now execute
+  as the rank-zero instance of their Tier-2 RISC composition with every
+  constituent primitive finalized at the declared dtype, and the C host ABI
+  emits private concrete specializations for f16, bf16, f32, and f64 from one
+  template; tensor activations keep using the canonical `chelis-ir` Tier-2
+  lowerers. `tan`, `atan`, `floor`, `ceil`, and `round` route through explicit
+  checker policy; scalar integer `floor`, `ceil`, and `round` are exact
+  identities at int8/int16/int32/int64 with no float round trip; scalar
+  `max_elem` and `min_elem` are locked across every admitted signed-integer
+  and float width. Two rounding defects fall out with it: the published
+  `chelis_f32_to_f16` helper rounded subnormal midpoints away from zero
+  instead of ties-to-even, and reduced-width activation constants are now
+  constructed directly so an f64 activation does not double-round through
+  f32. The scalar rules are authored in `spec/05-risc-primitives.md`. Part of
+  chelis#729.
+
+- **A deferred reshape shape survives the chain that carries it
+  (chelis#1190, chelis#1191).** An unresolved positional-`expand` shape choice
+  is now carried through reshape chains as a candidate relation — preserving
+  the element dtype and the exact element-count obligation — until the first
+  shape-bearing consumer selects one candidate, instead of being dropped at
+  the first intervening reshape. A failed deferred-output unification is
+  transactional, so a rejected candidate leaves no partial substitution
+  behind, and unresolved shape relations survive serialization. Every static
+  negative reshape target extent is now rejected. Because pre-repair
+  serialized substitutions must not stale-hit against the repaired unifier,
+  the compiled-context cache advances 8 → 9, the stdlib cache 4 → 5, and the
+  library cache 1 → 2; the first build after upgrading is cold. No normative
+  spec edit was needed — the implementation now follows
+  `spec/04-type-system.md` §§3.1, 4.3, 4.7.1-4.7.5, 5.1, 5.8 and
+  `spec/05-risc-primitives.md` §2.4, [05-DIM-1..3], §2.5.1, and [05-OP-7].
+
+- **chelis#1197: a pipe stage calling an operator-named primitive resugars
+  again, and a blocked migration batch names every file that blocked it.**
+  `resugar_operator_application` and `resugar_finite_list` rewrite a Deep
+  `app` into `Binary`, `Unary`, or `List`, and none of the three can carry
+  the `|> f(args)` call-stage sugar, so `resugar_pipe_stage` rejected the
+  stage bodies the desugarer itself emits for `x |> add(y)`,
+  `x |> mul(cast(2.0, f32))`, `x |> cmplt(y)`, and `x |> Cons(Nil)`. Those
+  spellings are canonical Surf that `chelis fmt --check` accepts, that
+  `spec/02-surf-syntax.md` §8.2 uses in its own worked example, and that the
+  `prefer-pipe-operator` autofix emits, yet `chelis migrate surf` and
+  `chelis surf` both failed closed on them. The stage application is now
+  rebuilt from the Deep application before those sugars apply, so only the
+  stage callee is held back and its operands keep their operator spelling.
+  A stage whose parameter is not the leading argument, whose body is not an
+  application, that carries more than one parameter, or that leaves a free
+  occurrence of its parameter elsewhere in the application still fails
+  closed. The last condition matters because the sugar drops the stage
+  binder along with the leading occurrence, so a surviving reference would
+  be captured by whatever the name means in the enclosing scope. That test
+  reads Deep name atoms rather than their resugared forms, since the
+  operator sugar erases exactly the callee name it needs to see, and it
+  honors an inner `fn` that rebinds the parameter, because nested pipe
+  stages independently mint the same `__chelis_pipe` spelling.
+
+  `chelis migrate surf` now also collects the whole batch's preflight
+  failures instead of returning on the first, so a single unmigratable file
+  no longer hides the rest. The batch stays all-or-nothing: a blocked file
+  still means nothing is written. A lone failure keeps its bare per-file
+  diagnostic. Acceptance oracles:
+  `cargo nextest run -p chelis-surf --test canonical_surf --no-fail-fast`
+  and
+  `cargo nextest run -p chelis-cli --test migrate_surf --no-fail-fast`.
+
+- **chelis#1200: a destructuring `let` no longer poisons the rest of its
+  block.** The Linearity-F2 use-after-consume gate was scoped to the
+  destructuring let's *body*, and in a block every later statement is
+  nested inside that body — so one `_ = f(x)` discard (or any
+  non-`Var` let pattern) turned every subsequent consume-after-consume
+  in the block into a hard error, on ANY variable, including ordinary
+  bindings unrelated to the destructure and the destructure's own
+  source. The gate is now membership on the consumed binding: only a name
+  actually introduced by a destructure component is subject to F2, and
+  the mark rides the binding's scope entry so shadowing and scope exit
+  behave like every other per-binding property. The diagnostic keeps its
+  wording for a genuine component — under the new guard its "(from a
+  destructured binding)" claim is finally accurate — and an ordinary
+  binding that merely aliases one is now labelled as such instead. Reuse
+  of a component without `copy()` is still an error.
+
+  Downstream, coral's vendored suite recovers with no source edits: 7 of
+  its 9 test files stopped compiling under the old gate, so only 17 of
+  its 74 tests ran at all. All 74 run and pass again. Shoals'
+  `tests/curves_basis.ch` clears the same way.
+
+  The rule is now stated normatively at `spec/04-type-system.md` §8.3,
+  with the mechanism in `spec/design/implicit_linearity.md`
+  §"Destructured components" — both previously described copy insertion
+  with no component carve-out at all.
+
+- **chelis#1200: five further linearity misroutes found by review.** The
+  destructured-component rule is per BINDING, and the checker resolves
+  bindings through names. Each of these is a place where that resolution
+  went to the wrong binding:
+
+  - **A component consumed twice inside a `match` arm or an `if` branch
+    is accepted**, matching the closure-body verdict and 0.18.3. A
+    closure body re-declares its captures, so the mark was already
+    shadowed there; branch scopes clone without re-declaring, so the same
+    program rejected in an arm and compiled in a closure. Branch bodies
+    are new declaration regions and now drop the inherited marks. A
+    destructure authored INSIDE the arm still gates its own components.
+  - **A component consumed in a branch and again after the join is now an
+    error.** It was silently accepted: a component's carrier is never
+    `Live` (the component's own bind records an aliasing consume on it),
+    and the join only propagated a branch's consume onto `Live` entries,
+    so it dropped the consume outright. This one falsified the true
+    positive F2 exists to protect.
+  - **A component captured by a closure and reused afterwards is now an
+    error.** The capture consume landed on the component's own entry
+    instead of forwarding through the alias chain to its carrier, so the
+    carrier stayed live and the reuse was accepted — while the identical
+    reuse without the closure errored.
+  - **A nested destructure no longer hides an outer double consume.** The
+    desugarer restarted its `__chelis_tmpN` counter per block, so nested
+    destructures minted colliding names and the inner ones shadowed the
+    outer ones in the checker's scope. The counter is now context-wide.
+  - **A second alias bind of one component compiles again**
+    (`(a, b) = p; y = a; z = a`). An alias bind destroys nothing, so it
+    is not a fan-out event; gating it rejected a shape 0.18.3 accepted.
+
+  Also fixed: closure-capture classification was nondeterministic — the
+  capture list came from a `HashSet`, and because the walk mutates scope
+  as it goes, one measured program compiled on 1 run in 12 and failed on
+  the other 11. Diagnostics no longer name a desugarer temp
+  (`__chelis_tmpN`) to the user.
+
+  The gap that review deferred — an alias resolved by NAME, following it
+  to whatever binding was on top of the scope stack rather than to the
+  generation it was taken against — is closed by chelis#1209: the checker
+  now keys all state (alias links, consumption marks, component
+  identity) on per-binding generation ids, normatively [04-LIN-1] in
+  `spec/04-type-system.md` §8.3. Shadowing a source after an alias is
+  taken no longer hides the alias's double consume or blames the fresh
+  binding, and re-binding a source name as a destructured component no
+  longer hands the old alias the component restriction; the two shapes
+  are un-ignored tests in
+  `crates/chelis-types/tests/issue_1200_destructure_component_scope.rs`.
+  The same identity closes chelis#1212 (an authored `__chelis_tmp0`
+  colliding with a synthesized carrier is now ordinary shadowing and
+  hides nothing). One further verdict change rides the identity rule: a
+  self-rebind `a = a` of a destructured component now records a real
+  alias to the older generation, so double-consuming the re-bound name
+  is the same hard error as any other component alias (previously the
+  self-link was dead and the fan-out silently fell through to implicit
+  copy); the ordinary-binding self-rebind is unchanged and stays
+  copyable. Deliberately unchanged, now pinned as [04-LIN-2]: a
+  consuming closure capture consumes the binding it names, so two
+  closures may consume one value through two user-visible names, and an
+  ordinary alias's record at a branch join keeps its existing behavior
+  (the join's consume promotion stays carrier-only).
+
+- **A non-recursive generic host call is specialized, not inlined
+  (chelis#1201).** Value-level inlining substituted the argument expression
+  over the parameter name and dropped the parameter's declared type, so a
+  generic ADT whose instantiation was only recoverable from that annotation
+  reached lowering unresolved and failed closed with `constructor ... is not
+  concretely instantiated`. Such a call now falls through to the same bounded
+  monomorphization chelis#1158 uses for the recursive case, which keys on the
+  checked type application instead of pasting syntax. Two further gaps are
+  closed with it: an `if` branch and a `match` arm are result positions and
+  now receive the caller's expected type, and a specialized body's own
+  constructors resolve through the specialization's type substitution.
+
+  That substitution is solved against the `fn` node's **recorded** type, not
+  the declared `defsig`. The two name their variables in different spaces — a
+  signature says `a` (and, for a dimension parameter, the source dimension
+  name), while every node the checker stamped inside the body names the same
+  variable in inference space (`t376`). A substitution built from the
+  declared signature installs correctly and then matches nothing, because no
+  body node ever mentions `a`. Acceptance oracle: `cargo nextest run
+  -p chelis-ir --no-fail-fast`.
+
+  Two adversarial-review follow-ups ride along. A generic callee with a
+  **callable parameter** stays on the inline path (a callable argument has
+  no host-type key), and that path now threads the call's checked result
+  type through the body like every other inline path, so
+  `apply[a](f: (a) -> a, x: a) -> Box[a]` resolves its constructor again.
+  A **non-recursive** call whose instantiation never resolves
+  (`pick[a, b](x: a, y: Box[b]) -> a` applied to `Empty`) falls back to
+  guarded value-level inlining instead of dying on the specialization
+  residue. The residue that remains (a genuinely unresolvable call) keeps
+  failing closed, with recursion-neutral wording — non-recursive calls can
+  reach it — citing the open chelis#1226 rather than the closed
+  chelis#1158 ([05-UNS-5]).
+
+  Not fixed there: a **recursive dimension-generic** function is never
+  monomorphized at all, so a generic ADT parameterised by its dimension
+  variable still fails at the code-generation boundary with an unresolved
+  host type variable. That is a distinct defect in the dimension/rank
+  lowering path rather than a residue of this one; see chelis#1216 below.
+
+- **A recursive function generic over an erased ADT dimension is
+  monomorphized (chelis#1216).** chelis#940's `Frame[n] -> Column[n] ->
+  tensor[n, _]` shape has no stored ABI field, so its standalone definition
+  is elided and the call is normally specialized by inlining. On a recursive
+  callee that inline refuses the recursive edge (the call graph has a cycle),
+  and the edge fell through to a plain call to the elided symbol, carrying
+  the ADT's own parameter variable to the code-generation boundary and
+  failing with `unresolved host type variable`. Such a callee now reaches the
+  same bounded monomorphization chelis#1158 uses on the type axis, so the
+  recursive edge has an in-progress specialization to complete its slots
+  from. A true rank variable is deliberately not routed there: variable rank
+  is monomorphized through the DAG `tensor_rank_substitutions` path.
+
+  Deriving that specialization key also needed the checker's stamped type as
+  a fallback. The structural walk does not reconstruct every node's type — a
+  list literal lowers through `Cons` applications and comes back as a fresh
+  inference variable — so an argument whose only unresolved part was a
+  representation-erased ADT dimension sank the whole application. The stamp
+  is adopted only once canonicalization has erased those arguments; a stamp
+  still unresolved after erasure is genuinely underconstrained and is left to
+  the existing residue. Acceptance oracle: `cargo nextest run -p chelis-ir
+  --no-fail-fast`.
+
+  With this, `Coral.Frame` compiles and runs on the build lane (coral#26).
 
 ## [0.18.4] — 2026-08-05
 

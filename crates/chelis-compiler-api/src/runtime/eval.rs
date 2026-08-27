@@ -79,9 +79,16 @@ impl<'a> EvalContext<'a> {
                 let bridged = node.to_list(*span);
                 self.eval_list(&bridged)
             }
-            Expr::BareList(_, _) | Expr::UnknownForm(_) => {
-                Err("transitional Expr variant is not evaluable".to_string())
+            // chelis#1087: loud rejection, identifying the form the way the
+            // resugar boundary describes it rather than by an internal
+            // variant name.
+            Expr::BareList(_, _) => {
+                Err("a structural bare list is not a runtime expression".to_string())
             }
+            Expr::UnknownForm(data) => Err(format!(
+                "unknown form `{}` is not a runtime expression",
+                data.head
+            )),
         }
     }
 
@@ -412,7 +419,17 @@ impl<'a> EvalContext<'a> {
             return Ok(RuntimeValue::Tensor(value.clone()));
         }
         if self.lookup_top_level_def(name).is_some() {
-            return self.resolve_top_level(name);
+            let value = self.resolve_top_level(name)?;
+            // A zero-parameter top-level declaration is a value thunk when
+            // referenced in expression position. Calls still resolve their
+            // callee directly in `eval_app`, so `name()` receives the closure
+            // and applies it exactly once; a bare `name` consumes its value.
+            // This mirrors the checker/lowerer's nullary-def treatment and is
+            // required when manifest routing selects the host evaluator.
+            if matches!(&value, RuntimeValue::Closure { params, .. } if params.is_empty()) {
+                return self.apply_resolved_callable(value, Vec::new());
+            }
+            return Ok(value);
         }
         if name == "Nil" {
             return Ok(RuntimeValue::List(Vec::new()));
@@ -1674,16 +1691,19 @@ impl<'a> EvalContext<'a> {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::F64 => {
                         payload.as_f64_lossy()
                     }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
+                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
                         return Err(format!(
-                            "jnum: expected an f64 value, got {:?} (suffix the literal, \
+                            "jnum: expected an f64 value, got {} (suffix the literal, \
                              `0.1f64`, or use cast(n, f64); an f32 value would quantize \
                              through the byte-exact serializer)",
-                            payload.dtype()
+                            describe_value(value)
                         ));
                     }
                     other => {
-                        return Err(format!("expected f64 arg at index 0, got {other:?}"));
+                        return Err(format!(
+                            "expected f64 arg at index 0, got {}",
+                            describe_argument(other)
+                        ));
                     }
                 };
                 Ok(super::json::jnum(value))
@@ -1698,15 +1718,18 @@ impl<'a> EvalContext<'a> {
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype() == Prim::Int64 => {
                         payload.as_i64()
                     }
-                    Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
+                    Some(value @ RuntimeValue::Scalar(payload)) if payload.dtype().is_integer() => {
                         return Err(format!(
-                            "jint: expected an int64 value, got {:?} (suffix the literal, \
+                            "jint: expected an int64 value, got {} (suffix the literal, \
                              `1i64`, or use cast(n, int64))",
-                            payload.dtype()
+                            describe_value(value)
                         ));
                     }
                     other => {
-                        return Err(format!("expected int64 arg at index 0, got {other:?}"));
+                        return Err(format!(
+                            "expected int64 arg at index 0, got {}",
+                            describe_argument(other)
+                        ));
                     }
                 };
                 Ok(super::json::jint(value))
@@ -1745,7 +1768,8 @@ impl<'a> EvalContext<'a> {
                         Some(RuntimeValue::String(key)) => key,
                         other => {
                             return Err(format!(
-                                "jdict keys must be strings, got {other:?} at index {index}"
+                                "jdict keys must be strings, got {} at index {index}",
+                                describe_argument(other.as_ref())
                             ));
                         }
                     };
@@ -1796,13 +1820,16 @@ impl<'a> EvalContext<'a> {
                     }
                     Some(RuntimeValue::Scalar(payload)) if payload.dtype().is_float() => {
                         Err(format!(
-                            "round_to: unsupported operand dtype {:?} ([05-OP-1] authors \
+                            "round_to: unsupported operand dtype {} ([05-OP-1] authors \
                              decimal rounding for f64 and f32 only; cast the operand \
                              explicitly)",
-                            payload.dtype()
+                            payload.dtype().name()
                         ))
                     }
-                    other => Err(format!("expected float arg at index 0, got {other:?}")),
+                    other => Err(format!(
+                        "expected float arg at index 0, got {}",
+                        describe_argument(other)
+                    )),
                 }
             }
             // Host-lane CSV I/O (chelis#903). Eval-only, like the JSON
@@ -2345,6 +2372,28 @@ impl<'a> EvalContext<'a> {
                 let tensor = expect_tensor_arg(args, 0)?;
                 let axis = expect_int_arg(args, 1)?;
                 tensor_reduce_host(&tensor, axis, ReduceOp::Sum).map(RuntimeValue::Tensor)
+            }
+            "count" => {
+                let tensor = expect_tensor_arg(args, 0)?;
+                let rank = tensor.value.shape.len();
+                let mut axes = Vec::with_capacity(args.len().saturating_sub(1));
+                for index in 1..args.len() {
+                    let raw = expect_int_arg(args, index)?;
+                    let axis = if raw < 0 {
+                        rank.checked_sub(raw.unsigned_abs() as usize)
+                    } else {
+                        usize::try_from(raw).ok().filter(|&axis| axis < rank)
+                    }
+                    .ok_or_else(|| {
+                        format!("count axis {raw} is out of bounds for rank {rank} tensor")
+                    })?;
+                    if axes.contains(&axis) {
+                        return Err(format!("count has duplicate normalized axis {raw}"));
+                    }
+                    axes.push(axis);
+                }
+                axes.sort_unstable_by(|a, b| b.cmp(a));
+                tensor_count_host(&tensor, &axes).map(RuntimeValue::Tensor)
             }
             "matmul" => {
                 let lhs = expect_tensor_arg(args, 0)?;

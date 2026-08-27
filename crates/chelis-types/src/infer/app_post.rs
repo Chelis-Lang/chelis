@@ -334,6 +334,7 @@ pub(super) fn finish_unified_app(
             fname,
             "matmul"
                 | "sum"
+                | "count"
                 | "max_reduce"
                 | "min_reduce"
                 | "prod_reduce"
@@ -380,7 +381,7 @@ pub(super) fn finish_unified_app(
                 }
                 result_ty = check_matmul_signature(&arg_tys, &result_ty, subst, errors);
             }
-            "sum" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
+            "sum" | "count" | "max_reduce" | "min_reduce" | "prod_reduce" | "argmax_reduce"
             | "argmin_reduce" | "mean" => {
                 checked_route_observed = true;
                 if owes_shape_replay {

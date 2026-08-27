@@ -52,8 +52,6 @@ pub enum BypassExpectation {
     RequiresPattern,
     /// Form-expecting (same as RuntimeExpr rule — undecodable → UnknownForm).
     FormExpecting,
-    /// Structural list (→ BareList without head decode).
-    Structural,
 }
 
 /// Exhaustive child-role table for the closed Deep vocabulary.
@@ -499,8 +497,63 @@ pub fn bypass_child_expectation(tag: DeepTag, index: usize) -> BypassExpectation
         DeepTag::PatTuple => RequiresPattern,
         DeepTag::PatAs => RequiresPattern,
         DeepTag::Kv => FormExpecting,
-        // Tags that do not have bypass slots should not reach here.
-        _ => panic!(
+        // Tags with no bypass slot, enumerated explicitly so this function
+        // keeps the module's totality promise: adding a `DeepTag` variant is
+        // a compile error here until the new tag is classified, the same
+        // mutation-oracle contract `child_stamp_role` carries
+        // (`spec/design/checker_totality.md` §Phase 3 oracle). Reaching this
+        // arm at runtime is still a consumer bug: `child_stamp_role` never
+        // reports `ExplicitInferenceBypass` for these tags.
+        DeepTag::Import
+        | DeepTag::ImportAll
+        | DeepTag::Export
+        | DeepTag::Def
+        | DeepTag::Defsig
+        | DeepTag::Deftype
+        | DeepTag::Typealias
+        | DeepTag::Variant
+        | DeepTag::Field
+        | DeepTag::Defdim
+        | DeepTag::Fn
+        | DeepTag::App
+        | DeepTag::If
+        | DeepTag::Var
+        | DeepTag::Lit
+        | DeepTag::Access
+        | DeepTag::Block
+        | DeepTag::Tuple
+        | DeepTag::TupleGet
+        | DeepTag::Par
+        | DeepTag::HandleEffect
+        | DeepTag::Borrow
+        | DeepTag::PatVar
+        | DeepTag::PatLit
+        | DeepTag::PatWild
+        | DeepTag::TPrim
+        | DeepTag::TFn
+        | DeepTag::TTensor
+        | DeepTag::TRef
+        | DeepTag::TAdt
+        | DeepTag::TVar
+        | DeepTag::TUnit
+        | DeepTag::TTuple
+        | DeepTag::DName
+        | DeepTag::DVar
+        | DeepTag::DLit
+        | DeepTag::DRank
+        | DeepTag::Grad
+        | DeepTag::Vmap
+        | DeepTag::Jit
+        | DeepTag::Realize
+        | DeepTag::Cast
+        | DeepTag::Copy
+        | DeepTag::Quote
+        | DeepTag::Unquote
+        | DeepTag::Splice
+        | DeepTag::Params
+        | DeepTag::Bind
+        | DeepTag::Effects
+        | DeepTag::Resource => panic!(
             "bypass_child_expectation called for non-bypass (tag={:?}, index={index})",
             tag
         ),
@@ -609,5 +662,36 @@ mod tests {
             bypass_child_expectation(DeepTag::Kv, 1),
             BypassExpectation::FormExpecting
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-bypass")]
+    fn non_bypass_tag_panics_loudly() {
+        // `def`'s children are Binder/RuntimeExpr; asking for a bypass
+        // expectation is a consumer bug and must stay a loud panic, not a
+        // silent default.
+        let _ = bypass_child_expectation(DeepTag::Def, 1);
+    }
+
+    #[test]
+    fn bypass_expectation_agrees_with_role_table_in_both_directions() {
+        // The role table and the expectation table must name the same tag
+        // set: a tag has a bypass slot iff `bypass_child_expectation`
+        // answers for it. Divergence in either direction means one table
+        // was edited without the other.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        for tag in DeepTag::ALL {
+            let has_bypass_slot = (0..10).any(|index| {
+                child_stamp_role(tag, index, 10) == ChildStampRole::ExplicitInferenceBypass
+            });
+            let answers =
+                std::panic::catch_unwind(|| bypass_child_expectation(tag, usize::MAX)).is_ok();
+            assert_eq!(
+                has_bypass_slot, answers,
+                "role table and bypass expectation disagree for {tag:?}"
+            );
+        }
+        std::panic::set_hook(previous_hook);
     }
 }

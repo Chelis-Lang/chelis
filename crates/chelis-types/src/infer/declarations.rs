@@ -225,6 +225,7 @@ pub(super) fn detect_forged_linker_names(exprs: &[deep::Expr], errors: &mut Diag
 
 pub(super) fn infer_signature_metadata_with_context_and_headers(
     exprs: &[deep::Expr],
+    function_plan: &FunctionInferencePlan,
     type_env: &HashMap<String, deep::Expr>,
     signature_context: &SignatureInferenceMetadata,
     type_headers: &TypeResolutionEnv,
@@ -232,9 +233,32 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
 ) -> SignatureInferenceMetadata {
     let defsig_names = collect_defsig_names(exprs);
     let authored_signature_types = collect_authored_signature_types(exprs, type_headers, errors);
-    let recursive_members = recursive_call_cycle_members(exprs);
+    let recursive_members = function_plan.recursive_member_names();
     let mut functions = BTreeMap::new();
-    let ordered_defs = signature_inference_def_order(exprs);
+    let mut defs_by_name = HashMap::<String, VecDeque<&deep::Expr>>::new();
+    for expr in top_level_decl_items(exprs) {
+        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+            continue;
+        };
+        let Some(name) = kids.first().and_then(symbol_name) else {
+            continue;
+        };
+        if kids
+            .get(1)
+            .and_then(|body| tagged_children(body, DeepTag::Fn))
+            .is_none()
+        {
+            continue;
+        }
+        defs_by_name
+            .entry(name.to_string())
+            .or_default()
+            .push_back(expr);
+    }
+    let ordered_defs = function_plan
+        .ordered_members()
+        .filter_map(|member| defs_by_name.get_mut(&member.name)?.pop_front())
+        .collect::<Vec<_>>();
     let passes = ordered_defs.len().max(1);
     let imported_signatures = signature_context
         .functions
@@ -346,163 +370,435 @@ pub(super) fn infer_signature_metadata_with_context_and_headers(
     SignatureInferenceMetadata { functions }
 }
 
-pub(super) struct FunctionInferenceComponent<'a> {
-    pub(super) members: Vec<&'a deep::Expr>,
+#[derive(Clone, Debug)]
+pub(super) struct FunctionInferenceMember {
+    pub(super) item_index: usize,
+    pub(super) name: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct FunctionInferenceComponent {
+    pub(super) members: Vec<FunctionInferenceMember>,
     pub(super) recursive: bool,
 }
 
-/// Canonical dependency/SCC planner for top-level function declarations.
-/// Components are returned callee-first; member order within one SCC remains
-/// source order. Primary module scheduling and signature inference both
-/// consume this plan, while bare acyclic primary inference deliberately keeps
-/// its historical textual order.
-pub(super) fn function_inference_sccs(exprs: &[deep::Expr]) -> Vec<FunctionInferenceComponent<'_>> {
-    let def_items = top_level_decl_items(exprs)
-        .into_iter()
-        .filter_map(|expr| {
-            let (DeepTag::Def, _, kids) = stamped_parts(expr)? else {
-                return None;
+#[derive(Clone, Debug)]
+pub(super) struct FunctionInferencePlan {
+    pub(super) components: Vec<FunctionInferenceComponent>,
+    pub(super) complete: bool,
+}
+
+impl Default for FunctionInferencePlan {
+    fn default() -> Self {
+        Self {
+            components: Vec::new(),
+            complete: true,
+        }
+    }
+}
+
+struct FunctionDefItem<'a> {
+    vertex: usize,
+    item_index: usize,
+    name: String,
+    expr: &'a deep::Expr,
+}
+
+impl FunctionInferencePlan {
+    /// Build the one canonical function dependency plan for an inference run.
+    /// SCCs are constructed in O(vertices + edges), returned callee-first,
+    /// and retain source order within each component.
+    pub(super) fn build(items: &[(Option<String>, &deep::Expr)]) -> Self {
+        profile_plan_build();
+        let cancel = crate::cancel::current_cancel_token();
+        let cancelled = || cancel.as_ref().is_some_and(CancelToken::is_cancelled);
+        let mut vertex_by_name = HashMap::<String, usize>::new();
+        let mut def_items = Vec::new();
+        for (item_index, (_, expr)) in items.iter().enumerate() {
+            if cancelled() {
+                return Self::incomplete();
+            }
+            let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
+                continue;
             };
-            let name = kids.first().and_then(symbol_name)?;
-            kids.get(1)
-                .and_then(|body| tagged_children(body, DeepTag::Fn))?;
-            Some((name.to_string(), expr))
-        })
-        .collect::<Vec<_>>();
-    let def_names = def_items
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<HashSet<_>>();
-    let mut graph = HashMap::<String, HashSet<String>>::new();
-    for (name, expr) in &def_items {
-        let Some((DeepTag::Def, _, kids)) = stamped_parts(expr) else {
-            continue;
-        };
-        let Some(fn_kids) = kids
-            .get(1)
-            .and_then(|body| tagged_children(body, DeepTag::Fn))
-        else {
-            continue;
-        };
-        let (Some(params), Some(body)) = (fn_kids.first(), fn_kids.get(1)) else {
-            continue;
-        };
-        let mut bound = vec![
-            param_source_infos(params)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
-        ];
-        let mut calls = HashSet::new();
-        collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
-        graph.insert(name.clone(), calls);
-    }
-
-    let mut assigned = HashSet::new();
-    let mut unordered = Vec::<FunctionInferenceComponent<'_>>::new();
-    // chelis#930: per-declaration cancellation. The component search below is
-    // quadratic in declaration count (each unassigned name is tested for
-    // mutual reachability against every other), measured at ~0.9 s over 1500
-    // declarations, and it also runs before body inference. A short component
-    // list means later declarations are never inferred; the check entry's
-    // `cancellation_gate` rejects the unit.
-    let cancel = crate::cancel::current_cancel_token();
-    for (name, _) in &def_items {
-        if cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            break;
-        }
-        if assigned.contains(name) {
-            continue;
-        }
-        let member_names = def_items
-            .iter()
-            .filter_map(|(candidate, _)| {
-                let same_component = candidate == name
-                    || (reaches_name(candidate, name, &graph, &mut HashSet::new())
-                        && reaches_name(name, candidate, &graph, &mut HashSet::new()));
-                same_component.then_some(candidate.clone())
-            })
-            .collect::<HashSet<_>>();
-        assigned.extend(member_names.iter().cloned());
-        let members = def_items
-            .iter()
-            .filter_map(|(candidate, expr)| member_names.contains(candidate).then_some(*expr))
-            .collect::<Vec<_>>();
-        let recursive = members.len() > 1
-            || graph
-                .get(name)
-                .is_some_and(|callees| callees.contains(name));
-        unordered.push(FunctionInferenceComponent { members, recursive });
-    }
-
-    let mut component_by_name = HashMap::new();
-    for (component_index, component) in unordered.iter().enumerate() {
-        for expr in &component.members {
-            if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
-                && let Some(name) = kids.first().and_then(symbol_name)
+            let Some(name) = kids.first().and_then(symbol_name) else {
+                continue;
+            };
+            if kids
+                .get(1)
+                .and_then(|body| tagged_children(body, DeepTag::Fn))
+                .is_none()
             {
-                component_by_name.insert(name.to_string(), component_index);
+                continue;
+            }
+            let next_vertex = vertex_by_name.len();
+            let vertex = *vertex_by_name
+                .entry(name.to_string())
+                .or_insert(next_vertex);
+            def_items.push(FunctionDefItem {
+                vertex,
+                item_index,
+                name: name.to_string(),
+                expr,
+            });
+        }
+
+        let def_names = vertex_by_name.keys().cloned().collect::<HashSet<_>>();
+        let mut graph = vec![Vec::<usize>::new(); vertex_by_name.len()];
+        for item in &def_items {
+            if cancelled() {
+                return Self::incomplete();
+            }
+            let Some((DeepTag::Def, _, kids)) = stamped_parts(item.expr) else {
+                continue;
+            };
+            let Some(fn_kids) = kids
+                .get(1)
+                .and_then(|body| tagged_children(body, DeepTag::Fn))
+            else {
+                continue;
+            };
+            let (Some(params), Some(body)) = (fn_kids.first(), fn_kids.get(1)) else {
+                continue;
+            };
+            let mut bound = vec![
+                param_source_infos(params)
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect(),
+            ];
+            let mut calls = HashSet::new();
+            collect_top_level_calls(body, &def_names, &mut bound, &mut calls);
+            let mut callees = calls
+                .into_iter()
+                .filter_map(|name| vertex_by_name.get(&name).copied())
+                .collect::<Vec<_>>();
+            callees.sort_unstable();
+            callees.dedup();
+            // Preserve the previous duplicate-declaration behavior: the last
+            // well-formed body for one name supplies that name's adjacency.
+            graph[item.vertex] = callees;
+        }
+        profile_graph(graph.len(), graph.iter().map(Vec::len).sum());
+
+        let Some(vertex_components) = ordered_scc_vertex_components(&graph, cancel.as_ref()) else {
+            return Self::incomplete();
+        };
+        let mut component_by_vertex = vec![0; graph.len()];
+        for (component_index, vertices) in vertex_components.iter().enumerate() {
+            for &vertex in vertices {
+                component_by_vertex[vertex] = component_index;
+            }
+        }
+        let mut components = vertex_components
+            .iter()
+            .map(|_| FunctionInferenceComponent {
+                members: Vec::new(),
+                recursive: false,
+            })
+            .collect::<Vec<_>>();
+        for item in def_items {
+            components[component_by_vertex[item.vertex]]
+                .members
+                .push(FunctionInferenceMember {
+                    item_index: item.item_index,
+                    name: item.name,
+                });
+        }
+        for (component, vertices) in components.iter_mut().zip(&vertex_components) {
+            component.recursive = component.members.len() > 1
+                || vertices
+                    .iter()
+                    .any(|&vertex| graph[vertex].binary_search(&vertex).is_ok());
+        }
+        Self {
+            components,
+            complete: true,
+        }
+    }
+
+    fn incomplete() -> Self {
+        Self {
+            components: Vec::new(),
+            complete: false,
+        }
+    }
+
+    pub(super) fn ordered_members(&self) -> impl Iterator<Item = &FunctionInferenceMember> {
+        self.components
+            .iter()
+            .flat_map(|component| component.members.iter())
+    }
+
+    pub(super) fn recursive_member_names(&self) -> HashSet<String> {
+        self.components
+            .iter()
+            .filter(|component| component.recursive)
+            .flat_map(|component| component.members.iter())
+            .map(|member| member.name.clone())
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TarjanFrame {
+    vertex: usize,
+    next_edge: usize,
+}
+
+/// Iterative Tarjan followed by the historical deterministic component
+/// postorder. The iterative stack avoids replacing the cubic defect with a
+/// native-stack limit on long declaration chains.
+fn ordered_scc_vertex_components(
+    graph: &[Vec<usize>],
+    cancel: Option<&CancelToken>,
+) -> Option<Vec<Vec<usize>>> {
+    let cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
+    let mut next_index = 0usize;
+    let mut indices = vec![None; graph.len()];
+    let mut lowlinks = vec![0usize; graph.len()];
+    let mut on_stack = vec![false; graph.len()];
+    let mut tarjan_stack = Vec::new();
+    let mut frames = Vec::<TarjanFrame>::new();
+    let mut raw_component_by_vertex = vec![usize::MAX; graph.len()];
+    let mut raw_component_count = 0usize;
+
+    for start in 0..graph.len() {
+        if indices[start].is_some() {
+            continue;
+        }
+        if cancelled() {
+            return None;
+        }
+        indices[start] = Some(next_index);
+        lowlinks[start] = next_index;
+        next_index += 1;
+        tarjan_stack.push(start);
+        on_stack[start] = true;
+        profile_scc_vertex_entry();
+        frames.push(TarjanFrame {
+            vertex: start,
+            next_edge: 0,
+        });
+
+        while let Some(frame) = frames.last().copied() {
+            if frame.next_edge < graph[frame.vertex].len() {
+                if cancelled() {
+                    return None;
+                }
+                let callee = graph[frame.vertex][frame.next_edge];
+                frames.last_mut().expect("Tarjan frame exists").next_edge += 1;
+                profile_scc_edge_inspection();
+                if indices[callee].is_none() {
+                    indices[callee] = Some(next_index);
+                    lowlinks[callee] = next_index;
+                    next_index += 1;
+                    tarjan_stack.push(callee);
+                    on_stack[callee] = true;
+                    profile_scc_vertex_entry();
+                    frames.push(TarjanFrame {
+                        vertex: callee,
+                        next_edge: 0,
+                    });
+                } else if on_stack[callee] {
+                    lowlinks[frame.vertex] =
+                        lowlinks[frame.vertex].min(indices[callee].expect("visited vertex"));
+                }
+                continue;
+            }
+
+            let finished = frames.pop().expect("Tarjan frame exists").vertex;
+            if lowlinks[finished] == indices[finished].expect("visited vertex") {
+                loop {
+                    let member = tarjan_stack.pop().expect("SCC root remains on stack");
+                    on_stack[member] = false;
+                    raw_component_by_vertex[member] = raw_component_count;
+                    if member == finished {
+                        break;
+                    }
+                }
+                raw_component_count += 1;
+            }
+            if let Some(parent) = frames.last() {
+                lowlinks[parent.vertex] = lowlinks[parent.vertex].min(lowlinks[finished]);
             }
         }
     }
+
+    // Tarjan's discovery order is an implementation detail. Re-form the
+    // component list in first-source-occurrence order before applying the
+    // old callee-first postorder, preserving diagnostics and serialization.
+    let mut compact_by_raw = HashMap::new();
+    let mut unordered = Vec::<Vec<usize>>::new();
+    for (vertex, &raw) in raw_component_by_vertex.iter().enumerate() {
+        let next = compact_by_raw.len();
+        let component = *compact_by_raw.entry(raw).or_insert_with(|| {
+            unordered.push(Vec::new());
+            next
+        });
+        unordered[component].push(vertex);
+    }
+    let mut component_by_vertex = vec![0usize; graph.len()];
+    for (component, vertices) in unordered.iter().enumerate() {
+        for &vertex in vertices {
+            component_by_vertex[vertex] = component;
+        }
+    }
     let mut component_graph = vec![HashSet::<usize>::new(); unordered.len()];
-    for (caller, callees) in &graph {
-        let Some(caller_component) = component_by_name.get(caller).copied() else {
-            continue;
-        };
-        for callee in callees {
-            if let Some(callee_component) = component_by_name.get(callee).copied()
-                && callee_component != caller_component
-            {
+    for (caller, callees) in graph.iter().enumerate() {
+        if cancelled() {
+            return None;
+        }
+        for &callee in callees {
+            let caller_component = component_by_vertex[caller];
+            let callee_component = component_by_vertex[callee];
+            if caller_component != callee_component {
                 component_graph[caller_component].insert(callee_component);
             }
         }
     }
+    let dependencies = component_graph
+        .into_iter()
+        .map(|component| {
+            let mut dependencies = component.into_iter().collect::<Vec<_>>();
+            dependencies.sort_unstable();
+            dependencies
+        })
+        .collect::<Vec<_>>();
 
-    fn visit_component(
-        component: usize,
-        graph: &[HashSet<usize>],
-        visiting: &mut HashSet<usize>,
-        visited: &mut HashSet<usize>,
-        out: &mut Vec<usize>,
-    ) {
-        if visited.contains(&component) || !visiting.insert(component) {
-            return;
+    let mut order = Vec::with_capacity(unordered.len());
+    let mut visiting = vec![false; unordered.len()];
+    let mut visited = vec![false; unordered.len()];
+    for root in 0..unordered.len() {
+        if visited[root] {
+            continue;
         }
-        let mut dependencies = graph[component].iter().copied().collect::<Vec<_>>();
-        dependencies.sort_unstable();
-        for dependency in dependencies {
-            visit_component(dependency, graph, visiting, visited, out);
+        visiting[root] = true;
+        let mut component_frames = vec![(root, 0usize)];
+        while let Some((component, next_dependency)) = component_frames.last().copied() {
+            if cancelled() {
+                return None;
+            }
+            if next_dependency < dependencies[component].len() {
+                let dependency = dependencies[component][next_dependency];
+                component_frames
+                    .last_mut()
+                    .expect("component frame exists")
+                    .1 += 1;
+                if !visited[dependency] && !visiting[dependency] {
+                    visiting[dependency] = true;
+                    component_frames.push((dependency, 0));
+                }
+                continue;
+            }
+            component_frames.pop();
+            visiting[component] = false;
+            if !visited[component] {
+                visited[component] = true;
+                order.push(component);
+            }
         }
-        visiting.remove(&component);
-        visited.insert(component);
-        out.push(component);
-    }
-
-    let mut order = Vec::new();
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    for component in 0..unordered.len() {
-        visit_component(
-            component,
-            &component_graph,
-            &mut visiting,
-            &mut visited,
-            &mut order,
-        );
     }
     let mut slots = unordered.into_iter().map(Some).collect::<Vec<_>>();
-    order
-        .into_iter()
-        .filter_map(|index| slots[index].take())
-        .collect()
+    Some(
+        order
+            .into_iter()
+            .filter_map(|component| slots[component].take())
+            .collect(),
+    )
 }
 
-pub(super) fn signature_inference_def_order(exprs: &[deep::Expr]) -> Vec<&deep::Expr> {
-    function_inference_sccs(exprs)
-        .into_iter()
-        .flat_map(|component| component.members)
-        .collect()
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct FunctionPlanProfile {
+    pub(super) plan_builds: usize,
+    pub(super) graph_vertices: usize,
+    pub(super) graph_edges: usize,
+    pub(super) scc_vertex_entries: usize,
+    pub(super) scc_edge_inspections: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FUNCTION_PLAN_PROFILE: RefCell<FunctionPlanProfile> = RefCell::default();
+    static FUNCTION_PLAN_CANCEL_AFTER_EDGES: RefCell<Option<(usize, CancelToken)>> =
+        const { RefCell::new(None) };
+}
+
+fn profile_plan_build() {
+    #[cfg(test)]
+    FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().plan_builds += 1);
+}
+
+fn profile_graph(vertices: usize, edges: usize) {
+    #[cfg(test)]
+    FUNCTION_PLAN_PROFILE.with(|profile| {
+        let mut profile = profile.borrow_mut();
+        profile.graph_vertices += vertices;
+        profile.graph_edges += edges;
+    });
+    #[cfg(not(test))]
+    let _ = (vertices, edges);
+}
+
+fn profile_scc_vertex_entry() {
+    #[cfg(test)]
+    FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().scc_vertex_entries += 1);
+}
+
+fn profile_scc_edge_inspection() {
+    #[cfg(test)]
+    {
+        FUNCTION_PLAN_PROFILE.with(|profile| profile.borrow_mut().scc_edge_inspections += 1);
+        FUNCTION_PLAN_CANCEL_AFTER_EDGES.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            let Some((remaining, token)) = hook.as_mut() else {
+                return;
+            };
+            *remaining -= 1;
+            if *remaining == 0 {
+                token.cancel();
+                hook.take();
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+pub(super) fn reset_function_plan_profile() {
+    FUNCTION_PLAN_PROFILE.with(|profile| *profile.borrow_mut() = FunctionPlanProfile::default());
+}
+
+#[cfg(test)]
+pub(super) fn take_function_plan_profile() -> FunctionPlanProfile {
+    FUNCTION_PLAN_PROFILE.with(|profile| std::mem::take(&mut *profile.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(super) struct FunctionPlanCancellationHook;
+
+#[cfg(test)]
+impl Drop for FunctionPlanCancellationHook {
+    fn drop(&mut self) {
+        FUNCTION_PLAN_CANCEL_AFTER_EDGES.with(|hook| hook.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+pub(super) fn cancel_function_plan_after_edges_for_test(
+    inspections: usize,
+    token: CancelToken,
+) -> FunctionPlanCancellationHook {
+    assert!(inspections > 0);
+    FUNCTION_PLAN_CANCEL_AFTER_EDGES.with(|hook| {
+        assert!(hook.borrow_mut().replace((inspections, token)).is_none());
+    });
+    FunctionPlanCancellationHook
+}
+
+#[cfg(test)]
+pub(super) fn linear_scc_component_vertices_for_test(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    ordered_scc_vertex_components(graph, None).expect("uncancelled SCC construction completes")
 }
 
 pub(super) fn collect_defsig_names(exprs: &[deep::Expr]) -> HashSet<String> {
@@ -536,43 +832,6 @@ pub(super) fn collect_authored_signature_types(
         }
     }
     signatures
-}
-
-pub(super) fn recursive_call_cycle_members(exprs: &[deep::Expr]) -> HashSet<String> {
-    let mut recursive = HashSet::new();
-    for component in function_inference_sccs(exprs) {
-        if !component.recursive {
-            continue;
-        }
-        for expr in component.members {
-            if let Some((DeepTag::Def, _, kids)) = stamped_parts(expr)
-                && let Some(name) = kids.first().and_then(symbol_name)
-            {
-                recursive.insert(name.to_string());
-            }
-        }
-    }
-    recursive
-}
-
-pub(super) fn reaches_name(
-    start: &str,
-    current: &str,
-    graph: &HashMap<String, HashSet<String>>,
-    visited: &mut HashSet<String>,
-) -> bool {
-    let Some(nexts) = graph.get(current) else {
-        return false;
-    };
-    for next in nexts {
-        if next == start {
-            return true;
-        }
-        if visited.insert(next.clone()) && reaches_name(start, next, graph, visited) {
-            return true;
-        }
-    }
-    false
 }
 
 pub(super) fn collect_top_level_calls(

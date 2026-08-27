@@ -1,15 +1,7 @@
 # spec/04-type-system.md — Chelis Type System
 
-**Status:** v0.3
-**Scope:** Phase 0 type system plus the shipped Phase 2a effect subset: ADTs,
-Hindley-Milner inference, numeric precision types, named tensor dimensions, fitness
-scoring, annotated checked Deep, and bounded `Random` / `Resource(Device)` effect
-checking.
-
-**Executable completeness note:** this document includes type-level shapes that are
-larger than the currently practical tensor-only execution story. In particular, the
-remaining Phase `3c` / `3d` / `3g` work is what turns scalar/string/collection ideas
-into a real end-to-end AI-programming surface rather than only syntax or type examples.
+**Scope:** ADTs, Hindley-Milner inference, numeric precision types, named tensor
+dimensions, fitness scoring, annotated checked Deep, effects, and linearity.
 
 ---
 
@@ -24,8 +16,7 @@ compiler-facing representation.
 - lowering, evaluation, effect checking, and CLI build/eval paths consume that
   annotated tree rather than the original raw Deep
 
-This contract matters for Phase 2a because effect inference/checking runs after HM type
-inference on the same annotated tree.
+Effect inference and checking run after HM type inference on the same annotated tree.
 
 ---
 
@@ -35,7 +26,7 @@ Types are represented as Deep AST nodes using the `t-*` tag family.
 
 ### 1.1 Primitive Types
 
-The active numeric primitive set is exactly nine names:
+The active primitive set is exactly ten names:
 
 ```scheme
 (t-prim {} f32)       ;; 32-bit float
@@ -47,70 +38,64 @@ The active numeric primitive set is exactly nine names:
 (t-prim {} int32)     ;; 32-bit signed integer
 (t-prim {} int64)     ;; 64-bit signed integer
 (t-prim {} bool)      ;; boolean
-(t-prim {} string)    ;; string type exists in the grammar/type layer; practical first-class runtime support is a remaining Phase 3 item
+(t-prim {} string)    ;; UTF-8 string
 ```
 
-This is the **active** numeric dtype list. Code, tests, examples, and stdlib
-signatures referenced from any active spec section must resolve to one of these
-names (or to a documented deferred name in §1.1.1).
+These closed subsets are used throughout the specs:
 
-#### 1.1.1 Deferred Numeric Primitives
+- the **eight active numeric dtypes** are the four floats (`f16`, `bf16`,
+  `f32`, `f64`) and four signed integers (`int8`, `int16`, `int32`, `int64`);
+- the **nine active tensor element dtypes** are those eight numeric dtypes plus
+  `bool`; and
+- `string` is an active host primitive, but is neither a numeric dtype nor a
+  tensor element dtype.
+
+Code, tests, examples, and stdlib signatures referenced from any active spec
+section must use these set names with exactly those meanings. The reserved
+spellings in §1.1.1 are rejected.
+
+#### 1.1.1 Reserved And Rejected Numeric Names
 
 > **[04-DTYPE-1]** A primitive type position SHALL name one of the active
-> primitives in §1.1. Every deferred name in this section is reserved but
-> rejected by the type checker, including as a `cast` target, until a spec
-> revision moves it into the active set. Any other primitive spelling is an
+> primitives in §1.1. Every name in this section is reserved but rejected by
+> the type checker, including as a `cast` target. Any other primitive spelling is an
 > unknown type and is likewise rejected; it SHALL NOT acquire the operand's
 > type or a default dtype.
 
-The following primitive names are reserved in the spec but **not active** in
-the current dtype build-out cycle. They are documented here rather than
-silently dropped so producers do not assume they have gone away. Every name
-below is rejected by the type checker with a diagnostic pointing at this
-section, and `cast(x, <name>)` is rejected with it.
+The following primitive names are reserved but **not members of the language's
+primitive set**. Every name below is rejected by the type checker with a
+diagnostic pointing at this section, and `cast(x, <name>)` is rejected with it.
 
-Each reserved name declares its ARITHMETIC WIDTH ([04-NUM-8]) at reservation
-time, so the width question is settled before anyone implements the dtype
-rather than being decided per-lane during implementation - the failure mode
-chelis#727 documents. The names and widths track the ecosystem's own
-vocabulary (numpy, PyTorch, JAX, Apache Arrow, and the OCP 8-bit and
-Microscaling specifications); Chelis reserves the standard spelling and the
-standard semantics, never a bespoke variant.
+Each reserved name records the arithmetic family that its spelling denotes;
+because the name is rejected, that record does not admit values or operations.
+The spellings and format identities follow numpy, PyTorch, JAX, Apache Arrow,
+and the OCP 8-bit and Microscaling specifications rather than introducing
+Chelis-specific variants.
 
 **Reduced-precision floats.**
 
 - `f8e4m3` — 8-bit float (E4M3 per the OCP 8-bit Floating Point
-  Specification). Arithmetic width: **f32**. **Rationale:** no current Chelis
-  backend implements f8e4m3; revisit when a concrete backend (HIP, C, or
-  Metal) gains native E4M3 support and a corresponding evaluator round-trip
-  representation. Note OCP E4M3 is not IEEE-shaped: it has no infinities and
-  reuses that encoding to extend range, so its finalize row is not a
-  parameterization of [04-NUM-2] and must be authored when it activates.
+  Specification). Arithmetic width: **f32**. OCP E4M3 is not IEEE-shaped: it
+  has no infinities and reuses that encoding to extend range. Chelis defines
+  no finalization rule for this reserved spelling, so the checker rejects it.
 - `f8e5m2` — 8-bit float (E5M2 per the same OCP specification). Arithmetic
   width: **f32**. **Rationale:** E4M3 and E5M2 are one format pair, not two
-  independent dtypes - FP8 training uses E4M3 for forward values and E5M2 for
-  gradients, and every implementation that ships one ships both. Reserving
-  only E4M3 would reserve half a format.
+  independent dtypes: FP8 training uses E4M3 for forward values and E5M2 for
+  gradients. Reserving only E4M3 would reserve half a format.
 
 **Unsigned integers.**
 
 - `uint8`, `uint16`, `uint32`, `uint64` — unsigned integers at width.
   Arithmetic width: **exact at their own width**, unsigned. Overflow traps per
-  [04-NUM-3]; the named modular operations of [04-NUM-7] are the wrapping
-  escape hatch and extend to these dtypes when they activate. **Rationale:**
+  [04-NUM-3]. No arithmetic operation, including [04-NUM-7]'s modular
+  operations, admits these reserved spellings. **Rationale:**
   universal in the ecosystem (numpy, PyTorch, JAX, and Arrow all carry the
   full set) and unavoidable at real ingress boundaries - `uint8` is the image
   dtype, and hashing, checksums, and PRNG state are natively unsigned.
-  Deferred rather than active because the implementation surface is real:
-  separate unsigned comparison and division, unsigned AD adjoints, and
-  per-backend dispatch. Until activation, cast to a signed type (typically
-  `int32` or `int64`) at the boundary where unsigned data enters.
 - `int4`, `uint4` — 4-bit integers. Arithmetic width: **exact at their own
   width**. **Rationale:** the quantized-inference frontier (JAX carries both).
-  Deferred additionally on a storage question the other widths do not raise:
-  a 4-bit element has no addressable byte, so activation requires a packing
-  decision (two elements per byte, and which nibble is element zero) that
-  belongs with the representation work, not with this list.
+  A 4-bit element has no addressable byte, and Chelis defines no packing or
+  element-order rule for these reserved spellings.
 
 **Complex.**
 
@@ -118,10 +103,8 @@ standard semantics, never a bespoke variant.
   respectively. Arithmetic width: **f32 and f64 components**. **Rationale:**
   present in numpy, PyTorch, and JAX under exactly these spellings; the naming
   convention is TOTAL bits, so `complex64` is a pair of f32 - Chelis follows
-  the ecosystem spelling rather than inventing `complex32x2`. Deferred because
-  complex multiply and divide have their own accuracy and overflow story
-  (naive division overflows for representable inputs; the ecosystem uses
-  Smith's algorithm or a variant) which must be authored, not inherited.
+  the ecosystem spelling rather than inventing `complex32x2`. Chelis defines
+  no complex arithmetic operations for these reserved spellings.
 
 **Decimal (interchange only).**
 
@@ -135,8 +118,7 @@ standard semantics, never a bespoke variant.
   (built on `trunc_div` scale shifts, see `spec/05-risc-primitives.md` §2.1),
   and `Std.Io.Parquet` is the interop surface. These names are therefore
   reserved for the **Arrow and parquet interchange boundary only** and are
-  explicitly NOT reserved as tensor element types; activating them does not
-  put decimal into the tensor arithmetic path. They are also the only reserved
+  explicitly NOT tensor element types. They are also the only reserved
   names that are parameterized, which is itself a reason to keep them off that
   path: every other `Prim` is a bare name.
 
@@ -146,41 +128,25 @@ specification (MXFP8, MXFP6, MXFP4), and FP8 training's amax-scaled tensors
 are NOT additional dtypes. Each is a storage dtype PLUS scale metadata - per
 tensor, per channel, or per block of 32. Modelling scale once, as an axis over
 a storage dtype, admits all of them; adding them as primitive names would
-recreate exactly the per-cell scatter chelis#727 exists to end. When scaled
-storage is authored it is authored as that axis, and this paragraph is the
-record of the decision.
+recreate per-format dtype cells. Scaled storage is represented by a storage
+dtype plus an explicit scale axis.
 
-**Not reserved: saturating arithmetic.** Image pipelines saturate rather than
-trap or wrap (OpenCV and PIL both, and SIMD provides native saturating adds
-such as `paddusb`). If `uint8` image work activates, `sat_add` and siblings
-are the named ops to author, on the [04-NUM-7] pattern - a named op, never a
-mode. Recorded here so the third behavior is not rediscovered as a surprise.
-The pressure will arrive as "wrapping is wrong AND trapping is tiresome" the
-day `uint8` image work is real; the answer that preserves [04-NUM-3]'s
-doctrine is the named op, authored then - not a mode, and not a silent
-default.
+**Saturating arithmetic is not implicit.** Ordinary arithmetic traps rather
+than saturating under [04-NUM-3]. Saturating behavior exists only where a
+separate named operation defines it; it is never a mode or default.
 
-#### 1.1.2 Unsigned Integer Types: Deferred, Not Out Of Scope
+#### 1.1.2 Unsigned Integer Spellings
 
 Unsigned integer types are reserved under §1.1.1 as `uint8`, `uint16`,
-`uint32`, and `uint64`, with `int4`/`uint4` alongside them. This section
-formerly declared them "out of scope for this cycle" on the rationale that no
-customer use case justified the implementation surface. That stance was
-revised 2026-07-28: the implementation-surface argument still holds and keeps
-them deferred, but declaring a type the entire ecosystem carries to be out of
-scope left Chelis without a reserved spelling for data it must eventually
-ingest, and the deferral list is the honest home for that. The short
-spellings `u8`/`u16`/`u32`/`u64` are NOT reserved; the `uint*` spellings are
-canonical, matching numpy and Arrow.
-
-The workaround while deferred is unchanged: cast to a signed integer type
-(typically `int32` or `int64`) at the boundary where unsigned data enters the
-program.
+`uint32`, and `uint64`, with `int4`/`uint4` alongside them. The short spellings
+`u8`/`u16`/`u32`/`u64` are NOT reserved; the `uint*` spellings are canonical,
+matching numpy and Arrow. All of these spellings are rejected under
+[04-DTYPE-1].
 
 #### 1.1.3 Per-Backend Dtype Support Matrix
 
 The active primitive set in §1.1 is the **language-level** dtype contract: a
-program that mentions one of the nine active primitives is well-typed in
+program that mentions one of the ten active primitives is well-typed in
 every Chelis pass that does not select a backend (parser, type checker, IR
 evaluator). Backend code generation is a separate surface; not every backend
 admits every active dtype. This sub-section is the authoritative per-backend
@@ -203,9 +169,8 @@ the spec or in user-facing docs must resolve to a cell in this table.
 property of the dtype, declared once by [04-NUM-8] and owned by the semantic
 side of the capability split (`spec/design/capability_table.md`'s Table A,
 whose rejections the CHECKER reports because they hold whatever the target
-is). This table is Table B's ancestor: it records per-backend implementation
-status, which is a different decision reported by build and lowering where
-the target is known. Reproducing the widths here would put an A-fact in a
+is). This table records target capability, which build and lowering decide
+after the target is known. Reproducing the widths here would put an A-fact in a
 B-table and create a second copy to keep in sync by hand.
 
 The constraint this table DOES carry is the consequence: a backend that
@@ -216,20 +181,14 @@ rule already applied, not an exception to it.
 
 Cell semantics:
 
-- **admitted** — the backend codegen accepts the dtype on every shipped op
-  surface that admits any dtype, and emits correct code. Per-op restrictions
+- **admitted** — the backend codegen accepts the dtype on every operation
+  surface whose own dtype rule admits it, and emits code satisfying that rule. Per-op restrictions
   (e.g. matmul accumulator dispatch per §5.7.1, transcendental ops are
   float-only per §5.4) apply uniformly across backends and are not encoded
   in this matrix.
-- **rejected (deferred)** — the backend rejects the dtype at codegen with a
-  diagnostic naming the deferral. The dtype is admitted at the language
-  level and on at least one other backend; the gap is implementation-side
-  and the spec will lift the rejection in a future cycle.
 - **rejected (hardware)** — the backend rejects the dtype at codegen with a
-  diagnostic naming the hardware constraint. There is no planned lift,
-  because no lift is achievable on the target hardware without software
-  emulation, which is explicitly out of scope (see the f64-on-Metal entry
-  below).
+  diagnostic naming the hardware constraint and does not substitute a dtype
+  or software emulation (see the f64-on-Metal entry below).
 
 ##### f64 on Metal: hard-rejected (hardware rationale)
 
@@ -238,15 +197,11 @@ Cell semantics:
 > substitute f32 or software-emulated arithmetic for the language's f64
 > semantics.
 
-f64 on the Metal backend is **hard-rejected**, not deferred. Apple Silicon
-GPUs (M1, M2, M3, M4, and every announced successor in the Apple GPU family)
-have no double-precision floating-point ALUs in their GPU compute units;
+f64 on the Metal backend is **hard-rejected**. Apple Silicon GPUs have no
+double-precision floating-point ALUs in their GPU compute units;
 this is a hardware constraint, not a Chelis design choice. Software
-emulation (e.g., double-double arithmetic over two f32s) is **explicitly
-out of scope** for this cycle and any foreseeable cycle: the precision,
-performance, and AD-adjoint stories for emulated f64 do not match the
-language-level f64 contract, and silently substituting an emulated value
-would violate the no-implicit-precision-promotion rule in §5.
+emulation (e.g., double-double arithmetic over two f32s) does not satisfy the
+language-level f64 contract and is not a Metal-target substitute.
 
 The required diagnostic when a program uses f64 with `--target metal` is:
 
@@ -283,10 +238,6 @@ device is:
 > "bf16 requires Apple7+ GPU family (M3 or later); detected device family is
 > Apple{N}."
 
-Programs that target bf16 on Metal must be tested on Apple7+ hardware.
-Test runners on M1/M2 hardware should mark bf16 Metal correctness tests as
-ignored with the manual gate documented in the owning phase plan.
-
 ##### Metal runtime header: ARC vs MRC and MPS wrapper ownership model
 
 The Metal backend's Objective-C++ runtime header
@@ -300,11 +251,10 @@ ARC-owned `id<MTLBuffer>` whose strong reference is released automatically
 when the local goes out of scope, and there is intentionally no
 `chelis_metal_free`.
 
-Future helpers that the runtime header exposes — including the planned
-`MetalPerformanceShaders.MPSMatrixMultiplication` wrapper helpers
-(`chelis_metal_mps_gemm_f32`, `chelis_metal_mps_gemm_f16`, and any
-sibling) — must follow the **same ARC model**. The four invariants below
-are pinned for every present and future Metal runtime helper:
+Any helper that the runtime header exposes — including
+`MetalPerformanceShaders.MPSMatrixMultiplication` wrapper helpers — must
+follow the **same ARC model**. The four invariants below govern every Metal
+runtime helper:
 
 1. **ARC vs MRC.** The runtime header is compiled under ARC. Every helper
    added to `chelis_metal_runtime.h` MUST follow the same model.
@@ -328,15 +278,13 @@ are pinned for every present and future Metal runtime helper:
    convenience constructors, transient `NSError` chains, etc.) do not
    leak across host calls. The autorelease pool is per-helper-call, not
    per-program.
-4. **No-mixed-model invariant.** Future additions to
+4. **No-mixed-model invariant.** Additions to
    `chelis_metal_runtime.h` MUST follow the same ARC model. Any new
    helper that would mix models must be in a separate translation unit
    with explicit boundary documentation; it must not be added to
    `chelis_metal_runtime.h`.
 
-These four invariants exist so that the implementation phase that adds the
-MPS wrappers does not re-decide the ownership model, and so that future
-Metal runtime work cannot drift the contract.
+These four invariants keep one ownership model across the Metal runtime.
 
 ### 1.2 Function Types
 
@@ -384,7 +332,7 @@ Last child is the precision type (must be a numeric `t-prim`). All preceding chi
 ;; Option f32
 (t-adt {} Option (t-prim {} f32))
 
-;; List (tensor[batch, f32]) -- illustrative future/planned collection typing surface
+;; List (tensor[batch, f32])
 (t-adt {} List (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 
 ;; No type arguments
@@ -439,10 +387,6 @@ Recursive references are by name. No explicit `mu` type needed:
   (variant {} Nil))
 ```
 
-The recursive `List` example shows the intended type-level shape of collection support.
-It should not be read as a claim that the full practical collection runtime and
-iteration surface are already shipped today.
-
 ### 2.3.1 Generic ADT representation classification
 
 > **[04-ADT-1]** Backend layout and generic-function specialization SHALL use
@@ -454,7 +398,7 @@ A parameter used only as a tensor dimension is representation-erased; a
 parameter used as a tensor precision or another value-represented field is
 stored. The distinction is recursive through nested ADTs. Thus
 `Frame[n,a] -> Hamt[Column[n,a]] -> tensor[n,a]` erases `n` but must retain
-and specialize `a` (chelis#940, chelis#948). The checked registry and authored
+and specialize `a`. The checked registry and authored
 signature marker survive serialization, context composition, effects
 reannotation, and linearity annotation.
 
@@ -463,7 +407,7 @@ reannotation, and linearity annotation.
 > scheme, a substitution SHALL NOT be applied through that scheme's quantified
 > type, dimension, or rank variables, including through an alias chain. Thus
 > one concrete tensor extent, rank, precision, or stored ADT argument cannot
-> constrain a later use in the same consuming module (chelis#968).
+> constrain a later use in the same consuming module.
 
 ### 2.4 Exhaustive Pattern Matching
 
@@ -543,7 +487,7 @@ the names of decls it admits at each boundary: the package/source
 rewrite (`rewrite_module_decls`, used by `check`/`build`/the library
 context) rewrites every binding name through `internal_name`. The
 eval/test entry rewrite (`rewrite_eval_module_decls`, used by `chelis
-test`, `chelis eval`'s in-context path, module-init, and the legacy
+test`, `chelis eval`'s in-context path, module-init, and the batch
 batch path) keeps user-authored binding names (so eval can report
 roots and the test runner can select synthetic roots by name) and
 therefore rejects the reserved format at that boundary directly: a
@@ -662,7 +606,7 @@ post-desugar and raw `.dp`). The authoritative design record is
 - **Opaque required.** An `invariant` key requires `opaque: true`
   (assumption injection is unsound for a forgeable type).
 - **Value class.** The representation must be exactly one record-shaped
-  variant; every field must be in the V1 value class: a **numeric or
+  variant; every field must be in the invariant value class: a **numeric or
   boolean** scalar primitive (`f32`, `f64`, the signed integer widths,
   `bool`), a fixed-shape `f32`/`f64` tensor (every dimension literal), or
   a nested single-variant record whose fields are themselves value class.
@@ -703,48 +647,20 @@ are no predicates in the typing judgment, no verification conditions at
 use sites, and no solver in the check loop. A program whose invariant
 is **violated** by an in-module constructor (e.g. constructing a
 `Probability { value: 5.0 }` under `value <= 1.0`) still type-checks.
-The invariant is consumed by `chelis prove` (derived producer
-obligations and assumption injection) in later workstreams, not by
-`chelis check`.
+The invariant is consumed by `chelis prove` for derived producer obligations
+and assumption injection, not by `chelis check`.
+
+### 2.6 Collection Observation
+
+The read-only container queries `len` and `index` are observational on a
+tensor-carrying `List` or `Dict`: they auto-borrow their container argument
+and do not consume it, so reading a container's length or an element does not
+forbid a later reuse of the container. See `spec/05-risc-primitives.md`
+§1.3.1.
 
 ---
 
 ## 3. Hindley-Milner Inference
-
-### 2.5 Planned Remaining Phase 3 Type-Surface Extensions
-
-The remaining language-completeness work is expected to make the following type-level
-surfaces practical and executable:
-
-- first-class non-tensor `Int`, `Float`, and `Bool` values
-- first-class `string` values with ordinary operations
-- `Option[T]` as the ergonomic failure-returning surface for parse/lookups
-- `List[T]` and `Dict[K, V]` as practical collection types
-- explicit bridges between collection values and tensor values
-- later Phase 3 core numeric surfaces such as `einsum`, `gather`, `where`, `sort`,
-  `diagonal` / `trace`, and `clamp`
-- later standard-library host types such as `Std.Time` and `Std.Decimal`
-
-The currently shipped executable `3d` slice covers compiled collection foundations:
-`List[T]`, list literals, `len`, `index`, `append`, `concat`, `take`, `drop`,
-`chunk`, `flatten`, `range`, `zip`, `enumerate`, numeric `to_tensor`, practical rank-1
-`to_list`, `pad_sequences`, and the first immutable `Dict[K, V]` surface (`dict_of`,
-`dict_get`, `dict_contains`, `dict_remove`, `dict_insert`, `dict_merge`, `dict_keys`,
-`dict_values`, `dict_entries`) plus higher-order iteration (`map`, `filter`, `fold`,
-`scan`, `partition`, `flat_map`) compile through the host-value lane, and callback
-effects propagate through iteration in the shipped checker. This compiled helper set is
-now the practical collection foundation for `3g`: nested token lists can be flattened
-or chunked on the host side, dictionaries can be updated/trimmed immutably, and
-`pad_sequences` still marks the explicit bridge into fixed-shape tensors.
-
-Those items should be treated as Phase 3 implementation targets, not as a claim that the
-current evaluator/backends already provide the full runtime behavior implied by the type
-examples above.
-
-The read-only container queries `len` and `index` are observational on a
-tensor-carrying `List` / `Dict`: they auto-borrow their container argument and do not
-consume it, so reading a list's length or an element does not forbid a later reuse of the
-list (chelis#527). See `spec/05-risc-primitives.md` §1.3.1.
 
 ### 3.1 Algorithm
 
@@ -896,7 +812,7 @@ Standard notation: Γ ⊢ e : τ means "in environment Γ, expression e has type
     Γ ⊢ (tuple-get {} e k) : τₖ
 ```
 
-**grad (shipped 2db result shape):**
+**grad:**
 If `f` has scalar floating output, `grad(f)` returns gradients only.
 The gradient payload shape is:
 
@@ -904,8 +820,7 @@ The gradient payload shape is:
 - multiple differentiable targets => flat `t-tuple` in target order
 - explicit `wrt` on a non-differentiable parameter => type error
 
-The forward value is not bundled into the `grad(...)` result in the shipped language
-surface.
+The forward value is not bundled into the `grad(...)` result.
 
 ---
 
@@ -923,10 +838,7 @@ Tensor operations require strict dimension matching. Two dimension lists are com
 - `(d-name {} batch)` unifies with `(d-var {} a)` — binds `a = batch`.
 - `(d-name {} batch)` unifies with `(d-lit {} N)` — a concrete literal satisfies a
   concrete-but-named slot at the call site. Names are preserved in diagnostics; they do
-  not impose a distinct-from-literal constraint. This is Option A from
-  `Chelis-Lang/chelis#219`, which removes the prior `Name <-> Lit` asymmetry that
-  rejected `f(to_tensor([[1, 2, 3]]))` against `def f(x: tensor[batch, hidden, f32])`
-  even though the corresponding `Var <-> Lit` shape was accepted.
+  not impose a distinct-from-literal constraint.
 
 ### 4.2 No Broadcasting
 
@@ -946,10 +858,22 @@ Rationale: Broadcasting masks fatal dimension errors in AI-generated code. Named
 
 | Operation | Input type(s) | Output type | Dimension rule |
 |---|---|---|---|
-| `add`, `mul`, `max_elem` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | Dimensions must match exactly |
-| `neg`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved |
-| `sum(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k |
-| `max_reduce(x, axis=k)` | same as sum | same as sum | same as sum |
+| `add`, `mul`, `div`, `floor_div`, `trunc_div`, `max_elem`, `wrap_add`, `wrap_sub`, `wrap_mul` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | Dimensions must match exactly; each operation's dtype domain remains as specified in spec/05 |
+| `cmplt`, `lt`, `gt`, `gte`, `lte` | `tensor[D, p_numeric]`, `tensor[D, p_numeric]` | `tensor[D, bool]` | Dimensions and numeric dtypes must match exactly |
+| `eq`, `neq` | `tensor[D, p]`, `tensor[D, p]` | `tensor[D, bool]` | Dimensions and active tensor element dtypes must match exactly; the scalar and recursive host-value forms are governed by [05-OP-36] |
+| `neg`, `recip`, `exp`, `log`, `sin`, `cos`, `tan`, `atan`, `sqrt`, `abs`, `floor`, `ceil`, `round` | `tensor[D, p]` | `tensor[D, p]` | Dimensions preserved; each operation's dtype domain remains as specified in spec/05 |
+| `is_nan`, `is_finite`, `is_infinite` | `tensor[D, p_float]` | `tensor[D, bool]` | Dimensions preserved |
+| `sum(x, axis=k, accumulator=a)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, sum_result(p,a)]` | Remove dimension at axis k; `sum_result` is §5.7.1's result-precision rule |
+| `count(x, axis=k)` | `tensor[d₁,...,dₙ, bool]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, int64]` | Remove dimension at axis k; the named multi-axis form removes every selected axis |
+| `mean`, `max_reduce`, `min_reduce`, `prod_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, p]` | Remove dimension at axis k; `mean` additionally requires float `p` |
+| `argmax_reduce`, `argmin_reduce` `(x, axis=k)` | `tensor[d₁,...,dₙ, p]` | `tensor[d₁,...,d_{k-1},d_{k+1},...,dₙ, int64]` | Remove dimension at axis k |
+| `cumsum(x, axis=k)` | `tensor[D, p]` | `tensor[D, sum_result(p,default(p))]` | Dimensions preserved; every prefix uses §5.7.1's default sum accumulator |
+| `sort(x, axis=k)` | `tensor[D, p]` | `(tensor[D, p], tensor[D, int64])` | Values and stable source indices preserve the input dimensions |
+| `where(cond, yes, no)` | `tensor[D, bool]`, `tensor[D, p]`, `tensor[D, p]` | `tensor[D, p]` | All three dimension lists match exactly |
+| `clamp(x, lower, upper)` | `tensor[D, p]` plus rank-zero or `tensor[D, p]` bounds | `tensor[D, p]` | Bounds are explicitly rank-zero or shape-equal; no broadcasting rule is inferred |
+| `diagonal(x, axis1, axis2)` | `tensor[D, p]` | `tensor[D_diagonal, p]` | Remove axis2 and replace axis1 by the smaller selected extent as [05-OP-33] specifies |
+| `trace(x, axis1, axis2)` | `tensor[D, p]` | `tensor[D_without_axes, sum_result(p,default(p))]` | Remove both axes; sum the selected diagonal with the default accumulator |
+| `einsum(equation, left, right, accumulator=a)` | two `tensor[..., p]` operands | `tensor[D_output, sum_result(p,a)]` | Explicit output labels define `D_output`; [05-OP-33] owns label/extent legality |
 | `reshape(x, shape)` | `tensor[D_old, p]` | `tensor[D_new, p]` | Product of dims must match. New dims are `d-lit` or `d-name` (user-specified) |
 | `permute(x, axes)` | `tensor[d₁,...,dₙ, p]` | `tensor[d_{axes[0]},...,d_{axes[n-1]}, p]` | Reorder dimensions |
 | `expand(x, shape)` | `tensor[D_small, p]` | `tensor[D_large, p]` | Add dimensions. Each new dim is explicit. |
@@ -995,7 +919,7 @@ dim variable is genuinely bound to a concrete dimension.
 ;; tensor[n, f32]; n and m are distinct rigid dim parameters.
 ```
 
-#### 4.4.1 Return-Only Dim Parameters (chelis#273)
+#### 4.4.1 Return-Only Dim Parameters
 
 A declared dim parameter that appears **only in the return type** has a
 different relationship to the body than a param-position one. Chelis has
@@ -1051,7 +975,7 @@ Three deliberate boundaries of this rule:
 - coupling through a *named* symbolic dim
   (`def f(x: tensor[batch, f32]) -> tensor[m, f32] = x`, which binds
   `m` to `batch`) is not flagged: `Dim::Name` unifies permissively by
-  design (chelis#219) and no declared dim parameter participates.
+  design and no declared dim parameter participates.
   (When a param-position declared dim parameter *also* resolves to the
   same name — e.g. `def f[n, m](x: tensor[n, f32],
   y: tensor[batch, f32]) -> tensor[m, f32] = add(x, y)` binds both `n`
@@ -1061,13 +985,8 @@ Three deliberate boundaries of this rule:
   (`def f[k](b: tensor[*, f32]) -> tensor[k, f32] = b` is accepted):
   the wildcard unifies permissively without binding (§4.5), so `k`
   stays unbound and generalizes even though the returned value's
-  runtime dimension is the input's. This is the pre-existing §4.5
-  wildcard permissiveness, not a new tolerance of this rule.
-
-Enforcement is `check_return_only_dvars_rigid` in
-`crates/chelis-types/src/infer.rs`, run at the same def-vs-signature
-reconciliation point as the §4.4 param-position guard; the acceptance
-oracle is `crates/chelis-cli/tests/issue_273_return_dvar_rigidity.rs`.
+  runtime dimension is the input's. This follows §4.5's wildcard
+  permissiveness.
 
 ### 4.5 The Wildcard Dimension
 
@@ -1107,15 +1026,13 @@ Rationale: Chelis dimension variables (§4.4) range over individual
 dimensions, not over shape vectors. Permitting `[rank-1, rank-2]` to
 unify by erasing the rank would mask the kinds of transposition and
 reshape bugs that named dimensions exist to catch (§4.2 rationale). A
-rank-erased element type is not provided in the shipped surface; users
+rank-erased element type is not part of the language; users
 who genuinely need to carry mixed-rank tensors through a list must
 reshape elements to a common rank before listing, or use a sum type
 that names each rank as a separate variant. A rank-polymorphic
-`List[tensor[k, f32]]` (letting `k` range over shape vectors per call
-site) was considered and deferred: the named-dim safety guarantee in
-§4.2 is preferred over the additional flexibility, and the
-reshape-at-the-boundary idiom is cheap enough that current consumers
-absorb it without losing per-tensor named dimensions. A *constrained,
+`List[tensor[k, f32]]` does not let `k` range over shape vectors; the
+named-dim safety guarantee in §4.2 takes precedence over that additional
+flexibility. A *constrained,
 name-preserving* shape spread that does **not** sacrifice that guarantee
 is admitted for top-level tensor signatures by Tier-3 rank polymorphism
 (§4.5.3) — but it remains barred from `List`/ADT element position, so the
@@ -1151,8 +1068,7 @@ A list literal of tensors, `[a, b, ...]`, desugars to a `Cons`/`Nil`
 chain. Each `Cons` step computes a **per-axis join** of the new element
 against the running list-element type. The join is intentionally
 permissive about *concrete* shape so that the common
-`concat([a, b], axis)` pattern accepts elements whose concrete axes
-differ (chelis#218):
+`concat([a, b], axis)` pattern accepts elements whose concrete axes differ:
 
 - equal concrete dims (two equal literals, or two equal names) are
   preserved;
@@ -1166,11 +1082,7 @@ differ (chelis#218):
   distinct rigid dims unify with each other; a `(rigid, concrete)` pair
   pins the rigid dim to the concrete value.
 
-This is the chelis#272 tightening. The earlier behavior widened *every*
-non-equal pair — including pairs naming rigid dim parameters — to a
-wildcard, which then satisfied an explicit `List[tensor[k, f32]]`
-return annotation and silently defeated the §4.4 rigid-distinct-dim
-guarantee. Two consequences of the tightened rule:
+Two consequences of the rule are:
 
 1. A body whose list mixes two **distinct rigid dims** (e.g.
    `def make[k, m](a: tensor[k, f32], b: tensor[m, f32])
@@ -1192,8 +1104,7 @@ binding makes **no** uniformity promise — a bare
 dim parameters, or an explicit `List[tensor[*, f32]]` annotation, both
 type-check.
 
-Two boundary properties of the current rule are intentional but narrow,
-and are locked by dedicated tests so a future change is a conscious one:
+Two boundary properties complete the rule:
 
 - **The `(concrete, wildcard)` join is head-biased.** A `Cons` step
   resolves the joined axis to whatever the *head* (the element being
@@ -1203,40 +1114,28 @@ and are locked by dedicated tests so a future change is a conscious one:
   `[tensor[*, f32], tensor[2, f32]]` joins to `tensor[*, f32]` (the
   wildcard head erases the concrete tail). Under a `def f[k](a:
   tensor[2, f32], b: tensor[*, f32]) -> List[tensor[k, f32]]`
-  annotation **both orderings are now rejected**, but through different
+  annotation **both orderings are rejected**, but through different
   guards: the concrete-element ordering pins the return-only `k` to the
   parameter's `Lit(2)` and trips the §4.4.1 return-position rigidity
-  check (chelis#273 — parity with the non-list
+  check (the same rule as the non-list
   `def f[k](a: tensor[2, f32]) -> tensor[k, f32] = a`), while the
   wildcard-element ordering trips the join-origin-wildcard uniformity
   check below. The head bias itself is still observable in *which*
-  diagnostic fires. (Before chelis#273 the concrete-element ordering
-  type-checked, because the return-only `k` was outside the rigidity
-  guard's param-position scope.) Genuinely-mismatched *concrete*
+  diagnostic fires. Genuinely-mismatched *concrete*
   heads/tails still widen to `*` regardless of order (the ragged-axis
   arm).
-- **The uniformity check recurses through nested `List` wrappers**
-  (chelis#276). It compares the declared and body element axes of a
+- **The uniformity check recurses through nested `List` wrappers.** It compares the declared and body element axes of a
   `List[tensor[..]]`, and when the element is itself a `List` it descends
   into it, so an inner rigid/named dim under `List[List[tensor[k, f32]]]`
   — at any nesting depth — is checked too. A wildcard tensor nested under
   `List[List[tensor[k, f32]]]` is therefore rejected, the same as the
   single-level `List[tensor[k, f32]]` case: `List[List[tensor[k]]]` still
-  promises every innermost element shares length `k`. (The earlier
-  single-level check left this same #272 soundness gap one `List`
-  deeper.)
+  promises every innermost element shares length `k`.
 
-The enforcement is in `crates/chelis-types/src/infer.rs`
-(`infer_app`'s `Cons` join and `check_list_elem_rigid_dim_vs_wildcard`,
-alongside `check_declared_dvars_rigid`); the acceptance oracle is
-`crates/chelis-cli/tests/issue_272_list_dim_rigidity.rs` with the
-chelis#218 ergonomics locked by
-`crates/chelis-cli/tests/issue_218_to_tensor_in_grad_body.rs`.
+#### 4.5.3 Name-Preserving Rank Polymorphism
 
-#### 4.5.3 Name-Preserving Rank Polymorphism (Tier-3)
-
-§4.5.1 deferred a shape-vector variable because *rank erasure masks
-transposition bugs*. Tier-3 admits a **constrained, name-preserving** shape
+Rank-erasing shape variables are forbidden because *rank erasure masks
+transposition bugs*. Chelis instead admits a **constrained, name-preserving** shape
 spread that does not reopen that hole: a rank variable `..r` (the `Dim::Rank`
 spread) binds to the *actual named dims it covers*, so per-axis names are
 retained, not erased, and the surviving axes carry their identity through.
@@ -1254,22 +1153,38 @@ symbolically.
 ;;   tensor[a, b, seq, c]       -> tensor[a, b, c]
 ```
 
-Multiple **named** axes may be reduced in one call — the variadic form
-`sum(x, seq, head)` (chelis#339) — or by composing single-axis reductions
-(`sum(sum(x, head), seq)`); the two are equivalent, and the variadic form is
-order-insensitive (`sum(x, head, seq)` produces the same result). The variadic
-form is defined for the value reductions `sum`, `mean`, `max_reduce`,
-`min_reduce`, and `prod_reduce` (for `mean`, reducing axes one at a time with
-uniform weights equals the joint mean). It is **not** defined for the
+Multiple axes may be reduced in one call. A rank-polymorphic operand uses
+unique named axes — `sum(x, seq, head)` or `count(mask, seq, head)`. A
+concrete-rank operand may instead use one or more compile-time int32 positional
+axes — `sum(x, 1i32, 3i32)` or `count(mask, -1i32, 0i32)`. Each positional
+axis applies §4.7's one-step negative normalization against the original rank;
+every normalized axis must be in range and unique. Named and positional axes
+cannot be mixed in one call. For value reductions, the result is obtained by
+composing single-axis reductions in the
+canonical order below. The variadic form is order-insensitive:
+`sum(x, head, seq)` and `sum(x, seq, head)` produce the same result because
+axis arguments are sorted by their positions in the original operand, from
+highest position to lowest, before lowering. The resulting single-axis
+composition owns the exact value, trap, NaN-selection, and adjoint behavior;
+source spelling order never does. A dedicated multi-axis node such as
+`Count` stores this same strictly descending normalized original-position
+vector rather than the source order. The variadic form is defined for the value
+reductions `sum`, `mean`, `max_reduce`, `min_reduce`, and `prod_reduce`.
+`count` instead resolves the complete unique axis set and executes the
+single dedicated multi-axis reduction of [05-OP-29]; it cannot compose
+single-axis `count` operations because the first result has dtype `int64`.
+The variadic form is **not** defined for the
 index-returning reductions `argmax_reduce`/`argmin_reduce`: an index along one
 axis is not composable with a second reduction, so a variadic call on those is
-a hard error. Every axis in a variadic call must be a *named* axis (a
-positional integer is only valid as the single axis of a concrete-rank
-operand), each name must resolve per the rules above, and a **duplicate** axis
-name in the list is a hard error. Inside a `..r` body the Body-Discipline
-admission is unchanged (`sum`/`mean` only, chelis#340). At lowering the
-variadic call desugars to the composition, innermost stage reducing the last
-listed axis.
+a hard error. Every named axis must resolve per the rules above; duplicate
+names, duplicate normalized positional axes, a dynamic positional value, or a
+mixed named/positional list is a hard error. Inside a `..r` body, the
+Body-Discipline admits exactly the named-axis reduction operations whose
+signatures preserve symbolic-rank trackability, including `sum`, `count`,
+`mean`, `max_reduce`, `min_reduce`, and `prod_reduce`, with their ordinary
+operand and result dtype rules. At lowering, value reductions
+desugar to the canonical highest-original-position-first composition, while
+`count` lowers once with the complete resolved axis vector.
 
 **Unification (unitary).** A row shape unifies with a ground shape by locating
 each named anchor uniquely in the ground and binding the spreads to the runs
@@ -1286,8 +1201,7 @@ most-general unifier:
 
 **Named-axis expand (`R+1`).** The inverse arithmetic direction: `expand`
 inserts a *named* axis in a rank-polymorphic way when its axis argument is a
-dimension name rather than an integer. Two call forms are admitted
-(chelis#339):
+dimension name rather than an integer. Two call forms are admitted:
 
 ```chelis
 ;; insert a trailing named axis (the new axis goes after every existing axis):
@@ -1315,11 +1229,10 @@ Hard errors (`DimensionMismatch`, never a guessed placement):
   would make every later by-name lookup ambiguous). This holds through
   call-site rank monomorphization too: when the inserted name survives into
   the result row, a caller whose spread-covered axes include that name is
-  rejected at check time (the introduced-name rule in `unify.rs`); when the
-  inserted name is consumed inside the body (insert + reduce), or the
-  collision comes from a single-letter dim *var* whose source letter matches,
-  the check cannot see it and the collision surfaces as a **fatal lowering
-  error** at build/eval — loud, never a silent wrong-axis resolution;
+  rejected at the earliest fully instantiated typed boundary. This includes
+  a name consumed later in the body by insert-then-reduce and a collision
+  originating from a single-letter dimension variable; neither may be
+  deferred into lowering or resolved by guessing;
 - the anchor is absent from the operand's row, or ambiguous (appears more than
   once);
 - a *positional* (integer) insert axis on a rank-spread operand — an index is
@@ -1333,17 +1246,14 @@ Hard errors (`DimensionMismatch`, never a guessed placement):
 The inserted axis is a *named* dim: declared result types refer to it by name
 (`tensor[..rest, one, f32]`). A bare identifier in the axis slot is read as a
 dimension name only when it is **not bound in the value environment**: a bound
-`int32` variable is a runtime value and keeps the compile-time-constant
-rejection (issue #259) — `expand(x, ax, 4)` with `ax: int32` is still an
-error, never a trailing insert of an axis named `ax`. The `size` argument
-must be a **positive compile-time literal** (an `int64` literal `Ni64`, or a
-`cast(N, int64)` form):
-the inserted axis's extent is stamped onto the new named dim at lowering, and
-a symbolic-dim or runtime `int64` size has no stampable extent (the eval lane
-cannot stage it and the C backend would reference an undeclared dim symbol),
-so those forms are rejected at check time. The positional concrete-rank
-`expand` forms (§4.7.2, insert-or-set) are unchanged and keep the three
-§4.7.2 size forms. At lowering, the named insertion point
+`int32` variable is a runtime value and keeps the static-axis rule:
+`expand(x, ax, 4i64)` with `ax: int32` is an error, never a trailing insert
+of an axis named `ax`. The `size` argument is any expression of exactly type
+`int64`. A static negative value is a type error; a runtime negative value
+traps `Domain`. The inserted named dimension carries the executed extent. A
+literal or named extent claimed by a surrounding result type is either proven
+equal statically or protected by an execution-time equality guard under
+§4.7.2; no backend may require a literal size. At lowering, the named insertion point
 is resolved against the monomorphized operand dims (trailing → operand rank;
 anchored → the anchor's index), mirroring named-axis reduction.
 
@@ -1358,20 +1268,9 @@ could hide an untracked transposition. For the name-tracked ops the procedural
 inference arm is the real gate: it rejects a positional index at symbolic rank
 and a non-existent/ambiguous/duplicate axis name, so no transposition can slip
 past. This is what keeps the §4.5.1 transposition-safety guarantee intact while
-admitting the deferred flexibility for the reduction and expand cases.
+admitting reductions and named-axis expansion at symbolic rank.
 
-Enforcement: the unification arm is `crates/chelis-types/src/unify.rs`
-(`unify_row_against_ground` / `unify_row_against_row`); the named-axis reduction
-arm is `check_reduction_signature`, the named-axis expand arm is
-`check_expand_signature`, and the discipline check is
-`check_rank_body_discipline` in `crates/chelis-types/src/infer.rs`. Call-site
-**rank monomorphization** (`tensor_rank_substitutions` /
-`extract_rank_var_bindings` in `crates/chelis-ir/src/lower.rs`) substitutes each
-spread's concrete run and resolves the named axis to a positional index at
-lowering, so a rank-poly reduce **builds and runs** on the C backend. The
-acceptance oracle is `crates/chelis-cli/tests/rank_poly_tier3.rs`.
-
-#### 4.5.4 Concat Result Typing (chelis#631, chelis#594)
+#### 4.5.4 Concat Result Typing
 
 `concat(list, axis)` over a `List[tensor[...]]` types its result from the
 joined element type (§4.5.2), the **concat axis value**, and the
@@ -1381,7 +1280,7 @@ chain at the concat site exposes every element, while a variable bound
 to a list literal in an enclosing `let` (or top-level bind) carries only
 its literal **length** to the concat site. The rules, in order:
 
-1. **Direct per-element sum (chelis#594).** Axis is a static integer
+1. **Direct per-element sum.** Axis is a static integer
    literal (negative axes normalize against the element rank) and the
    list is a literal chain at the concat site whose every element
    carries a **literal** extent on the concat axis: the concat axis
@@ -1414,20 +1313,10 @@ its literal **length** to the concat site. The rules, in order:
    types `*` at the element rank — rank is still statically known
    (§4.5.1 rank uniformity), per-axis extents are not.
 
-History: before chelis#631 the checker typed the result from the element
-type alone and wildcarded the **last** axis unconditionally, so an
-axis-0 concat of two `[1, m]` rows was typed `[1, m]` — a wrong concrete
-extent that the host-program C lane baked into tensor-helper signatures,
-turning valid guarded (`if`/`fail`) forward programs into runtime
-aborts. That misplaced-wildcard shape is also what chelis#594 reported.
-Enforcement is `tensor_concat_result_type` in
-`crates/chelis-types/src/infer.rs`; the acceptance oracle is
-`crates/chelis-cli/tests/issue_631_guarded_forward_concat_c_parity.rs`.
-
 ### 4.6 Property Definitions
 
 Surf `@property` declarations type-check as ordinary functions whose result
-type is `bool`. Every binder must have an explicit type in v1. The `where`
+type is `bool`. Every binder must have an explicit type. The `where`
 preconditions must type-check as `bool` expressions in the binder scope; the
 predicate body must type-check as `bool`.
 
@@ -1439,31 +1328,36 @@ signature like any other definition.
 
 ### 4.7 Runtime Shape Semantics
 
-Some Chelis programs need to pass a runtime axis size as an argument to a
-movement primitive, typically when the input tensor has a symbolic batch
-dimension that is only known at run time. The relevant built-ins are:
+Runtime shape values are ordinary typed integer values. Their legality never
+depends on whether an expression is literal, inline, let-bound, top-level,
+returned by a function, or derived by integer arithmetic. The relevant
+built-ins are:
 
 - `shape(x, axis)`: returns the size of `x`'s `axis`-th dimension as an
-  `int64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` must be
-  a concrete non-negative integer literal (either a bare `int32` literal
-  or a `cast(N, int32)` form; both reach the axis-bounds check). The
-  result is a runtime scalar, not a symbolic dim reference.
+  `int64` value (`spec/05-risc-primitives.md` [05-DIM-2]). `axis` is any
+  expression of exactly type `int32`. The result is a runtime scalar, not a
+  symbolic dim reference.
 - `expand(x, axis, size)`: insert or set a dimension at position `axis`
-  with width `size`. When `axis` is a dimension *name* instead of an
-  integer, the call is the named-axis expand form (§4.5.3): it inserts a
-  new named axis at the trailing end, or — with a fourth `anchor`
-  argument — immediately before an existing named axis.
+  with width `size`, where `size` is any expression of exactly type `int64`.
+  When `axis` is a dimension *name* instead of an integer, the call is the
+  named-axis expand form (§4.5.3): it inserts a new named axis at the trailing
+  end, or — with a fourth `anchor` argument — immediately before an existing
+  named axis.
 - `reshape(x, shape_list)`: reinterpret the memory of `x` against
-  `shape_list`, a `List<int64>`.
+  `shape_list`, a `List<int64>`; every element may be computed at runtime.
+- `reduce_window_*`: consume runtime `List[int64]` window and stride values
+  under [05-RWIN-1..2]. Their values and list lengths are validated at
+  execution when not statically known.
 
-This section pins which call shapes preserve symbolic dims in the type
-checker's output and which fall back to `(d-name {} *)` (see §4.5). The
-canonical examples live in
-[`examples/illustrative/runtime_shape_semantics.ch`](../examples/illustrative/runtime_shape_semantics.ch).
+Static knowledge improves diagnostics and symbolic dimension propagation; it
+does not define a smaller executable language. A violation proven from
+literals is a type error. A constraint that depends on runtime values is
+checked before allocation or element access and traps `Domain` or `Overflow`
+under the owning operation's atom. Every execution mode observes the same
+values and traps.
 
 For the movement primitives, symbolic-dim pass-through is
-**identity-only** (chelis#632, mirroring the IR-side rule in
-`chelis_ir::dag::shape_source_for_axis`): a `stride` axis with literal
+**identity-only**: a `stride` axis with literal
 step 1 and a `pad` axis with zero padding keep the input's symbolic dim;
 every other movement axis — a non-identity literal step or padding, or
 any runtime bound — types a fresh `(d-name {} *)` whose extent the
@@ -1475,34 +1369,33 @@ extents.
 
 #### 4.7.1 `shape` axis form
 
-Both forms below produce an `int64` value ([05-DIM-2]) and both pass the
-infer-time axis-bounds check (`cast(N, int32)` is unwrapped by the
-cast-aware extractor described in `crates/chelis-types/src/infer.rs`):
+Every form below produces an `int64` value ([05-DIM-2]):
 
 ```text
 shape(x, 0)
 shape(x, cast(0, int32))
+shape(x, -1)
+shape(x, cast(-1, int32))
+shape(x, axis_parameter)
+shape(x, computed_int32_axis)
 ```
 
-Internal callers (stdlib) use the `cast(0, int32)` form for stability
-against future literal-default changes. User code MAY use either.
-
-A negative axis or an axis greater than or equal to the input rank is a
-type error (`DimensionMismatch`).
+The bare and cast literal spellings are equivalent. Every literal or computed
+axis first adds the input rank exactly once when negative, so `-1` names the
+last axis. A statically known normalized value outside `0..rank` is a type
+error (`DimensionMismatch`). A computed normalized value outside that range
+traps `Domain` as operation `shape` before reading metadata. An axis whose
+type is not exactly `int32` is a type error; no width is inferred or coerced.
+The zero-cotangent and target-independent execution rules are [05-OP-7] and
+[05-SHAPE-1].
 
 #### 4.7.2 `expand` with a runtime size
 
-`expand(x, axis, size)` accepts three forms for its `size` argument:
-
-1. an `int64` integer literal (`Ni64`, or a `cast(N, int64)` form):
-   produces an output dim of `(d-lit {} N)`.
-2. a symbolic dim name in scope (a bare `var` reference such as a
-   declared `[batch]` dim parameter): produces an output dim of
-   `(d-name {} batch)`.
-3. any other `int64` expression, including a runtime `shape(...)`
-   call: the typer defers the output rank slot to whatever the
-   declared signature's return-type or the surrounding call context
-   imposes via standard unification.
+`expand(x, axis, size)` accepts any `int64` `size`. A literal produces a
+literal result extent; an in-scope symbolic dimension may preserve its name;
+and every other expression produces a fresh runtime extent. A static negative
+size is a type error. A runtime negative size traps `Domain` before allocation
+or access.
 
 For a positional three-argument call, a declared result tensor or the first
 shape-bearing consumer fixes which of the two shapes applies: a same-rank
@@ -1518,179 +1411,38 @@ fixes the shape. A reusable library context carries the unresolved choice to
 its downstream program rather than deciding it early. An axis greater than
 `rank(x)` is a type error.
 
-**Sourceless-size rejection (source-tracking).** A runtime `size`
-that is neither form (1) nor a form-(2)/form-(3) shape source has no
-extent the backend can materialize, so the checker rejects it at check
-time with the §4.7.2 sourceless-size diagnostic. The discriminator is
-**provenance, not surface spelling**: a runtime size is accepted iff
-its value provably
+When a declared or inferred result dimension claims a literal or named extent
+that is not statically proven equal to `size`, execution checks equality and
+traps `Domain` on mismatch. An unconstrained computed extent is represented as
+`(d-name {} *)`. The runtime value itself is always retained. A function
+parameter, top-level or local binding, user-function result, cast, or checked
+integer-arithmetic expression is equally admissible; no stage may reject an
+extent because of its provenance or default it to one.
 
-- **folds to a compile-time constant** — a literal, a `cast(N, _)`,
-  or integer arithmetic (`add`/`sub`/`mul`/`div`/`mod`/`neg`) over
-  such values — or
-- **derives from an in-scope tensor's shape** — a `shape(t, axis)`
-  read, or a bare `var` naming an in-scope tensor dimension (form 2)
-  — followed transitively through `let` bindings, `cast` wrappers,
-  and integer arithmetic.
+#### 4.7.3 `reshape` with runtime sizes
 
-Everything else is sourceless: a bare runtime scalar parameter (e.g.
-`a_dim: int64`), a `cast`-wrapped one (`cast(a_dim, int64)`), a `let`
-bound to one (`d = a_dim`), arithmetic that *touches* one
-(`add(a_dim, 1)` — sourceless is absorbing), or **any other
-function-call value** (`ident(a_dim)`, a user `def` — an inline
-non-arithmetic / non-`shape` / non-`cast` `app`-rooted size produces a
-runtime value with no shape source the check layer can see). All of
-these are rejected **uniformly**, whatever the spelling. The provenance
-analysis is per-scope-correct: a name that re-binds to a sourceless RHS
-(`len = shape(x, 0)` then `len = k`) loses its earlier shape provenance,
-and a value parameter that shadows an outer shape-sourced name (a `d:
-int32` parameter shadowing an outer `d = shape(&xs, 0)`) does not
-inherit it. This keeps the "a check-clean program must build" invariant:
-a sourceless runtime expand size (whether a single `expand(g, 0, a_dim)`
-or a chained rank-1 → rank-N broadcast such as `broadcast_to_achw`) is
-rejected identically at `check`, `build`, and `eval`. Source the extent
-from a tensor in scope via the form-(3) `shape(x, cast(axis, int32))`
-read instead — directly or bound to a `let`. Tracked by
-Chelis-Lang/chelis#397 and #469.
+`reshape` accepts a `List[int64]` whose arity is statically known, because
+tensor rank is part of the static type. Every element may be an arbitrary
+runtime int64 expression. A literal extent becomes a literal result dim. A
+direct shape read may preserve an input dimension identity only when ordinary
+type reasoning proves that identity; an arithmetic expression, a cross-tensor
+read without a proof of equality, or any other computed value produces a
+fresh `(d-name {} *)` extent. A surrounding signature may give that extent a
+literal or name only by imposing an execution-time equality guard.
 
-The check-time accept set matches what the evaluator and host runtime
-materialize. The C backend's IR lowering now materializes the runtime
-extent for each of these forms (Chelis-Lang/chelis#469):
+Every target evaluates the complete shape list in source order. A negative
+extent, checked product overflow, or product different from the input element
+count traps before allocation or access. No syntactic form, binding scope,
+function boundary, or source-tensor identity changes acceptance.
 
-- an **inline `shape(x, axis)` read** and a **`let`-bound shape read**
-  (`a = shape(x, 0)` then `expand(b, 0, a)`, followed through `cast`
-  wrappers AND `let`-to-`let` aliases — `c = a; expand(b, 0, c)`) bind
-  the extent to the shape-source operand `x` via a `shape_dep` liveness
-  edge that keeps `x`'s `Load` alive through DCE; alias recovery records
-  the underlying `shape(x, axis)` app, so the extent binds to the actual
-  source tensor and axis (the `let`-bound recovery is
-  Chelis-Lang/chelis#369/#495, alias threading is #469 RT-3);
-- a **`literal`/`cast(N, _)`** size, or **static integer arithmetic**
-  over such values (`add`/`sub`/`mul`/`mod`/`neg`, followed through
-  `cast` and `let`-bound static names), is const-folded to a concrete
-  extent (Chelis-Lang/chelis#528). `div` is float-only (§ divergence
-  below / spec/05 §2.1) and never reaches this fold as an integer size.
+#### 4.7.4 Runtime shape expression execution
 
-Two residual materializable-at-check forms are **rejected loudly at C
-`build`** rather than resolved — a build-side capability limit, never a
-silent miscompile:
-
-- **integer arithmetic that combines a `shape(x, axis)` read (or a
-  symbolic dim) with another term** (`mul(shape(x, 0), 2)`,
-  `add(shape(x, 0), 1)`): the extent is a runtime `shape * k` / `shape
-  + k` the backend's `DimExpr` has no representation for, so it rejects
-  with the #469 diagnostic;
-- a **top-level-`def`-bound** shape read or static value referenced as
-  an expand size (`a = shape(&x, 0)` at module scope then
-  `expand(b, 0, a)`): top-level binding provenance is not threaded into
-  IR lowering (only `let`/block-scoped bindings are), so it rejects at
-  build.
-
-Both stay fail-closed: rejected identically enough that no `build`
-emits a wrong extent. (The old spelling-based predicate allowed a
-silent miscompile for the `cast`-wrapped and the function-call
-sourceless spellings; closing those is what makes the uniform-rejection
-claim above true at check.)
-
-Form (3) is how the `bias_broadcast` pattern from
-`examples/illustrative/runtime_shape_semantics.ch` preserves the
-symbolic batch dim `n`:
-
-```chelis
-sig bias_broadcast: &tensor[n, 4, f32] -> &tensor[4, f32] -> tensor[n, 4, f32]
-def bias_broadcast(x, b) -> tensor[n, 4, f32] = expand(b, 0, shape(x, cast(0, int32)))
-```
-
-The declared return type `tensor[n, 4, f32]` is unified with the
-fresh result tvar produced for the `expand` call; the typer does not
-need to derive the symbolic dim from the runtime `shape(...)`
-expression itself. If the call site does not impose a known dim at
-the expanded axis (for example, an unannotated `let` binding), the
-output dim at that axis falls back to `(d-name {} *)`.
-
-The above is the **typer's** behavior. IR lowering separately
-recovers the concrete broadcast *extent* for codegen and autodiff:
-when the `size` argument reads `shape(operand, axis)` — whether the
-`shape(...)` call sits directly in the `size` slot or is bound to a
-`let` name and referenced as `cast(len, int64)` (an identity cast under
-[05-DIM-2]) — lowering reads the
-extent from `operand`'s already-resolved axis dim rather than
-defaulting to size 1. The `let`-indirection case is the canonical
-`tensor_full_like` / scalar-broadcast helper idiom (`len = shape(x,
-0)` then `expand(s, 0, cast(len, int64))`); without the recovery the
-expand lowers to a size-1 axis, the size-1 broadcast that the typer
-accepts is rejected by the no-implicit-broadcasting IR, and
-`grad` fails to construct the backward DAG (Chelis-Lang/chelis#318,
-#369). Lowering additionally const-folds a fully-static size (a
-`literal`/`cast(N, _)`, integer arithmetic over such, or a `let`-bound
-static name) to a concrete extent. A `size` that is neither a recognized
-static value nor a resolvable single-tensor shape source — a bare
-runtime scalar, or arithmetic that *combines* a `shape(...)` read with
-another term (`mul(shape(x, 0), 2)`) — has no extent the backend can
-materialize and is rejected loudly at lowering, never silently defaulted
-to size 1 (§4.7.2 Form-3, Chelis-Lang/chelis#469).
-
-#### 4.7.3 `reshape` with runtime sizes from `shape(x, ...)`
-
-`reshape` recognizes one specific syntactic source for each element
-of its shape list and propagates the corresponding input axis into
-the result type. The recognized forms for a shape-list element are:
-
-```text
-shape(<reshape-input-var>, <literal-axis>)
-cast(shape(<reshape-input-var>, <literal-axis>), int64)
-```
-
-The second form's outer cast is an identity cast under [05-DIM-2],
-accepted so the pre-[05-DIM-2] spelling keeps its propagation. All
-conditions are required:
-
-1. The element is a `shape(...)` call, optionally wrapped in a `cast`
-   whose target type is `int64` (matching the `List<int64>` element
-   type that `reshape` expects).
-2. The `shape` call's first argument is a bare `var` whose bound name
-   is the same as the reshape's input tensor argument.
-3. The `shape` call's axis argument extracts to a concrete
-   non-negative integer (literal or `cast(N, int32)` form).
-
-When all conditions hold, the typer propagates the input's dim
-at the named axis into the corresponding output dim. The
-`flatten_batch` and `flatten_two` patterns from
-`examples/illustrative/runtime_shape_semantics.ch` are the canonical
-examples:
-
-```chelis
-sig flatten_batch: &tensor[n, 4, f32] -> tensor[n, 4, f32]
-def flatten_batch(x) -> tensor[n, 4, f32] = reshape(x, [cast(shape(x, cast(0, int32)), int64), cast(4, int64)])
-```
-
-A plain integer literal element (`4i64`, or `cast(4, int64)`) still
-produces `(d-lit {} 4)`. Any element shape that is not literal and does
-not match the conditions above falls back to `(d-name {} *)`.
-
-#### 4.7.4 Patterns that fall back to wildcard
-
-The following shape-list forms in `reshape` fall back to
-`(d-name {} *)` for that element. The typer does NOT manufacture a
-symbolic dim for them; the contract is "recognize the exact
-syntactic pattern from §4.7.3 or fall back."
-
-- **Cross-tensor shape source**: `cast(shape(y, axis), int64)` where
-  `y` is a different tensor than the one being reshaped. The
-  recognizer's same-input-var check requires bound-name equality.
-  Inventing a propagated dim here would silently unify two distinct
-  declared dim parameters and trip the rigidity check in §4.4.
-- **Arithmetic or other expression wrappers**: `cast(add(shape(x,
-  0), 1), int64)`, `cast(mul(shape(x, 0), 2), int64)`, etc. The
-  outer cast peel does not find a direct `shape(input, lit_axis)`
-  call, so the recognizer falls back. Propagating `x`'s dim through
-  an arithmetic wrapper would be unsound.
-- **Non-`var` reshape input**: `reshape(reshape(x, ...), [...])`
-  where the inner reshape is the input. The reshape input is not a
-  bare `var` Deep node, so there is no input-var name to match
-  against the inner `shape(...)`'s tensor arg. Inner reshape's body
-  still type-checks via the polymorphic fresh result tvar unifying
-  with the declared signature.
+Runtime extent expressions are lowered as ordinary typed integer dataflow.
+This includes function parameters, top-level and local bindings, user-function
+results, casts, and arbitrary checked integer arithmetic over literal,
+symbolic, or `shape`-derived values. Eval, C, HIP, and Metal execute the same
+graph and checks. A backend may optimize a proven constant but may not require
+one, infer provenance to narrow the language, or substitute a guessed extent.
 
 #### 4.7.5 Precision rule for `reshape`'s shape list
 
@@ -1722,20 +1474,15 @@ resolve, and its message should name the disagreeing element rather than
 render an `expected`/`got` pair, whose direction reflects unification
 order rather than which element the user got wrong.
 
-*(Not fully implemented; chelis#1112 owns the producer-side gap and
-chelis#916 the diagnostic form.)*
+#### 4.7.6 Arbitrary Runtime Shape Expressions
 
-#### 4.7.6 Out-of-scope: arbitrary runtime shape expressions
-
-Chelis does NOT currently propagate symbolic dims through arbitrary
-runtime shape expressions. If a downstream tool needs to emit code
-that derives a reshape dim from an arithmetic combination of input
-axes (`shape(x, 0) * 2`, `add(shape(x, 0), shape(y, 0))`, etc.), the
-result dim is `(d-name {} *)` and the surrounding code must accept
-that wildcard. The recommended downstream pattern is to emit only
-the recognized forms in §4.7.3 and reject other shapes at the tool
-boundary with a clear diagnostic, so the user is not surprised by a
-silent `Wildcard` cascade.
+Chelis executes arbitrary runtime shape expressions. When ordinary type
+reasoning cannot prove a symbolic identity for an expression such as
+`shape(x, 0) * 2` or `add(shape(x, 0), shape(y, 0))`, the result dim is
+`(d-name {} *)`. A surrounding literal or named-dimension claim adds the
+runtime equality guard from §4.7.2/§4.7.3; it does not make the expression
+illegal. Producers may emit any well-typed expression and need not rewrite it
+into a privileged syntactic shape.
 
 ---
 
@@ -1787,6 +1534,11 @@ that discards a fractional part, wraps, or saturates requires an explicit
 rounding operation or a distinct named conversion; it is never the default
 float-to-integer behavior of `cast`.
 
+**Named conversions ([04-NUM-16]).** `cast_trunc`, `cast_saturate`, and
+`cast_wrap` are separate operations with the source/target domains and exact
+value rules in `spec/05-risc-primitives.md` §3.8. There is no `cast_round`;
+write `cast(round(x), target)` when that composition is intended.
+
 ### 5.3 Literal Types
 
 Integer literals default to `int32`. Float literals default to `f32`. These
@@ -1807,10 +1559,7 @@ integer or float literal token at i64/f64 precision so that out-of-range
 literals can be diagnosed before defaulting; the desugarer/type-check
 narrows the literal to `int32` (for integer tokens) or `f32` (for float
 tokens) before Deep is materialized. The narrowing is mechanical and
-non-overridable except by the three mechanisms above. Implementation
-references for verification: `crates/chelis-surf/src/desugar.rs` (literal
-desugaring emits `(lit {type: (t-prim {} int32)} N)`), `crates/chelis-types/src/infer.rs`
-(literal inference rule maps `Atom::Int → Prim::Int32`, `Atom::Float → Prim::F32`).
+non-overridable except by the three mechanisms above.
 
 > **[04-LIT-1]** A primitive literal's Deep value atom SHALL agree with its
 > declared primitive family: integer atoms denote only integer primitives,
@@ -1834,15 +1583,22 @@ Operations accept same-precision operands only. The table of valid combinations:
 | Float division (div) | f32, f64, bf16, f16 only (not integer; integer operands cite `spec/05-risc-primitives.md` §2.1 and point at `floor_div` / `trunc_div`) |
 | Floor division (floor_div) | f32, f64, bf16, f16, int8, int16, int32, int64 (all same) |
 | Truncating division (trunc_div) | int8, int16, int32, int64 only (integer-only; float operands are a type error) |
-| Comparison (cmplt, eq) | any numeric (same precision) → bool |
+| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any active numeric dtype (both operands same dtype) → bool |
+| Equality (`eq`, `neq`) | any active numeric dtype or bool (both operands same dtype), plus the recursively comparable host-value domain in [05-OP-36] → bool |
 | Logical (and, or, not) | bool only |
 | Transcendental (exp, log, sin, cos, tan, atan, sqrt) | f32, f64, bf16, f16 only (not integer) |
 
-Every deferred name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
+Every reserved name of §1.1.1 - `f8e4m3`, `f8e5m2`, the `uint*` family,
 `int4`/`uint4`, `complex64`/`complex128`, and `decimal128`/`decimal256` - is
-reserved but not active, and is not a valid arithmetic precision in any row.
-Each carries a declared arithmetic width at §1.1.1 so that activating it adds
-rows here without reopening the width question.
+rejected and is not a valid arithmetic precision in any row.
+None of these reserved spellings has an arithmetic row.
+
+Every tensor comparison preserves the operand surface: two same-dtype tensors
+with identical dimensions return a bool tensor with those dimensions. Numeric
+or bool scalar equality returns a bool scalar; ordered scalar comparison is
+numeric only. The recursive host-value equality forms return one bool scalar.
+Mixed tensor/scalar surfaces or tensor dimensions are type errors.
+[05-OP-36] owns the exact values and the complete equality domain.
 
 ### 5.5 Literal Suffix Grammar
 
@@ -1863,7 +1619,7 @@ narrowing. The closed suffix set is:
 
 Float-typed suffixes (`f32`, `f64`, `bf16`, `f16`) bind the decoded float at
 that type. Canonical Surf requires the canonical float body (`42.0f32`, not
-the v0.18 alias `42f32`). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`)
+`42f32`). Integer-typed suffixes (`i8`, `i16`, `i32`, `i64`)
 attach to integer literal tokens only; `1.0i8` is a parse error.
 
 Suffix lexing rule: a suffix is part of the literal token only if it
@@ -1880,12 +1636,12 @@ binding rule, and the canonical printer emits the decoded decimal token.
 Canonical decimal float literals carry float suffixes without ambiguity
 (`1.0f32`, `1000.0f32`).
 
-Deferred suffixes:
+Rejected suffixes:
 
-- No suffix exists for any deferred name of §1.1.1 (`f8e4m3`, `f8e5m2`, the
+- No suffix exists for any reserved name of §1.1.1 (`f8e4m3`, `f8e5m2`, the
   `uint*` family, `int4`/`uint4`, `complex64`/`complex128`,
   `decimal128`/`decimal256`). Each is rejected at lex time with a diagnostic
-  pointing at §1.1.1. A suffix is authored only when its dtype activates.
+  pointing at §1.1.1.
 - The short unsigned spellings (`u8`, `u16`, `u32`, `u64`) are not reserved in
   any form; `uint8`/`uint16`/`uint32`/`uint64` are the canonical names per
   §1.1.2, matching numpy and Arrow.
@@ -1914,8 +1670,7 @@ exactly:
    precision type literal — the literal body adopts `p`
 
 Position 4 applies to a **bare scalar numeric literal** as well as to a
-tensor-literal body (issue #308; the end-to-end parse→eval consequence is
-issue #394). `cast(1.1, f64)` binds the decimal `1.1`
+tensor-literal body. `cast(1.1, f64)` binds the decimal `1.1`
 at `f64` — exactly `0x3ff199999999999a` — it does NOT narrow to the §5.3
 `f32` default and then widen (which would yield the f32-truncation value
 `1.100000023841858`). Likewise `cast(3000000000, int64)` binds the literal
@@ -1962,11 +1717,11 @@ explicit dtype that disagrees with the surrounding `f32` element type.
 
 A bare tensor literal `[1, 2, 3]` in an unannotated position evaluates to
 `tensor[3, int32]`, not `tensor[3, int64]`. The fallback to the §5.3
-default is the spec contract; the implementation must not silently widen.
+default is the spec contract; no stage may silently widen it.
 
 ### 5.7 Mixed-Precision Accumulator Parameter
 
-Two reduction-shaped operations carry an **optional** accumulator-precision
+Exactly three reduction-shaped operations carry an **optional** accumulator-precision
 parameter that controls the precision used for the inner sum:
 
 - `matmul(A, B, accumulator=p)` — the precision of the inner-product
@@ -1975,6 +1730,8 @@ parameter that controls the precision used for the inner sum:
 - `reduce_sum(x, axis=k, accumulator=p)` (also known under the spec name
   `sum`; see `spec/05-risc-primitives.md` §2.3) — the precision of the
   running sum
+- `einsum(equation, left, right, accumulator=p)` — the precision of every
+  contracted-label sum
 
 The accumulator parameter is the **only** mechanism for mixed precision in
 these ops. There is no implicit precision promotion: passing two `bf16`
@@ -1983,17 +1740,17 @@ parameter is what tells the backend to compute the inner sum at a wider
 precision and (where the result is the operand precision) downcast at the
 end.
 
-When the accumulator parameter is **omitted**, the compiler resolves it to
-the documented default for the operand precision, before any backend is
-invoked. The IR matmul/reduce_sum nodes always carry a populated
-accumulator-precision field; "no accumulator parameter" is a Surf/Deep
-ergonomic shorthand, not an IR state.
+The accumulator is optional only on the user-facing Surf and Deep call
+surfaces. When it is omitted, the compiler resolves it to the documented
+default for the operand precision before any backend is invoked. The IR
+`Matmul`, `Sum`, and `Einsum` nodes always carry a populated
+accumulator-precision field; "no accumulator parameter" is not an IR state.
 
 #### 5.7.1 Default Accumulator Precision
 
 For operands of precision `p`, the default accumulator precision is:
 
-| Operand precision `p` | Default accumulator (matmul) | Default accumulator (reduce_sum) | Result precision |
+| Operand precision `p` | Default accumulator (matmul) | Default accumulator (sum and einsum) | `sum_result(p, default(p))` |
 |---|---|---|---|
 | `bf16` | `f32` | `f32` | operand precision (`bf16`) |
 | `f16` | `f32` | `f32` | operand precision (`f16`) |
@@ -2014,45 +1771,51 @@ The same instinct exists ecosystem-wide, but the details differ: PyTorch's
 `torch.sum` promotes ALL integral inputs to `int64`, and NumPy accumulates at
 the platform default integer. Chelis deliberately widens one step instead of
 jumping to `int64`; the §5.7 accumulator parameter is the authored route to a
-wider accumulator when a reduction genuinely needs one. (Corrected
-2026-07-30: this paragraph formerly claimed the `int32` default "matches
-PyTorch's `torch.sum` accumulator-promotion rule"; PyTorch's rule is
-`int64`.)
+wider accumulator when a reduction genuinely needs one.
 
-The accumulator parameter is permitted only when it is at least as wide as
+An accumulator has the same numeric kind as its operands: a signed-integer
+operand selects a signed-integer accumulator, and a float operand selects a
+float accumulator. Cross-kind accumulation is a type error. Within that kind,
+the accumulator parameter is permitted only when it is at least as wide as
 the operand precision and is not narrower than the documented default. A
 program that explicitly requests a narrower accumulator (e.g.
 `reduce_sum(x: tensor[N, int8], accumulator=int8)`) is a type error with a
 diagnostic suggesting either omitting the parameter (which yields the i32
 default) or accepting the wider default explicitly.
 
-The user-facing result precision of `reduce_sum` is given by the
-"Result precision" column of the §5.7.1 table above. For `int8` and
-`int16` operands the result widens to the accumulator (`int32`) to
-prevent silent overflow; for `int32`, `int64`, `f32`, and `f64`
-operands the result equals both operand and accumulator. For `bf16`
-and `f16` operands the result returns to the operand precision (the
-`f32` accumulator is consumed inside the op and downcast on output) so
-the caller sees a uniform-precision result tensor.
+The permitted accumulator and result pairs are total and exact:
+
+| Operand dtype `p` | Permitted accumulator dtype `a` | `sum_result(p, a)` |
+|---|---|---|
+| `bf16` | `f32`, `f64` | `bf16` |
+| `f16` | `f32`, `f64` | `f16` |
+| `f32` | `f32`, `f64` | accumulator dtype `a` |
+| `f64` | `f64` | `f64` |
+| `int8` | `int32`, `int64` | accumulator dtype `a` |
+| `int16` | `int32`, `int64` | accumulator dtype `a` |
+| `int32` | `int32`, `int64` | accumulator dtype `a` |
+| `int64` | `int64` | `int64` |
+
+Equivalently, `sum_result(p, a) = p` exactly when `p` is `bf16` or `f16`;
+otherwise `sum_result(p, a) = a`. A pair absent from this table is a type
+error. Thus an explicitly wider accumulator controls the public result dtype
+for signed integers and for `f32`, while the reduced-precision float rows
+always restore their operand storage dtype after accumulating.
 
 At the IR level, the `Sum` node's output precision is always the
 accumulator precision; lowering inserts an explicit `Cast` for the
-`bf16`/`f16` row to recover the operand-precision result documented in
-the table.
+`bf16`/`f16` rows to recover the operand-precision result documented in
+the table. No other row inserts that result cast.
 
-The result precision of `matmul` matches the operand precision (the
-wider accumulator is consumed inside the op and downcast on output) so
-that the caller sees a uniform-precision result tensor.
+The result precision of `matmul` matches the operand precision (the wider
+accumulator is consumed inside the op and downcast on output). The result
+precision of `einsum` is `sum_result(p, a)`, exactly like `sum`, where `a` is
+the explicit accumulator or `default(p)` when the argument is omitted.
 
 #### 5.7.2 Integer matmul
 
-The active matmul signature does not admit integer operand precisions
-(`int8`, `int16`, `int32`, `int64`). The spec deliberately does not pin an
-integer-matmul accumulator rule in this cycle: there is no current backend
-that supports integer BLAS, and an integer-matmul surface raises questions
-(saturating vs wrapping accumulator, signed-vs-unsigned interaction with
-§1.1.2) that are out of scope here. Integer `reduce_sum` is supported per
-§5.7.1.
+The matmul signature rejects integer operand precisions (`int8`, `int16`,
+`int32`, `int64`). Integer `sum` is admitted per §5.7.1.
 
 ### 5.8 Stdlib Generalization Shape
 
@@ -2077,14 +1840,11 @@ carry an explicit kind restriction limiting `p` to the float subset of the
 active dtype set. Examples include `exp`, `log`, `sin`, `sqrt`, the
 transcendental row in §5.4, and `div` (float division — its integer-operand
 diagnostic points at `floor_div` / `trunc_div`). Calling a float-only op on an
-integer tensor is a type error reported at the call site, not deep inside the
-implementation. `trunc_div` is the mirror case (integer-only): applying it to a
+integer tensor is a type error reported at the call site. `trunc_div` is the mirror case (integer-only): applying it to a
 float tensor is a type error.
 
-The implementation is permitted to specialize each instantiation (e.g. via
-monomorphization) so that backends never see a polymorphic stdlib body. The
-spec contract is that the **public signature** is generalized; per-backend
-specialization is an implementation detail.
+Backends may specialize each instantiation, but the **public signature** is
+generalized and specialization cannot change its admitted dtypes or results.
 
 The active dtype set is the source of truth for stdlib generalization
 coverage: every public tensor op must be usable at every dtype in §1.1 that
@@ -2134,20 +1894,11 @@ must carry `TensorPrec::Concrete(_)`. Backends assert this invariant
 at the lowering match arm; a `TensorPrec::Var(_)` reaching a backend
 is a monomorphization bug, not user error.
 
-Monomorphization is implemented (WS-A8) by threading a precision
-substitution map (`prec_substitutions`) through `LowerCtx`, populated
-at every call site of a polymorphic-precision sig from the formal vs
-actual parameter types. Inlining at a concrete call site supplies the
-concrete precision before the backend boundary; standalone emission
-of a polymorphic-precision sig is intentionally elided (no caller can
-use the symbol without a concrete instantiation). Cross-row spec
-rules (§5.4 transcendental float-only, §5.7.2 integer matmul not
-admitted) are enforced both at direct primitive call sites and at
-polymorphic-call-site instantiation by the
-`validate_polymorphic_op_constraints` pass; an integer instantiation
-of a polymorphic body that uses `matmul` (or float-only operand of a
-transcendental row op) surfaces with the spec's existing
-`PrecisionMismatch` diagnostic kind and a §5.7.2 / §5.4 citation.
+Every polymorphic call supplies a concrete precision before the backend
+boundary. The restrictions in §5.4 and §5.7.2 apply both to direct primitive
+calls and to a polymorphic call's instantiation. An inadmissible
+instantiation is a `PrecisionMismatch` at the call site with a citation to
+the governing section.
 
 ---
 
@@ -2183,7 +1934,7 @@ The agent can read the annotated AST and see exactly which nodes type-checked an
 > inference product's checked-node counters, not a fabricated structural AST
 > count. A cached or layered check SHALL preserve those counters per checked
 > unit and add them across the program partition, so its fitness report is
-> byte-identical to an equivalent monolithic check (chelis#858, chelis#973).
+> byte-identical to an equivalent monolithic check.
 > The `structure` component remains a separate structural-AST measurement.
 
 ### 6.3 Repair Suggestions
@@ -2231,76 +1982,63 @@ Suggestions are structured data in the fitness report JSON, not just strings.
 
 ---
 
-## 7. Effects (Phase 2a Shipped Subset)
+## 7. Effects
 
 ### 7.1 Effect Model
-
-The long-term effect design still points toward row-polymorphic effect inference, but
-the shipped Phase 2a subset is narrower and explicit about its boundaries.
 
 Built-in effect vocabulary in the type layer:
 
 - `Random` -- stochasticity introduced by compiler-known operations such as `dropout`
 - `Accum` -- internal-only hook for associative gradient accumulation
-- `IO` -- host-side effects such as `print` and `debug` (debugging/logging),
+- `IO` -- host-side effects such as `print` and `debug`,
   the file builtins (`read_file`, `write_file`, ...), and subprocess exec via
-  `process_run`. The effect enum itself is unchanged; `IO` is the single
-  effect that covers all host-side observable interaction, now including
-  spawning external processes.
+  `process_run`; `IO` is the single effect for host-side observable interaction
+- `Test` -- assertions whose failure is observed by the Chelis test runner
 - `Resource(Device)` -- allocation / placement region on a concrete device
 
-Settled Phase 2a design decisions:
-
-- `Diff` is a compiler capability, not a user-visible boundary effect
-- `Accum` is internal-only in v1; users do not handle it directly
-- `Random` and `Resource(Device)` are the real Phase 2a boundary effects
-- `IO` is a shipped Phase 3 host-side effect rather than a Phase 2a handler boundary
+`Diff` is a compiler capability marker, not a user-handled boundary effect.
+`Accum` is internal-only and users do not handle it directly. `Random` and
+`Resource(Device)` are the two user-handler boundaries. `IO` may remain
+unhandled at the program boundary. `Test` is consumed by `chelis test`; other
+execution boundaries reject an unhandled `Test` effect.
 
 > **[04-EFF-1]** A `handle-effect` form SHALL name one of the two user
 > handler boundaries, `random` or `resource`. Any other handler kind is a
 > type error; lowering SHALL NOT erase its handler or execute the body as if
 > no handler were present.
 
-Current shipped inference/checking behavior:
+Inference and checking obey these rules:
 
 - effect inference runs after HM type inference on the annotated Deep returned by the
   type checker
 - a function's inferred effect set is the union of the effects of compiler-known
   operations in its body
-- `dropout(x, rate)` and tensor RNG operations such as `uniform_like` are the
-  concrete shipped `Random` sources; stdlib random helpers such as
+- `dropout(x, rate)` and tensor RNG operations such as `uniform_like` are
+  `Random` sources; stdlib random helpers such as
   `normal_like` and Kaiming/Xavier initializers inherit that effect through
   calls
-- `print(x)` and `debug(x)` are the concrete shipped `IO` sources, alongside
+- `print(x)` and `debug(x)` are `IO` sources, alongside
   the file builtins (`read_file`, `write_file`, `read_lines`, `read_bytes`,
-  `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec;
-  eval/test-only, rejected by the build backends per spec/05-risc-primitives.md
-  §2.6)
+  `file_exists`, `list_dir`, `mmap_file`) and `process_run` (subprocess exec).
+  Compiled host execution preserves these effects and their order under
+  spec/05-risc-primitives.md [05-HOST-1..2]
 - `with seed(seed) { ... }` handles `Random` across direct operations and calls made
   inside the handled region; the C host backend preserves this with generated
   handler-scoped RNG state for nested stdlib/user functions. The seed is
   semantically int64, and a seed written as an integer literal SHALL carry the
   `i64` suffix (`with seed(42i64) { ... }`, spec/02-surf-syntax.md §P10a); an
-  unsuffixed literal is a type error naming the required suffix (chelis#731 Phase 1
-  / §C1.5, the reject-diagnostic half chelis#771 left to this phase). The body is
+  unsuffixed literal is a type error naming the required suffix. The body is
   checked in the enclosing context and its type is returned, so the enclosing
-  signature is enforced. Per-lane determinism of a seeded region is
-  `spec/05-risc-primitives.md` [05-RNG-1]; cross-lane stream identity (eval and the
-  compiled-C host lane producing the same draw sequence) is tracked at chelis#735,
-  now unblocked by Phase 1's seed-literal diagnostic
+  signature is enforced. `spec/05-risc-primitives.md` [05-RNG-1] governs the
+  seeded stream in every lane
 - `with device(device) { ... }` marks a resource region that is validated against the
   chosen build target
-- declared `Resource("...")` annotations are accepted on `t-fn` type expressions, but
-  the current checker does not yet synthesize `Resource(Device)` onto checked `fn`
-  metadata the way it does for inferred `Random`
+- declared `Resource("...")` annotations on `t-fn` expressions constrain the
+  inferred resource set, and checked `fn` metadata records every unhandled
+  `Resource(Device)` effect
 - unhandled top-level `Random` is a check error with repair guidance
-- top-level `IO` is currently permitted for debugging/logging programs
-
-The current shipped checker does **not** yet claim the full Phase 2 design:
-
-- no full user-visible `Diff` effect checking
-- no user-visible `Accum` inference/handling
-- no general row-polymorphic higher-order effect surface promised as shipped behavior
+- top-level `IO` is permitted
+- assertion operations introduce `Test`; only the test runner handles it
 
 ### 7.2 Type Representation
 
@@ -2319,30 +2057,26 @@ Checked function bodies may also carry inferred effect metadata:
 (fn {type: (t-fn {} ...), effects: (effects {} random)} (params {} x) body)
 ```
 
-In the shipped subset, this inferred `effects` metadata is used for effect information
-the checker actually synthesizes today, notably `Random`. Resource regions are enforced
-at the handler/build boundary, but are not yet written back onto checked `fn` metadata.
+The `effects` metadata records the complete inferred, unhandled effect set.
+Resource regions are also enforced at the handler and build boundary. Effect
+annotations are optional in Surf and Deep; when present, the inferred set must
+fit the declared upper bound.
 
-Effect annotations remain optional in Surf and Deep. They are accepted as part of the
-surface syntax even where the current checker only implements a bounded subset of the
-eventual design.
+### 7.3 Metadata Contract
 
-### 7.3 Phase 0 Extension Point
-
-The `eff` meta key on `t-fn` nodes and the `effects` meta key on checked `fn` nodes are
-the active Phase 2a extension points.
+The `eff` metadata key on `t-fn` nodes carries a declared effect upper bound;
+the `effects` key on checked `fn` nodes carries the inferred unhandled set.
 
 ---
 
-## 8. Linearity (Phase 2b, Superseded By Implicit Linearity)
+## 8. Linearity
 
 ### 8.1 Model
 
-Phase 2b uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
+Chelis uses lightweight uniqueness, not a Rust-style ownership-and-lifetimes
 system. Tensor values are owned by default, but read-only calls borrow their tensor
 arguments. A consuming use makes the binding dead; a borrow leaves the owned binding
-live. The `copy-drop` model in `spec/design/implicit_linearity.md` supersedes the old
-requirement that every local owner write an explicit final consume.
+live. The compiler inserts end-of-scope `Drop` operations for unconsumed local owners.
 
 ### 8.2 Type Representation
 
@@ -2354,7 +2088,7 @@ requirement that every local owner write an explicit final consume.
 (t-ref {} (t-tensor {} (d-name {} batch) (t-prim {} f32)))
 ```
 
-The shipped Phase 2b user surface is type- and expression-based:
+The user surface is type- and expression-based:
 
 - `&T` is the read-only borrow type, represented in Deep as `t-ref`
 - `&x` is an optional explicit borrow expression, represented as `(borrow {} x)`
@@ -2381,10 +2115,7 @@ by a later `&tensor[..]` parameter in the surrounding call — the inner is
 still an unresolved type variable when the borrow is first checked. In that
 case classification is **deferred**: the borrow is provisionally accepted
 and the surrounding flow's expected argument type pins the variable through
-unification. A previously-required workaround was to round-trip the value
-through a monomorphic identity (`def id4[a,c,h,w](x: tensor[a,c,h,w,f32]) ->
-tensor[a,c,h,w,f32] = x`) to re-bind the dimension variables before the
-borrow; that workaround is no longer necessary.
+unification.
 
 The deferral is sound only when the variable is *eventually* pinned to a
 tensor or tensor carrier. If the consumer is itself fully polymorphic
@@ -2401,7 +2132,7 @@ Linearity is checked after effect inference, before lowering:
 
 `parse -> desugar -> type infer/check -> effect infer/check -> linearity check -> lower`
 
-Linearity is expected to compose with effects, especially `Resource(Device)`: the
+Linearity composes with effects, especially `Resource(Device)`: the
 effect system tracks where a tensor lives, while linearity tracks when it is consumed.
 That gives the compiler a stronger basis for safe in-place buffer reuse.
 
@@ -2419,11 +2150,58 @@ That gives the compiler a stronger basis for safe in-place buffer reuse.
   drops for locals that are not otherwise consumed.
 - Pattern matching on a tuple or other value carrying tensor payloads consumes the
   scrutinee; any tensor payloads bound by the pattern become the new live bindings.
-- Creating a closure that captures a tensor consumes that outer binding at closure
-  creation time.
+- Creating a closure whose body consumes a captured tensor consumes that outer binding
+  at closure creation time; a capture whose body uses are all borrow-reads borrows the
+  outer binding instead. Which binding a consuming capture lands on is [04-LIN-2]'s
+  subject below.
 - Ordinary consuming fan-out is handled by inserted copies. Diagnostics remain for
   invalid borrows, borrow escapes, impossible branch/loop ownership, and recursive or
-  cyclic consume cases outside the v1 inference scope.
+  cyclic consume cases for which a unique terminal path cannot be proven.
+- **Destructured components are excepted from copy insertion.** A binding introduced by
+  a destructuring `let` — any `let` whose pattern is not a single name — is a
+  *component*. A component projects a fresh owned value out of the destructured value
+  rather than aliasing it, so consuming fan-out on a component is not copyable and is a
+  hard error. Write `copy(x)` on the earlier consuming use to fan out a component.
+  The exception is scoped to the component itself: it does not extend to the value that
+  was destructured, to bindings that merely follow the destructuring `let`, or to
+  a component's name after an ordinary `let` re-binds it.
+- A binding introduced inside a new declaration region is an ordinary binding, whatever
+  the name denoted outside. Closure captures, `match` arm binders, and `if` / `match`
+  branch bodies each open such a region, so a component's fan-out inside one is copied
+  like any other value. A destructuring `let` written inside the region introduces
+  components of that region and is excepted there as above.
+
+Two requirements pin the binding-identity semantics the rules above rest on:
+
+> **[04-LIN-1]** Every binding introduction — a `let` bind (destructuring
+> or not), a function parameter, a closure capture, a `match` binder, a
+> top-level `def` — creates a binding distinct from every other binding,
+> including earlier and later bindings of the same name. A name at a use
+> site denotes the innermost such binding whose scope encloses the site.
+> Every ownership fact — an alias relationship, a consumption, a borrow,
+> destructured-component identity — SHALL attach to the binding it was
+> resolved against where it was recorded, never to the name. In
+> particular, an alias denotes the binding its source name denoted where
+> the alias was introduced: a later re-binding of that name SHALL
+> neither re-point the alias nor confer the new binding's properties
+> (such as a component restriction) on it, and consuming through the
+> alias SHALL affect the aliased binding, not whichever binding owns the
+> name at the consuming use.
+
+> **[04-LIN-2]** Creating a closure whose body consumes a captured value
+> consumes the binding the capture names at closure creation time; a
+> capture whose uses in the body are all borrow-reads borrows that
+> binding instead. Distinct user-visible bindings of one underlying
+> value — an ordinary alias `y = x` beside its source — are distinct for
+> capture: one closure consuming through `y` and another through `x`
+> each consume their own binding, and both closure creations are
+> accepted. The sole forwarding is a consuming capture of a destructured
+> component (or of an alias of one), which consumes the component's
+> carrier binding.
+
+Diagnostics for violations of these rules SHALL name a binding the
+program's source spells — the alias or component name written at the
+faulting use — never a compiler-synthesized intermediate.
 
 ### 8.4 Tensor-carrying ADTs
 
@@ -2455,7 +2233,7 @@ field of type `Inner[k]` and `Inner` is tensor-carrying, then `Outer` is
 tensor-carrying. Resolution is a least-fixed-point over all `deftype` decls
 visible at check time. When the linearity checker runs against composed
 contexts (library + new code), both halves are resolved in one pass so a
-new-code `Outer` whose carrier status depends on a library `Inner` is
+new-code `Outer` whose carrier classification depends on a library `Inner` is
 recognized correctly.
 
 ### 8.5 Type-Name Uniqueness
@@ -2473,15 +2251,9 @@ A top-level `def` or `sig` whose name appears in the closed builtin function
 vocabulary (`BUILTIN_NAMES` in `crates/chelis-types/src/builtins.rs`) is
 rejected at declaration time as `BuiltinShadowing`, before inference runs.
 
-Rationale: call sites are dispatched builtin-first by name in both the host
-evaluator and IR lowering, so a user definition that shadows a builtin name
-can never be reached by name. Pre-rule, the checker resolved such calls to
-the user signature while eval and the backends resolved them to the builtin —
-three lanes, three different answers (chelis#353: `def sum` checked clean,
-failed with the builtin's arity error under eval, and segfaulted on the C
-backend). The rejection reads the same `BUILTIN_NAMES` table the evaluator
-dispatch and IR lowering import, so the rejected set and the dispatched set
-cannot drift.
+Rationale: top-level builtin names identify the language's intrinsic call
+surface. Rejecting a same-name top-level declaration prevents a declaration
+from presenting a signature that differs from the intrinsic operation.
 
 Scope:
 
@@ -2500,76 +2272,16 @@ Scope:
   mis-dispatches — inside a package the user def genuinely wins (the
   stdlib's `Std.Decimal.normalize` and `Std.Test.fail` rely on this).
 - Function parameters and block-local bindings may reuse builtin names: they
-  bind values, not call-site dispatch, and shadow harmlessly on every lane.
-  Known residual asymmetry: *calling* a function-typed parameter or local
-  named like a builtin still dispatches builtin-first under eval (a loud
-  eval-time error) while the C backend compiles the call correctly; that
-  gap is documented here rather than rejected, because rejecting it would
-  break programs the backend lane compiles and runs correctly today.
+  shadow the builtin under ordinary lexical scoping in every lane. A call to
+  that unqualified name invokes the innermost local binding, including when
+  the binding is function-typed. The shadowed builtin is inaccessible by that
+  unqualified name until the local scope ends.
 - Builtin-adjacent reserved keywords (`cast`, `grad`, `vmap`, ...) are not
   part of `BUILTIN_NAMES`; a `def cast` is already a parse error.
 
 ---
 
-## 9. Numeric Value Semantics (Decided 2026-07; Implementation Tracked As chelis#729)
-
-**Status banner - read before citing.** The atoms below are DECIDED
-normative semantics, authored 2026-07-16 out of the numeric audit
-(chelis#680-#734; metas #695/#727). They are NOT yet implemented: today's
-behavior diverges per the issue references in each atom's note, and the
-divergences are locked as issue-linked `#[ignore]`d tests. Those tests are
-visible known-failure records only: under `spec/design/spec_provenance.md`
-§C3-§C4, registration, freshness, execution, debt, and waiver remain separate,
-and an ignored test does not satisfy coverage. The delivery plan and the full
-elaboration (finalize semantics, kernel signatures, storage) is
-`spec/design/dtype_semantics.md`. Atom IDs are stable, and the current
-blockquote authorities remain normative until selected for fixture-proven
-migration in chelis#733 Phase 1. The pinned Buoy shell-side integration—not a
-`chelis-lint` rule—attaches and checks full semantic revisions.
-
-**Amendment 2026-07-28 - lifted contracts.** [04-NUM-9], [04-NUM-10], and
-[04-NUM-11] were added on the same date, moving three decisions out of
-`spec/design/dtype_semantics.md` and into this section: the closed trap-kind
-set with cross-lane rendering identity (its §C2), traps-as-values-until-the-
-lane-boundary including the device-lane error-flag shape (also §C2), and the
-guarantee that a value survives storage and transport at its declared dtype
-(the observable half of its §C3 storage decision). None of the three is a new
-decision; each was already decided and each lived only in a design document,
-which is a working artifact that stops being read once its phases ship. The
-numbered spec is where a decision has to live to outlast the work that made
-it - the precedent is [05-OBS-1..5], lifted the same way out of
-`faithful_observation.md`. The design documents keep the elaboration, the
-mechanism, and the evidence, and now point here for the rule.
-
-**Amendment 2026-07-28 - arithmetic width.** [04-NUM-2] formerly closed with
-"Computing a single op in f64 and rounding once is a conforming implementation
-for f32/f16/bf16." That clause was REMOVED and replaced by [04-NUM-8], which
-declares an arithmetic width per dtype. It is recorded here so the deletion is
-not re-derived as an oversight. The clause was permissive and single-op scoped,
-but `spec/design/dtype_semantics.md` cited it to mandate f64 computation for
-all float ops, and the IR evaluator extended that to multi-step float
-reductions and to `argmax`/`argmin` operand comparison - three levels of drift
-from one sentence. [04-NUM-8] states the width positively so there is nothing
-left to widen from.
-
-**Amendment 2026-07-30 - trap occurrence, and the record carries its
-cost.** A review pass on the same change set added [04-NUM-12]: trap
-OCCURRENCE for multi-step operations is defined relative to each lane's
-documented accumulation order, and trap-versus-exact divergence at
-accumulator range edges is the one permitted cross-lane trap divergence.
-[04-NUM-9] required identical RENDERING but was silent on occurrence,
-which order-dependence makes a real question for int64 reductions - and
-it had to be answered before chelis#729 Phase 2 freezes the trap
-contract. The same pass stated the availability trade in the rationale
-(trapping converts silent corruption into loud termination,
-deliberately), scoped [04-NUM-8]'s native-narrow permission to the basic
-operations so it no longer conflicts with the reduced-precision opt-in
-rule, and re-pointed the deferred-name rejection diagnostics at §1.1.1
-in the same change set (chelis#944: both lexers, the checker's
-tensor-element and cast-target arms, and their locking tests - the
-`uint*` messages formerly cited §1.1.2's superseded "out of scope"
-stance, and the newly reserved names fell to the generic unknown-name
-rejections with no citation).
+## 9. Numeric Value Semantics
 
 > **[04-NUM-1]** Every numeric op result SHALL be finalized into its
 > declared dtype - rounding for floats, width and domain checks for
@@ -2577,28 +2289,35 @@ rejections with no citation).
 > comparison, fold, or output, in every lane and on every surface
 > (scalar and tensor alike).
 
-*(Not honored today: chelis#689, #693, #699, #714.)*
-
 > **[04-NUM-2]** Float finalization SHALL be IEEE-754 round-to-nearest,
 > ties-to-even, at the dtype's own STORAGE width (f64 identity; f32
 > 24-bit, f16 11-bit including subnormals, bf16 8-bit mantissa), with
-> overflow to the correctly signed infinity, and NaN, signed zero, and
-> infinities preserved. The width at which the op is COMPUTED before
-> finalization is fixed by [04-NUM-8], not by this atom.
-
-*(Not honored today: chelis#714.)*
+> overflow to the correctly signed infinity and signed zero and infinities
+> preserved. Any floating arithmetic or numeric conversion that produces a
+> NaN, including one given a signaling-NaN input, SHALL finalize to the
+> target dtype's canonical quiet NaN: f16 `0x7e00`, bf16 `0x7fc0`, f32
+> `0x7fc00000`, or f64 `0x7ff8000000000000`. Arithmetic preserves the NaN
+> class, not an input payload or sign. A pure bit-moving or selection
+> operation preserves NaN payload bits only when its governing operation atom
+> explicitly says it is bit-preserving. The width at which the op is COMPUTED
+> before finalization is fixed by [04-NUM-8], not by this atom.
 
 > **[04-NUM-3]** Integer op results that are not exactly representable
 > in the declared width SHALL trap with the branded overflow diagnostic;
 > no lane and no surface SHALL wrap (except via the named modular
-> operations of [04-NUM-7]), saturate, or silently widen.
+> operations of [04-NUM-7] and the named `cast_wrap` of [04-NUM-16]),
+> saturate (except via the named `cast_saturate` of [04-NUM-16]), or
+> silently widen.
 > In-range integer arithmetic SHALL be exact at every width.
 
-*(Not honored today: chelis#689.)*
-
-> **[04-NUM-4]** A `bool` value SHALL be exactly 0 or 1; arithmetic
-> that would produce any other value in a bool-typed position SHALL be
-> rejected by the checker or trap.
+> **[04-NUM-4]** A `bool` value SHALL be exactly 0 or 1. Arithmetic operators
+> and arithmetic reductions SHALL reject a `bool` operand at the checker;
+> they SHALL NOT promote, wrap, saturate, reinterpret, or otherwise admit
+> bool-arithmetic behavior. `and`, `or`, and `not` are the logical operations,
+> and [05-OP-29] `count` is the bool-tensor counting operation. If a corrupted
+> internal or external carrier presents any other bool representation, the
+> first typed boundary SHALL trap `Domain` before the value enters an
+> operation.
 
 > **[04-NUM-5]** Comparisons SHALL compare finalized values: a cast's
 > rounding applies before any comparison reads it, including in
@@ -2612,11 +2331,9 @@ rejections with no citation).
 > and SHALL NOT be "fixed"; identical printed numbers at an integer
 > dtype are a defect. Same inputs, opposite verdicts, by design.
 
-*(Honored and locked: `precision_matrix.rs` ByDesign rows.)*
-
-> **[04-NUM-7]** A named modular-arithmetic operation (initially
-> `wrap_add`, `wrap_sub`, `wrap_mul`; the roster is owned by the
-> capability table) on an integer dtype SHALL produce the unique value
+> **[04-NUM-7]** A named modular-arithmetic operation - exactly `wrap_add`,
+> `wrap_sub`, or `wrap_mul` - on a signed-integer dtype SHALL produce the unique
+> value
 > in that dtype's range congruent to the exact mathematical result
 > modulo 2^width, and SHALL NOT trap. These operations are the
 > explicit, user-visible escape hatch for modular arithmetic (hashing,
@@ -2628,10 +2345,6 @@ rejections with no citation).
 > dtype (floats overflow to infinity per [04-NUM-2] and have no modular
 > escape hatch by construction), and requesting one on a non-integer
 > dtype is a checker-level type error.
-
-*(Not expressible today: no `wrap_*` builtins exist; the eval RNG's
-splitmix hash (`dropout_sample`, `chelis-ir/src/eval.rs`) is the
-in-tree witness of the need. Tracked by chelis#753.)*
 
 > **[04-NUM-8]** Every dtype declares an ARITHMETIC WIDTH in addition to
 > its storage width. Every op SHALL be performed at its operands'
@@ -2651,7 +2364,7 @@ in-tree witness of the need. Tracked by chelis#753.)*
 > | `int8` | 8 | exact int8 |
 > | `bool` | 8 | not an arithmetic dtype ([04-NUM-4]) |
 >
-> The reduction and matmul accumulator parameter of §5.7 is the ONLY
+> The `matmul`, `sum`, and `einsum` accumulator parameter of §5.7 is the ONLY
 > user-selectable widening; it is explicit, typed, defaulted per §5.7.1,
 > and it does not license any other widening. An implementation MAY
 > compute a BASIC f16 or bf16 operation (add, sub, mul, div, sqrt)
@@ -2669,9 +2382,9 @@ in-tree witness of the need. Tracked by chelis#753.)*
 > bit-identical native-narrow case above is not reduced precision) -
 > SHALL be available only through a named, explicit
 > opt-in at the call site, SHALL never be a default, and SHALL never be
-> selected by a backend, a build flag, or a global mode. No such opt-in is
-> authored yet; until one is, narrower-than-declared computation is
-> non-conforming in every lane.
+> selected by a backend, a build flag, or a global mode. This specification
+> defines no reduced-precision opt-in; narrower-than-declared computation is
+> therefore non-conforming in every lane.
 >
 > Arithmetic a backend SYNTHESIZES that is not an op on program values -
 > the loop counters and addressing expressions of generated code - carries
@@ -2680,30 +2393,18 @@ in-tree witness of the need. Tracked by chelis#753.)*
 > NOT be the carrier of a declared-dtype value crossing a boundary
 > ([04-NUM-11] governs those crossings).
 
-*(Not honored today: the IR evaluator computes every float op and every
-float reduction in f64 because its tensor store itself is f64-backed -
-`TensorValue { data: Vec<f64> }` in `chelis-ir/src/eval.rs` - so
-`binary_map`/`unary_map`'s closures and the `reduce` fold (`init: f64`)
-run at f64 whatever the dtype, and `reduce_argcmp` compares
-`argmax`/`argmin` operands as f64, returning the wrong index for
-adjacent int64 values above 2^53. The storage-width column's `bool` row
-is also ahead of the shipped ABI: the C runtime still stores bool at 4
-bytes through the f32 encoding (`RuntimeDType::byte_width`), and the
-native byte lands with the §C3 storage decision at 0.19 (chelis#892,
-chelis#894). Tracked by chelis#729 Phase 2's kernel split and Phase 1's
-storage decision.)*
-
 **Rationale for the f16/bf16 rows.** These are not exclusions carved out
 of a general rule; the arithmetic width is part of what the format is.
-No shipped hardware provides a bf16 arithmetic instruction: AVX512-BF16's
-`vdpbf16ps` and ARM's BFDOT/BFMMLA both accumulate into f32, and there is
-no `vaddbf16` on any target. f16 arithmetic does exist (ARMv8.2-A,
+BF16 instruction families such as AVX512-BF16 `vdpbf16ps` and ARM
+BFDOT/BFMMLA accumulate into f32 rather than providing bf16 addition. f16
+arithmetic does exist (ARMv8.2-A,
 AVX512-FP16, NVIDIA `__hadd`), which is why the atom permits it, but even
 there the transcendental path converts to f32 because the special-function
 units are f32. The same property holds one rung down and is why §1.1.1
-defers `f8e4m3`: FP8 is a matmul-input format whose tensor-core ops
-accumulate in f32 and which requires an out-of-band scale factor, so it
-has no self-contained arithmetic width to declare yet.
+reserves `f8e4m3`: FP8 is a matmul-input format whose tensor-core ops
+accumulate in f32 and which requires an out-of-band scale factor. The
+reserved spelling therefore has no self-contained value or finalization
+contract.
 
 **Why f32 is not widened.** f32 has native arithmetic on every CPU and GPU
 in the supported set, so computing it at f64 invents a width the format
@@ -2714,7 +2415,7 @@ multi-step reductions it also changes the answer, which is what would
 otherwise force a cross-lane tolerance table between two lanes that
 should agree exactly. The same argument applies to routing exact integer
 arithmetic through f64, which additionally destroys int64 exactness above
-2^53 (chelis#684, chelis#680).
+2^53.
 
 **Why reduced precision is opt-in only.** The prohibition on narrowing is
 not symmetric with the prohibition on widening by accident. Widening is
@@ -2729,9 +2430,11 @@ that must be spelled at the call site, so Chelis admits the capability and
 refuses the default.
 
 > **[04-NUM-9]** A numeric trap has a CLOSED set of kinds: `Overflow` (an
-> integer result outside the declared dtype's range), `Domain` (a value
-> outside the declared dtype's set - a fractional or non-finite value at an
-> integer dtype, a value other than 0 or 1 at `bool`), and `DivZero`
+> integer result outside the declared dtype's range), `Domain` (an input or
+> result violates the operation's defined mathematical domain or the target
+> dtype's value set - including a fractional or non-finite value at an
+> integer dtype, a value other than 0 or 1 at `bool`, or an empty reduction
+> whose operation has no identity), and `DivZero`
 > (integer division or remainder by a zero divisor). Every trap SHALL name
 > its kind, the operation that raised it, and the dtype it was finalizing
 > to, and SHALL render byte-identically in every lane and on every surface.
@@ -2745,7 +2448,11 @@ refuses the default.
 > primitive, the trap SHALL retain the lowered primitive name; it SHALL NOT
 > be renamed to the composed operation or wrapped in lane, lowering, or
 > evaluator plumbing. No additional prefix or suffix is permitted on any
-> user-facing numeric-trap line.
+> user-facing numeric-trap line. A typed operation-precondition guard is
+> itself the trap-producing primitive for this rule and carries the guarded
+> builtin's canonical name and declared result dtype. A failure raised by
+> such a guard therefore names the guarded builtin; it is not a renamed trap
+> from a later primitive in the successful lowering.
 
 > **[04-NUM-10]** A numeric trap SHALL be a VALUE inside a lane and SHALL
 > become a process failure only at that lane's boundary: `chelis eval`
@@ -2759,31 +2466,16 @@ refuses the default.
 > device lane's boundary, so this rule is satisfied there by construction
 > rather than excepted from.
 
-*(The device-lane shape is evidence-backed and provisional pending the HIP
-half, chelis#736. The Metal spike (chelis#737) measured flag detection as
-effectively free for the memory-bound elementwise shape the backend emits -
-worst case +0.7% median, int64 multiply included - and verified MSL int64
-bit-exactness. Implementation rider from the same spike, recorded here
-because it is a correctness constraint rather than a preference: the clang
-overflow builtins are BANNED in emitted MSL. `__builtin_mul_overflow(long)`
-crashes the backend compiler reproducibly, and at-scale vectorization
-miscompiles the add and sub forms into false positives; the division-based
-form crashes the backend as well. The hand-written checks - widening for
-int32, sign-bit XOR for add and sub, `mulhi` for int64 multiply - are the
-implementation.)*
-
 **The availability trade, stated.** Trapping converts silent data
 corruption into loud termination, by design: a long-running job that
 overflows an `int64` counter DIES where wrapping arithmetic would have
 carried a silently wrong value to completion. That operational cost is
 deliberate, and this record carries it alongside the benefit: the
 alternative outcome is not a successful run but a plausible wrong result,
-which the 2026-07 audit measured as the strictly worse failure mode
-(chelis#703). Code that WANTS mod-2^width semantics states it with
-[04-NUM-7]'s named `wrap_*` operations; saturation - the third behavior,
-which image pipelines want - is authored as named `sat_*` ops if `uint8`
-activates (§1.1.1's non-reservation note). Behaviors are named ops, never
-modes.
+which is the strictly worse failure mode. Code that WANTS mod-2^width semantics states it with
+[04-NUM-7]'s named `wrap_*` operations. Saturating conversion is the named
+`cast_saturate` of [04-NUM-16]; saturating arithmetic would require separate
+named operations if introduced. Behaviors are named operations, never modes.
 
 > **[04-NUM-11]** A value SHALL survive storage, transport, and every
 > boundary crossing at its declared dtype without collapse. An `int64`
@@ -2794,26 +2486,16 @@ modes.
 > that dtype, and no stage SHALL substitute a wider or narrower one to
 > compensate.
 
-*(Not honored before chelis#729 Phase 1: tensor storage, the wire schema,
-and the Python binding each flattened numeric payloads to f64, so an int64
-above 2^53 collapsed at every boundary no matter how exactly it had been
-computed - chelis#684, chelis#685, chelis#686. This atom is the
-user-visible statement of what `spec/design/dtype_semantics.md` §C3's
-storage decision delivers: that document owns the mechanism, this atom owns
-the guarantee. Also not honored on the Metal host/device bool boundary,
-where a value crosses at a quarter of its storage width: chelis#892.)*
-
 > **[04-NUM-12]** A numeric trap's OCCURRENCE is deterministic within a
 > lane and is defined by that lane's documented evaluation order. For a
 > multi-step operation (a reduction or scan), whether an intermediate
 > result leaves the accumulator dtype's range - and therefore whether
 > the operation traps - is evaluated against the lane's documented
-> accumulation order: the host lanes' stride-4 cascade
-> (`spec/05-risc-primitives.md` §2.3) or a device lane's documented tree
-> reduction. Same program, same inputs, same lane SHALL always produce
+> accumulation order in `spec/05-risc-primitives.md`. Same program, same
+> inputs, same lane SHALL always produce
 > the same trap or the same completion. Where two lanes document
 > different accumulation orders, an integer accumulation whose
-> intermediate sums approach the accumulator's range MAY trap in one
+> intermediate results approach the accumulator's range MAY trap in one
 > lane and complete in another; a lane that completes SHALL produce the
 > exact result. Trap-versus-exact at accumulator range edges is the ONLY
 > permitted cross-lane divergence in trap behavior: trap versus a wrong
@@ -2821,26 +2503,7 @@ where a value crosses at a quarter of its storage width: chelis#892.)*
 > and when two lanes both trap, [04-NUM-9]'s rendering identity applies
 > in full.
 
-*(Authored 2026-07-30, before chelis#729 Phase 2 freezes the trap
-strings, because [04-NUM-9]'s identity requirement was silent on exactly
-this interaction: trapping addition is associative in VALUE but not in
-trap occurrence, so pinned-order host lanes and tree-order device lanes
-can legitimately differ at range edges. The alternative - pinning one
-accumulation order across every lane - was considered and rejected: §2.3
-already documents per-lane order divergence for float values, and
-serializing device reductions to the host cascade would forfeit the
-parallel reduction for a case reachable only at the extreme edge of the
-range. Practical reach: §5.7.1's widened default accumulators make
-occurrence order-independent for the narrow integer dtypes whenever
-n·max|element| fits the accumulator - no ordering of partial sums each
-bounded by n·max|element| can overflow int32 before roughly 2^24 int8
-elements - so the divergence window is real only for int64 (and
-extreme-length int32) accumulations near the range edge. No lane traps
-integer overflow today ([04-NUM-3]'s divergence note), so this atom
-rides chelis#729 Phase 2 with the trap contract itself; the chelis#687
-and chelis#754 cross-lane oracles treat a trap-versus-complete
-divergence as conforming only under this atom's conditions.)*
- > **[04-NUM-13]** `shl` and `shr` on a signed integer dtype SHALL operate
+> **[04-NUM-13]** `shl` and `shr` on a signed integer dtype SHALL operate
 > on that dtype's fixed-width two's-complement bit pattern. `shl` discards
 > bits beyond the declared width and `shr` is arithmetic (sign-extending).
 > A non-negative count at least the declared width produces zero for
@@ -2849,8 +2512,6 @@ divergence as conforming only under this atom's conditions.)*
 > `shift amount must be non-negative, got N`. These semantics are
 > independent of host-language signed-shift behavior; a compiled backend
 > SHALL NOT invoke undefined or implementation-defined signed shifts.
-
- *(Implemented and UBSan-locked in eval and the C host lane for chelis#682.)*
 
 > **[04-NUM-14]** `cast(source, target)` SHALL be explicit and SHALL apply
 > the target dtype's finalization rule identically on scalar and tensor
@@ -2862,7 +2523,16 @@ divergence as conforming only under this atom's conditions.)*
 > wrap. A source cast to a float target is total IEEE-754 round-to-nearest,
 > ties-to-even at the target width per [04-NUM-2], even when that loses
 > integer exactness. A source cast to `bool` accepts exactly 0 or 1 per
-> [04-NUM-4].
+> [04-NUM-4]. For automatic differentiation, a float-to-float cast has
+> adjoint `cast(g, source_dtype)` on the same scalar or tensor surface; the
+> backward cast obeys this atom's exact target-width finalization and traps.
+> An exact same-float-dtype cast is the identity in both directions. A float
+> source cast to an integer or bool target is piecewise constant and
+> structurally rejects `grad` with
+> `AdRejectionReason::PiecewiseConstant`; it never contributes a silent zero.
+> A bool or integer source is a discrete forward-only value and carries no
+> cotangent, irrespective of target. These rules apply equally to explicit
+> default casts introduced inside another authored operation.
 
 > **[04-NUM-15]** For an elementwise operation that maps a tensor to a
 > tensor and can trap per-element, the trap the operation raises SHALL be
@@ -2880,20 +2550,21 @@ divergence as conforming only under this atom's conditions.)*
 > implementation that reduces per-thread candidates to the global minimum
 > index is conforming, and serialization is not required.
 
-*(Authored 2026-08-04. [04-NUM-12] defined occurrence by "that lane's
-documented evaluation order", but no lane documented an order for an
-elementwise trapping map, so the multi-offender case was unauthored while
-both [04-NUM-9]'s cross-lane rendering identity and [04-NUM-12]'s
-within-lane determinism formally applied to it. Index order is the choice
-consistent with the two existing precedents: [04-NUM-10] already requires a
-device lane to carry "the first failing element index", and
-`spec/05-risc-primitives.md`'s `Scatter` deterministic-order rule already
-uses updates-tensor row-major flat order. The alternative - leaving the
-offender unspecified while guaranteeing the trap - was rejected because the
-kind is part of the rendered line, so an unspecified offender would have
-required weakening [04-NUM-9]'s byte-identity requirement to accommodate an
-implementation. Stated for elementwise trapping maps generally rather than
-for `cast`, so a later trapping map does not reopen the same question.)*
+> **[04-NUM-16]** The named lossy casts are separate operations, never a
+> mode of the checked `cast` in [04-NUM-14]. `cast_saturate(source, target)`
+> admits an active signed-integer or float source and a signed-integer target.
+> It reads the source value exactly at its stored dtype, truncates a finite float
+> toward zero, and clamps the resulting mathematical integer to the target's
+> inclusive range; `-inf` clamps to the target minimum, `+inf` to its maximum,
+> and `NaN` traps `Domain`. `cast_wrap(source, target)` admits active
+> signed-integer source and target dtypes and returns the unique signed
+> target-width representative congruent to the exact source modulo
+> `2^target_width`. Both operations apply
+> elementwise with identical scalar and tensor semantics. Neither admits
+> `bool`, `string`, or a reserved dtype. A rounding cast is not a separate
+> operation: a program spells `round(source)` followed by checked `cast`.
+> [04-NUM-15] governs the selected failure when a tensor `cast_saturate`
+> contains more than one `NaN`.
 
 ---
 
@@ -2908,20 +2579,20 @@ i64.
 
 | dtype | value set | arithmetic width | finalize(wide) | overflow / out of range | special values |
 |---|---|---|---|---|---|
-| `f64` | IEEE binary64 | f64 | identity | n/a (IEEE handles it) | NaN, ±inf, -0.0 preserved |
-| `f32` | IEEE binary32 | f32 | RNE to 24-bit mantissa | rounds to ±inf per IEEE | NaN preserved (quiet), ±inf, -0.0 preserved |
-| `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (`mul(65504f16, 2f16) = inf`) | as f32 |
-| `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | as f32 |
+| `f64` | IEEE binary64 | f64 | identity except canonical-NaN finalization | n/a (IEEE handles it) | arithmetic/conversion NaN -> `0x7ff8000000000000`; ±inf and -0.0 preserved |
+| `f32` | IEEE binary32 | f32 | RNE to 24-bit mantissa | rounds to ±inf per IEEE | arithmetic/conversion NaN -> `0x7fc00000`; ±inf and -0.0 preserved |
+| `f16` | IEEE binary16 | f32 | RNE to 11-bit mantissa, incl. subnormals | overflow -> ±inf (`mul(65504f16, 2f16) = inf`) | arithmetic/conversion NaN -> `0x7e00`; ±inf and -0.0 preserved |
+| `bf16` | bfloat16 | f32 | RNE to 8-bit mantissa | overflow -> ±inf | arithmetic/conversion NaN -> `0x7fc0`; ±inf and -0.0 preserved |
 | `int64` | integers in [-2^63, 2^63-1] | exact int64 | must be integral and in range, else trap | trap: `Overflow` out of range, `Domain` non-integral ([04-NUM-9]) | none |
 | `int32` / `int16` / `int8` | integers at width | exact at width | same rule at width | trap: `Overflow` / `Domain` at width | none |
 | `bool` | {0, 1} | n/a (not an arithmetic dtype) | must be exactly 0 or 1, else trap | trap, kind `Domain` | none |
-| deferred names (§1.1.1) | rejected by the checker | - | unreachable: rejection is compile-time-visible, never a runtime arm | - | - |
+| reserved names (§1.1.1) | rejected by the checker | - | unreachable: rejection is compile-time-visible, never a runtime arm | - | - |
 
 Reading notes:
 
 - The **arithmetic width** column is [04-NUM-8]'s table restated per row. It
   is deliberately NOT reproduced into §1.1.3's per-backend matrix: it is a
-  target-independent fact and §1.1.3 records per-target implementation status.
+  target-independent language fact rather than a target capability cell.
 - The **trap cells** name [04-NUM-9]'s kinds; for multi-step operations,
   trap OCCURRENCE is governed by [04-NUM-12] (each lane's documented
   accumulation order).
@@ -2931,20 +2602,11 @@ Reading notes:
   same inputs, opposite verdicts, by design.
 - The **bool row has no arithmetic width** because arithmetic on `bool` is
   rejected rather than performed ([04-NUM-4]). `and` / `or` / `not` are the
-  logical operations; counting is the explicit-cast idiom.
-- The **deferred row** covers every name reserved in §1.1.1. Each has its
-  arithmetic width declared at reservation, so activating one adds a row here
-  without reopening the width question; `f8e4m3` additionally needs its
-  finalize cell authored on activation, since OCP E4M3 has no infinities and
-  is therefore not a parameterization of [04-NUM-2].
+  logical operations and `count` is the bool-tensor counting operation.
+- The **reserved row** covers every name in §1.1.1. Those names are rejected
+  before evaluation and therefore have no runtime finalization semantics.
 
-## 10. Checker Totality (Decided 2026-07; Ratified At chelis#731 Phase 1)
-
-**Status banner:** same transitional-blockquote and honesty rules as §9. The
-delivery plan is `spec/design/checker_totality.md`. chelis#731 Phase 1
-ratifies this section's semantics; the atom IDs remain the citation grammar and
-the blockquotes remain normative until chelis#733 Phase 1 migrates them through
-the pinned Buoy shell-side integration and attaches full revisions.
+## 10. Checker Totality
 
 > **[04-TOT-1]** Every Deep tag in the closed vocabulary
 > (spec/03-deep-syntax.md) SHALL have an explicit checker disposition: a
@@ -2952,85 +2614,11 @@ the pinned Buoy shell-side integration and attaches full revisions.
 > construct the checker does not recognize SHALL produce a diagnostic,
 > never a silent exemption of its subtree.
 
-*(Honored at the construct level as of chelis#731 Phase 1: the
-`handle-effect` case landed - the seed/device handler is checked per
-effect kind and the body's type is returned so the enclosing signature is
-enforced (chelis#709) - and `infer_expr`'s unknown-tag wildcard now pushes
-`UnknownForm` instead of a silent `Type::Error`.)*
-
-*(Compile-time exhaustiveness landed at chelis#731 Phase 3 and was
-strengthened to decode-once at the 2026-07-24 rework: the closed
-vocabulary is the `chelis_deep::DeepTag` enum, the parser stamps it as
-`Atom::Tag` so the tag string does not exist in the parsed tree, and
-`infer_expr`, `lower_expr`'s tag dispatch, the `.dp` structural
-validators, and every migrated consumer match it exhaustively with no
-wildcard arm, so a new tag fails the build at every chokepoint that has
-not chosen a disposition. In-vocabulary tags with no expression-position
-inference case are an explicit loud `UnknownForm` disposition naming the
-tag (`block` has a real sequencing case per chelis#859), and the
-unknown-string wildcard survives only at raw-string boundaries - input
-that never crossed the parser's vocabulary screen. A top-level list the
-checker cannot decode is a loud diagnostic, never a silent skip
-(chelis#858). Delivery record: `spec/design/checker_totality.md`
-Phase 3.)*
-
 > **[04-TOT-2]** If a check completes with an empty error vector, the
 > typed result SHALL contain no error-typed expression: `Type::Error`
 > without a corresponding reported diagnostic SHALL be unconstructible.
-
-*(Structurally honored as of chelis#731 Phase 2: `Type::Error` carries a
-private `ErrorWitness`. A fresh witness is minted only by
-`chelis_types::errors::report`, which appends the owning diagnostic through
-the checker's private `DiagnosticSink`; `propagate` copies an existing witness
-for cascade suppression. The sink is append-only, and the shared
-`session::run_result` boundary vetoes `Ok` whenever that authoritative vector
-is non-empty. A planted bare `Type::Error` fails to compile outside the
-diagnostics module.)*
-
-*(Fresh inference results converge on `finalize_checked_program`, which
-validates the annotated runtime tree's required function, pattern, and
-expression stamps, with incoming and inferred signature metadata as
-backstops. Annotation consumes canonical stamps from the owning
-`InferenceProduct` epoch; it does not semantically re-infer a node under a
-fresh substitution. The exhaustive child-role classification includes an
-effects-owned `EffectHandler` payload and a type-owned handled body. Public raw
-`from_parts`/`try_from_parts` reconstruction does not exist. The effects-owned
-tree transformation is fallible
-`CheckedProgram::try_with_effect_annotations`: it requires identical roots,
-spans, atoms, children, and all metadata except the effects-owned `effects`
-entry; preserves the checked type environment, signature inference, and
-linearity; and reruns totality validation. The
-effects pass maps a violation to one `TypeTotality` error. Other operations
-have disjoint ownership: `CheckedProgram::with_linearity` changes only
-linearity metadata, and `CheckedProgram::compose` combines two
-already-successful, context-stacked checked halves. Neither rewrites
-type-owned tree structure.)*
-
-*(The Surf-reachable chelis#755 field-access and chelis#756 deep-type sites are
-closed here. Deep type and dimension resolution has one centralized, located,
-witnessed boundary: `DeepTypeResolver` returns a resolved type or an
-`ErrorWitness` minted while appending the exact owning diagnostic. Recursive
-parents propagate without re-reporting. Binder visibility is an explicit,
-serde-skipped `TypeResolutionScope` field on the cloned lexical `Env`, never
-ambient process/thread state. Binder modes distinguish closed input, explicit
-`deftype`/`typealias` binders, implicit-generic `defsig` binders, and trusted
-compiler metadata. Nominal headers and arities are precollected for the full
-check unit, preserving legal self/forward references while preventing unknown
-names, wrong arities, malformed nested nodes, and bare declaration-field types
-from entering a successful/cacheable context. Bare and canonical cast targets
-use the same boundary and exact-arity checks. Recursive functions are
-prebound only within genuine SCCs, inferred/generalized as a unit, with no
-post-report diagnostic deletion. The Phase 0 invariant mirror, fitness-honesty
-corpus, cascade-count corpus, and checker-totality Phase 2 oracle in
-`spec/design/checker_totality.md` enforce these claims. See spec/03
-§2.5.1/§2.6.)*
 
 > **[04-TOT-3]** A structurally malformed Deep form that reaches the
 > checker SHALL be rejected with a diagnostic naming the tag and the
 > expected shape; deferring the failure to a later stage is not a
 > disposition.
-
-*(Honored as of chelis#731 Phase 1: the malformed arity/shape guards push
-`MalformedForm` - the two Phase 0 holes (`(def)` with no body, `(cast)`
-with no target) plus the census-extension family (jit/realize/copy/borrow/
-var/lit/match/pipe/tuple-get/record/access/record-update/grad/vmap).)*

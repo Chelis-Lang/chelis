@@ -41,6 +41,13 @@
 //! - `permuted_edge_with_unconstrained_argument_specializes_correctly`
 //! - `mutual_unconstrained_cross_edge_fails_closed` (documented residue)
 //!
+//! chelis#1216 (PR #1218 review) — recursive erased-ADT-dimension generics:
+//! - `recursive_erased_dim_generic_compiles_links_and_runs` (the coral#26
+//!   shape end-to-end: the defect was an elided C symbol, so the C is
+//!   emitted, compiled, linked, and RUN)
+//! - `underconstrained_erased_dim_call_fails_closed` (checker-stamp
+//!   fallback negative parity; documented residue)
+//!
 //! Determinism golden (change task 4.2):
 //! - `specialized_symbol_set_is_deterministic_across_builds`
 //!
@@ -182,7 +189,7 @@ out = print(concrete())
 /// parameter unconstrained. The checker admits it ([04-INF-2]: unconstrained
 /// is chosen as the caller's own), and eval executes it; host lowering has
 /// no positional correspondence across different defs' parameters, so the
-/// build stays on the documented fail-closed chelis#1158 residue.
+/// build stays on the documented fail-closed chelis#1226 residue.
 const MUTUAL_UNCONSTRAINED_CROSS_EDGE: &str = "\
 type Box[a] =
   | Empty
@@ -351,13 +358,25 @@ fn count_occurrences(text: &str, needle: &str) -> usize {
 }
 
 fn write_qualified_collision_package(root: &std::path::Path) -> PathBuf {
+    // Derive the compiler pin and the chelis-std hashes rather than
+    // hardcoding them: `validate_manifest` rejects any pin other than the
+    // running binary's, and the lock's hashes are synthesized from the
+    // embedded bundle, so literals here go stale at every release bump.
+    let ver = chelis_compiler_api::COMPILER_VERSION;
+    let std_version = chelis_std_bundle::BUNDLED_CHELIS_STD_VERSION;
+    let archive_sha256 = chelis_std_bundle::archive_sha256();
+    let shell_sha256 = chelis_std_bundle::shell_sha256();
     write_file(
         &root.join("reef.toml"),
-        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\ncompiler = \"=0.18.4\"\nmodule_prefix = \"Demo\"\n",
+        &format!(
+            "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\ncompiler = \"={ver}\"\nmodule_prefix = \"Demo\"\n"
+        ),
     );
     write_file(
         &root.join("reef.lock"),
-        "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"0.4.0\"\ncompiler = \"=0.18.4\"\narchive_sha256 = \"c12eb890eb09451e8e8e3ae647d7072ec29c6c0c3737d1264526e7b05b722049\"\nshell_sha256 = \"5bd235c779ca0e49b026d383634c31331c124d0f02a4f8563a64aabca23d6d2a\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"0.18.4\"\n",
+        &format!(
+            "[package]\nname = \"qualified-collision\"\nversion = \"0.1.0\"\n\n[[dependencies]]\nname = \"chelis-std\"\nversion = \"{std_version}\"\ncompiler = \"={ver}\"\narchive_sha256 = \"{archive_sha256}\"\nshell_sha256 = \"{shell_sha256}\"\n\n[dependencies.source]\nkind = \"bundled\"\ncompiler_version = \"{ver}\"\n"
+        ),
     );
     write_file(
         &root.join("src/a.ch"),
@@ -391,9 +410,15 @@ fn compile_generated_object(out_dir: &std::path::Path, stem: &str) -> PathBuf {
         },
     );
     let object = out_dir.join(format!("{stem}.o"));
+    let isolated_main = format!("{stem}__manifest_main");
     let output = StdCommand::new(&toolchain.compiler)
         .current_dir(out_dir)
         .args(&toolchain.compile_flags)
+        // These are independently executable manifested programs. Rename
+        // each generated driver while combining their relocatable objects so
+        // this oracle isolates specialization-symbol collisions from the two
+        // intentionally present C entry points.
+        .arg(format!("-Dmain={isolated_main}"))
         .args(["-I.", "-c", &format!("{stem}.c"), "-o"])
         .arg(&object)
         .output()
@@ -514,8 +539,15 @@ fn no_shipped_diagnostic_cites_closed_issue_941() {
         !stderr.contains("chelis#941"),
         "no shipped diagnostic may cite the closed chelis#941, got:\n{stderr}"
     );
+    // chelis#1158 closed with its delivery, so it joined chelis#941 as a
+    // forbidden citation; the open residue tracker is chelis#1226
+    // (PR #1215 review).
     assert!(
-        stderr.contains("chelis#1158") || stderr.contains("[04-") || stderr.contains("[05-"),
+        !stderr.contains("chelis#1158"),
+        "no shipped diagnostic may cite the closed chelis#1158, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("chelis#1226") || stderr.contains("[04-") || stderr.contains("[05-"),
         "rejection must carry its authority (open issue or deciding atom) per \
          [05-UNS-5], got:\n{stderr}"
     );
@@ -687,9 +719,15 @@ fn permuted_edge_with_unconstrained_argument_specializes_correctly() {
 fn mutual_unconstrained_cross_edge_fails_closed() {
     let (_dir, c_artifact, stderr) = build_err(MUTUAL_UNCONSTRAINED_CROSS_EDGE, "mutual_empty");
     assert!(
-        stderr.contains("unsupported") && stderr.contains("chelis#1158"),
-        "the cross-member unconstrained edge stays on the branded chelis#1158 \
+        stderr.contains("unsupported") && stderr.contains("chelis#1226"),
+        "the cross-member unconstrained edge stays on the branded chelis#1226 \
          residue, got:\n{stderr}"
+    );
+    // PR #1215 review: the residue is reachable by non-recursive calls too,
+    // so its wording is recursion-neutral.
+    assert!(
+        !stderr.contains("recursive generic host call"),
+        "the residue diagnostic must not claim the call is recursive, got:\n{stderr}"
     );
     assert!(
         !c_artifact.exists(),
@@ -943,5 +981,84 @@ fn specialized_symbol_set_is_deterministic_across_builds() {
         symbols_a.len(),
         2,
         "two instantiations must emit exactly two specialized symbols: {symbols_a:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// chelis#1216 (PR #1218 review): recursive ERASED-ADT-DIMENSION generics
+// ---------------------------------------------------------------------------
+
+/// chelis#1216's coral#26 shape: a RECURSIVE function generic over an
+/// erased ADT dimension (`Col[n]` stores no `n`-typed ABI field). The
+/// defect was an ELIDED C symbol — the inline path specialized the outer
+/// call and the recursive edge fell through to a plain call to a
+/// definition the emitter never wrote — so Host IR lowering alone does
+/// not cover the failure boundary; this fixture must compile, link, and
+/// RUN. Prints `true`.
+const RECURSIVE_ERASED_DIM: &str = "\
+type Col[n] =
+  | FloatCol(tensor[n, f32])
+def zero_i64() -> int64 = cast(0, int64)
+def one_i64() -> int64 = cast(1, int64)
+def col_len[n](col: Col[n]) -> int64 = match col with {
+  | FloatCol(xs) => numel(xs)
+}
+def all_eq_len[n](pairs: List[(string, Col[n])], expected: int64) -> bool =
+  if eq(len(pairs), zero_i64()) then true else {
+    entry = index(pairs, zero_i64())
+    if neq(col_len(entry.1), expected) then false else all_eq_len(drop(pairs, one_i64()), expected)
+  }
+def main() -> bool = all_eq_len([(\"a\", FloatCol(to_tensor([cast(1.0, f32), cast(2.0, f32)])))], cast(2, int64))
+out = print(main())
+";
+
+/// Negative parity for the chelis#1216 checker-stamp fallback: `Col[n, a]`
+/// carries a TYPE parameter alongside the erased dimension, and the call
+/// site (`[]`) never constrains `a`, so the stamped type is still
+/// unresolved AFTER erased-argument canonicalization. The stamp must not
+/// be adopted: the checker and eval accept the program ([04-INF-2] types
+/// the unconstrained argument), and the build stays on the fail-closed
+/// [05-UNS-1] residue.
+const UNDERCONSTRAINED_ERASED_DIM: &str = "\
+type Col[n, a] =
+  | Tagged { label: a, xs: tensor[n, f32] }
+def zero_i64() -> int64 = cast(0, int64)
+def one_i64() -> int64 = cast(1, int64)
+def all_eq_len[n, a](pairs: List[(string, Col[n, a])], expected: int64) -> bool =
+  if eq(len(pairs), zero_i64()) then true else all_eq_len(drop(pairs, one_i64()), expected)
+def main() -> bool = all_eq_len([], cast(0, int64))
+out = print(main())
+";
+
+#[test]
+fn recursive_erased_dim_generic_compiles_links_and_runs() {
+    let eval = eval_first_line(RECURSIVE_ERASED_DIM, "erased_dim_eval");
+    let (_dir, out_dir) = build_ok(RECURSIVE_ERASED_DIM, "erased_dim");
+    let c_source = read_generated_c(&out_dir, "erased_dim");
+    let specialized = identifiers_with_prefix(&c_source, "all_eq_len__mono_");
+    assert!(
+        !specialized.is_empty(),
+        "the emitted C must contain an `all_eq_len` specialization; the \
+         chelis#1216 defect was precisely this symbol being elided"
+    );
+    let compiled = run_first_line(&out_dir, "erased_dim");
+    assert_eq!(eval, "true");
+    assert_eq!(compiled, eval, "compiled output must match the eval lane");
+}
+
+#[test]
+fn underconstrained_erased_dim_call_fails_closed() {
+    let eval = eval_first_line(UNDERCONSTRAINED_ERASED_DIM, "underconstrained_eval");
+    assert_eq!(eval, "true", "check and eval accept the unconstrained call");
+    let (_dir, c_artifact, stderr) = build_err(UNDERCONSTRAINED_ERASED_DIM, "underconstrained");
+    assert!(
+        stderr.contains("unsupported") && stderr.contains("[05-UNS-1]"),
+        "a stamp still unresolved after erasure must stay on the branded \
+         fail-closed residue, got:\n{stderr}"
+    );
+    assert!(
+        !c_artifact.exists(),
+        "no C artifact may be written on rejection: {}",
+        c_artifact.display()
     );
 }
