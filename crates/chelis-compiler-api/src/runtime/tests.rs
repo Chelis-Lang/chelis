@@ -973,6 +973,37 @@ fn host_runtime_einsum_accepts_the_legal_rank_zero_grammar() {
     assert_eq!(output.value.to_f64_lossy_vec(), vec![6.0]);
 }
 
+/// A zero extent means zero elements wherever the zero sits, so both shapes
+/// below describe the same empty operand and the derived reduction count is
+/// zero for both. A left-to-right checked fold reaches `BIG * BIG` first,
+/// which is not an int64, and so accepted one permutation while rejecting the
+/// other. The C runtime holds the same invariant in
+/// `crates/chelis-runtime/tests/op33_int64_extent_domain.rs`.
+#[test]
+fn host_runtime_einsum_zero_extent_acceptance_does_not_depend_on_axis_order() {
+    const BIG: usize = 4_000_000_000;
+    // The zero's axis is the only difference between the two cases, and the
+    // equation names it, so diagnostics identify the case by equation rather
+    // than by Debug-printing the extents (faithful_observation.md B2.4: no
+    // third formatter in an observation exit surface).
+    for (shape, equation) in [
+        (vec![BIG, 0, BIG], "abc,def->b"),
+        (vec![BIG, BIG, 0], "abc,def->c"),
+    ] {
+        let operand = RuntimeTensorValue {
+            value: IrTensorValue::from_vec(shape, Vec::new()),
+            precision: Prim::F32,
+        };
+        let output = tensor_einsum_value(equation, &operand, &operand)
+            .unwrap_or_else(|error| panic!("host einsum `{equation}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape,
+            vec![0],
+            "host einsum `{equation}` must produce an empty result"
+        );
+    }
+}
+
 #[test]
 fn host_runtime_einsum_rejects_non_lowercase_labels() {
     let operand = RuntimeTensorValue {

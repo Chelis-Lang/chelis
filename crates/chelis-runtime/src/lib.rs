@@ -690,21 +690,35 @@ fn parse_einsum_equation(equation: &str, lhs_rank: usize, rhs_rank: usize) -> Ei
     }
 }
 
-/// Fold a shape into its element count in the canonical int64 extent domain
-/// ([05-DIM-2]).
+/// The element count of a shape, in the canonical int64 extent domain
+/// ([05-DIM-2]), independent of the order the extents appear in.
 ///
-/// The int64 fold is the normative check. [05-OP-33] requires an
-/// unrepresentable count to trap `Overflow`, and "representable" means
-/// representable as an int64 extent, not "happens to fit whatever width this
-/// host spells `usize`". Folding in `usize` accepted the whole
-/// `[i64::MAX + 1, u64::MAX]` band on a 64-bit host and would have rejected
-/// perfectly legal extents on a 32-bit one, making the language's extent
-/// domain a property of the compiling machine.
-fn checked_einsum_extent_product(shape: &[i64], context: &str) -> i64 {
-    shape.iter().copied().fold(1_i64, |product, extent| {
-        product.checked_mul(extent).unwrap_or_else(|| {
-            runtime_fail!("Overflow: einsum {context} extent product exceeds int64")
-        })
+/// Two rules meet here.
+///
+/// The domain is int64. [05-OP-33] requires an unrepresentable count to trap
+/// `Overflow`, and "representable" means representable as an int64 extent, not
+/// "happens to fit whatever width this host spells `usize`". A `usize` fold
+/// accepts the whole `[i64::MAX + 1, u64::MAX]` band on a 64-bit host and
+/// rejects legal extents on a 32-bit one, making the language's extent domain
+/// a property of the compiling machine.
+///
+/// The count is a product, not a running prefix. A zero extent means zero
+/// elements ([05-OP-33]), so the count of any shape containing a zero is zero
+/// no matter what the other extents are or where they sit. Folding
+/// left-to-right and trapping on the first intermediate that leaves int64 made
+/// acceptance depend on axis order: `[i64::MAX, 0, i64::MAX]` was accepted with
+/// size zero while its permutation `[i64::MAX, i64::MAX, 0]` was rejected,
+/// though both describe the same empty tensor. Extents are already validated
+/// nonnegative, so once no extent is zero the product is monotonic and a
+/// checked fold over the rest is exact.
+fn checked_extent_product(extents: impl IntoIterator<Item = i64> + Clone, context: &str) -> i64 {
+    if extents.clone().into_iter().any(|extent| extent == 0) {
+        return 0;
+    }
+    extents.into_iter().fold(1_i64, |product, extent| {
+        product
+            .checked_mul(extent)
+            .unwrap_or_else(|| runtime_fail!("Overflow: {context} extent product exceeds int64"))
     })
 }
 
@@ -797,17 +811,20 @@ unsafe fn checked_tensor_metadata(
     }
     let rank = rank as usize;
     let mut owned_shape = Vec::with_capacity(rank);
-    let mut size = 1_i64;
     for axis in 0..rank {
         let extent = *shape.add(axis);
         if extent < 0 {
             runtime_fail!("Domain: {context} has negative extent {extent} at axis {axis}");
         }
-        size = size
-            .checked_mul(extent)
-            .unwrap_or_else(|| runtime_fail!("Overflow: {context} shape product exceeds int64"));
         owned_shape.push(extent);
     }
+    // The element count is the product of every extent, so it does not depend
+    // on axis order. The canonical strides below stay a checked suffix walk on
+    // purpose: [05-OP-31] defines each stride as the exact product of the
+    // following extents, and that product really can leave int64 for an empty
+    // tensor (`[0, i64::MAX, i64::MAX]` has an unrepresentable axis-0 stride),
+    // which is an `Overflow` the shape product must not mask.
+    let size = checked_extent_product(owned_shape.iter().copied(), context);
     let mut owned_strides = vec![0_i64; rank];
     let mut stride = 1_i64;
     for axis in (0..rank).rev() {
@@ -3970,12 +3987,12 @@ pub unsafe extern "C" fn chelis_tensor_einsum(
         }
     }
     let out_size = checked_einsum_buffer_len(
-        checked_einsum_extent_product(&out_shape, "output"),
+        checked_extent_product(out_shape.iter().copied(), "einsum output"),
         result_dtype,
         "output",
     );
     let reduction_total = checked_einsum_buffer_len(
-        checked_einsum_extent_product(&reduction_shape, "reduction"),
+        checked_extent_product(reduction_shape.iter().copied(), "einsum reduction"),
         accumulator,
         "reduction",
     );
