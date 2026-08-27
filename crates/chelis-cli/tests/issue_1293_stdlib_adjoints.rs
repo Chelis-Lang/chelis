@@ -98,8 +98,8 @@ drop_runtime = grad(drop_dynamic_loss, wrt=xs)(values, runtime_count)
 }
 
 #[test]
-fn handled_random_grad_advances_only_along_the_executed_branch_in_eval_and_c() {
-    let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-branch-ordinals");
+fn handled_random_grad_advances_for_false_true_and_invalid_paths_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-basic-branch-ordinals");
     write_file(
         &app_pkg.join("src/main.ch"),
         r#"module Demo.Main
@@ -148,6 +148,55 @@ after_invalid_forward = with seed(227i64) {
   skipped = maybe_invalid(fresh_template(), cast(-1.0, f32), runtime_false)
   sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
+false_branch_parity = eq(after_false_grad, after_false_forward)
+true_branch_parity = eq(after_true_grad, after_true_forward)
+invalid_untaken_parity = eq(after_invalid_grad, after_invalid_forward)
+"#,
+    );
+
+    let eval = eval_app_stdout(&reef_home, &app_pkg);
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    for expected in [
+        "false_branch_parity = true",
+        "true_branch_parity = true",
+        "invalid_untaken_parity = true",
+    ] {
+        assert!(
+            eval.contains(expected),
+            "eval missing `{expected}`:\n{eval}"
+        );
+        assert!(
+            compiled.contains(expected),
+            "compiled C missing `{expected}`:\n{compiled}"
+        );
+    }
+}
+
+#[test]
+fn handled_random_grad_advances_for_repeated_and_nested_handlers_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1293-random-composed-branch-ordinals");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Init.Random (normal_like)
+import Std.Init.XavierExt (xavier_uniform)
+
+def fresh_template() -> tensor[2, f32] = to_tensor([cast(0.0, f32), cast(0.0, f32)])
+def sum_all(value: tensor[2, f32]) -> f32 = tensor_to_scalar(sum(value, cast(0, int32)))
+def combo(template: tensor[2, f32], scale: f32) -> f32 ! { Random } = {
+  normal = normal_like(template, cast(0.0, f32), scale)
+  xavier = xavier_uniform(template, scale, scale)
+  add(sum_all(normal), sum_all(xavier))
+}
+def maybe_combo(template: tensor[2, f32], scale: f32, run: bool) -> f32 ! { Random } =
+  if run then combo(template, scale) else sum_all(template)
+
+false_mask: tensor[1, bool] = [false]
+false_count: int64 = tensor_to_scalar(count(&false_mask, 0))
+runtime_false: bool = eq(false_count, cast(1, int64))
+runtime_true: bool = eq(false_count, cast(0, int64))
+
 after_repeated_grads = with seed(229i64) {
   first = grad(maybe_combo, wrt=scale)(fresh_template(), cast(1.0, f32), runtime_false)
   second = grad(maybe_combo, wrt=scale)(fresh_template(), cast(1.0, f32), runtime_true)
@@ -171,9 +220,6 @@ after_nested_forward = with seed(233i64) {
   sum_all(normal_like(fresh_template(), cast(0.0, f32), cast(1.0, f32)))
 }
 
-false_branch_parity = eq(after_false_grad, after_false_forward)
-true_branch_parity = eq(after_true_grad, after_true_forward)
-invalid_untaken_parity = eq(after_invalid_grad, after_invalid_forward)
 repeated_parity = eq(after_repeated_grads, after_repeated_forwards)
 nested_parity = eq(after_nested_grad, after_nested_forward)
 "#,
@@ -181,13 +227,7 @@ nested_parity = eq(after_nested_grad, after_nested_forward)
 
     let eval = eval_app_stdout(&reef_home, &app_pkg);
     let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
-    for expected in [
-        "false_branch_parity = true",
-        "true_branch_parity = true",
-        "invalid_untaken_parity = true",
-        "repeated_parity = true",
-        "nested_parity = true",
-    ] {
+    for expected in ["repeated_parity = true", "nested_parity = true"] {
         assert!(
             eval.contains(expected),
             "eval missing `{expected}`:\n{eval}"

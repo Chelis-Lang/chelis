@@ -120,6 +120,134 @@ fn make_unary_program(op_name: &str, prim: Prim) -> HostProgram {
     }
 }
 
+fn make_tensor_to_scalar_program(prim: Prim, scalar_ty: HostType) -> HostProgram {
+    let tensor_ty = TensorType {
+        dims: Vec::new(),
+        precision: prim,
+    };
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "tensor_to_scalar".to_string(),
+        args: vec![HostExpr::new(HostExprKind::Var(
+            "input".to_string(),
+            HostType::Tensor(tensor_ty.clone()),
+        ))],
+        ty: scalar_ty.clone(),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "input".to_string(),
+                ty: HostType::Tensor(tensor_ty),
+            }],
+            ret_ty: scalar_ty,
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+fn make_scalar_to_tensor_program() -> HostProgram {
+    let tensor_ty = TensorType {
+        dims: Vec::new(),
+        precision: Prim::Int64,
+    };
+    let body = HostExpr::new(HostExprKind::Builtin {
+        name: "scalar_to_tensor".to_string(),
+        args: vec![HostExpr::new(HostExprKind::Var(
+            "input".to_string(),
+            HostType::Int64,
+        ))],
+        ty: HostType::Tensor(tensor_ty.clone()),
+    });
+    HostProgram {
+        globals: Vec::new(),
+        global_tensor_helpers: Vec::new(),
+        functions: vec![HostFunction {
+            name: "the_fn".to_string(),
+            params: vec![HostParam {
+                name: "input".to_string(),
+                ty: HostType::Int64,
+            }],
+            ret_ty: HostType::Tensor(tensor_ty),
+            body,
+            tensor_helpers: Vec::new(),
+            origin: HostFunctionOrigin::Authored,
+            specialization: None,
+            summary_rejections: Vec::new(),
+        }],
+        summary_rejections: Vec::new(),
+    }
+}
+
+#[test]
+fn tensor_to_scalar_i64_never_round_trips_through_f64() {
+    let source = emit_host_program(
+        &make_tensor_to_scalar_program(Prim::Int64, HostType::Int64),
+        "tensor_to_scalar_i64_exact",
+    )
+    .expect("rank-zero int64 extraction must emit");
+
+    assert!(
+        source.contains("chelis_host_tensor_to_i64("),
+        "int64 tensor_to_scalar must use the private exact-width extractor:\n{source}"
+    );
+    assert!(
+        source.contains("*((const int64_t *)tensor->data)"),
+        "the private extractor must read int64 storage at its declared width:\n{source}"
+    );
+    assert!(
+        !source.contains("__result = chelis_tensor_to_f64("),
+        "int64 tensor_to_scalar must not pass through double:\n{source}"
+    );
+}
+
+#[test]
+fn tensor_to_scalar_f64_keeps_the_float_extractor() {
+    let source = emit_host_program(
+        &make_tensor_to_scalar_program(Prim::F64, HostType::Float64),
+        "tensor_to_scalar_f64",
+    )
+    .expect("rank-zero f64 extraction must emit");
+
+    assert!(
+        source.contains("__result = chelis_tensor_to_f64("),
+        "f64 tensor_to_scalar must keep the floating extractor:\n{source}"
+    );
+}
+
+#[test]
+fn scalar_to_tensor_i64_uses_exact_i64_storage() {
+    let source = emit_host_program(
+        &make_scalar_to_tensor_program(),
+        "scalar_to_tensor_i64_exact",
+    )
+    .expect("rank-zero int64 packing must emit");
+
+    assert!(
+        source.contains("__result = chelis_host_scalar_tensor_from_i64("),
+        "int64 scalar_to_tensor must use the private exact-width packer:\n{source}"
+    );
+    assert!(
+        source.contains("chelis_alloc(0, NULL, CHELIS_I64)"),
+        "the private packer must allocate storage tagged CHELIS_I64:\n{source}"
+    );
+    assert!(
+        source.contains("*((int64_t *)tensor->data) = value"),
+        "the private packer must write at the declared int64 width:\n{source}"
+    );
+    assert!(
+        !source.contains("__result = chelis_scalar_tensor_from_i64("),
+        "int64 scalar_to_tensor must not call the legacy I32 storage helper:\n{source}"
+    );
+}
+
 fn make_checked_tensor_cast_program(source: Prim, target: Prim) -> HostProgram {
     let source_ty = vec_ty(2, source);
     let target_ty = vec_ty(2, target);

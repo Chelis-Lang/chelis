@@ -29,6 +29,67 @@ fn eval_app_stdout(reef_home: &std::path::Path, app_pkg: &std::path::Path) -> St
     String::from_utf8(assert.get_output().stdout.clone()).expect("utf-8 stdout")
 }
 
+fn assert_eval_and_c_diagnostic(
+    reef_home: &std::path::Path,
+    app_pkg: &std::path::Path,
+    expected: &str,
+) {
+    let eval = Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
+        .args([
+            "eval",
+            "--file",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+        ])
+        .output()
+        .expect("eval should run");
+    assert!(
+        !eval.status.success(),
+        "invalid List control unexpectedly evaluated"
+    );
+    assert!(
+        String::from_utf8_lossy(&eval.stderr).contains(expected),
+        "unexpected eval diagnostic: {}",
+        String::from_utf8_lossy(&eval.stderr)
+    );
+
+    let out_dir = app_pkg.join("main-out");
+    Command::cargo_bin("chelis")
+        .expect("binary")
+        .env("CHELIS_STYLE_GATE_DISABLE", "1")
+        .env("CHELIS_REEF_HOME", reef_home)
+        .current_dir(app_pkg)
+        .args([
+            "build",
+            app_pkg.join("src/main.ch").to_str().unwrap(),
+            "--target",
+            "c",
+            "--output",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert!(
+        link_generated(&out_dir, "main.c", "main").success(),
+        "generated C must compile and link"
+    );
+    let compiled = std::process::Command::new(out_dir.join("main"))
+        .output()
+        .expect("compiled binary should run");
+    assert!(
+        !compiled.status.success(),
+        "invalid List control unexpectedly compiled and ran"
+    );
+    assert!(
+        String::from_utf8_lossy(&compiled.stderr).contains(expected),
+        "unexpected compiled diagnostic: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+}
+
 #[test]
 fn runtime_list_selection_does_not_mix_unselected_non_finite_values() {
     let (_dir, reef_home, app_pkg) = make_app("issue-1293-list-non-finite-selection");
@@ -168,61 +229,38 @@ out = grad(loss, wrt=xs)(
 "#,
     );
 
-    let expected = "index 9223372036854775807 out of bounds for list of len 2";
-    let eval = Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args([
-            "eval",
-            "--file",
-            app_pkg.join("src/main.ch").to_str().unwrap(),
-        ])
-        .output()
-        .expect("eval should run");
-    assert!(
-        !eval.status.success(),
-        "out-of-bounds eval unexpectedly passed"
+    assert_eval_and_c_diagnostic(
+        &reef_home,
+        &app_pkg,
+        "index 9223372036854775807 out of bounds for list of len 2",
     );
-    assert!(
-        String::from_utf8_lossy(&eval.stderr).contains(expected),
-        "unexpected eval diagnostic: {}",
-        String::from_utf8_lossy(&eval.stderr)
+}
+
+#[test]
+fn composed_runtime_list_negative_extreme_is_guarded_before_internal_selection() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1293-list-negative-extreme-guard");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Index (drop_list, list_index, take_list)
+
+def loss(xs: List[f32], drop_count: int64, take_count: int64) -> f32 =
+  list_index(take_list(drop_list(xs, drop_count), take_count), cast(0, int64))
+
+runtime_min: int64 = tensor_to_scalar(
+  sum(to_tensor([-9223372036854775808i64]), cast(0, int32))
+)
+
+out = grad(loss, wrt=xs)(
+  [cast(2.0, f32), cast(3.0, f32), cast(5.0, f32)],
+  runtime_min,
+  cast(9223372036854775807, int64)
+)
+"#,
     );
 
-    let out_dir = app_pkg.join("main-out");
-    Command::cargo_bin("chelis")
-        .expect("binary")
-        .env("CHELIS_STYLE_GATE_DISABLE", "1")
-        .env("CHELIS_REEF_HOME", &reef_home)
-        .current_dir(&app_pkg)
-        .args([
-            "build",
-            app_pkg.join("src/main.ch").to_str().unwrap(),
-            "--target",
-            "c",
-            "--output",
-            out_dir.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    assert!(
-        link_generated(&out_dir, "main.c", "main").success(),
-        "generated C must compile and link"
-    );
-    let compiled = std::process::Command::new(out_dir.join("main"))
-        .output()
-        .expect("compiled binary should run");
-    assert!(
-        !compiled.status.success(),
-        "out-of-bounds compiled program unexpectedly passed"
-    );
-    assert!(
-        String::from_utf8_lossy(&compiled.stderr).contains(expected),
-        "unexpected compiled diagnostic: {}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
+    assert_eval_and_c_diagnostic(&reef_home, &app_pkg, "drop requires non-negative count");
 }
 
 #[test]
