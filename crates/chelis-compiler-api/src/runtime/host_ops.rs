@@ -2734,16 +2734,31 @@ pub(super) fn tensor_diagonal_value(
             out_shape.push(*size);
         }
     }
+    // [05-OP-33]: the result "keeps source axis order with the second axis
+    // removed", so `out_index` holds one coordinate per RETAINED source axis.
+    // The diagonal therefore sits at axis1's position after that removal,
+    // which is one slot earlier whenever axis2 comes first. Indexing
+    // `out_index` with the source axis number instead read a neighbouring
+    // axis's coordinate, and panicked when axis1 was the last source axis.
+    // The C runtime holds the same mapping in `chelis_tensor_diagonal`.
+    let diag_out_axis = if axis2 < axis1 { axis1 - 1 } else { axis1 };
     let out_numel = tensor_numel(&out_shape);
     let mut picks = Vec::with_capacity(out_numel);
     for linear in 0..out_numel {
         let out_index = linear_to_indices(linear, &out_shape);
         let mut src_index = Vec::with_capacity(tensor.value.shape.len());
         let mut out_pos = 0usize;
-        let diag_idx = out_index[axis1];
+        let diag_idx = out_index[diag_out_axis];
         for index in 0..tensor.value.shape.len() {
-            if index == axis1 || index == axis2 {
+            if index == axis2 {
+                // axis2 is the removed axis: it has no output coordinate of
+                // its own and repeats the diagonal's.
                 src_index.push(diag_idx);
+            } else if index == axis1 {
+                // axis1 keeps an output slot, and that slot is the diagonal's,
+                // so it is consumed here rather than handed to a later axis.
+                src_index.push(diag_idx);
+                out_pos += 1;
             } else {
                 src_index.push(out_index[out_pos]);
                 out_pos += 1;
@@ -2810,8 +2825,22 @@ pub(super) fn tensor_trace_value(
     axis2: i64,
 ) -> Result<RuntimeTensorValue, String> {
     let diagonal = tensor_diagonal_value(tensor, axis1, axis2)?;
+    let source_rank = tensor.value.shape.len();
+    let axis1_i = normalize_axis(source_rank, axis1, "trace")?;
+    let axis2_i = normalize_axis(source_rank, axis2, "trace")?;
     let rank = diagonal.value.shape.len();
-    let axis = normalize_axis(rank, axis1.min(axis2), "trace").unwrap_or(rank.saturating_sub(1));
+    // Trace reduces the axis the diagonal was written into, and `diagonal`
+    // keeps source axis order with axis2 removed, so that axis sits at axis1's
+    // position AFTER the removal. The previous spelling normalized the raw
+    // `axis1.min(axis2)` against the DIAGONAL's rank and fell back to the last
+    // axis when that landed out of range, so `trace(x, 2, 0)` summed an
+    // unrelated axis. The C runtime holds the same mapping in
+    // `chelis_tensor_trace`.
+    let axis = if axis2_i < axis1_i {
+        axis1_i - 1
+    } else {
+        axis1_i
+    };
     let mut out_shape = diagonal.value.shape.clone();
     let axis_len = out_shape.remove(axis);
     let out_numel = tensor_numel(&out_shape);

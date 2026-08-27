@@ -3718,6 +3718,18 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
         out_shape.as_ptr(),
         dtype.id() as chelis_dtype,
     );
+    // [05-OP-33]: the result "keeps source axis order with the second axis
+    // removed", so `out_index` holds one coordinate per RETAINED source axis.
+    // The diagonal therefore sits at axis1's position after that removal,
+    // which is one slot earlier whenever axis2 comes first. Indexing
+    // `out_index` with the source axis number instead read a neighbouring
+    // axis's coordinate, and ran off the end when axis1 was the last source
+    // axis.
+    let diag_out_axis = if axis2_i < axis1_i {
+        axis1_i - 1
+    } else {
+        axis1_i
+    };
     let elem_size = tensor_elem_size(dtype);
     let mut out_index = vec![0; (*out).rank as usize];
     let mut src_index = vec![0; (*tensor).rank as usize];
@@ -3728,15 +3740,22 @@ pub unsafe extern "C" fn chelis_tensor_diagonal(
             (*out).rank,
             out_index.as_mut_ptr(),
         );
-        let diag_idx = out_index[axis1_i];
+        let diag_idx = out_index[diag_out_axis];
         let mut out_pos = 0usize;
         for (i, src_slot) in src_index
             .iter_mut()
             .enumerate()
             .take((*tensor).rank as usize)
         {
-            if i == axis1_i || i == axis2_i {
+            if i == axis2_i {
+                // axis2 is the removed axis: it has no output coordinate of
+                // its own and repeats the diagonal's.
                 *src_slot = diag_idx;
+            } else if i == axis1_i {
+                // axis1 keeps an output slot, and that slot is the diagonal's,
+                // so it is consumed here rather than handed to a later axis.
+                *src_slot = diag_idx;
+                out_pos += 1;
             } else {
                 *src_slot = out_index[out_pos];
                 out_pos += 1;
@@ -3764,8 +3783,19 @@ pub unsafe extern "C" fn chelis_tensor_trace(
 ) -> *mut chelis_tensor {
     let [dtype] = validate_tensor_inputs([(tensor, "trace input")]);
     let dtype = require_signed_integer_or_float_dtype(dtype, "trace input");
-    let reduce_axis = tensor_normalize_axis(tensor, axis1, "trace")
-        .min(tensor_normalize_axis(tensor, axis2, "trace"));
+    let axis1_i = tensor_normalize_axis(tensor, axis1, "trace");
+    let axis2_i = tensor_normalize_axis(tensor, axis2, "trace");
+    // Trace reduces the axis the diagonal was written into, and `diagonal`
+    // keeps source axis order with axis2 removed, so that axis sits at axis1's
+    // position AFTER the removal. `min(axis1, axis2)` names the same slot only
+    // when the axes are adjacent; for `trace(x, 2, 0)` it named axis 0 of the
+    // diagonal, so the operation summed an unrelated axis and returned the
+    // wrong result at the wrong shape.
+    let reduce_axis = if axis2_i < axis1_i {
+        axis1_i - 1
+    } else {
+        axis1_i
+    };
     let diag = chelis_tensor_diagonal(tensor, axis1, axis2);
     let axis_size = (*diag).shape[reduce_axis] as usize;
     let mut out_shape = vec![0; (*diag).rank.saturating_sub(1) as usize];
