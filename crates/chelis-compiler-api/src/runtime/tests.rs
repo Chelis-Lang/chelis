@@ -1004,6 +1004,268 @@ fn host_runtime_einsum_zero_extent_acceptance_does_not_depend_on_axis_order() {
     }
 }
 
+/// [05-OP-33]: `diagonal` "keeps source axis order with the second axis
+/// removed", so its output holds one coordinate per RETAINED source axis and
+/// the diagonal's own coordinate sits at axis1's position AFTER that removal.
+/// Reading that vector at the SOURCE axis number picked up a neighbouring
+/// axis's coordinate and panicked when axis1 was the last source axis, and the
+/// remaining coordinates were not shifted past the slot the diagonal occupies.
+/// `trace` then has to reduce the axis the diagonal was written into, which
+/// `min(axis1, axis2)` names only for an adjacent pair.
+///
+/// Every expectation is the closed form of the ramp `in[i][j][k] = 4i + 2j + k`
+/// evaluated at the coordinates the atom names. The C runtime holds the same
+/// invariants in `crates/chelis-runtime/tests/op33_diagonal_axis_mapping.rs`;
+/// this is the host lane's half, and the two lanes agreeing is the point:
+/// before this repair they were bug-compatible, so eval-vs-C parity was green
+/// on a wrong answer.
+#[test]
+fn host_runtime_diagonal_and_trace_map_every_axis_pair_to_source_coordinates() {
+    let ramp = |shape: Vec<usize>| {
+        let count: usize = shape.iter().product();
+        RuntimeTensorValue {
+            value: IrTensorValue::from_vec(
+                shape,
+                (0..count).map(|index| index as f64).collect::<Vec<_>>(),
+            ),
+            precision: Prim::F32,
+        }
+    };
+
+    /// One axis-pair case: source shape, the two axes, and the output shape
+    /// and elements [05-OP-33] requires.
+    struct AxisPairCase {
+        label: &'static str,
+        shape: Vec<usize>,
+        axis1: i64,
+        axis2: i64,
+        out_shape: Vec<usize>,
+        elements: Vec<f64>,
+    }
+    let case =
+        |label, shape: Vec<usize>, axis1, axis2, out_shape: Vec<usize>, elements| AxisPairCase {
+            label,
+            shape,
+            axis1,
+            axis2,
+            out_shape,
+            elements,
+        };
+
+    let diagonal_cases = vec![
+        case("rank2-forward", vec![2, 2], 0, 1, vec![2], vec![0.0, 3.0]),
+        case("rank2-reversed", vec![2, 2], 1, 0, vec![2], vec![0.0, 3.0]),
+        case(
+            "rank2-negative-axes-reversed",
+            vec![2, 2],
+            -1,
+            -2,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        case(
+            "rank3-leading-pair",
+            vec![2, 2, 2],
+            0,
+            1,
+            vec![2, 2],
+            vec![0.0, 1.0, 6.0, 7.0],
+        ),
+        case(
+            "rank3-trailing-pair",
+            vec![2, 2, 2],
+            1,
+            2,
+            vec![2, 2],
+            vec![0.0, 3.0, 4.0, 7.0],
+        ),
+        case(
+            "rank3-straddling-forward",
+            vec![2, 2, 2],
+            0,
+            2,
+            vec![2, 2],
+            vec![0.0, 2.0, 5.0, 7.0],
+        ),
+        case(
+            "rank3-straddling-reversed",
+            vec![2, 2, 2],
+            2,
+            0,
+            vec![2, 2],
+            vec![0.0, 5.0, 2.0, 7.0],
+        ),
+        case(
+            "rank4-straddling-reversed",
+            vec![2, 2, 2, 2],
+            2,
+            0,
+            vec![2, 2, 2],
+            vec![0.0, 1.0, 10.0, 11.0, 4.0, 5.0, 14.0, 15.0],
+        ),
+        // Distinct extents everywhere, so a misrouted coordinate changes the
+        // OUTPUT SHAPE and not merely the values. `infer_diagonal_result_type`
+        // derives the declared type the same way, so a disagreement here is a
+        // checked type the interpreter does not honor.
+        case(
+            "rank4-distinct-extents-reversed",
+            vec![2, 3, 2, 5],
+            2,
+            0,
+            vec![3, 2, 5],
+            vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, 35.0, 36.0, 37.0, 38.0, 39.0, 10.0, 11.0, 12.0, 13.0,
+                14.0, 45.0, 46.0, 47.0, 48.0, 49.0, 20.0, 21.0, 22.0, 23.0, 24.0, 55.0, 56.0, 57.0,
+                58.0, 59.0,
+            ],
+        ),
+        case(
+            "non-square-forward",
+            vec![3, 2],
+            0,
+            1,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        case(
+            "non-square-reversed",
+            vec![3, 2],
+            1,
+            0,
+            vec![2],
+            vec![0.0, 3.0],
+        ),
+        // A zero selected extent is deliberately absent here and present in
+        // the C runtime's sibling file, because the two lanes disagree on it
+        // and the host half is chelis#1347, not this repair. `tensor_numel`
+        // reports one element for a zero-extent shape, so `linear_to_indices`
+        // divides by that zero: `tensor_diagonal_value(shape [0, 3], 0, 1)`
+        // panics "attempt to calculate the remainder with a divisor of zero"
+        // at host_ops.rs, where `chelis_tensor_diagonal` returns the empty
+        // result [05-OP-33] owes. Nothing in this test's own repair touches
+        // that path.
+    ];
+    for probe in diagonal_cases {
+        let label = probe.label;
+        let output = tensor_diagonal_value(&ramp(probe.shape), probe.axis1, probe.axis2)
+            .unwrap_or_else(|error| panic!("host diagonal `{label}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape, probe.out_shape,
+            "host diagonal `{label}` output shape"
+        );
+        assert_eq!(
+            output.value.to_f64_lossy_vec(),
+            probe.elements,
+            "host diagonal `{label}` elements"
+        );
+    }
+
+    let trace_cases = vec![
+        case("rank2-forward", vec![2, 2], 0, 1, Vec::new(), vec![3.0]),
+        case("rank2-reversed", vec![2, 2], 1, 0, Vec::new(), vec![3.0]),
+        case(
+            "rank3-leading-pair",
+            vec![2, 2, 2],
+            0,
+            1,
+            vec![2],
+            vec![6.0, 8.0],
+        ),
+        case(
+            "rank3-leading-pair-reversed",
+            vec![2, 2, 2],
+            1,
+            0,
+            vec![2],
+            vec![6.0, 8.0],
+        ),
+        case(
+            "rank3-trailing-pair",
+            vec![2, 2, 2],
+            1,
+            2,
+            vec![2],
+            vec![3.0, 11.0],
+        ),
+        case(
+            "rank3-straddling-forward",
+            vec![2, 2, 2],
+            0,
+            2,
+            vec![2],
+            vec![5.0, 9.0],
+        ),
+        case(
+            "rank3-straddling-reversed",
+            vec![2, 2, 2],
+            2,
+            0,
+            vec![2],
+            vec![5.0, 9.0],
+        ),
+        case(
+            "rank4-straddling-reversed",
+            vec![2, 2, 2, 2],
+            2,
+            0,
+            vec![2, 2],
+            vec![10.0, 12.0, 18.0, 20.0],
+        ),
+        // `infer_trace_result_type` removes both source axes and declares
+        // [3, 5]; reducing the diagonal's axis 0 instead would yield [2, 5].
+        case(
+            "rank4-distinct-extents-reversed",
+            vec![2, 3, 2, 5],
+            2,
+            0,
+            vec![3, 5],
+            vec![
+                35.0, 37.0, 39.0, 41.0, 43.0, 55.0, 57.0, 59.0, 61.0, 63.0, 75.0, 77.0, 79.0, 81.0,
+                83.0,
+            ],
+        ),
+    ];
+    for probe in trace_cases {
+        let label = probe.label;
+        let output = tensor_trace_value(&ramp(probe.shape), probe.axis1, probe.axis2)
+            .unwrap_or_else(|error| panic!("host trace `{label}` must evaluate: {error}"));
+        assert_eq!(
+            output.value.shape, probe.out_shape,
+            "host trace `{label}` output shape"
+        );
+        assert_eq!(
+            output.value.to_f64_lossy_vec(),
+            probe.elements,
+            "host trace `{label}` elements"
+        );
+    }
+}
+
+/// Negative parity for the case above: the axis domain still fails closed, and
+/// an equal pair is rejected whichever spelling produces it.
+#[test]
+fn host_runtime_diagonal_and_trace_reject_equal_and_out_of_range_axes() {
+    let operand = RuntimeTensorValue {
+        value: IrTensorValue::from_vec(vec![2, 2, 2], (0..8).map(|i| i as f64).collect()),
+        precision: Prim::F32,
+    };
+    for (label, axis1, axis2) in [
+        ("equal-axes", 1_i64, 1_i64),
+        ("equal-axes-normalized", 2, -1),
+        ("axis-out-of-range", 0, 3),
+        ("negative-axis-out-of-range", 0, -4),
+    ] {
+        assert!(
+            tensor_diagonal_value(&operand, axis1, axis2).is_err(),
+            "host diagonal `{label}` must be rejected"
+        );
+        assert!(
+            tensor_trace_value(&operand, axis1, axis2).is_err(),
+            "host trace `{label}` must be rejected"
+        );
+    }
+}
+
 /// An empty operand's axis decomposition is never read, and computing it
 /// anyway overflows `usize` on the prefix product or spins an empty loop. The
 /// C runtime holds the same invariant in
