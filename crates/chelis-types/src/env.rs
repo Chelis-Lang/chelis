@@ -94,6 +94,11 @@ pub struct Env {
     /// nested lexical clones, and omitted from cached checker state.
     #[serde(skip)]
     type_resolution_scope: TypeResolutionScope,
+    /// Declared result trusted only while checking a linker-reserved
+    /// [05-OP-35] stdlib wrapper whose runtime-axis shape proof is owned by
+    /// #1298. Never serialized or exposed to entry source.
+    #[serde(skip)]
+    exact_stdlib_expected_result: Option<Type>,
     /// chelis#397/#469: provenance of `let`-bound `int`-valued names, so a
     /// runtime `expand` size built from a `let` binding can be checked for
     /// materializability. Cloned at every lexical scope boundary along with
@@ -132,6 +137,14 @@ impl Env {
     /// `d-rank` nodes do not allocate inference variables.
     pub(crate) fn type_resolution_binders(&self) -> Option<&HashSet<String>> {
         self.type_resolution_scope.binders.as_ref()
+    }
+
+    pub(crate) fn set_exact_stdlib_expected_result(&mut self, result: Option<Type>) {
+        self.exact_stdlib_expected_result = result;
+    }
+
+    pub(crate) fn exact_stdlib_expected_result(&self) -> Option<&Type> {
+        self.exact_stdlib_expected_result.as_ref()
     }
 
     /// Record the size provenance of a `let`-bound name (chelis#397/#469).

@@ -1,6 +1,6 @@
 module Std.Tests.Init.Random
 import Std.Init.Random (normal_like)
-import Std.Test (assert_close, assert_close_tensor, assert_eq_int, assert_true)
+import Std.Test (assert_close, assert_close_tensor, assert_eq, assert_true)
 def abs_f32(x: f32) -> f32 = if lt(x, cast(0.0, f32)) then sub(cast(0.0, f32), x) else x
 def make_template(n: int64) -> tensor[n, f32] = to_tensor(map(fn (i: int64) -> cast(0.0, f32), range(cast(0, int64), n)))
 def sample_mean[n](t: tensor[n, f32]) -> f32 = {
@@ -36,7 +36,7 @@ def test_normal_like_preserves_template_shape() -> unit ! { Test } = {
   template = make_template(cast(64, int64))
   out = with seed(7i64) { normal_like(template, cast(0.0, f32), cast(1.0, f32)) }
   actual_n = cast(len(to_list(out)), int64)
-  assert_eq_int(actual_n, cast(64, int64), "normal_like output length matches template length")
+  assert_eq(actual_n, cast(64, int64), "normal_like output length matches template length")
 }
 def test_normal_like_mean_zero_std_one_within_loose_bound() -> unit ! { Test } = {
   template = make_template(cast(1024, int64))

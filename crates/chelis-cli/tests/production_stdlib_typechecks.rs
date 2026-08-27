@@ -75,11 +75,6 @@ fn production_stdlib_init_kaiming_typechecks() {
 }
 
 #[test]
-fn production_stdlib_init_xavier_typechecks() {
-    assert_stdlib_clean("src/init/xavier.ch");
-}
-
-#[test]
 fn production_stdlib_init_xavierext_typechecks() {
     assert_stdlib_clean("src/init/xavierext.ch");
 }

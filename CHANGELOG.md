@@ -881,8 +881,9 @@ authored edits.
   the reader cannot drop them; fields or headers containing CR/LF are
   rejected because the line-based reader cannot round-trip them).
   `Std.Io.Json` gains `to_json` / `try_to_json` / `write_json` /
-  `try_write_json` (insertion-order keys, shortest-round-trip f64 via
-  `to_string`, non-finite numbers fail loudly / return `None`) and now
+  `try_write_json` (object keys recursively sorted by Unicode scalar-value
+  sequence, shortest-round-trip f64 via `to_string`, non-finite numbers fail
+  loudly / return `None`) and now
   exports the seven `Json` constructors so documents can be built directly.
   New `Std.Text` module with `join(parts, sep)`. The bundled chelis-std
   0.4.0 dist bytes changed accordingly (same version; committed reef.lock

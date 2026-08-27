@@ -128,12 +128,6 @@ unwinds with chelis#893 (the Repr-keyed payload seal) and the 0.19 storage break
 const PERMANENT_PLAIN_DISPOSITION: &str =
     "permanent-disposition(C6 initial non-seam complete descriptor set ratified 2026-08-04)";
 
-/// The one reviewed permanent capacity exception: the source-faithful Json
-/// carrier distinguishes exact source integers from source floats and is
-/// governed by [05-OP-2]. The complete enforcement descriptor is closed.
-const PERMANENT_JSON_DISPOSITION: &str = "permanent-disposition([05-OP-2] source-faithful prelude Json numeric split; exact descriptor ratified 2026-08-04)";
-const PERMANENT_JSON_ID: &str = "prelude::Json: JNull | JBool(bool) | JInt(int64) | JNum(f64) | JStr(string) | JList(List[Json]) | JDict(Dict[string, Json])";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrozenDispositionRow {
     kind: &'static str,
@@ -1359,7 +1353,640 @@ const FINAL_TAGGED_TRANSPORT_ROWS: &[StaticSurfaceDescriptor] = &[
 /// chelis#1289 tagged-carrier ABI. Each anchor is a literal phrase from the
 /// governing atom's normative block in spec/05-risc-primitives.md; the atoms
 /// incorporate their identity registries under spec/registry/ by reference.
+macro_rules! final_numeric_row {
+    ($kind:literal, $id:literal, $flags:expr, $atom:literal, $anchor:literal) => {
+        FinalNumericOperationRegistration {
+            surface: StaticSurfaceDescriptor::new(PRIMARY_CENSUS_FAMILY, $kind, $id, $flags),
+            atom: $atom,
+            authority_anchor: $anchor,
+        }
+    };
+}
+
 const FINAL_NUMERIC_OPERATION_ROWS: &[FinalNumericOperationRegistration] = &[
+    final_numeric_row!(
+        "std-adt-numeric",
+        "decimal::Decimal: () (variant {} Decimal (field {} coefficient (t-prim {} int64)) (field {} scale (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "io/json::Json: () (variant {} JsonNull) (variant {} JsonBool (t-prim {} bool)) (variant {} JsonInt (t-prim {} int64)) (variant {} JsonBigInt (t-prim {} string)) (variant {} JsonFloat (t-prim {} f64)) (variant {} JsonString (t-prim {} string)) (variant {} JsonArray (t-adt {} List (t-adt {} Json))) (variant {} JsonObject (t-adt {} Dict (t-prim {} string) (t-adt {} Json)))",
+        &["float-carrier", "numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "time::Date: () (variant {} Date (field {} year (t-prim {} int64)) (field {} month (t-prim {} int64)) (field {} day (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "time::Duration: () (variant {} Duration (field {} days (t-prim {} int64)) (field {} hours (t-prim {} int64)) (field {} minutes (t-prim {} int64)) (field {} seconds (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-adt-numeric",
+        "tokenizer::Tokenizer: () (variant {} BpeTokenizer (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} string) (t-prim {} int64)) (t-adt {} Dict (t-prim {} int64) (t-prim {} string)) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-34]",
+        "numeric_adt"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::normal_cdf: (t-fn {} (t-var {} p_float) (t-var {} p_float))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::normal_cdf_contract_samples: (t-fn {} (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::normal_cdf_contract_seed: (t-fn {} (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "contracts::standard_contract_tolerance: (t-fn {} (t-prim {} f32))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal: (t-fn {} (t-prim {} string) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_add: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_div: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} int64) (t-adt {} RoundingMode) (t-adt {} Decimal))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_eq: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_from_int: (t-fn {} (t-prim {} int64) (t-adt {} Decimal))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_gt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_gte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_lt: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_lte: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_mul: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_sub: (t-fn {} (t-adt {} Decimal) (t-adt {} Decimal) (t-adt {} Decimal))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_float: (t-fn {} (t-adt {} Decimal) (t-prim {} f64))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::decimal_to_string: (t-fn {} (t-adt {} Decimal) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "decimal::try_decimal: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Decimal)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "index::drop_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "index::list_index: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-var {} item))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "index::take_list: (t-fn {} (t-adt {} List (t-var {} item)) (t-prim {} int64) (t-adt {} List (t-var {} item)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/kaiming::kaiming_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/kaiming::kaiming_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/random::normal_like: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/xavierext::trunc_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/xavierext::xavier_normal: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "init/xavierext::xavier_uniform: (t-fn {eff: (effects {} random)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_float))) (t-var {} p_float) (t-var {} p_float) (t-tensor {} (d-rank {} r) (t-var {} p_float)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_array: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} List (t-adt {} Json))))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_bigint: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_bool: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} bool)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_float: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} f64)))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_get: (t-fn {} (t-adt {} Json) (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_int: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_is_null: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_object: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-adt {} Dict (t-prim {} string) (t-adt {} Json))))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::json_string: (t-fn {} (t-adt {} Option (t-adt {} Json)) (t-adt {} Option (t-prim {} string)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::parse_json: (t-fn {} (t-prim {} string) (t-adt {} Json))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::to_json: (t-fn {} (t-adt {} Json) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_load_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_parse_json: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Json)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_to_json: (t-fn {} (t-adt {} Json) (t-adt {} Option (t-prim {} string)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::try_write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-adt {} Option (t-unit {})))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io/json::write_json: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Json) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io::mmap_size: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "io::read_head_bytes: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-prim {} int64) (t-adt {} List (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "process::run: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "process::run_chelis: (t-fn {eff: (effects {} io)} (t-adt {} List (t-prim {} string)) (t-tuple {} (t-prim {} int64) (t-prim {} string) (t-prim {} string)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "scalar::abs: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "scalar::max: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "scalar::min: (t-fn {} (t-var {} p_numeric) (t-var {} p_numeric) (t-var {} p_numeric))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "sort::sort: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric))) (t-prim {} int32) (t-tuple {} (t-tensor {} (d-rank {} r) (t-var {} p_numeric)) (t-tensor {} (d-rank {} r) (t-prim {} int64))))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::arange: (t-fn {} (t-var {} p_int) (t-var {} p_int) (t-tensor {} (d-var {} n) (t-var {} p_int)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::linspace: (t-fn {} (t-var {} p_float) (t-var {} p_float) (t-prim {} int64) (t-tensor {} (d-var {} n) (t-var {} p_float)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::squeeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::stack: (t-fn {} (t-adt {} List (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-name {} rows) (d-rank {} post) (t-var {} p)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/construct::unsqueeze: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} pre) (d-rank {} post) (t-var {} p))) (t-prim {} int32) (t-tensor {} (d-rank {} pre) (d-lit {} 1) (d-rank {} post) (t-var {} p)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tensor/mask::where_indices: (t-fn {} (t-ref {} (t-tensor {} (d-rank {} r) (t-prim {} bool))) (t-tensor {} (d-var {} hits) (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_close: (t-fn {eff: (effects {} test)} (t-var {} p_float) (t-var {} p_float) (t-var {} p_float) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_close_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-ref {} (t-tensor {} (d-var {} n) (t-var {} p))) (t-prim {} f32) (t-prim {} string) (t-unit {}))",
+        &["float-carrier"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_eq: (t-fn {eff: (effects {} test)} (t-var {} q) (t-var {} q) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_eq_tensor: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-prim {} string) (t-unit {}))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "test::assert_shape: (t-fn {eff: (effects {} test)} (t-ref {} (t-tensor {} (d-rank {} r) (t-var {} p))) (t-adt {} List (t-prim {} int64)) (t-prim {} string) (t-unit {}))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::add_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_gt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_gte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_lt: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_lte: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} bool))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::date_to_string: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::day_of_week: (t-fn {} (t-adt {} Date) (t-adt {} DayOfWeek))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::day_of_week_name: (t-fn {} (t-adt {} Date) (t-prim {} string))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::day_of_year: (t-fn {} (t-adt {} Date) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::days_between: (t-fn {} (t-adt {} Date) (t-adt {} Date) (t-prim {} int64))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::duration: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Duration))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::is_leap_year: (t-fn {} (t-prim {} int64) (t-prim {} bool))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::parse_date: (t-fn {} (t-prim {} string) (t-adt {} Option (t-adt {} Date)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::sub_days: (t-fn {} (t-adt {} Date) (t-prim {} int64) (t-adt {} Date))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "time::try_date: (t-fn {} (t-prim {} int64) (t-prim {} int64) (t-prim {} int64) (t-adt {} Option (t-adt {} Date)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::batch_encode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} string)) (t-prim {} int64) (t-prim {} int64) (t-tensor {} (d-name {} batch) (d-name {} seq) (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::decode: (t-fn {} (t-adt {} Tokenizer) (t-adt {} List (t-prim {} int64)) (t-prim {} string))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::encode: (t-fn {} (t-adt {} Tokenizer) (t-prim {} string) (t-adt {} List (t-prim {} int64)))",
+        &["numeric-op"],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Tokenizer))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
+    final_numeric_row!(
+        "std-def-numeric",
+        "tokenizer::try_load_tokenizer: (t-fn {eff: (effects {} io)} (t-prim {} string) (t-adt {} Option (t-adt {} Tokenizer)))",
+        &[],
+        "[05-OP-35]",
+        "stdlib_numeric_def"
+    ),
     FinalNumericOperationRegistration {
         surface: StaticSurfaceDescriptor::new(
             PRIMARY_CENSUS_FAMILY,
@@ -1802,7 +2429,7 @@ fn coverage_manifest() -> CoverageManifest {
                 expected_success: "capacity_census_matches_public_surface passes".to_string(),
                 mutations: vec![
                     "planted_prelude_adt_with_f64_variant_is_detected".to_string(),
-                    "registered_prelude_json_adt_is_enumerated_with_both_flags".to_string(),
+                    "final_surface_has_no_duplicate_prelude_json".to_string(),
                 ],
             },
             CoveredLeg {
@@ -2628,10 +3255,6 @@ fn has_recognized_permanent_plain_disposition(row: &Row) -> bool {
 
 fn has_recognized_permanent_disposition(row: &Row) -> bool {
     has_recognized_permanent_plain_disposition(row)
-        || (row.citation == PERMANENT_JSON_DISPOSITION
-            && row.kind == "prelude-adt-numeric"
-            && row.id == PERMANENT_JSON_ID
-            && row.flags == ["float-carrier", "numeric-op"])
 }
 
 fn has_recognized_legacy_disposition(row: &Row) -> bool {
@@ -2666,7 +3289,7 @@ fn frozen_disposition_for_canonical_key(
 }
 
 fn frozen_disposition_rows() -> Vec<Row> {
-    let mut rows: Vec<Row> = GRANDFATHER_SEAM_ROWS
+    GRANDFATHER_SEAM_ROWS
         .iter()
         .map(|frozen| row_from_frozen(frozen, GRANDFATHER_SEAM_CITATION))
         .chain(
@@ -2679,14 +3302,7 @@ fn frozen_disposition_rows() -> Vec<Row> {
                 .iter()
                 .map(|frozen| row_from_frozen(frozen, PERMANENT_PLAIN_DISPOSITION)),
         )
-        .collect();
-    rows.push(Row {
-        kind: "prelude-adt-numeric".to_string(),
-        id: PERMANENT_JSON_ID.to_string(),
-        flags: vec!["float-carrier".to_string(), "numeric-op".to_string()],
-        citation: PERMANENT_JSON_DISPOSITION.to_string(),
-    });
-    rows
+        .collect()
 }
 
 fn check_active_legacy_subset(baseline: &Baseline) -> Result<(), String> {
@@ -3236,6 +3852,26 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
             {
                 prims.insert(name.clone());
             }
+            // [05-OP-35]'s closed precision domains and recursive equality
+            // domain are numeric capacity even when no concrete primitive is
+            // written in the signature. A tensor precision variable is also
+            // capacity over the active tensor element set. These markers are
+            // deliberately not in `FLOAT_PRIMS`: they use the tagged carrier,
+            // so they are numeric operations without introducing a bare-float
+            // seam.
+            if list.tag() == Some(DeepTag::TVar)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+                && matches!(name.as_str(), "p_float" | "p_int" | "p_numeric" | "q" | "Q")
+            {
+                prims.insert(name.clone());
+            }
+            if list.tag() == Some(DeepTag::TTensor)
+                && let Some(Expr::List(precision, _)) = list.elements.last()
+                && precision.tag() == Some(DeepTag::TVar)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = precision.elements.get(2)
+            {
+                prims.insert(format!("tensor-precision:{name}"));
+            }
             for e in &list.elements {
                 collect_numeric_tprims(e, prims);
             }
@@ -3249,6 +3885,162 @@ fn collect_numeric_tprims(expr: &Expr, prims: &mut BTreeSet<String>) {
         Expr::Node(node, span) => {
             let bridged = Expr::List(node.to_list(*span), *span);
             collect_numeric_tprims(&bridged, prims);
+        }
+        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+    }
+}
+
+fn collect_referenced_adts(expr: &Expr, names: &mut BTreeSet<String>) {
+    match expr {
+        Expr::List(list, _) => {
+            if list.tag() == Some(DeepTag::TAdt)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+            {
+                names.insert(name.clone());
+            }
+            for element in &list.elements {
+                collect_referenced_adts(element, names);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_referenced_adts(value, names);
+            }
+        }
+        Expr::MetaExpr(meta, _) => collect_referenced_adts(&meta.expr, names),
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_referenced_adts(&bridged, names);
+        }
+        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+    }
+}
+
+#[derive(Default)]
+struct AdtNumericDependencies {
+    direct_prims: BTreeSet<String>,
+    referenced_adts: BTreeSet<String>,
+}
+
+fn collect_adt_numeric_dependencies(
+    expr: &Expr,
+    definitions: &mut BTreeMap<String, AdtNumericDependencies>,
+) {
+    match expr {
+        Expr::List(list, _) => {
+            if list.tag() == Some(DeepTag::Deftype) {
+                let mut dependency = AdtNumericDependencies::default();
+                for element in list.elements.iter().skip(3) {
+                    collect_numeric_tprims(element, &mut dependency.direct_prims);
+                    collect_referenced_adts(element, &mut dependency.referenced_adts);
+                }
+                definitions.insert(deftype_name(list), dependency);
+            }
+            for element in &list.elements {
+                collect_adt_numeric_dependencies(element, definitions);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_adt_numeric_dependencies(value, definitions);
+            }
+        }
+        Expr::MetaExpr(meta, _) => collect_adt_numeric_dependencies(&meta.expr, definitions),
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_adt_numeric_dependencies(&bridged, definitions);
+        }
+        Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
+    }
+}
+
+fn nominal_adt_numeric_prims(exprs: &[Vec<Expr>]) -> BTreeMap<String, BTreeSet<String>> {
+    let mut definitions = BTreeMap::new();
+    for program in exprs {
+        for expr in program {
+            collect_adt_numeric_dependencies(expr, &mut definitions);
+        }
+    }
+
+    let mut closure: BTreeMap<String, BTreeSet<String>> = definitions
+        .iter()
+        .map(|(name, dependency)| (name.clone(), dependency.direct_prims.clone()))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (name, dependency) in &definitions {
+            let inherited = dependency
+                .referenced_adts
+                .iter()
+                .filter_map(|referenced| closure.get(referenced))
+                .flat_map(|prims| prims.iter().cloned())
+                .collect::<Vec<_>>();
+            let target = closure.entry(name.clone()).or_default();
+            let previous_len = target.len();
+            target.extend(inherited);
+            changed |= target.len() != previous_len;
+        }
+        if !changed {
+            return closure;
+        }
+    }
+}
+
+fn collect_numeric_tprims_with_adts(
+    expr: &Expr,
+    adt_prims: &BTreeMap<String, BTreeSet<String>>,
+    prims: &mut BTreeSet<String>,
+) {
+    collect_numeric_tprims(expr, prims);
+    let mut referenced = BTreeSet::new();
+    collect_referenced_adts(expr, &mut referenced);
+    for name in referenced {
+        if let Some(reachable) = adt_prims.get(&name) {
+            prims.extend(reachable.iter().cloned());
+        }
+    }
+}
+
+/// Collect numeric primitives that cross the exported definition boundary
+/// without first entering a source-defined nominal ADT. The recursive ADT
+/// closure above decides whether a callable is numeric; this narrower pass
+/// decides whether it exposes an untagged primitive carrier. A tagged value
+/// such as `Json` remains numeric surface, but merely accepting or returning
+/// that ADT does not create another bare-float seam for every JSON operation.
+fn collect_untagged_numeric_tprims(
+    expr: &Expr,
+    nominal_adts: &BTreeMap<String, BTreeSet<String>>,
+    prims: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::List(list, _) => {
+            if list.tag() == Some(DeepTag::TAdt)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+                && nominal_adts.contains_key(name)
+            {
+                return;
+            }
+            if list.tag() == Some(DeepTag::TPrim)
+                && let Some(Expr::Atom(Atom::Name(name), _)) = list.elements.get(2)
+                && NUMERIC_PRIMS.contains(&name.as_str())
+            {
+                prims.insert(name.clone());
+            }
+            for element in &list.elements {
+                collect_untagged_numeric_tprims(element, nominal_adts, prims);
+            }
+        }
+        Expr::Map(map, _) => {
+            for (_, value) in &map.entries {
+                collect_untagged_numeric_tprims(value, nominal_adts, prims);
+            }
+        }
+        Expr::MetaExpr(meta, _) => {
+            collect_untagged_numeric_tprims(&meta.expr, nominal_adts, prims);
+        }
+        Expr::Node(node, span) => {
+            let bridged = Expr::List(node.to_list(*span), *span);
+            collect_untagged_numeric_tprims(&bridged, nominal_adts, prims);
         }
         Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
     }
@@ -3271,7 +4063,12 @@ fn symbol(expr: &Expr) -> Option<&str> {
     }
 }
 
-fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>) {
+fn scan_exported_numeric_defs(
+    list: &List,
+    file_label: &str,
+    adt_prims: &BTreeMap<String, BTreeSet<String>>,
+    rows: &mut Vec<Row>,
+) {
     if list.tag() != Some(DeepTag::Module) {
         return;
     }
@@ -3334,33 +4131,45 @@ fn scan_exported_numeric_defs(list: &List, file_label: &str, rows: &mut Vec<Row>
             );
             continue;
         };
-        let mut prims = BTreeSet::new();
-        collect_numeric_tprims(signature, &mut prims);
-        if prims.is_empty() {
+        let mut reachable_prims = BTreeSet::new();
+        collect_numeric_tprims_with_adts(signature, adt_prims, &mut reachable_prims);
+        if reachable_prims.is_empty() {
             continue;
         }
+        let mut untagged_prims = BTreeSet::new();
+        collect_untagged_numeric_tprims(signature, adt_prims, &mut untagged_prims);
         rows.push(Row {
             kind: "std-def-numeric".to_string(),
             id: format!(
                 "{file_label}::{name}: {}",
                 chelis_deep::printer::print_expr_flat(signature)
             ),
-            flags: numeric_carrier_flags(&prims),
+            flags: numeric_carrier_flags(&untagged_prims),
             citation: String::new(),
         });
     }
 }
 
-fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
-    fn walk(expr: &Expr, file_label: &str, rows: &mut Vec<Row>) {
+fn scan_deftypes_with_adts(
+    exprs: &[Expr],
+    file_label: &str,
+    adt_prims: &BTreeMap<String, BTreeSet<String>>,
+    rows: &mut Vec<Row>,
+) {
+    fn walk(
+        expr: &Expr,
+        file_label: &str,
+        adt_prims: &BTreeMap<String, BTreeSet<String>>,
+        rows: &mut Vec<Row>,
+    ) {
         match expr {
             Expr::List(list, _) => {
-                scan_exported_numeric_defs(list, file_label, rows);
+                if list.tag() == Some(DeepTag::Module) {
+                    scan_exported_numeric_defs(list, file_label, adt_prims, rows);
+                }
                 if list.tag() == Some(DeepTag::Deftype) {
-                    let mut prims = BTreeSet::new();
-                    for e in list.elements.iter().skip(2) {
-                        collect_numeric_tprims(e, &mut prims);
-                    }
+                    let name = deftype_name(list);
+                    let prims = adt_prims.get(&name).cloned().unwrap_or_default();
                     if !prims.is_empty() {
                         let shape = list
                             .elements
@@ -3369,35 +4178,40 @@ fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
                             .map(chelis_deep::printer::print_expr_flat)
                             .collect::<Vec<_>>()
                             .join(" ");
-                        let id = format!("{file_label}::{}: {shape}", deftype_name(list),);
                         rows.push(Row {
                             kind: "std-adt-numeric".to_string(),
-                            id,
+                            id: format!("{file_label}::{name}: {shape}"),
                             flags: numeric_carrier_flags(&prims),
                             citation: String::new(),
                         });
                     }
                 }
                 for e in &list.elements {
-                    walk(e, file_label, rows);
+                    walk(e, file_label, adt_prims, rows);
                 }
             }
             Expr::Map(map, _) => {
                 for (_, v) in &map.entries {
-                    walk(v, file_label, rows);
+                    walk(v, file_label, adt_prims, rows);
                 }
             }
-            Expr::MetaExpr(me, _) => walk(&me.expr, file_label, rows),
+            Expr::MetaExpr(me, _) => walk(&me.expr, file_label, adt_prims, rows),
             Expr::Node(node, span) => {
                 let bridged = Expr::List(node.to_list(*span), *span);
-                walk(&bridged, file_label, rows);
+                walk(&bridged, file_label, adt_prims, rows);
             }
             Expr::Atom(..) | Expr::BareList(..) | Expr::UnknownForm(..) => {}
         }
     }
     for e in exprs {
-        walk(e, file_label, rows);
+        walk(e, file_label, adt_prims, rows);
     }
+}
+
+fn scan_deftypes(exprs: &[Expr], file_label: &str, rows: &mut Vec<Row>) {
+    let programs = vec![exprs.to_vec()];
+    let adt_prims = nominal_adt_numeric_prims(&programs);
+    scan_deftypes_with_adts(exprs, file_label, &adt_prims, rows);
 }
 
 fn stdlib_rows(root: &Path) -> Vec<Row> {
@@ -3405,7 +4219,7 @@ fn stdlib_rows(root: &Path) -> Vec<Row> {
     let mut files = Vec::new();
     walk_ch_files(&src_dir, &mut files);
     files.sort();
-    let mut rows = Vec::new();
+    let mut programs = Vec::new();
     for path in files {
         let src =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -3422,7 +4236,16 @@ fn stdlib_rows(root: &Path) -> Vec<Row> {
             .with_extension("")
             .to_string_lossy()
             .replace('\\', "/");
-        scan_deftypes(&exprs, &label, &mut rows);
+        programs.push((label, exprs));
+    }
+    let exprs = programs
+        .iter()
+        .map(|(_, exprs)| exprs.clone())
+        .collect::<Vec<_>>();
+    let adt_prims = nominal_adt_numeric_prims(&exprs);
+    let mut rows = Vec::new();
+    for (label, exprs) in programs {
+        scan_deftypes_with_adts(&exprs, &label, &adt_prims, &mut rows);
     }
     rows
 }
@@ -3508,13 +4331,11 @@ fn collect_prelude_numeric_prims(ty: &chelis_types::types::Type, prims: &mut BTr
 /// The prelude-adt-numeric leg (spec/design/dtype_semantics.md §C6): the
 /// Rust-registered prelude value ADTs, enumerated from the single
 /// registration path (`chelis_types::prelude_adt_defs`, which rebuilds
-/// through `register_prelude_adts`). Before chelis#890 no prelude ADT
-/// carried a numeric payload, so the family's `.ch` enumerator had
-/// nothing to miss; the prelude `Json` ADT (JInt int64 / JNum f64) made
-/// the Rust registry a numeric surface, and an unenumerated numeric
-/// surface is exactly the §C6 review-blocking blind spot. Same
-/// classification rule as every other family: a float primitive is a
-/// `float-carrier` seam, an integer primitive is `numeric-op`.
+/// through `register_prelude_adts`). The final #1293 surface intentionally
+/// has no numeric prelude ADT, but this leg stays executable so adding one
+/// cannot create an unenumerated numeric channel. Same classification rule
+/// as every other family: a float primitive is a `float-carrier` seam, an
+/// integer primitive is `numeric-op`.
 fn prelude_adt_rows() -> Vec<Row> {
     let mut rows = Vec::new();
     for def in chelis_types::prelude_adt_defs() {
@@ -3800,15 +4621,6 @@ fn check_against_baseline_with_authorities(
                 row.flags
             ));
         }
-        if row.kind == "prelude-adt-numeric"
-            && row.id == PERMANENT_JSON_ID
-            && !has_recognized_permanent_disposition(row)
-        {
-            problems.push(format!(
-                "FROZEN DISPOSITION CHANGED for [{}] {}: the Json descriptor must retain its exact permanent disposition and flags",
-                row.kind, row.id
-            ));
-        }
         if row.citation == GRANDFATHER_SEAM_CITATION && !has_recognized_grandfather_disposition(row)
         {
             problems.push(format!(
@@ -3838,15 +4650,6 @@ fn check_against_baseline_with_authorities(
                  string a new row may copy. A new or changed row must enter exactly one final \
                  authority class; a numeric callable authors its governing `[05-OP-N]` atom \
                  and complete family-qualified registration: [{}] {}",
-                row.kind, row.id
-            ));
-        }
-        if row.citation == PERMANENT_JSON_DISPOSITION && !has_recognized_permanent_disposition(row)
-        {
-            problems.push(format!(
-                "PERMANENT JSON disposition on the wrong descriptor: the [05-OP-2] \
-                 source-faithful exception binds exact kind/id/flags and cannot be \
-                 copied or stripped of semantic classification: [{}] {}",
                 row.kind, row.id
             ));
         }
@@ -4063,6 +4866,27 @@ fn migrated_primary_rows_have_exact_final_authority_and_no_transition_dispositio
             )
         );
     }
+    let tensor_shape_registration = FINAL_NUMERIC_OPERATION_ROWS
+        .iter()
+        .find(|registration| registration.surface.id.contains("chelis_tensor_shape"))
+        .expect("tensor_shape remains registered");
+    let tensor_shape = baseline
+        .rows
+        .iter()
+        .find(|row| row.id == tensor_shape_registration.surface.id)
+        .expect("tensor_shape remains discovered");
+    assert!(tensor_shape.citation.is_empty());
+    // chelis#1308 re-registered the tagged-carrier `chelis_tensor_shape`
+    // successor under [05-OP-33]; the pre-rebase pin of [05-OP-7] named
+    // the pre-tagged-ABI registration this row superseded.
+    assert_eq!(
+        capacity_census_authority::classify_final_authority(
+            &authority_surface(tensor_shape),
+            final_authority_registries(),
+            &spec,
+        ),
+        Ok(capacity_census_authority::FinalAuthority::NumericOperation { atom: "[05-OP-33]" })
+    );
 }
 
 #[test]
@@ -5647,40 +6471,6 @@ fn active_legacy_rows_may_shrink_but_cannot_leave_the_foundation_universe() {
 }
 
 #[test]
-fn permanent_json_disposition_is_exact_descriptor_only() {
-    let exact = Row {
-        kind: "prelude-adt-numeric".to_string(),
-        id: PERMANENT_JSON_ID.to_string(),
-        flags: vec!["float-carrier".to_string(), "numeric-op".to_string()],
-        citation: PERMANENT_JSON_DISPOSITION.to_string(),
-    };
-    let exact_baseline = exact.clone();
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![exact_baseline],
-    };
-    assert!(
-        check_against_baseline_with(std::slice::from_ref(&exact), &baseline, &[], "").is_ok(),
-        "the obsolete prelude Json identity remains sealed legacy debt until #1293 removes it"
-    );
-
-    let mut copied = flagged_row("prelude::CopiedJson: JNum(f64)", PERMANENT_JSON_DISPOSITION);
-    copied.kind = "prelude-adt-numeric".to_string();
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![copied.clone()],
-    };
-    let err = check_against_baseline_with(&[copied], &baseline, &[], "")
-        .expect_err("a copied permanent disposition must fail");
-    assert!(
-        err.contains("PERMANENT JSON disposition on the wrong descriptor"),
-        "unexpected copied-disposition diagnostic: {err}"
-    );
-}
-
-#[test]
 fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
     let permanent = *active_legacy_permanent_plain_sample();
     let baseline = Baseline {
@@ -5710,20 +6500,6 @@ fn permanent_dispositions_bind_the_complete_enforcement_descriptor() {
     let err = check_against_baseline(&baseline.rows, &baseline)
         .expect_err("a permanent descriptor with changed derived flags must fail");
     assert!(err.contains("PERMANENT PLAIN disposition"), "{err}");
-
-    let baseline = Baseline {
-        version: 3,
-        legs: coverage_manifest(),
-        rows: vec![Row {
-            kind: "prelude-adt-numeric".to_string(),
-            id: PERMANENT_JSON_ID.to_string(),
-            flags: Vec::new(),
-            citation: PERMANENT_JSON_DISPOSITION.to_string(),
-        }],
-    };
-    let err = check_against_baseline_with(&baseline.rows, &baseline, &[], "")
-        .expect_err("the Json exception must preserve both flags and its registration");
-    assert!(err.contains("PERMANENT JSON disposition"), "{err}");
 }
 
 #[test]
@@ -6575,38 +7351,81 @@ fn count_is_registered_against_its_exact_authority_atom() {
     );
 }
 
-/// prelude-adt-numeric positive control: the real registered prelude
-/// `Json` ADT is enumerated with BOTH classifications under a complete
-/// `(kind, id, flags)` descriptor. It deliberately remains in the sealed
-/// legacy universe: #1293 removes this obsolete duplicate before a successor
-/// can receive final authority.
 #[test]
-fn registered_prelude_json_adt_is_enumerated_with_both_flags() {
-    let rows = prelude_adt_rows();
-    assert_eq!(
-        rows.len(),
-        1,
-        "exactly the Json ADT carries numeric capacity today: {rows:?}"
-    );
-    let row = &rows[0];
-    assert_eq!(row.kind, "prelude-adt-numeric");
-    assert_eq!(
-        row.id,
-        "prelude::Json: JNull | JBool(bool) | JInt(int64) | JNum(f64) | JStr(string) | \
-         JList(List[Json]) | JDict(Dict[string, Json])"
-    );
-    assert_eq!(
-        row.flags,
-        vec!["float-carrier".to_string(), "numeric-op".to_string()]
-    );
-    assert!(is_seam(&row.flags));
+fn final_surface_has_no_duplicate_prelude_json() {
     assert!(
-        capacity_census_authority::classify_final_authority(
-            &authority_surface(row),
-            final_authority_registries(),
-            &fs::read_to_string(repo_root().join(CONTROLLING_SPEC_REL)).unwrap(),
-        )
-        .is_err(),
-        "the obsolete prelude Json identity must not be mistaken for final authority"
+        prelude_adt_rows().is_empty(),
+        "the final language has no prelude numeric ADT: {:?}",
+        prelude_adt_rows()
     );
+}
+
+fn normative_registry_identities(registry: &str) -> BTreeSet<&str> {
+    registry
+        .lines()
+        .filter_map(|line| line.strip_prefix("| `"))
+        .filter_map(|rest| rest.split_once('`').map(|(identity, _)| identity))
+        .collect()
+}
+
+#[test]
+fn final_stdlib_registrations_are_exact_and_bijective_with_normative_registries() {
+    let current_rows = stdlib_rows(&repo_root());
+    let current: BTreeSet<(&str, &str, Vec<&str>)> = current_rows
+        .iter()
+        .map(|row| {
+            (
+                row.kind.as_str(),
+                row.id.as_str(),
+                row.flags.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    let registered: BTreeSet<(&str, &str, Vec<&str>)> = FINAL_NUMERIC_OPERATION_ROWS
+        .iter()
+        .filter(|registration| registration.surface.kind.starts_with("std-"))
+        .map(|registration| {
+            (
+                registration.surface.kind,
+                registration.surface.id,
+                registration.surface.flags.to_vec(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        current, registered,
+        "every final stdlib capacity descriptor must have one exact final numeric-operation registration"
+    );
+
+    for (kind, registry, expected_atom) in [
+        (
+            "std-adt-numeric",
+            include_str!("../../../spec/registry/stdlib_adt_identities.md"),
+            "[05-OP-34]",
+        ),
+        (
+            "std-def-numeric",
+            include_str!("../../../spec/registry/stdlib_numeric_manifest.md"),
+            "[05-OP-35]",
+        ),
+    ] {
+        let registered_identities: BTreeSet<&str> = FINAL_NUMERIC_OPERATION_ROWS
+            .iter()
+            .filter(|registration| registration.surface.kind == kind)
+            .map(|registration| {
+                assert_eq!(registration.atom, expected_atom);
+                registration
+                    .surface
+                    .id
+                    .split_once(": ")
+                    .expect("complete stdlib descriptor includes its signature")
+                    .0
+            })
+            .collect();
+        assert_eq!(
+            registered_identities,
+            normative_registry_identities(registry),
+            "final {kind} registrations must be bijective with their normative registry"
+        );
+    }
 }

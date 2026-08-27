@@ -4,7 +4,6 @@
 //! computing gradients of the output with respect to specified input nodes.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt;
 
 use crate::dag::{Dag, DagNode, DimExpr, DimInfo, NodeId, RiscOp, RtDim, TensorType};
@@ -424,6 +423,10 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
     // clone span_id and merged_spans."
     let mut dag = forward.clone();
     let mut adjoints: HashMap<NodeId, NodeId> = HashMap::new();
+    // Contributions wait here until reverse traversal reaches their input.
+    // Keeping the consumer ordinal and input slot makes the normative order
+    // explicit instead of inheriting reverse traversal order.
+    let mut pending: HashMap<NodeId, Vec<(usize, usize, NodeId)>> = HashMap::new();
     // Seed the gradient at `output` (∂output/∂output = 1). This is a
     // backward node corresponding to the forward `output`, so it
     // carries the grad marker.
@@ -436,15 +439,34 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         None,
     );
     stamp_grad_marker(&mut dag, dag_before_seed, &output_node);
-    adjoints.insert(output, seed);
 
     // Walk forward topological order in reverse.
     let topo = forward.topological_order();
+    let topo_positions: HashMap<NodeId, usize> = topo
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(position, node)| (node, position))
+        .collect();
     for &node_id in topo.iter().rev() {
-        let grad_out = match adjoints.get(&node_id) {
-            Some(&g) => g,
-            None => continue,
+        let grad_out = if node_id == output {
+            seed
+        } else {
+            let Some(mut contributions) = pending.remove(&node_id) else {
+                continue;
+            };
+            contributions.sort_by_key(|(consumer, slot, _)| (*consumer, *slot));
+            let node = forward.get(node_id).expect("topological node exists");
+            balanced_adjoint_sum(
+                &mut dag,
+                node,
+                contributions
+                    .into_iter()
+                    .map(|(_, _, contribution)| contribution)
+                    .collect(),
+            )
         };
+        adjoints.insert(node_id, grad_out);
 
         let node = forward.get(node_id).unwrap().clone();
         let dag_size_before = dag.len();
@@ -461,24 +483,22 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         // forward span onto each.
         stamp_grad_marker(&mut dag, dag_size_before, &node);
 
+        let consumer_position = topo_positions[&node_id];
+        let mut used_slots = vec![false; node.inputs.len()];
         for (input_id, grad_node) in input_grads {
-            match adjoints.entry(input_id) {
-                Entry::Vacant(e) => {
-                    e.insert(grad_node);
-                }
-                Entry::Occupied(mut e) => {
-                    let existing = *e.get();
-                    let ty = dag.get(existing).unwrap().output_type.clone();
-                    // Sum-accumulator for multi-consumer forward nodes
-                    // — also a backward node, attributed to the
-                    // forward input being accumulated.
-                    let dag_before_sum = dag.len();
-                    let sum = dag.add_node(RiscOp::Add, vec![existing, grad_node], ty, None);
-                    let input_forward = forward.get(input_id).unwrap().clone();
-                    stamp_grad_marker(&mut dag, dag_before_sum, &input_forward);
-                    e.insert(sum);
-                }
-            }
+            let input_slot = node
+                .inputs
+                .iter()
+                .enumerate()
+                .find_map(|(slot, candidate)| {
+                    (!used_slots[slot] && *candidate == input_id).then_some(slot)
+                })
+                .expect("adjoint input belongs to its forward node");
+            used_slots[input_slot] = true;
+            pending
+                .entry(input_id)
+                .or_default()
+                .push((consumer_position, input_slot, grad_node));
         }
     }
 
@@ -513,6 +533,48 @@ fn grad_dag_result(forward: &Dag, output: NodeId, wrt: &[NodeId]) -> Result<Grad
         output_node,
         grad_nodes,
     })
+}
+
+/// Combine one forward value's incoming cotangent contributions in the exact
+/// spec/06 §2.4 order: an exact positive-zero base leaf followed by increasing
+/// forward consumer ordinal and input slot, reduced by adjacent pairs while an
+/// odd tail is carried unchanged. The caller supplies contributions in that
+/// sorted order.
+fn balanced_adjoint_sum(
+    dag: &mut Dag,
+    forward_node: &DagNode,
+    contributions: Vec<NodeId>,
+) -> NodeId {
+    debug_assert!(!contributions.is_empty());
+    let ty = forward_node.output_type.clone();
+    let before_zero = dag.len();
+    let zero = dag.add_node(
+        RiscOp::synth_const(ty.precision, 0.0),
+        vec![],
+        ty.clone(),
+        None,
+    );
+    dag.add_shape_dep(zero, forward_node.id);
+    stamp_grad_marker(dag, before_zero, forward_node);
+
+    let mut level = Vec::with_capacity(contributions.len() + 1);
+    level.push(zero);
+    level.extend(contributions);
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            if let [left, right] = pair {
+                let before_add = dag.len();
+                let sum = dag.add_node(RiscOp::Add, vec![*left, *right], ty.clone(), None);
+                stamp_grad_marker(dag, before_add, forward_node);
+                next.push(sum);
+            } else {
+                next.push(pair[0]);
+            }
+        }
+        level = next;
+    }
+    level[0]
 }
 
 fn is_scalar_float(ty: &TensorType) -> bool {
@@ -1730,7 +1792,25 @@ fn compute_adjoints(
             );
             Some(vec![(values, dvalues)])
         }
-        RiscOp::ScatterAdd { .. } => None,
+        RiscOp::ScatterAdd { axis } => {
+            // Scatter-add is linear in both its target and updates. Indices
+            // are discrete: the target cotangent is the upstream value
+            // unchanged, while the updates cotangent gathers the upstream
+            // value at the same index positions. This also makes the
+            // internal List-selection table differentiable without adding a
+            // new public RISC/WireDag operation.
+            let target = node.inputs[0];
+            let indices = node.inputs[1];
+            let updates = node.inputs[2];
+            let updates_ty = forward.get(updates).unwrap().output_type.clone();
+            let dupdates = dag.add_node(
+                RiscOp::Gather { axis: *axis },
+                vec![g, indices],
+                updates_ty,
+                None,
+            );
+            Some(vec![(target, g), (updates, dupdates)])
+        }
         RiscOp::ReduceWindow {
             reducer,
             window_shape,
@@ -2380,6 +2460,80 @@ mod tests {
     }
 
     #[test]
+    fn grad_accumulation_uses_forward_consumer_order_and_a_balanced_tree() {
+        // The four uses of x have forward consumer order c1, c2, c3, c4.
+        // With the required positive-zero base leaf, adjacent-pair balancing
+        // computes ((+0 + c1) + (c2 + c3)) + c4 = 1 at f32. The historical
+        // reverse-consumer left fold computes (((c4 + c3) + c2) + c1) = 0.
+        let mut dag = Dag::new();
+        let ty = scalar_f32();
+        let x = dag.add_node(RiscOp::Load { name: "x".into() }, vec![], ty.clone(), None);
+        let coefficients = [1.0e20, -1.0e20, 1.0, 1.0];
+        let mut uses = Vec::new();
+        for coefficient in coefficients {
+            let constant = dag.add_node(
+                RiscOp::synth_const(Prim::F32, coefficient),
+                vec![],
+                ty.clone(),
+                None,
+            );
+            uses.push(dag.add_node(RiscOp::Mul, vec![x, constant], ty.clone(), None));
+        }
+        let left = dag.add_node(RiscOp::Add, vec![uses[0], uses[1]], ty.clone(), None);
+        let right = dag.add_node(RiscOp::Add, vec![uses[2], uses[3]], ty.clone(), None);
+        let output = dag.add_node(RiscOp::Add, vec![left, right], ty, None);
+
+        let grad_result = grad_dag(&dag, output, &[x]).expect("gradient");
+        let values = eval_scalar(&grad_result.dag, &HashMap::from([("x".to_string(), 0.0)]));
+
+        assert_eq!(values[&grad_result.grad_nodes[&x]], 1.0);
+    }
+
+    #[test]
+    fn balanced_adjoint_zero_tracks_runtime_wildcard_shape() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let concrete_ty = TensorType {
+            dims: vec![DimInfo::Lit(3)],
+            precision: Prim::F32,
+        };
+        let mut dag = Dag::new();
+        let source = dag.add_node(
+            RiscOp::Load { name: "x".into() },
+            vec![],
+            concrete_ty.clone(),
+            None,
+        );
+        let symbolic_ty = TensorType {
+            dims: vec![DimInfo::Named("*".to_string(), None)],
+            precision: Prim::F32,
+        };
+        let contribution_1 = dag.add_node(RiscOp::Copy, vec![source], concrete_ty.clone(), None);
+        let contribution_2 = dag.add_node(RiscOp::Copy, vec![source], concrete_ty, None);
+        let mut symbolic_forward = dag.get(source).expect("source exists").clone();
+        symbolic_forward.output_type = symbolic_ty;
+        let accumulated = balanced_adjoint_sum(
+            &mut dag,
+            &symbolic_forward,
+            vec![contribution_1, contribution_2],
+        );
+        dag.add_root(accumulated);
+
+        let values = eval_tensor(
+            &dag,
+            &HashMap::from([(
+                "x".to_string(),
+                TensorValue::from_vec(vec![3], vec![1.0, 2.0, 3.0]),
+            )]),
+        )
+        .expect("runtime-wildcard accumulation evaluates");
+        let gradient = &values[&accumulated];
+
+        assert_eq!(gradient.shape, vec![3]);
+        assert_eq!(gradient.to_f64_lossy_vec(), vec![2.0, 4.0, 6.0]);
+    }
+
+    #[test]
     fn grad_cmplt_zero() {
         let bool_ty = TensorType {
             dims: vec![],
@@ -2699,6 +2853,100 @@ mod tests {
         // d(sum(permute(x)))/dx = ones, shape should be 2x3
         assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
         assert_eq!(grad.shape, vec![2, 3]);
+    }
+
+    #[test]
+    fn scatter_add_adjoint_preserves_target_and_gathers_update_cotangents() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let vec4_ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let vec2_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let index_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int64,
+        };
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            vec4_ty.clone(),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            index_ty,
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            vec2_ty,
+            None,
+        );
+        let scattered = dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            vec4_ty.clone(),
+            None,
+        );
+        let coefficients = dag.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![2.0, 3.0, 5.0, 7.0]),
+            vec![],
+            vec4_ty.clone(),
+            None,
+        );
+        let weighted = dag.add_node(RiscOp::Mul, vec![scattered, coefficients], vec4_ty, None);
+        let output = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![weighted],
+            scalar_f32(),
+            None,
+        );
+
+        let gradient = grad_dag(&dag, output, &[target, updates]).expect("scatter-add gradient");
+        let values = eval_tensor(
+            &gradient.dag,
+            &HashMap::from([
+                (
+                    "target".to_string(),
+                    TensorValue::from_vec(vec![4], vec![11.0, 13.0, 17.0, 19.0]),
+                ),
+                (
+                    "indices".to_string(),
+                    TensorValue::from_vec(vec![2], vec![1.0, 3.0]),
+                ),
+                (
+                    "updates".to_string(),
+                    TensorValue::from_vec(vec![2], vec![23.0, 29.0]),
+                ),
+            ]),
+        )
+        .expect("scatter-add adjoint evaluates");
+
+        assert_eq!(
+            values[&gradient.grad_nodes[&target]].to_f64_lossy_vec(),
+            vec![2.0, 3.0, 5.0, 7.0],
+        );
+        assert_eq!(
+            values[&gradient.grad_nodes[&updates]].to_f64_lossy_vec(),
+            vec![3.0, 7.0],
+        );
     }
 
     #[test]

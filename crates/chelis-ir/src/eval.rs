@@ -31,6 +31,10 @@ use chelis_types::dtype_semantics::{
 };
 use chelis_types::types::Prim;
 
+/// Public evaluator entry points that do not inherit an enclosing handler
+/// still evaluate a path-sensitive DAG from the beginning of its stream.
+const INITIAL_RANDOM_STREAM_ORDINAL: u64 = 0;
+
 #[derive(Debug, Clone)]
 pub struct TensorValue {
     storage: TensorStorage,
@@ -1813,11 +1817,13 @@ fn eval_tensor_internal<F>(
     dag: &Dag,
     live: Option<&[bool]>,
     strict_loads: bool,
+    random_counter: u64,
     mut load_input: F,
-) -> Result<HashMap<NodeId, TensorValue>, String>
+) -> Result<(HashMap<NodeId, TensorValue>, u64), String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
+    let mut path_random_counter = random_counter;
     let required_symbols = required_symbolic_dims(dag, live);
     let needs_symbolic_binding = !required_symbols.is_empty()
         // chelis#368: a `Shrink` carrying the `SHRINK_TO_END` full-axis
@@ -2064,13 +2070,36 @@ where
             // backend's `rintf` under the default rounding mode. NOT
             // `f64::round`, which rounds half away from zero.
             RiscOp::Round => unary_elementwise(ElementwiseUnOp::Round, &values[&node.inputs[0]])?,
-            RiscOp::UniformLike { low, high, seed } => uniform_like(
-                &values[&node.inputs[0]].shape.clone(),
-                *low,
-                *high,
-                *seed,
-                out_prim,
-            )?,
+            RiscOp::UniformLike { low, high, seed } => {
+                let effective_seed = if let Some(activation) = node.inputs.get(1) {
+                    let active = match values[activation].storage().to_raw() {
+                        RawTensor::Int(values) if values.len() == 1 => values[0] != 0,
+                        _ => {
+                            return Err(format!(
+                                "uniform_like path activation at node {} is not a scalar Bool",
+                                node.id.0
+                            ));
+                        }
+                    };
+                    if active {
+                        let effective =
+                            *seed ^ path_random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        path_random_counter = path_random_counter.saturating_add(1);
+                        effective
+                    } else {
+                        *seed
+                    }
+                } else {
+                    *seed
+                };
+                uniform_like(
+                    &values[&node.inputs[0]].shape.clone(),
+                    *low,
+                    *high,
+                    effective_seed,
+                    out_prim,
+                )?
+            }
             RiscOp::Dropout { rate, seed } => {
                 dropout(&values[&node.inputs[0]], *rate, *seed, out_prim)?
             }
@@ -2431,14 +2460,15 @@ where
         values.insert(node.id, value);
     }
 
-    Ok(values)
+    Ok((values, path_random_counter))
 }
 
 pub fn eval_tensor_with<F>(dag: &Dag, load_input: F) -> Result<HashMap<NodeId, TensorValue>, String>
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, false, load_input)
+    eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+        .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_with_strict<F>(
@@ -2448,7 +2478,8 @@ pub fn eval_tensor_with_strict<F>(
 where
     F: FnMut(&str) -> Option<TensorValue>,
 {
-    eval_tensor_internal(dag, None, true, load_input)
+    eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+        .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_roots_with<F>(
@@ -2460,11 +2491,19 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, false, load_input);
+        return eval_tensor_internal(dag, None, false, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+            .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), false, load_input)
+    eval_tensor_internal(
+        dag,
+        Some(&live),
+        false,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        load_input,
+    )
+    .map(|(values, _)| values)
 }
 
 pub fn eval_tensor_roots_with_strict<F>(
@@ -2476,11 +2515,39 @@ where
     F: FnMut(&str) -> Option<TensorValue>,
 {
     if roots.is_empty() {
-        return eval_tensor_internal(dag, None, true, load_input);
+        return eval_tensor_internal(dag, None, true, INITIAL_RANDOM_STREAM_ORDINAL, load_input)
+            .map(|(values, _)| values);
     }
     reject_drop_roots(dag, roots)?;
     let live = live_mask_for_roots(dag, roots);
-    eval_tensor_internal(dag, Some(&live), true, load_input)
+    eval_tensor_internal(
+        dag,
+        Some(&live),
+        true,
+        INITIAL_RANDOM_STREAM_ORDINAL,
+        load_input,
+    )
+    .map(|(values, _)| values)
+}
+
+/// Evaluate roots while threading the executed Random path's next ordinal.
+/// Only `UniformLike` nodes carrying a scalar Bool activation participate;
+/// ordinary baked-seed DAGs retain their historical behavior.
+pub fn eval_tensor_roots_with_strict_random_progress<F>(
+    dag: &Dag,
+    roots: &[NodeId],
+    random_counter: u64,
+    load_input: F,
+) -> Result<(HashMap<NodeId, TensorValue>, u64), String>
+where
+    F: FnMut(&str) -> Option<TensorValue>,
+{
+    if roots.is_empty() {
+        return eval_tensor_internal(dag, None, true, random_counter, load_input);
+    }
+    reject_drop_roots(dag, roots)?;
+    let live = live_mask_for_roots(dag, roots);
+    eval_tensor_internal(dag, Some(&live), true, random_counter, load_input)
 }
 
 fn reject_drop_roots(dag: &Dag, roots: &[NodeId]) -> Result<(), String> {
@@ -2541,6 +2608,67 @@ mod tests {
             dims: dims.iter().copied().map(DimInfo::Lit).collect(),
             precision,
         }
+    }
+
+    #[test]
+    fn path_sensitive_uniform_like_advances_only_active_nodes() {
+        let mut dag = Dag::new();
+        let ty = tensor_ty(&[2], Prim::F32);
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            ty.clone(),
+            None,
+        );
+        let inactive = dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 0.0),
+            vec![],
+            tensor_ty(&[], Prim::Bool),
+            None,
+        );
+        let active = dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            tensor_ty(&[], Prim::Bool),
+            None,
+        );
+        let skipped = dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 17,
+            },
+            vec![template, inactive],
+            ty.clone(),
+            None,
+        );
+        let executed = dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 17,
+            },
+            vec![template, active],
+            ty,
+            None,
+        );
+        dag.add_root(skipped);
+        dag.add_root(executed);
+
+        let roots = dag.roots().to_vec();
+        let (values, next) =
+            eval_tensor_roots_with_strict_random_progress(&dag, &roots, 7, |name| {
+                (name == "template").then(|| TensorValue::from_vec(vec![2], vec![0.0; 2]))
+            })
+            .expect("path-sensitive Random DAG evaluates");
+        assert_eq!(next, 8, "only the active draw consumes an ordinal");
+        let expected_seed = 17 ^ 7_u64.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let expected = uniform_like(&[2], 0.0, 1.0, expected_seed, Prim::F32).unwrap();
+        assert_eq!(values[&executed], expected);
+        let skipped_expected = uniform_like(&[2], 0.0, 1.0, 17, Prim::F32).unwrap();
+        assert_eq!(values[&skipped], skipped_expected);
     }
 
     #[test]

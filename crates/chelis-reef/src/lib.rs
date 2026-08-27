@@ -8021,6 +8021,15 @@ fn rewrite_decl(decl: &Decl, resolver: &NameResolver, package: &str, module: &st
                 .iter()
                 .map(|param| param.name.clone())
                 .collect::<HashSet<_>>();
+            // [05-OP-35] exposes Std.Sort.sort as the sole stdlib identity
+            // while its body delegates to the compiler primitive of the
+            // same spelling. Keep that one body reference bare so builtin-
+            // first dispatch reaches the primitive instead of rewriting it
+            // into trivial self-recursion. Entry source cannot take this
+            // path: it is exact to the bundled package/module identity.
+            if package == "chelis-std" && module == "Std.Sort" && name == "sort" {
+                locals.insert(name.clone());
+            }
             let body = rewrite_expr(body, resolver, &mut locals);
             Decl::FunDef {
                 name: internal_name(package, module, name),

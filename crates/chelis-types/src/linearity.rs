@@ -1991,7 +1991,7 @@ fn builtin_arg_is_borrowed(name: Option<&str>, arg_index: usize) -> bool {
             | "where"
             | "clamp"
             | "test_assert_close_tensor"
-            | "test_assert_eq_tensor_int64"
+            | "test_assert_eq_tensor"
     ) || matches!(
         (name, arg_index),
         (

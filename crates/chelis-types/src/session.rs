@@ -70,6 +70,25 @@ impl DiagnosticSink<'_> {
     ) -> std::slice::Iter<'_, CheckError> {
         self.errors[checkpoint.offset..].iter()
     }
+
+    /// Retain only diagnostics accepted by `keep` after an earlier checkpoint.
+    ///
+    /// This deliberately cannot inspect, replace, or discard diagnostics that
+    /// precede the checkpoint. It exists for an exact compiler-owned source
+    /// boundary whose structural validator accepts a closed wrapper graph while
+    /// ordinary HM inference still records useful child stamps for that graph.
+    pub(crate) fn retain_since(
+        &mut self,
+        checkpoint: DiagnosticCheckpoint,
+        mut keep: impl FnMut(&CheckError) -> bool,
+    ) {
+        let retained = self
+            .errors
+            .drain(checkpoint.offset..)
+            .filter(|error| keep(error))
+            .collect::<Vec<_>>();
+        self.errors.extend(retained);
+    }
 }
 
 #[cfg(test)]

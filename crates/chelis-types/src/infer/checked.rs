@@ -301,7 +301,7 @@ pub(super) enum DeferredShapeRule {
     Expand {
         axis_is_dim_name: bool,
         size_class: SizeClass,
-        env: Env,
+        env: Box<Env>,
     },
     LayerNorm,
     Conv2d,

@@ -8,6 +8,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
+/// Path-sensitive helpers emitted outside the dynamic handler cannot bake its
+/// seed. The active helper path obtains the real seed from the host handler;
+/// the inactive path's value is discarded by the enclosing blend.
+const COMPILED_HANDLER_OWNED_SEED: u64 = 0;
+
 thread_local! {
     /// When set, `lower_unrepresentable` panics with a quiet empty payload
     /// that `catch_unwind` catches without printing a backtrace. Scoped
@@ -1175,9 +1180,55 @@ pub fn try_lower_subexpr_program(
     full_type_env: HashMap<String, Expr>,
     program_defs: HashMap<String, Expr>,
 ) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_random_state(
+        expr,
+        scoped_tensor_types,
+        full_type_env,
+        program_defs,
+        None,
+        0,
+    )
+}
+
+pub fn try_lower_subexpr_program_with_random_state(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    full_type_env: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<Dag, LowerDiagnostic> {
+    try_lower_subexpr_program_with_random_state_progress(
+        expr,
+        scoped_tensor_types,
+        full_type_env,
+        program_defs,
+        random_seed,
+        random_counter,
+    )
+    .map(|(dag, _)| dag)
+}
+
+/// Lower a subexpression while also returning the next unused Random stream
+/// ordinal. Host evaluators use this form when lowering a handled transform so
+/// random draws inside the transform advance the enclosing handler's stream.
+pub fn try_lower_subexpr_program_with_random_state_progress(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    full_type_env: HashMap<String, Expr>,
+    program_defs: HashMap<String, Expr>,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<(Dag, u64), LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
     let context = prepare_subexpr_lowering_context(&full_type_env, Arc::new(program_defs));
-    try_lower_subexpr_program_with_context(expr, scoped_tensor_types, &context)
+    try_lower_subexpr_program_with_context_and_random_state(
+        expr,
+        scoped_tensor_types,
+        &context,
+        random_seed,
+        random_counter,
+    )
 }
 
 #[derive(Clone)]
@@ -1208,19 +1259,84 @@ pub(crate) fn try_lower_subexpr_program_with_context(
     context: &SubexprLoweringContext,
 ) -> Result<Dag, LowerDiagnostic> {
     assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
-    catch_lowering(|| lower_subexpr_program_inner(expr, scoped_tensor_types, context))
+    try_lower_subexpr_program_with_context_and_random_state(
+        expr,
+        scoped_tensor_types,
+        context,
+        None,
+        0,
+    )
+    .map(|(dag, _)| dag)
+}
+
+pub(crate) fn try_lower_subexpr_program_with_context_and_controls(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+) -> Result<LoweredSubexprWithControls, LowerDiagnostic> {
+    assert_decode_once_at_boundary("lower_subexpr_program: expr", std::slice::from_ref(expr));
+    catch_lowering(|| {
+        let (dag, _, value_root_count, list_checks) =
+            lower_subexpr_program_inner_impl(expr, scoped_tensor_types, context, None, 0, true);
+        LoweredSubexprWithControls {
+            dag,
+            value_root_count,
+            list_checks,
+        }
+    })
+}
+
+fn try_lower_subexpr_program_with_context_and_random_state(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> Result<(Dag, u64), LowerDiagnostic> {
+    catch_lowering(|| {
+        lower_subexpr_program_inner(
+            expr,
+            scoped_tensor_types,
+            context,
+            random_seed,
+            random_counter,
+        )
+    })
 }
 
 fn lower_subexpr_program_inner(
     expr: &Expr,
     scoped_tensor_types: HashMap<String, TensorType>,
     context: &SubexprLoweringContext,
-) -> Dag {
+    random_seed: Option<u64>,
+    random_counter: u64,
+) -> (Dag, u64) {
+    let (dag, random_counter, _, _) = lower_subexpr_program_inner_impl(
+        expr,
+        scoped_tensor_types,
+        context,
+        random_seed,
+        random_counter,
+        false,
+    );
+    (dag, random_counter)
+}
+
+fn lower_subexpr_program_inner_impl(
+    expr: &Expr,
+    scoped_tensor_types: HashMap<String, TensorType>,
+    context: &SubexprLoweringContext,
+    random_seed: Option<u64>,
+    random_counter: u64,
+    include_list_controls: bool,
+) -> (Dag, u64, usize, Vec<RuntimeListCheckDescriptor>) {
     let mut ctx = LowerCtx::new(
         context.program_types.clone(),
         context.program_defs.clone(),
         LinearityInfo::default(),
     );
+    ctx.random_seed = random_seed;
+    ctx.random_counter = random_counter;
     // Pre-create a `Load` for every scoped tensor param in a DETERMINISTIC
     // (name-sorted) order. `scoped_tensor_types_for_bindings` is a `HashMap`,
     // whose iteration order is randomized per process; using it directly made
@@ -1277,9 +1393,53 @@ fn lower_subexpr_program_inner(
         };
         ctx.dag.add_root(root_id);
     }
+    let value_root_count = ctx.dag.roots().len();
+    let mut list_checks = Vec::new();
+    if include_list_controls {
+        let checks = std::mem::take(&mut ctx.runtime_list_checks);
+        for check in checks {
+            let (descriptor, values): (RuntimeListCheckDescriptor, Vec<NodeId>) = match check {
+                RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value,
+                } => (
+                    RuntimeListCheckDescriptor::NonNegative {
+                        operation,
+                        argument,
+                    },
+                    vec![value],
+                ),
+                RuntimeListCheck::IndexBounds { index, len } => {
+                    (RuntimeListCheckDescriptor::IndexBounds, vec![index, len])
+                }
+            };
+            for value in values {
+                let output_type = ctx
+                    .dag
+                    .get(value)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(LowerCtx::default_type);
+                let distinct = ctx.dag.add_node(
+                    RiscOp::Copy,
+                    vec![value],
+                    output_type,
+                    ctx.current_span_id.clone(),
+                );
+                ctx.dag.add_root(distinct);
+            }
+            list_checks.push(descriptor);
+        }
+    }
+    let next_random_counter = ctx.random_counter;
     let dce_dag = crate::optimize::dead_code_eliminate(&ctx.dag);
     let (copy_dag, _) = insert_copy_nodes_for_consuming_fanout(&dce_dag);
-    insert_drop_nodes_for_unconsumed_values(copy_dag)
+    (
+        insert_drop_nodes_for_unconsumed_values(copy_dag),
+        next_random_counter,
+        value_root_count,
+        list_checks,
+    )
 }
 
 pub fn remap_tensor_dim_symbols(
@@ -2618,20 +2778,6 @@ fn expr_requires_host_runtime_with_ctx(expr: &Expr, exempt_to_tensor_literal: bo
                         | "mmap_read"
                         | "mmap_len"
                         | "process_run"
-                        | "parse_json"
-                        | "to_json"
-                        | "json_f64"
-                        | "json_int"
-                        | "json_str"
-                        | "json_list"
-                        | "json_f64s"
-                        | "json_ints"
-                        | "jnum"
-                        | "jint"
-                        | "jstr"
-                        | "jlist"
-                        | "jdict"
-                        | "json_set"
                         | "round_to"
                         | "parse_csv"
                         | "to_csv"
@@ -3525,6 +3671,21 @@ fn to_list_source_expr(expr: &Expr) -> Option<&Expr> {
     Some(source)
 }
 
+fn zip_to_list_source_exprs(expr: &Expr) -> Option<(&Expr, &Expr)> {
+    let ("zip", [lhs, rhs]) = app_var_name_and_args(expr)? else {
+        return None;
+    };
+    Some((to_list_source_expr(lhs)?, to_list_source_expr(rhs)?))
+}
+
+fn tensor_shape_template_expr(expr: &Expr) -> Option<&Expr> {
+    let (name, args) = app_var_name_and_args(expr)?;
+    if name != "tensor_shape" && !name.ends_with("__tensor_shape") {
+        return None;
+    }
+    args.first()
+}
+
 fn concrete_dim_len(dim: &DimInfo) -> Option<usize> {
     match dim {
         DimInfo::Lit(n) => Some(*n),
@@ -3688,6 +3849,105 @@ fn adt_cons_chain_values(value: &LoweredValue) -> Option<Vec<LoweredValue>> {
             }
             _ => return None,
         }
+    }
+}
+
+fn runtime_list_view_parts(value: &LoweredValue) -> Option<(NodeId, NodeId, Vec<LoweredValue>)> {
+    let LoweredValue::Adt { ctor, fields, .. } = value else {
+        return None;
+    };
+    if ctor != RUNTIME_LIST_VIEW_CTOR || fields.len() != 3 {
+        return None;
+    }
+    let offset = fields[0].as_single_node()?;
+    let len = fields[1].as_single_node()?;
+    let LoweredValue::Tuple(items) = &fields[2] else {
+        return None;
+    };
+    Some((offset, len, items.clone()))
+}
+
+fn rebuild_runtime_list_view(
+    offset: NodeId,
+    len: NodeId,
+    items: Vec<LoweredValue>,
+) -> LoweredValue {
+    LoweredValue::Adt {
+        ctor: RUNTIME_LIST_VIEW_CTOR.to_string(),
+        field_names: None,
+        fields: vec![
+            LoweredValue::Node(offset),
+            LoweredValue::Node(len),
+            LoweredValue::Tuple(items),
+        ],
+    }
+}
+
+/// Flatten every scalar/tensor leaf of a recursive List/tuple/ADT value.
+/// Empty structures contribute no leaves while retaining their position in
+/// the separate reconstruction template.
+fn recursive_list_leaf_nodes(value: &LoweredValue) -> Vec<NodeId> {
+    fn walk(value: &LoweredValue, out: &mut Vec<NodeId>) {
+        match value {
+            LoweredValue::Node(node) => out.push(*node),
+            LoweredValue::Adt { .. } if adt_cons_chain_values(value).is_some() => {
+                for item in adt_cons_chain_values(value).expect("guarded above") {
+                    walk(&item, out);
+                }
+            }
+            LoweredValue::Tuple(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            LoweredValue::Adt { fields, .. } => {
+                for field in fields {
+                    walk(field, out);
+                }
+            }
+        }
+    }
+
+    let mut leaves = Vec::new();
+    walk(value, &mut leaves);
+    leaves
+}
+
+/// Rebuild a recursive List/tuple/ADT value from its primal structure and a
+/// flat sequence of replacement leaves. This is used symmetrically for staged
+/// parameter Loads and for the returned recursive cotangent.
+fn rebuild_recursive_list_like(
+    template: &LoweredValue,
+    leaves: &mut impl Iterator<Item = LoweredValue>,
+) -> LoweredValue {
+    match template {
+        LoweredValue::Node(_) => leaves.next().expect("recursive List leaf count mismatch"),
+        LoweredValue::Adt { .. } if adt_cons_chain_values(template).is_some() => {
+            let items = adt_cons_chain_values(template)
+                .expect("guarded above")
+                .into_iter()
+                .map(|item| rebuild_recursive_list_like(&item, leaves))
+                .collect();
+            rebuild_cons_chain(items)
+        }
+        LoweredValue::Tuple(items) => LoweredValue::Tuple(
+            items
+                .iter()
+                .map(|item| rebuild_recursive_list_like(item, leaves))
+                .collect(),
+        ),
+        LoweredValue::Adt {
+            ctor,
+            field_names,
+            fields,
+        } => LoweredValue::Adt {
+            ctor: ctor.clone(),
+            field_names: field_names.clone(),
+            fields: fields
+                .iter()
+                .map(|field| rebuild_recursive_list_like(field, leaves))
+                .collect(),
+        },
     }
 }
 
@@ -4237,6 +4497,36 @@ enum LoweredValue {
     },
 }
 
+const RUNTIME_LIST_VIEW_CTOR: &str = "__chelis_runtime_list_view";
+
+#[derive(Clone)]
+enum RuntimeListCheck {
+    NonNegative {
+        operation: &'static str,
+        argument: &'static str,
+        value: NodeId,
+    },
+    IndexBounds {
+        index: NodeId,
+        len: NodeId,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RuntimeListCheckDescriptor {
+    NonNegative {
+        operation: &'static str,
+        argument: &'static str,
+    },
+    IndexBounds,
+}
+
+pub(crate) struct LoweredSubexprWithControls {
+    pub(crate) dag: Dag,
+    pub(crate) value_root_count: usize,
+    pub(crate) list_checks: Vec<RuntimeListCheckDescriptor>,
+}
+
 impl LoweredValue {
     /// Whether `add_named_roots` would contribute zero roots for this
     /// value, i.e. whether it holds no tensor node anywhere (chelis#1095).
@@ -4515,6 +4805,12 @@ struct LowerCtx {
     program_types: Arc<HashMap<String, TensorType>>,
     program_defs: Arc<HashMap<String, Expr>>,
     random_seed: Option<u64>,
+    random_counter: u64,
+    /// Scalar Bool activation for path-sensitive Random nodes inside an AD
+    /// transform. `None` is the ordinary static-ordinal lane; `Some` makes
+    /// each draw consume the handled stream only when its executed path is
+    /// active at runtime.
+    random_path_condition: Option<NodeId>,
     linearity: LinearityInfo,
     /// chelis#620 (Inlining-F1 successor): per-callee active-inline depth.
     /// Recursion lowers by unrolling, so a self- or mutually-recursive call
@@ -4602,6 +4898,10 @@ struct LowerCtx {
     /// combinator rewrites are an AD bridge, not the general C/backend
     /// lowering for ordinary list programs.
     allow_host_list_ad_rewrites: bool,
+    /// Runtime checks owned by staged List views. The tensor DAG carries the
+    /// checked scalar values as private helper roots; the host lane turns the
+    /// descriptors into the same traps as ordinary List evaluation.
+    runtime_list_checks: Vec<RuntimeListCheck>,
     /// The span_id of the Deep `Expr` currently being lowered. Threaded
     /// through `lower_expr` (set on entry, restored on exit) so every
     /// helper that calls `self.dag.add_node(...)` can pass the
@@ -4627,6 +4927,8 @@ impl LowerCtx {
             program_types: program_types.into(),
             program_defs: program_defs.into(),
             random_seed: None,
+            random_counter: 0,
+            random_path_condition: None,
             linearity,
             inlining_depths: HashMap::new(),
             inlining_active: 0,
@@ -4638,6 +4940,7 @@ impl LowerCtx {
             rank_substitutions: HashMap::new(),
             dim_axis_positions: HashMap::new(),
             allow_host_list_ad_rewrites: false,
+            runtime_list_checks: Vec::new(),
             current_span_id: None,
         }
     }
@@ -5769,6 +6072,13 @@ impl LowerCtx {
                 self.append_current_span_to_lowered_value(&cached);
                 return cached;
             }
+            if self.allow_host_list_ad_rewrites && name == "Nil" {
+                return LoweredValue::Adt {
+                    ctor: "Nil".to_string(),
+                    field_names: None,
+                    fields: Vec::new(),
+                };
+            }
             // Reject `(var X)` where X is a known builtin name. The DAG
             // emits a Load when it encounters a free var, but a builtin
             // like `fold`, `map`, or `einsum` is a language-level operator,
@@ -5858,6 +6168,35 @@ impl LowerCtx {
             && !self.local_callables.contains_key(func_name)
             && !self.fn_typed_params.contains(func_name)
         {
+            if self.allow_host_list_ad_rewrites && func_name == "Cons" && elems.len() == 5 {
+                return LoweredValue::Adt {
+                    ctor: "Cons".to_string(),
+                    field_names: None,
+                    fields: vec![self.lower_expr(&elems[3]), self.lower_expr(&elems[4])],
+                };
+            }
+            // [05-OP-35] A statically staged List keeps its exact spine, so
+            // `len` is discrete compile-time data inside a differentiated
+            // body. Materialize that exact int64 constant before `lower_if`
+            // sees it; leaving `len` as a synthetic tensor Load would make a
+            // static empty/non-empty guard look runtime-dependent and mix an
+            // int64 mask into the floating adjoint branches.
+            if self.allow_host_list_ad_rewrites && func_name == "len" && elems.len() == 4 {
+                let list = self.lower_expr(&elems[3]);
+                if let Some((_, len, _)) = runtime_list_view_parts(&list) {
+                    return LoweredValue::Node(len);
+                }
+                if let Some(items) = adt_cons_chain_values(&list) {
+                    let value = i64::try_from(items.len()).unwrap_or_else(|_| {
+                        raise_fatal_lowering_error(
+                            "statically staged List length does not fit int64",
+                            Some(elems[3].span()),
+                            elems[3].span_id().map(ToOwned::to_owned),
+                        )
+                    });
+                    return LoweredValue::Node(self.int64_constant(value));
+                }
+            }
             // chelis#520: a positional ADT constructor application
             // `(app {} (var Ctor) args...)`. Same uppercase-initial rule
             // as `lower_var`'s nullary-constructor branch; a constructor
@@ -5886,6 +6225,19 @@ impl LowerCtx {
             if func_name == "concat"
                 && elems.len() == 5
                 && let Some(value) = self.try_lower_static_list_concat(&elems[3], &elems[4])
+            {
+                return value;
+            }
+            // [05-OP-35] List adjoints: inside `grad`, runtime List
+            // arguments are staged as a closed Cons/Nil spine of tensor
+            // leaves. Preserve that structure through the three exported
+            // index wrappers so ordinary tensor AD assigns cotangents to
+            // the exact selected/taken/dropped positions.
+            if self.allow_host_list_ad_rewrites
+                && matches!(func_name.as_str(), "index" | "take" | "drop")
+                && elems.len() == 5
+                && let Some(value) =
+                    self.try_lower_staged_list_selection(func_name, &elems[3], &elems[4], &ty)
             {
                 return value;
             }
@@ -5936,7 +6288,7 @@ impl LowerCtx {
         });
         match callable {
             CallableExpr::Plain(fn_expr) => {
-                Some(self.lower_plain_callable_app(&fn_expr, args, app_span, inlining_name))
+                Some(self.lower_plain_callable_app(&fn_expr, args, ty, app_span, inlining_name))
             }
             CallableExpr::Vmap { fn_expr, axis } => {
                 Some(self.lower_vmap_callable_app(&fn_expr, axis, args, ty, app_span))
@@ -6168,10 +6520,9 @@ impl LowerCtx {
     /// values. Used by both `lower_grad_callable_app` (which lowers
     /// expression arguments first) and `lower_pipe` (which inherits the
     /// argument from the previous pipe stage). A `Node` argument is the
-    /// classic tensor/scalar lane; an `Adt` argument (chelis#520 D2) is a
-    /// statically-constructed record whose float-tensor fields are
-    /// differentiated field-wise, producing an `Adt`-shaped gradient (the
-    /// pytree contract of spec/design/differentiable_language.md Decision 6).
+    /// scalar/tensor lane; tuple and ADT arguments recursively flatten their
+    /// differentiable float leaves and repack the resulting cotangent into
+    /// the exact primal structure required by spec/06 section 2.1.
     fn lower_grad_callable_with_values(
         &mut self,
         fn_expr: &Expr,
@@ -6187,73 +6538,30 @@ impl LowerCtx {
             .enumerate()
             .map(|(index, _)| extract_param_type(fn_expr, index).cloned())
             .collect();
-        // chelis#520 D2: classify each already-lowered argument. A `Node`
-        // is the classic tensor/scalar lane. An `Adt` is a statically-
-        // constructed record: its fields must themselves be single tensor
-        // nodes (nested ADT/tuple fields are outside the slice and fail
-        // loudly). A `Tuple` argument has never been accepted here.
+        // Classify each already-lowered argument. A `Node` is the
+        // scalar/tensor lane. Tuples and ADTs are recursively flattened to
+        // typed leaf nodes while retaining a template for exact repacking.
         enum GradArgPlan {
             Tensor(NodeId),
-            Adt {
-                ctor: String,
-                field_names: Option<Vec<String>>,
-                field_nodes: Vec<NodeId>,
+            Structured {
+                template: LoweredValue,
+                leaf_nodes: Vec<NodeId>,
             },
         }
-        // chelis#520 D2: a multi-argument grad call may mix ADT and
-        // tensor/scalar arguments. Each argument is lowered independently
-        // below into its own gradient plan; the per-argument result plans
-        // repack the flat gradient roots back into the correct structure
-        // (an `Adt` for an ADT parameter, a `Node` for a tensor one), so
-        // the result is a `Tuple` whose slots line up 1:1 with the
-        // selected parameters. Structure alignment is preserved because
-        // every ADT field root gets a distinct dotted key.
+        // A multi-argument grad call may mix structured and scalar/tensor
+        // arguments. Each argument owns one result plan, so flat reverse
+        // roots repack into slots that line up with selected parameters.
         let plans: Vec<GradArgPlan> = actual_args
             .iter()
-            .enumerate()
-            .map(|(index, arg)| match arg {
+            .map(|arg| match arg {
                 LoweredValue::Node(id) => GradArgPlan::Tensor(*id),
-                LoweredValue::Adt {
-                    ctor,
-                    field_names,
-                    fields,
-                } => {
-                    let field_nodes = fields
-                        .iter()
-                        .enumerate()
-                        .map(|(fidx, field)| {
-                            field.as_single_node().unwrap_or_else(|| {
-                                let label = field_names
-                                    .as_ref()
-                                    .and_then(|names| names.get(fidx).cloned())
-                                    .unwrap_or_else(|| fidx.to_string());
-                                raise_fatal_lowering_error(
-                                    format!(
-                                        "`grad(...)` argument {index}: field `{label}` of \
-                                         constructor `{ctor}` is not a single tensor value; \
-                                         nested ADT/tuple fields are not supported yet \
-                                         (chelis#520 D2)"
-                                    ),
-                                    Some(app_span),
-                                    None,
-                                )
-                            })
-                        })
-                        .collect();
-                    GradArgPlan::Adt {
-                        ctor: ctor.clone(),
-                        field_names: field_names.clone(),
-                        field_nodes,
+                LoweredValue::Tuple(_) | LoweredValue::Adt { .. } => {
+                    let leaf_nodes = recursive_list_leaf_nodes(arg);
+                    GradArgPlan::Structured {
+                        template: arg.clone(),
+                        leaf_nodes,
                     }
                 }
-                LoweredValue::Tuple(_) => raise_fatal_lowering_error(
-                    format!(
-                        "`grad(...)` argument {index} must be a tensor, scalar, or ADT of \
-                         float tensors; got a tuple value"
-                    ),
-                    Some(app_span),
-                    None,
-                ),
             })
             .collect();
         let node_type = |ctx: &Self, id: NodeId| {
@@ -6358,11 +6666,36 @@ impl LowerCtx {
         // reached while differentiating the body monomorphizes to concrete
         // ranks instead of tripping the rank-monomorphization boundary.
         subctx.rank_substitutions = grad_rank_subst;
+        // Random wrapper adjoints are pathwise: the differentiated graph must
+        // consume the same handled stream as the forward execution. A fresh
+        // lowering context otherwise silently falls back to seed zero.
+        subctx.random_seed = self.random_seed;
+        subctx.random_counter = self.random_counter;
         subctx.allow_host_list_ad_rewrites = true;
         // Subctx inherits the parent's current span so synthesized loads
         // for grad's parameters carry the grad-call's span.
         subctx.current_span_id = self.current_span_id.clone();
+        let random_path_true = subctx.dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            },
+            subctx.current_span_id.clone(),
+        );
+        subctx.random_path_condition = Some(random_path_true);
         let captured_bindings = self.seed_subctx_with_lexical_scope(&mut subctx, &param_names);
+        // Generated structured-leaf Loads share one name-keyed splice map
+        // with ordinary parameters and captured values. Keep a fresh-name
+        // set over that complete namespace: deriving a load name from an
+        // authored parameter alone lets another parameter capture the leaf
+        // (for example `xs` beside `xs__structured_leaf_0`).
+        let mut used_load_names = param_names
+            .iter()
+            .cloned()
+            .chain(captured_bindings.keys().cloned())
+            .collect::<HashSet<_>>();
         let mut wrt = Vec::new();
         // Actual argument node backing each `wrt` load, in `wrt` order
         // (tensor param -> the argument node, ADT field -> the field node).
@@ -6377,10 +6710,9 @@ impl LowerCtx {
         // it owns and how to reshape them.
         enum GradResultPlan {
             Tensor,
-            Adt {
-                ctor: String,
-                field_names: Option<Vec<String>>,
-                field_count: usize,
+            Structured {
+                template: LoweredValue,
+                differentiable_leaves: Vec<bool>,
             },
         }
         let mut result_plans: Vec<GradResultPlan> = Vec::new();
@@ -6390,74 +6722,68 @@ impl LowerCtx {
             .enumerate()
         {
             match plans.get(index) {
-                Some(GradArgPlan::Adt {
-                    ctor,
-                    field_names,
-                    field_nodes,
+                Some(GradArgPlan::Structured {
+                    template,
+                    leaf_nodes,
                 }) => {
-                    // chelis#520 D2: an ADT-typed differentiated parameter.
-                    // Every float-tensor field becomes its own Load + wrt
-                    // entry; the parameter name binds to the Adt of those
-                    // loads so the body's `match`/`access` destructuring
-                    // resolves statically.
-                    let selected = match wrt_indices {
-                        Some(indices) => indices.contains(&index),
-                        None => true,
-                    };
-                    let mut field_values = Vec::with_capacity(field_nodes.len());
-                    for (fidx, field_node) in field_nodes.iter().enumerate() {
-                        let field_ty = node_type(self, *field_node);
-                        if selected && !field_ty.precision.is_float() {
-                            let label = field_names
-                                .as_ref()
-                                .and_then(|names| names.get(fidx).cloned())
-                                .unwrap_or_else(|| fidx.to_string());
-                            raise_fatal_lowering_error(
-                                format!(
-                                    "`grad(...)` over ADT-typed parameter `{name}`: field \
-                                     `{label}` of constructor `{ctor}` is not a float \
-                                     tensor; mixed-struct gradients are not supported yet \
-                                     (chelis#520 D2)"
-                                ),
-                                Some(app_span),
-                                None,
-                            );
-                        }
-                        let load_name = format!("{name}__adt_field_{fidx}");
+                    let differentiable_leaves = leaf_nodes
+                        .iter()
+                        .map(|node| node_type(self, *node).precision.is_float())
+                        .collect::<Vec<_>>();
+                    let differentiable = differentiable_leaves.iter().any(|leaf| *leaf);
+                    let selected = differentiable
+                        && wrt_indices.is_none_or(|indices| indices.contains(&index));
+                    let mut leaf_values = Vec::with_capacity(leaf_nodes.len());
+                    for (leaf_index, element_node) in leaf_nodes.iter().enumerate() {
+                        let element_ty = node_type(self, *element_node);
+                        let mut suffix = 0usize;
+                        let load_name = loop {
+                            let candidate =
+                                format!("__chelis_grad_arg_{index}_leaf_{leaf_index}_{suffix}");
+                            if used_load_names.insert(candidate.clone()) {
+                                break candidate;
+                            }
+                            suffix += 1;
+                        };
                         let load = subctx.dag.add_node(
                             RiscOp::Load {
                                 name: load_name.as_str().into(),
                             },
                             vec![],
-                            field_ty.clone(),
+                            element_ty.clone(),
                             subctx.current_span_id.clone(),
                         );
-                        if selected {
+                        if selected && differentiable_leaves[leaf_index] {
                             wrt.push(load);
-                            wrt_actuals.push(*field_node);
+                            wrt_actuals.push(*element_node);
                         }
-                        remap_formal_types.push(field_ty.clone());
-                        remap_actual_types.push(field_ty);
-                        adt_arg_map_entries.push((load_name, *field_node));
-                        field_values.push(LoweredValue::Node(load));
+                        remap_formal_types.push(element_ty.clone());
+                        remap_actual_types.push(element_ty);
+                        adt_arg_map_entries.push((load_name, *element_node));
+                        leaf_values.push(LoweredValue::Node(load));
                     }
                     if selected {
-                        result_plans.push(GradResultPlan::Adt {
-                            ctor: ctor.clone(),
-                            field_names: field_names.clone(),
-                            field_count: field_nodes.len(),
+                        result_plans.push(GradResultPlan::Structured {
+                            template: template.clone(),
+                            differentiable_leaves,
                         });
                     }
+                    let mut leaf_values = leaf_values.into_iter();
                     subctx.bindings.insert(
                         name.clone(),
-                        LoweredValue::Adt {
-                            ctor: ctor.clone(),
-                            field_names: field_names.clone(),
-                            fields: field_values,
-                        },
+                        rebuild_recursive_list_like(template, &mut leaf_values),
                     );
                 }
                 Some(GradArgPlan::Tensor(actual)) => {
+                    // [05-OP-35] List selection counts are discrete scalar
+                    // parameters, but the staged List spine still needs their
+                    // exact call-site value while the grad body is lowered.
+                    // Preserve a statically known integer through the fresh
+                    // Load so an imported list_index/take_list/drop_list
+                    // wrapper can select the correct primal positions.
+                    if let Some(value) = self.static_i64_from_node(*actual) {
+                        subctx.static_size_bindings.insert(name.clone(), value);
+                    }
                     let load = subctx.dag.add_node(
                         RiscOp::Load {
                             name: name.as_str().into(),
@@ -6501,6 +6827,11 @@ impl LowerCtx {
         }
         let lowered_output = subctx.lower_expr(body);
         let output = lowered_output.expect_node("grad requires a scalar floating output");
+        // The subcontext starts at the enclosing handler's current ordinal.
+        // Hand the consumed ordinal count back before lowering any following
+        // expression in the same `with seed` region; otherwise that expression
+        // reuses the grad forward pass's random source words.
+        self.random_counter = subctx.random_counter;
         if subctx
             .callable_dependency_state
             .output_depends_on_unresolved(&subctx.dag, output)
@@ -6511,6 +6842,46 @@ impl LowerCtx {
             // concrete callable is supplied, ordinary call-site inlining
             // re-lowers this body without markers and computes the real value.
             return LoweredValue::Tuple(Vec::new());
+        }
+        // Runtime List checks are host-visible control results even when the
+        // selected cotangent is structurally empty or the differentiated
+        // output is constant. Give every descriptor its own Copy root before
+        // AD; grad pruning preserves forward roots in order, so the enclosing
+        // helper can recover each value without exposing a new GradResult
+        // field or assuming that pruning preserves numeric node ids.
+        let runtime_list_checks = std::mem::take(&mut subctx.runtime_list_checks);
+        let mut retained_checks = Vec::with_capacity(runtime_list_checks.len());
+        for check in runtime_list_checks {
+            let mut retain = |value: NodeId| {
+                let output_type = subctx
+                    .dag
+                    .get(value)
+                    .map(|node| node.output_type.clone())
+                    .unwrap_or_else(Self::default_type);
+                let retained = subctx.dag.add_node(
+                    RiscOp::Copy,
+                    vec![value],
+                    output_type,
+                    subctx.current_span_id.clone(),
+                );
+                subctx.dag.add_root(retained);
+                retained
+            };
+            retained_checks.push(match check {
+                RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value,
+                } => RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value: retain(value),
+                },
+                RuntimeListCheck::IndexBounds { index, len } => RuntimeListCheck::IndexBounds {
+                    index: retain(index),
+                    len: retain(len),
+                },
+            });
         }
         subctx.dag.add_root(output);
         // Issue #197: route through grad_dag_checked so a
@@ -6533,8 +6904,8 @@ impl LowerCtx {
             .zip(plans.iter())
             .filter_map(|(name, plan)| match plan {
                 GradArgPlan::Tensor(actual) => Some((name.clone(), *actual)),
-                // ADT params are served by their per-field load entries.
-                GradArgPlan::Adt { .. } => None,
+                // Structured params are served by their per-leaf entries.
+                GradArgPlan::Structured { .. } => None,
             })
             .chain(adt_arg_map_entries)
             .chain(captured_bindings)
@@ -6545,6 +6916,30 @@ impl LowerCtx {
             &remap_actual_types,
         );
         let remap = self.splice_dag(&specialized_grad_dag, &arg_map);
+        let mut control_roots = grad_result.dag.roots().iter().copied();
+        for check in retained_checks {
+            self.runtime_list_checks.push(match check {
+                RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value: _,
+                } => RuntimeListCheck::NonNegative {
+                    operation,
+                    argument,
+                    value: remap[&control_roots
+                        .next()
+                        .expect("retained List check root must survive AD")],
+                },
+                RuntimeListCheck::IndexBounds { .. } => RuntimeListCheck::IndexBounds {
+                    index: remap[&control_roots
+                        .next()
+                        .expect("retained List index root must survive AD")],
+                    len: remap[&control_roots
+                        .next()
+                        .expect("retained List length root must survive AD")],
+                },
+            });
+        }
         // Per-wrt gradient node (post-splice). Any output-reachable unresolved
         // callable result returned above, so a `None` entry here is proven to
         // mean that the wrt input does not influence the known output
@@ -6590,32 +6985,30 @@ impl LowerCtx {
                         }
                     }
                 }
-                GradResultPlan::Adt {
-                    ctor,
-                    field_names,
-                    field_count,
+                GradResultPlan::Structured {
+                    template,
+                    differentiable_leaves,
                 } => {
-                    let mut fields = Vec::with_capacity(*field_count);
-                    for _ in 0..*field_count {
-                        let grad_node = grad_iter.next().flatten();
-                        let actual = wrt_actual_iter.next();
-                        let node = grad_node.unwrap_or_else(|| {
-                            // The field does not influence the output:
-                            // its gradient is exactly zero. Materialize
-                            // the zero so the gradient struct keeps the
-                            // input's field structure (pytree contract).
-                            let field_ty = actual
-                                .map(|id| node_type(self, id))
-                                .unwrap_or_else(Self::default_type);
-                            self.zero_tensor_node(&field_ty, actual)
-                        });
-                        fields.push(LoweredValue::Node(node));
+                    let mut leaves = Vec::with_capacity(differentiable_leaves.len());
+                    for differentiable in differentiable_leaves {
+                        if *differentiable {
+                            let grad_node = grad_iter.next().flatten();
+                            let actual = wrt_actual_iter.next();
+                            let node = grad_node.unwrap_or_else(|| {
+                                let element_ty = actual
+                                    .map(|id| node_type(self, id))
+                                    .unwrap_or_else(Self::default_type);
+                                self.zero_tensor_node(&element_ty, actual)
+                            });
+                            leaves.push(LoweredValue::Node(node));
+                        } else {
+                            // Discrete cotangent leaves are unit; they do not
+                            // consume a backward root or an actual tensor.
+                            leaves.push(LoweredValue::Tuple(Vec::new()));
+                        }
                     }
-                    packed.push(LoweredValue::Adt {
-                        ctor: ctor.clone(),
-                        field_names: field_names.clone(),
-                        fields,
-                    });
+                    let mut leaves = leaves.into_iter();
+                    packed.push(rebuild_recursive_list_like(template, &mut leaves));
                 }
             }
         }
@@ -6627,7 +7020,7 @@ impl LowerCtx {
                     .iter()
                     .filter_map(|plan| match plan {
                         GradArgPlan::Tensor(actual) => Some(*actual),
-                        GradArgPlan::Adt { .. } => None,
+                        GradArgPlan::Structured { .. } => None,
                     })
                     .collect();
                 if candidate_inputs.len() == plans.len() {
@@ -6640,7 +7033,7 @@ impl LowerCtx {
                 }
                 LoweredValue::Node(*single)
             }
-            [single_adt @ LoweredValue::Adt { .. }] => single_adt.clone(),
+            [single] => single.clone(),
             _ => LoweredValue::Tuple(packed),
         }
     }
@@ -6697,6 +7090,7 @@ impl LowerCtx {
         &mut self,
         fn_expr: &Expr,
         args: &[Expr],
+        expected_return_ty: &TensorType,
         _app_span: Span,
         inlining_name: Option<String>,
     ) -> LoweredValue {
@@ -6753,6 +7147,11 @@ impl LowerCtx {
             .zip(param_types)
             .zip(param_type_exprs.iter())
         {
+            // Preserve a caller-known integer through the inlined parameter
+            // name. This is required by the [05-OP-35] wrappers: their public
+            // count parameter is renamed once more before the builtin
+            // index/take/drop app reaches the staged List rewrite.
+            let static_size = self.fold_static_size(arg_expr);
             // Item 2-extended: shadowing; the inlined fn's param name
             // is bound to a fresh value (either a `local_callable` or a
             // `bindings` entry). Drop any outer-scope
@@ -6769,6 +7168,11 @@ impl LowerCtx {
             // unresolved outer callable.
             let callable = self.resolve_callable_expr(arg_expr);
             self.fn_typed_params.remove(name);
+            if let Some(value) = static_size {
+                self.static_size_bindings.insert(name.clone(), value);
+            } else {
+                self.static_size_bindings.remove(name);
+            }
             if let Some(callable) = callable {
                 match callable {
                     // Preserve structural incompleteness when an unresolved
@@ -6905,6 +7309,20 @@ impl LowerCtx {
         // stack nears exhaustion mid-descent, and every additional level
         // re-enters this function, so the grow site is always in reach.
         let result = stacker::maybe_grow(64 * 1024, 4 * 1024 * 1024, || self.lower_expr(body));
+        if let Some(ret_ty_expr) = extract_fn_return_type(fn_expr) {
+            let ret_ty = Self::type_from_type_expr_with_subst(
+                ret_ty_expr,
+                &self.prec_substitutions,
+                &self.rank_substitutions,
+            );
+            self.repair_output_type_if_default(&result, &ret_ty);
+        } else {
+            // A named definition may carry its result type only in a
+            // separate `sig`; the resolved application metadata still has
+            // the fully substituted type. Preserve that rank/precision when
+            // the inlined body ends in an untyped default node.
+            self.repair_output_type_if_default(&result, expected_return_ty);
+        }
         self.inlining_active -= 1;
         if let Some(name) = &inlining_name
             && let Some(depth) = self.inlining_depths.get_mut(name)
@@ -6945,6 +7363,14 @@ impl LowerCtx {
         for (name, arg_id) in param_names.iter().zip(args.iter().cloned()) {
             // Same shadowing rationale as `lower_plain_callable_app`.
             self.fn_typed_params.remove(name);
+            if let Some(value) = arg_id
+                .as_single_node()
+                .and_then(|node| self.static_i64_from_node(node))
+            {
+                self.static_size_bindings.insert(name.clone(), value);
+            } else {
+                self.static_size_bindings.remove(name);
+            }
             self.bindings.insert(name.clone(), arg_id);
         }
         let result = self.lower_expr(body);
@@ -7674,7 +8100,28 @@ impl LowerCtx {
                     as f64;
                 let high = self.resolve_static_f64_arg(&args[2], "uniform_like", "high bound")
                     as f32 as f64;
-                let seed = self.random_seed.unwrap_or(0);
+                let (seed, activation) = match self.random_path_condition {
+                    Some(activation) => {
+                        // A path-sensitive DAG has two owners. Eval lowering
+                        // carries the handler's concrete seed here. Compiled-C
+                        // helper lowering cannot bake that runtime value, and
+                        // `CHELIS_EFFECTIVE_UNIFORM_SEED` deliberately ignores
+                        // this operand whenever the activation is true. Keep
+                        // the neutral placeholder explicit instead of hiding
+                        // it behind an Option fallback.
+                        let seed = match self.random_seed {
+                            Some(seed) => seed,
+                            None => COMPILED_HANDLER_OWNED_SEED,
+                        };
+                        (seed, Some(activation))
+                    }
+                    None => {
+                        let seed = self.random_seed.unwrap_or(0)
+                            ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        self.random_counter = self.random_counter.saturating_add(1);
+                        (seed, None)
+                    }
+                };
                 // When no `type` metadata is attached to the `app` form
                 // (as is common when the host lane drives sub-expression
                 // lowering through `lower_subexpr_program` from a
@@ -7696,7 +8143,7 @@ impl LowerCtx {
                 };
                 let node = self.dag.add_node(
                     RiscOp::UniformLike { low, high, seed },
-                    vec![template],
+                    activation.map_or_else(|| vec![template], |active| vec![template, active]),
                     resolved_ty,
                     self.current_span_id.clone(),
                 );
@@ -7708,7 +8155,9 @@ impl LowerCtx {
                 // bounds): a wrapped/computed rate must resolve statically or
                 // fail loudly, never silently become 0.0 (no-op dropout).
                 let rate = self.resolve_static_f64_arg(&args[1], "dropout", "rate");
-                let seed = self.random_seed.unwrap_or(0);
+                let seed = self.random_seed.unwrap_or(0)
+                    ^ self.random_counter.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                self.random_counter = self.random_counter.saturating_add(1);
                 let inferred_ty = self
                     .dag
                     .get(x)
@@ -8414,6 +8863,16 @@ impl LowerCtx {
                 let (new_shape, ty_dims, shape_srcs) = if args.len() >= 2 {
                     let checker_dims = ty.dims.clone();
                     self.extract_reshape_dim_list(&args[1], &checker_dims, &mut inputs)
+                        .or_else(|| {
+                            let template = tensor_shape_template_expr(&args[1])?;
+                            let source = self.lower_expr_node(template, "tensor_shape template");
+                            let source_ty = self.dag.get(source)?.output_type.clone();
+                            Some((
+                                source_ty.dims.iter().map(RtDim::from_dim_info).collect(),
+                                source_ty.dims,
+                                vec![source],
+                            ))
+                        })
                         .unwrap_or_else(fallback)
                 } else {
                     fallback()
@@ -9310,6 +9769,465 @@ impl LowerCtx {
         Some(rebuild_cons_chain(items))
     }
 
+    fn int64_constant(&mut self, value: i64) -> NodeId {
+        self.dag.add_node(
+            RiscOp::Const {
+                value: scalar_from_i64("List control", Prim::Int64, value)
+                    .expect("an i64 is representable as int64"),
+            },
+            vec![],
+            TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            },
+            self.current_span_id.clone(),
+        )
+    }
+
+    fn staged_list_parts(
+        &mut self,
+        value: &LoweredValue,
+    ) -> Option<(NodeId, NodeId, Vec<LoweredValue>)> {
+        if let Some(parts) = runtime_list_view_parts(value) {
+            return Some(parts);
+        }
+        let items = adt_cons_chain_values(value)?;
+        let len = i64::try_from(items.len()).ok()?;
+        let offset = self.int64_constant(0);
+        let len = self.int64_constant(len);
+        Some((offset, len, items))
+    }
+
+    /// Select one same-typed scalar/tensor value without evaluating an
+    /// arithmetic blend of the candidates.
+    ///
+    /// The previous one-hot `sum(mask * candidate)` spelling is not a
+    /// selection over IEEE values: an unselected NaN/Inf contaminates the
+    /// sum, and multiplying a signed zero by a mask can lose its sign. Build
+    /// a private leading-axis table with differentiable, disjoint
+    /// `ScatterAdd` writes and gather the requested row instead. A `-0`
+    /// baseline preserves both zero signs under IEEE addition (`-0 + -0`
+    /// stays negative, while `-0 + +0` is positive in the default rounding
+    /// mode). No new RISC or WireDag operation is needed.
+    fn select_runtime_node(&mut self, items: &[NodeId], effective_index: NodeId) -> Option<NodeId> {
+        let first = *items.first()?;
+        let out_ty = self.dag.get(first)?.output_type.clone();
+        if items.iter().any(|item| {
+            self.dag
+                .get(*item)
+                .is_none_or(|node| node.output_type != out_ty)
+        }) {
+            return None;
+        }
+
+        // ScatterAdd is an arithmetic carrier, so stage bools through the
+        // exact 0/1 int64 representation. The terminal checked cast restores
+        // the original bool type and remains value-independent for AD.
+        if out_ty.precision == Prim::Bool {
+            let int_ty = TensorType {
+                dims: out_ty.dims.clone(),
+                precision: Prim::Int64,
+            };
+            let cast_items = items
+                .iter()
+                .map(|item| {
+                    self.dag.add_node(
+                        RiscOp::Cast {
+                            new_precision: Prim::Int64,
+                        },
+                        vec![*item],
+                        int_ty.clone(),
+                        self.current_span_id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let selected = self.select_runtime_node(&cast_items, effective_index)?;
+            return Some(self.dag.add_node(
+                RiscOp::Cast {
+                    new_precision: Prim::Bool,
+                },
+                vec![selected],
+                out_ty,
+                self.current_span_id.clone(),
+            ));
+        }
+        if out_ty.precision == Prim::String {
+            return None;
+        }
+
+        let count = items.len();
+        let mut stacked_dims = Vec::with_capacity(out_ty.dims.len() + 1);
+        stacked_dims.push(DimInfo::Lit(count));
+        stacked_dims.extend(out_ty.dims.iter().cloned());
+        let stacked_ty = TensorType {
+            dims: stacked_dims.clone(),
+            precision: out_ty.precision,
+        };
+        let scalar_ty = TensorType {
+            dims: Vec::new(),
+            precision: out_ty.precision,
+        };
+        let baseline = if out_ty.precision.is_float() {
+            -0.0
+        } else {
+            0.0
+        };
+        let mut table = self.dag.add_node(
+            RiscOp::synth_const(out_ty.precision, baseline),
+            vec![],
+            scalar_ty,
+            self.current_span_id.clone(),
+        );
+        let mut expanded_dims = Vec::with_capacity(stacked_dims.len());
+        for (axis, dim) in stacked_dims.iter().enumerate() {
+            expanded_dims.push(dim.clone());
+            let size = DimExpr::from(dim);
+            let symbolic = size.as_concrete().is_none();
+            table = self.dag.add_node(
+                RiscOp::Expand { axis, size },
+                vec![table],
+                TensorType {
+                    dims: expanded_dims.clone(),
+                    precision: out_ty.precision,
+                },
+                self.current_span_id.clone(),
+            );
+            if symbolic {
+                self.dag.add_shape_dep(table, first);
+            }
+        }
+        for (position, item) in items.iter().enumerate() {
+            let position = self.int64_constant(i64::try_from(position).ok()?);
+            table = self.dag.add_node(
+                RiscOp::ScatterAdd { axis: 0 },
+                vec![table, position, *item],
+                stacked_ty.clone(),
+                self.current_span_id.clone(),
+            );
+        }
+        Some(self.dag.add_node(
+            RiscOp::Gather { axis: 0 },
+            vec![table, effective_index],
+            out_ty,
+            self.current_span_id.clone(),
+        ))
+    }
+
+    fn blend_runtime_list_items(
+        &mut self,
+        items: &[LoweredValue],
+        effective_index: NodeId,
+    ) -> Option<LoweredValue> {
+        let first = items.first()?;
+        // A runtime outer selection may itself return a List, and candidate
+        // sublists need not have equal lengths. Own that value as one view
+        // over the candidates' concatenated payloads: select the candidate's
+        // absolute offset and logical length with the same one-hot mask used
+        // for scalar/tensor leaves. A later `index`/`take`/`drop` therefore
+        // composes with this view without enumerating any selector state.
+        if items.iter().all(|item| {
+            runtime_list_view_parts(item).is_some() || adt_cons_chain_values(item).is_some()
+        }) {
+            let candidates = items
+                .iter()
+                .map(|item| self.staged_list_parts(item))
+                .collect::<Option<Vec<_>>>()?;
+            let int_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            };
+            let mut offsets = Vec::with_capacity(candidates.len());
+            let mut lengths = Vec::with_capacity(candidates.len());
+            let mut payload = Vec::new();
+            for (position, (offset, len, candidate_payload)) in candidates.into_iter().enumerate() {
+                let prefix = i64::try_from(payload.len()).ok()?;
+                let absolute_offset = if prefix == 0 {
+                    offset
+                } else {
+                    let prefix = self.int64_constant(prefix);
+                    self.dag.add_node(
+                        RiscOp::Add,
+                        vec![prefix, offset],
+                        int_ty.clone(),
+                        self.current_span_id.clone(),
+                    )
+                };
+                let _ = position;
+                offsets.push(absolute_offset);
+                lengths.push(len);
+                payload.extend(candidate_payload);
+            }
+            let selected_offset = self.select_runtime_node(&offsets, effective_index)?;
+            let selected_len = self.select_runtime_node(&lengths, effective_index)?;
+            return Some(rebuild_runtime_list_view(
+                selected_offset,
+                selected_len,
+                payload,
+            ));
+        }
+        match first {
+            LoweredValue::Node(first_node) => {
+                let out_ty = self.dag.get(*first_node)?.output_type.clone();
+                if items.iter().any(|item| {
+                    item.as_single_node()
+                        .and_then(|node| self.dag.get(node))
+                        .is_none_or(|node| node.output_type != out_ty)
+                }) {
+                    return None;
+                }
+                let nodes = items
+                    .iter()
+                    .map(LoweredValue::as_single_node)
+                    .collect::<Option<Vec<_>>>()?;
+                Some(LoweredValue::Node(
+                    self.select_runtime_node(&nodes, effective_index)?,
+                ))
+            }
+            LoweredValue::Tuple(first_items) => {
+                if items.iter().any(|item| {
+                    !matches!(item, LoweredValue::Tuple(fields) if fields.len() == first_items.len())
+                }) {
+                    return None;
+                }
+                let mut blended = Vec::with_capacity(first_items.len());
+                for field_index in 0..first_items.len() {
+                    let fields = items
+                        .iter()
+                        .map(|item| match item {
+                            LoweredValue::Tuple(fields) => fields[field_index].clone(),
+                            _ => unreachable!("tuple shape checked above"),
+                        })
+                        .collect::<Vec<_>>();
+                    blended.push(self.blend_runtime_list_items(&fields, effective_index)?);
+                }
+                Some(LoweredValue::Tuple(blended))
+            }
+            LoweredValue::Adt {
+                ctor,
+                field_names,
+                fields: first_fields,
+            } if ctor != RUNTIME_LIST_VIEW_CTOR => {
+                if items.iter().any(|item| {
+                    !matches!(item, LoweredValue::Adt { ctor: item_ctor, fields, .. }
+                        if item_ctor == ctor && fields.len() == first_fields.len())
+                }) {
+                    return None;
+                }
+                let mut blended = Vec::with_capacity(first_fields.len());
+                for field_index in 0..first_fields.len() {
+                    let fields = items
+                        .iter()
+                        .map(|item| match item {
+                            LoweredValue::Adt { fields, .. } => fields[field_index].clone(),
+                            _ => unreachable!("ADT shape checked above"),
+                        })
+                        .collect::<Vec<_>>();
+                    blended.push(self.blend_runtime_list_items(&fields, effective_index)?);
+                }
+                Some(LoweredValue::Adt {
+                    ctor: ctor.clone(),
+                    field_names: field_names.clone(),
+                    fields: blended,
+                })
+            }
+            LoweredValue::Adt { .. } => None,
+        }
+    }
+
+    fn try_lower_staged_list_selection(
+        &mut self,
+        name: &str,
+        list_arg: &Expr,
+        count_arg: &Expr,
+        result_ty: &TensorType,
+    ) -> Option<LoweredValue> {
+        let list = self.lower_expr(list_arg);
+        if runtime_list_view_parts(&list).is_none()
+            && let Some(raw) = self.static_i64_from_expr_or_binding(count_arg)
+        {
+            let (_, _, items) = self.staged_list_parts(&list)?;
+            if raw < 0 {
+                let argument = if name == "index" { "index" } else { "count" };
+                raise_fatal_lowering_error(
+                    format!("{name} requires non-negative {argument}, got {raw}"),
+                    Some(count_arg.span()),
+                    count_arg.span_id().map(ToOwned::to_owned),
+                );
+            }
+            let count = usize::try_from(raw).unwrap_or(usize::MAX);
+            return match name {
+                "index" => Some(items.get(count).cloned().unwrap_or_else(|| {
+                    raise_fatal_lowering_error(
+                        format!("index {raw} out of bounds for list of len {}", items.len()),
+                        Some(count_arg.span()),
+                        count_arg.span_id().map(ToOwned::to_owned),
+                    )
+                })),
+                "take" => Some(rebuild_cons_chain(items.into_iter().take(count).collect())),
+                "drop" => Some(rebuild_cons_chain(items.into_iter().skip(count).collect())),
+                _ => None,
+            };
+        }
+
+        let count = self.lower_expr(count_arg).as_single_node()?;
+        let (offset, len, items) = self.staged_list_parts(&list)?;
+        let argument = if name == "index" { "index" } else { "count" };
+        self.runtime_list_checks
+            .push(RuntimeListCheck::NonNegative {
+                operation: match name {
+                    "index" => "index",
+                    "take" => "take",
+                    "drop" => "drop",
+                    _ => return None,
+                },
+                argument,
+                value: count,
+            });
+        if name == "index" {
+            self.runtime_list_checks
+                .push(RuntimeListCheck::IndexBounds { index: count, len });
+            if items.is_empty() {
+                // The bounds check above is unconditionally false for an
+                // empty List, so this value is an unreachable typed
+                // placeholder used only to keep the forward/AD DAG valid
+                // until the host check reports the public error. It is never
+                // a silent fallback: both eval and generated C execute the
+                // check before exposing the result.
+                return Some(LoweredValue::Node(self.zero_tensor_node(result_ty, None)));
+            }
+            let int_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Int64,
+            };
+            // The public checks retain the original index and logical
+            // length, but the private Gather must never observe an invalid
+            // address or overflow while computing one before the host lane
+            // can render those exact diagnostics. Clamp the relative index
+            // before adding the view offset, then clamp the resulting end
+            // position for an empty view. This is bounds guarding, not a
+            // semantic fallback, because every invalid source index still
+            // takes the retained failure branch.
+            let zero = self.int64_constant(0);
+            let nonnegative_count = self.dag.add_node(
+                RiscOp::MaxElem,
+                vec![count, zero],
+                int_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let within_view = tier2::lower_min_elem(
+                &mut self.dag,
+                nonnegative_count,
+                len,
+                &int_ty,
+                self.current_span_id.as_deref(),
+            );
+            let raw_effective = self.dag.add_node(
+                RiscOp::Add,
+                vec![offset, within_view],
+                int_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let last = self.int64_constant(i64::try_from(items.len()).ok()? - 1);
+            let effective = tier2::lower_min_elem(
+                &mut self.dag,
+                raw_effective,
+                last,
+                &int_ty,
+                self.current_span_id.as_deref(),
+            );
+            return self.blend_runtime_list_items(&items, effective);
+        }
+
+        let int_ty = TensorType {
+            dims: Vec::new(),
+            precision: Prim::Int64,
+        };
+        let clamped = if items.is_empty() {
+            self.int64_constant(0)
+        } else {
+            // Keep an invalid negative count out of the internal view
+            // offset/length arithmetic. The retained check still reports the
+            // original count, so this guard cannot turn a rejected program
+            // into a successful one.
+            let zero = self.int64_constant(0);
+            let nonnegative = self.dag.add_node(
+                RiscOp::MaxElem,
+                vec![count, zero],
+                int_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            tier2::lower_min_elem(
+                &mut self.dag,
+                nonnegative,
+                len,
+                &int_ty,
+                self.current_span_id.as_deref(),
+            )
+        };
+        match name {
+            "take" => Some(rebuild_runtime_list_view(offset, clamped, items)),
+            "drop" => {
+                let new_offset = self.dag.add_node(
+                    RiscOp::Add,
+                    vec![offset, clamped],
+                    int_ty.clone(),
+                    self.current_span_id.clone(),
+                );
+                let neg_clamped = self.dag.add_node(
+                    RiscOp::Neg,
+                    vec![clamped],
+                    int_ty.clone(),
+                    self.current_span_id.clone(),
+                );
+                let new_len = self.dag.add_node(
+                    RiscOp::Add,
+                    vec![len, neg_clamped],
+                    int_ty,
+                    self.current_span_id.clone(),
+                );
+                Some(rebuild_runtime_list_view(new_offset, new_len, items))
+            }
+            _ => None,
+        }
+    }
+
+    fn static_i64_from_expr_or_binding(&mut self, expr: &Expr) -> Option<i64> {
+        if let Some(value) = self.fold_static_size(expr) {
+            return Some(value);
+        }
+        let node = self.lower_expr(expr).as_single_node()?;
+        self.static_i64_from_node(node)
+    }
+
+    fn static_i64_from_node(&self, node: NodeId) -> Option<i64> {
+        let node = self.dag.get(node)?;
+        match &node.op {
+            RiscOp::Const { value } => value.as_i64_exact(),
+            // Integer count arguments are commonly materialized as
+            // `cast(<literal>, int64)` before an imported wrapper is
+            // inlined. The checker has already established an integer
+            // result type, so an exact integer input survives the cast.
+            RiscOp::Cast { .. } | RiscOp::Copy => self.static_i64_from_node(*node.inputs.first()?),
+            _ => None,
+        }
+    }
+
+    fn static_numel_from_expr(&self, expr: &Expr) -> Option<usize> {
+        let ("numel", [operand]) = app_var_name_and_args(expr)? else {
+            return None;
+        };
+        let name = bare_var_name(operand)?;
+        let source = self.bindings.get(&name)?.as_single_node()?;
+        self.dag
+            .get(source)?
+            .output_type
+            .dims
+            .iter()
+            .try_fold(1usize, |product, dim| {
+                product.checked_mul(concrete_dim_len(dim)?)
+            })
+    }
+
     fn resolved_list_expr(&self, expr: &Expr) -> Expr {
         bare_var_name(expr)
             .and_then(|name| self.list_bindings.get(&name).cloned())
@@ -9339,9 +10257,15 @@ impl LowerCtx {
         match (name, args) {
             ("map", [callback, list_expr]) => {
                 let list_resolved = self.resolved_list_expr(list_expr);
-                let source = to_list_source_expr(&list_resolved)?;
-                let source_node = self.lower_expr_node(source, "map source");
-                self.lower_host_list_map(callback, source_node)
+                if let Some((lhs, rhs)) = zip_to_list_source_exprs(&list_resolved) {
+                    let lhs_node = self.lower_expr_node(lhs, "map zip left source");
+                    let rhs_node = self.lower_expr_node(rhs, "map zip right source");
+                    self.lower_host_list_zip_map(callback, lhs_node, rhs_node)
+                } else {
+                    let source = to_list_source_expr(&list_resolved)?;
+                    let source_node = self.lower_expr_node(source, "map source");
+                    self.lower_host_list_map(callback, source_node)
+                }
             }
             ("filter", [predicate, list_expr]) => {
                 let list_resolved = self.resolved_list_expr(list_expr);
@@ -9360,7 +10284,7 @@ impl LowerCtx {
         let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
             return None;
         };
-        let (len, elem_ty, out_dim) = self.rank1_list_source_parts(source_node)?;
+        let (source_node, len, elem_ty, out_dim) = self.flattened_list_source_parts(source_node)?;
         let mut mapped = Vec::with_capacity(len);
         for index in 0..len {
             let item = self.rank1_item(source_node, index, &elem_ty);
@@ -9370,6 +10294,39 @@ impl LowerCtx {
             mapped.push(item_out);
         }
         self.stack_scalar_nodes(&mapped, out_dim)
+    }
+
+    fn lower_host_list_zip_map(
+        &mut self,
+        callback: &Expr,
+        lhs_node: NodeId,
+        rhs_node: NodeId,
+    ) -> Option<NodeId> {
+        let CallableExpr::Plain(fn_expr) = self.resolve_callable_expr(callback)? else {
+            return None;
+        };
+        let (lhs_node, lhs_len, lhs_elem_ty, _) = self.flattened_list_source_parts(lhs_node)?;
+        let (rhs_node, rhs_len, rhs_elem_ty, _) = self.flattened_list_source_parts(rhs_node)?;
+        // Host `zip` truncates to the shorter input. Random wrappers supply
+        // two tensors with the same template shape, but preserving the host
+        // rule keeps this AD rewrite valid for every accepted expression.
+        let len = lhs_len.min(rhs_len);
+        let mut mapped = Vec::with_capacity(len);
+        for index in 0..len {
+            let lhs_item = self.rank1_item(lhs_node, index, &lhs_elem_ty);
+            let rhs_item = self.rank1_item(rhs_node, index, &rhs_elem_ty);
+            let item_out = self
+                .lower_plain_callable_with_values(
+                    &fn_expr,
+                    &[LoweredValue::Tuple(vec![
+                        LoweredValue::Node(lhs_item),
+                        LoweredValue::Node(rhs_item),
+                    ])],
+                )
+                .expect_node("map zip callback");
+            mapped.push(item_out);
+        }
+        self.stack_scalar_nodes(&mapped, DimInfo::Lit(len))
     }
 
     fn lower_host_list_filter(&mut self, predicate: &Expr, source_node: NodeId) -> Option<NodeId> {
@@ -9453,6 +10410,41 @@ impl LowerCtx {
             precision: source_ty.precision,
         };
         Some((len, elem_ty, dim))
+    }
+
+    fn flattened_list_source_parts(
+        &mut self,
+        source_node: NodeId,
+    ) -> Option<(NodeId, usize, TensorType, DimInfo)> {
+        let source_ty = self.dag.get(source_node)?.output_type.clone();
+        let len = source_ty.dims.iter().try_fold(1usize, |product, dim| {
+            product.checked_mul(concrete_dim_len(dim)?)
+        })?;
+        let out_dim = if source_ty.dims.len() == 1 {
+            source_ty.dims[0].clone()
+        } else {
+            DimInfo::Lit(len)
+        };
+        let elem_ty = TensorType {
+            dims: vec![],
+            precision: source_ty.precision,
+        };
+        let flattened = if source_ty.dims.len() == 1 {
+            source_node
+        } else {
+            self.dag.add_node(
+                RiscOp::Reshape {
+                    new_shape: vec![RtDim::Lit(len)],
+                },
+                vec![source_node],
+                TensorType {
+                    dims: vec![out_dim.clone()],
+                    precision: source_ty.precision,
+                },
+                self.current_span_id.clone(),
+            )
+        };
+        Some((flattened, len, elem_ty, out_dim))
     }
 
     fn rank1_item(&mut self, source_node: NodeId, index: usize, elem_ty: &TensorType) -> NodeId {
@@ -10487,9 +11479,12 @@ impl LowerCtx {
         match effect_kind {
             Ok(EffectKind::Random) if elems.len() >= 4 => {
                 let saved_seed = self.random_seed;
+                let saved_counter = self.random_counter;
                 self.random_seed = self.extract_u64_value(&elems[2]).or(saved_seed);
+                self.random_counter = 0;
                 let result = self.lower_expr(&elems[3]);
                 self.random_seed = saved_seed;
+                self.random_counter = saved_counter;
                 result
             }
             Ok(EffectKind::Resource) if elems.len() >= 4 => self.lower_expr(&elems[3]),
@@ -10698,6 +11693,15 @@ impl LowerCtx {
                 }
                 op_dims.push(RtDim::Lit(value as usize));
                 ty_dims.push(DimInfo::Lit(value as usize));
+            } else if let Some(value) = self.static_numel_from_expr(elem) {
+                // Rank-polymorphic stdlib wrappers flatten a concrete call
+                // site's tensor as `reshape(x, [numel(x)])` before crossing
+                // the rank-1 `to_list` boundary. Once the wrapper is inlined,
+                // the bound tensor node carries every concrete extent, so
+                // preserve that exact product in the DAG instead of falling
+                // back to an unresolved checker symbol.
+                op_dims.push(RtDim::Lit(value));
+                ty_dims.push(DimInfo::Lit(value));
             } else if let Some((dim_expr, src)) = self.dim_expr_from_shape_arg_with_source(elem)
                 && let Some(dim) = Self::dim_info_from_dim_expr(&dim_expr)
             {
@@ -11578,10 +12582,50 @@ impl LowerCtx {
         if let Some(taken) = self.fold_static_cond(cond) {
             return self.lower_expr(if taken { then_expr } else { else_expr });
         }
+        let saved_random_path = self.random_path_condition;
+        if let Some(parent_path) = saved_random_path {
+            let path_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            };
+            let then_path = self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, cond],
+                path_ty,
+                self.current_span_id.clone(),
+            );
+            self.random_path_condition = Some(then_path);
+        }
         let then_value = self.lower_expr(then_expr);
         let then_node = self.expect_runtime_if_branch(then_value, "then", elems);
+        if let Some(parent_path) = saved_random_path {
+            let path_ty = TensorType {
+                dims: Vec::new(),
+                precision: Prim::Bool,
+            };
+            let one = self.dag.add_node(
+                RiscOp::synth_const(Prim::Bool, 1.0),
+                vec![],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let not_cond = self.dag.add_node(
+                RiscOp::CmpLt,
+                vec![cond, one],
+                path_ty.clone(),
+                self.current_span_id.clone(),
+            );
+            let else_path = self.dag.add_node(
+                RiscOp::Mul,
+                vec![parent_path, not_cond],
+                path_ty,
+                self.current_span_id.clone(),
+            );
+            self.random_path_condition = Some(else_path);
+        }
         let else_value = self.lower_expr(else_expr);
         let else_node = self.expect_runtime_if_branch(else_value, "else", elems);
+        self.random_path_condition = saved_random_path;
         let out_ty = if let Some(Expr::Map(meta, _)) = elems.get(1) {
             self.type_from_meta(&meta.entries)
         } else {

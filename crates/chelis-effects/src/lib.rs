@@ -518,13 +518,7 @@ fn infer_app_effects(
     if matches!(
         builtin_name,
         Some(
-            "test_assert"
-                | "test_assert_eq_f32"
-                | "test_assert_eq_int"
-                | "test_assert_eq_bool"
-                | "test_assert_eq_string"
-                | "test_assert_close_tensor"
-                | "test_assert_eq_tensor_int64"
+            "test_assert" | "test_assert_eq" | "test_assert_close_tensor" | "test_assert_eq_tensor"
         )
     ) {
         effects.insert(Effect::Test);

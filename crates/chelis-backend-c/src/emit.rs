@@ -524,7 +524,7 @@ impl CEmitter {
             // `f64::round_ties_even`. (`roundf` would be ties-away-from-zero.)
             RiscOp::Round => self.emit_unary_func(id, "rintf", &node.inputs, &node.output_type),
             RiscOp::UniformLike { low, high, seed } => {
-                self.emit_uniform_like(id, *low, *high, *seed, &node.output_type)
+                self.emit_uniform_like(id, *low, *high, *seed, &node.inputs, &node.output_type)
             }
             RiscOp::Dropout { .. } => {
                 unreachable!("dropout should be rejected before C code generation")
@@ -3028,11 +3028,37 @@ impl CEmitter {
         }
     }
 
-    fn emit_uniform_like(&mut self, id: usize, low: f64, high: f64, seed: u64, ty: &TensorType) {
+    fn emit_uniform_like(
+        &mut self,
+        id: usize,
+        low: f64,
+        high: f64,
+        seed: u64,
+        inputs: &[NodeId],
+        ty: &TensorType,
+    ) {
         self.emit_slot_wrapper(id, ty);
-        self.line(&format!(
-            "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
-        ));
+        if let Some(activation) = inputs.get(1) {
+            // The activation is a rank-0 Bool predicate, and chelis#1308's
+            // tagged-carrier ABI stores Bool tensors as one uint8 per
+            // element. Reading it through `(float*)` was correct only under
+            // the pre-#1308 float-backed Bool storage; against uint8
+            // storage it reads one valid byte plus three out-of-bounds
+            // heap bytes, so an untaken branch's gate could go active on
+            // whatever the allocator left there (Linux CI caught the RNG
+            // parity break; macOS zero-fill masked it).
+            self.line(&format!(
+                "int t{id}_active = ((const uint8_t*)t{}->data)[0] != 0 ? 1 : 0;",
+                activation.0
+            ));
+            self.line(&format!(
+                "uint64_t t{id}_seed = t{id}_active ? CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL) : {seed}ULL;"
+            ));
+        } else {
+            self.line(&format!(
+                "uint64_t t{id}_seed = CHELIS_EFFECTIVE_UNIFORM_SEED({seed}ULL);"
+            ));
+        }
         self.line("#pragma omp parallel for");
         self.line(&format!("for (int64_t i = 0; i < t{id}->size; i++) {{"));
         self.indent += 1;
@@ -7711,6 +7737,47 @@ mod tests {
         );
         let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
         assert!(c.contains("chelis_alloc(0, NULL, CHELIS_DTYPE_BOOL);"));
+    }
+
+    #[test]
+    fn path_sensitive_uniform_reads_float_backed_bool_and_gates_counter() {
+        let mut dag = Dag::new();
+        let template = dag.add_node(
+            RiscOp::Load {
+                name: "template".into(),
+            },
+            vec![],
+            vec_f32(2),
+            None,
+        );
+        let activation = dag.add_node(
+            RiscOp::synth_const(Prim::Bool, 1.0),
+            vec![],
+            TensorType {
+                dims: vec![],
+                precision: Prim::Bool,
+            },
+            None,
+        );
+        dag.add_node(
+            RiscOp::UniformLike {
+                low: 0.0,
+                high: 1.0,
+                seed: 11,
+            },
+            vec![template, activation],
+            vec_f32(2),
+            None,
+        );
+        let c = CEmitter::emit_dag(&dag, "test_fn").unwrap();
+        // chelis#1308 stores Bool tensors as one uint8 per element; the
+        // draw gate must read the predicate at that width. A `(float*)`
+        // read of the one-byte allocation is out of bounds and
+        // platform-divergent (the Linux-only RNG parity break on PR #1302).
+        assert!(c.contains("((const uint8_t*)t1->data)[0] != 0"));
+        assert!(c.contains("? CHELIS_EFFECTIVE_UNIFORM_SEED(11ULL) : 11ULL"));
+        assert!(!c.contains("((float*)t1->data)[0] != 0.0f"));
+        assert!(!c.contains("((bool*)t1->data)"));
     }
 
     #[test]

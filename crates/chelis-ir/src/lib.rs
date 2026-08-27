@@ -60,5 +60,7 @@ pub use lower::{
     LoweredLibrary, lower_program, lower_program_to_library, lower_program_with_context,
     lower_subexpr_program, tensor_type_from_deep, try_lower_program, try_lower_program_to_library,
     try_lower_program_with_context, try_lower_subexpr_program,
+    try_lower_subexpr_program_with_random_state,
+    try_lower_subexpr_program_with_random_state_progress,
 };
 pub use pipeline::{grad_then_fuse, grad_then_fuse_checked};

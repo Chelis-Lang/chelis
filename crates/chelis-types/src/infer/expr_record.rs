@@ -762,7 +762,7 @@ pub(super) fn infer_cast(
     let (resolved_target, target_location) = {
         let mut resolver = DeepTypeResolver::new(
             TypeUseSite::CastTarget,
-            BinderMode::ClosedInput,
+            annotation_binder_mode(env),
             adt_reg.resolution_env(),
             vg,
             errors,
@@ -836,6 +836,29 @@ pub(super) fn infer_cast(
     }
 
     let new_prec = match target_ty {
+        Type::Var(target) => {
+            // A cast inside a declaration may name one of that declaration's
+            // quantified scalar type variables. Keep the target symbolic and
+            // let the declared signature plus its numeric consumers select the
+            // concrete active dtype. This is the source-level spelling needed
+            // by [05-OP-35]'s same-p `linspace` and `arange` graphs; a closed
+            // cast outside such a declaration still rejects the name in the
+            // resolver above.
+            return match resolved {
+                Type::Prim(source) if source.is_numeric() => Type::Var(target),
+                Type::Var(_) | Type::Error(_) => Type::Var(target),
+                other => report(
+                    errors,
+                    CheckError::new(
+                        CheckErrorKind::CastNonTensor,
+                        format!(
+                            "cast to a quantified scalar dtype requires a numeric scalar, got {other}"
+                        ),
+                        vec![],
+                    ),
+                ),
+            };
+        }
         Type::Prim(p) => p,
         other => {
             return report(

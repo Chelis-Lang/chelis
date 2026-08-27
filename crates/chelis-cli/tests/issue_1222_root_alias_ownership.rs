@@ -44,13 +44,20 @@
 //!   already been emitted, and because the block-scope follow-up will edit
 //!   exactly that code.
 //!
-//! Known gap, deliberately not fixed here: a `let` binding inside a
-//! compiled function that copies a captured top-level binding is still
-//! released at the block close, dropping a reference the block never
-//! acquired. Gating that the way `main` is gated costs an unbounded
-//! per-call leak (measured in `Std.Io.Json` and `Std.Decimal`), so it needs
-//! positive ownership evidence rather than an inferred borrow. See the
-//! follow-up issue linked from the PR.
+//! The block-scope half predicted above landed as the transfer-leaf
+//! retain fix (chelis#1344, PR #1302): a bare copy into a binding VALUE
+//! TEMP now retains regardless of the source's provenance, which is the
+//! positive ownership evidence this note originally called for and adds
+//! no per-call leak (retain and block-close release cancel). A block's
+//! RESULT TARGET keeps the tracked-binding-source rule, because its
+//! release path is the caller's alias-aware machinery - the binder-key
+//! parameter test below pins that side. The fixed shapes - the
+//! captured-top-level copy, the parameter-aliasing conditional arm, and
+//! the may-return-its-argument call - are pinned in
+//! `issue_1344_block_alias_ownership.rs`, along with the owned-return
+//! summary and the outer-returning-call escape retain that keep callers
+//! and callees on one convention. Residual chelis#1344 scope, not
+//! reached: a transfer through a call-argument temp.
 
 use std::fs;
 use std::path::Path;
@@ -1033,15 +1040,32 @@ fn a_let_binder_shadowing_a_parameter_does_not_mask_an_outer_result() {
                     \x20 zzq_inner = g\n  zzq_inner\n}\n\
                     b = f([2i64])\nc = g\n";
     let (_stdout, emitted) = build_run_and_emit(colliding, "param_shadow_outer");
-    // The argument temp (a fresh list this scope built) and `g`. Neither
-    // `b` nor `c` is a second owner of `g`'s allocation. Three releases here
-    // is the defect.
+    // The binder still shadows the parameter in the analysis - that is
+    // what this test pins - but the ownership contract of the RESULT
+    // changed with the chelis#1344 transfer-leaf retain (PR #1302): a
+    // refcount-tracked binding owns its allocation (value-temp retain)
+    // and returning it retains again at the result leaf, so `f` hands
+    // back an OWNED reference and the caller now claims it. Three
+    // releases - the argument temp, the claimed result `b`, and `g`
+    // itself - against `f`'s two retains is exact balance (verified: the
+    // program runs with zero leaked bytes under `leaks --atExit`). Under
+    // the pre-#1302 borrowed-return contract the third release WAS the
+    // chelis#1222 defect; the count alone no longer distinguishes the
+    // two, which is why `f`'s retain count is pinned alongside it.
     assert_eq!(
         release_count(&emitted, "chelis_list_release("),
-        2,
-        "`f` returns the captured `g`, so the call result is borrowed and \
-         only the argument temp and `g` itself are owned here:\n{}",
+        3,
+        "`f` returns the captured `g` through an owned binding, so the \
+         caller claims the result: argument temp, claimed result, and `g` \
+         are each released once:\n{}",
         emitted_main(&emitted)
+    );
+    let f_body = emitted_function(&emitted, "chelis_list* f(chelis_list* p)");
+    assert_eq!(
+        count_in(f_body, "chelis_list_retain("),
+        2,
+        "`f` owns at both leaves (value-temp copy retain and result-target \
+         retain), which is what licenses the caller's claim:\n{f_body}"
     );
     assert_alpha_invariant_pair(
         colliding,

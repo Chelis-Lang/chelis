@@ -7,12 +7,12 @@ def seed_strings() -> List[string] = [""]
 def seed_ints() -> List[int64] = [cast(0, int64)]
 def seed_string_int_pairs() -> List[(string, int64)] = zip(seed_strings(), seed_ints())
 def seed_int_string_pairs() -> List[(int64, string)] = zip(seed_ints(), seed_strings())
-def load_tokenizer(path: string) -> Tokenizer =
+def load_tokenizer(path: string) -> Tokenizer ! { IO } =
   match try_load_tokenizer(path) with {
     | Some(tokenizer) => tokenizer
     | None => fail(string_concat("load_tokenizer failed for ", path))
   }
-def try_load_tokenizer(path: string) -> Option[Tokenizer] =
+def try_load_tokenizer(path: string) -> Option[Tokenizer] ! { IO } =
   match try_load_json(path) with {
     | Some(root) => match json_object(json_get(root, "model")) with {
     | Some(model) => match json_string(dict_get(model, "type")) with {

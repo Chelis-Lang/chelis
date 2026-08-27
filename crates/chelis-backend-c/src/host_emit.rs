@@ -381,7 +381,28 @@ fn result_alias_set(
             // meaning of the very name being bound.
             let mut saved: Vec<(String, Option<ReturnsArg>)> = Vec::new();
             for binding in bindings {
-                let set = result_alias_set(&binding.value, param_index, summary, env, helpers);
+                // A refcount-tracked binding OWNS its allocation: the
+                // emitter retains at the value temp on a bare copy
+                // (whatever the source's provenance) and retains again at
+                // a result leaf naming the binding, so a return THROUGH
+                // such a binding hands the caller an owned reference, not
+                // a borrow of the parameter or captured value it started
+                // from. Its result-alias meaning is therefore `empty`.
+                // Propagating the value's alias set here instead made the
+                // caller's call-escape retain compensate an already-owned
+                // return: for `def f(p) = { d = p  d }`, three retains
+                // against two releases, one leaked allocation per call
+                // (PR #1302 round-2 red-team finding). Non-refcounted
+                // carriers (tensors above all) have no retain machinery
+                // and still return true borrows, so they keep the
+                // propagated set -- blanking those would let a caller
+                // claim a borrowed tensor and restore the chelis#1222
+                // double free.
+                let set = if retain_call(&binding.name, &binding.ty).is_some() {
+                    ReturnsArg::empty()
+                } else {
+                    result_alias_set(&binding.value, param_index, summary, env, helpers)
+                };
                 saved.push((binding.name.clone(), env.insert(binding.name.clone(), set)));
             }
             let result = result_alias_set(body, param_index, summary, env, helpers);
@@ -689,10 +710,29 @@ pub(crate) fn emit_host_abi_program(
         emit_main(&mut body, program_name, program, &returns_arg, &hoisted)?;
     }
 
+    // Keep the JSON-only sorting machinery out of unrelated generated
+    // translation units. Detect the structured call emitted above, then
+    // prepend its definition so C never relies on an implicit declaration.
+    let needs_json_canonical_object_helper = body
+        .iter()
+        .any(|line| line.contains(" = chelis_json_canonical_object_entries("));
+    if needs_json_canonical_object_helper {
+        let mut json_helpers = Vec::new();
+        append_json_canonical_object_helpers(&mut json_helpers);
+        json_helpers.push(String::new());
+        json_helpers.extend(body);
+        body = json_helpers;
+    }
+
     let mut out: Vec<String> = vec![
         "#include \"chelis_runtime.h\"".to_string(),
         "#include <assert.h>".to_string(),
         "#include <math.h>".to_string(),
+    ];
+    if needs_json_canonical_object_helper {
+        out.push("#include <stdlib.h>".to_string());
+    }
+    out.extend([
         String::new(),
         // chelis#943: emitter-internal accumulator ABI. Deliberately absent
         // from the published chelis_runtime.h (the capacity census governs
@@ -702,7 +742,7 @@ pub(crate) fn emit_host_abi_program(
         "chelis_list *chelis_list_with_capacity(int64_t capacity);".to_string(),
         "void chelis_list_push(chelis_list *list, chelis_value value);".to_string(),
         "void chelis_list_extend(chelis_list *list, const chelis_list *src);".to_string(),
-    ];
+    ]);
     if helper_requirements.needs_blas_header {
         out.push("#include \"chelis_blas.h\"".to_string());
     }
@@ -841,6 +881,83 @@ fn append_uniform_sample_helper(out: &mut Vec<String>) {
         "#define CHELIS_EFFECTIVE_UNIFORM_SEED(seed) chelis_effective_uniform_seed(seed)"
             .to_string(),
     );
+}
+
+/// Translation-unit-local support for Std.Io.Json's canonical object
+/// observation. Generic Dict iteration remains insertion ordered; this helper
+/// sorts only the private JSON serializer boundary. Comparing one Unicode
+/// scalar slice at a time handles prefixes and embedded U+0000, while UTF-8's
+/// byte order preserves scalar-value order for every nonzero scalar.
+fn append_json_canonical_object_helpers(out: &mut Vec<String>) {
+    for line in [
+        "static int chelis_json_compare_strings(chelis_string lhs, chelis_string rhs) {",
+        "    int64_t lhs_len = chelis_string_len(lhs);",
+        "    int64_t rhs_len = chelis_string_len(rhs);",
+        "    int64_t common = lhs_len < rhs_len ? lhs_len : rhs_len;",
+        "    for (int64_t index = 0; index < common; ++index) {",
+        "        chelis_string lhs_scalar = chelis_string_slice(lhs, index, 1);",
+        "        chelis_string rhs_scalar = chelis_string_slice(rhs, index, 1);",
+        "        const unsigned char *lhs_bytes = (const unsigned char *)chelis_string_data(lhs_scalar);",
+        "        const unsigned char *rhs_bytes = (const unsigned char *)chelis_string_data(rhs_scalar);",
+        "        int result = 0;",
+        "        int64_t byte = 0;",
+        "        while (lhs_bytes[byte] != 0 && rhs_bytes[byte] != 0 && lhs_bytes[byte] == rhs_bytes[byte]) {",
+        "            ++byte;",
+        "        }",
+        "        if (lhs_bytes[byte] < rhs_bytes[byte]) result = -1;",
+        "        if (lhs_bytes[byte] > rhs_bytes[byte]) result = 1;",
+        "        chelis_string_release(lhs_scalar);",
+        "        chelis_string_release(rhs_scalar);",
+        "        if (result != 0) return result;",
+        "    }",
+        "    return lhs_len < rhs_len ? -1 : (lhs_len > rhs_len ? 1 : 0);",
+        "}",
+        "",
+        "static int chelis_json_compare_entry_keys(chelis_value lhs_entry, chelis_value rhs_entry) {",
+        "    chelis_value lhs_key = chelis_tuple_get(chelis_value_as_tuple(lhs_entry), 0);",
+        "    chelis_value rhs_key = chelis_tuple_get(chelis_value_as_tuple(rhs_entry), 0);",
+        "    int result = chelis_json_compare_strings(chelis_value_as_string(lhs_key), chelis_value_as_string(rhs_key));",
+        "    chelis_value_release(lhs_key);",
+        "    chelis_value_release(rhs_key);",
+        "    return result;",
+        "}",
+        "",
+        "static chelis_list *chelis_json_canonical_object_entries(const chelis_dict *dict) {",
+        "    chelis_list *source = chelis_dict_entries(dict);",
+        "    int64_t len = chelis_list_len(source);",
+        "    int64_t *order = len > 0 ? (int64_t *)malloc((size_t)len * sizeof(int64_t)) : NULL;",
+        "    if (len > 0 && order == NULL) {",
+        "        chelis_fail(chelis_string_from_cstr(\"JSON canonical object ordering allocation failed\"));",
+        "    }",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        order[index] = index;",
+        "        int64_t cursor = index;",
+        "        while (cursor > 0) {",
+        "            chelis_value lhs = chelis_list_index(source, order[cursor - 1]);",
+        "            chelis_value rhs = chelis_list_index(source, order[cursor]);",
+        "            int comparison = chelis_json_compare_entry_keys(lhs, rhs);",
+        "            chelis_value_release(lhs);",
+        "            chelis_value_release(rhs);",
+        "            if (comparison <= 0) break;",
+        "            int64_t swap = order[cursor - 1];",
+        "            order[cursor - 1] = order[cursor];",
+        "            order[cursor] = swap;",
+        "            --cursor;",
+        "        }",
+        "    }",
+        "    chelis_list *result = chelis_list_with_capacity(len);",
+        "    for (int64_t index = 0; index < len; ++index) {",
+        "        chelis_value entry = chelis_list_index(source, order[index]);",
+        "        chelis_list_push(result, entry);",
+        "        chelis_value_release(entry);",
+        "    }",
+        "    free(order);",
+        "    chelis_list_release(source);",
+        "    return result;",
+        "}",
+    ] {
+        out.push(line.to_string());
+    }
 }
 
 /// Instantiate the scalar host-expression path at each concrete float ABI.
@@ -2327,6 +2444,14 @@ struct LetReleaseScope {
     /// temp (a transient arg fed to `chelis_tuple_get`, say) is a borrow and
     /// is not retained.
     owned_destinations: HashSet<String>,
+    /// The subset of `owned_destinations` that are binding value temps.
+    /// Their reference is transferred to the binding name and released at
+    /// this block's close unconditionally, so a bare copy into one must
+    /// retain whatever the source's provenance. The block's result target
+    /// is deliberately NOT in this set: its release path is the caller's
+    /// alias-aware machinery, so it keeps the tracked-binding-source rule
+    /// (see `retain_transferred_result`).
+    value_temps: HashSet<String>,
     /// Heap binding names this block releases at its close.
     bindings: HashSet<String>,
 }
@@ -2545,38 +2670,62 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    /// Retain `target` when a bare pointer-copy `target = source` moves a
-    /// heap `let` binding into a slot that owns an independent reference
-    /// (issue #406). Fires only when `source` is a binding some open block
-    /// frees at its close *and* `target` is one of that block's
-    /// `owned_destinations` (its result target or another binding's value
-    /// temp). The retain cancels the eventual release of the destination so
-    /// every owned slot — the escaping result, and any binding that aliases
-    /// an earlier one — carries exactly one reference.
+    /// Retain `target` when a bare pointer-copy `target = source` lands in
+    /// a slot whose own release path demands an independent reference
+    /// (issue #406, chelis#1286 invariant 2). The two destination classes
+    /// carry different rules, and the difference is the caller's
+    /// compensation, not the emitter's convenience:
+    ///
+    /// * A binding's VALUE TEMP is released (through its binding name) at
+    ///   this block's close, unconditionally. The copy retains whatever
+    ///   the source's provenance: a block binding is released at its own
+    ///   close, a parameter or captured value by its caller or owning
+    ///   scope, and skipping the retain hands two release paths one
+    ///   reference. The earlier tracked-binding-only guard let the
+    ///   stdlib's `digits = if negative then string_slice(text, ..) else
+    ///   text` (`canonical_bigint_text`) free the caller's string through
+    ///   the parameter-aliasing arm, corrupting the heap on every
+    ///   compiled out-of-int64 JSON token (PR #1302 red-team finding
+    ///   P0-1).
+    ///
+    /// * A block's RESULT TARGET is released by the CALLER's machinery,
+    ///   which is alias-aware: `main`'s root ledger (chelis#1222) frees a
+    ///   returned alias once, and a `let`-block caller compensates through
+    ///   the call-escape retain. The result therefore retains only when
+    ///   the source is a binding this block is about to release (the
+    ///   classic escaping-result case). Retaining a returned parameter
+    ///   here would double-count against the caller's compensation and
+    ///   leak once per call
+    ///   (`a_parameter_spelled_like_a_binder_key_takes_no_retain` pins
+    ///   this side).
     ///
     /// A transient read of a binding into an internal arg temp (e.g.
-    /// `__arg0 = p` feeding `chelis_tuple_get`) is not an owned destination,
-    /// so it is left alone: `chelis_tuple_get` does its own element retain
-    /// and the binding's single release still balances its construction. A
-    /// transfer of a parameter or outer-scope value is likewise untouched —
-    /// no open block frees it, so a retain would leak.
+    /// `__arg0 = p` feeding `chelis_tuple_get`) is neither class and is
+    /// left alone: `chelis_tuple_get` does its own element retain and the
+    /// binding's single release still balances its construction.
     fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) {
-        // `source` may be a binding of an outer block while `target` is an
-        // owned slot of an inner one (a nested `let b = a in ...`), so test
-        // the two conditions independently across all open scopes rather
-        // than within a single scope.
-        let target_is_owned = self
+        let target_is_value_temp = self
             .let_scopes
             .iter()
-            .any(|scope| scope.owned_destinations.contains(target));
-        // chelis#1222: `bindings` holds alias keys, not spellings, so the
-        // incoming source name resolves the same way a reference does.
-        let source_key = self.resolve_alias_key(source);
-        let source_is_binding = self
-            .let_scopes
-            .iter()
-            .any(|scope| scope.bindings.contains(&source_key));
-        if !(target_is_owned && source_is_binding) {
+            .any(|scope| scope.value_temps.contains(target));
+        let retains = if target_is_value_temp {
+            true
+        } else {
+            let target_is_owned = self
+                .let_scopes
+                .iter()
+                .any(|scope| scope.owned_destinations.contains(target));
+            // chelis#1222: `bindings` holds alias keys, not spellings, so
+            // the incoming source name resolves the same way a reference
+            // does.
+            let source_key = self.resolve_alias_key(source);
+            let source_is_binding = self
+                .let_scopes
+                .iter()
+                .any(|scope| scope.bindings.contains(&source_key));
+            target_is_owned && source_is_binding
+        };
+        if !retains {
             return;
         }
         if let Some(call) = retain_call(target, ty) {
@@ -2678,11 +2827,12 @@ impl<'a> HostEmitter<'a> {
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else {
                     // `target = name` is a bare pointer copy that does not
-                    // bump the refcount. When `name` is a heap `let` binding
-                    // freed at its block close (issue #406), retain the
-                    // transferred result to keep the caller's reference
-                    // alive; a parameter or outer-scope `name` is left
-                    // untouched (the block does not free it).
+                    // bump the refcount. A binding value temp retains
+                    // whatever `name`'s provenance; a block result target
+                    // retains only a tracked block binding (issue #406,
+                    // chelis#1286 invariant 2 - see
+                    // `retain_transferred_result` for why the classes
+                    // differ).
                     //
                     // #379: route the referenced name through `c_ident` so a
                     // binding/param/let spelled like a C keyword resolves to
@@ -2853,6 +3003,7 @@ impl<'a> HostEmitter<'a> {
                 // each owned slot keeps exactly one reference.
                 self.let_scopes.push(LetReleaseScope {
                     owned_destinations: HashSet::from([target.to_string()]),
+                    value_temps: HashSet::new(),
                     bindings: HashSet::new(),
                 });
                 // chelis#1222: open a binder scope. It starts EMPTY on
@@ -2879,6 +3030,7 @@ impl<'a> HostEmitter<'a> {
                         && let Some(scope) = self.let_scopes.last_mut()
                     {
                         scope.owned_destinations.insert(temp.clone());
+                        scope.value_temps.insert(temp.clone());
                     }
                     self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
                     self.lines.push(format!(
@@ -3082,6 +3234,20 @@ impl<'a> HostEmitter<'a> {
             let arg_ty = expected_builtin_arg_ty(name, ty, index).unwrap_or(inferred_ty);
             self.emit_expr_to_var(arg, &arg_name, &arg_ty)?;
             arg_vars.push((arg_name, arg_ty));
+        }
+
+        if name == "__json_canonical_object_entries" {
+            if arg_vars.len() != 1 || !matches!(arg_vars[0].1, HostType::Dict(_, _)) {
+                return Err(invalid_abi_shape(
+                    "JSON canonical object ordering requires one Dict argument".to_string(),
+                    "C host JSON serialization",
+                ));
+            }
+            self.lines.push(format!(
+                "{}{target} = chelis_json_canonical_object_entries({});",
+                self.indent, arg_vars[0].0
+            ));
+            return Ok(());
         }
 
         if name == "cast" {
@@ -5923,13 +6089,25 @@ impl<'a> HostEmitter<'a> {
     }
 
     /// Issue #406 (call-escape): when a block result is produced by a call
-    /// whose return may alias one of its arguments, and that argument is a
-    /// bare `Var` naming a heap binding some open `let` block frees at its
-    /// close, the call's result `target` shares the binding's allocation
-    /// and the block release would drop the reference the caller now
-    /// holds. Retain `target` once per such escaping argument so the
-    /// block's release leaves exactly one live reference (the same
-    /// retain-cancels-release balance the bare-`Var` transfer arm uses).
+    /// whose return may alias one of its bare-`Var` arguments, the call's
+    /// result `target` shares that variable's allocation, and the target's
+    /// own release would drop a reference someone else still owns. Retain
+    /// `target` once so the two release paths hold two references (the
+    /// same retain-cancels-release balance the bare-`Var` transfer arm
+    /// uses).
+    ///
+    /// As in [`HostEmitter::retain_transferred_result`], the destination's
+    /// class decides how much the argument's provenance matters
+    /// (chelis#1286 invariant 2). A binding VALUE TEMP is released at the
+    /// block close unconditionally, so any bare-`Var` argument the callee
+    /// may hand back forces the retain whatever owns that argument - the
+    /// earlier tracked-binding-only guard let `d = pass_through(text)`
+    /// release the caller's `text` through `d`'s block close and
+    /// underflow the string refcount (PR #1302 red-team follow-up to
+    /// P0-1). Any other destination keeps the tracked-binding
+    /// requirement: its release path is the caller's alias-aware
+    /// machinery, and retaining a borrowed return there would leak once
+    /// per call.
     ///
     /// Precision: the per-function `returns_arg` summary
     /// ([`analyze_returns_arg`]) determines which argument positions the
@@ -5956,6 +6134,10 @@ impl<'a> HostEmitter<'a> {
             return false;
         }
         let callee = self.returns_arg.get(function).cloned();
+        let target_is_value_temp = self
+            .let_scopes
+            .iter()
+            .any(|scope| scope.value_temps.contains(target));
         let mut retained = false;
         for (index, arg) in args.iter().enumerate() {
             // Only a bare `Var` directly aliases a binding's allocation.
@@ -5967,15 +6149,17 @@ impl<'a> HostEmitter<'a> {
             let HostExprKind::Var(name, _) = &arg.kind else {
                 continue;
             };
-            // chelis#1222: resolve the reference before testing membership;
-            // `bindings` holds alias keys, not spellings.
-            let source_key = self.resolve_alias_key(name);
-            let source_is_binding = self
-                .let_scopes
-                .iter()
-                .any(|scope| scope.bindings.contains(&source_key));
-            if !source_is_binding {
-                continue;
+            if !target_is_value_temp {
+                // chelis#1222: resolve the reference before testing
+                // membership; `bindings` holds alias keys, not spellings.
+                let source_key = self.resolve_alias_key(name);
+                let source_is_binding = self
+                    .let_scopes
+                    .iter()
+                    .any(|scope| scope.bindings.contains(&source_key));
+                if !source_is_binding {
+                    continue;
+                }
             }
             let may_return = match &callee {
                 Some(summary) => summary.may_return(index),
@@ -5984,6 +6168,30 @@ impl<'a> HostEmitter<'a> {
                 None => true,
             };
             if may_return {
+                retained = true;
+            }
+        }
+        // A callee that may hand back a CAPTURED top-level binding
+        // returns a borrowed reference through no argument at all
+        // (`def retg() -> string = gcap`). A value temp claiming that
+        // result unretained falsified the owned-binding precondition the
+        // `returns_arg` Let-arm refinement rests on: PR #1302's round-3
+        // red team showed `d = retg()  d` aborting once the owned-return
+        // summary let `main` claim the result of a function whose binding
+        // never owned it. Retain exactly as for an escaping argument; the
+        // block release pairs it. The known cost is chelis#1344's
+        // door-(a) imprecision in retain form: a branch-insensitive outer
+        // verdict over-retains a fresh-branch result into a bounded
+        // per-call leak instead of the borrowed-branch use-after-free.
+        // Non-value-temp targets keep the provenance path: `main` and the
+        // binder ledger abstain from claiming an outer-borrowed result,
+        // so a retain there would strand.
+        if target_is_value_temp {
+            let callee_may_return_outer = match &callee {
+                Some(summary) => summary.may_return_outer(),
+                None => true,
+            };
+            if callee_may_return_outer {
                 retained = true;
             }
         }
@@ -6723,10 +6931,14 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
             HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            // Unit has no payload and no dedicated public chelis_value tag.
+            // Its canonical structural runtime image is the empty tuple,
+            // which already renders as `()` and participates in the generic
+            // ADT/list carriers without expanding the public C ABI.
+            HostType::Unit => {
+                "chelis_value_from_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
+            }
+            HostType::Callback(_, _) | HostType::Option(_) | HostType::MappedFile => {
                 return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
             }
         })
@@ -6772,10 +6984,9 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
             HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            // The empty tuple carrier above has no scalar payload to read.
+            HostType::Unit => "0".to_string(),
+            HostType::Callback(_, _) | HostType::Option(_) | HostType::MappedFile => {
                 return Err(unsupported_value_boxing(
                     ty,
                     "unboxing a resolved host value",
