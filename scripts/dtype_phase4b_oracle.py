@@ -395,7 +395,7 @@ FROZEN_REGION_DIGESTS = {
         "AGENTS.md",
         "### Numeric Surface Discipline",
         "### Public-Surface Change Rule",
-        "38d25ae7156389328f184eff98065d6cec7fbe9203d4a85d65f234b11caf22fe",
+        "de1f56b43a92495cc8a71d7e543b888372f4fb803946a1fed78eb603fb67f917",
     ),
     "numeric value semantics": (
         "spec/04-type-system.md",
