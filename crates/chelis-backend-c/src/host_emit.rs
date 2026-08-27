@@ -2423,6 +2423,14 @@ struct LetReleaseScope {
     /// temp (a transient arg fed to `chelis_tuple_get`, say) is a borrow and
     /// is not retained.
     owned_destinations: HashSet<String>,
+    /// The subset of `owned_destinations` that are binding value temps.
+    /// Their reference is transferred to the binding name and released at
+    /// this block's close unconditionally, so a bare copy into one must
+    /// retain whatever the source's provenance. The block's result target
+    /// is deliberately NOT in this set: its release path is the caller's
+    /// alias-aware machinery, so it keeps the tracked-binding-source rule
+    /// (see `retain_transferred_result`).
+    value_temps: HashSet<String>,
     /// Heap binding names this block releases at its close.
     bindings: HashSet<String>,
 }
@@ -2641,38 +2649,62 @@ impl<'a> HostEmitter<'a> {
         }
     }
 
-    /// Retain `target` when a bare pointer-copy `target = source` moves a
-    /// heap `let` binding into a slot that owns an independent reference
-    /// (issue #406). Fires only when `source` is a binding some open block
-    /// frees at its close *and* `target` is one of that block's
-    /// `owned_destinations` (its result target or another binding's value
-    /// temp). The retain cancels the eventual release of the destination so
-    /// every owned slot — the escaping result, and any binding that aliases
-    /// an earlier one — carries exactly one reference.
+    /// Retain `target` when a bare pointer-copy `target = source` lands in
+    /// a slot whose own release path demands an independent reference
+    /// (issue #406, chelis#1286 invariant 2). The two destination classes
+    /// carry different rules, and the difference is the caller's
+    /// compensation, not the emitter's convenience:
+    ///
+    /// * A binding's VALUE TEMP is released (through its binding name) at
+    ///   this block's close, unconditionally. The copy retains whatever
+    ///   the source's provenance: a block binding is released at its own
+    ///   close, a parameter or captured value by its caller or owning
+    ///   scope, and skipping the retain hands two release paths one
+    ///   reference. The earlier tracked-binding-only guard let the
+    ///   stdlib's `digits = if negative then string_slice(text, ..) else
+    ///   text` (`canonical_bigint_text`) free the caller's string through
+    ///   the parameter-aliasing arm, corrupting the heap on every
+    ///   compiled out-of-int64 JSON token (PR #1302 red-team finding
+    ///   P0-1).
+    ///
+    /// * A block's RESULT TARGET is released by the CALLER's machinery,
+    ///   which is alias-aware: `main`'s root ledger (chelis#1222) frees a
+    ///   returned alias once, and a `let`-block caller compensates through
+    ///   the call-escape retain. The result therefore retains only when
+    ///   the source is a binding this block is about to release (the
+    ///   classic escaping-result case). Retaining a returned parameter
+    ///   here would double-count against the caller's compensation and
+    ///   leak once per call
+    ///   (`a_parameter_spelled_like_a_binder_key_takes_no_retain` pins
+    ///   this side).
     ///
     /// A transient read of a binding into an internal arg temp (e.g.
-    /// `__arg0 = p` feeding `chelis_tuple_get`) is not an owned destination,
-    /// so it is left alone: `chelis_tuple_get` does its own element retain
-    /// and the binding's single release still balances its construction. A
-    /// transfer of a parameter or outer-scope value is likewise untouched —
-    /// no open block frees it, so a retain would leak.
+    /// `__arg0 = p` feeding `chelis_tuple_get`) is neither class and is
+    /// left alone: `chelis_tuple_get` does its own element retain and the
+    /// binding's single release still balances its construction.
     fn retain_transferred_result(&mut self, target: &str, source: &str, ty: &HostType) {
-        // `source` may be a binding of an outer block while `target` is an
-        // owned slot of an inner one (a nested `let b = a in ...`), so test
-        // the two conditions independently across all open scopes rather
-        // than within a single scope.
-        let target_is_owned = self
+        let target_is_value_temp = self
             .let_scopes
             .iter()
-            .any(|scope| scope.owned_destinations.contains(target));
-        // chelis#1222: `bindings` holds alias keys, not spellings, so the
-        // incoming source name resolves the same way a reference does.
-        let source_key = self.resolve_alias_key(source);
-        let source_is_binding = self
-            .let_scopes
-            .iter()
-            .any(|scope| scope.bindings.contains(&source_key));
-        if !(target_is_owned && source_is_binding) {
+            .any(|scope| scope.value_temps.contains(target));
+        let retains = if target_is_value_temp {
+            true
+        } else {
+            let target_is_owned = self
+                .let_scopes
+                .iter()
+                .any(|scope| scope.owned_destinations.contains(target));
+            // chelis#1222: `bindings` holds alias keys, not spellings, so
+            // the incoming source name resolves the same way a reference
+            // does.
+            let source_key = self.resolve_alias_key(source);
+            let source_is_binding = self
+                .let_scopes
+                .iter()
+                .any(|scope| scope.bindings.contains(&source_key));
+            target_is_owned && source_is_binding
+        };
+        if !retains {
             return;
         }
         if let Some(call) = retain_call(target, ty) {
@@ -2774,11 +2806,12 @@ impl<'a> HostEmitter<'a> {
                         .push(format!("{}{target} = chelis_list_empty();", self.indent));
                 } else {
                     // `target = name` is a bare pointer copy that does not
-                    // bump the refcount. When `name` is a heap `let` binding
-                    // freed at its block close (issue #406), retain the
-                    // transferred result to keep the caller's reference
-                    // alive; a parameter or outer-scope `name` is left
-                    // untouched (the block does not free it).
+                    // bump the refcount. A binding value temp retains
+                    // whatever `name`'s provenance; a block result target
+                    // retains only a tracked block binding (issue #406,
+                    // chelis#1286 invariant 2 - see
+                    // `retain_transferred_result` for why the classes
+                    // differ).
                     //
                     // #379: route the referenced name through `c_ident` so a
                     // binding/param/let spelled like a C keyword resolves to
@@ -2949,6 +2982,7 @@ impl<'a> HostEmitter<'a> {
                 // each owned slot keeps exactly one reference.
                 self.let_scopes.push(LetReleaseScope {
                     owned_destinations: HashSet::from([target.to_string()]),
+                    value_temps: HashSet::new(),
                     bindings: HashSet::new(),
                 });
                 // chelis#1222: open a binder scope. It starts EMPTY on
@@ -2975,6 +3009,7 @@ impl<'a> HostEmitter<'a> {
                         && let Some(scope) = self.let_scopes.last_mut()
                     {
                         scope.owned_destinations.insert(temp.clone());
+                        scope.value_temps.insert(temp.clone());
                     }
                     self.emit_expr_to_var(&binding.value, &temp, &binding.ty)?;
                     self.lines.push(format!(
@@ -6033,13 +6068,25 @@ impl<'a> HostEmitter<'a> {
     }
 
     /// Issue #406 (call-escape): when a block result is produced by a call
-    /// whose return may alias one of its arguments, and that argument is a
-    /// bare `Var` naming a heap binding some open `let` block frees at its
-    /// close, the call's result `target` shares the binding's allocation
-    /// and the block release would drop the reference the caller now
-    /// holds. Retain `target` once per such escaping argument so the
-    /// block's release leaves exactly one live reference (the same
-    /// retain-cancels-release balance the bare-`Var` transfer arm uses).
+    /// whose return may alias one of its bare-`Var` arguments, the call's
+    /// result `target` shares that variable's allocation, and the target's
+    /// own release would drop a reference someone else still owns. Retain
+    /// `target` once so the two release paths hold two references (the
+    /// same retain-cancels-release balance the bare-`Var` transfer arm
+    /// uses).
+    ///
+    /// As in [`HostEmitter::retain_transferred_result`], the destination's
+    /// class decides how much the argument's provenance matters
+    /// (chelis#1286 invariant 2). A binding VALUE TEMP is released at the
+    /// block close unconditionally, so any bare-`Var` argument the callee
+    /// may hand back forces the retain whatever owns that argument - the
+    /// earlier tracked-binding-only guard let `d = pass_through(text)`
+    /// release the caller's `text` through `d`'s block close and
+    /// underflow the string refcount (PR #1302 red-team follow-up to
+    /// P0-1). Any other destination keeps the tracked-binding
+    /// requirement: its release path is the caller's alias-aware
+    /// machinery, and retaining a borrowed return there would leak once
+    /// per call.
     ///
     /// Precision: the per-function `returns_arg` summary
     /// ([`analyze_returns_arg`]) determines which argument positions the
@@ -6066,6 +6113,10 @@ impl<'a> HostEmitter<'a> {
             return false;
         }
         let callee = self.returns_arg.get(function).cloned();
+        let target_is_value_temp = self
+            .let_scopes
+            .iter()
+            .any(|scope| scope.value_temps.contains(target));
         let mut retained = false;
         for (index, arg) in args.iter().enumerate() {
             // Only a bare `Var` directly aliases a binding's allocation.
@@ -6077,15 +6128,17 @@ impl<'a> HostEmitter<'a> {
             let HostExprKind::Var(name, _) = &arg.kind else {
                 continue;
             };
-            // chelis#1222: resolve the reference before testing membership;
-            // `bindings` holds alias keys, not spellings.
-            let source_key = self.resolve_alias_key(name);
-            let source_is_binding = self
-                .let_scopes
-                .iter()
-                .any(|scope| scope.bindings.contains(&source_key));
-            if !source_is_binding {
-                continue;
+            if !target_is_value_temp {
+                // chelis#1222: resolve the reference before testing
+                // membership; `bindings` holds alias keys, not spellings.
+                let source_key = self.resolve_alias_key(name);
+                let source_is_binding = self
+                    .let_scopes
+                    .iter()
+                    .any(|scope| scope.bindings.contains(&source_key));
+                if !source_is_binding {
+                    continue;
+                }
             }
             let may_return = match &callee {
                 Some(summary) => summary.may_return(index),

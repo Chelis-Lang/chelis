@@ -44,13 +44,19 @@
 //!   already been emitted, and because the block-scope follow-up will edit
 //!   exactly that code.
 //!
-//! Known gap, deliberately not fixed here: a `let` binding inside a
-//! compiled function that copies a captured top-level binding is still
-//! released at the block close, dropping a reference the block never
-//! acquired. Gating that the way `main` is gated costs an unbounded
-//! per-call leak (measured in `Std.Io.Json` and `Std.Decimal`), so it needs
-//! positive ownership evidence rather than an inferred borrow. See the
-//! follow-up issue linked from the PR.
+//! The block-scope half predicted above landed as the transfer-leaf
+//! retain fix (chelis#1344, PR #1302): a bare copy into a binding VALUE
+//! TEMP now retains regardless of the source's provenance, which is the
+//! positive ownership evidence this note originally called for and adds
+//! no per-call leak (retain and block-close release cancel). A block's
+//! RESULT TARGET keeps the tracked-binding-source rule, because its
+//! release path is the caller's alias-aware machinery - the binder-key
+//! parameter test below pins that side. The fixed shapes - the
+//! captured-top-level copy, the parameter-aliasing conditional arm, and
+//! the may-return-its-argument call - are pinned in
+//! `issue_1344_block_alias_ownership.rs`. Residual chelis#1344 scope, not
+//! reached by that fix: a callee returning a captured binding it was
+//! never passed, and a transfer through a call-argument temp.
 
 use std::fs;
 use std::path::Path;

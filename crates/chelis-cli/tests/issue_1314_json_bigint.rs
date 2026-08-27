@@ -204,3 +204,72 @@ unicode_and_escaped = to_json(JsonObject(dict_of([
         );
     }
 }
+
+/// PR #1302 red-team finding P0-1: every earlier bigint *ingestion* test
+/// ran the eval lane only, so compiled `parse_json` of any out-of-int64
+/// integer token heap-corrupted (a block-close release of the
+/// parameter-aliasing `digits` binding inside `canonical_bigint_text`
+/// freed the caller's string) while the suite stayed green. This drives
+/// the full ingestion boundary through BOTH lanes and requires identical
+/// output: MAX/MIN stay exact ints, MAX+1/MIN-1 and a 60-digit token
+/// round-trip verbatim as bigints, the `json_bigint` accessor refuses an
+/// in-range int, leading zeros are refused, `-0` collapses to `0`, and a
+/// constructed in-range `JsonBigInt` refuses to serialize.
+#[test]
+fn bigint_ingestion_round_trips_identically_in_eval_and_c() {
+    let (_dir, reef_home, app_pkg) = make_app("issue-1302-bigint-ingestion");
+    write_file(
+        &app_pkg.join("src/main.ch"),
+        r#"module Demo.Main
+
+import Std.Io.Json (Json, JsonBigInt, parse_json, try_parse_json, to_json, try_to_json, json_bigint)
+
+def opt_text(value: Option[string], fallback: string) -> string =
+  match value with {
+    | Some(text) => text
+    | None => fallback
+  }
+
+def parse_refused(text: string) -> string =
+  match try_parse_json(text) with {
+    | Some(_) => "PARSED"
+    | None => "REFUSED"
+  }
+
+over_max = to_json(parse_json("9223372036854775808"))
+under_min = to_json(parse_json("-9223372036854775809"))
+at_max = to_json(parse_json("9223372036854775807"))
+at_min = to_json(parse_json("-9223372036854775808"))
+wide = to_json(parse_json("123456789012345678901234567890123456789012345678901234567890"))
+accessor = opt_text(json_bigint(Some(parse_json("123456789012345678901234567890"))), "NONE")
+accessor_refuses_int = opt_text(json_bigint(Some(parse_json("7"))), "NONE")
+leading_zero = parse_refused("-012")
+negative_zero = to_json(parse_json("-0"))
+in_range_ctor = opt_text(try_to_json(JsonBigInt("42")), "REFUSED")
+"#,
+    );
+
+    let eval = eval_app_stdout(&reef_home, &app_pkg);
+    let compiled = build_and_run_app(&reef_home, &app_pkg, "main");
+    for expected in [
+        "over_max = 9223372036854775808",
+        "under_min = -9223372036854775809",
+        "at_max = 9223372036854775807",
+        "at_min = -9223372036854775808",
+        "wide = 123456789012345678901234567890123456789012345678901234567890",
+        "accessor = 123456789012345678901234567890",
+        "accessor_refuses_int = NONE",
+        "leading_zero = REFUSED",
+        "negative_zero = 0",
+        "in_range_ctor = REFUSED",
+    ] {
+        assert!(
+            eval.contains(expected),
+            "eval missing `{expected}`:\n{eval}"
+        );
+        assert!(
+            compiled.contains(expected),
+            "compiled C missing `{expected}`:\n{compiled}"
+        );
+    }
+}
