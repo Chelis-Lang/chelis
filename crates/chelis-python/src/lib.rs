@@ -1903,7 +1903,15 @@ fn dims_array(dims: &[usize]) -> PyResult<[i32; CHELIS_MAX_DIM]> {
 /// reject the clamped value, and the GPU path did not notice at all. The count
 /// crosses into `ChelisTensor.size`, which is `int64_t`, so int64 is the
 /// domain the check belongs in.
+///
+/// A zero extent short-circuits to zero so acceptance does not depend on axis
+/// order. Without it a checked fold rejects `[i64::MAX, i64::MAX, 0]` while
+/// accepting `[i64::MAX, 0, i64::MAX]`, though both describe the same empty
+/// array.
 fn element_count(shape: &[usize]) -> PyResult<usize> {
+    if shape.contains(&0) {
+        return Ok(0);
+    }
     let count = shape.iter().copied().try_fold(1_i64, |acc, dim| {
         let dim = i64::try_from(dim)
             .map_err(|_| PyValueError::new_err(format!("dimension too large for ABI: {dim}")))?;
@@ -2289,6 +2297,12 @@ loss = (mean(x, 0) : tensor[f32])
         assert_eq!(element_count(&[]).expect("rank zero"), 1);
         assert_eq!(element_count(&[3, 4]).expect("legal shape"), 12);
         assert_eq!(element_count(&[0, 5]).expect("zero extent"), 0);
+        // A zero extent means zero elements wherever it sits, so acceptance
+        // must not depend on axis order.
+        let huge = i64::MAX as usize;
+        assert_eq!(element_count(&[huge, 0, huge]).expect("zero middle"), 0);
+        assert_eq!(element_count(&[huge, huge, 0]).expect("zero last"), 0);
+        assert_eq!(element_count(&[0, huge, huge]).expect("zero first"), 0);
         // A single extent past int64.
         assert!(element_count(&[usize::MAX]).is_err());
         // 2^32 * 2^32 = 2^64. Every extent is legal on its own; the product is

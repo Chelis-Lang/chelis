@@ -14,6 +14,16 @@
 //! only probes the host ceiling reports green while the language ceiling is
 //! unguarded.
 //!
+//! The zero-position permutations are the other half of the contract. A count
+//! is a product, not a running prefix: [05-OP-33] says a zero extent means zero
+//! elements, so `[i64::MAX, i64::MAX, 0]` and `[i64::MAX, 0, i64::MAX]`
+//! describe the same empty tensor and must be accepted alike. A left-to-right
+//! checked fold accepted one and rejected the other, and no checked-in control
+//! caught it because none permuted the zero. The `[0, i64::MAX, i64::MAX]`
+//! case is deliberately still a trap: its canonical axis-0 stride is the exact
+//! product of the following extents ([05-OP-31]), which really is
+//! unrepresentable, so the size repair must not mask it.
+//!
 //! The `split-negative-*` cases also close a heap out-of-bounds read: with the
 //! sum equality as the only guard, `[5, -1]` against an extent-4 axis summed
 //! to 4, allocated a `[5, ..]` part, and walked its copy loop past the end of
@@ -177,6 +187,16 @@ fn run_case(case: &str) -> ! {
                     0,
                 );
             }
+            // A zero extent does not make an unrepresentable canonical stride
+            // legal: axis 0's stride is the exact product of the following
+            // extents, and i64::MAX * i64::MAX is not an int64.
+            "alloc-unrepresentable-canonical-stride" => {
+                tensor(&[0, i64::MAX, i64::MAX], CHELIS_DTYPE_F32);
+            }
+            // No zero extent, so the product really is unrepresentable.
+            "alloc-extent-product-at-int64-ceiling" => {
+                tensor(&[i64::MAX, 2], CHELIS_DTYPE_F32);
+            }
             other => panic!("unknown int64-extent-domain case: {other}"),
         }
     }
@@ -218,6 +238,14 @@ const NEGATIVE_MATRIX: &[(&str, &str)] = &[
         "concat-output-extent-at-int64-ceiling",
         "Overflow: concat output extent exceeds int64",
     ),
+    (
+        "alloc-unrepresentable-canonical-stride",
+        "Overflow: chelis_alloc stride product exceeds int64",
+    ),
+    (
+        "alloc-extent-product-at-int64-ceiling",
+        "Overflow: chelis_alloc extent product exceeds int64",
+    ),
 ];
 
 #[test]
@@ -252,6 +280,73 @@ fn derived_products_and_sums_trap_at_the_int64_extent_ceiling() {
         NEGATIVE_MATRIX.len(),
         failures.join("\n")
     );
+}
+
+/// A zero extent means zero elements wherever the zero sits, so every
+/// permutation of the same extents must be accepted alike, with identical
+/// size, capacity, null data, and canonical strides.
+#[test]
+fn zero_extent_acceptance_does_not_depend_on_axis_order() {
+    unsafe {
+        for (shape, expected_strides) in [
+            (vec![i64::MAX, 0, i64::MAX], vec![0, i64::MAX, 1]),
+            (vec![i64::MAX, i64::MAX, 0], vec![0, 0, 1]),
+            (vec![BAND_EXTENT, 0, BAND_EXTENT], vec![0, BAND_EXTENT, 1]),
+            (vec![BAND_EXTENT, BAND_EXTENT, 0], vec![0, 0, 1]),
+            (vec![0, 0], vec![0, 1]),
+            (vec![0], vec![1]),
+        ] {
+            let allocated = tensor(&shape, CHELIS_DTYPE_F32);
+            assert_eq!(
+                (*allocated).size,
+                0,
+                "shape {shape:?} must hold no elements"
+            );
+            assert_eq!(
+                (*allocated).byte_capacity,
+                0,
+                "shape {shape:?} must need no bytes"
+            );
+            assert!(
+                (*allocated).data.is_null(),
+                "shape {shape:?} must carry null data"
+            );
+            assert_eq!(
+                std::slice::from_raw_parts(
+                    (*allocated).strides.as_ptr(),
+                    (*allocated).rank as usize
+                ),
+                expected_strides.as_slice(),
+                "shape {shape:?} must keep canonical strides"
+            );
+        }
+
+        // The same permutation invariance through a derived einsum count. The
+        // output label sits on the zero axis, so the reduction extents are the
+        // two `BAND_EXTENT` axes of each operand plus one zero; their product
+        // is zero, but a left-to-right fold reaches `BAND_EXTENT` squared
+        // first, which is not an int64. Only the zero's position differs
+        // between the two cases.
+        for (equation_shape, equation) in [
+            ([BAND_EXTENT, 0, BAND_EXTENT], "abc,def->b"),
+            ([BAND_EXTENT, BAND_EXTENT, 0], "abc,def->c"),
+        ] {
+            let lhs = tensor(&equation_shape, CHELIS_DTYPE_F32);
+            let rhs = tensor(&equation_shape, CHELIS_DTYPE_F32);
+            let text = CString::new(equation).expect("equation is C-compatible");
+            let contracted = chelis_tensor_einsum(
+                chelis_string_from_cstr(text.as_ptr()),
+                lhs,
+                rhs,
+                CHELIS_DTYPE_F32,
+            );
+            assert_eq!(
+                (*contracted).size,
+                0,
+                "einsum `{equation}` over {equation_shape:?} must produce an empty result"
+            );
+        }
+    }
 }
 
 #[test]

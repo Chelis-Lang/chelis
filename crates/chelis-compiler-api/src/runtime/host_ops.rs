@@ -2952,8 +2952,13 @@ pub(super) fn tensor_einsum_value(
     // The host lane carries shapes as `usize`, but the language's extent
     // domain is int64 ([05-DIM-2]) and [05-OP-33] wants an unrepresentable
     // count to trap `Overflow`. Fold in int64 so this lane agrees with the C
-    // runtime about where the ceiling is instead of inheriting the host's.
+    // runtime about where the ceiling is instead of inheriting the host's, and
+    // short-circuit a zero extent so the answer does not depend on axis order:
+    // a zero anywhere means zero elements, whatever the other extents are.
     let checked_product = |shape: &[usize], context: &str| {
+        if shape.contains(&0) {
+            return Ok(0_usize);
+        }
         shape
             .iter()
             .try_fold(1_i64, |product, &extent| {
