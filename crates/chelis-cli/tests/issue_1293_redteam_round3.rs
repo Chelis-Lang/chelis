@@ -464,11 +464,18 @@ fn build_runtime_list_index_grad_source(len: usize) -> String {
 #[test]
 fn runtime_list_adjoint_generated_source_growth_is_linear() {
     let small = build_runtime_list_index_grad_source(8);
-    let large = build_runtime_list_index_grad_source(64);
+    let medium = build_runtime_list_index_grad_source(64);
+    let large = build_runtime_list_index_grad_source(128);
     assert!(
-        large.len() <= small.len() * 12,
+        medium.len() <= small.len() * 12,
         "runtime List adjoint source must scale linearly: N=8 {} bytes, N=64 {} bytes",
         small.len(),
+        medium.len()
+    );
+    assert!(
+        large.len() <= medium.len() * 3,
+        "runtime List adjoint source must remain near-linear when the list doubles: N=64 {} bytes, N=128 {} bytes",
+        medium.len(),
         large.len()
     );
     let helper_count = |source: &str| {
@@ -482,18 +489,20 @@ fn runtime_list_adjoint_generated_source_growth_is_linear() {
             .count()
     };
     let small_helpers = helper_count(&small);
+    let medium_helpers = helper_count(&medium);
     let large_helpers = helper_count(&large);
     assert!(
         small_helpers > 0,
         "the structural helper census must be live"
     );
     eprintln!(
-        "runtime List codegen ratchet: N=8 {} bytes/{small_helpers} helpers; N=64 {} bytes/{large_helpers} helpers",
+        "runtime List codegen ratchet: N=8 {} bytes/{small_helpers} helpers; N=64 {} bytes/{medium_helpers} helpers; N=128 {} bytes/{large_helpers} helpers",
         small.len(),
+        medium.len(),
         large.len()
     );
     assert!(
-        large_helpers <= small_helpers + 2,
-        "runtime List adjoint helper count must stay bounded: N=8 {small_helpers}, N=64 {large_helpers}"
+        medium_helpers <= small_helpers + 2 && large_helpers <= small_helpers + 2,
+        "runtime List adjoint helper count must stay bounded: N=8 {small_helpers}, N=64 {medium_helpers}, N=128 {large_helpers}"
     );
 }

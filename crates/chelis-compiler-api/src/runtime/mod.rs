@@ -455,8 +455,6 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
     // names correctly.
     let mut adt_fields = collect_adt_ctor_fields(library_exprs);
     adt_fields.extend(collect_adt_ctor_fields(program.exprs()));
-    let adt_grad_rejections =
-        host_ops::collect_adt_grad_rejections(&[library_exprs, program.exprs()]);
 
     let mut top_level_defs = HashMap::new();
     let mut top_level_order = Vec::new();
@@ -502,9 +500,9 @@ pub(crate) fn evaluate_host_program_with_library_and_types(
         named_axis_route_cache: HashMap::new(),
         named_axis_route_visiting: HashSet::new(),
         top_level_defs,
+        adt_registry: program.adt_registry().clone(),
         type_env,
         adt_fields,
-        adt_grad_rejections,
         tensor_bindings,
         transcript: Vec::new(),
         resolving_top_levels: Vec::new(),
@@ -887,6 +885,9 @@ struct EvalContext<'a> {
     /// Cycle guard for the recursive routing detection walk.
     named_axis_route_visiting: HashSet<String>,
     top_level_defs: HashMap<String, Expr>,
+    /// Checker-owned nominal definitions used when the executed constructor
+    /// alone cannot reveal whether the parameter type has a float leaf.
+    adt_registry: chelis_types::adt::AdtRegistry,
     /// Combined library + new-code Deep type-env. Threaded into
     /// [`chelis_ir::lower::lower_subexpr_program`] when the host runtime
     /// hits a `grad` / `vmap` form so the lowerer can resolve free names
@@ -894,13 +895,6 @@ struct EvalContext<'a> {
     /// present (e.g. unit tests that don't need transform support).
     type_env: HashMap<String, Expr>,
     adt_fields: HashMap<String, Vec<String>>,
-    /// chelis#520 D2: constructor -> rejection reason for ADT types
-    /// outside the field-wise gradient slice (mixed fields in any
-    /// variant, or no fields at all). Consulted by the grad argument
-    /// marshalling so the eval lane rejects exactly the arguments the
-    /// checker types as non-differentiable, instead of fabricating a
-    /// gradient value the static type does not admit.
-    adt_grad_rejections: HashMap<String, String>,
     tensor_bindings: &'a HashMap<String, RuntimeTensorValue>,
     transcript: Vec<String>,
     resolving_top_levels: Vec<String>,

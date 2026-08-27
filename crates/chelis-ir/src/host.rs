@@ -6693,7 +6693,7 @@ fn resolve_scalar_def<'a>(
 /// Try to lower `app(grad(f, wrt=...), arg0, ...)` as a host-lane scalar
 /// forward-mode derivative. Returns `Some(host_expr)` on success, `None`
 /// when this is not a scalar-grad app this pass handles (tensor lane,
-/// container `wrt`, unsupported op, unresolvable callee — all fall through
+/// structured `wrt`, unsupported op, unresolvable callee — all fall through
 /// to the existing unresolved-callable-marker rejection path).
 fn try_lower_scalar_grad_app(
     list: &List,
@@ -6732,10 +6732,10 @@ fn try_lower_scalar_grad_app(
     {
         return Ok(None);
     }
-    // Every parameter must be a scalar. A container parameter that is not the
+    // Every parameter must be a scalar. A structured parameter that is not the
     // `wrt` target is still fine to treat as a constant, but the call args
     // would be containers we cannot evaluate in the dual tree, so reject the
-    // whole app (the canonical container-AD escalation in the spec).
+    // whole app (the recursive structured-AD lane below owns those calls).
     if param_tys.iter().any(|ty| !is_dual_scalar_type(ty)) {
         return Ok(None);
     }
@@ -6794,6 +6794,7 @@ fn try_lower_scalar_grad_app(
 #[derive(Clone)]
 enum ListGradPackPlan {
     Leaf(HostTypeTerm),
+    Unit,
     List {
         ty: HostTypeTerm,
         items: Vec<ListGradPackPlan>,
@@ -6802,19 +6803,29 @@ enum ListGradPackPlan {
         ty: HostTypeTerm,
         items: Vec<ListGradPackPlan>,
     },
+    Adt {
+        ty: HostTypeTerm,
+        ctor: String,
+        items: Vec<ListGradPackPlan>,
+    },
 }
 
 impl ListGradPackPlan {
     fn host_type(&self) -> HostTypeTerm {
         match self {
-            Self::Leaf(ty) | Self::List { ty, .. } | Self::Tuple { ty, .. } => ty.clone(),
+            Self::Leaf(ty)
+            | Self::List { ty, .. }
+            | Self::Tuple { ty, .. }
+            | Self::Adt { ty, .. } => ty.clone(),
+            Self::Unit => HostTypeTerm::Unit,
         }
     }
 
     fn leaf_count(&self) -> usize {
         match self {
             Self::Leaf(_) => 1,
-            Self::List { items, .. } | Self::Tuple { items, .. } => {
+            Self::Unit => 0,
+            Self::List { items, .. } | Self::Tuple { items, .. } | Self::Adt { items, .. } => {
                 items.iter().map(Self::leaf_count).sum()
             }
         }
@@ -6823,9 +6834,17 @@ impl ListGradPackPlan {
     fn first_tensor_type(&self) -> Option<TensorType> {
         match self {
             Self::Leaf(ty) => tensor_type_from_host_input(ty),
-            Self::List { items, .. } | Self::Tuple { items, .. } => {
+            Self::Unit => None,
+            Self::List { items, .. } | Self::Tuple { items, .. } | Self::Adt { items, .. } => {
                 items.iter().find_map(Self::first_tensor_type)
             }
+        }
+    }
+
+    fn is_structured(&self) -> bool {
+        match self {
+            Self::List { .. } | Self::Tuple { .. } | Self::Adt { .. } => true,
+            Self::Leaf(_) | Self::Unit => false,
         }
     }
 }
@@ -6885,20 +6904,143 @@ fn resolve_list_grad_shape_expr(
     resolved
 }
 
-fn list_grad_pack_plan(ty: &HostTypeTerm, actual: &Expr) -> Option<ListGradPackPlan> {
+fn list_grad_pack_plan(
+    ty: &HostTypeTerm,
+    actual: &Expr,
+    program: &CheckedProgram,
+) -> Option<ListGradPackPlan> {
+    if let HostTypeTerm::Adt(name, arguments) = ty
+        && let Some((_, alias)) = program
+            .adt_registry()
+            .aliases
+            .iter()
+            .find(|(candidate, _)| terminal_name_matches(candidate, name))
+    {
+        let checker_parameter_names = alias
+            .param_vars
+            .iter()
+            .zip(&alias.params)
+            .map(|(variable, name)| (format!("t{}", variable.0), name.clone()))
+            .collect::<HashMap<_, _>>();
+        let expanded = rename_host_type_variables(
+            decode_host_type_or_raise(&type_to_deep_expr(&alias.body), &HashMap::new()),
+            &checker_parameter_names,
+        );
+        let substitutions = alias
+            .params
+            .iter()
+            .cloned()
+            .zip(arguments.iter().cloned())
+            .collect();
+        return list_grad_pack_plan(
+            &substitute_host_type_term(expanded, &substitutions),
+            actual,
+            program,
+        );
+    }
     match ty {
         HostTypeTerm::List(element_ty) => {
             let items = static_list_spine_items(actual)?;
             let items = items
                 .iter()
-                .map(|item| list_grad_pack_plan(element_ty, item))
+                .map(|item| list_grad_pack_plan(element_ty, item, program))
                 .collect::<Option<Vec<_>>>()?;
             Some(ListGradPackPlan::List {
                 ty: ty.clone(),
                 items,
             })
         }
-        _ => tensor_type_from_host_input(ty).map(|_| ListGradPackPlan::Leaf(ty.clone())),
+        HostTypeTerm::Tuple(item_tys) => {
+            let (DeepTag::Tuple, _, item_exprs) = stamped_parts(actual)? else {
+                return None;
+            };
+            if item_tys.len() != item_exprs.len() {
+                return None;
+            }
+            let items = item_tys
+                .iter()
+                .zip(item_exprs)
+                .map(|(item_ty, item)| list_grad_pack_plan(item_ty, item, program))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ListGradPackPlan::Tuple {
+                ty: HostTypeTerm::Tuple(items.iter().map(ListGradPackPlan::host_type).collect()),
+                items,
+            })
+        }
+        HostTypeTerm::Adt(_, _) => {
+            let (ctor, supplied): (String, Vec<(Option<String>, &Expr)>) =
+                match stamped_parts(actual)? {
+                    (DeepTag::Record, _, kids) => {
+                        let ctor = kids.first().and_then(symbol_name)?.to_string();
+                        let fields = kids
+                            .iter()
+                            .skip(1)
+                            .map(|field| {
+                                let (DeepTag::Kv, _, kv) = stamped_parts(field)? else {
+                                    return None;
+                                };
+                                Some((
+                                    Some(kv.first().and_then(symbol_name)?.to_string()),
+                                    kv.get(1)?,
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        (ctor, fields)
+                    }
+                    (DeepTag::App, _, kids) => {
+                        let ctor = kids.first().and_then(direct_var_name)?.to_string();
+                        (
+                            ctor,
+                            kids.iter().skip(1).map(|field| (None, field)).collect(),
+                        )
+                    }
+                    (DeepTag::Var, _, kids) => {
+                        (kids.first().and_then(symbol_name)?.to_string(), Vec::new())
+                    }
+                    _ => return None,
+                };
+            let AdtConstructorResolution::Unique(definition) =
+                resolve_adt_constructor_definition(program, &ctor)
+            else {
+                return None;
+            };
+            let instantiated = definition.instantiate(ty).ok()?;
+            let field_exprs = if supplied.iter().all(|(name, _)| name.is_some()) {
+                instantiated
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        supplied
+                            .iter()
+                            .find(|(name, _)| name.as_ref() == field.name.as_ref())
+                            .map(|(_, expr)| *expr)
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            } else {
+                supplied.iter().map(|(_, expr)| *expr).collect()
+            };
+            if instantiated.fields.len() != field_exprs.len() {
+                return None;
+            }
+            let items = instantiated
+                .fields
+                .iter()
+                .zip(field_exprs)
+                .map(|(field, expr)| list_grad_pack_plan(&field.ty, expr, program))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ListGradPackPlan::Adt {
+                ty: ty.clone(),
+                ctor,
+                items,
+            })
+        }
+        HostTypeTerm::Tensor(tensor) if tensor.precision.is_float() => {
+            Some(ListGradPackPlan::Leaf(ty.clone()))
+        }
+        HostTypeTerm::Scalar(HostPrecisionTerm::Concrete(precision)) if precision.is_float() => {
+            Some(ListGradPackPlan::Leaf(ty.clone()))
+        }
+        _ => Some(ListGradPackPlan::Unit),
     }
 }
 
@@ -6944,6 +7086,7 @@ fn pack_list_grad_roots(
                 force_host_expr_type(root, ty.clone())
             }
         }
+        ListGradPackPlan::Unit => HostExpr::new(HostExprKind::Unit),
         ListGradPackPlan::List { ty, items } => HostExpr::new(HostExprKind::List(
             items
                 .iter()
@@ -6958,12 +7101,20 @@ fn pack_list_grad_roots(
                 .collect(),
             ty.clone(),
         )),
+        ListGradPackPlan::Adt { ty, ctor, items } => HostExpr::new(HostExprKind::AdtConstruct {
+            ctor: ctor.clone(),
+            fields: items
+                .iter()
+                .map(|item| pack_list_grad_roots(item, roots))
+                .collect(),
+            ty: ty.clone(),
+        }),
     }
 }
 
-/// Own the public reconstruction for every finite List cotangent. The IR
-/// stages a List as finite payload plus runtime offset/length control, emits
-/// one reverse DAG, and appends private check roots. This host step only
+/// Own public reconstruction for finite recursive List/tuple/ADT cotangents.
+/// The IR stages each structure as typed leaves plus runtime List controls,
+/// emits one reverse DAG, and appends private check roots. This host step only
 /// projects those roots back into the checked recursive result type.
 fn try_lower_general_list_grad_app(
     app_expr: &Expr,
@@ -7006,6 +7157,10 @@ fn try_lower_general_list_grad_app(
     let Some(wrt_names) = grad_wrt_param_names(callee, &param_names) else {
         return Ok(None);
     };
+    let has_explicit_wrt = matches!(
+        callee.elements.get(1),
+        Some(Expr::Map(meta, _)) if meta.entries.iter().any(|(key, _)| key == "wrt")
+    );
 
     let mut rewritten_elements = list.elements.clone();
     let mut selected_plans = Vec::new();
@@ -7028,18 +7183,22 @@ fn try_lower_general_list_grad_app(
         if wrt_names.contains(&param_names[param_index]) {
             let shape_actual =
                 resolve_list_grad_shape_expr(&rewritten_actual, program, defs.as_ref());
-            let Some(plan) = list_grad_pack_plan(&param_ty, &shape_actual) else {
+            let Some(plan) = list_grad_pack_plan(&param_ty, &shape_actual, program) else {
                 return Ok(None);
             };
             rewritten_actual = shape_actual;
             rewritten_elements[actual_index + 2] = rewritten_actual;
-            selected_plans.push(plan);
+            // Spec/06 section 2.2: absent `wrt` selects only parameters
+            // containing a differentiable float leaf. Preserve an explicit
+            // target's zero-runtime-leaf plan (for example an empty
+            // `List[f32]`) because its checked element type still defines a
+            // differentiable, shape-preserving empty cotangent.
+            if has_explicit_wrt || plan.leaf_count() != 0 {
+                selected_plans.push(plan);
+            }
         }
     }
-    if !selected_plans
-        .iter()
-        .any(|plan| matches!(plan, ListGradPackPlan::List { .. }))
-    {
+    if !selected_plans.iter().any(ListGradPackPlan::is_structured) {
         return Ok(None);
     }
 

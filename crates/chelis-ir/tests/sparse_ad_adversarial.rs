@@ -32,6 +32,9 @@
 //!    includes the canonical user-facing language. Locks `Display` so
 //!    downstream consumers that *do* render for humans (CLI diagnostics)
 //!    don't silently regress.
+//! 9. **ScatterAdd reverse mode**: target cotangents pass through, update
+//!    cotangents gather at the same indices, and the discrete indices receive
+//!    no cotangent.
 
 use std::collections::HashMap;
 
@@ -558,24 +561,25 @@ fn scatter_ad_error_display_contains_canonical_language() {
     }
 }
 
-/// Defensive: ScatterAdd's AD path remains None (the adjoint flows
-/// through Gather elsewhere — see `grad.rs::backward_op`'s ScatterAdd
-/// arm returns `None`). Locks the contract that ScatterAdd's own
-/// backward is not auto-synthesized at this layer.
+/// ScatterAdd is linear in its target and updates: the target cotangent is
+/// the upstream value and the updates cotangent gathers that value at the
+/// forward indices. Its integer indices are discrete and receive no
+/// cotangent even when explicitly requested.
 #[test]
-fn scatter_add_backward_op_returns_no_individual_adjoint() {
-    use chelis_ir::grad::grad_dag;
+fn scatter_add_backward_routes_target_and_updates_but_not_indices() {
     let mut dag = Dag::new();
     let target = dag.add_node(
         RiscOp::Load {
             name: "target".into(),
         },
         vec![],
-        t(vec![3, 2]),
+        t(vec![4]),
         None,
     );
     let indices = dag.add_node(
-        RiscOp::synth_const(t_i32(vec![2]).precision, 0.0),
+        RiscOp::Load {
+            name: "indices".into(),
+        },
         vec![],
         t_i32(vec![2]),
         None,
@@ -585,40 +589,63 @@ fn scatter_add_backward_op_returns_no_individual_adjoint() {
             name: "updates".into(),
         },
         vec![],
-        t(vec![2, 2]),
+        t(vec![2]),
         None,
     );
     let sa = dag.add_node(
         RiscOp::ScatterAdd { axis: 0 },
         vec![target, indices, updates],
-        t(vec![3, 2]),
+        t(vec![4]),
         None,
     );
-    let s1 = dag.add_node(
-        RiscOp::Sum {
-            axis: 0,
-            accumulator: Prim::F32,
-        },
-        vec![sa],
-        t(vec![2]),
+    let coefficients = dag.add_node(
+        RiscOp::synth_const_tensor(Prim::F32, vec![2.0, 3.0, 5.0, 7.0]),
+        vec![],
+        t(vec![4]),
         None,
     );
+    let weighted = dag.add_node(RiscOp::Mul, vec![sa, coefficients], t(vec![4]), None);
     let out = dag.add_node(
         RiscOp::Sum {
             axis: 0,
             accumulator: Prim::F32,
         },
-        vec![s1],
+        vec![weighted],
         TensorType::scalar_f32(),
         None,
     );
 
-    // grad_dag(unchecked) returns None for ScatterAdd whose backward_op
-    // path returns None (no individual adjoint synthesized at the op level).
-    let result = grad_dag(&dag, out, &[updates]);
+    let grad = grad_dag_checked(&dag, out, &[target, indices, updates])
+        .expect("ScatterAdd reverse mode must be defined");
+    assert!(grad.grad_nodes.contains_key(&target));
+    assert!(grad.grad_nodes.contains_key(&updates));
     assert!(
-        result.is_none(),
-        "grad_dag over ScatterAdd alone should return None at the op-adjoint layer; \
-         got Some(_) (means the backward arm got rewired)"
+        !grad.grad_nodes.contains_key(&indices),
+        "integer ScatterAdd indices must remain a stop-gradient boundary"
+    );
+
+    let inputs = HashMap::from([
+        (
+            "target".to_string(),
+            TensorValue::from_vec(vec![4], vec![11.0, 13.0, 17.0, 19.0]),
+        ),
+        (
+            "indices".to_string(),
+            TensorValue::from_vec(vec![2], vec![1.0, 3.0]),
+        ),
+        (
+            "updates".to_string(),
+            TensorValue::from_vec(vec![2], vec![23.0, 29.0]),
+        ),
+    ]);
+    let values = eval_tensor_with(&grad.dag, |name| inputs.get(name).cloned())
+        .expect("ScatterAdd adjoints evaluate");
+    assert_eq!(
+        values[&grad.grad_nodes[&target]].to_f64_lossy_vec(),
+        vec![2.0, 3.0, 5.0, 7.0]
+    );
+    assert_eq!(
+        values[&grad.grad_nodes[&updates]].to_f64_lossy_vec(),
+        vec![3.0, 7.0]
     );
 }

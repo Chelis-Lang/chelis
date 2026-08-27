@@ -6833,10 +6833,14 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_from_list({value})"),
             HostType::Tuple(_) => format!("chelis_value_from_tuple({value})"),
             HostType::Dict(_, _) => format!("chelis_value_from_dict({value})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            // Unit has no payload and no dedicated public chelis_value tag.
+            // Its canonical structural runtime image is the empty tuple,
+            // which already renders as `()` and participates in the generic
+            // ADT/list carriers without expanding the public C ABI.
+            HostType::Unit => {
+                "chelis_value_from_tuple(chelis_tuple_from_values(NULL, 0))".to_string()
+            }
+            HostType::Callback(_, _) | HostType::Option(_) | HostType::MappedFile => {
                 return Err(unsupported_value_boxing(ty, "boxing a resolved host value"));
             }
         })
@@ -6882,10 +6886,9 @@ impl<'a> HostEmitter<'a> {
             HostType::List(_) => format!("chelis_value_as_list({value_expr})"),
             HostType::Tuple(_) => format!("chelis_value_as_tuple({value_expr})"),
             HostType::Dict(_, _) => format!("chelis_value_as_dict({value_expr})"),
-            HostType::Callback(_, _)
-            | HostType::Option(_)
-            | HostType::MappedFile
-            | HostType::Unit => {
+            // The empty tuple carrier above has no scalar payload to read.
+            HostType::Unit => "0".to_string(),
+            HostType::Callback(_, _) | HostType::Option(_) | HostType::MappedFile => {
                 return Err(unsupported_value_boxing(
                     ty,
                     "unboxing a resolved host value",

@@ -1792,7 +1792,25 @@ fn compute_adjoints(
             );
             Some(vec![(values, dvalues)])
         }
-        RiscOp::ScatterAdd { .. } => None,
+        RiscOp::ScatterAdd { axis } => {
+            // Scatter-add is linear in both its target and updates. Indices
+            // are discrete: the target cotangent is the upstream value
+            // unchanged, while the updates cotangent gathers the upstream
+            // value at the same index positions. This also makes the
+            // internal List-selection table differentiable without adding a
+            // new public RISC/WireDag operation.
+            let target = node.inputs[0];
+            let indices = node.inputs[1];
+            let updates = node.inputs[2];
+            let updates_ty = forward.get(updates).unwrap().output_type.clone();
+            let dupdates = dag.add_node(
+                RiscOp::Gather { axis: *axis },
+                vec![g, indices],
+                updates_ty,
+                None,
+            );
+            Some(vec![(target, g), (updates, dupdates)])
+        }
         RiscOp::ReduceWindow {
             reducer,
             window_shape,
@@ -2835,6 +2853,100 @@ mod tests {
         // d(sum(permute(x)))/dx = ones, shape should be 2x3
         assert_eq!(grad.to_f64_lossy_vec(), vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
         assert_eq!(grad.shape, vec![2, 3]);
+    }
+
+    #[test]
+    fn scatter_add_adjoint_preserves_target_and_gathers_update_cotangents() {
+        use crate::eval::{TensorValue, eval_tensor};
+
+        let vec4_ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision: Prim::F32,
+        };
+        let vec2_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::F32,
+        };
+        let index_ty = TensorType {
+            dims: vec![DimInfo::Lit(2)],
+            precision: Prim::Int64,
+        };
+        let mut dag = Dag::new();
+        let target = dag.add_node(
+            RiscOp::Load {
+                name: "target".into(),
+            },
+            vec![],
+            vec4_ty.clone(),
+            None,
+        );
+        let indices = dag.add_node(
+            RiscOp::Load {
+                name: "indices".into(),
+            },
+            vec![],
+            index_ty,
+            None,
+        );
+        let updates = dag.add_node(
+            RiscOp::Load {
+                name: "updates".into(),
+            },
+            vec![],
+            vec2_ty,
+            None,
+        );
+        let scattered = dag.add_node(
+            RiscOp::ScatterAdd { axis: 0 },
+            vec![target, indices, updates],
+            vec4_ty.clone(),
+            None,
+        );
+        let coefficients = dag.add_node(
+            RiscOp::synth_const_tensor(Prim::F32, vec![2.0, 3.0, 5.0, 7.0]),
+            vec![],
+            vec4_ty.clone(),
+            None,
+        );
+        let weighted = dag.add_node(RiscOp::Mul, vec![scattered, coefficients], vec4_ty, None);
+        let output = dag.add_node(
+            RiscOp::Sum {
+                axis: 0,
+                accumulator: Prim::F32,
+            },
+            vec![weighted],
+            scalar_f32(),
+            None,
+        );
+
+        let gradient = grad_dag(&dag, output, &[target, updates]).expect("scatter-add gradient");
+        let values = eval_tensor(
+            &gradient.dag,
+            &HashMap::from([
+                (
+                    "target".to_string(),
+                    TensorValue::from_vec(vec![4], vec![11.0, 13.0, 17.0, 19.0]),
+                ),
+                (
+                    "indices".to_string(),
+                    TensorValue::from_vec(vec![2], vec![1.0, 3.0]),
+                ),
+                (
+                    "updates".to_string(),
+                    TensorValue::from_vec(vec![2], vec![23.0, 29.0]),
+                ),
+            ]),
+        )
+        .expect("scatter-add adjoint evaluates");
+
+        assert_eq!(
+            values[&gradient.grad_nodes[&target]].to_f64_lossy_vec(),
+            vec![2.0, 3.0, 5.0, 7.0],
+        );
+        assert_eq!(
+            values[&gradient.grad_nodes[&updates]].to_f64_lossy_vec(),
+            vec![3.0, 7.0],
+        );
     }
 
     #[test]
