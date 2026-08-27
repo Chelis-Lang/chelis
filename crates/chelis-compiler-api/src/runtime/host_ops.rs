@@ -2606,6 +2606,20 @@ pub(super) fn tensor_cumsum_value(
 ) -> Result<RuntimeTensorValue, String> {
     let axis = normalize_axis(tensor.value.shape.len(), axis, "cumsum")?;
     let mut data = tensor.value.to_f64_lossy_vec();
+    // An empty operand has nothing to scan, and its axis decomposition is
+    // never read. `outer` is the product of the extents BEFORE the axis, which
+    // for an empty tensor are unconstrained: the zero elsewhere is what makes
+    // the element count representable. Computing it anyway overflows `usize`
+    // or spins an empty loop, matching the C runtime's guard in
+    // `chelis_tensor_cumsum` / `chelis_tensor_sort`.
+    if tensor.value.is_empty() {
+        return RuntimeTensorValue::from_wide(
+            "cumsum",
+            tensor.precision,
+            tensor.value.shape.clone(),
+            data,
+        );
+    }
     let axis_size = tensor.value.shape[axis];
     let inner: usize = tensor.value.shape[axis + 1..]
         .iter()
@@ -2635,6 +2649,26 @@ pub(super) fn tensor_sort_value(
     axis: i64,
 ) -> Result<RuntimeValue, String> {
     let axis = normalize_axis(tensor.value.shape.len(), axis, "sort")?;
+    // An empty operand has nothing to scan, and its axis decomposition is
+    // never read. `outer` is the product of the extents BEFORE the axis, which
+    // for an empty tensor are unconstrained: the zero elsewhere is what makes
+    // the element count representable. Computing it anyway overflows `usize`
+    // or spins an empty loop, matching the C runtime's guard in
+    // `chelis_tensor_cumsum` / `chelis_tensor_sort`.
+    if tensor.value.is_empty() {
+        return Ok(RuntimeValue::Tuple(vec![
+            RuntimeValue::Tensor(RuntimeTensorValue::new(IrTensorValue::from_storage(
+                tensor.value.shape.clone(),
+                tensor.value.storage().reuse_gather(&[]),
+            ))),
+            RuntimeValue::Tensor(RuntimeTensorValue::from_wide_int(
+                "sort",
+                Prim::Int64,
+                tensor.value.shape.clone(),
+                Vec::new(),
+            )?),
+        ]));
+    }
     let axis_size = tensor.value.shape[axis];
     let inner: usize = tensor.value.shape[axis + 1..]
         .iter()
