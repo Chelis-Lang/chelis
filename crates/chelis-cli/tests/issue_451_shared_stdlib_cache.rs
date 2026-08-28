@@ -340,16 +340,25 @@ fn public_std_test_active_float_rank_matrix_is_identical_cold_and_reused() {
     let pkg = stage_fixture(guard.path());
     let probe = pkg.join("src/assertclosematrix.ch");
     let mut source = String::from(
-        "module PseudoNautilus.AssertCloseMatrix\nimport Std.Test (assert_close_tensor)\n\n",
+        "module PseudoNautilus.AssertCloseMatrix\n\
+         import Std.Test (assert_close_tensor)\n\n\
+         close_alias = assert_close_tensor\n\
+         nested_alias = close_alias\n\
+         def return_close() = nested_alias\n\
+         returned_alias = return_close()\n\
+         close_pair = (returned_alias, nested_alias)\n\
+         stored_alias = close_pair.0\n\
+         def invoke(f, actual, expected, tol, label) = f(actual, expected, tol, label)\n\n",
     );
     for dtype in ["f16", "bf16", "f32", "f64"] {
         for (rank, tensor_type) in [
             (0, format!("tensor[{dtype}]")),
             (1, format!("tensor[2, {dtype}]")),
+            (2, format!("tensor[2, 3, {dtype}]")),
             (3, format!("tensor[2, 3, 4, {dtype}]")),
         ] {
             source.push_str(&format!(
-                "def accept_{dtype}_r{rank}(actual: &{tensor_type}, expected: &{tensor_type}, tol: {dtype}) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, tol, \"{dtype}/r{rank}\")\n"
+                "def accept_{dtype}_r{rank}(actual: &{tensor_type}, expected: &{tensor_type}, tol: {dtype}) -> unit ! {{ Test }} = invoke(stored_alias, actual, expected, tol, \"{dtype}/r{rank}\")\n"
             ));
         }
     }
@@ -363,7 +372,7 @@ fn public_std_test_active_float_rank_matrix_is_identical_cold_and_reused() {
     );
     assert!(
         check_errors(&cold).is_empty(),
-        "the shipped Std.Test must accept every active float at ranks 0, 1, and 3; got:\n{}",
+        "the shipped Std.Test must accept every active float at ranks 0, 1, 2, and 3; got:\n{}",
         String::from_utf8_lossy(&cold)
     );
 }
@@ -375,37 +384,71 @@ fn public_std_test_non_float_rejections_are_structural_cold_and_reused() {
     let probe = pkg.join("src/assertclosenonfloat.ch");
 
     for dtype in ["int8", "int16", "int32", "int64", "bool"] {
-        fs::write(
-            &probe,
-            format!(
-                "module PseudoNautilus.AssertCloseNonFloat\nimport Std.Test (assert_close_tensor)\n\ndef reject(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = assert_close_tensor(actual, expected, tol, \"{dtype}\")\n"
+        for (route, declarations, call) in [
+            ("direct", "", "assert_close_tensor"),
+            (
+                "top-level alias",
+                "close_alias = assert_close_tensor\n",
+                "close_alias",
             ),
-        )
-        .expect("write public Std.Test non-float probe");
+            (
+                "nested alias",
+                "close_alias = assert_close_tensor\nnested_alias = close_alias\n",
+                "nested_alias",
+            ),
+            (
+                "higher-order alias",
+                "close_alias = assert_close_tensor\ndef invoke(f, actual, expected, tol) = f(actual, expected, tol, \"higher-order\")\n",
+                "invoke(close_alias",
+            ),
+            (
+                "returned alias",
+                "def return_close() = assert_close_tensor\nreturned_alias = return_close()\n",
+                "returned_alias",
+            ),
+            (
+                "stored alias",
+                "close_pair = (assert_close_tensor, assert_close_tensor)\nstored_alias = close_pair.0\n",
+                "stored_alias",
+            ),
+        ] {
+            let invocation = if route == "higher-order alias" {
+                format!("{call}, actual, expected, tol)")
+            } else {
+                format!("{call}(actual, expected, tol, \"{route}\")")
+            };
+            fs::write(
+                &probe,
+                format!(
+                    "module PseudoNautilus.AssertCloseNonFloat\nimport Std.Test (assert_close_tensor)\n\n{declarations}def reject(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = {invocation}\n"
+                ),
+            )
+            .expect("write public Std.Test non-float probe");
 
-        let cold = run_check(&probe, &cache_home, &[]);
-        let warm = run_check(&probe, &cache_home, &[]);
-        assert_eq!(
-            cold, warm,
-            "cold/reused public diagnostic diverged for {dtype}"
-        );
-        let errors = check_errors(&cold);
-        assert_eq!(
-            errors.len(),
-            1,
-            "{dtype} must produce exactly one diagnostic, never an empty fallback or cascade: {errors:#?}"
-        );
-        let error = &errors[0];
-        assert_eq!(
-            error.get("kind").and_then(Value::as_str),
-            Some("PrecisionMismatch"),
-            "{dtype} must reject structurally: {error:#?}"
-        );
-        let message = error.get("message").and_then(Value::as_str).unwrap_or("");
-        assert!(
-            message.contains("active float dtype") && message.contains(dtype),
-            "{dtype} diagnostic must name the active-float restriction and concrete dtype: {message:?}"
-        );
+            let cold = run_check(&probe, &cache_home, &[]);
+            let warm = run_check(&probe, &cache_home, &[]);
+            assert_eq!(
+                cold, warm,
+                "cold/reused public diagnostic diverged for {dtype} through {route}"
+            );
+            let errors = check_errors(&cold);
+            assert_eq!(
+                errors.len(),
+                1,
+                "{dtype} through {route} must produce exactly one diagnostic, never an empty fallback or cascade: {errors:#?}"
+            );
+            let error = &errors[0];
+            assert_eq!(
+                error.get("kind").and_then(Value::as_str),
+                Some("PrecisionMismatch"),
+                "{dtype} through {route} must reject structurally: {error:#?}"
+            );
+            let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+            assert!(
+                message.contains("active float dtype") && message.contains(dtype),
+                "{dtype} through {route} must name the active-float restriction and concrete dtype: {message:?}"
+            );
+        }
     }
 }
 

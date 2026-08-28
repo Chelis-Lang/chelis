@@ -4919,6 +4919,7 @@ def hidden(x: f32) -> f32 = x
         name: "hidden".to_string(),
         kind: SymbolKind::Value,
         type_repr: public.type_repr,
+        type_variable_restrictions: public.type_variable_restrictions,
         effects: public.effects,
         has_body: true,
     });

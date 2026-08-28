@@ -25,7 +25,7 @@ pub use effect_kind::decode_effect_kind;
 pub use lexer::LiteralSuffix;
 pub use parser::{
     StampOrParseError, parse_and_stamp, parse_and_stamp_file, parse_and_stamp_runtime_exprs,
-    parse_and_stamp_tagged, parse_raw_str,
+    parse_and_stamp_tagged, parse_and_stamp_type, parse_raw_str,
 };
 pub use path::{
     DeepPath, InsertFunctionError, PathError, PathSegment, ResolveError, ResolvedFunction,

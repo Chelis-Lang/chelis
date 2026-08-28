@@ -644,6 +644,27 @@ pub fn parse_and_stamp_runtime_exprs(source: &str) -> Result<Vec<Expr>, StampOrP
     Ok(typed)
 }
 
+/// Lex, parse, then stamp exactly one expression in a type position.
+///
+/// This is the role-directed ingress for a serialized type representation.
+/// Type syntax is closed: a list whose head is not a type-vocabulary tag is
+/// rejected rather than retained as an untyped bare list.
+pub fn parse_and_stamp_type(source: &str) -> Result<Expr, StampOrParseError> {
+    let tokens = lexer::lex(source).map_err(ParseError::from)?;
+    let mut raw_exprs = parse_raw(&tokens)?;
+    if raw_exprs.len() != 1 {
+        return Err(ParseError::Expected {
+            expected: "exactly one type expression".to_string(),
+            found: format!("{} top-level expressions", raw_exprs.len()),
+            offset: source.len(),
+        }
+        .into());
+    }
+    Ok(crate::stamp_to_typed::stamp_type(
+        raw_exprs.pop().expect("length checked above"),
+    )?)
+}
+
 /// Lex, parse, then require every top-level form to carry `expected` as its
 /// head tag (chelis#1088).
 ///
@@ -669,7 +690,8 @@ pub fn parse_and_stamp_tagged(
 /// entry point that names what it actually accepts: [`parse_and_stamp_file`]
 /// for a `.dp` program, [`parse_and_stamp`] for a declaration bundle,
 /// [`parse_and_stamp_runtime_exprs`] for an expression, or
-/// [`parse_and_stamp_tagged`] for one named tag. This spelling survives for
+/// [`parse_and_stamp_type`] for one type, or [`parse_and_stamp_tagged`] for
+/// one named tag. This spelling survives for
 /// in-crate fixtures that build a fragment in no particular role.
 pub fn parse_str(source: &str) -> Result<Vec<Expr>, ParseError> {
     let tokens = lexer::lex(source)?;

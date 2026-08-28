@@ -133,6 +133,30 @@ def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}
 "#,
                 ),
             ),
+            (
+                "returned alias",
+                format!(
+                    r#"
+def return_close() = test_assert_close_tensor
+returned_alias = return_close()
+
+def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =
+  returned_alias(actual, expected, tol, "returned")
+"#,
+                ),
+            ),
+            (
+                "stored alias",
+                format!(
+                    r#"
+close_pair = (test_assert_close_tensor, test_assert_close_tensor)
+stored_alias = close_pair.0
+
+def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} =
+  stored_alias(actual, expected, tol, "stored")
+"#,
+                ),
+            ),
         ];
 
         for (route, source) in fixtures {
@@ -153,11 +177,15 @@ fn aliased_higher_order_calls_accept_every_float_at_rank_zero_and_multiple_ranks
                 r#"
 close_alias = test_assert_close_tensor
 nested_alias = close_alias
+def return_close() = nested_alias
+returned_alias = return_close()
+close_pair = (returned_alias, nested_alias)
+stored_alias = close_pair.0
 
 def invoke(f, actual, expected, tol) = f(actual, expected, tol, "positive")
 
 def check(actual: &{tensor_type}, expected: &{tensor_type}, tol: {dtype}) -> unit ! {{ Test }} =
-  invoke(nested_alias, actual, expected, tol)
+  invoke(stored_alias, actual, expected, tol)
 "#,
             );
             let errors = diagnostics(&source);

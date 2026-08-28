@@ -210,6 +210,16 @@ impl TypeEnv {
         self.inner.library_def_names.contains(name)
     }
 
+    /// Return the generalized checker scheme for a binding in this accepted
+    /// library context.
+    ///
+    /// Public package metadata uses this immutable view so quantified-domain
+    /// restrictions remain attached to function values at serialization
+    /// boundaries instead of being reconstructed from a printed type.
+    pub fn scheme(&self, name: &str) -> Option<&crate::types::Scheme> {
+        self.inner.env.lookup(name)
+    }
+
     /// Confirm that this context and a checked program are one library product pair.
     ///
     /// The library builders derive one opaque identity from accepted checked source.

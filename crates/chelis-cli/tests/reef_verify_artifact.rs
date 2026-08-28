@@ -1,5 +1,5 @@
 use assert_cmd::Command;
-use chelis_shell::{PackageId, ShellPackage, encode_shell};
+use chelis_shell::{PackageId, SHELL_FORMAT_VERSION, ShellPackage, encode_shell};
 use predicates::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -17,6 +17,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let shell_path = dir.path().join("demo-1.2.3.chb");
     fs::write(&archive_path, archive).expect("write archive");
     let shell = ShellPackage {
+        format_version: SHELL_FORMAT_VERSION,
         package: PackageId {
             name: "demo".to_string(),
             version: "1.2.3".to_string(),

@@ -20,11 +20,14 @@ Pipeline:
   6. git diff --stat to show what changed
 
 Invocation:
-  python3 scripts/regenerate_chelis_std_bundle.py [--debug]
+  python3 scripts/regenerate_chelis_std_bundle.py [--debug] [--check]
 
 Flags:
   --debug   build chelis in dev profile instead of release (faster
             iteration when wiring the script itself).
+  --check   regenerate twice in isolated snapshots, require the committed
+            five-output set to equal the first pass and the two passes to
+            equal each other, then restore the exact committed bytes.
 
 Exit codes:
   0  success (artifacts up-to-date or successfully regenerated)
@@ -116,16 +119,8 @@ def regenerate_runtime_lock(
         shutil.copy2(staged_lock, package_root / "reef.lock")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="build chelis in dev profile instead of release",
-    )
-    args = parser.parse_args()
-
-    repo = repo_root()
+def regenerate(repo: Path, *, debug: bool, show_diff: bool = True) -> int:
+    """Run one complete canonical source-to-artifact generation pass."""
     version = chelis_std_version(repo)
     bundle_dist = repo / "crates" / "chelis-std-bundle" / "dist"
     pkg_dist = repo / "packages" / "chelis-std" / "dist"
@@ -135,8 +130,8 @@ def main() -> int:
 
     bundle_dist.mkdir(parents=True, exist_ok=True)
 
-    profile_flag = [] if args.debug else ["--release"]
-    profile_dir = "debug" if args.debug else "release"
+    profile_flag = [] if debug else ["--release"]
+    profile_dir = "debug" if debug else "release"
 
     # Step 1: build the chelis CLI.
     print(f"[1/6] cargo build -p chelis-cli {' '.join(profile_flag)}", file=sys.stderr)
@@ -217,17 +212,18 @@ def main() -> int:
 
     # Step 6: show what changed under every owned generated surface. Helps
     # the user confirm that their commit will pick up the right bytes.
-    print("[6/6] git diff --stat for owned chelis-std outputs", file=sys.stderr)
-    subprocess.run(
-        [
-            "git",
-            "diff",
-            "--stat",
-            "--",
-            *(str(path.relative_to(repo)) for path in owned_outputs),
-        ],
-        cwd=repo,
-    )
+    if show_diff:
+        print("[6/6] git diff --stat for owned chelis-std outputs", file=sys.stderr)
+        subprocess.run(
+            [
+                "git",
+                "diff",
+                "--stat",
+                "--",
+                *(str(path.relative_to(repo)) for path in owned_outputs),
+            ],
+            cwd=repo,
+        )
 
     print("OK: chelis-std bundle regenerated.", file=sys.stderr)
     print(
@@ -235,6 +231,90 @@ def main() -> int:
         file=sys.stderr,
     )
     return 0
+
+
+def _snapshot_existing(paths: tuple[Path, ...]) -> dict[Path, bytes]:
+    return {path: path.read_bytes() for path in paths if path.is_file()}
+
+
+def _restore_snapshot(paths: tuple[Path, ...], snapshot: dict[Path, bytes]) -> None:
+    for path in paths:
+        if path in snapshot:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(snapshot[path])
+        elif path.exists():
+            path.unlink()
+
+
+def check_generated_outputs(repo: Path, *, debug: bool) -> int:
+    """Fail closed unless committed bytes are current and generation is stable."""
+    version = chelis_std_version(repo)
+    outputs = owned_generated_outputs(repo, version)
+    missing = [path for path in outputs if not path.is_file()]
+    if missing:
+        for path in missing:
+            print(
+                f"ERROR: missing generated output: {path.relative_to(repo)}",
+                file=sys.stderr,
+            )
+        return 1
+
+    committed = _snapshot_existing(outputs)
+    first: dict[Path, bytes] = {}
+    second: dict[Path, bytes] = {}
+    try:
+        print("[check 1/2] regenerate from committed inputs", file=sys.stderr)
+        if regenerate(repo, debug=debug, show_diff=False) != 0:
+            return 1
+        first = _snapshot_existing(outputs)
+
+        print("[check 2/2] regenerate again for byte determinism", file=sys.stderr)
+        if regenerate(repo, debug=debug, show_diff=False) != 0:
+            return 1
+        second = _snapshot_existing(outputs)
+    finally:
+        _restore_snapshot(outputs, committed)
+
+    stale = [path for path in outputs if committed.get(path) != first.get(path)]
+    unstable = [path for path in outputs if first.get(path) != second.get(path)]
+    for path in stale:
+        print(
+            f"ERROR: stale generated output: {path.relative_to(repo)}",
+            file=sys.stderr,
+        )
+    for path in unstable:
+        print(
+            f"ERROR: nondeterministic generated output: {path.relative_to(repo)}",
+            file=sys.stderr,
+        )
+    if stale or unstable:
+        return 1
+
+    print(
+        "OK: all five chelis-std generated outputs are current and byte-stable.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="build chelis in dev profile instead of release",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify committed outputs are current and byte-stable without changing them",
+    )
+    args = parser.parse_args()
+
+    repo = repo_root()
+    if args.check:
+        return check_generated_outputs(repo, debug=args.debug)
+    return regenerate(repo, debug=args.debug)
 
 
 if __name__ == "__main__":

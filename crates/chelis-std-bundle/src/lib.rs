@@ -29,7 +29,11 @@
 //!    - copies that pair into `crates/chelis-std-bundle/dist/`; and
 //!    - regenerates `packages/chelis-std/reef.lock` from those final bytes.
 //! 3. Commit both dist pairs and `packages/chelis-std/reef.lock`.
-//! 4. Rebuilding any crate that depends on this one (`chelis-reef`,
+//! 4. Run `python3 scripts/regenerate_chelis_std_bundle.py --check`. The
+//!    check regenerates twice, requires the committed five-output set to
+//!    equal the first pass and both passes to be byte-identical, and restores
+//!    the committed inputs without changing the worktree.
+//! 5. Rebuilding any crate that depends on this one (`chelis-reef`,
 //!    `chelis-cli`) picks up the new bytes.
 //!
 //! ## Loader integration
@@ -127,7 +131,9 @@ pub fn extract_into(dest: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chelis_shell::decode_shell;
+    use chelis_shell::{
+        SHELL_FORMAT_VERSION, TypeVariableDomain, TypeVariableRestriction, decode_shell,
+    };
     use tempfile::tempdir;
 
     /// The embedded shell bincode must agree with the embedded
@@ -146,6 +152,42 @@ mod tests {
             "embedded shell's archive_sha256 must match the embedded archive bytes: \
              rerun scripts/regenerate_chelis_std_bundle.py and commit the result"
         );
+    }
+
+    #[test]
+    fn package_and_embedded_shells_preserve_std_test_active_float_scheme() {
+        let package_shell = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/chelis-std/dist")
+            .join(format!("chelis-std-{BUNDLED_CHELIS_STD_VERSION}.chb"));
+        let package_bytes = std::fs::read(&package_shell).expect("read package CHB");
+        assert_eq!(
+            package_bytes, CHELIS_STD_SHELL,
+            "package and compile-time embedded CHB bytes must agree"
+        );
+
+        let shell = decode_shell(CHELIS_STD_SHELL).expect("decode embedded shell");
+        assert_eq!(shell.format_version, SHELL_FORMAT_VERSION);
+        let symbol = shell
+            .modules
+            .iter()
+            .find(|module| module.module == "Std.Test")
+            .and_then(|module| {
+                module
+                    .exports
+                    .iter()
+                    .find(|symbol| symbol.name == "assert_close_tensor")
+            })
+            .expect("Std.Test.assert_close_tensor must be shipped");
+        assert_eq!(
+            symbol.type_variable_restrictions,
+            vec![TypeVariableRestriction {
+                variable: "t0".to_string(),
+                domain: TypeVariableDomain::ActiveFloat,
+            }]
+        );
+        let type_repr = symbol.type_repr.as_deref().expect("function type");
+        assert!(type_repr.contains("(d-rank {} r0)"));
+        assert!(type_repr.matches("(t-var {} t0)").count() >= 3);
     }
 
     /// The extract path must produce a tree that `chelis-reef` can

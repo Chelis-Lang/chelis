@@ -336,7 +336,7 @@ fn stamp_runtime_expr(raw: RawExpr) -> Result<Expr, StampError> {
 /// type parameter), so atoms pass through; a non-empty list must decode
 /// to a vocabulary node, because type syntax is closed and an undecodable
 /// head has no type reading to fall back to.
-fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
+pub(crate) fn stamp_type(raw: RawExpr) -> Result<Expr, StampError> {
     match raw {
         RawExpr::Atom(atom, span) => Ok(Expr::Atom(convert_atom(atom), span)),
         RawExpr::List(elements, span) => {

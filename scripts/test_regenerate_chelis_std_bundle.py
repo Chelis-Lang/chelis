@@ -103,6 +103,68 @@ class RuntimeLockRegenerationTests(unittest.TestCase):
             },
         )
 
+    def test_check_fails_closed_when_any_owned_output_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outputs = tuple(root / f"output-{index}" for index in range(5))
+            for path in outputs[:-1]:
+                path.write_bytes(b"current")
+
+            with (
+                mock.patch.object(regen, "chelis_std_version", return_value="0.4.0"),
+                mock.patch.object(regen, "owned_generated_outputs", return_value=outputs),
+                mock.patch.object(regen, "regenerate") as regenerate,
+            ):
+                self.assertEqual(regen.check_generated_outputs(root, debug=True), 1)
+                regenerate.assert_not_called()
+
+    def test_check_detects_stale_bytes_at_each_owned_output_and_restores_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outputs = tuple(root / f"output-{index}" for index in range(5))
+            for path in outputs:
+                path.write_bytes(b"committed")
+
+            for stale in outputs:
+                def fake_regenerate(_repo, *, debug, show_diff):
+                    self.assertTrue(debug)
+                    self.assertFalse(show_diff)
+                    stale.write_bytes(b"canonical")
+                    return 0
+
+                with (
+                    mock.patch.object(regen, "chelis_std_version", return_value="0.4.0"),
+                    mock.patch.object(regen, "owned_generated_outputs", return_value=outputs),
+                    mock.patch.object(regen, "regenerate", side_effect=fake_regenerate),
+                ):
+                    self.assertEqual(regen.check_generated_outputs(root, debug=True), 1)
+
+                self.assertEqual(stale.read_bytes(), b"committed")
+
+    def test_check_detects_cross_process_nondeterminism_and_restores_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outputs = tuple(root / f"output-{index}" for index in range(5))
+            for path in outputs:
+                path.write_bytes(b"committed")
+            calls = 0
+
+            def fake_regenerate(_repo, *, debug, show_diff):
+                nonlocal calls
+                calls += 1
+                outputs[0].write_bytes(b"committed" if calls == 1 else b"different")
+                return 0
+
+            with (
+                mock.patch.object(regen, "chelis_std_version", return_value="0.4.0"),
+                mock.patch.object(regen, "owned_generated_outputs", return_value=outputs),
+                mock.patch.object(regen, "regenerate", side_effect=fake_regenerate),
+            ):
+                self.assertEqual(regen.check_generated_outputs(root, debug=True), 1)
+
+            for path in outputs:
+                self.assertEqual(path.read_bytes(), b"committed")
+
 
 class RealGeneratorFixedPointTests(unittest.TestCase):
     """Executable regression for the canonical, repository-owning pipeline."""
@@ -136,6 +198,41 @@ class RealGeneratorFixedPointTests(unittest.TestCase):
                 snapshots[0],
                 snapshots[1],
                 "two unchanged invocations of the supported generator must emit identical bytes",
+            )
+        finally:
+            for path, contents in before.items():
+                path.write_bytes(contents)
+
+    def test_check_rejects_stale_committed_output_without_mutating_it(self):
+        repo = regen.repo_root()
+        version = regen.chelis_std_version(repo)
+        outputs = regen.owned_generated_outputs(repo, version)
+        before = {path: path.read_bytes() for path in outputs}
+        stale = outputs[1]
+        mutated = before[stale] + b"round-5-stale-artifact"
+        stale.write_bytes(mutated)
+
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(repo / "scripts/regenerate_chelis_std_bundle.py"),
+                    "--debug",
+                    "--check",
+                ],
+                cwd=repo,
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            report = completed.stdout + completed.stderr
+            self.assertIn("stale generated output", report)
+            self.assertIn(stale.relative_to(repo).as_posix(), report)
+            self.assertEqual(
+                stale.read_bytes(),
+                mutated,
+                "--check must restore the exact committed input bytes",
             )
         finally:
             for path, contents in before.items():

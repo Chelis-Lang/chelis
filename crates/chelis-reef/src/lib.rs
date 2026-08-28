@@ -1,5 +1,6 @@
 use chelis_shell::{
-    PackageId, ShellModule, ShellPackage, ShellSymbol, SymbolKind, read_shell, write_shell,
+    PackageId, SHELL_FORMAT_VERSION, ShellModule, ShellPackage, ShellSymbol, SymbolKind,
+    TypeVariableDomain, TypeVariableRestriction, read_shell, write_shell,
 };
 use chelis_surf::ast::{
     Decl, EffectExpr, Expr, ImportKind, LetBinding, LetPattern, MatchArm, Param, Pattern,
@@ -2609,7 +2610,7 @@ pub fn build_package_with_options(
         .flat_map(|module| module.decls)
         .collect::<Vec<_>>();
     let deep = expanded_desugared_program(&linked_decls)?;
-    let checked = checked_program_with_effects(&deep)?;
+    let checked = checked_library_with_effects(&deep)?;
 
     let dist_dir = root.join("dist");
     fs::create_dir_all(&dist_dir).map_err(|e| e.to_string())?;
@@ -5310,10 +5311,15 @@ fn copy_package_source(src: &Path, dst: &Path) -> Result<(), String> {
 
 // ─── Issue #492: Machine-readable ABI/package schema ───
 
+/// Public JSON schema format. Version 2 adds exact quantified type-variable
+/// domain restrictions and is intentionally not compatible with version 1.
+pub const PACKAGE_SCHEMA_FORMAT_VERSION: u32 = 2;
+
 /// Machine-readable package schema describing exported functions, types,
 /// constructors, and required authoring signatures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageSchema {
+    pub format_version: u32,
     pub package: PackageId,
     pub compiler: String,
     pub modules: Vec<ModuleSchema>,
@@ -5332,6 +5338,7 @@ pub struct ModuleSchema {
 pub struct FunctionSchema {
     pub name: String,
     pub type_repr: Option<String>,
+    pub type_variable_restrictions: Vec<TypeVariableRestriction>,
     pub effects: Vec<String>,
     pub has_body: bool,
 }
@@ -5370,7 +5377,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
     let linked = link_graph(&graph, &entry_modules)?;
     let linked_decls: Vec<_> = linked.into_iter().flat_map(|m| m.decls).collect();
     let deep = expanded_desugared_program(&linked_decls)?;
-    let checked = checked_program_with_effects(&deep)?;
+    let checked = checked_library_with_effects(&deep)?;
 
     let mut modules = Vec::new();
     for module_source in root_pkg.modules.values() {
@@ -5383,11 +5390,9 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                 internal_name(&root_pkg.id.name, &module_source.module_name, export_name);
             match kind {
                 Some(chelis_shell::SymbolKind::Value) => {
-                    let type_repr = checked
-                        .type_env()
-                        .get(&internal)
-                        .map(canonical_shell_type_repr)
-                        .or_else(|| sig_type_repr(module_source, export_name));
+                    let signature = exported_function_type(&checked, &internal, || {
+                        sig_type_repr(module_source, export_name)
+                    })?;
                     let effects = symbol_effects(module_source, export_name);
                     let has_body = module_source.decls.iter().any(|d| {
                         matches!(d,
@@ -5397,7 +5402,8 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                     });
                     functions.push(FunctionSchema {
                         name: export_name.clone(),
-                        type_repr,
+                        type_repr: signature.type_repr,
+                        type_variable_restrictions: signature.type_variable_restrictions,
                         effects,
                         has_body,
                     });
@@ -5425,6 +5431,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                                         &v.name,
                                     );
                                     let ctor_type = checked
+                                        .program()
                                         .type_env()
                                         .get(&ctor_internal)
                                         .map(canonical_shell_type_repr);
@@ -5461,6 +5468,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
     modules.sort_by(|a, b| a.module.cmp(&b.module));
 
     Ok(PackageSchema {
+        format_version: PACKAGE_SCHEMA_FORMAT_VERSION,
         package: PackageId {
             name: manifest.package.name.clone(),
             version: manifest.package.version.clone(),
@@ -7609,9 +7617,12 @@ impl ShellTypeVariableRenamer {
 
 #[cfg(test)]
 mod shell_type_variable_canonicalization_tests {
-    use super::canonical_shell_type_repr;
+    use super::{canonical_shell_scheme, canonical_shell_type_repr};
+    use chelis_shell::{TypeVariableDomain, TypeVariableRestriction};
     use chelis_types::infer::type_to_deep_expr;
-    use chelis_types::types::{Dim, DimVar, RankVar, TensorPrec, Type, TypeVar};
+    use chelis_types::types::{
+        Dim, DimVar, RankVar, Scheme, TensorPrec, Type, TypeVar, TypeVarRestriction,
+    };
 
     fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type {
         Type::Fn(
@@ -7675,11 +7686,269 @@ mod shell_type_variable_canonicalization_tests {
         assert_eq!(rendered.matches("(t-var {} t0)").count(), 1);
         assert_eq!(rendered.matches("(t-var {} t1)").count(), 1);
     }
+
+    #[test]
+    fn scheme_restrictions_follow_structural_alpha_renaming_across_namespaces() {
+        let first = Scheme {
+            tvars: vec![TypeVar(9), TypeVar(42)],
+            tvar_restrictions: vec![
+                (TypeVar(42), TypeVarRestriction::ActiveFloat),
+                (TypeVar(9), TypeVarRestriction::ActiveFloat),
+            ],
+            dvars: vec![DimVar(9)],
+            rvars: vec![RankVar(9)],
+            body: representative_type(9, 42, 9, 9),
+        };
+        let second = Scheme {
+            tvars: vec![TypeVar(701), TypeVar(3)],
+            tvar_restrictions: vec![
+                (TypeVar(701), TypeVarRestriction::ActiveFloat),
+                (TypeVar(3), TypeVarRestriction::ActiveFloat),
+            ],
+            dvars: vec![DimVar(701)],
+            rvars: vec![RankVar(701)],
+            body: representative_type(701, 3, 701, 701),
+        };
+
+        let first = canonical_shell_scheme(&first).expect("first scheme must canonicalize");
+        let second = canonical_shell_scheme(&second).expect("second scheme must canonicalize");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.type_variable_restrictions,
+            vec![
+                TypeVariableRestriction {
+                    variable: "t0".to_string(),
+                    domain: TypeVariableDomain::ActiveFloat,
+                },
+                TypeVariableRestriction {
+                    variable: "t1".to_string(),
+                    domain: TypeVariableDomain::ActiveFloat,
+                },
+            ]
+        );
+        let rendered = first.type_repr.unwrap();
+        assert!(rendered.contains("(t-var {} t0)"));
+        assert!(rendered.contains("(t-var {} t1)"));
+        assert!(rendered.contains("(d-var {} d0)"));
+        assert!(rendered.contains("(d-rank {} r0)"));
+    }
+
+    #[test]
+    fn unrestricted_and_monomorphic_schemes_emit_an_empty_ledger() {
+        for scheme in [
+            Scheme {
+                tvars: vec![TypeVar(33)],
+                tvar_restrictions: vec![],
+                dvars: vec![],
+                rvars: vec![],
+                body: Type::Fn(
+                    vec![Type::Var(TypeVar(33))],
+                    Box::new(Type::Var(TypeVar(33))),
+                ),
+            },
+            Scheme::mono(Type::Prim(chelis_types::types::Prim::Int32)),
+        ] {
+            assert!(
+                canonical_shell_scheme(&scheme)
+                    .expect("scheme must canonicalize")
+                    .type_variable_restrictions
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn restriction_for_a_variable_absent_from_the_body_is_rejected() {
+        let scheme = Scheme {
+            tvars: vec![TypeVar(5)],
+            tvar_restrictions: vec![(TypeVar(5), TypeVarRestriction::ActiveFloat)],
+            dvars: vec![],
+            rvars: vec![],
+            body: Type::Prim(chelis_types::types::Prim::Int32),
+        };
+
+        assert_eq!(
+            canonical_shell_scheme(&scheme).unwrap_err(),
+            "checker scheme restricts type variable ?5 absent from its body"
+        );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalExportedType {
+    type_repr: Option<String>,
+    type_variable_restrictions: Vec<TypeVariableRestriction>,
+}
+
+fn exported_function_type(
+    checked: &chelis_pipeline_core::CheckedLibrary,
+    internal_name: &str,
+    authored_fallback: impl FnOnce() -> Option<String>,
+) -> Result<CanonicalExportedType, String> {
+    if let Some(scheme) = checked.type_env().scheme(internal_name) {
+        return canonical_shell_scheme(scheme);
+    }
+
+    Ok(CanonicalExportedType {
+        type_repr: checked
+            .program()
+            .type_env()
+            .get(internal_name)
+            .map(canonical_shell_type_repr)
+            .or_else(authored_fallback),
+        type_variable_restrictions: Vec::new(),
+    })
+}
+
+fn canonical_shell_scheme(
+    scheme: &chelis_types::types::Scheme,
+) -> Result<CanonicalExportedType, String> {
+    use chelis_types::infer::type_to_deep_expr;
+    use chelis_types::types::TypeVarRestriction;
+
+    let mut renamer = SchemeVariableRenamer::default();
+    let canonical_body = renamer.rewrite_type(&scheme.body);
+    let quantified = scheme.tvars.iter().copied().collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut restrictions = Vec::with_capacity(scheme.tvar_restrictions.len());
+
+    for (variable, restriction) in &scheme.tvar_restrictions {
+        if !quantified.contains(variable) {
+            return Err(format!(
+                "checker scheme restricts unquantified type variable ?{}",
+                variable.0
+            ));
+        }
+        if !seen.insert(*variable) {
+            return Err(format!(
+                "checker scheme repeats the restriction for type variable ?{}",
+                variable.0
+            ));
+        }
+        let canonical = renamer.type_vars.get(variable).copied().ok_or_else(|| {
+            format!(
+                "checker scheme restricts type variable ?{} absent from its body",
+                variable.0
+            )
+        })?;
+        let domain = match restriction {
+            TypeVarRestriction::ActiveFloat => TypeVariableDomain::ActiveFloat,
+        };
+        restrictions.push((
+            canonical.0,
+            TypeVariableRestriction {
+                variable: format!("t{}", canonical.0),
+                domain,
+            },
+        ));
+    }
+    restrictions.sort_by_key(|(index, _)| *index);
+
+    Ok(CanonicalExportedType {
+        type_repr: Some(canonical_shell_type_repr(&type_to_deep_expr(
+            &canonical_body,
+        ))),
+        type_variable_restrictions: restrictions
+            .into_iter()
+            .map(|(_, restriction)| restriction)
+            .collect(),
+    })
+}
+
+#[derive(Default)]
+struct SchemeVariableRenamer {
+    type_vars: HashMap<chelis_types::types::TypeVar, chelis_types::types::TypeVar>,
+    dim_vars: HashMap<chelis_types::types::DimVar, chelis_types::types::DimVar>,
+    rank_vars: HashMap<chelis_types::types::RankVar, chelis_types::types::RankVar>,
+}
+
+impl SchemeVariableRenamer {
+    fn rewrite_type(&mut self, ty: &chelis_types::types::Type) -> chelis_types::types::Type {
+        use chelis_types::types::{TensorPrec, Type};
+
+        match ty {
+            Type::Prim(prim) => Type::Prim(*prim),
+            Type::Fn(arguments, result) => Type::Fn(
+                arguments
+                    .iter()
+                    .map(|argument| self.rewrite_type(argument))
+                    .collect(),
+                Box::new(self.rewrite_type(result)),
+            ),
+            Type::Ref(inner) => Type::Ref(Box::new(self.rewrite_type(inner))),
+            Type::Tensor(dimensions, precision) => Type::Tensor(
+                dimensions
+                    .iter()
+                    .map(|dimension| self.rewrite_dimension(dimension))
+                    .collect(),
+                match precision {
+                    TensorPrec::Concrete(prim) => TensorPrec::Concrete(*prim),
+                    TensorPrec::Var(variable) => TensorPrec::Var(self.type_variable(*variable)),
+                },
+            ),
+            Type::Adt(name, arguments) => Type::Adt(
+                name.clone(),
+                arguments
+                    .iter()
+                    .map(|argument| self.rewrite_type(argument))
+                    .collect(),
+            ),
+            Type::Var(variable) => Type::Var(self.type_variable(*variable)),
+            Type::Tuple(elements) => Type::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.rewrite_type(element))
+                    .collect(),
+            ),
+            Type::Unit => Type::Unit,
+            Type::Error(witness) => Type::Error(*witness),
+        }
+    }
+
+    fn rewrite_dimension(
+        &mut self,
+        dimension: &chelis_types::types::Dim,
+    ) -> chelis_types::types::Dim {
+        use chelis_types::types::Dim;
+
+        match dimension {
+            Dim::Name(name) => Dim::Name(name.clone()),
+            Dim::Var(variable) => Dim::Var(self.dimension_variable(*variable)),
+            Dim::Lit(value) => Dim::Lit(*value),
+            Dim::Wildcard => Dim::Wildcard,
+            Dim::Rank(variable) => Dim::Rank(self.rank_variable(*variable)),
+        }
+    }
+
+    fn type_variable(
+        &mut self,
+        variable: chelis_types::types::TypeVar,
+    ) -> chelis_types::types::TypeVar {
+        let next = chelis_types::types::TypeVar(self.type_vars.len() as u32);
+        *self.type_vars.entry(variable).or_insert(next)
+    }
+
+    fn dimension_variable(
+        &mut self,
+        variable: chelis_types::types::DimVar,
+    ) -> chelis_types::types::DimVar {
+        let next = chelis_types::types::DimVar(self.dim_vars.len() as u32);
+        *self.dim_vars.entry(variable).or_insert(next)
+    }
+
+    fn rank_variable(
+        &mut self,
+        variable: chelis_types::types::RankVar,
+    ) -> chelis_types::types::RankVar {
+        let next = chelis_types::types::RankVar(self.rank_vars.len() as u32);
+        *self.rank_vars.entry(variable).or_insert(next)
+    }
 }
 
 fn build_shell_package(
     package: &LoadedPackage,
-    checked: &chelis_types::CheckedProgram,
+    checked: &chelis_pipeline_core::CheckedLibrary,
     archive_sha256: &str,
 ) -> Result<ShellPackage, String> {
     let mut modules = Vec::new();
@@ -7691,17 +7960,26 @@ fn build_shell_package(
                     format!("export `{name}` not defined in {}", module.module_name)
                 })?;
             let internal = internal_name(&package.id.name, &module.module_name, name);
-            let type_repr = checked
-                .type_env()
-                .get(&internal)
-                .map(canonical_shell_type_repr)
-                .or_else(|| sig_type_repr(module, name));
+            let signature = if kind == SymbolKind::Value {
+                exported_function_type(checked, &internal, || sig_type_repr(module, name))?
+            } else {
+                CanonicalExportedType {
+                    type_repr: checked
+                        .program()
+                        .type_env()
+                        .get(&internal)
+                        .map(canonical_shell_type_repr)
+                        .or_else(|| sig_type_repr(module, name)),
+                    type_variable_restrictions: Vec::new(),
+                }
+            };
             let effects = symbol_effects(module, name);
             let has_body = module.decls.iter().any(|decl| matches!(decl, Decl::FunDef { name: decl_name, .. } | Decl::LetDef { name: decl_name, .. } if decl_name == name));
             exports.push(ShellSymbol {
                 name: name.clone(),
                 kind,
-                type_repr,
+                type_repr: signature.type_repr,
+                type_variable_restrictions: signature.type_variable_restrictions,
                 effects,
                 has_body,
             });
@@ -7714,6 +7992,7 @@ fn build_shell_package(
     }
     modules.sort_by(|a, b| a.module.cmp(&b.module));
     Ok(ShellPackage {
+        format_version: SHELL_FORMAT_VERSION,
         package: package.id.clone(),
         compiler: package.manifest.package.compiler.clone(),
         modules,
@@ -9028,6 +9307,7 @@ fn expanded_desugared_program(decls: &[Decl]) -> Result<Vec<chelis_deep::ast::Ex
         .map_err(|err| err.to_string())
 }
 
+#[cfg(test)]
 fn checked_program_with_effects(
     deep_exprs: &[chelis_deep::ast::Expr],
 ) -> Result<chelis_types::CheckedProgram, String> {
@@ -9044,6 +9324,19 @@ fn checked_program_with_effects(
     chelis_pipeline_core::complete_checks(analysis, chelis_pipeline_core::SemanticContext::Isolated)
         .map(|checked| checked.into_parts().2)
         .map_err(|error| error.to_string())
+}
+
+fn checked_library_with_effects(
+    deep_exprs: &[chelis_deep::ast::Expr],
+) -> Result<chelis_pipeline_core::CheckedLibrary, String> {
+    let _linked = chelis_types::install_linked_program_guard();
+    let prepared = chelis_pipeline_core::PreparedProgram::from_expanded_deep(deep_exprs.to_vec());
+    chelis_pipeline_core::check_prepared_library(prepared).map_err(|error| match error {
+        chelis_pipeline_core::LibraryRejection::Type { report } => {
+            format!("Type errors: {:?}", report.errors)
+        }
+        other => other.to_string(),
+    })
 }
 
 #[cfg(test)]

@@ -471,6 +471,24 @@ fn tagged_ingress_rejects_a_different_tag() {
 }
 
 #[test]
+fn type_ingress_stamps_one_closed_type_expression() {
+    let ty = chelis_deep::parse_and_stamp_type(
+        "(t-fn {} (t-tensor {} (d-rank {} r0) (t-var {} t0)) (t-var {} t0))",
+    )
+    .expect("a canonical function type must stamp at a type position");
+
+    assert_eq!(ty.tag(), Some(DeepTag::TFn));
+
+    let multiple = chelis_deep::parse_and_stamp_type("(t-prim {} f32) (t-prim {} f64)")
+        .expect_err("a singular type boundary must reject multiple expressions");
+    assert!(multiple.to_string().contains("exactly one type expression"));
+
+    let unknown = chelis_deep::parse_and_stamp_type("(not-a-type {} f32)")
+        .expect_err("type syntax has a closed structural vocabulary");
+    assert!(unknown.to_string().contains("undecodable type head"));
+}
+
+#[test]
 fn declaration_ingress_rejects_a_module_wrapper_a_file_ingress_admits() {
     // The two whole-text entry points are deliberately different languages:
     // `parse_and_stamp` is a declaration bundle, `parse_and_stamp_file` is a
