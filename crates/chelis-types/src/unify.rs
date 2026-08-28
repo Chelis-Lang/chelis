@@ -90,6 +90,11 @@ pub enum TypeErrorKind {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Subst {
     types: Mutex<HashMap<TypeVar, Type>>,
+    /// Semantic domains attached to unresolved type variables. This is
+    /// serialized with reusable checking contexts: a constrained function
+    /// value must not become unconstrained after a cache round trip.
+    #[serde(default)]
+    tvar_restrictions: Mutex<HashMap<TypeVar, TypeVarRestriction>>,
     dims: Mutex<HashMap<DimVar, Dim>>,
     /// Rank-variable bindings: a `RankVar` binds to the *entire* shape vector
     /// it stands for (Tier-2 rank polymorphism). A binding to `[Dim::Rank(r2)]`
@@ -192,6 +197,12 @@ impl Clone for Subst {
     fn clone(&self) -> Self {
         Subst {
             types: Mutex::new(self.types.lock().expect("subst.types poisoned").clone()),
+            tvar_restrictions: Mutex::new(
+                self.tvar_restrictions
+                    .lock()
+                    .expect("subst.tvar_restrictions poisoned")
+                    .clone(),
+            ),
             dims: Mutex::new(self.dims.lock().expect("subst.dims poisoned").clone()),
             ranks: Mutex::new(self.ranks.lock().expect("subst.ranks poisoned").clone()),
             deferred_borrow_vars: Mutex::new(
@@ -423,6 +434,39 @@ impl Subst {
             .lock()
             .expect("subst.types poisoned")
             .insert(v, ty);
+    }
+
+    /// Install a semantic domain on an unresolved inference variable.
+    /// Currently domains have one member, so merging is idempotent. Keeping
+    /// the operation explicit makes incompatible future domains fail at the
+    /// unification seam rather than silently choosing one.
+    pub fn install_tvar_restriction(&self, v: TypeVar, restriction: TypeVarRestriction) {
+        let mut restrictions = self
+            .tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned");
+        if let Some(existing) = restrictions.insert(v, restriction) {
+            assert_eq!(
+                existing, restriction,
+                "incompatible type-variable restrictions require an explicit merge rule"
+            );
+        }
+    }
+
+    /// Restriction currently attached to an unresolved variable, if any.
+    pub fn tvar_restriction(&self, v: TypeVar) -> Option<TypeVarRestriction> {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .get(&v)
+            .copied()
+    }
+
+    fn remove_tvar_restriction(&self, v: TypeVar) {
+        self.tvar_restrictions
+            .lock()
+            .expect("subst.tvar_restrictions poisoned")
+            .remove(&v);
     }
 
     /// Record a new dim-variable binding.
@@ -1792,6 +1836,16 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
         });
     }
 
+    let source_restriction = subst.tvar_restriction(v);
+    let target_restriction = match ty {
+        Type::Var(target) => subst.tvar_restriction(*target),
+        _ => None,
+    };
+    let merged_restriction = source_restriction.or(target_restriction);
+    if let Some(restriction) = source_restriction {
+        ensure_tvar_restriction(restriction, ty)?;
+    }
+
     if !matches!(ty, Type::Var(_) | Type::Error(_))
         && subst.has_deferred_reshape_output(v)
         && subst.constrain_deferred_reshape_output(v, ty)?
@@ -1839,12 +1893,36 @@ fn bind_tvar(v: TypeVar, ty: &Type, subst: &mut Subst) -> Result<(), TypeError> 
     let target_level = subst.level_of_tvar(v);
     subst.lower_type_to(ty, target_level);
     subst.insert_type(v, ty.clone());
+    subst.remove_tvar_restriction(v);
+    if let (Some(restriction), Type::Var(target)) = (merged_restriction, ty) {
+        subst.install_tvar_restriction(*target, restriction);
+    }
     if let Type::Var(target) = ty {
         subst.transfer_deferred_reshape_alias(v, *target);
     } else {
         subst.resolve_deferred_reshapes_for_input(v, ty)?;
     }
     Ok(())
+}
+
+fn ensure_tvar_restriction(restriction: TypeVarRestriction, ty: &Type) -> Result<(), TypeError> {
+    match (restriction, ty) {
+        (TypeVarRestriction::ActiveFloat, Type::Prim(prim)) if prim.is_float() => Ok(()),
+        (TypeVarRestriction::ActiveFloat, Type::Var(_) | Type::Error(_)) => Ok(()),
+        (TypeVarRestriction::ActiveFloat, Type::Prim(prim)) => Err(TypeError {
+            kind: TypeErrorKind::PrecisionMismatch,
+            message: format!(
+                "type variable restricted to an active float dtype cannot be instantiated at `{}`",
+                prim.name()
+            ),
+        }),
+        (TypeVarRestriction::ActiveFloat, other) => Err(TypeError {
+            kind: TypeErrorKind::PrecisionMismatch,
+            message: format!(
+                "type variable restricted to an active float dtype cannot be instantiated at `{other}`"
+            ),
+        }),
+    }
 }
 
 fn bind_dvar(v: DimVar, dim: &Dim, subst: &mut Subst) -> Result<(), TypeError> {
@@ -2388,7 +2466,7 @@ mod tests {
             .generalize(&Type::Tensor(vec![], TensorPrec::Var(precision)), &subst);
         assert_eq!(scheme.tvars, vec![linked]);
 
-        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg);
+        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &subst);
         let Type::Tensor(_, TensorPrec::Var(fresh_precision)) = instantiated else {
             panic!("precision instantiation must remain a tensor precision variable");
         };
@@ -2402,6 +2480,40 @@ mod tests {
             subst.apply_tensor_prec(&TensorPrec::Var(fresh_precision)),
             TensorPrec::Concrete(Prim::F32)
         );
+    }
+
+    #[test]
+    fn active_float_restrictions_propagate_through_aliases_and_generalization() {
+        let mut vg = var_gen();
+        let mut subst = Subst::new();
+        let boundary = subst.enter_level(&vg);
+        let restricted = vg.fresh_tvar();
+        let alias = vg.fresh_tvar();
+        subst.install_tvar_restriction(restricted, TypeVarRestriction::ActiveFloat);
+        unify(&Type::Var(restricted), &Type::Var(alias), &mut subst)
+            .expect("restriction must flow through an ordinary type-variable alias");
+        subst.leave_level(boundary, &vg);
+
+        let scheme = crate::env::Env::new().generalize(&Type::Var(alias), &subst);
+        assert_eq!(scheme.tvars.len(), 1);
+        assert_eq!(
+            scheme.tvar_restrictions,
+            vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
+        );
+
+        let mut call_subst = Subst::new();
+        let instantiated = crate::env::Env::new().instantiate(&scheme, &mut vg, &call_subst);
+        let Type::Var(call_var) = instantiated else {
+            panic!("generalized alias must instantiate to a fresh variable");
+        };
+        let error = unify(
+            &Type::Var(call_var),
+            &Type::Prim(Prim::Bool),
+            &mut call_subst,
+        )
+        .expect_err("instantiated alias must retain its active-float domain");
+        assert!(matches!(error.kind, TypeErrorKind::PrecisionMismatch));
+        assert!(error.message.contains("active float dtype"));
     }
 
     #[test]

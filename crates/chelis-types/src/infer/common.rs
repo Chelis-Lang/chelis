@@ -1567,6 +1567,7 @@ fn install_exact_op35_dependency_contracts(
             "uniform_like".to_string(),
             Scheme {
                 tvars: vec![template, low, high],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -1595,6 +1596,7 @@ fn install_exact_op35_dependency_contracts(
             helper.to_string(),
             Scheme {
                 tvars: vec![tensor],
+                tvar_restrictions: vec![],
                 dvars: vec![],
                 rvars: vec![],
                 body: Type::Fn(
@@ -1836,7 +1838,7 @@ pub(super) fn infer_top_level(
             env.lookup(&name).map(|s| {
                 let s = s.clone();
                 if recursion::group_member(&name) {
-                    let (ty, mapping) = env.instantiate_with_tvar_mapping(&s, vg);
+                    let (ty, mapping) = env.instantiate_with_tvar_mapping(&s, vg, subst);
                     recursion_caller_guard = recursion::begin_caller(
                         &name,
                         declared_signatures.get(&name).map(|m| &m.binders),
@@ -1844,7 +1846,7 @@ pub(super) fn infer_top_level(
                     );
                     ty
                 } else {
-                    env.instantiate(&s, vg)
+                    env.instantiate(&s, vg, subst)
                 }
             })
         } else {

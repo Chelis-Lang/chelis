@@ -227,9 +227,16 @@ impl Env {
         self.bindings.remove(name);
     }
 
-    /// Instantiate a polymorphic scheme with fresh variables.
-    pub fn instantiate(&self, scheme: &Scheme, var_gen: &mut VarGen) -> Type {
-        self.instantiate_with_tvar_mapping(scheme, var_gen).0
+    /// Instantiate a scheme into the caller's inference substitution so
+    /// quantified semantic restrictions follow the fresh variables.
+    pub fn instantiate(
+        &self,
+        scheme: &Scheme,
+        var_gen: &mut VarGen,
+        inference_subst: &Subst,
+    ) -> Type {
+        self.instantiate_with_tvar_mapping(scheme, var_gen, inference_subst)
+            .0
     }
 
     /// Instantiate a scheme and return the fresh type minted for each
@@ -241,12 +248,21 @@ impl Env {
         &self,
         scheme: &Scheme,
         var_gen: &mut VarGen,
+        inference_subst: &Subst,
     ) -> (Type, Vec<(TypeVar, Type)>) {
         let mut subst = Subst::new();
         let mut mapping = Vec::with_capacity(scheme.tvars.len());
         for &tv in &scheme.tvars {
             let fresh = var_gen.fresh_type();
             subst.insert_type(tv, fresh.clone());
+            if let Type::Var(fresh_var) = fresh
+                && let Some((_, restriction)) = scheme
+                    .tvar_restrictions
+                    .iter()
+                    .find(|(restricted, _)| *restricted == tv)
+            {
+                inference_subst.install_tvar_restriction(fresh_var, *restriction);
+            }
             mapping.push((tv, fresh));
         }
         for &dv in &scheme.dvars {
@@ -325,6 +341,10 @@ impl Env {
                     "level-based type quantifiers diverged from the reference environment sweep"
                 );
                 assert_eq!(
+                    level_scheme.tvar_restrictions, sweep_scheme.tvar_restrictions,
+                    "level-based type-variable restrictions diverged from the reference environment sweep"
+                );
+                assert_eq!(
                     level_scheme.dvars, sweep_scheme.dvars,
                     "level-based dimension quantifiers diverged from the reference environment sweep"
                 );
@@ -347,19 +367,29 @@ impl Env {
         let ty_dvars = free_dvars(&ty);
         let ty_rvars = free_rvars(&ty);
         let level = subst.current_level();
-        Scheme {
-            tvars: ty_tvars
-                .into_iter()
-                .filter(|v| {
-                    subst.level_of_tvar(*v) > level
+        let tvars = ty_tvars
+            .into_iter()
+            .filter(|v| {
+                subst.level_of_tvar(*v) > level
                         && !subst.has_deferred_shape_constraint(*v)
                         // spec/04 §3.1.1: a variable minted for an in-group
                         // recursive instantiation stays monomorphic while its
                         // group is inferred, so a let-bound alias of a group
                         // member cannot smuggle in polymorphic recursion.
                         && !crate::infer::recursion::tvar_pinned(*v)
-                })
-                .collect(),
+            })
+            .collect::<Vec<_>>();
+        let tvar_restrictions = tvars
+            .iter()
+            .filter_map(|v| {
+                subst
+                    .tvar_restriction(*v)
+                    .map(|restriction| (*v, restriction))
+            })
+            .collect();
+        Scheme {
+            tvars,
+            tvar_restrictions,
             dvars: ty_dvars
                 .into_iter()
                 .filter(|v| subst.level_of_dvar(*v) > level)
@@ -380,15 +410,25 @@ impl Env {
         let env_tvars = self.free_tvars(subst);
         let env_dvars = self.free_dvars(subst);
         let env_rvars = self.free_rvars(subst);
+        let tvars = free_tvars(&ty)
+            .into_iter()
+            .filter(|v| {
+                !env_tvars.contains(v)
+                    && !subst.has_deferred_shape_constraint(*v)
+                    && !crate::infer::recursion::tvar_pinned(*v)
+            })
+            .collect::<Vec<_>>();
+        let tvar_restrictions = tvars
+            .iter()
+            .filter_map(|v| {
+                subst
+                    .tvar_restriction(*v)
+                    .map(|restriction| (*v, restriction))
+            })
+            .collect();
         Scheme {
-            tvars: free_tvars(&ty)
-                .into_iter()
-                .filter(|v| {
-                    !env_tvars.contains(v)
-                        && !subst.has_deferred_shape_constraint(*v)
-                        && !crate::infer::recursion::tvar_pinned(*v)
-                })
-                .collect(),
+            tvars,
+            tvar_restrictions,
             dvars: free_dvars(&ty)
                 .into_iter()
                 .filter(|v| !env_dvars.contains(v))
@@ -595,6 +635,7 @@ mod tests {
         let quantified_rank = RankVar(30);
         let scheme = Scheme {
             tvars: vec![quantified_type],
+            tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
             body: Type::Tuple(vec![
@@ -627,6 +668,7 @@ mod tests {
         let outer_rank = RankVar(32);
         let scheme = Scheme {
             tvars: vec![quantified_type],
+            tvar_restrictions: vec![],
             dvars: vec![quantified_dim],
             rvars: vec![quantified_rank],
             body: Type::Tuple(vec![
@@ -662,6 +704,7 @@ mod tests {
         let target_rank = RankVar(61);
         let scheme = Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: Type::Tuple(vec![

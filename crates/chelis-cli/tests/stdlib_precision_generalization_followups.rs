@@ -116,6 +116,26 @@ fn expect_any_error(json: &Value, label: &str) {
     );
 }
 
+fn expect_one_active_float_error(json: &Value, dtype: &str, label: &str) {
+    let errs = errors(json);
+    assert_eq!(
+        errs.len(),
+        1,
+        "{label}: expected exactly one diagnostic, never an empty-error fallback or cascade; got {errs:?}"
+    );
+    let error = errs[0];
+    assert_eq!(
+        error.get("kind").and_then(Value::as_str),
+        Some("PrecisionMismatch"),
+        "{label}: expected PrecisionMismatch; got {error:?}"
+    );
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        message.contains("active float dtype") && message.contains(dtype),
+        "{label}: expected an active-float diagnostic naming {dtype}; got {message:?}"
+    );
+}
+
 // =================================================================
 // 1. WS-A6 + WS-A7 sanity reproducer.
 //
@@ -334,6 +354,65 @@ def call(actual: &tensor[3, {dtype}], expected: &tensor[3, {dtype}]) -> unit ! {
         } else {
             expect_any_error(&json, &format!("test.assert_close_tensor[{dtype}]"));
         }
+    }
+}
+
+/// The public `chelis check` route must preserve the builtin's active-float
+/// domain when the function value is aliased or passed through a higher-order
+/// parameter. A literal callee-name check cannot satisfy this contract.
+#[test]
+fn test_assert_close_tensor_aliases_reject_every_non_float_dtype() {
+    for dtype in ["int8", "int16", "int32", "int64", "bool"] {
+        for (route, declarations) in [
+            (
+                "top-level alias",
+                "close_alias = test_assert_close_tensor\n".to_string(),
+            ),
+            (
+                "nested alias",
+                "close_alias = test_assert_close_tensor\nnested_alias = close_alias\n"
+                    .to_string(),
+            ),
+            (
+                "higher-order alias",
+                "close_alias = test_assert_close_tensor\ndef invoke(f, actual, expected, tol) = f(actual, expected, tol, \"cli\")\n"
+                    .to_string(),
+            ),
+        ] {
+            let callee = if route == "nested alias" {
+                "nested_alias"
+            } else if route == "higher-order alias" {
+                "invoke(close_alias"
+            } else {
+                "close_alias"
+            };
+            let closing = if route == "higher-order alias" {
+                ", actual, expected, tol)"
+            } else {
+                "(actual, expected, tol, \"cli\")"
+            };
+            let dir = tempdir().expect("tempdir");
+            let path = dir.path().join("assert_close_alias_neg.ch");
+            let source = format!(
+                "{declarations}def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = {callee}{closing}\n"
+            );
+            write_file(&path, &source);
+            let json = run_check(&path);
+            expect_one_active_float_error(&json, dtype, route);
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("assert_close_local_alias_neg.ch");
+        let source = format!(
+            r#"def bad(actual: &tensor[2, {dtype}], expected: &tensor[2, {dtype}], tol: {dtype}) -> unit ! {{ Test }} = {{
+  close_alias = test_assert_close_tensor
+  close_alias(actual, expected, tol, "cli")
+}}
+"#
+        );
+        write_file(&path, &source);
+        let json = run_check(&path);
+        expect_one_active_float_error(&json, dtype, "local alias");
     }
 }
 

@@ -15,6 +15,19 @@ use crate::errors::ErrorWitness;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TypeVar(pub u32);
 
+/// A semantic domain attached to a quantified type variable.
+///
+/// Unlike a callee-name check, a restriction is part of the polymorphic
+/// scheme itself. Instantiation installs it on the fresh inference variable,
+/// ordinary unification propagates it through aliases, and generalization
+/// re-quantifies it on wrappers and higher-order values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TypeVarRestriction {
+    /// The variable may instantiate only at an active float primitive:
+    /// `f16`, `bf16`, `f32`, or `f64`.
+    ActiveFloat,
+}
+
 /// A unique identifier for a dimension variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DimVar(pub u32);
@@ -505,6 +518,10 @@ impl fmt::Display for EffectSet {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scheme {
     pub tvars: Vec<TypeVar>,
+    /// Domain restrictions for quantified type variables. Entries are kept
+    /// in quantifier order for deterministic serialization.
+    #[serde(default)]
+    pub tvar_restrictions: Vec<(TypeVar, TypeVarRestriction)>,
     pub dvars: Vec<DimVar>,
     /// Quantified rank variables (Tier-2 rank polymorphism). Usually empty.
     #[serde(default)]
@@ -517,6 +534,7 @@ impl Scheme {
     pub fn mono(ty: Type) -> Scheme {
         Scheme {
             tvars: vec![],
+            tvar_restrictions: vec![],
             dvars: vec![],
             rvars: vec![],
             body: ty,

@@ -224,7 +224,7 @@ impl TypeEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Dim, Scheme, TensorPrec, Type};
+    use crate::types::{Dim, Prim, Scheme, TensorPrec, Type, TypeVarRestriction};
     use crate::unify::unify;
 
     #[test]
@@ -289,5 +289,63 @@ mod tests {
             let imported = resumed.env.generalize(&Type::Var(fresh), &resumed.subst);
             assert!(imported.tvars.is_empty());
         }
+    }
+
+    #[test]
+    fn type_variable_restrictions_survive_context_round_trips() {
+        let empty = TypeEnv::empty();
+        let mut inner = empty.inner().clone();
+        let live = inner.var_gen.fresh_tvar();
+        inner
+            .subst
+            .install_tvar_restriction(live, TypeVarRestriction::ActiveFloat);
+
+        let context = TypeEnv::from_inner(inner);
+        let encoded = bincode::serialize(&context).expect("restricted TypeEnv serializes");
+        let decoded: TypeEnv =
+            bincode::deserialize(&encoded).expect("restricted TypeEnv deserializes");
+        assert_eq!(
+            decoded.inner().subst.tvar_restriction(live),
+            Some(TypeVarRestriction::ActiveFloat)
+        );
+
+        let mut resumed = decoded.resume_for_new_check();
+        let scheme = resumed
+            .env
+            .lookup("test_assert_close_tensor")
+            .expect("builtin scheme survives round trip")
+            .clone();
+        assert_eq!(
+            scheme.tvar_restrictions,
+            vec![(scheme.tvars[0], TypeVarRestriction::ActiveFloat)]
+        );
+        let instantiated = resumed
+            .env
+            .instantiate(&scheme, &mut resumed.var_gen, &resumed.subst);
+        let Type::Fn(params, _) = instantiated else {
+            panic!("assert-close scheme must remain callable");
+        };
+        let Type::Var(precision) = params[2] else {
+            panic!("tolerance must use the quantified precision variable");
+        };
+        let mut integer_trial = resumed.subst.clone();
+        let error = unify(
+            &Type::Var(precision),
+            &Type::Prim(Prim::Int32),
+            &mut integer_trial,
+        )
+        .expect_err("round-tripped restriction must reject int32");
+        assert!(matches!(
+            error.kind,
+            crate::unify::TypeErrorKind::PrecisionMismatch
+        ));
+
+        let mut float_trial = resumed.subst.clone();
+        unify(
+            &Type::Var(precision),
+            &Type::Prim(Prim::F32),
+            &mut float_trial,
+        )
+        .expect("round-tripped restriction must accept f32");
     }
 }
