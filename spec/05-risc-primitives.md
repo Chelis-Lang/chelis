@@ -728,8 +728,9 @@ synthesized-arithmetic clause, not by this section.
 
 #### 2.4.1 Runtime (node-valued) bounds and reshape targets
 
-A movement bound (`pad` before/after, `shrink` start/end, `stride` step) and a
-`reshape` target extent are each represented as a `RtDim`:
+A movement bound (`pad` before/after, `shrink` start/end, `stride` step), an
+`expand` size, and a `reshape` target extent are each represented as a
+`RtDim`:
 
 - `Lit(n)` — a compile-time-constant extent.
 - `ToEnd` — the full-axis sentinel; legal only as a `shrink` end (the identity
@@ -740,6 +741,22 @@ A movement bound (`pad` before/after, `shrink` start/end, `stride` step) and a
   always the tensor operand and `inputs[1..]` are the bound scalars.
 - `Sym(name)` — a symbolic dim declared elsewhere (e.g. a bystander `batch`);
   legal only as a `reshape` target.
+- `InputAxis(t, a)` — the extent of an earlier tensor node's axis, read
+  directly from that tensor's shape metadata: `t` is an absolute index into
+  the owning node's `inputs` naming a tensor operand, and `a` is an `int32`
+  axis literal or an absolute input index naming a rank-0 `int32` scalar (a
+  computed axis under [05-OP-7]). Legal only as an `expand` size or a
+  `reshape` target. It is the folded form [05-OP-7] requires for a direct
+  `shape(x, axis)` extent argument and for an in-scope dimension binder
+  instantiated by a tensor axis; the same read bound to a `pad`, `shrink`, or
+  `stride` position is the rank-0 `Node` form. The read carries no identity:
+  whether the resulting axis keeps the source dimension's name is decided by
+  ordinary type reasoning (spec/04-type-system.md §4.7.3), and an unproved
+  identity is a fresh extent under an equality guard.
+
+`expand` admits `Lit`, `Node`, and `InputAxis`; `reshape` admits every form;
+`pad`, `shrink`, and `stride` admit `Lit` and `Node`, plus `ToEnd` for a
+`shrink` end.
 
 Runtime bounds are validated in every execution mode with matching language
 errors: a negative bound, a shrink range overshoot, a non-positive stride

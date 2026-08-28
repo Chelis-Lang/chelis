@@ -1356,6 +1356,27 @@ checked before allocation or element access and traps `Domain` or `Overflow`
 under the owning operation's atom. Every execution mode observes the same
 values and traps.
 
+A runtime extent guard is the check that a declared, named, or otherwise
+claimed extent agrees with the value actually observed, or that a runtime
+extent is non-negative. Each guard is evaluated exactly once, after every
+value it compares is available and before the first allocation or element
+access whose shape depends on the guarded extent. A guard whose operands are
+all interface values (an input tensor's axis, a scalar parameter, or a
+literal) is evaluated at function entry, in declared signature order, before
+any other operation of the function runs. A guard that compares a locally
+computed value (a `shape()` read, a cast, checked integer arithmetic, a
+user-function result, or an extent an operation computes) is evaluated after
+its producers and takes the source position of the operation that introduces
+the guarded extent: an independent effect or trap that precedes that operation
+in source order is observed first, and one that follows it is observed only if
+the guard passes. Guards ready at the same source position are evaluated in
+declaration order. These constraints are the complete observable contract; a
+guard and an operation related by neither data dependence nor source order may
+be evaluated in either order. A failing equality guard traps `Domain` under
+the operation that introduces the guarded extent and names the disagreeing
+sources; a failing non-negativity guard traps `Domain` under the owning
+movement operation. Every execution mode places guards by this rule.
+
 For the movement primitives, symbolic-dim pass-through is
 **identity-only**: a `stride` axis with literal
 step 1 and a `pad` axis with zero padding keep the input's symbolic dim;
@@ -1410,6 +1431,13 @@ The same default is materialized when no consumer in the complete program
 fixes the shape. A reusable library context carries the unresolved choice to
 its downstream program rather than deciding it early. An axis greater than
 `rank(x)` is a type error.
+
+When several positional `expand` results remain unresolved at the same freeze
+point, their defaults settle in source order: the result whose `expand` call
+appears first in the program settles first, and each later settlement observes
+the shapes fixed by the earlier ones. Settlement order is a property of the
+program text and never of an implementation's storage or iteration order, so a
+program has exactly one checked result across runs and implementations.
 
 When a declared or inferred result dimension claims a literal or named extent
 that is not statically proven equal to `size`, execution checks equality and

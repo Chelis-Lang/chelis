@@ -53,13 +53,13 @@ FROZEN_FILE_DIGESTS = {
         "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
-        "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
+        "745284a83a20a3a4c081c725e11f8fed67d012bc6878cb1db422c45668167082"
     ),
     "spec/05-risc-primitives.md": (
-        "577c242de5d43901afb68a0053b8d690d77476f64b24f2003938bf9018b66142"
+        "d2fdf7308cc9038b5e39f447417fd29066ae85466347fc78727cbf67cd040c38"
     ),
     "spec/06-transformations.md": (
-        "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
+        "ddc42ddc3d09adc80af1b1f8a8a66b2ec112404689c489eed6542a95d1ee1ed6"
     ),
     "spec/10-serialization.md": (
         "58f707d4e155d098962db224317061684b2c026816cab234ba026d560510a6da"
@@ -866,6 +866,14 @@ def validate_normative_contract(
         spec06,
         (
             (
+                "over these) is not batched",
+                "vmap runtime extent non-batching rule",
+            ),
+            (
+                "### 8.6 `batch_varying_extent` (vmap)",
+                "vmap batch-varying extent rejection",
+            ),
+            (
                 "If `A = List[T]` and `dT` is defined, then `dA = List[dT]`; the "
                 "cotangent\n  list has exactly the primal list's runtime length and "
                 "positional order",
@@ -982,6 +990,18 @@ def validate_normative_contract(
                 "A statically known normalized value outside `0..rank` is a type\n"
                 "error (`DimensionMismatch`)",
                 "shape post-normalization rejection",
+            ),
+            (
+                "access whose shape depends on the guarded extent",
+                "runtime extent guard placement",
+            ),
+            (
+                "places guards by this rule",
+                "runtime extent guard placement in every execution mode",
+            ),
+            (
+                "their defaults settle in source order",
+                "positional expand settlement order",
             ),
             (
                 "| Ordered comparison (`cmplt`, `lt`, `gt`, `gte`, `lte`) | any "
@@ -1849,6 +1869,11 @@ def validate_normative_contract(
     require_all(
         spec05,
         (
+            ("`InputAxis(t, a)`", "folded tensor-axis extent carrier"),
+            (
+                "`expand` admits `Lit`, `Node`, and `InputAxis`",
+                "runtime extent owner admission",
+            ),
             (
                 "| `cmplt(a, b)` | `cmplt(a, b)` | "
                 "`and(not(nan), cmplt(a, b))` |",
