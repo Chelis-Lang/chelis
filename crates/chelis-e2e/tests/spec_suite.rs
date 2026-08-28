@@ -328,7 +328,7 @@ fn spec_relu_decomposes_to_max_elem() {
 }
 
 #[test]
-fn spec_sub_decomposes_to_add_neg() {
+fn spec_sub_lowers_to_direct_identity_without_arithmetic_surrogate() {
     let src = r#"
         (def {} a (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} a))
         (def {} b (var {type: (t-tensor {} (d-lit {} 3) (t-prim {} f32))} b))
@@ -336,10 +336,20 @@ fn spec_sub_decomposes_to_add_neg() {
             (var {} sub) (var {} a) (var {} b)))
     "#;
     let dag = lower_deep(src);
-    let has_add = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Add));
-    let has_neg = dag.nodes().iter().any(|n| matches!(n.op, RiscOp::Neg));
-    assert!(has_add, "sub should decompose to include Add");
-    assert!(has_neg, "sub should decompose to include Neg");
+    assert_eq!(
+        dag.nodes()
+            .iter()
+            .filter(|node| matches!(node.op, RiscOp::Sub))
+            .count(),
+        1,
+        "sub should lower to exactly one direct Sub identity"
+    );
+    assert!(
+        dag.nodes()
+            .iter()
+            .all(|node| !matches!(node.op, RiscOp::Add | RiscOp::Neg)),
+        "direct Sub lowering must not reconstruct subtraction as Add/Neg"
+    );
 }
 
 #[test]

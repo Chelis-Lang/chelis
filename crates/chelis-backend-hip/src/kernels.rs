@@ -304,12 +304,11 @@ extern \"C\" __global__ void {kernel_name}(
     )
 }
 
-/// Generate kernel source for a binary function op (fmaxf for max_elem).
-/// `func` is the f32-suffixed libm name (e.g. `fmaxf`); for f64 the
-/// f-suffix is dropped per [`ElemKind::func`].
-pub fn binary_func(kernel_name: &str, func: &str, kind: ElemKind) -> String {
+/// Generate an exact direct extrema-selection kernel. The chosen operand is
+/// assigned unchanged so NaN payloads/signs and signed zero bits survive.
+pub fn binary_extrema(kernel_name: &str, is_max: bool, kind: ElemKind) -> String {
     let ty = kind.c_type();
-    let resolved = kind.func(func);
+    let comparison = if is_max { ">=" } else { "<=" };
     format!(
         "{DEVICE_HELPERS}\
 extern \"C\" __global__ void {kernel_name}(
@@ -325,7 +324,10 @@ extern \"C\" __global__ void {kernel_name}(
   chelis_flat_to_indices(i, out_sh, out_ndim, indices);
   int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
   int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
-  out[i] = {resolved}(a[idx_a], b[idx_b]);
+  {ty} av = a[idx_a];
+  {ty} bv = b[idx_b];
+  bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
+  out[i] = select_left ? av : bv;
 }}
 ",
         a_strides = stride_params("a"),
@@ -333,6 +335,91 @@ extern \"C\" __global__ void {kernel_name}(
         out_shape = shape_params("out"),
         build_a_s = build_array("a_s", "a", "s"),
         build_b_s = build_array("b_s", "b", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Exact signed-integer direct extrema selection. Equality selects the lhs;
+/// no arithmetic is performed.
+pub fn binary_extrema_integer(kernel_name: &str, is_max: bool, elem_c_ty: &str) -> String {
+    let comparison = if is_max { ">=" } else { "<=" };
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {elem_c_ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {elem_c_ty} *b, {b_strides}, int b_ndim, int b_size,
+    {elem_c_ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_b_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  {elem_c_ty} av = a[idx_a];
+  {elem_c_ty} bv = b[idx_b];
+  out[i] = av {comparison} bv ? av : bv;
+}}
+",
+        a_strides = stride_params("a"),
+        b_strides = stride_params("b"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_b_s = build_array("b_s", "b", "s"),
+        build_out_sh = build_array("out_sh", "out", "sh"),
+    )
+}
+
+/// Generate the AD-only exact extrema cotangent kernel. Inputs are the two
+/// forward operands and the incoming cotangent; output is the complete
+/// cotangent for the selected operand and exact positive zero otherwise.
+pub fn extrema_adjoint(
+    kernel_name: &str,
+    is_max: bool,
+    select_left_operand: bool,
+    kind: ElemKind,
+) -> String {
+    let ty = kind.c_type();
+    let comparison = if is_max { ">=" } else { "<=" };
+    let selected = if select_left_operand {
+        "select_left"
+    } else {
+        "!select_left"
+    };
+    let zero = kind.zero_lit_bool();
+    format!(
+        "{DEVICE_HELPERS}\
+extern \"C\" __global__ void {kernel_name}(
+    const {ty} *a, {a_strides}, int a_ndim, int a_size,
+    const {ty} *b, {b_strides}, int b_ndim, int b_size,
+    const {ty} *g, {g_strides}, int g_ndim, int g_size,
+    {ty} *out, {out_shape}, int out_ndim, int out_size) {{
+{build_a_s}
+{build_b_s}
+{build_g_s}
+{build_out_sh}
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= out_size) return;
+  int indices[{MAX_DIM}];
+  chelis_flat_to_indices(i, out_sh, out_ndim, indices);
+  int idx_a = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, a_s, a_ndim), a_size, 1);
+  int idx_b = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, b_s, b_ndim), b_size, 1);
+  int idx_g = CHELIS_GUARD_INDEX(chelis_indices_to_flat(indices, g_s, g_ndim), g_size, 1);
+  {ty} av = a[idx_a];
+  {ty} bv = b[idx_b];
+  bool select_left = isnan(av) || (!isnan(bv) && av {comparison} bv);
+  out[i] = {selected} ? g[idx_g] : {zero};
+}}
+",
+        a_strides = stride_params("a"),
+        b_strides = stride_params("b"),
+        g_strides = stride_params("g"),
+        out_shape = shape_params("out"),
+        build_a_s = build_array("a_s", "a", "s"),
+        build_b_s = build_array("b_s", "b", "s"),
+        build_g_s = build_array("g_s", "g", "s"),
         build_out_sh = build_array("out_sh", "out", "sh"),
     )
 }
@@ -931,6 +1018,11 @@ fn fused_step_lines(
                 let b = resolve_fused_input(&step.input_indices[1]);
                 format!("{a} + {b}")
             }
+            FusedStepOp::Sub => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let b = resolve_fused_input(&step.input_indices[1]);
+                format!("{a} - {b}")
+            }
             FusedStepOp::Mul => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
@@ -960,8 +1052,12 @@ fn fused_step_lines(
             FusedStepOp::MaxElem => {
                 let a = resolve_fused_input(&step.input_indices[0]);
                 let b = resolve_fused_input(&step.input_indices[1]);
-                let fmax = kind.func("fmaxf");
-                format!("{fmax}({a}, {b})")
+                format!("(isnan({a}) || (!isnan({b}) && ({a}) >= ({b})) ? ({a}) : ({b}))")
+            }
+            FusedStepOp::MinElem => {
+                let a = resolve_fused_input(&step.input_indices[0]);
+                let b = resolve_fused_input(&step.input_indices[1]);
+                format!("(isnan({a}) || (!isnan({b}) && ({a}) <= ({b})) ? ({a}) : ({b}))")
             }
             FusedStepOp::CmpLt => {
                 let a = resolve_fused_input(&step.input_indices[0]);

@@ -4,7 +4,7 @@
 //! a GPU or HIP runtime. They run in default CI.
 
 use chelis_backend_hip::codegen_hip;
-use chelis_ir::dag::{Dag, DimInfo, RiscOp, RtDim, TensorType};
+use chelis_ir::dag::{Dag, DimInfo, ExtremaKind, ExtremaOperand, RiscOp, RtDim, TensorType};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::env;
@@ -328,8 +328,10 @@ fn s2_neg_const_only_dag_only_fill_kernel() {
 fn s3_all_elementwise_ops_emit_kernels() {
     let ops_and_names: Vec<(RiscOp, &str)> = vec![
         (RiscOp::Add, "add"),
+        (RiscOp::Sub, "sub"),
         (RiscOp::Mul, "mul"),
         (RiscOp::MaxElem, "max_elem"),
+        (RiscOp::MinElem, "min_elem"),
         (RiscOp::CmpLt, "cmplt"),
     ];
     for (op, name) in &ops_and_names {
@@ -352,6 +354,90 @@ fn s3_all_elementwise_ops_emit_kernels() {
         assert!(
             result.c_source.contains("chelis_launch_kernel"),
             "Binary op '{name}' must emit a kernel launch"
+        );
+    }
+}
+
+#[test]
+fn direct_extrema_and_adjoint_emit_bit_preserving_kernels() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], vec_f32(4), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], vec_f32(4), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], vec_f32(4), None);
+    let sub = dag.add_node(RiscOp::Sub, vec![a, b], vec_f32(4), None);
+    let max = dag.add_node(RiscOp::MaxElem, vec![a, b], vec_f32(4), None);
+    let min = dag.add_node(RiscOp::MinElem, vec![a, b], vec_f32(4), None);
+    let adjoint = dag.add_node(
+        RiscOp::ExtremaAdjoint {
+            kind: ExtremaKind::Max,
+            operand: ExtremaOperand::Left,
+        },
+        vec![a, b, g],
+        vec_f32(4),
+        None,
+    );
+    for root in [sub, max, min, adjoint] {
+        dag.add_root(root);
+    }
+
+    let source = codegen_hip(&dag, "direct_arithmetic_structure")
+        .unwrap()
+        .c_source;
+    for kernel in [
+        "kernel_sub_f32",
+        "kernel_max_elem",
+        "kernel_min_elem",
+        "kernel_max_adjoint_left_f32",
+    ] {
+        assert!(source.contains(kernel), "missing {kernel}: {source}");
+    }
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av >= bv);"));
+    assert!(source.contains("bool select_left = isnan(av) || (!isnan(bv) && av <= bv);"));
+    assert!(!source.contains("fmaxf(av, bv)"), "{source}");
+    assert!(!source.contains("fminf(av, bv)"), "{source}");
+}
+
+#[test]
+fn direct_signed_integer_extrema_chains_stay_on_typed_hip_kernels() {
+    for (precision, suffix) in [
+        (Prim::Int8, "i8"),
+        (Prim::Int16, "i16"),
+        (Prim::Int32, "i32"),
+        (Prim::Int64, "i64"),
+    ] {
+        let ty = TensorType {
+            dims: vec![DimInfo::Lit(4)],
+            precision,
+        };
+        let mut dag = Dag::new();
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        dag.add_root(minimum);
+
+        let fused = fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+            "{precision:?} extrema must not enter the float-only fused HIP family"
+        );
+        let source = codegen_hip(
+            &fused,
+            &format!("direct_integer_extrema_{}", precision.name()),
+        )
+        .unwrap_or_else(|error| panic!("{precision:?} HIP codegen failed: {error}"))
+        .c_source;
+        assert!(
+            source.contains(&format!("kernel_max_elem_{suffix}")),
+            "{precision:?}: missing typed max kernel: {source}"
+        );
+        assert!(
+            source.contains(&format!("kernel_min_elem_{suffix}")),
+            "{precision:?}: missing typed min kernel: {source}"
         );
     }
 }

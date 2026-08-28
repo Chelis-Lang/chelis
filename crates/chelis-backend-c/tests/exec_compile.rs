@@ -7,7 +7,9 @@
 //! We link against the chelis_runtime .a to resolve those symbols.
 
 use chelis_backend_c::{CodegenOptions, MathLib, codegen_with_options};
-use chelis_ir::dag::{Dag, DimInfo, ReduceWindowKind, RiscOp, TensorType};
+use chelis_ir::dag::{
+    Dag, DimInfo, ExtremaKind, ExtremaOperand, ReduceWindowKind, RiscOp, TensorType,
+};
 use chelis_ir::fuse::fuse;
 use chelis_types::types::Prim;
 use std::fs;
@@ -2929,5 +2931,943 @@ fn exec_cmplt_f64_runtime_operands_match_evaluator() {
         "CHELIS_DTYPE_F64",
         &[-7.5, 2.25, -5.0, 10.0, 3.0],
         &[-3.5, 10.0, 3.0, 2.0, 3.0],
+    );
+}
+
+fn direct_int_sub_case(
+    tag: &str,
+    prim: Prim,
+    c_type: &str,
+    c_dtype: &str,
+    lhs: &str,
+    rhs: &str,
+    expected: &str,
+) {
+    let mut dag = Dag::new();
+    let ty = vec_prim(4, prim);
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+    dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+    let function = format!("direct_sub_{tag}");
+    let src = chelis_backend_c::codegen(&dag, &function)
+        .expect("direct subtraction codegen")
+        .c_source;
+    assert!(src.contains("chelis_int_checked_sub"), "{tag}: {src}");
+    assert!(!src.contains("chelis_int_checked_add("), "{tag}: {src}");
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+#include <limits.h>
+
+extern void {function}(chelis_tensor **inputs, int n_in, chelis_tensor **outputs, int n_out);
+
+int main(void) {{
+    {c_type} a_data[4] = {{ {lhs} }};
+    {c_type} b_data[4] = {{ {rhs} }};
+    {c_type} expected[4] = {{ {expected} }};
+    chelis_tensor a = make_view_typed_1d(a_data, 4, {c_dtype});
+    chelis_tensor b = make_view_typed_1d(b_data, 4, {c_dtype});
+    chelis_tensor *inputs[2] = {{ &a, &b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    {c_type} *got = ({c_type} *)outputs[0]->data;
+    for (int i = 0; i < 4; i++) {{
+        if (got[i] != expected[i]) return 1;
+    }}
+    puts("PASS");
+    return 0;
+}}
+"#
+    );
+    let output = compile_and_run_kernel(&function, &src, &harness)
+        .unwrap_or_else(|| panic!("{tag} direct subtraction did not compile and run"));
+    assert!(output.contains("PASS"), "{tag}: {output}");
+}
+
+#[test]
+fn direct_checked_subtraction_executes_exact_boundaries_at_every_signed_width() {
+    for case in [
+        (
+            "i8",
+            Prim::Int8,
+            "int8_t",
+            "CHELIS_DTYPE_I8",
+            "-1, INT8_MAX, INT8_MIN, 3",
+            "INT8_MIN, 1, -1, -4",
+            "INT8_MAX, INT8_MAX - 1, INT8_MIN + 1, 7",
+        ),
+        (
+            "i16",
+            Prim::Int16,
+            "int16_t",
+            "CHELIS_DTYPE_I16",
+            "-1, INT16_MAX, INT16_MIN, 3",
+            "INT16_MIN, 1, -1, -4",
+            "INT16_MAX, INT16_MAX - 1, INT16_MIN + 1, 7",
+        ),
+        (
+            "i32",
+            Prim::Int32,
+            "int32_t",
+            "CHELIS_DTYPE_I32",
+            "-1, INT32_MAX, INT32_MIN, 3",
+            "INT32_MIN, 1, -1, -4",
+            "INT32_MAX, INT32_MAX - 1, INT32_MIN + 1, 7",
+        ),
+        (
+            "i64",
+            Prim::Int64,
+            "int64_t",
+            "CHELIS_DTYPE_I64",
+            "-1, INT64_MAX, INT64_MIN, 3",
+            "INT64_MIN, 1, -1, -4",
+            "INT64_MAX, INT64_MAX - 1, INT64_MIN + 1, 7",
+        ),
+    ] {
+        direct_int_sub_case(case.0, case.1, case.2, case.3, case.4, case.5, case.6);
+    }
+}
+
+#[test]
+fn direct_checked_subtraction_traps_true_overflow_at_every_signed_width() {
+    for (tag, prim, c_type, c_dtype, max) in [
+        ("i8", Prim::Int8, "int8_t", "CHELIS_DTYPE_I8", "INT8_MAX"),
+        (
+            "i16",
+            Prim::Int16,
+            "int16_t",
+            "CHELIS_DTYPE_I16",
+            "INT16_MAX",
+        ),
+        (
+            "i32",
+            Prim::Int32,
+            "int32_t",
+            "CHELIS_DTYPE_I32",
+            "INT32_MAX",
+        ),
+        (
+            "i64",
+            Prim::Int64,
+            "int64_t",
+            "CHELIS_DTYPE_I64",
+            "INT64_MAX",
+        ),
+    ] {
+        let mut dag = Dag::new();
+        let ty = vec_prim(1, prim);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        dag.add_node(RiscOp::Sub, vec![a, b], ty, None);
+        let function = format!("direct_sub_overflow_{tag}");
+        let src = chelis_backend_c::codegen(&dag, &function).unwrap().c_source;
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+#include <stdint.h>
+#include <limits.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} av[1] = {{ {max} }}; {c_type} bv[1] = {{ -1 }};
+    chelis_tensor a = make_view_typed_1d(av, 1, {c_dtype});
+    chelis_tensor b = make_view_typed_1d(bv, 1, {c_dtype});
+    chelis_tensor *inputs[2] = {{ &a, &b }}; chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1); return 0;
+}}
+"#
+        );
+        let run = compile_and_capture_run(&function, &src, &harness);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            !run.status.success(),
+            "{tag} overflow unexpectedly succeeded"
+        );
+        assert!(
+            stderr.contains(&format!("numeric trap: overflow in sub at {}", prim.name())),
+            "{tag}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn direct_signed_integer_extrema_chains_survive_fusion_and_execute_at_every_width() {
+    for (tag, prim, c_type, c_dtype) in [
+        ("i8", Prim::Int8, "int8_t", "CHELIS_DTYPE_I8"),
+        ("i16", Prim::Int16, "int16_t", "CHELIS_DTYPE_I16"),
+        ("i32", Prim::Int32, "int32_t", "CHELIS_DTYPE_I32"),
+        ("i64", Prim::Int64, "int64_t", "CHELIS_DTYPE_I64"),
+    ] {
+        let mut dag = Dag::new();
+        let ty = vec_prim(4, prim);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        let c = dag.add_node(RiscOp::Load { name: "c".into() }, vec![], ty.clone(), None);
+        let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty.clone(), None);
+        let minimum = dag.add_node(RiscOp::MinElem, vec![maximum, c], ty, None);
+        dag.add_root(minimum);
+
+        let fused = fuse(&dag);
+        assert!(
+            fused
+                .nodes()
+                .iter()
+                .all(|node| !matches!(node.op, RiscOp::FusedElem { .. })),
+            "{tag}: signed-integer extrema must stay materialized"
+        );
+        let function = format!("direct_integer_extrema_chain_{tag}");
+        let src = chelis_backend_c::codegen(&fused, &function)
+            .unwrap_or_else(|error| panic!("{tag}: fused direct extrema codegen failed: {error}"))
+            .c_source;
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {c_type} a_data[4] = {{ -5, 7, 3, 0 }};
+    {c_type} b_data[4] = {{ -4, 7, -9, 5 }};
+    {c_type} c_data[4] = {{ -6, 6, 4, 5 }};
+    {c_type} expected[4] = {{ -6, 6, 3, 5 }};
+    chelis_tensor a = make_view_typed_1d(a_data, 4, {c_dtype});
+    chelis_tensor b = make_view_typed_1d(b_data, 4, {c_dtype});
+    chelis_tensor c = make_view_typed_1d(c_data, 4, {c_dtype});
+    chelis_tensor *inputs[3] = {{ &a, &b, &c }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 3, outputs, 1);
+    {c_type} *got = ({c_type} *)outputs[0]->data;
+    for (int i = 0; i < 4; i++) if (got[i] != expected[i]) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#
+        );
+        let output = compile_and_run_kernel(&function, &src, &harness)
+            .unwrap_or_else(|| panic!("{tag}: integer extrema chain did not compile and run"));
+        assert!(output.contains("PASS"), "{tag}: {output}");
+    }
+}
+
+#[test]
+fn direct_bool_max_elem_compiles_without_float_classification() {
+    let mut dag = Dag::new();
+    let ty = vec_prim(4, Prim::Bool);
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+    let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty, None);
+    dag.add_root(maximum);
+
+    let function = "direct_bool_max_elem";
+    let src = chelis_backend_c::codegen(&dag, function)
+        .expect("Bool max_elem codegen")
+        .c_source;
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t a_data[4] = {{ 0, 0, 1, 1 }};
+    uint8_t b_data[4] = {{ 0, 1, 0, 1 }};
+    uint8_t expected[4] = {{ 0, 1, 1, 1 }};
+    chelis_tensor a = make_view_typed_1d(a_data, 4, CHELIS_DTYPE_BOOL);
+    chelis_tensor b = make_view_typed_1d(b_data, 4, CHELIS_DTYPE_BOOL);
+    chelis_tensor *inputs[2] = {{ &a, &b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    uint8_t *got = (uint8_t *)outputs[0]->data;
+    for (int i = 0; i < 4; i++) if (got[i] != expected[i]) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#
+    );
+    let output = compile_and_run_kernel(function, &src, &harness)
+        .expect("Bool max_elem generated C must compile and run");
+    assert!(output.contains("PASS"), "{output}");
+    assert!(src.contains("uint8_t"), "Bool storage must stay byte-typed");
+    assert!(
+        !src.contains("isnan("),
+        "Bool max_elem must not enter the floating extrema branch: {src}"
+    );
+}
+
+#[test]
+fn direct_fused_runtime_shape_mismatch_traps_before_indexing() {
+    let runtime_vec = |name: &str| TensorType {
+        dims: vec![DimInfo::Named(name.into(), None)],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let n_ty = runtime_vec("n");
+    let m_ty = runtime_vec("m");
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        n_ty.clone(),
+        None,
+    );
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], m_ty, None);
+    let c = dag.add_node(
+        RiscOp::Load { name: "c".into() },
+        vec![],
+        n_ty.clone(),
+        None,
+    );
+    let difference = dag.add_node(RiscOp::Sub, vec![a, b], n_ty.clone(), None);
+    let minimum = dag.add_node(RiscOp::MinElem, vec![difference, c], n_ty, None);
+    dag.add_root(minimum);
+
+    let fused = fuse(&dag);
+    assert!(
+        fused
+            .nodes()
+            .iter()
+            .any(|node| matches!(node.op, RiscOp::FusedElem { .. })),
+        "float Sub -> MinElem must exercise the fused path"
+    );
+    let function = "direct_fused_runtime_shape_guard";
+    let src = chelis_backend_c::codegen(&fused, function)
+        .expect("fused runtime-shape codegen")
+        .c_source;
+    assert!(
+        src.contains("elementwise operand shape mismatch"),
+        "fused codegen dropped the deferred operand-shape guard:\n{src}"
+    );
+    assert!(
+        src.contains("if (t1->rank == t2->rank)"),
+        "fused codegen must compare every equal-rank external-input pair:\n{src}"
+    );
+
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+static chelis_tensor make_distinct_view(float *data, int64_t *shape) {{
+    static const int64_t strides[1] = {{1}};
+    return (chelis_tensor){{
+        .data = data, .shape = shape, .strides = strides, .size = shape[0],
+        .byte_capacity = shape[0] * (int64_t)sizeof(float), .rank = 1,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {{0, 0}},
+    }};
+}}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float a_data[3] = {{ 1, 2, 3 }};
+    float b_data[2] = {{ 1, 2 }};
+    float c_data[3] = {{ 4, 5, 6 }};
+    int64_t a_shape[1] = {{3}}, b_shape[1] = {{2}}, c_shape[1] = {{3}};
+    chelis_tensor a = make_distinct_view(a_data, a_shape);
+    chelis_tensor b = make_distinct_view(b_data, b_shape);
+    chelis_tensor c = make_distinct_view(c_data, c_shape);
+    chelis_tensor *inputs[3] = {{ &a, &b, &c }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 3, outputs, 1);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run("direct_fused_runtime_shape_guard", &src, &harness);
+    assert!(
+        !run.status.success(),
+        "mismatched deferred dimensions reached the fused loop; stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        "fused runtime-shape trap emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+fn direct_fused_reduction_runtime_shape_guard_case(reduce_kind: &str) {
+    let matrix = |row_name: &str, column_name: &str| TensorType {
+        dims: vec![
+            DimInfo::Named(row_name.into(), None),
+            DimInfo::Named(column_name.into(), None),
+        ],
+        precision: Prim::F32,
+    };
+    let mut dag = Dag::new();
+    let output_matrix_ty = matrix("rows", "columns");
+    let other_matrix_ty = matrix("other_rows", "other_columns");
+    let scalar = dag.add_node(
+        RiscOp::Load {
+            name: "scalar".into(),
+        },
+        vec![],
+        TensorType::scalar_f32(),
+        None,
+    );
+    let a = dag.add_node(
+        RiscOp::Load { name: "a".into() },
+        vec![],
+        output_matrix_ty.clone(),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::Load { name: "b".into() },
+        vec![],
+        other_matrix_ty,
+        None,
+    );
+    let shifted = dag.add_node(RiscOp::Add, vec![scalar, a], output_matrix_ty.clone(), None);
+    let product = dag.add_node(RiscOp::Mul, vec![shifted, b], output_matrix_ty, None);
+    let output_ty = TensorType {
+        dims: vec![DimInfo::Named("rows".into(), None)],
+        precision: Prim::F32,
+    };
+    let reduced = match reduce_kind {
+        "sum" => dag.add_node(
+            RiscOp::Sum {
+                axis: 1,
+                accumulator: Prim::F32,
+            },
+            vec![product],
+            output_ty,
+            None,
+        ),
+        "max" => dag.add_node(
+            RiscOp::MaxReduce { axis: 1 },
+            vec![product],
+            output_ty,
+            None,
+        ),
+        _ => unreachable!(),
+    };
+    dag.add_root(reduced);
+
+    let fused = fuse(&dag);
+    let fused_node = fused
+        .nodes()
+        .iter()
+        .find(|node| matches!(node.op, RiscOp::FusedElem { .. }))
+        .expect("Add -> Mul must form a FusedElem before reduction inlining");
+    assert_eq!(
+        fused_node.inputs,
+        vec![scalar, a, b],
+        "the scalar must be first so the guard proves all-pairs tensor comparison"
+    );
+    assert!(
+        chelis_ir::fuse::reduction_inlined_fused_elems(&fused).contains(&fused_node.id),
+        "the regression must exercise the reduction-inlined FusedElem path"
+    );
+
+    let function = format!("direct_fused_{reduce_kind}_runtime_shape_guard");
+    let src = chelis_backend_c::codegen(&fused, &function)
+        .expect("fused reduction runtime-shape codegen")
+        .c_source;
+    let function_body = src
+        .split_once(&format!("void {function}("))
+        .unwrap_or_else(|| panic!("generated C omitted {function}:\n{src}"))
+        .1;
+    let guard_offset = function_body
+        .find("elementwise operand shape mismatch")
+        .unwrap_or_else(|| panic!("inlined {reduce_kind} dropped its shape guard:\n{src}"));
+    let allocation_offset = function_body
+        .find("chelis_alloc(")
+        .unwrap_or_else(|| panic!("inlined {reduce_kind} emitted no output allocation:\n{src}"));
+    assert!(
+        guard_offset < allocation_offset,
+        "inlined {reduce_kind} must guard before allocation or indexing:\n{src}"
+    );
+    assert!(
+        function_body.contains("if (t1->rank == t2->rank)"),
+        "scalar-first ordering must still compare the later tensor pair:\n{src}"
+    );
+    assert_eq!(
+        function_body.matches("chelis_alloc(").count(),
+        1,
+        "reduction-inlined FusedElem must not allocate an intermediate:\n{src}"
+    );
+
+    let expected = if reduce_kind == "sum" {
+        "29.0f, 110.0f"
+    } else {
+        "16.0f, 49.0f"
+    };
+    let harness_support = r#"
+static chelis_tensor make_scalar_view(float *data) {
+    return (chelis_tensor){
+        .data = data, .shape = NULL, .strides = NULL, .size = 1,
+        .byte_capacity = (int64_t)sizeof(float), .rank = 0,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
+    };
+}
+static chelis_tensor make_matrix_view(
+    float *data, int64_t *shape, int64_t *strides, int64_t backing_elements
+) {
+    return (chelis_tensor){
+        .data = data, .shape = shape, .strides = strides,
+        .size = shape[0] * shape[1],
+        .byte_capacity = backing_elements * (int64_t)sizeof(float), .rank = 2,
+        .dtype = CHELIS_DTYPE_F32, .owns_data = 0, .reserved = {0, 0},
+    };
+}
+"#;
+    let positive_harness = format!(
+        r#"{HARNESS_HEADER}{harness_support}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float scalar_data[1] = {{1.0f}};
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[7] = {{2, 3, 4, -99, 5, 6, 7}};
+    int64_t a_shape[2] = {{2, 3}}, a_strides[2] = {{3, 1}};
+    int64_t b_shape[2] = {{2, 3}}, b_strides[2] = {{4, 1}};
+    chelis_tensor scalar = make_scalar_view(scalar_data);
+    chelis_tensor a = make_matrix_view(a_data, a_shape, a_strides, 6);
+    chelis_tensor b = make_matrix_view(b_data, b_shape, b_strides, 7);
+    chelis_tensor *inputs[3] = {{&scalar, &a, &b}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    {function}(inputs, 3, outputs, 1);
+    float expected[2] = {{{expected}}};
+    float *got = (float *)outputs[0]->data;
+    for (int i = 0; i < 2; i++) if (fabsf(got[i] - expected[i]) > 1e-6f) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#
+    );
+    let output = compile_and_run_kernel(
+        &format!("direct_fused_{reduce_kind}_shape_positive"),
+        &src,
+        &positive_harness,
+    )
+    .unwrap_or_else(|| panic!("inlined {reduce_kind} positive case failed"));
+    assert!(output.contains("PASS"), "inlined {reduce_kind}: {output}");
+
+    let mismatch_harness = format!(
+        r#"{HARNESS_HEADER}{harness_support}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    float scalar_data[1] = {{1.0f}};
+    float a_data[6] = {{1, 2, 3, 4, 5, 6}};
+    float b_data[5] = {{2, 3, -99, 5, 6}};
+    int64_t a_shape[2] = {{2, 3}}, a_strides[2] = {{3, 1}};
+    int64_t b_shape[2] = {{2, 2}}, b_strides[2] = {{3, 1}};
+    chelis_tensor scalar = make_scalar_view(scalar_data);
+    chelis_tensor a = make_matrix_view(a_data, a_shape, a_strides, 6);
+    chelis_tensor b = make_matrix_view(b_data, b_shape, b_strides, 5);
+    chelis_tensor *inputs[3] = {{&scalar, &a, &b}};
+    chelis_tensor *outputs[1] = {{NULL}};
+    {function}(inputs, 3, outputs, 1);
+    puts("UNREACHABLE");
+    return 0;
+}}
+"#
+    );
+    let run = compile_and_capture_run(
+        &format!("direct_fused_{reduce_kind}_shape_mismatch"),
+        &src,
+        &mismatch_harness,
+    );
+    assert!(
+        !run.status.success(),
+        "inlined {reduce_kind} mismatch reached allocation/indexing"
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stderr).contains("elementwise operand shape mismatch"),
+        "inlined {reduce_kind} mismatch emitted the wrong diagnostic: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn direct_fused_sum_runtime_shape_guard_precedes_allocation_and_executes() {
+    direct_fused_reduction_runtime_shape_guard_case("sum");
+}
+
+#[test]
+fn direct_fused_max_reduce_runtime_shape_guard_precedes_allocation_and_executes() {
+    direct_fused_reduction_runtime_shape_guard_case("max");
+}
+
+#[derive(Clone, Copy)]
+struct DirectExtremaBitCase<'a> {
+    tag: &'a str,
+    prim: Prim,
+    c_dtype: &'a str,
+    bits_type: &'a str,
+    lhs_bits: &'a [u64],
+    rhs_bits: &'a [u64],
+}
+
+fn direct_extrema_bit_case(
+    case: DirectExtremaBitCase<'_>,
+    expected_max: &[u64],
+    expected_min: &[u64],
+) {
+    let DirectExtremaBitCase {
+        tag,
+        prim,
+        c_dtype,
+        bits_type,
+        lhs_bits,
+        rhs_bits,
+    } = case;
+    let n = lhs_bits.len();
+    assert_eq!(rhs_bits.len(), n);
+    let format_bits = |bits: &[u64]| {
+        bits.iter()
+            .map(|value| match bits_type {
+                "uint64_t" => format!("UINT64_C(0x{value:016x})"),
+                "uint32_t" => format!("UINT32_C(0x{value:08x})"),
+                _ => format!("UINT16_C(0x{value:04x})"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for (op_name, op, expected) in [
+        ("max", RiscOp::MaxElem, expected_max),
+        ("min", RiscOp::MinElem, expected_min),
+    ] {
+        let mut dag = Dag::new();
+        let ty = vec_prim(n, prim);
+        let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+        let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+        dag.add_node(op, vec![a, b], ty, None);
+        let function = format!("direct_{op_name}_{tag}");
+        let src = chelis_backend_c::codegen(&dag, &function).unwrap().c_source;
+        assert!(!src.contains("fmaxf("), "{tag}/{op_name}: {src}");
+        assert!(!src.contains("fminf("), "{tag}/{op_name}: {src}");
+
+        let (value_type, setup, got) = match prim {
+            Prim::F64 => (
+                "double",
+                "double a_data[N]; double b_data[N]; memcpy(a_data, a_bits, sizeof(a_bits)); memcpy(b_data, b_bits, sizeof(b_bits));",
+                "uint64_t got; memcpy(&got, &((double *)outputs[0]->data)[i], sizeof(got));",
+            ),
+            Prim::F32 => (
+                "float",
+                "float a_data[N]; float b_data[N]; memcpy(a_data, a_bits, sizeof(a_bits)); memcpy(b_data, b_bits, sizeof(b_bits));",
+                "uint32_t got; memcpy(&got, &((float *)outputs[0]->data)[i], sizeof(got));",
+            ),
+            Prim::F16 | Prim::Bf16 => (
+                "uint16_t",
+                "uint16_t *a_data = a_bits; uint16_t *b_data = b_bits;",
+                "uint16_t got = ((uint16_t *)outputs[0]->data)[i];",
+            ),
+            _ => unreachable!(),
+        };
+        let harness = format!(
+            r#"{HARNESS_HEADER}
+#include <stdint.h>
+#define N {n}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {bits_type} a_bits[N] = {{ {lhs} }};
+    {bits_type} b_bits[N] = {{ {rhs} }};
+    {bits_type} expected[N] = {{ {expected} }};
+    {setup}
+    (void)sizeof({value_type});
+    chelis_tensor a = make_view_typed_1d(a_data, N, {c_dtype});
+    chelis_tensor b = make_view_typed_1d(b_data, N, {c_dtype});
+    chelis_tensor *inputs[2] = {{ &a, &b }}; chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    for (int i = 0; i < N; i++) {{ {got} if (got != expected[i]) return 1; }}
+    puts("PASS"); return 0;
+}}
+"#,
+            lhs = format_bits(lhs_bits),
+            rhs = format_bits(rhs_bits),
+            expected = format_bits(expected),
+        );
+        let output = compile_and_run_kernel(&function, &src, &harness)
+            .unwrap_or_else(|| panic!("{tag}/{op_name} did not compile and run"));
+        assert!(output.contains("PASS"), "{tag}/{op_name}: {output}");
+    }
+}
+
+#[test]
+fn direct_extrema_preserve_nan_payloads_and_lhs_signed_zero_at_every_float_width() {
+    direct_extrema_bit_case(
+        DirectExtremaBitCase {
+            tag: "f64",
+            prim: Prim::F64,
+            c_dtype: "CHELIS_DTYPE_F64",
+            bits_type: "uint64_t",
+            lhs_bits: &[
+                0x7ff8_1111_2222_3333,
+                0x3ff0_0000_0000_0000,
+                0,
+                0x8000_0000_0000_0000,
+            ],
+            rhs_bits: &[
+                0x4000_0000_0000_0000,
+                0xfff8_4444_5555_6666,
+                0x8000_0000_0000_0000,
+                0,
+            ],
+        },
+        &[
+            0x7ff8_1111_2222_3333,
+            0xfff8_4444_5555_6666,
+            0,
+            0x8000_0000_0000_0000,
+        ],
+        &[
+            0x7ff8_1111_2222_3333,
+            0xfff8_4444_5555_6666,
+            0,
+            0x8000_0000_0000_0000,
+        ],
+    );
+    direct_extrema_bit_case(
+        DirectExtremaBitCase {
+            tag: "f32",
+            prim: Prim::F32,
+            c_dtype: "CHELIS_DTYPE_F32",
+            bits_type: "uint32_t",
+            lhs_bits: &[0x7fc1_2345, 0x3f80_0000, 0, 0x8000_0000],
+            rhs_bits: &[0x4000_0000, 0xffc5_4321, 0x8000_0000, 0],
+        },
+        &[0x7fc1_2345, 0xffc5_4321, 0, 0x8000_0000],
+        &[0x7fc1_2345, 0xffc5_4321, 0, 0x8000_0000],
+    );
+    direct_extrema_bit_case(
+        DirectExtremaBitCase {
+            tag: "f16",
+            prim: Prim::F16,
+            c_dtype: "CHELIS_DTYPE_F16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7e11, 0x3c00, 0, 0x8000],
+            rhs_bits: &[0x4000, 0xfe22, 0x8000, 0],
+        },
+        &[0x7e11, 0xfe22, 0, 0x8000],
+        &[0x7e11, 0xfe22, 0, 0x8000],
+    );
+    direct_extrema_bit_case(
+        DirectExtremaBitCase {
+            tag: "bf16",
+            prim: Prim::Bf16,
+            c_dtype: "CHELIS_DTYPE_BF16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7fc1, 0x3f80, 0, 0x8000],
+            rhs_bits: &[0x4000, 0xffc2, 0x8000, 0],
+        },
+        &[0x7fc1, 0xffc2, 0, 0x8000],
+        &[0x7fc1, 0xffc2, 0, 0x8000],
+    );
+}
+
+fn direct_extrema_adjoint_bit_case(
+    case: DirectExtremaBitCase<'_>,
+    gradient_bits: &[u64],
+    expected: [&[u64]; 4],
+) {
+    let DirectExtremaBitCase {
+        tag,
+        prim,
+        c_dtype,
+        bits_type,
+        lhs_bits,
+        rhs_bits,
+    } = case;
+    let n = lhs_bits.len();
+    assert_eq!(rhs_bits.len(), n);
+    assert_eq!(gradient_bits.len(), n);
+    assert!(expected.iter().all(|values| values.len() == n));
+    let format_bits = |bits: &[u64]| {
+        bits.iter()
+            .map(|value| match bits_type {
+                "uint64_t" => format!("UINT64_C(0x{value:016x})"),
+                "uint32_t" => format!("UINT32_C(0x{value:08x})"),
+                _ => format!("UINT16_C(0x{value:04x})"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut dag = Dag::new();
+    let ty = vec_prim(n, prim);
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+    let g = dag.add_node(RiscOp::Load { name: "g".into() }, vec![], ty.clone(), None);
+    for (kind, operand) in [
+        (ExtremaKind::Max, ExtremaOperand::Left),
+        (ExtremaKind::Max, ExtremaOperand::Right),
+        (ExtremaKind::Min, ExtremaOperand::Left),
+        (ExtremaKind::Min, ExtremaOperand::Right),
+    ] {
+        let node = dag.add_node(
+            RiscOp::ExtremaAdjoint { kind, operand },
+            vec![a, b, g],
+            ty.clone(),
+            None,
+        );
+        dag.add_root(node);
+    }
+    let function = format!("direct_extrema_adjoint_{tag}");
+    let src = chelis_backend_c::codegen(&dag, &function).unwrap().c_source;
+    assert!(
+        src.contains("UINT16_C(0)") || src.contains("0.0"),
+        "{tag}: {src}"
+    );
+
+    let setup = match prim {
+        Prim::F64 => {
+            "double a_data[N]; double b_data[N]; double g_data[N]; memcpy(a_data, a_bits, sizeof(a_bits)); memcpy(b_data, b_bits, sizeof(b_bits)); memcpy(g_data, g_bits, sizeof(g_bits));"
+        }
+        Prim::F32 => {
+            "float a_data[N]; float b_data[N]; float g_data[N]; memcpy(a_data, a_bits, sizeof(a_bits)); memcpy(b_data, b_bits, sizeof(b_bits)); memcpy(g_data, g_bits, sizeof(g_bits));"
+        }
+        Prim::F16 | Prim::Bf16 => {
+            "uint16_t *a_data = a_bits; uint16_t *b_data = b_bits; uint16_t *g_data = g_bits;"
+        }
+        _ => unreachable!(),
+    };
+    let read_got = match prim {
+        Prim::F64 => "uint64_t got; memcpy(&got, &((double *)outputs[out]->data)[i], sizeof(got));",
+        Prim::F32 => "uint32_t got; memcpy(&got, &((float *)outputs[out]->data)[i], sizeof(got));",
+        Prim::F16 | Prim::Bf16 => "uint16_t got = ((uint16_t *)outputs[out]->data)[i];",
+        _ => unreachable!(),
+    };
+    let expected_rows = expected
+        .iter()
+        .map(|values| format!("{{ {} }}", format_bits(values)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+#define N {n}
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    {bits_type} a_bits[N] = {{ {lhs} }};
+    {bits_type} b_bits[N] = {{ {rhs} }};
+    {bits_type} g_bits[N] = {{ {gradient} }};
+    {bits_type} expected[4][N] = {{ {expected_rows} }};
+    {setup}
+    chelis_tensor a = make_view_typed_1d(a_data, N, {c_dtype});
+    chelis_tensor b = make_view_typed_1d(b_data, N, {c_dtype});
+    chelis_tensor g = make_view_typed_1d(g_data, N, {c_dtype});
+    chelis_tensor *inputs[3] = {{ &a, &b, &g }};
+    chelis_tensor *outputs[4] = {{ NULL, NULL, NULL, NULL }};
+    {function}(inputs, 3, outputs, 4);
+    for (int out = 0; out < 4; out++) {{
+        for (int i = 0; i < N; i++) {{ {read_got} if (got != expected[out][i]) return 1; }}
+    }}
+    puts("PASS"); return 0;
+}}
+"#,
+        lhs = format_bits(lhs_bits),
+        rhs = format_bits(rhs_bits),
+        gradient = format_bits(gradient_bits),
+    );
+    let output = compile_and_run_kernel(&function, &src, &harness)
+        .unwrap_or_else(|| panic!("{tag} direct extrema adjoints did not compile and run"));
+    assert!(output.contains("PASS"), "{tag}: {output}");
+}
+
+#[test]
+fn direct_extrema_adjoints_copy_exact_gradient_bits_for_ties_and_nan_selection() {
+    let run = |case: DirectExtremaBitCase<'_>, gradient: &[u64]| {
+        let zero = 0;
+        let max_left = [
+            gradient[0],
+            zero,
+            gradient[2],
+            gradient[3],
+            gradient[4],
+            zero,
+        ];
+        let max_right = [zero, gradient[1], zero, zero, zero, gradient[5]];
+        let min_left = [
+            gradient[0],
+            zero,
+            gradient[2],
+            gradient[3],
+            zero,
+            gradient[5],
+        ];
+        let min_right = [zero, gradient[1], zero, zero, gradient[4], zero];
+        direct_extrema_adjoint_bit_case(
+            case,
+            gradient,
+            [&max_left, &max_right, &min_left, &min_right],
+        );
+    };
+
+    run(
+        DirectExtremaBitCase {
+            tag: "f64",
+            prim: Prim::F64,
+            c_dtype: "CHELIS_DTYPE_F64",
+            bits_type: "uint64_t",
+            lhs_bits: &[
+                0x7ff8_1111_2222_3333,
+                0x3ff0_0000_0000_0000,
+                0,
+                0x8000_0000_0000_0000,
+                0x4000_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+            ],
+            rhs_bits: &[
+                0x4000_0000_0000_0000,
+                0xfff8_4444_5555_6666,
+                0x8000_0000_0000_0000,
+                0,
+                0x3ff0_0000_0000_0000,
+                0x4000_0000_0000_0000,
+            ],
+        },
+        &[
+            0x7ff8_abcd_1234_5678,
+            0xbff0_0000_0000_0000,
+            0x3ff0_0000_0000_0000,
+            0x8000_0000_0000_0000,
+            0x4008_0000_0000_0000,
+            0xc010_0000_0000_0000,
+        ],
+    );
+    run(
+        DirectExtremaBitCase {
+            tag: "f32",
+            prim: Prim::F32,
+            c_dtype: "CHELIS_DTYPE_F32",
+            bits_type: "uint32_t",
+            lhs_bits: &[
+                0x7fc1_2345,
+                0x3f80_0000,
+                0,
+                0x8000_0000,
+                0x4000_0000,
+                0x3f80_0000,
+            ],
+            rhs_bits: &[
+                0x4000_0000,
+                0xffc5_4321,
+                0x8000_0000,
+                0,
+                0x3f80_0000,
+                0x4000_0000,
+            ],
+        },
+        &[
+            0x7fc6_789a,
+            0xbf80_0000,
+            0x3f80_0000,
+            0x8000_0000,
+            0x4040_0000,
+            0xc080_0000,
+        ],
+    );
+    run(
+        DirectExtremaBitCase {
+            tag: "f16",
+            prim: Prim::F16,
+            c_dtype: "CHELIS_DTYPE_F16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7e11, 0x3c00, 0, 0x8000, 0x4000, 0x3c00],
+            rhs_bits: &[0x4000, 0xfe22, 0x8000, 0, 0x3c00, 0x4000],
+        },
+        &[0x7e33, 0xbc00, 0x3c00, 0x8000, 0x4200, 0xc400],
+    );
+    run(
+        DirectExtremaBitCase {
+            tag: "bf16",
+            prim: Prim::Bf16,
+            c_dtype: "CHELIS_DTYPE_BF16",
+            bits_type: "uint16_t",
+            lhs_bits: &[0x7fc1, 0x3f80, 0, 0x8000, 0x4000, 0x3f80],
+            rhs_bits: &[0x4000, 0xffc2, 0x8000, 0, 0x3f80, 0x4000],
+        },
+        &[0x7fc3, 0xbf80, 0x3f80, 0x8000, 0x4040, 0xc080],
     );
 }

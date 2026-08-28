@@ -1,16 +1,19 @@
-//! Tier 2 decomposition helpers.
+//! Tier 2 decomposition helpers and direct identity lowerers.
 //!
-//! These functions decompose Tier 2 (derived) operations into Tier 1 RISC DAG nodes.
+//! Most functions in this module decompose Tier 2 derived operations into
+//! Tier 1 RISC DAG nodes. `lower_sub` and `lower_min_elem` emit direct Tier-1 identities
+//! while retaining this module's shared span-propagation path.
 //!
-//! Span propagation per `spec/design/chelis_span_survival.md` §2.3 Tier 2
-//! row: every synthesized sub-node inherits the decomposed parent's
+//! For decomposing helpers, span propagation follows
+//! `spec/design/chelis_span_survival.md` §2.3's Tier 2 row: every synthesized
+//! sub-node inherits the decomposed parent's
 //! `span_id`. If the parent had no span, sub-nodes carry the canonical
 //! `__synthesized_tier2__` marker (defined in
 //! `spec/03-deep-syntax.md` §1.1.1).
 //!
 //! Each public lowerer takes `parent_span: Option<&str>`:
-//!   * `Some(s)` — the operation's source span; sub-nodes inherit `s`.
-//!   * `None` — no source region; sub-nodes carry `__synthesized_tier2__`.
+//!   * `Some(s)` — the operation's source span; emitted nodes inherit `s`.
+//!   * `None` — no source region; emitted nodes carry `__synthesized_tier2__`.
 //!
 //! The internal `add_synth` helper applies the rule once per node so we
 //! don't duplicate it across the ~109 `add_node` callsites.
@@ -42,7 +45,7 @@ fn add_synth(
     dag.add_node(op, inputs, output_type, span_id)
 }
 
-/// `sub(a, b)` = `add(a, neg(b))`
+/// Direct checked `sub(a, b)` identity ([05-OP-41]).
 pub fn lower_sub(
     dag: &mut Dag,
     a: NodeId,
@@ -50,8 +53,7 @@ pub fn lower_sub(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let neg_b = add_synth(dag, RiscOp::Neg, vec![b], ty.clone(), parent_span);
-    add_synth(dag, RiscOp::Add, vec![a, neg_b], ty.clone(), parent_span)
+    add_synth(dag, RiscOp::Sub, vec![a, b], ty.clone(), parent_span)
 }
 
 /// `relu(x)` = `max_elem(x, const(0))`
@@ -386,7 +388,7 @@ pub fn lower_neq(
     )
 }
 
-/// H1: `min_elem(a, b)` = `neg(max_elem(neg(a), neg(b)))`
+/// Direct stored-bit `min_elem(a, b)` selection identity ([05-OP-40]).
 pub fn lower_min_elem(
     dag: &mut Dag,
     a: NodeId,
@@ -394,16 +396,7 @@ pub fn lower_min_elem(
     ty: &TensorType,
     parent_span: Option<&str>,
 ) -> NodeId {
-    let neg_a = add_synth(dag, RiscOp::Neg, vec![a], ty.clone(), parent_span);
-    let neg_b = add_synth(dag, RiscOp::Neg, vec![b], ty.clone(), parent_span);
-    let max = add_synth(
-        dag,
-        RiscOp::MaxElem,
-        vec![neg_a, neg_b],
-        ty.clone(),
-        parent_span,
-    );
-    add_synth(dag, RiscOp::Neg, vec![max], ty.clone(), parent_span)
+    add_synth(dag, RiscOp::MinElem, vec![a, b], ty.clone(), parent_span)
 }
 
 /// H2: `and(a, b)` on bools = `mul(a, b)`
@@ -1386,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn sub_produces_add_neg() {
+    fn sub_produces_direct_identity() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 5.0),
@@ -1403,13 +1396,10 @@ mod tests {
         let result = lower_sub(&mut dag, a, b, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
-        // Should have: Const(5), Const(3), Neg, Add
-        assert_eq!(dag.len(), 4);
+        assert_eq!(dag.len(), 3);
         let result_node = dag.get(result).unwrap();
-        assert_eq!(result_node.op, RiscOp::Add);
-        // The Neg node is one of the inputs to Add.
-        let neg_id = result_node.inputs[1];
-        assert_eq!(dag.get(neg_id).unwrap().op, RiscOp::Neg);
+        assert_eq!(result_node.op, RiscOp::Sub);
+        assert_eq!(result_node.inputs, vec![a, b]);
     }
 
     #[test]
@@ -1659,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn min_elem_produces_neg_max_neg() {
+    fn min_elem_produces_direct_selection() {
         let mut dag = Dag::new();
         let a = dag.add_node(
             RiscOp::synth_const(scalar_f32().precision, 5.0),
@@ -1676,10 +1666,10 @@ mod tests {
         let result = lower_min_elem(&mut dag, a, b, &scalar_f32(), None);
         assert!(verify::verify(&dag).is_empty());
 
-        // a, b, neg(a), neg(b), max(neg_a, neg_b), neg(max)
-        assert_eq!(dag.len(), 6);
+        assert_eq!(dag.len(), 3);
         let node = dag.get(result).unwrap();
-        assert_eq!(node.op, RiscOp::Neg);
+        assert_eq!(node.op, RiscOp::MinElem);
+        assert_eq!(node.inputs, vec![a, b]);
     }
 
     // --- H2: Boolean operators ---
@@ -1885,10 +1875,10 @@ mod tests {
                 .any(|op| matches!(op, RiscOp::Sum { axis: 0, .. })),
             "expected Sum"
         );
-        // Sub still produces Add+Neg.
+        // Sub remains its own primitive identity.
         assert!(
-            ops.iter().any(|op| matches!(op, RiscOp::Neg)),
-            "expected Neg (from sub)"
+            ops.iter().any(|op| matches!(op, RiscOp::Sub)),
+            "expected direct Sub"
         );
 
         // the final result is now a single `Div` node

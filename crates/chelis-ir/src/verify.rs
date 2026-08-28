@@ -65,12 +65,14 @@ pub fn verify(dag: &Dag) -> Vec<String> {
         let arity = node.inputs.len();
         match &node.op {
             RiscOp::Add
+            | RiscOp::Sub
             | RiscOp::Mul
             | RiscOp::Div
             | RiscOp::FloorDiv
             | RiscOp::TruncDiv
             | RiscOp::CmpLt
-            | RiscOp::MaxElem => {
+            | RiscOp::MaxElem
+            | RiscOp::MinElem => {
                 if arity != 2 {
                     errors.push(format!(
                         "binary op at node {} has {} inputs (expected 2)",
@@ -123,6 +125,36 @@ pub fn verify(dag: &Dag) -> Vec<String> {
                         "reduce_window_grad at node {} has {} inputs (expected 2)",
                         node.id.0, arity
                     ));
+                }
+            }
+            RiscOp::ExtremaAdjoint { .. } => {
+                if arity != 3 {
+                    errors.push(format!(
+                        "extrema adjoint at node {} has {} inputs (expected 3)",
+                        node.id.0, arity
+                    ));
+                } else {
+                    let inputs = node
+                        .inputs
+                        .iter()
+                        .filter_map(|input| dag.get(*input))
+                        .collect::<Vec<_>>();
+                    if inputs.len() == 3 {
+                        for input in &inputs {
+                            if input.output_type != node.output_type {
+                                errors.push(format!(
+                                    "extrema adjoint at node {} has input type {:?}, expected {:?}",
+                                    node.id.0, input.output_type, node.output_type
+                                ));
+                            }
+                        }
+                        if !node.output_type.precision.is_float() {
+                            errors.push(format!(
+                                "extrema adjoint at node {} requires a float dtype, found {:?}",
+                                node.id.0, node.output_type.precision
+                            ));
+                        }
+                    }
                 }
             }
             RiscOp::BlasMatmul {

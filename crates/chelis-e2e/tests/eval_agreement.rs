@@ -306,12 +306,15 @@ fn agreement_op_for_risc(op: &RiscOp) -> AgreementOp {
         RiscOp::Sqrt => AgreementOp::Sqrt,
         RiscOp::Tan => AgreementOp::Tan,
         RiscOp::Add
+        | RiscOp::Sub
         | RiscOp::Mul
         | RiscOp::Div
         | RiscOp::FloorDiv
         | RiscOp::TruncDiv
         | RiscOp::CmpLt
         | RiscOp::MaxElem
+        | RiscOp::MinElem
+        | RiscOp::ExtremaAdjoint { .. }
         | RiscOp::Neg
         | RiscOp::Abs
         | RiscOp::Floor

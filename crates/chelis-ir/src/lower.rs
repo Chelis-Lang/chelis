@@ -8177,7 +8177,7 @@ impl LowerCtx {
                 self.attach_reuse_hint(node, app_span, &[x])
             }
 
-            // Tier 2 decompositions
+            // Direct Tier-1 subtraction identity
             "sub" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "sub lhs");
                 let b = self.lower_expr_node(&args[1], "sub rhs");
@@ -8189,6 +8189,7 @@ impl LowerCtx {
                 let node = tier2::lower_sub(&mut self.dag, a, b, &out_ty, parent_span.as_deref());
                 self.attach_reuse_hint(node, app_span, &[a, b])
             }
+            // Tier 2 decompositions
             "relu" if args.len() == 1 => {
                 let x = self.lower_expr_node(&args[0], "relu input");
                 // Elementwise: output dims always come from the lowered
@@ -8505,6 +8506,7 @@ impl LowerCtx {
                 let parent_span = self.current_span_id.clone();
                 tier2::lower_neq(&mut self.dag, a, b, ty, parent_span.as_deref())
             }
+            // Direct Tier-1 minimum selection identity
             "min_elem" if args.len() == 2 => {
                 let a = self.lower_expr_node(&args[0], "min_elem lhs");
                 let b = self.lower_expr_node(&args[1], "min_elem rhs");
@@ -14095,17 +14097,17 @@ mod tests {
     }
 
     #[test]
-    fn lower_sub_decomposes() {
+    fn lower_sub_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 1.0))
             (def {} c (app {} (var {} sub) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a=Const(3), b=Const(1), Neg(b), Add(a, Neg(b))
-        assert_eq!(non_drop_len(&dag), 4);
+        // a=Const(3), b=Const(1), Sub(a, b)
+        assert_eq!(non_drop_len(&dag), 3);
         assert!(verify::verify(&dag).is_empty());
-        assert_eq!(root_node(&dag).op, RiscOp::Add);
+        assert_eq!(root_node(&dag).op, RiscOp::Sub);
     }
 
     #[test]
@@ -14850,17 +14852,19 @@ mod tests {
         assert_eq!(non_drop_len(&dag), 7);
     }
 
+    // --- Direct Tier-1 MinElem lowering ---
+
     #[test]
-    fn lower_min_elem_decomposes() {
+    fn lower_min_elem_preserves_direct_identity() {
         let src = r#"
             (def {} a (lit {type: (t-tensor {} (t-prim {} f32))} 5.0))
             (def {} b (lit {type: (t-tensor {} (t-prim {} f32))} 3.0))
             (def {} c (app {} (var {} min_elem) (var {} a) (var {} b)))
         "#;
         let dag = parse_and_lower(src);
-        // a, b, neg(a), neg(b), max(neg_a, neg_b), neg(max)
-        assert_eq!(non_drop_len(&dag), 6);
-        assert_eq!(root_node(&dag).op, RiscOp::Neg);
+        // a, b, MinElem(a, b)
+        assert_eq!(non_drop_len(&dag), 3);
+        assert_eq!(root_node(&dag).op, RiscOp::MinElem);
         assert!(verify::verify(&dag).is_empty());
     }
 

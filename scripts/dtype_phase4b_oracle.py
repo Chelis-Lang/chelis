@@ -50,13 +50,13 @@ FROZEN_FILE_DIGESTS = {
         "15e690f490c57d1a5a9629f87901900accb07ae14f7ec83d22195eea1d26904c"
     ),
     "spec/03-deep-syntax.md": (
-        "fc5230f7c06e39f8a17f6f4f856fccdbbfb7a685f1b0edcdaf1c4420d87711dd"
+        "5e21649cf61087df1119040a971a60b5b499d40321d8647ce719e91b8571120a"
     ),
     "spec/04-type-system.md": (
         "c7e825b5d9cc7e0d4bc588504e49612705520b4d63df618be24613fd4bc9b414"
     ),
     "spec/05-risc-primitives.md": (
-        "ea9ad8f67f645ff5b835a83c0a18290a4bc7336c9022af2386ebcbee75a5fb78"
+        "577c242de5d43901afb68a0053b8d690d77476f64b24f2003938bf9018b66142"
     ),
     "spec/06-transformations.md": (
         "faa71c7b4be426d9c6e41fa756998161d96377cf3b5d97ad99d6fda105da18fb"
@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "7384f828ce1564c6a1280d95ce1d8fcfc9ab0a6b053a886fac5f922aa3a3b4d4"
+        "c220f74b51ea177c7ade1d78e429a58234afca774afa280a6db355f0e64e1e02"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"
@@ -407,7 +407,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/05-risc-primitives.md",
         "### 2.1 Elementwise Binary",
         "### 2.4 Movement",
-        "53fc4eb2ab078b587f18e70fd187671ed4f907277cefa9534e953872324a968f",
+        "90fdc968d6de13e06f0908da4666d98d6e68258195eed3123e30b2c57dda7485",
     ),
     "logical builtin contract": (
         "spec/05-risc-primitives.md",
@@ -455,7 +455,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/dtype_semantics.md",
         "## Phase 4 - the capability table becomes the permanent guard",
         "## I1. Interlock with loud unsupported ([#730])",
-        "9e3f43c16eaa6194e02cb989f6e38fb698214c3cd49dd30af8836622d5f37044",
+        "a43f019ff6e3e0ff7e04bd12b4c4ee30b43f918dea8c5779bc2577221e25d840",
     ),
     "compiled stdlib consumer": (
         "spec/design/loud_unsupported.md",
@@ -473,7 +473,7 @@ FROZEN_REGION_DIGESTS = {
         "spec/design/remediation_roadmap.md",
         "| **v0.19.0 - grounded dtype storage break",
         "| **v0.20.0 - behavior-preserving permanent guards**",
-        "0a907eb4bb342d38e8643a7008ecf6ec5e6111eab66430ac2088af945ed63c9f",
+        "d072d8df78f937b2b943c08caeaf1a3aa150409cb3aa2db3fa4aa82fe74ca533",
     ),
     "status dtype row": (
         "docs/investigations/remediation_status_2026_08_04.md",

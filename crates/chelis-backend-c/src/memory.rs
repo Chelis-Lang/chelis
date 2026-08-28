@@ -151,12 +151,15 @@ fn classify_nodes(dag: &Dag, skipped: &HashSet<NodeId>) -> Vec<NodeMemoryKind> {
                 // alias the input buffer (chelis#513/#558).
                 | RiscOp::Shape { .. }
                 | RiscOp::Add
+                | RiscOp::Sub
                 | RiscOp::Mul
                 | RiscOp::Div
                 | RiscOp::FloorDiv
                 | RiscOp::TruncDiv
                 | RiscOp::CmpLt
                 | RiscOp::MaxElem
+                | RiscOp::MinElem
+                | RiscOp::ExtremaAdjoint { .. }
                 | RiscOp::Neg
                 | RiscOp::Recip
                 | RiscOp::Exp

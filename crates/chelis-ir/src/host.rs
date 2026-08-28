@@ -4126,7 +4126,10 @@ fn sparse_op_kind(op: &RiscOp) -> Option<SparseOpKind> {
 fn risc_op_canonical_name(op: &RiscOp) -> &'static str {
     match op {
         RiscOp::Add => "add",
+        RiscOp::Sub => "sub",
         RiscOp::Mul => "mul",
+        RiscOp::MaxElem => "max_elem",
+        RiscOp::MinElem => "min_elem",
         RiscOp::Neg => "neg",
         RiscOp::Abs => "abs",
         RiscOp::Reshape { .. } => "reshape",
@@ -10090,9 +10093,11 @@ fn actualize_tensor_helper_types(
                 Some(inferred_load_type(name.as_str(), scope, &node.output_type))
             }
             crate::dag::RiscOp::Add
+            | crate::dag::RiscOp::Sub
             | crate::dag::RiscOp::Mul
             | crate::dag::RiscOp::CmpLt
-            | crate::dag::RiscOp::MaxElem => node
+            | crate::dag::RiscOp::MaxElem
+            | crate::dag::RiscOp::MinElem => node
                 .inputs
                 .first()
                 .and_then(|lhs| inferred.get(lhs))
@@ -10102,6 +10107,29 @@ fn actualize_tensor_helper_types(
                         .and_then(|rhs| inferred.get(rhs))
                         .map(|rhs| merge_binary_tensor_types(lhs, rhs, node.output_type.precision))
                         .unwrap_or_else(|| precision_like(lhs, node.output_type.precision))
+                }),
+            crate::dag::RiscOp::ExtremaAdjoint { .. } => node
+                .inputs
+                .first()
+                .and_then(|lhs| inferred.get(lhs))
+                .map(|lhs| {
+                    let forward = node
+                        .inputs
+                        .get(1)
+                        .and_then(|rhs| inferred.get(rhs))
+                        .map(|rhs| merge_binary_tensor_types(lhs, rhs, node.output_type.precision))
+                        .unwrap_or_else(|| precision_like(lhs, node.output_type.precision));
+                    node.inputs
+                        .get(2)
+                        .and_then(|gradient| inferred.get(gradient))
+                        .map(|gradient| {
+                            merge_binary_tensor_types(
+                                &forward,
+                                gradient,
+                                node.output_type.precision,
+                            )
+                        })
+                        .unwrap_or(forward)
                 }),
             crate::dag::RiscOp::Neg
             | crate::dag::RiscOp::Exp

@@ -1008,14 +1008,11 @@ impl<'a> EvalContext<'a> {
             // zero divisor with the shared diagnostic.
             "floor_div" => eval_floor_div(args),
             "trunc_div" => eval_trunc_div(args),
-            // Tier-1 `max_elem` and Tier-2 `min_elem` are element-wise
-            // binary ops. The IR evaluator emits
-            // `binary_map(.., f64::max)` for `RiscOp::MaxElem` and
-            // `lower_min_elem` (`crates/chelis-ir/src/tier2.rs:364`)
-            // synthesizes `neg(max_elem(neg a, neg b))`; the host-runtime
-            // closure form fuses that into a direct `f64::min` for the
-            // same observable result. Wired for issue
-            // Chelis-Lang/chelis#185.
+            // Tier-1 `max_elem` and `min_elem` are direct element-wise
+            // selection identities. The integer path compares at the
+            // declared width, and the float path returns the exact operand
+            // selected by [05-OP-40], including its stored NaN payload or
+            // signed-zero bits. Wired for Chelis-Lang/chelis#185/#1306.
             "max_elem" => numeric_binop(args, Some(IntBinOp::Max), Some(FloatBinOp::Max)),
             "min_elem" => numeric_binop(args, Some(IntBinOp::Min), Some(FloatBinOp::Min)),
             "mod" => eval_mod(args),
