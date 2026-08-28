@@ -106,17 +106,44 @@ execution.
 
 ### C2 Representation first, provenance deletion last
 
-The target `expand` node and graph-level equality contract are:
+The state-indexed target `expand` node and graph-level equality contract are:
 
 ```rust
-RiscOp::Expand {
+RiscOp<S: RuntimeDimState>::Expand {
     axis: usize,
-    size: RuntimeExtent,
+    size: RuntimeExtent<S>,
 }
 
-struct RuntimeExtent {
+trait RuntimeDimState {
+    type DimRef;
+    type EvidenceRef;
+}
+
+struct AnnotatedRuntimeDimState;
+struct FinalizedRuntimeDimState;
+
+impl RuntimeDimState for AnnotatedRuntimeDimState {
+    type DimRef = ProvisionalRuntimeDimRef;
+    type EvidenceRef = ProvisionalRuntimeIdentityEvidenceId;
+}
+
+impl RuntimeDimState for FinalizedRuntimeDimState {
+    type DimRef = RuntimeDimRef;
+    type EvidenceRef = RuntimeIdentityEvidenceId;
+}
+
+struct RuntimeExtent<S: RuntimeDimState> {
     value: RtDim,
-    class: Option<RuntimeDimRef>,
+    class: Option<S::DimRef>,
+    evidence: S::EvidenceRef,
+}
+
+type ProvisionalRuntimeExtent = RuntimeExtent<AnnotatedRuntimeDimState>;
+type FinalRuntimeExtent = RuntimeExtent<FinalizedRuntimeDimState>;
+
+struct ProvisionalRuntimeDimRef {
+    class: HygienicRuntimeDim,
+    use_id: ProvisionalRuntimeDimUseId,
 }
 
 struct RuntimeDimRef {
@@ -202,10 +229,36 @@ struct RuntimeDimDeclaration {
 struct RuntimeDimAuthority {
     origins: Vec<RuntimeOrigin>,
     occurrences: Vec<RuntimeValueOccurrence>,
-    identity_evidence: Vec<RuntimeIdentityEvidence>,
+    identity_evidence: Vec<RuntimeIdentityEvidenceRecord>,
     declarations: Vec<RuntimeDimDeclaration>,
     dynamic_axis_occurrences: Vec<RuntimeDynamicAxisOccurrence>,
     transforms: RuntimeTransformNamespace,
+}
+
+struct RuntimeIdentityEvidenceRecord {
+    id: RuntimeIdentityEvidenceId,
+    destination: RuntimeIdentityDestination,
+    evidence: RuntimeIdentityEvidence,
+}
+
+enum RuntimeIdentityDestination {
+    Bound {
+        origin: RuntimeOriginId,
+        field: RuntimeBoundField,
+        class_use: Option<RuntimeDimRef>,
+    },
+    OutputAxis {
+        origin: RuntimeOriginId,
+        axis: usize,
+        class_use: Option<RuntimeDimRef>,
+    },
+}
+
+struct RuntimeOutputAxisIdentityAnnotation {
+    origin: RuntimeOriginId,
+    axis: usize,
+    class_use: Option<RuntimeDimRef>,
+    evidence: RuntimeIdentityEvidenceId,
 }
 
 struct RuntimeValueOccurrence {
@@ -250,9 +303,35 @@ struct RuntimeDynamicAxisOccurrence {
 struct ProvisionalRuntimeDimAuthority {
     origins: Vec<RuntimeOrigin>,
     occurrences: Vec<ProvisionalRuntimeValueOccurrence>,
-    identity_evidence: Vec<ProvisionalRuntimeIdentityEvidence>,
+    identity_evidence: Vec<ProvisionalRuntimeIdentityEvidenceRecord>,
     declarations: Vec<ProvisionalRuntimeDimDeclaration>,
     transforms: RuntimeTransformNamespace,
+}
+
+struct ProvisionalRuntimeIdentityEvidenceRecord {
+    id: ProvisionalRuntimeIdentityEvidenceId,
+    destination: ProvisionalRuntimeIdentityDestination,
+    evidence: ProvisionalRuntimeIdentityEvidence,
+}
+
+enum ProvisionalRuntimeIdentityDestination {
+    Bound {
+        origin: RuntimeOriginId,
+        field: RuntimeBoundField,
+        class_use: Option<ProvisionalRuntimeDimRef>,
+    },
+    OutputAxis {
+        origin: RuntimeOriginId,
+        axis: usize,
+        class_use: Option<ProvisionalRuntimeDimRef>,
+    },
+}
+
+struct ProvisionalOutputAxisIdentityAnnotation {
+    origin: RuntimeOriginId,
+    axis: usize,
+    class_use: Option<ProvisionalRuntimeDimRef>,
+    evidence: ProvisionalRuntimeIdentityEvidenceId,
 }
 
 enum ProvisionalRuntimeIdentityEvidence {
@@ -297,8 +376,13 @@ struct ProvisionalRuntimeDimDeclaration {
 }
 
 struct AnnotatedDag {
-    graph: SealedDag, // private; exposes no raw mutable graph
+    graph: SealedDag<AnnotatedRuntimeDimState>, // provisional refs only
     runtime_dims: ProvisionalRuntimeDimAuthority,
+}
+
+struct FinalizedDag {
+    graph: SealedDag<FinalizedRuntimeDimState>, // final refs only
+    runtime_dims: RuntimeDimAuthority,
 }
 
 enum RuntimeGraphMutationSite { // generated
@@ -379,10 +463,19 @@ index reconstructed from, node-local annotations. The annotations point into
 this authority so transforms and finalization can cross-check two independent
 representations. Identity proof has the same separation: typed inference stores
 only `ProvisionalRuntimeIdentityEvidence`, whose proved source names the opaque
-provisional class, class-local source edge, and physical occurrence. A
-provisional record never contains or guesses a final numeric class, source,
-use, or occurrence ID.
-`SealedDag` is a module-private newtype with no `DerefMut`, `AsMut<RawDag>`, raw
+provisional class, class-local source edge, and physical occurrence. Every
+provisional bound is a `ProvisionalRuntimeExtent`: its optional class/use is a
+`ProvisionalRuntimeDimRef`, and its mandatory evidence ID resolves to exactly
+one evidence record whose destination repeats that same origin, bound field,
+and optional class/use. A provisional output-axis annotation likewise carries
+the evidence ID whose record repeats that exact origin, axis, and optional
+class/use. Evidence IDs are authority-issued opaque handles, not vector
+indices; annotations cannot forge them or attach one proof to two destinations.
+Finalized graph bounds use only `FinalRuntimeExtent` and final evidence IDs. A
+provisional record or annotated graph never contains or guesses a final numeric
+class, source, use, occurrence, or evidence ID.
+`SealedDag<S>` is a state-indexed module-private newtype with no `DerefMut`,
+`AsMut<RawDag>`, raw
 constructor, or extraction method. The underlying `RawDag` implementation is
 also module-private: it is not re-exported, has no public constructor or
 mutator, and does not implement a public `Serialize` or `Deserialize` path.
@@ -530,19 +623,22 @@ target-capacity rejection is allowed.
   occurrence identities. The transaction
   applies that class/source/use/occurrence mapping to every
   `ProvisionalRuntimeIdentitySource` atomically with the declaration,
-  occurrence bindings, and annotations: a cloned local proof points only to
-  the cloned local class edge and cloned occurrence, while a proof for a
-  captured outside declaration remains unchanged. Vmap, grad, specialization,
-  and ordinary clone/remap use this rule. Import first maps opaque source DAG
+  occurrence bindings, graph `ProvisionalRuntimeDimRef`, evidence ID, and
+  evidence destination: a cloned local proof and bound point only to the cloned
+  local class/use/source edges and cloned occurrence, while a proof and bound
+  for a captured outside declaration remain unchanged. The evidence record and
+  its destination annotation are created, remapped, or discharged as one
+  non-forgeable pair. Vmap, grad, specialization, and ordinary clone/remap use
+  this rule. Import first maps opaque source DAG
   handles into fresh destination handles; it then translates every proof
   triple through that same total map before commit. CSE may remap only the
   occurrence member of a proof triple to the selected physically equivalent
   occurrence while preserving its class-local source edge. DCE either
   preserves the complete reachable proof triple or explicitly discharges the
   proof together with its axis/use and any now-dead declaration edge. No
-  transaction may update one member of a proof triple, retain an evidence
-  record with a missing endpoint, or infer a replacement proof from equal
-  values.
+  transaction may update one member of a proof triple or bound ref, retain an
+  annotation/evidence record with a missing or mismatched destination, or infer
+  a replacement proof from equal values.
 
   Earlier insertion, owner reordering, and canonical vector rebuilding do not
   rewrite opaque provisional handles at all; only the registered semantic
@@ -595,7 +691,10 @@ target-capacity rejection is allowed.
   Declarations follow owner order; their source/use ordering follows the rule
   below and compares a shared occurrence by that one canonical occurrence
   index. Each occurrence's witness/alias bindings follow declaration order and
-  then source/use position. The graph-level dynamic-axis occurrence list follows
+  then source/use position. Evidence records follow their destination graph
+  origin, then bound-field tag or output-axis number, then optional declaration
+  and use order; evidence IDs are assigned only from that structural order.
+  The graph-level dynamic-axis occurrence list follows
   occurrence order, never repeated declaration membership. Encoders regenerate this order and
   decoders reject reordered tables. No hash-map iteration, graph
   hash, allocation address, or display name participates in ordering.
@@ -628,13 +727,20 @@ target-capacity rejection is allowed.
   `OutputAxisRule` to assign value and identity rules to generated axes. CSE
   may combine physical producers only when their operation, operands,
   dtype/rank, effect/trap behavior, and occurrence origin are equivalent under
-  the registered transform rule. A legal merge creates or selects one
+  the registered transform rule **and** the union of their witness bindings has
+  at most one source edge from each class. If two candidate occurrences carry
+  different witness source IDs for the same class, CSE retains both producers;
+  it may not merge or discharge either source merely because their values are
+  equal. A legal merge of unclassed occurrences or occurrences whose witness
+  class sets are disjoint creates or selects one
   compute-once `RuntimeValueOccurrenceId`, transactionally remaps every
   declaration edge to it, and unions the canonically ordered witness/alias
   bindings; the distinct class, source, and use IDs are never merged. If the
-  physical executions or occurrence origins differ, CSE retains separate
-  nodes. Multiple class edges to one occurrence are the required structural
-  representation, not a reason to duplicate the producer. DCE runs
+  physical executions or occurrence origins differ, or the merged witness
+  class sets overlap, CSE retains separate nodes. Multiple edges from distinct
+  classes to one occurrence are the required structural representation, not a
+  reason to duplicate the producer; two source edges from one class are never a
+  legal merged state. DCE runs
   before authority freezes, but may discharge a binder, source, or use only
   after the authority proves that no public interface, equality obligation,
   movement bound, alias, or surviving annotation refers to it. Root selection
@@ -706,7 +812,7 @@ target-capacity rejection is allowed.
   that the provisional authority has not explicitly discharged.
   IDs are assigned from owner and origin order, never from display spelling.
   Finalization constructs one checked `RuntimeDimFinalizationMap` containing
-  four bijections over the surviving authority:
+  five bijections over the surviving authority:
 
   ```rust
   classes: HygienicRuntimeDim <-> RuntimeDimId
@@ -715,17 +821,29 @@ target-capacity rejection is allowed.
         <-> (RuntimeDimId, RuntimeDimSourceId)
   uses: (HygienicRuntimeDim, ProvisionalRuntimeDimUseId)
         <-> (RuntimeDimId, RuntimeDimUseId)
+  evidence: ProvisionalRuntimeIdentityEvidenceId
+        <-> RuntimeIdentityEvidenceId
   ```
 
-  It translates every `ProvisionalRuntimeIdentityEvidence` through these maps
-  in the same transaction that freezes declarations and occurrence bindings.
+  It translates every provisional graph class/use ref, evidence ID, evidence
+  destination, and `ProvisionalRuntimeIdentityEvidence` through these maps in
+  the same transaction that freezes declarations and occurrence bindings.
+  That transaction is the only conversion from
+  `SealedDag<AnnotatedRuntimeDimState>` to
+  `SealedDag<FinalizedRuntimeDimState>`: every
+  `ProvisionalRuntimeExtent` becomes one `FinalRuntimeExtent` only after all of
+  its handles translate successfully.
+  Every annotated bound and output-axis evidence ID must resolve to exactly one
+  record with the identical destination origin/field-or-axis and optional
+  class/use; every surviving record must have exactly one such destination.
   `ProvedEqual` is accepted only when its class, source edge, and occurrence
   all map, the mapped source belongs to the mapped class and occurrence, and
   the typed proof site is still the canonical typed-arena site for that axis.
-  A missing, duplicate, stale, redirected, or non-bijective endpoint aborts
-  finalization before any `FinalizedDag` exists. Final ID assignment therefore
-  cannot change the referent of an earlier proof merely because an owner,
-  source, or occurrence sorts before it.
+  A missing, duplicate, stale, redirected, destination-mismatched, or
+  non-bijective endpoint aborts finalization before any `FinalizedDag` exists.
+  Final ID assignment therefore cannot change the referent of an earlier bound
+  or proof merely because an owner, source, use, occurrence, or evidence record
+  sorts before it.
   Each declaration enumerates the complete ordered `RuntimeDimSourceId`s and
   `RuntimeDimUseId`s plus their typed or synthesized origins. Each source ID is
   a class-local edge to one `RuntimeValueOccurrenceId`; distinct declarations
@@ -738,14 +856,16 @@ target-capacity rejection is allowed.
   transform a decoded finalized DAG consumes it back into the annotated form,
   using the final declarations as the new independent provisional baseline.
   Consume allocates one fresh opaque provisional handle for each final class,
-  occurrence, class-local source, and class-local use in canonical final order,
-  records the checked inverse bijections for the duration of the transaction,
-  and translates each final `RuntimeIdentityEvidence` back to the corresponding
-  provisional proof triple. It never embeds or casts a final numeric ID into a
-  provisional handle. It preserves owner/origin records, history high-water,
-  and transform cursor; a no-op consume/refinalize returns the same canonical
-  final IDs and bytes because final ordering is structural, not because the
-  provisional handles happen to compare equally. The caller
+  occurrence, class-local source, class-local use, and evidence record in
+  canonical final order, records the checked inverse bijections for the
+  duration of the transaction, and translates each final graph class/use ref,
+  evidence attachment/destination, and `RuntimeIdentityEvidence` back to the
+  corresponding provisional records and proof triple. It never embeds or casts
+  a final numeric ID into a provisional handle. It preserves owner/origin
+  records, history high-water, and transform cursor; a no-op
+  consume/refinalize returns the same canonical final IDs and bytes because
+  final ordering is structural, not because the provisional handles happen to
+  compare equally. The caller
   must refinalize the result.
 
   Each physical literal, rank-zero scalar, or tensor-axis value is assigned one
@@ -838,9 +958,9 @@ target-capacity rejection is allowed.
   and every remaining member is an equality obligation. A
   single resolved occurrence may therefore appear as a source member in
   several manifests and in several guards without executing again. A
-  `RuntimeExtent` that denotes the binder carries the declared class/use pair
-  and executes the canonical value; it does not carry a second, losable copy of
-  the member list.
+  `RuntimeExtent<S>` that denotes the binder carries the state-correct declared
+  class/use pair and its exact evidence attachment, and executes the canonical
+  value; it does not carry a second, losable copy of the member list.
   A reusable generic may retain the
   binder in typed pre-monomorphization state, but a complete executable DAG
   must resolve it to a local class/use pair and one of these three value forms.
@@ -855,21 +975,24 @@ target-capacity rejection is allowed.
   table is not an equivalent size carrier.
 
   The in-memory owner matrix is exact and matches the Wire matrix; all named
-  fields below store `RuntimeExtent`, not a bare `RtDim`:
+  fields below store `RuntimeExtent<S>`, not a bare `RtDim`:
 
   | `RiscOp` field | in-memory type | legal `RuntimeExtent.value` |
   |---|---|---|
-  | `Expand.size` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node` |
-  | `Reshape.new_shape[*]` | `RuntimeExtent` | `Lit`, `InputAxis`, `Node` |
-  | `Pad.padding[*].before/after` | `RuntimeExtent` | `Lit`, `Node` |
-  | `Shrink.bounds[*].start` | `RuntimeExtent` | `Lit`, `Node` |
-  | `Shrink.bounds[*].end` | `RuntimeExtent` | `Lit`, `Node`, `ToEnd` |
-  | `Stride.strides[*]` | `RuntimeExtent` | `Lit`, `Node` |
+  | `Expand.size` | `RuntimeExtent<S>` | `Lit`, `InputAxis`, `Node` |
+  | `Reshape.new_shape[*]` | `RuntimeExtent<S>` | `Lit`, `InputAxis`, `Node` |
+  | `Pad.padding[*].before/after` | `RuntimeExtent<S>` | `Lit`, `Node` |
+  | `Shrink.bounds[*].start` | `RuntimeExtent<S>` | `Lit`, `Node` |
+  | `Shrink.bounds[*].end` | `RuntimeExtent<S>` | `Lit`, `Node`, `ToEnd` |
+  | `Stride.strides[*]` | `RuntimeExtent<S>` | `Lit`, `Node` |
 
-  A surviving binder use requires `class: Some(RuntimeDimRef)` in every row.
-  Anonymous or fully concrete values may have no class. `ToEnd` is legal only
-  for `Shrink.bounds[*].end` and requires `class: None`; `Sym` is illegal in
-  every executable owner. Verification maps each row through the same
+  A surviving binder use requires `class: Some(S::DimRef)` in every row:
+  `ProvisionalRuntimeDimRef` on an annotated DAG and `RuntimeDimRef` on a
+  finalized DAG. Every row also carries the evidence ID for its exact
+  destination. Anonymous or fully concrete values may have no class but still
+  carry `Unclassed` evidence. `ToEnd` is legal only for
+  `Shrink.bounds[*].end` and requires `class: None`; `Sym` is illegal in every
+  executable owner. Verification maps each row through the same
   `RuntimeBoundField` identity that its provisional and final use declaration
   carries.
 - **C2.2 Equality classes are executable graph structure.** The DAG stores the
@@ -879,7 +1002,8 @@ target-capacity rejection is allowed.
   Verification starts from the declarations and requires three exact
   bijections: occurrence IDs to their one physical placement; declared
   class-local source/use IDs to occurrence witness/alias bindings, literals,
-  and `RuntimeDimRef`s; then declared ordered classes to executable manifests.
+  state-correct graph refs, and evidence attachments; then declared ordered
+  classes to executable manifests.
   It rejects an absent declaration, occurrence, source, use, stamp,
   dynamic-axis occurrence, class, or bound reference; a duplicate or unplaced
   occurrence; a missing or duplicate edge; reuse of one source/use ID in
@@ -888,7 +1012,8 @@ target-capacity rejection is allowed.
   reference one occurrence; rejecting that relation or turning it into several
   producer executions is invalid.
   It also checks every scalar/axis node, rank, dtype, topological position,
-  literal, `OutputAxisRule`, and `RuntimeExtent.class` reference. This is
+  literal, `OutputAxisRule`, and state-correct `RuntimeExtent<S>` class/evidence
+  references. This is
   deliberately graph-level:
   Load/Load, Load/operation-output, and operation-output/operation-output
   equalities exist even when no movement-bound field owns them.
@@ -1019,7 +1144,8 @@ target-capacity rejection is allowed.
   [#609] is deleted.
 - **C2.5 Every consumer lands before deletion.** Verification, Eval, C, HIP,
   Metal, specialization, fusion, AD, vmap, hashing, and cloning/remapping passes read
-  `RuntimeExtent.value`, its optional declared class/use reference, every
+  `RuntimeExtent<S>.value`, its optional declared class/use reference and exact
+  evidence attachment, every
   value occurrence, witness/alias binding vector, dynamic-axis carrier, and
   complete ordered class manifest before any provenance rejection is removed.
   Each ordinary bound value is exactly one tag admitted by the owner matrix;
@@ -1286,7 +1412,7 @@ enum AxisSource {
   struct RuntimeAxisDisposition {
       value: AxisSource,
       identity: OutputAxisIdentityRule,
-      evidence: RuntimeIdentityEvidence,
+      evidence: RuntimeIdentityEvidenceId,
       value_occurrence: Option<RuntimeValueOccurrenceId>,
       output_occurrence: Option<RuntimeValueOccurrenceId>,
       value_bindings: Vec<RuntimeAxisClassBinding>,
@@ -1326,10 +1452,16 @@ enum AxisSource {
   second witness. Equality of extent formulas alone never selects
   `ProvedAlias`.
 
-  Typed inference writes sealed `ProvisionalRuntimeIdentityEvidence` into the
-  provisional authority before lowering. Transactions preserve it or apply the
-  one atomic proof-triple remap above; finalization translates it through the
-  checked provisional-to-final bijections into `RuntimeIdentityEvidence`.
+  Typed inference writes a sealed `ProvisionalRuntimeIdentityEvidenceRecord`
+  into the provisional authority before lowering and attaches its opaque ID to
+  the exact provisional bound or output-axis annotation named by the record's
+  destination. A synthesized destination keeps its synthesized origin while a
+  `ProvedEqual` record keeps the canonical typed site that supplied the proof;
+  destination origin and proof site are deliberately distinct fields.
+  Transactions preserve the record/annotation pair or apply the one atomic
+  class/use/proof/evidence remap above; finalization translates it through the
+  checked provisional-to-final bijections into a linked
+  `RuntimeIdentityEvidenceRecord` and final graph evidence ID.
   Finalization and Wire verification require `ProvedAlias` to carry a valid
   final `ProvedEqual` proof from the canonical typed arena and require
   `FreshWitness` for `NotProved`. No later pass, lane, or decoder may upgrade
@@ -1556,7 +1688,13 @@ axes and windows in one issue.
    transform. Provisional-proof rows insert an earlier-sorting owner before
    finalization and prove that the original opaque proof still maps to its
    original class/source/occurrence; a mutation that stores an early final
-   numeric ID or redirects the proof to the inserted class fails. Clone and
+   numeric ID or redirects the proof to the inserted class fails.
+   Provisional-bound rows independently insert earlier-sorting source, use, and
+   evidence records and prove the graph's opaque class/use/evidence handles
+   still name their original destination. Mutations replace a provisional
+   class/use with a final numeric ref, swap evidence IDs between two axes,
+   mismatch a record's origin/field-or-axis/class-use destination, or update
+   only the annotation or record half; each fails before finalization. Clone and
    vmap rows freshen all three endpoints for a cloned local proof while leaving
    a captured outer proof unchanged; mutations that freshen only the class,
    only the source, or only the occurrence fail atomically. Import rows remap
@@ -1577,8 +1715,12 @@ axes and windows in one issue.
    stale slot/ID fail before emission. Grad-created movement/output witnesses,
    specialization, and post-transform DCE finalize exactly. CSE merges only
    physically equivalent occurrences and transactionally unions their complete
-   ordered class edges without merging IDs or executions; mutations that lose
-   an edge, merge IDs/classes, or combine nonequivalent occurrences fail.
+   ordered class edges without merging IDs or executions when their witness
+   class sets are disjoint. An exact negative gives two equivalent occurrences
+   distinct source edges from the same class; they remain two producers, and a
+   mutation that merges them fails the one-source-per-class verifier. Mutations
+   that lose an edge, merge IDs/classes, or combine nonequivalent occurrences
+   likewise fail.
    Pre-finalization mutations remove a scalar-operation source, a static
    or node-valued tensor-axis source, a whole provisional class, and one
    annotation immediately before final DCE; every mutation fails against the
@@ -1591,9 +1733,11 @@ axes and windows in one issue.
    and rejection of replayed transform IDs, origins, generated paths, malformed
    scope-instance lineages, or duplicate complete owner identities. They also
    prove that consume-to-annotated allocates a complete inverse provisional
-   baseline, translates final proof triples through it, and returns identical
-   bytes on no-op refinalization; embedding or casting a final numeric ID into
-   a provisional proof or omitting one inverse endpoint fails. The
+   baseline, translates final graph refs, evidence attachments/destinations,
+   and proof triples through it, and returns identical bytes on no-op
+   refinalization; embedding or casting a final numeric ID into a provisional
+   annotation/proof, omitting one inverse endpoint, or detaching an evidence
+   record fails. The
    derived guard schedule is recomputed after every named transform. Mutations
    stale or move a `check_at` event; omit or swap its immediate observable
    predecessor/successor fence; corrupt `ready_after` or `guarded_events`;
@@ -1641,14 +1785,17 @@ axes and windows in one issue.
    a duplicate complete origin/generated-path identity or conflicting
    mutation-site tags under one transform ID, malformed
    scope-instance lineage, duplicate complete owner identity, malformed or
-   missing typed identity evidence, a proof/source mismatch, or an attempted
+   missing typed identity evidence, a missing/duplicate evidence ID, a bound or
+   output annotation whose evidence destination origin/field/axis/class-use
+   differs from its record, a proof/source mismatch, or an attempted
    `NotProved`-to-`ProvedEqual` upgrade,
    missing occurrence/source/use ID, placement, stamp, or binding;
    declaration/occurrence/stamp disagreement; correlated binding-plus-manifest
    removal with its declaration fixed; one occurrence duplicated across
    physical placements; one class-local source ID reused by another class;
    one shared occurrence edge omitted, duplicated, or redirected; valid-axis
-   substitution from another class; split/merged class
+   substitution from another class; two same-class witness sources collapsed
+   onto one occurrence by an illegal CSE merge; split/merged class
    carriers that disagree with the declaration, dropped otherwise-unused
    public Load or guard root, `input_axis` in any Pad/Shrink/Stride field or
    another owner-illegal tag, classed `to_end`, unshifted
@@ -1726,7 +1873,8 @@ never reused.
 - encode `WireRiscOp::Expand { axis, size: WireRuntimeExtent }`
   and use the same wrapper for every other runtime-extent owner;
   `WireRuntimeExtent` contains one `value: WireRtDim` plus an optional
-  `class: WireRuntimeDimRef { class, use_id }`. `input_axis`
+  `class: WireRuntimeDimRef { class, use_id }` and one mandatory
+  `evidence: WireRuntimeIdentityEvidenceId`. `input_axis`
   carries a tensor input slot plus a
   `WireRtAxis` that is an exact int32 literal or scalar input slot. The `lit`
   tag carries an exact nonnegative `i64`, never `usize` or an unsigned JSON
@@ -1751,9 +1899,13 @@ never reused.
   ordered durable class-local source/use IDs; each source entry references one
   `WireRuntimeValueOccurrenceId`, and distinct declarations may reference the
   same occurrence through distinct source IDs. Encode the canonical
-  `RuntimeOrigin`, `RuntimeIdentityEvidence`, and
+  `RuntimeOrigin`, `RuntimeIdentityEvidenceRecord`, and
   `WireRuntimeValueOccurrence` tables. Identity evidence retains the canonical
-  typed site and, for `ProvedEqual`, the checker's exact typed-proof record;
+  evidence ID, exact bound-field or output-axis destination, optional
+  class/use, canonical typed site and, for `ProvedEqual`, the checker's exact
+  typed-proof record. Each `WireRuntimeExtent.evidence` and output-axis
+  evidence ID resolves to exactly one record whose destination repeats that
+  graph location and class/use, and each record has exactly one destination;
   `NotProved` can never decode as `ProvedEqual`. The finalized evidence is
   hashed authority. Structural decode checks its internal origins, class/source
   relation, and `OutputAxisRule`; a coherent replacement remains subject to the
@@ -1772,7 +1924,7 @@ never reused.
   shared occurrence IDs; a
   `tensor_axis` witness carries its tensor node and a literal or rank-zero
   `int32` scalar node for the axis. Encode every static tensor output axis's
-  sealed identity evidence, selected proof-sensitive identity rule, optional
+  sealed identity evidence ID, selected proof-sensitive identity rule, optional
   output-occurrence ID, and complete ordered output-axis
   `witness { class, source }` / `alias { class, use_id }` bindings. Its value
   occurrence and bindings are encoded at their one physical literal, scalar,
@@ -1934,8 +2086,10 @@ intermediates, and conversion sites; admit exact scalar-operation-output
 sources, the independent provisional authority, sealed annotated graph, and
 closed atomic graph/authority transaction API,
 provisional hygienic annotations, the provisional proof/source algebra and
-atomic proof-triple remapping, the checked provisional-to-final bijections and
-consume-to-annotated inverse baseline, the typed/synthesized origin algebra,
+state-indexed graph bound references, non-forgeable evidence IDs with exact
+destinations, atomic proof/ref/attachment remapping, the checked
+provisional-to-final bijections and consume-to-annotated inverse baseline, the
+typed/synthesized origin algebra,
 the exact structural origin comparator, a serialized checked transform cursor
 with retained hashed high-water history and explicit exhaustion, lexical and
 runtime scope-instance ownership,
@@ -1961,7 +2115,8 @@ element-derived extents; and amend `spec/10`
 for the next monotonic WireDag version (v8 from the current v6 baseline).
 Write the derived positive, negative, proof-sensitive same/cross-tensor,
 shared-occurrence/many-to-many, equality-class/observable-event-schedule,
-semantic-transit/cross-host, owner-matrix, and transform test stubs before
+same-class CSE exclusion, semantic-transit/cross-host, owner-matrix, and
+transform test stubs before
 implementation. Then deliver C2.1-C2.6 and C6
 across all in-memory, target, transform, and wire consumers, followed by C2.7
 deletion. Close
@@ -1970,15 +2125,18 @@ its mechanism use `Part of #578` until its complete rank-polymorphic
 acceptance reproducer is green under the owning rank-polymorphism work.
 
 **Frozen at exit:** amended `spec/05`/`spec/06` atoms;
-`Expand.size: RuntimeExtent`; exact nonnegative-`i64` semantic extents in every
+`Expand.size: RuntimeExtent<S>` with distinct annotated/finalized reference
+states; exact nonnegative-`i64` semantic extents in every
 `RtDim`, `DimInfo`, `DimExpr`, tensor-type, and Wire copy, with `usize` only
 behind checked physical-capacity conversions; structural tensor-axis and
 scalar input values; the generated semantic-extent transit census over fields,
 artifacts, keys, APIs/maps/intermediates, operation parameters, and conversions;
 the exact `RuntimeExtent` owner matrix; provisional hygienic keys and the
 independent provisional authority, opaque provisional proof/source algebra,
-atomic proof-triple remapping, checked provisional-to-final bijections, and
-consume-to-annotated inverse baseline; sealed graph, atomic mutation transactions,
+state-indexed graph bound references, non-forgeable evidence IDs and exact
+destinations, atomic proof/ref/attachment remapping, checked
+provisional-to-final bijections, and consume-to-annotated inverse baseline;
+sealed graph, atomic mutation transactions,
 opaque annotated/finalized public states, finalized-only Eval/backend/cache
 boundaries, and external-crate compile-fail raw construction, mutation,
 deserialization, extraction, and submission boundaries; typed/synthesized origin and
@@ -2002,6 +2160,7 @@ the complete workspace production mutation/import/deserialization capability
 and callsite registry,
 `BroadcastScalarRef`, trap/effect occurrence rules, and transform/fusion
 behavior for every bound-dependency class;
+the same-class witness-source CSE exclusion;
 WireDag v8; no provenance-rejection construct; one static folder; all-lane
 guard placement.
 
@@ -2013,8 +2172,10 @@ semantic-transit/cross-host rows, generated-origin/clone-lineage rows, sealed
 public
 construction/mutation/deserialization/artifact/backend boundaries,
 and entry-selection rows, same/cross-tensor proof-identity rows,
-earlier-owner proof-redirection, clone/vmap/import/CSE/DCE proof-remap, and
-consume/refinalize inverse-map rows; shared-occurrence two-class rows,
+earlier-owner/source/use/evidence redirection, correlated graph-ref/evidence
+attachment mutations, clone/vmap/import/CSE/DCE proof remap, and
+consume/refinalize inverse-map rows; shared-occurrence two-class and same-class
+CSE-exclusion rows,
 compute-once vmap/fusion trap/effect rows, retained
 high-water/DCE/hash rows, structural Wire negatives, coherent-replacement
 integrity mismatches, zero, and negative rows owned by this phase, plus the
