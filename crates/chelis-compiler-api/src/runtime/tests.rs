@@ -443,6 +443,52 @@ x = test_assert_close_tensor(actual, expected, nan_tol, "nan-tol")
     );
 }
 
+/// Evaluate one Deep expression against hand-supplied runtime bindings.
+///
+/// The `test_assert_close_tensor` eval arm guards operands the checker has
+/// already constrained: `reject_inadmissible_operand_dtypes` requires the
+/// tolerance to carry the tensor's own float dtype, so no CHECKED program
+/// reaches the arm's own dtype, shape, and tolerance rejections. They exist
+/// for dynamically-constructed calls, and their whole job is to name the value
+/// they were handed, so the runtime library's `eval_expr` entry rather than
+/// the checked pipeline is where their text is observable.
+fn eval_deep_with_bindings(
+    surf_expr: &str,
+    args: &[(&str, RuntimeValue)],
+) -> Result<String, String> {
+    let source = format!("probe = {surf_expr}\n");
+    let decls = chelis_surf::parser::parse_str(&source).expect("surf parse");
+    let exprs = chelis_surf::desugar::desugar_program(&decls);
+    let Expr::List(def, _) = &exprs[0] else {
+        panic!("desugaring a top-level binding yields one def form");
+    };
+    // `(def {} <name> <body>)`: the body is the fourth element.
+    let body = def.elements[3].clone();
+
+    let empty_tensors: HashMap<String, RuntimeTensorValue> = HashMap::new();
+    let mut ctx = EvalContext {
+        bindings: HashMap::new(),
+        binding_types: HashMap::new(),
+        named_axis_route_cache: HashMap::new(),
+        named_axis_route_visiting: HashSet::new(),
+        top_level_defs: HashMap::new(),
+        type_env: HashMap::new(),
+        adt_fields: HashMap::new(),
+        adt_registry: chelis_types::adt::AdtRegistry::default(),
+        tensor_bindings: &empty_tensors,
+        transcript: Vec::new(),
+        resolving_top_levels: Vec::new(),
+        random_seed: None,
+        random_counter: 0,
+        cancel: None,
+    };
+    for (name, value) in args {
+        ctx.bindings.insert((*name).to_string(), value.clone());
+        ctx.binding_types.insert((*name).to_string(), None);
+    }
+    ctx.eval_expr(&body).map(|value| render_value(&value))
+}
+
 #[test]
 fn test_assert_close_tensor_f32_uses_f32_subtraction() {
     // These are exact f32 values. Their exact widened difference is
