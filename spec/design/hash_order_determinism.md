@@ -20,18 +20,21 @@ the execution-backed census discipline; [`checker_totality.md`](checker_totality
 
 ## Summary
 
-Six instances of one defect are confirmed across four subsystems, three of them
-verdict- or dispatch-affecting. Each resolved instance was found from a downstream
-symptom, repaired by a local sort, and pinned by a test that could not see the next
-site. The invariant is therefore still maintained by comments and vigilance.
+Six source-order instances of one defect are confirmed across four subsystems, three
+of them verdict- or dispatch-affecting. Exact-head review also confirmed a seventh
+manifestation in the whole-package cache graph. Each resolved instance was found from
+a downstream symptom, repaired by a local sort, and pinned by a test that could not
+see the next site. The invariant is therefore still maintained by comments and
+vigilance.
 
 Closure has four structural parts:
 
 1. derive the production compiler universe from Cargo metadata and maintain an
-   exact source-to-census bijection for hash-backed carriers and their consumers;
+   exact expanded, type-resolved source-to-census bijection for hash-backed
+   carriers and their consumers;
 2. require one authority-backed canonical order wherever order reaches behavior;
-3. inventory the complete Serde graph of every persisted cache payload and make
-   its bytes canonical; and
+3. inventory every production serialization, persistence, hash, and handoff root,
+   then make its complete Serde graph canonical; and
 4. make those boundaries private, mutation-tested, and continuously executable
    through one class oracle.
 
@@ -48,9 +51,11 @@ of completeness and carries no false-pass probability claim.
 | ADT variant dispatch (`adt.rs`, `lookup_variant_preferring_shape`) | hash order selected the first matching variant | resolved by sorting candidates by ADT name |
 | input-validation preamble (C and HIP emitters) | validation-block order changed emitted bytes | resolved at `17a28b9`; regression in `codegen_determinism.rs` |
 | Load pre-creation (`chelis-ir`, `lower_subexpr_program_inner`) | input-slot order and emitted C bytes varied after lowering | resolved in the chelis#469 wave; CLI regression in `rank_poly_tier3` |
+| `CompiledContext::{encode, save}` and CLI worker handoff | identical fixed-source package contexts produced eight distinct encoded digests in eight fresh processes | OPEN - complete serialization-root work in Phase 2 |
 
-The escalation is the class evidence: presentation bytes, ABI slot assignment,
-dispatch and linearity verdicts, and now the type checker's accept/reject result.
+The escalation is the class evidence: presentation and persisted bytes, ABI slot
+assignment, dispatch and linearity verdicts, and now the type checker's accept/reject
+result.
 
 **Not in this class:** deliberate language-level nondeterminism semantics such as
 duplicate-index `scatter` rejection; floating-point reduction-order semantics;
@@ -98,8 +103,8 @@ bindings, proof, and editor/server routes when they are in the derived graph.
 
 #### C2.2 Source identities and bijection
 
-A Rust liveness test parses the production sources with `syn` and resolves local
-imports and type aliases conservatively. It enumerates:
+The authoritative enumerator runs after macro expansion with resolved Rust types.
+It enumerates:
 
 - every `HashMap`/`HashSet` field, local, parameter, return carrier,
   constructor, and typed `collect` origin;
@@ -108,20 +113,31 @@ imports and type aliases conservatively. It enumerates:
   iterator combinators; and
 - every `Serialize`/`Deserialize` edge for a hash-backed carrier.
 
+A raw-source `syn` sidecar supplies stable module/item/binding identities and checks
+unexpanded imports, aliases, and handwritten syntax. It is not completeness proof.
+Every expanded carrier and consumer must map through its source span to one sidecar
+identity. An expansion without a stable source mapping fails closed unless the macro
+has an explicit census identity and a checked invocation fixture that exposes its
+expanded carriers and consumers to the same type-resolved enumerator. This applies to
+`macro_rules!`, derive and attribute macros, and procedural macros, including macros
+defined outside the audited package. No opaque macro expansion is silently skipped.
+
 An identity is `(crate, module, enclosing item, carrier field or binding,
 consumer)`. Anonymous or ambiguous carriers must gain a stable census marker;
-unresolved aliases, duplicate identities, and unknown order-consuming forms fail
-closed instead of being skipped.
+unresolved aliases, unmapped macro expansions, duplicate identities, and unknown
+order-consuming forms fail closed instead of being skipped.
 
 The generated identities and census rows are bijective: a missing source row, a
 stale census row, or two rows claiming one identity is an oracle failure. The
 Clippy lint and grep may seed review, but neither defines this universe.
 
-Each row records the carrier/key type, consumer chain, C1 surface, cache roots if
-any, canonical-order authority, evidence, and exactly one disposition:
+Each row records the carrier/key type, consumer chain, C1 surface, serialization
+roots if any, canonical-order authority, the exact executable evidence identity and
+command, and exactly one disposition:
 
-- **order-insensitive** - executable evidence or a checked algebraic argument
-  proves that every consumer is insensitive to order;
+- **order-insensitive** - an executable test or controlled planted mutation proves
+  that every consumer is insensitive to order; an algebraic argument may explain
+  the expected result but never replaces that executable lock;
 - **ordered-store** - the carrier is a private ordered/newtyped store exposing
   only the row's canonical order; or
 - **canonical-boundary** - a named boundary sorts or canonically serializes the
@@ -135,9 +151,14 @@ The liveness oracle must reject all of these planted changes:
 2. `keys().collect::<Vec<_>>()` followed by iteration;
 3. the same collect with its vector type inferred;
 4. an iterator combinator such as `for_each`;
-5. a new hash-backed field under derived Serde;
-6. a new carrier or consumer with no census row; and
-7. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
+5. macro-generated direct iteration;
+6. macro-generated collect-then-iterate and `for_each`, including a consumer that
+   exists only after expansion;
+7. an opaque procedural-macro expansion with no checked expansion fixture;
+8. a new hash-backed field under derived Serde;
+9. a new serialization, persistence, cache-key, or byte-handoff root;
+10. a new carrier or consumer with no census row; and
+11. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
 
 The mutation suite is the completeness lock that the lint alone cannot provide.
 
@@ -177,27 +198,48 @@ that would test the stronger, out-of-scope property of order-independent resolut
 
 ### C4 Complete canonical serialization
 
-Persisted bytes are part of C1, so derived Serde is part of the census even though
-its iteration executes in dependency code.
+Persisted, hashed, returned, and cross-process handoff bytes are part of C1, so
+derived Serde is part of the census even when its iteration executes in dependency
+code.
 
-The serialization enumerator starts at every concrete call to
-`cache_envelope::save<T>`, records each payload root, and walks its complete
-Serde-reachable struct/enum graph. It includes derived implementations, manual
-`Serialize` implementations, `serde(with)` modules, and nested containers. An
-unknown custom edge fails closed and requires an explicit census row.
+The type-resolved enumerator discovers every production serialization sink and every
+wrapper that can reach one. A root is any concrete byte stream that is written,
+returned through a public API, hashed or compared to select a cache entry, or handed
+to another process. This includes direct `bincode::serialize` or other serializer
+calls as well as repository wrappers. Serialization-sink identities and the root
+manifest are bijective: a new sink, wrapper, cache writer, key derivation, or handoff
+without a root row fails the C2.3 mutation oracle.
 
-The `LibraryContext` graph is a mandatory representative. Its wire carrier reaches
-`TypeEnv` and `CheckedProgram`; those reach `Subst`, `Env`, `AdtRegistry`, and other
-hash-backed state. `Subst` alone currently serializes `types`, `dims`, `ranks`, both
-deferred-constraint maps, and three lowered-level maps. Converting only the two
-deferred stores cannot satisfy this contract.
+For each root, the enumerator walks the complete Serde-reachable struct/enum graph.
+It includes derived implementations, manual `Serialize` implementations,
+`serde(with)` modules, nested containers, and custom encoding adapters. An unknown
+custom edge or type-erased payload fails closed and requires an explicit row and an
+executable construction fixture.
+
+Mandatory current roots include:
+
+- `cache_envelope::save<T>` payload and envelope bytes for `LibraryContext` and
+  `StdLibContext`;
+- `CompiledContext::encode` public bytes;
+- `CompiledContext::save` payload and its independent on-disk envelope;
+- the CLI worker handoff that writes encoded `CompiledContext` bytes; and
+- serialized inputs to stdlib, library, compiled-context, and lowering cache keys.
+
+The `LibraryContext` and `CompiledContext` graphs are mandatory complete-payload
+representatives. Their wire carriers reach `TypeEnv`, `CheckedProgram`,
+`LoweredLibrary`, `Subst`, `Env`, `AdtRegistry`, and other hash-backed state. `Subst`
+alone currently serializes `types`, `dims`, `ranks`, both deferred-constraint maps,
+and three lowered-level maps. Converting only the two deferred stores cannot satisfy
+this contract. At reviewed head `5b2dfd14`, eight fixed-source fresh-process
+`CompiledContext::encode` probes produced eight distinct SHA-256 digests.
 
 Every reachable unordered carrier is either converted to an ordered representation
 or serialized by a canonical adapter that sorts the complete key/value sequence.
-The cache format version is bumped whenever the canonical wire shape changes under
-the existing cache exactness policy. Representative complete payloads are built with
-multiple insertion orders and serialized in 24 fresh processes; payload bytes,
-payload SHA-256, and final envelope bytes must all match exactly.
+The relevant cache format version is bumped whenever a canonical wire shape changes
+under the existing cache exactness policy. Every root names executable exact-byte
+evidence. Complete payloads are built with multiple insertion orders and serialized
+in 24 fresh processes; public encoded bytes, key bytes/digests, payload bytes, payload
+SHA-256, handoff bytes, and final envelope bytes must match exactly as applicable.
 
 This track owns deterministic compiler-cache bytes. [#1198] may consume that result
 for archive reproducibility, but it is not the authority or a prerequisite here.
@@ -219,14 +261,17 @@ the final line `HASH ORDER DETERMINISM ORACLE: PASS` require every leg:
    serialization roots, and census rows are exact and duplicate-free.
 2. **Mutation rejection:** all C2.3 mutations fail for the intended missing-row or
    forbidden-order reason.
-3. **Canonical boundaries:** ordered/newtyped stores pass insertion/hash-order
+3. **Per-row evidence:** every census row's named test or controlled mutation exists,
+   resolves to that row, executes, and observes the row's complete consumer chain.
+4. **Canonical boundaries:** ordered/newtyped stores pass insertion/hash-order
    perturbations, and raw access fails to compile.
-4. **Cache bytes:** every representative complete payload is byte-identical across
-   insertion permutations and 24 fresh processes.
-5. **Public surfaces:** the [#1338] reproducer and at least one representative for
+5. **Serialized bytes:** every serialization root's exact-byte evidence is green;
+   mandatory complete payloads are byte-identical across insertion permutations and
+   24 fresh processes.
+6. **Public surfaces:** the [#1338] reproducer and at least one representative for
    each C1 output class run in 24 fresh processes with identical verdicts,
    diagnostics, values, and bytes.
-6. **Existing regressions and lint:** the backend and CLI byte-determinism tests
+7. **Existing regressions and lint:** the backend and CLI byte-determinism tests
    remain present and green, and every lint allow maps to the census.
 
 The 24-process legs are supporting randomized regressions with a fixed execution
@@ -237,14 +282,18 @@ the deterministic structural and mutation legs.
 
 ### Phase 0 - executable universe and census
 
-**Deliver:** the Cargo-derived package enumerator, source/Serde identity extractor,
-census schema, all currently discovered rows, and the C2.3 mutation suite.
+**Deliver:** the Cargo-derived package enumerator, expanded type-resolved enumerator,
+raw-source identity sidecar, macro-expansion fixture boundary, serialization-root and
+Serde graph extractor, census schema, all currently discovered rows with executable
+evidence, and the C2.3 mutation suite.
 
-**Frozen at exit:** universe derivation, identity schema, dispositions, and the rule
-that unknown syntax/serialization edges fail closed.
+**Frozen at exit:** universe derivation, expanded-to-source identity mapping,
+serialization-root identity, dispositions, executable-evidence schema, and the rule
+that unknown syntax, macro expansions, and serialization edges fail closed.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_determinism_oracle.py --phase census`
-exits 0 with `HASH ORDER CENSUS: PASS` after every negative mutation is observed.
+exits 0 with `HASH ORDER CENSUS: PASS` after every negative mutation is observed and
+every census row's evidence has executed.
 
 ### Phase 1 - specified open sites
 
@@ -264,9 +313,9 @@ exits 0 with `HASH ORDER OPEN SITES: PASS`.
 ### Phase 2 - all behavior and serialization carriers
 
 **Deliver:** every `ordered-store` and `canonical-boundary` census row, the complete
-cache payload graph, cache format bumps required by changed bytes, and exact payload/
-envelope tests. No behavior-reaching raw hash iterator or derived unordered cache
-carrier remains.
+serialization-root and payload graphs, cache format bumps required by changed bytes,
+and exact encode/key/payload/handoff/envelope tests. No behavior-reaching raw hash
+iterator or derived unordered serialized carrier remains.
 
 **Frozen at exit:** private store APIs and canonical serialization adapters.
 
