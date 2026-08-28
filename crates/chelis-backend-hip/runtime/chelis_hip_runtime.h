@@ -188,25 +188,14 @@ typedef struct {
 
 /* ---- Allocation / deallocation ---- */
 
+/* Device element width. This delegates to the runtime's single width
+ * authority rather than restating the table: a second copy is exactly how
+ * chelis#1360 happened, where this function said `bool` was one byte while
+ * the emitter still dispatched four-byte kernels over the buffer it sized.
+ * `chelis_dtype_size` rejects an unknown tag itself, and a HIP link already
+ * pulls in libchelis_runtime.a, so nothing is gained by inlining a copy. */
 static inline size_t chelis_gpu_dtype_size(int dtype) {
-    switch (dtype) {
-        case CHELIS_DTYPE_F64:
-        case CHELIS_DTYPE_I64:
-            return 8;
-        case CHELIS_DTYPE_F32:
-        case CHELIS_DTYPE_I32:
-            return 4;
-        case CHELIS_DTYPE_BF16:
-        case CHELIS_DTYPE_F16:
-        case CHELIS_DTYPE_I16:
-            return 2;
-        case CHELIS_DTYPE_BOOL:
-        case CHELIS_DTYPE_I8:
-            return 1;
-        default:
-            fprintf(stderr, "invalid Chelis GPU dtype tag: %d\n", dtype);
-            abort();
-    }
+    return (size_t)chelis_dtype_size((chelis_dtype)dtype);
 }
 
 static inline chelis_gpu_tensor* chelis_gpu_alloc(int ndim, const int *shape, int dtype) {

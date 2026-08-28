@@ -390,15 +390,15 @@ fn require_hipcc() {
 }
 
 /// Storage element width in bytes for the dtype constants emitted by
-/// `dtype_macro`. Mirrors `chelis_gpu_dtype_size` in
-/// `chelis_hip_runtime.h`.
+/// `dtype_macro`.
+///
+/// Read from the dtype's physical representation rather than restated. This
+/// was a fourth hand-written copy of the width table and said `bool` was four
+/// bytes; chelis#1360 is the drift that copies like it produce.
 fn dtype_bytes(p: Prim) -> usize {
-    match p {
-        Prim::F32 | Prim::Int32 | Prim::Bool => 4,
-        Prim::F64 | Prim::Int64 => 8,
-        Prim::Bf16 | Prim::F16 => 2,
-        other => panic!("ws_a3 harness does not size dtype {}", other.name()),
-    }
+    p.runtime_dtype()
+        .unwrap_or_else(|error| panic!("ws_a3 harness does not size dtype {}: {error}", p.name()))
+        .byte_width()
 }
 
 /// C macro name for a dtype, matching `HipEmitter::dtype_macro`.

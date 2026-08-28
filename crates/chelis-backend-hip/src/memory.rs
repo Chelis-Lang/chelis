@@ -419,23 +419,21 @@ impl MemoryPlan {
     }
 }
 
+/// Device element width, in bytes.
+///
+/// Derived from the dtype's physical representation rather than restated
+/// here. chelis#1360 is what a restatement costs: this planner, the emitter,
+/// and `chelis_gpu_dtype_size` each carried their own copy, chelis#1308
+/// narrowed `bool` from four bytes to one in the runtime, and the two copies
+/// that were not updated went on sizing four-byte kernels over a one-byte
+/// allocation. `Repr::byte_width` is the one authority all three now read.
 fn bytes_per_element(dtype: Prim) -> usize {
-    match dtype {
-        // WS-A4: i8/i16 element widths.
-        Prim::Int8 => 1,
-        Prim::Int16 => 2,
-        Prim::F32 | Prim::Bool | Prim::Int32 => 4,
-        Prim::F64 | Prim::Int64 => 8,
-        // WS-A3: bf16 / f16 storage is 2 bytes; mirrors
-        // `chelis_gpu_dtype_size` in `chelis_hip_runtime.h` and the
-        // matching arm in `HipEmitter::bytes_per_element`.
-        Prim::Bf16 | Prim::F16 => 2,
-        other => panic!(
-            "HIP memory planner supports f32/f64/bool/int8/int16/int32/int64/bf16/f16 \
-             tensors today; got `{}`.",
-            other.name()
-        ),
-    }
+    dtype
+        .runtime_dtype()
+        .unwrap_or_else(|error| {
+            panic!("HIP memory planner cannot size `{}`: {error}", dtype.name())
+        })
+        .byte_width()
 }
 
 #[cfg(test)]

@@ -17,6 +17,13 @@ fn vec_f32(n: usize) -> TensorType {
     }
 }
 
+fn vec_f64(n: usize) -> TensorType {
+    TensorType {
+        dims: vec![DimInfo::Lit(n)],
+        precision: Prim::F64,
+    }
+}
+
 fn vec_bool(n: usize) -> TensorType {
     TensorType {
         dims: vec![DimInfo::Lit(n)],
@@ -519,10 +526,10 @@ fn rt12_cast_emits_kernel() {
     );
     let c = dag.add_node(
         RiscOp::Cast {
-            new_precision: Prim::Bool,
+            new_precision: Prim::F64,
         },
         vec![x],
-        vec_bool(4),
+        vec_f64(4),
         None,
     );
     dag.add_root(c);
@@ -530,6 +537,74 @@ fn rt12_cast_emits_kernel() {
     assert!(
         result.c_source.contains("kernel_cast"),
         "Cast must emit a kernel"
+    );
+}
+
+// ===========================================================================
+// RT12b: Cast to bool rejects rather than emitting a four-byte kernel
+// ===========================================================================
+
+/// chelis#1360. This case used to be RT12 itself, asserting only that
+/// `kernel_cast` appeared in the output. It did appear - as `kernel_cast_f32`,
+/// writing `N * 4` bytes into the `N * 1` byte allocation that chelis#1308's
+/// tagged carrier now sizes for `CHELIS_DTYPE_BOOL`. The assertion was true
+/// and the emitted program overran its device heap by `3N` bytes, so the test
+/// now pins the rejection instead of the kernel name.
+#[test]
+fn rt12b_cast_to_bool_is_rejected_not_emitted_as_f32() {
+    let mut dag = Dag::new();
+    let x = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let c = dag.add_node(
+        RiscOp::Cast {
+            new_precision: Prim::Bool,
+        },
+        vec![x],
+        vec_bool(4),
+        None,
+    );
+    dag.add_root(c);
+    let error = match codegen_hip(&dag, "test_cast_bool") {
+        Err(error) => error,
+        Ok(_) => panic!("a bool result has no HIP kernel family (chelis#1364)"),
+    };
+    assert!(
+        format!("{error:?}").contains("bool"),
+        "the rejection must name the offending dtype; got: {error:?}"
+    );
+}
+
+/// chelis#1360 companion: `cmplt` is the other producer of a bool tensor, and
+/// it reached `kernel_cmplt_f32` the same way. Reproducible from two lines of
+/// Surf (`x < y`), so this is the shape that mattered most in practice.
+#[test]
+fn rt12c_cmplt_to_bool_is_rejected_not_emitted_as_f32() {
+    let mut dag = Dag::new();
+    let a = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 1.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let b = dag.add_node(
+        RiscOp::synth_const(vec_f32(4).precision, 2.0),
+        vec![],
+        vec_f32(4),
+        None,
+    );
+    let c = dag.add_node(RiscOp::CmpLt, vec![a, b], vec_bool(4), None);
+    dag.add_root(c);
+    let error = match codegen_hip(&dag, "test_cmplt_bool") {
+        Err(error) => error,
+        Ok(_) => panic!("a bool result has no HIP kernel family (chelis#1364)"),
+    };
+    assert!(
+        format!("{error:?}").contains("bool"),
+        "the rejection must name the offending dtype; got: {error:?}"
     );
 }
 

@@ -231,8 +231,10 @@ unsafe impl TensorElement for Bool8 {
 
 /// Typed access to a tensor's buffer as `*mut f32`.
 ///
-/// This helper remains for F32 and for
-/// `Repr::BoolInBinary32`, the current bool payload representation.
+/// This helper is for `Repr::Ieee754Binary32` only. It once also served
+/// `Repr::BoolInBinary32`, the bool payload representation this runtime used
+/// before chelis#1308; that variant no longer exists, and bool is now
+/// `Repr::Bool8`, reached through [`Bool8`] rather than an `f32` pointer.
 ///
 /// Do not use equal byte width as an access rule. `CHELIS_DTYPE_I32` also uses four
 /// bytes, but `Repr::TwosComplement32` requires an `i32` pointer.
