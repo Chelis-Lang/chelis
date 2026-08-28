@@ -95,11 +95,22 @@ HIP, and Metal backends. The audited package set is:
    through normal or build dependencies; plus
 2. the workspace dependency closure of those packages and the anchors.
 
-It scans production `src/**/*.rs` for that set. Test, example, and benchmark
-sources are evidence consumers, not production census inputs. A new package or
-dependency enters automatically; no stale crate allowlist can hide it. This rule
-includes the parser, Deep, effects, validation, pipeline-core, compiler API, CLI,
-bindings, proof, and editor/server routes when they are in the derived graph.
+For every derived package, the enumerator takes the exact `src_path` of every Cargo
+target except target kinds `test`, `example`, and `bench`, then follows the compiler's
+complete module and expansion graph from that root. Library, binary, proc-macro,
+static/dynamic library, and `custom-build` targets are production inputs even when
+their roots are `build.rs`, use an explicit path outside `src/`, include generated
+Rust from `OUT_DIR`, or load modules outside the conventional tree. Build scripts are
+in scope because their iteration order can change generated files, compiler flags,
+link directives, and artifact bytes. An included/generated module without a stable
+source mapping reaches C2.2's fail-closed expansion-fixture boundary.
+
+Test, example, and benchmark target sources are evidence consumers, not production
+census inputs. A new package, dependency, target, custom path, module, or generated
+input enters automatically; no directory convention or stale crate allowlist can hide
+it. This rule includes the parser, Deep, effects, validation, pipeline-core, compiler
+API, CLI, bindings, proof, editor/server, build-script, and generated-code routes when
+they are in the derived graph.
 
 #### C2.2 Source identities and bijection
 
@@ -157,8 +168,12 @@ The liveness oracle must reject all of these planted changes:
 7. an opaque procedural-macro expansion with no checked expansion fixture;
 8. a new hash-backed field under derived Serde;
 9. a new serialization, persistence, cache-key, or byte-handoff root;
-10. a new carrier or consumer with no census row; and
-11. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
+10. direct, indirect, and macro-generated consumers in an explicit Cargo target
+    whose `src_path` is outside `src/`;
+11. a serialization root in an outside-`src` target;
+12. the same four shapes in a `custom-build` target;
+13. a new carrier or consumer with no census row; and
+14. an `#[allow(clippy::iter_over_hash_type)]` with no matching row.
 
 The mutation suite is the completeness lock that the lint alone cannot provide.
 
@@ -282,14 +297,16 @@ the deterministic structural and mutation legs.
 
 ### Phase 0 - executable universe and census
 
-**Deliver:** the Cargo-derived package enumerator, expanded type-resolved enumerator,
-raw-source identity sidecar, macro-expansion fixture boundary, serialization-root and
-Serde graph extractor, census schema, all currently discovered rows with executable
-evidence, and the C2.3 mutation suite.
+**Deliver:** the Cargo-derived package/target enumerator, exact non-test target and
+module graph (including custom paths, custom-build targets, and generated inputs),
+expanded type-resolved enumerator, raw-source identity sidecar, macro-expansion
+fixture boundary, serialization-root and Serde graph extractor, census schema, all
+currently discovered rows with executable evidence, and the C2.3 mutation suite.
 
-**Frozen at exit:** universe derivation, expanded-to-source identity mapping,
-serialization-root identity, dispositions, executable-evidence schema, and the rule
-that unknown syntax, macro expansions, and serialization edges fail closed.
+**Frozen at exit:** package/target/module universe derivation, expanded-to-source
+identity mapping, serialization-root identity, dispositions, executable-evidence
+schema, and the rule that unknown targets, generated inputs, syntax, macro expansions,
+and serialization edges fail closed.
 
 **Oracle:** `.venv/bin/python scripts/hash_order_determinism_oracle.py --phase census`
 exits 0 with `HASH ORDER CENSUS: PASS` after every negative mutation is observed and
