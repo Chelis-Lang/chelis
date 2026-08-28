@@ -2298,12 +2298,12 @@ impl CEmitter {
         self.line("}");
     }
 
-    /// Exact direct-extrema selection expression for f32/f64 and integer
-    /// storage. The conditional returns one operand expression unchanged, so
-    /// NaN payloads, NaN signs, and signed zero bits are never re-encoded.
+    /// Exact direct-extrema selection expression for floating, integer, and
+    /// Bool storage. The conditional returns one operand expression unchanged,
+    /// so NaN payloads, NaN signs, and signed zero bits are never re-encoded.
     fn extrema_select_expr(ty: &TensorType, func: &str, lhs: String, rhs: String) -> String {
         let comparison = if func.contains("max") { ">=" } else { "<=" };
-        if ty.precision.is_integer() {
+        if ty.precision.is_integer() || matches!(ty.precision, Prim::Bool) {
             format!("(({lhs}) {comparison} ({rhs}) ? ({lhs}) : ({rhs}))")
         } else {
             format!(

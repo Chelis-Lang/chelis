@@ -81,6 +81,16 @@ def source_contracts() -> tuple[SourceContract, ...]:
             ),
         ),
         SourceContract(
+            "C Bool extrema avoid floating classification",
+            "crates/chelis-backend-c/src/emit.rs",
+            (
+                "if ty.precision.is_integer() || matches!(ty.precision, Prim::Bool) {",
+            ),
+            (
+                'if ty.precision.is_integer() {\n            format!("(({lhs})',
+            ),
+        ),
+        SourceContract(
             "HIP stored-bit extrema",
             "crates/chelis-backend-hip/src/kernels.rs",
             (
@@ -231,6 +241,29 @@ def source_contracts() -> tuple[SourceContract, ...]:
                 "Binary Tier 2",
                 "binary_map(.., f64::max)",
                 "binary_map(.., f64::min)",
+            ),
+        ),
+        SourceContract(
+            "current fused direct-extrema narrative",
+            "crates/chelis-ir/tests/fusion_adversarial.rs",
+            (
+                "ADV-10: MaxElem in fused chain preserves exact selected-operand semantics",
+            ),
+            (
+                "ADV-10: MaxElem in fused chain uses fmaxf",
+            ),
+        ),
+        SourceContract(
+            "retired direct-arithmetic timing identities",
+            "scripts/test_timing_baseline.json",
+            (),
+            (
+                "max_elem_emits_fmaxf",
+                "spec_sub_decomposes_to_add_neg",
+                "lower_min_elem_decomposes",
+                "lower_sub_decomposes",
+                "min_elem_produces_neg_max_neg",
+                "sub_produces_add_neg",
             ),
         ),
     )

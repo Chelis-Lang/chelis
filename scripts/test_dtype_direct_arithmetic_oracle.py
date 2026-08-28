@@ -138,6 +138,17 @@ class SourceContractMutationTests(unittest.TestCase):
         with self.assertRaisesRegex(oracle.OracleFailure, "C stored-bit extrema"):
             oracle.validate_source_contracts(self.repo)
 
+    def test_c_bool_extrema_float_classification_mutation_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-backend-c/src/emit.rs",
+            "if ty.precision.is_integer() || matches!(ty.precision, Prim::Bool) {",
+            "if ty.precision.is_integer() {",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "C Bool extrema avoid floating classification"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
     def test_hip_first_operand_extrema_mutation_fails(self) -> None:
         self.mutate(
             "crates/chelis-backend-hip/src/kernels.rs",
@@ -208,6 +219,41 @@ class SourceContractMutationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             oracle.OracleFailure, "current builtin direct arithmetic grouping"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_required_fused_extrema_narrative_deletion_fails(self) -> None:
+        self.mutate(
+            "crates/chelis-ir/tests/fusion_adversarial.rs",
+            "ADV-10: MaxElem in fused chain preserves exact selected-operand semantics",
+            "ADV-10: MaxElem in fused chain",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "current fused direct-extrema narrative"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_obsolete_fused_extrema_narrative_restoration_fails(self) -> None:
+        current = "ADV-10: MaxElem in fused chain preserves exact selected-operand semantics"
+        self.mutate(
+            "crates/chelis-ir/tests/fusion_adversarial.rs",
+            current,
+            current + "\n// ADV-10: MaxElem in fused chain uses fmaxf",
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "current fused direct-extrema narrative"
+        ):
+            oracle.validate_source_contracts(self.repo)
+
+    def test_retired_timing_identity_restoration_fails(self) -> None:
+        current = '"chelis-ir::tier2::tests::or_produces_max_elem":'
+        self.mutate(
+            "scripts/test_timing_baseline.json",
+            current,
+            '"chelis-ir::lower::tests::lower_sub_decomposes": 0.001,\n  ' + current,
+        )
+        with self.assertRaisesRegex(
+            oracle.OracleFailure, "retired direct-arithmetic timing identities"
         ):
             oracle.validate_source_contracts(self.repo)
 

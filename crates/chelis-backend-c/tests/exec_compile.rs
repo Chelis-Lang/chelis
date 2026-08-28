@@ -3147,6 +3147,49 @@ int main(void) {{
 }
 
 #[test]
+fn direct_bool_max_elem_compiles_without_float_classification() {
+    let mut dag = Dag::new();
+    let ty = vec_prim(4, Prim::Bool);
+    let a = dag.add_node(RiscOp::Load { name: "a".into() }, vec![], ty.clone(), None);
+    let b = dag.add_node(RiscOp::Load { name: "b".into() }, vec![], ty.clone(), None);
+    let maximum = dag.add_node(RiscOp::MaxElem, vec![a, b], ty, None);
+    dag.add_root(maximum);
+
+    let function = "direct_bool_max_elem";
+    let src = chelis_backend_c::codegen(&dag, function)
+        .expect("Bool max_elem codegen")
+        .c_source;
+    let harness = format!(
+        r#"{HARNESS_HEADER}
+#include <stdint.h>
+extern void {function}(chelis_tensor **, int, chelis_tensor **, int);
+int main(void) {{
+    uint8_t a_data[4] = {{ 0, 0, 1, 1 }};
+    uint8_t b_data[4] = {{ 0, 1, 0, 1 }};
+    uint8_t expected[4] = {{ 0, 1, 1, 1 }};
+    chelis_tensor a = make_view_typed_1d(a_data, 4, CHELIS_DTYPE_BOOL);
+    chelis_tensor b = make_view_typed_1d(b_data, 4, CHELIS_DTYPE_BOOL);
+    chelis_tensor *inputs[2] = {{ &a, &b }};
+    chelis_tensor *outputs[1] = {{ NULL }};
+    {function}(inputs, 2, outputs, 1);
+    uint8_t *got = (uint8_t *)outputs[0]->data;
+    for (int i = 0; i < 4; i++) if (got[i] != expected[i]) return 1;
+    puts("PASS");
+    return 0;
+}}
+"#
+    );
+    let output = compile_and_run_kernel(function, &src, &harness)
+        .expect("Bool max_elem generated C must compile and run");
+    assert!(output.contains("PASS"), "{output}");
+    assert!(src.contains("uint8_t"), "Bool storage must stay byte-typed");
+    assert!(
+        !src.contains("isnan("),
+        "Bool max_elem must not enter the floating extrema branch: {src}"
+    );
+}
+
+#[test]
 fn direct_fused_runtime_shape_mismatch_traps_before_indexing() {
     let runtime_vec = |name: &str| TensorType {
         dims: vec![DimInfo::Named(name.into(), None)],
