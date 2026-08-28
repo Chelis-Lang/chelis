@@ -119,15 +119,31 @@ through a typed implementation receipt, to exact execution.
    op-declared sites; the HIP lane compiles a Load-declared symbolic
    `expand` because `emit_expand` (`crates/chelis-backend-hip/src/emit.rs:
    3107-3140`) never reads the size and takes the output shape from the
-   node's type metadata by name (`emit_alias_view`, `1996-2001`). Both GPU
-   gates run only on the device-DAG path (`reject_unsupported_hip_ops`,
+   node's type metadata by name (`emit_alias_view`, `1996-2001`). The
+   Metal lane executes no `expand` row at all today: its emitter has no
+   standalone `Expand` arm (`crates/chelis-backend-metal/src/emit.rs:
+   641-646`, which defers broadcasts to the Metal backend plan) and
+   `require_static_shape` (`701-727`) rejects every symbolic-dim and every
+   rank-0 `Load`, so each such program builds to the M1 fallback stub
+   (`174-188`), which aborts at runtime with no typed receipt while
+   `chelis build --target metal` reports success. Both GPU gates run only
+   on the device-DAG path (`reject_unsupported_hip_ops`,
    `crates/chelis-compiler-api/src/compiler.rs:4495`, called at `2079`;
-   `reject_unsupported_metal_ops`, `4201`): there HIP rejects every
-   `RtDim::Node` bound and the `Shape` read itself (`4628-4694`) and Metal
-   rejects node-valued bounds (`4238-4259`), while a program whose roots
-   manifest to the host lane (`compiler.rs:2049-2066`,
-   `codegen_host_program`) executes `Node` bounds and `Shape` reads today
-   under `--target hip` and `--target metal` through the C emitter. `vmap`
+   `reject_unsupported_metal_ops`, `4204`, called only from `chelis-cli`):
+   there HIP rejects every `RtDim::Node` bound and the `Shape` read itself
+   (`4628-4694`) and Metal rejects node-valued bounds (`4238-4259`) with a
+   `deliberate [05-MOV-1]` receipt whose hint ("defined on eval and C; use
+   `--target c`") asserts the language restriction the atom forbids. The
+   host path executes `Node` bounds and `Shape` reads today through the C
+   emitter (`codegen_host_program`), but the two targets route to it
+   differently: `chelis build --target hip` takes it when any root
+   manifests to the host lane or the DAG has no roots and no
+   tensor-signature entry (`crates/chelis-cli/src/main.rs:3285-3295`),
+   while `--target metal` takes it only in the second case
+   (`main.rs:3359-3362`), so a host-rooted program with a tensor-signature
+   `def` executes on HIP and is gate-rejected on Metal; the compiler-api
+   path at `compiler.rs:2049-2066` is HIP-only and lacks the host-roots
+   test. `vmap`
    (`crates/chelis-ir/src/vmap.rs:12`) prepends the batch axis
    to every node including rank-0 scalars and has no `Shape` arm;
    `chelis_ir::verify::verify`, which would reject the rank-1 bound source
@@ -262,9 +278,10 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
   static folder is shared between the checker and lowering. Failure to
   fold produces the exact `InputAxis` or
   `Node` carrier dictated by C2.1; it never rejects the expression or guesses
-  a value. The `size > 0` checks at `app_tensor.rs:985-996` and `1184-1193`
-  and the verifier's `size must be > 0` become negative-only rejections; a
-  runtime negative value traps `Domain` before allocation.
+  a value. The `size > 0` checks at `app_tensor.rs:985-996` and `1184-1193`,
+  the verifier's `size must be > 0`, and the evaluator's `expand requires
+  positive count` (`runtime/eval.rs:2236`) become negative-only rejections;
+  a runtime negative value traps `Domain` before allocation.
 - **C2.3 Every result is constructed.** The checker always constructs an
   `expand` result tensor whose rank is the operand rank or the operand rank
   plus one, stamps complete type metadata, and validates a declared or
@@ -333,15 +350,28 @@ fn derive_runtime_dim_classes(dag: &Dag) -> Vec<RuntimeDimClass>;
     to the derived class list and from name order to signature order.
   - Eval: the same placement, expressed as ordinary dataflow plus explicit
     guard steps before the first dependent allocation.
-  - HIP and Metal: their gates admit `Lit` and `InputAxis`, which are
-    metadata reads (the same by-name metadata read HIP's `emit_expand`
-    performs today), so a Load-declared symbolic `expand` keeps compiling.
-    On the device-DAG path they reject `Node` with the existing [05-MOV-1]
-    typed receipt until the device scalar path lands under
-    [#1112]/[#1298]; that is a legal interim state in the C5 lattice. On the
-    host-program path both targets already execute `Node` bounds through
-    the C emitter, and those rows keep executing. An extent above `INT_MAX`
-    on HIP remains [#1112]'s defect exactly as it is now.
+  - HIP: its gate admits `Lit` and `InputAxis`, which are metadata reads
+    (the same by-name metadata read `emit_expand` performs today), so a
+    Load-declared symbolic `expand` keeps compiling. On the device-DAG path
+    it rejects `Node` at `typed_unsupported(#1298)`, the owner the atom's
+    own parenthetical names, until the device scalar path lands there; the
+    same gate edit changes the receipt from `deliberate [05-MOV-1]` (a
+    language-rejected authority whose hint asserts a restriction the atom
+    forbids) to `unimplemented chelis#1298`, the [05-UNS-5] kind for an
+    implementation gap. That is a legal interim state in the C5 lattice.
+    An extent above `INT_MAX` on HIP remains [#1112]'s defect exactly as
+    it is now.
+  - Metal: its gate admits the same carriers and rejects `Node` at
+    `typed_unsupported(#1383)` with the same receipt-kind change, but no
+    device-path `expand` row and no symbolic-dim or rank-0 `Load` row
+    executes on Metal today (evidence item 4): every such row is recorded
+    at `lane_divergent` (the M1 abort stub) and stays there until [#1383]
+    lands `expand` emission and symbolic-dim `Load` support under the
+    Metal backend plan. This plan adds no Metal emission.
+  - Host path: a program the CLI routes to the host lane (evidence item 4:
+    host-rooted or root-free on HIP, root-free only on Metal) already
+    executes `Node` bounds through the C emitter, and those rows keep
+    executing.
   - Wire: `Expand.size` changes from a display string to `WireRtDim`, which
     gains an `input_axis { tensor, axis }` variant; nothing is serialized
     for classes, since every consumer derives them from the names and
@@ -546,8 +576,10 @@ the properties below; the generator, not this document, enumerates rows.
    the named rows that start at `silent_unguarded`, and [#1377] and [#1379]
    the ones that start at `lane_divergent`.
 2. **GPU build and execution.** The same rows compile and execute in the HIP
-   and Metal correctness suites, not merely through capability-gate
-   rejection tests:
+   correctness suite, not merely through capability-gate rejection tests;
+   Metal device-path rows sit at their recorded `lane_divergent` baseline
+   (evidence item 4) until the Metal backend plan lands `expand` emission
+   and symbolic-dim `Load` support, and then run under the second command:
 
    ```sh
    scripts/hip_test.py -p chelis-backend-hip --test gpu_correctness --
@@ -557,8 +589,9 @@ the properties below; the generator, not this document, enumerates rows.
    ```
 
    Each command reports the runtime-extent group at the same commit and
-   corpus digest as the host run. A row a lane rejects with the [05-MOV-1]
-   receipt sits at `typed_unsupported`, never at a silent pass.
+   corpus digest as the host run. A row a lane rejects with an issue
+   receipt sits at `typed_unsupported`, never at a silent pass; a row that
+   builds to the Metal stub sits at `lane_divergent`, never at a receipt.
 3. **Negative parity.** Every C1 rule has a failing control on every
    applicable lane with the owning diagnostic or trap: static negative
    extents, runtime negative extents, wrong dtype, out-of-range axis,
@@ -666,12 +699,13 @@ next monotonic `WIRE_DAG_SCHEMA_VERSION` at landing, coordinated with [#1298]
 so the two migrations use distinct successive versions and both trackers,
 `spec/10`, fixtures, hashes, and rejected-version controls update together;
 and the regenerated typed wire capacity census. The provenance walk and the
-lowerer's rejection sites are untouched (C2.7). Close [#1367], [#609],
-[#1378], and [#592] if its reproducer is green once the size carrier lands;
-[#597] waits for Slice B's removal of the lowering override that inserts
-the extra axis. [#578] remains open; commits that improve its mechanism use `Part of
-#578` until its complete rank-polymorphic acceptance reproducer is green
-under the owning rank-polymorphism work.
+lowerer's rejection sites keep their acceptance decisions (C2.7). Close
+[#1367], [#609], [#1378], [#1382], and [#592] if its reproducer is green
+once the size carrier lands; [#597] waits for Slice B's removal of the lowering
+override that inserts the extra axis. [#578] remains open; commits that
+improve its mechanism use `Part of #578` until its complete
+rank-polymorphic acceptance reproducer is green under the owning
+rank-polymorphism work.
 
 **Frozen at exit:** corpus row identities and status vocabulary;
 `Expand.size: RtDim`; the `InputAxis` carrier with a literal axis; the owner
@@ -681,10 +715,13 @@ decisions unchanged.
 
 **Oracle:** `uv run --managed-python --python 3.11 --no-project python
 scripts/runtime_extent_oracle.py --phase a`: lane parity for every row
-whose recorded `main` baseline is `executes_exactly`, HIP and Metal
-build-and-execute rows for `Lit` and `InputAxis` (with device-path `Node`
-rows at `typed_unsupported([05-MOV-1])` and host-path `Node` rows at their
-executing baseline), the insertion and named-axis zero rows,
+whose recorded `main` baseline is `executes_exactly`, HIP build-and-execute
+rows for `Lit` and `InputAxis` (with device-path `Node` rows at
+`typed_unsupported(#1298)`, host-path `Node` rows at their executing
+baseline, and Metal device-path rows at `typed_unsupported(#1383)` for the
+gate-rejected bounds or their recorded `lane_divergent` baseline for the
+stub rows), the bare-binder row ([#1382], from `ice` to `executes_exactly`
+through the binder fold), the insertion and named-axis zero rows,
 rebuild-survival rows, and wire rows this slice owns; every other row,
 including every positional same-rank replacement row (`silent_unguarded`,
 owner [#597]), stays at its recorded baseline.
@@ -695,8 +732,10 @@ owner [#597]), stays at its recorded baseline.
 device-resident extents only: HIP must carry `int64` device extents to
 compare them exactly, so host, C, host-path Metal, and host-path HIP rows
 may exit first with the device-resident HIP rows at
-`typed_unsupported(#1112)` and device-path Metal `Node` rows at the
-[05-MOV-1] receipt until the Metal device scalar path lands.
+`typed_unsupported(#1112)`. [#1383] for the device-path Metal guard rows:
+they stay at their recorded `lane_divergent` baseline until Metal can
+load a symbolic-dim tensor and emit `expand` (evidence item 4), and this
+slice does not wait for them.
 [#1298] for the node-valued `InputAxis` axis rows only, which sit at
 `typed_unsupported(#1298)` on every lane until then.
 
@@ -705,7 +744,8 @@ may exit first with the device-resident HIP rows at
 with the four C2.4 rules; removal of lowering's `fallback_expand_type`
 override of the stamped result type so the declared claim survives to
 derivation (what closes [#1374] and [#1376]); guard placement per C1.3 on
-Eval, C, HIP, and Metal; replacement of `symbolic_occurrences`,
+Eval, C, and HIP (and on Metal once [#1383] lands); replacement of
+`symbolic_occurrences`,
 `op_declared_output_axes`, `shape_source_for_axis`, and `symbolic_bindings`
 by the two derivations; then, in the same change, deletion of `SizeClass`,
 `classify_expand_size`, `classify_arith_app`,
@@ -759,9 +799,12 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 - **[#729] / [#1112]:** owns the remaining HIP `int64` metadata carrier.
   Slice B's HIP guard rows over device-resident extents depend on it;
   nothing else here does, and this plan neither reparents nor closes it.
-- **[#1298]:** owns computed runtime `shape` axes and runtime reduction
-  windows. This plan admits `RtAxis::Node` only after that runtime axis
-  lands, and composes its oracle only for those rows. Whichever of [#1298]
+- **[#1298]:** owns computed runtime `shape` axes, runtime reduction
+  windows, and, as [05-MOV-1]'s own parenthetical records, the device
+  scalar path that device-path `Node` bound rows wait on
+  (`typed_unsupported(#1298)`). This plan admits `RtAxis::Node` only after
+  that runtime axis lands, and composes its oracle only for those rows.
+  Whichever of [#1298]
   and Slice A lands first takes the next monotonic `WIRE_DAG_SCHEMA_VERSION`;
   the other takes the one after; both trackers update together and no
   version is reused.
@@ -774,6 +817,13 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
   [#609] rank error use that channel.
 - **[#730]:** owns the typed `Unsupported` receipt used by C4's interim
   transition and by the GPU lanes' `Node` rows.
+- **[#1383] / Metal backend plan**
+  ([`chelis_metal_backend_plan.md`](chelis_metal_backend_plan.md) §4, the
+  `expand` row; run evidence under [#737]): owns Metal `expand` emission,
+  symbolic-dim and rank-0 `Load` support, and the device-path receipt kind.
+  Every device-path Metal row here sits at its recorded baseline until that
+  lands; this plan adds no Metal emission and gates its Metal guard rows on
+  that owner.
 - **Rank-polymorphism plans** (`rank_polymorphism.md`,
   `rank_polymorphism_tier3_followups.md`): own whether named-axis forms are
   legal inside a `..r` body; this plan provides the resolution mechanism
@@ -806,11 +856,13 @@ class completion oracle and ends with `RUNTIME EXTENT ORACLE: PASS`.
 | [#1377] | eval executes a literal claim over a cross-tensor read that C guards | B |
 | [#1378] | vmap batches a `shape()` bound so it reads the batch extent | A |
 | [#1379] | arithmetic size under a named claim: eval unguarded, compiled lanes reject | B |
+| [#1382] | bare binder as an `expand` size: no witness in eval, compiled lanes ICE | A |
 | [#1265] | comparison consumer never selects the deferred shape | C |
 | [#1338] | coupled defaults settle nondeterministically | C / [#1341] mechanism |
 | [#578] | mechanism evidence only; full rank-polymorphic repro stays open | external rank-polymorphism work |
 | [#1112] | HIP metadata-carrier width; Slice B HIP guard rows | [#729] |
 | [#1298] | runtime axes and windows; `RtAxis::Node` rows and wire ordering | [#729] |
+| [#1383] | Metal device-path runtime extents: emission, `Load` support, receipt kind | Metal backend plan |
 
 ### Not owned here
 
@@ -818,7 +870,8 @@ Data-dependent output ranks or shapes ([#600]), type-level dimension
 arithmetic ([#526]), grad's symbolic-window gaps ([#513]), runtime axes and
 windows ([#1298]), the rank-polymorphic legality half of [#578], the DAG
 rebuild integrity class ([#1372]), exact `i64` internal carriers ([#1373]),
-sibling symbolic-dim defects not yet parented to [#1277], and
+Metal `expand` emission and symbolic-dim `Load` support ([#1383]), sibling
+symbolic-dim defects not yet parented to [#1277], and
 dtype-semantics decisions.
 
 ## Considered and rejected
@@ -967,6 +1020,7 @@ decides the underlying rule, and what replaces it.
 [#729]: https://github.com/Chelis-Lang/chelis/issues/729
 [#730]: https://github.com/Chelis-Lang/chelis/issues/730
 [#731]: https://github.com/Chelis-Lang/chelis/issues/731
+[#737]: https://github.com/Chelis-Lang/chelis/issues/737
 [#1112]: https://github.com/Chelis-Lang/chelis/issues/1112
 [#1265]: https://github.com/Chelis-Lang/chelis/issues/1265
 [#1266]: https://github.com/Chelis-Lang/chelis/issues/1266
@@ -984,3 +1038,5 @@ decides the underlying rule, and what replaces it.
 [#1377]: https://github.com/Chelis-Lang/chelis/issues/1377
 [#1378]: https://github.com/Chelis-Lang/chelis/issues/1378
 [#1379]: https://github.com/Chelis-Lang/chelis/issues/1379
+[#1382]: https://github.com/Chelis-Lang/chelis/issues/1382
+[#1383]: https://github.com/Chelis-Lang/chelis/issues/1383

@@ -56,7 +56,7 @@ FROZEN_FILE_DIGESTS = {
         "9d4d577b1e36dafe3409ba6a4b4e9106d1f30c79a5f051bc4777b4193df98491"
     ),
     "spec/05-risc-primitives.md": (
-        "bbf63136961e67cebb90072bbb0f94409f8144b550265153d8bf6a709d4b7337"
+        "10d64930ae6d9b3316ac9b0f35892052b2e0b1475c50097dd63ca5c0ba61ef6a"
     ),
     "spec/06-transformations.md": (
         "30a78217103d0a57d63b9e1a3d927d2e1079affa4d1d0641ef36a9afff34e25a"
@@ -68,7 +68,7 @@ FROZEN_FILE_DIGESTS = {
         "a0ec07d22a5c26e2b81ffd9354dd0b055822a02689ccaed692592ec235ef6f09"
     ),
     "spec/design/dtype_semantics.md": (
-        "388cf76e700c728c1302dbea59254e534194b56ca35f12e1dc145650304fa4f1"
+        "0d46e2c3561089138755e598474d551b09922414e4424e53b8ac96881b47264e"
     ),
     "spec/design/loud_unsupported.md": (
         "dec76721503b380278124b12448112d3e4bf754f8320f949642d32f7d30d5414"

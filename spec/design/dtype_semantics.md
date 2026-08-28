@@ -1289,7 +1289,10 @@ the same rule, while reverse-mode AD remains fail-closed.
 placement rule and the §4.7.2 settlement order for coupled positional `expand`
 defaults), `spec/05-risc-primitives.md` §2.4.1 and §2.5.1 (an `expand` size is
 an `RtDim`; the `InputAxis` carrier realizes the extent-argument fold; the
-per-operation admission sentence), and `spec/06-transformations.md` §3.3,
+per-operation admission sentence) together with the [05-MOV-1] enumeration,
+which now names `expand` sizes and whose parenthetical links chelis#1277
+beside chelis#1298 (the atom is locked by the file digest only), and
+`spec/06-transformations.md` §3.3,
 §3.7, and §8.6 (runtime extents under `vmap`; `batch_varying_extent`). It
 deliberately moves the complete-file digests for those three chapters and for
 this document; it adds no atom and moves no atom or region digest, and it adds

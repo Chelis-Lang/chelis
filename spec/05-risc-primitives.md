@@ -809,7 +809,7 @@ differentiability rejection.
 > require host provenance, emit a statically guessed extent, or turn a backend
 > implementation gap into a language restriction.
 
-*(Not fully implemented; chelis#1298.)*
+*(Not fully implemented; chelis#1277, chelis#1298.)*
 
 ### 2.5 Memory
 
