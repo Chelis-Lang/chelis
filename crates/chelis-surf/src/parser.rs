@@ -435,6 +435,24 @@ impl Parser {
         }
     }
 
+    /// Tokens that can only CONTINUE an expression, never begin one.
+    ///
+    /// chelis#849. A top-level newline inside a sequencing context ends the
+    /// expression being parsed unless the next significant token is one of these:
+    ///
+    /// * `|>` -- an infix pipeline stage has no meaning at the head of a statement.
+    /// * `then` / `else` -- an `if` is not a legal expression without both, so
+    ///   neither can begin one.
+    ///
+    /// Membership is the structural property "cannot head an expression", not a
+    /// convenience list. A token that CAN head one (`with`, `match`, an
+    /// identifier) must not be added: after a newline it is genuinely ambiguous
+    /// between a continuation and a new statement, and admitting it would
+    /// re-open the juxtaposition defect chelis#706 closed.
+    fn is_expression_continuation(kind: &TokenKind) -> bool {
+        matches!(kind, TokenKind::Pipe | TokenKind::Then | TokenKind::Else)
+    }
+
     fn block_expr_end(&self) -> usize {
         let mut pos = self.pos;
         let mut paren_depth = 0usize;
@@ -445,13 +463,34 @@ impl Parser {
                 TokenKind::Newline | TokenKind::Semicolon
                     if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 =>
                 {
+                    // A top-level newline does not end the expression when
+                    // the next significant token CANNOT begin one (chelis#849).
+                    // That is the whole rule, and it is structural rather than
+                    // a list of special cases: `|>` is an infix continuation,
+                    // and `then` / `else` are the mandatory continuations of an
+                    // `if` -- none of the three can head a statement, so seeing
+                    // one after a newline is unambiguous.
+                    //
+                    // This helper is the only one of the three boundary
+                    // rules that is CLOSED. `decl_expr_end` and
+                    // `property_expr_end` are permissive -- they end only at
+                    // a declaration start (and, for a property predicate, at
+                    // `with`), so a leading `then` or `else` already
+                    // continued there and neither ever showed this defect.
+                    // `block_expr_end` broke instead, which is the 0.17
+                    // regression. spec/02 P12 states all three.
+                    //
+                    // The set is deliberately closed to tokens that can only
+                    // continue. `with {` is NOT admitted: it heads an
+                    // expression, so a leading `with` after a newline is
+                    // genuinely ambiguous and is left to its own decision.
                     if matches!(token.kind, TokenKind::Newline)
                         && self
                             .tokens
                             .iter()
                             .skip(pos + 1)
                             .find(|next| !matches!(next.kind, TokenKind::Newline))
-                            .is_some_and(|next| matches!(next.kind, TokenKind::Pipe))
+                            .is_some_and(|next| Self::is_expression_continuation(&next.kind))
                     {
                         pos += 1;
                         continue;
@@ -2779,8 +2818,9 @@ impl Parser {
         }
         // The tail is Sep-bounded exactly like a binding value
         // (`BlockBody <- (BlockBinding Sep)* Expr`, spec/02 §BlockBody):
-        // a top-level newline/`;` ends it unless the next line begins `|>`
-        // or the break is inside ()/[]/{}. An empty tail keeps today's
+        // a top-level newline/`;` ends it unless the next line begins a
+        // continuation (`|>`, `then`, `else`; spec/02 §P12) or the break is
+        // inside ()/[]/{}. An empty tail keeps today's
         // "expected expression" shape — routing `{ x = 1 }` (RBrace here)
         // through the nested parser would report Eof and disturb the
         // pinned message, so guard it explicitly first.
@@ -4347,8 +4387,9 @@ mod tests {
     // ===== chelis#706: bounded block tail + bare-statement diagnostic =====
     //
     // The tail expression, like a binding value, is Sep-bounded: a
-    // top-level newline/`;` ends it unless the next line begins `|>` or
-    // the break is inside ()/[]/{}. A second top-level expression after
+    // top-level newline/`;` ends it unless the next line begins a
+    // continuation (`|>`, `then`, `else`; spec/02 §P12) or the break is
+    // inside ()/[]/{}. A second top-level expression after
     // the tail is rejected (previously it silently cross-newline
     // juxtaposed into an application).
 
@@ -6061,6 +6102,187 @@ mod tests {
             },
             other => panic!("expected Apply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn block_if_with_else_on_a_later_line_parses() {
+        // chelis#849: inside a `{ }` block, `block_expr_end` ended the
+        // statement at the newline after the `then` branch, so `parse_if`
+        // reached Eof before its mandatory `else` and reported
+        // `expected Else, found Eof`. The `else` is present -- only its line
+        // placement differs. `|>` already had this continuation carve-out.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n  else lte(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "block + newline before `else` must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    #[test]
+    fn block_if_else_on_one_line_still_parses() {
+        // Positive control for the sibling form, so the fix cannot be a
+        // regression that only moves which layout works.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true else lte(a, b)\n}";
+        assert!(parse_str(src).is_ok(), "same-line form must keep parsing");
+    }
+
+    #[test]
+    fn block_if_with_a_missing_else_is_still_rejected() {
+        // Negative parity: the continuation must not make `else` optional.
+        // Pin the REASON, not merely that something failed -- an unrelated
+        // rejection would otherwise keep this green (review of PR #1369).
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c then true\n}";
+        match parse_str(src) {
+            Err(ParseError::Expected {
+                expected, found, ..
+            }) => {
+                assert_eq!(expected, "Else", "the missing `else` is the reason");
+                assert_eq!(found, "Eof", "the block ended before the `else`");
+            }
+            other => panic!("expected a missing-`else` rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_if_with_a_missing_then_is_still_rejected() {
+        // The `then` half of the same parity: admitting `then` as a
+        // continuation must not make it optional either.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n}";
+        match parse_str(src) {
+            Err(ParseError::Expected { expected, .. }) => {
+                assert_eq!(expected, "Then", "the missing `then` is the reason");
+            }
+            other => panic!("expected a missing-`then` rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn block_if_with_then_on_a_later_line_parses() {
+        // chelis#849 review: the same defect exists one token earlier. A
+        // newline between the condition and `then` failed with
+        // `expected Then, found Eof` for the identical reason.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  if c\n  then true\n  else lte(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a newline before `then` must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    #[test]
+    fn a_multiline_else_if_chain_parses() {
+        // The shape that motivated admitting `then`: each arm of a chained
+        // `else if` puts its own `then` and `else` on later lines.
+        let src = "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else if lt(a, b)\n  then b\n  else mul(a, b)\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a multiline `else if` chain must parse: {:?}",
+            parse_str(src).err()
+        );
+    }
+
+    /// chelis#849 review: the corrected spec/02 P12 states that a
+    /// declaration body and a property predicate bound PERMISSIVELY -- they
+    /// end at a declaration start (and, for a predicate, at `with`), so any
+    /// other token continues them across a top-level newline.
+    ///
+    /// The earlier revision of P12 claimed the closed `|>`/`then`/`else` set
+    /// governed declaration bodies too, which is false: a newline-led `with`
+    /// continues one. Asserting it here keeps the numbered spec honest, and
+    /// keeps this PR from silently narrowing a boundary it does not own.
+    #[test]
+    fn the_permissive_boundaries_are_not_governed_by_the_closed_set() {
+        let declaration_body = concat!(
+            "type Point = | Point { x: f32 }\n",
+            "def update(p: Point) -> Point = p\n",
+            "  with { x: 1.0f32 }\n",
+        );
+        assert!(
+            parse_str(declaration_body).is_ok(),
+            "a newline-led `with` must continue a declaration body: {:?}",
+            parse_str(declaration_body).err()
+        );
+
+        // The `where` precondition routes through `property_expr_end`, the
+        // third boundary rule. It is not the property-OPTION path covered
+        // above; confusing the two is what left that consumer untested.
+        let property_predicate =
+            "@property p forall(x: int32) where if lte(x, 1i32)\n  then true\n  else false: true";
+        assert!(
+            parse_str(property_predicate).is_ok(),
+            "a split `if` must survive a property predicate: {:?}",
+            parse_str(property_predicate).err()
+        );
+    }
+
+    /// chelis#849 review: `block_expr_end` is shared by seven call sites
+    /// across five constructs -- block bindings, block tails, `do` items,
+    /// `par` items, and property option values. The continuation rule applies
+    /// to all of them, so each is covered rather than assumed.
+    ///
+    /// The property-option case reaches `block_expr_end` through
+    /// `parse_property_option`, which needs a real `with <name> = <expr>`
+    /// option. A `where` precondition looks similar and is NOT this path: it
+    /// routes through `property_expr_end`, a different and permissive rule.
+    /// The `where` form is covered separately below, precisely because
+    /// mistaking one for the other is what left this consumer untested.
+    #[test]
+    fn the_continuation_rule_holds_for_every_block_expr_end_consumer() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "block binding value",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  d = if c\n  then a\n  else b\n  d\n}",
+            ),
+            (
+                "block tail",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  if c\n  then a\n  else b\n}",
+            ),
+            (
+                "do item",
+                "def f(a: f32, b: f32) -> f32 ! { IO } = {\n  c = neq(a, a)\n  g = do {\n    if c\n    then print(\"y\")\n    else print(\"n\")\n  }\n  a\n}",
+            ),
+            (
+                "property option value",
+                "@property p forall(x: f32): true\n  with tolerance = if lte(x, 1.0f32)\n  then 1e-6f32\n  else 1e-3f32",
+            ),
+            (
+                "par item",
+                "def f(a: f32, b: f32) -> f32 = {\n  c = neq(a, a)\n  g = par {\n    if c\n    then a\n    else b\n  }\n  g\n}",
+            ),
+        ];
+        for (label, src) in cases {
+            assert!(
+                parse_str(src).is_ok(),
+                "{label}: the continuation rule must hold here too: {:?}",
+                parse_str(src).err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_token_that_can_head_an_expression_is_not_a_continuation() {
+        // The rule is "cannot begin an expression", not a convenience list.
+        // `with` heads one, so it stays out -- admitting it would re-open the
+        // juxtaposition defect chelis#706 closed.
+        assert!(Parser::is_expression_continuation(&TokenKind::Pipe));
+        assert!(Parser::is_expression_continuation(&TokenKind::Then));
+        assert!(Parser::is_expression_continuation(&TokenKind::Else));
+        assert!(!Parser::is_expression_continuation(&TokenKind::With));
+        assert!(!Parser::is_expression_continuation(&TokenKind::Match));
+        assert!(!Parser::is_expression_continuation(&TokenKind::If));
+    }
+
+    #[test]
+    fn block_statement_after_an_if_else_is_not_swallowed() {
+        // The continuation extends the statement only across the newline that
+        // precedes `else`. A following binding must remain its own statement.
+        let src = "def f(a: f32, b: f32) -> bool = {\n  c = neq(a, a)\n  d = if c then true\n  else lte(a, b)\n  d\n}";
+        assert!(
+            parse_str(src).is_ok(),
+            "a statement after the if/else must still parse: {:?}",
+            parse_str(src).err()
+        );
     }
 
     #[test]
