@@ -5386,11 +5386,7 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                     let type_repr = checked
                         .type_env()
                         .get(&internal)
-                        .map(|expr| {
-                            chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
-                                .trim()
-                                .to_string()
-                        })
+                        .map(canonical_shell_type_repr)
                         .or_else(|| sig_type_repr(module_source, export_name));
                     let effects = symbol_effects(module_source, export_name);
                     let has_body = module_source.decls.iter().any(|d| {
@@ -5428,14 +5424,10 @@ pub fn package_schema(root: &Path) -> Result<PackageSchema, String> {
                                         &module_source.module_name,
                                         &v.name,
                                     );
-                                    let ctor_type =
-                                        checked.type_env().get(&ctor_internal).map(|expr| {
-                                            chelis_deep::printer::print_canonical(
-                                                std::slice::from_ref(expr),
-                                            )
-                                            .trim()
-                                            .to_string()
-                                        });
+                                    let ctor_type = checked
+                                        .type_env()
+                                        .get(&ctor_internal)
+                                        .map(canonical_shell_type_repr);
                                     ConstructorSchema {
                                         name: v.name.clone(),
                                         kind: if has_invariant {
@@ -7484,6 +7476,207 @@ fn shell_package_sha256(shell: &ShellPackage) -> Result<String, String> {
         .map_err(|e| format!("encode shell for content identity: {e}"))
 }
 
+/// Render one exported checker type for a CHB/package-schema boundary.
+///
+/// Solver-variable numbers are allocation identities, not part of a public
+/// type. They can differ between otherwise equivalent checker runs when an
+/// internal map chooses a different traversal order. Persisting those numbers
+/// made the CHB content hash depend on that incidental order. Rename each
+/// variable class by deterministic first occurrence before printing so equal
+/// type structures have one byte representation while shared and independent
+/// variables remain distinguishable.
+fn canonical_shell_type_repr(expr: &chelis_deep::Expr) -> String {
+    let mut renamer = ShellTypeVariableRenamer::default();
+    let canonical = renamer.rewrite(expr);
+    chelis_deep::printer::print_canonical(std::slice::from_ref(&canonical))
+        .trim()
+        .to_string()
+}
+
+#[derive(Default)]
+struct ShellTypeVariableRenamer {
+    type_vars: BTreeMap<String, String>,
+    dim_vars: BTreeMap<String, String>,
+    rank_vars: BTreeMap<String, String>,
+}
+
+impl ShellTypeVariableRenamer {
+    fn rewrite(&mut self, expr: &chelis_deep::Expr) -> chelis_deep::Expr {
+        use chelis_deep::{Expr as DeepExpr, List, MetaExpr, UnknownFormData};
+
+        match expr {
+            DeepExpr::Atom(..) => expr.clone(),
+            DeepExpr::Map(meta, span) => DeepExpr::Map(self.rewrite_meta(meta), *span),
+            DeepExpr::MetaExpr(meta, span) => DeepExpr::MetaExpr(
+                MetaExpr {
+                    entries: meta
+                        .entries
+                        .iter()
+                        .map(|(key, value)| (key.clone(), self.rewrite(value)))
+                        .collect(),
+                    expr: Box::new(self.rewrite(&meta.expr)),
+                },
+                *span,
+            ),
+            DeepExpr::Node(node, span) => {
+                let tag = node.tag();
+                let children = node
+                    .children_slice()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| self.rewrite_child(tag, index, child))
+                    .collect();
+                DeepExpr::node(tag, self.rewrite_meta(node.meta()), children, *span)
+            }
+            DeepExpr::List(list, span) => {
+                let tag = list.tag();
+                let elements = list
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(index, child)| match tag {
+                        Some(tag) if index >= 2 => self.rewrite_child(tag, index - 2, child),
+                        _ => self.rewrite(child),
+                    })
+                    .collect();
+                DeepExpr::List(List { elements }, *span)
+            }
+            DeepExpr::BareList(children, span) => DeepExpr::BareList(
+                children.iter().map(|child| self.rewrite(child)).collect(),
+                *span,
+            ),
+            DeepExpr::UnknownForm(data) => DeepExpr::UnknownForm(Box::new(UnknownFormData {
+                head: data.head.clone(),
+                meta: self.rewrite_meta(&data.meta),
+                children: data
+                    .children
+                    .iter()
+                    .map(|child| self.rewrite(child))
+                    .collect(),
+                span: data.span,
+            })),
+        }
+    }
+
+    fn rewrite_meta(&mut self, meta: &chelis_deep::MetaMap) -> chelis_deep::MetaMap {
+        chelis_deep::MetaMap {
+            entries: meta
+                .entries
+                .iter()
+                .map(|(key, value)| (key.clone(), self.rewrite(value)))
+                .collect(),
+        }
+    }
+
+    fn rewrite_child(
+        &mut self,
+        tag: chelis_deep::DeepTag,
+        index: usize,
+        child: &chelis_deep::Expr,
+    ) -> chelis_deep::Expr {
+        use chelis_deep::{Atom, Expr as DeepExpr};
+
+        if index == 0
+            && let DeepExpr::Atom(Atom::Name(name), span) = child
+        {
+            let renamed = match tag {
+                chelis_deep::DeepTag::TVar => Self::canonical_name(&mut self.type_vars, "t", name),
+                chelis_deep::DeepTag::DVar => Self::canonical_name(&mut self.dim_vars, "d", name),
+                chelis_deep::DeepTag::DRank => Self::canonical_name(&mut self.rank_vars, "r", name),
+                _ => return self.rewrite(child),
+            };
+            return DeepExpr::Atom(Atom::Name(renamed), *span);
+        }
+        self.rewrite(child)
+    }
+
+    fn canonical_name(
+        names: &mut BTreeMap<String, String>,
+        prefix: &str,
+        original: &str,
+    ) -> String {
+        if let Some(existing) = names.get(original) {
+            return existing.clone();
+        }
+        // Every variable occurrence is rewritten, so allocating by map length
+        // cannot collide even when an input already uses (for example) `t0`:
+        // that input spelling is itself assigned exactly one output spelling.
+        let canonical = format!("{prefix}{}", names.len());
+        names.insert(original.to_string(), canonical.clone());
+        canonical
+    }
+}
+
+#[cfg(test)]
+mod shell_type_variable_canonicalization_tests {
+    use super::canonical_shell_type_repr;
+    use chelis_types::infer::type_to_deep_expr;
+    use chelis_types::types::{Dim, DimVar, RankVar, TensorPrec, Type, TypeVar};
+
+    fn representative_type(t_first: u32, t_second: u32, dim: u32, rank: u32) -> Type {
+        Type::Fn(
+            vec![
+                Type::Var(TypeVar(t_first)),
+                Type::Ref(Box::new(Type::Tensor(
+                    vec![Dim::Var(DimVar(dim)), Dim::Rank(RankVar(rank))],
+                    TensorPrec::Var(TypeVar(t_second)),
+                ))),
+                Type::Adt(
+                    "Boxed".to_string(),
+                    vec![Type::Tuple(vec![
+                        Type::Var(TypeVar(t_first)),
+                        Type::Var(TypeVar(t_second)),
+                    ])],
+                ),
+            ],
+            Box::new(Type::Tensor(
+                vec![Dim::Var(DimVar(dim)), Dim::Rank(RankVar(rank))],
+                TensorPrec::Var(TypeVar(t_first)),
+            )),
+        )
+    }
+
+    #[test]
+    fn alpha_equivalent_type_dim_and_rank_ids_render_identically() {
+        let first =
+            canonical_shell_type_repr(&type_to_deep_expr(&representative_type(9, 42, 17, 23)));
+        let second =
+            canonical_shell_type_repr(&type_to_deep_expr(&representative_type(701, 3, 999, 2)));
+
+        assert_eq!(first, second);
+        assert!(first.contains("(t-var {} t0)"));
+        assert!(first.contains("(t-var {} t1)"));
+        assert!(first.contains("(d-var {} d0)"));
+        assert!(first.contains("(d-rank {} r0)"));
+    }
+
+    #[test]
+    fn shared_and_independent_variables_remain_distinct() {
+        let shared = Type::Fn(
+            vec![Type::Var(TypeVar(50)), Type::Var(TypeVar(50))],
+            Box::new(Type::Var(TypeVar(50))),
+        );
+        let independent = Type::Fn(
+            vec![Type::Var(TypeVar(50)), Type::Var(TypeVar(51))],
+            Box::new(Type::Var(TypeVar(50))),
+        );
+
+        assert_ne!(
+            canonical_shell_type_repr(&type_to_deep_expr(&shared)),
+            canonical_shell_type_repr(&type_to_deep_expr(&independent)),
+        );
+    }
+
+    #[test]
+    fn canonical_names_do_not_collapse_existing_canonical_looking_ids() {
+        let ty = Type::Tuple(vec![Type::Var(TypeVar(99)), Type::Var(TypeVar(0))]);
+        let rendered = canonical_shell_type_repr(&type_to_deep_expr(&ty));
+
+        assert_eq!(rendered.matches("(t-var {} t0)").count(), 1);
+        assert_eq!(rendered.matches("(t-var {} t1)").count(), 1);
+    }
+}
+
 fn build_shell_package(
     package: &LoadedPackage,
     checked: &chelis_types::CheckedProgram,
@@ -7501,11 +7694,7 @@ fn build_shell_package(
             let type_repr = checked
                 .type_env()
                 .get(&internal)
-                .map(|expr| {
-                    chelis_deep::printer::print_canonical(std::slice::from_ref(expr))
-                        .trim()
-                        .to_string()
-                })
+                .map(canonical_shell_type_repr)
                 .or_else(|| sig_type_repr(module, name));
             let effects = symbol_effects(module, name);
             let has_body = module.decls.iter().any(|decl| matches!(decl, Decl::FunDef { name: decl_name, .. } | Decl::LetDef { name: decl_name, .. } if decl_name == name));
@@ -7551,11 +7740,7 @@ fn sig_type_repr(module: &ModuleSource, name: &str) -> Option<String> {
     let chelis_deep::ast::Expr::List(list, _) = expr else {
         return None;
     };
-    list.elements.get(3).map(|ty| {
-        chelis_deep::printer::print_canonical(std::slice::from_ref(ty))
-            .trim()
-            .to_string()
-    })
+    list.elements.get(3).map(canonical_shell_type_repr)
 }
 
 fn symbol_effects(module: &ModuleSource, name: &str) -> Vec<String> {

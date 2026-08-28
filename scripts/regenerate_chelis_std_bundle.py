@@ -5,7 +5,9 @@ chelis binary.
 This script is the canonical pipeline for refreshing the bytes that
 `crates/chelis-std-bundle` embeds via `include_bytes!()`. Run it from
 the repo root after any change to `packages/chelis-std/src/**.ch`,
-then commit the updated files in `crates/chelis-std-bundle/dist/`.
+then commit all five owned outputs: the `.tar.zst`/`.chb` pair under
+`packages/chelis-std/dist/`, the matching pair under
+`crates/chelis-std-bundle/dist/`, and `packages/chelis-std/reef.lock`.
 
 Pipeline:
   1. cargo build -p chelis --release
@@ -57,6 +59,19 @@ def chelis_std_version(repo: Path) -> str:
     with manifest_path.open("rb") as f:
         manifest = tomllib.load(f)
     return manifest["package"]["version"]
+
+
+def owned_generated_outputs(repo: Path, version: str) -> tuple[Path, ...]:
+    """Every tracked output owned by this regeneration pipeline."""
+    archive_name = f"chelis-std-{version}.tar.zst"
+    shell_name = f"chelis-std-{version}.chb"
+    return (
+        repo / "packages" / "chelis-std" / "dist" / archive_name,
+        repo / "packages" / "chelis-std" / "dist" / shell_name,
+        repo / "crates" / "chelis-std-bundle" / "dist" / archive_name,
+        repo / "crates" / "chelis-std-bundle" / "dist" / shell_name,
+        repo / "packages" / "chelis-std" / "reef.lock",
+    )
 
 
 def stage_runtime_package_for_lock(package_root: Path, staged_root: Path) -> None:
@@ -116,6 +131,7 @@ def main() -> int:
     pkg_dist = repo / "packages" / "chelis-std" / "dist"
     archive_name = f"chelis-std-{version}.tar.zst"
     shell_name = f"chelis-std-{version}.chb"
+    owned_outputs = owned_generated_outputs(repo, version)
 
     bundle_dist.mkdir(parents=True, exist_ok=True)
 
@@ -208,9 +224,7 @@ def main() -> int:
             "diff",
             "--stat",
             "--",
-            str(pkg_dist.relative_to(repo)),
-            str((repo / "packages/chelis-std/reef.lock").relative_to(repo)),
-            str(bundle_dist.relative_to(repo)),
+            *(str(path.relative_to(repo)) for path in owned_outputs),
         ],
         cwd=repo,
     )

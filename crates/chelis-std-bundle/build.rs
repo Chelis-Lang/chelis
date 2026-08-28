@@ -35,8 +35,8 @@ fn main() {
             panic!(
                 "chelis-std bundle artifact missing at {}.\n\
                  Run `python3 scripts/regenerate_chelis_std_bundle.py` from the\n\
-                 repository root to rebuild and copy the bytes into\n\
-                 crates/chelis-std-bundle/dist/, then commit them.",
+                 repository root, then commit both package/embedded dist\n\
+                 artifact pairs and packages/chelis-std/reef.lock.",
                 path.display()
             );
         }

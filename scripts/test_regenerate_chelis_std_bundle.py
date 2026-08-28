@@ -1,6 +1,9 @@
 """Unit tests for the chelis-std shipped-artifact regeneration pipeline."""
 
 import importlib.util
+import hashlib
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -22,6 +25,10 @@ def _load_module():
 
 
 regen = _load_module()
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class RuntimeLockRegenerationTests(unittest.TestCase):
@@ -77,6 +84,62 @@ class RuntimeLockRegenerationTests(unittest.TestCase):
 
             self.assertEqual((package / "reef.lock").read_text(), "generated final lock\n")
             self.assertEqual(artifact.read_bytes(), before)
+
+    def test_owned_output_inventory_is_complete_and_exact(self):
+        repo = regen.repo_root()
+        version = regen.chelis_std_version(repo)
+        relative = {
+            path.relative_to(repo).as_posix()
+            for path in regen.owned_generated_outputs(repo, version)
+        }
+        self.assertEqual(
+            relative,
+            {
+                f"packages/chelis-std/dist/chelis-std-{version}.tar.zst",
+                f"packages/chelis-std/dist/chelis-std-{version}.chb",
+                f"crates/chelis-std-bundle/dist/chelis-std-{version}.tar.zst",
+                f"crates/chelis-std-bundle/dist/chelis-std-{version}.chb",
+                "packages/chelis-std/reef.lock",
+            },
+        )
+
+
+class RealGeneratorFixedPointTests(unittest.TestCase):
+    """Executable regression for the canonical, repository-owning pipeline."""
+
+    def test_two_real_debug_regenerations_reach_a_byte_fixed_point(self):
+        repo = regen.repo_root()
+        version = regen.chelis_std_version(repo)
+        outputs = regen.owned_generated_outputs(repo, version)
+        before = {path: path.read_bytes() for path in outputs}
+        command = [sys.executable, str(repo / "scripts/regenerate_chelis_std_bundle.py"), "--debug"]
+        env = os.environ.copy()
+
+        try:
+            snapshots = []
+            for iteration in (1, 2):
+                completed = subprocess.run(
+                    command,
+                    cwd=repo,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    f"real generator pass {iteration} failed:\n{completed.stdout}\n{completed.stderr}",
+                )
+                snapshots.append({path.relative_to(repo): _sha256(path) for path in outputs})
+
+            self.assertEqual(
+                snapshots[0],
+                snapshots[1],
+                "two unchanged invocations of the supported generator must emit identical bytes",
+            )
+        finally:
+            for path, contents in before.items():
+                path.write_bytes(contents)
 
 
 if __name__ == "__main__":

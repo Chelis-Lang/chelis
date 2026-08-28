@@ -16,7 +16,7 @@
 //!   without inheriting the bytes' crate-internal layout;
 //! - confines the build.rs / `include_bytes!` surface to one place;
 //! - makes regeneration explicit (run `scripts/regenerate_chelis_std_bundle.py`,
-//!   then commit the updated `dist/` files).
+//!   then commit every output listed below).
 //!
 //! ## Artifact regeneration
 //!
@@ -24,10 +24,11 @@
 //! 2. Run `python3 scripts/regenerate_chelis_std_bundle.py`. The script:
 //!    - builds the chelis CLI in release mode;
 //!    - runs `chelis reef build` against `packages/chelis-std/`;
-//!    - copies the resulting `chelis-std-<version>.tar.zst` and `.chb`
-//!      into `crates/chelis-std-bundle/dist/` (overwriting the
-//!      committed bytes).
-//! 3. `git add crates/chelis-std-bundle/dist/` and commit.
+//!    - writes the resulting `chelis-std-<version>.tar.zst` and `.chb`
+//!      under `packages/chelis-std/dist/`;
+//!    - copies that pair into `crates/chelis-std-bundle/dist/`; and
+//!    - regenerates `packages/chelis-std/reef.lock` from those final bytes.
+//! 3. Commit both dist pairs and `packages/chelis-std/reef.lock`.
 //! 4. Rebuilding any crate that depends on this one (`chelis-reef`,
 //!    `chelis-cli`) picks up the new bytes.
 //!
